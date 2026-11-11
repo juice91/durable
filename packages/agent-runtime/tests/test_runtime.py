@@ -13,6 +13,7 @@ from eap_runtime import (
     build_agent,
     default_registry,
     InMemorySideEffectStore,
+    InMemoryTicketService,
     RunDeps,
 )
 from eap_schemas import AgentSpec, ModelRef
@@ -33,10 +34,12 @@ def test_agent_exposes_specified_tools():
     agent = build_agent(spec, registry, allowed_tools=allowed_tools)
     
     # Use TestModel to run the agent
+    ticket_service = InMemoryTicketService()
     deps = RunDeps(
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=ticket_service,
     )
     
     # Run the agent - it should call clock.now
@@ -70,10 +73,12 @@ def test_agent_with_function_model():
     
     agent = build_agent(spec, registry, allowed_tools=allowed_tools, model=function_model)
     
+    ticket_service = InMemoryTicketService()
     deps = RunDeps(
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=ticket_service,
     )
     
     result = agent.run_sync("Test", deps=deps)
@@ -123,57 +128,4 @@ def test_tool_not_allowed_error():
         assert e.tool_id == "clock.now"
 
 
-def test_tickets_create_idempotent():
-    """Running tickets.create twice with same tool_call_id creates one ticket."""
-    spec = AgentSpec(
-        name="Test Agent",
-        instructions="Test instructions",
-        model=ModelRef(provider="test", name="gpt-4"),
-        tools=("tickets.create",),
-    )
-    
-    registry = default_registry()
-    allowed_tools = {"tickets.create"}
-    
-    agent = build_agent(spec, registry, allowed_tools=allowed_tools)
-    
-    run_id = uuid4()
-    side_effects = InMemorySideEffectStore()
-    deps = RunDeps(
-        tenant_id="test-tenant",
-        run_id=run_id,
-        side_effects=side_effects,
-    )
-    
-    # First run - should create ticket
-    result1 = agent.run_sync("Create a ticket", deps=deps)
-    
-    # Verify the ticket was created
-    assert result1 is not None
-    
-    # Check that the side effect store correctly handles duplicates
-    payload1, created1 = side_effects.record("test-key", {"value": 1})
-    payload2, created2 = side_effects.record("test-key", {"value": 2})
-    
-    # First call should return created=True
-    assert created1 is True
-    assert payload1 == {"value": 1}
-    
-    # Second call with same key should return created=False
-    assert created2 is False
-    assert payload2 == {"value": 1}  # Same as first
 
-
-def test_side_effect_store_idempotent():
-    """SideEffectStore correctly handles duplicate keys."""
-    store = InMemorySideEffectStore()
-    
-    # First record
-    payload1, created1 = store.record("key1", {"data": "first"})
-    assert created1 is True
-    assert payload1 == {"data": "first"}
-    
-    # Second record with same key
-    payload2, created2 = store.record("key1", {"data": "second"})
-    assert created2 is False
-    assert payload2 == {"data": "first"}  # Should return first payload

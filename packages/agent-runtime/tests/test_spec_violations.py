@@ -14,6 +14,7 @@ from eap_runtime import (
     build_agent,
     default_registry,
     InMemorySideEffectStore,
+    InMemoryTicketService,
     RunDeps,
 )
 from eap_schemas import AgentSpec, ModelRef
@@ -45,6 +46,7 @@ def test_model_inference_test_provider():
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=InMemoryTicketService(),
     )
     
     result = agent.run_sync("Test", deps=deps)
@@ -101,6 +103,7 @@ def test_model_settings_applied():
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=InMemoryTicketService(),
     )
     
     result = agent.run_sync("Test", deps=deps)
@@ -139,6 +142,7 @@ def test_model_settings_partial():
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=InMemoryTicketService(),
     )
     
     result = agent.run_sync("Test", deps=deps)
@@ -177,6 +181,7 @@ def test_instructions_not_duplicated():
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=InMemoryTicketService(),
     )
     
     result = agent.run_sync("Test", deps=deps)
@@ -202,12 +207,14 @@ def test_tickets_create_requires_tool_call_id():
     
     run_id = uuid4()
     side_effects = InMemorySideEffectStore()
+    ticket_service = InMemoryTicketService()
     
     # Create deps - no tool_call_id since RunDeps no longer has it
     deps = RunDeps(
         tenant_id="test-tenant",
         run_id=run_id,
         side_effects=side_effects,
+        ticket_service=ticket_service,
     )
     
     # When running, ctx.tool_call_id will be set by pydantic-ai
@@ -244,6 +251,7 @@ def test_tool_names_use_derived_name():
         tenant_id="test-tenant",
         run_id=uuid4(),
         side_effects=InMemorySideEffectStore(),
+        ticket_service=InMemoryTicketService(),
     )
     
     result = agent.run_sync("Test", deps=deps)

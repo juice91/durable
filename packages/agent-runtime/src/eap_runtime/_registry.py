@@ -42,6 +42,7 @@ class ToolRegistry:
         *,
         description: str = "",
         side_effect: bool = False,
+        external_idempotent: bool = False,
     ) -> None:
         """Register a tool with the given ID."""
         if not self._TOOL_ID_PATTERN.fullmatch(tool_id):
@@ -64,6 +65,7 @@ class ToolRegistry:
         self._tools[tool_id] = (func, {
             "description": description,
             "side_effect": side_effect,
+            "external_idempotent": external_idempotent,
         })
         self._tool_names[derived_name] = tool_id
 
