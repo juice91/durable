@@ -29,6 +29,19 @@ class TestHealthz:
 class TestAuth:
     """Tests for authentication."""
 
+    @pytest.mark.parametrize("auth_mode", [None, "production", "DEV"])
+    def test_app_refuses_to_start_without_explicit_dev_auth(self, monkeypatch, auth_mode):
+        if auth_mode is None:
+            monkeypatch.delenv("EAP_AUTH_MODE", raising=False)
+        else:
+            monkeypatch.setenv("EAP_AUTH_MODE", auth_mode)
+
+        with pytest.raises(
+            RuntimeError,
+            match="no production authentication is configured; set EAP_AUTH_MODE=dev for local development only",
+        ):
+            create_app(database_url="sqlite:///:memory:")
+
     def test_missing_authorization_header(self, client, tenant):
         """Missing Authorization header returns 401."""
         response = client.get("/api/v1/agents", headers={})

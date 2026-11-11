@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,6 +24,7 @@ from sqlalchemy import text
 
 from eap_api.app import create_app
 from eap_api.launcher import DBOSRunLauncher, LauncherSettings, get_run_launcher
+import eap_api.sse as sse
 from eap_api.sse import StreamSettings, get_delta_source, get_stream_settings, no_deltas, run_event_stream
 from eap_schemas import RunEvent
 
@@ -133,12 +136,18 @@ def start(client: TestClient, headers: dict[str, str], agent_id: str, run_id: st
     return client.post(f"/api/v1/agents/{agent_id}/runs", json=payload, headers=headers)
 
 
+def _tenant_of_run(app, run_id: str) -> str:
+    with app.state.database_engine.connect() as conn:
+        return conn.execute(text("SELECT tenant_id FROM runs WHERE id = :r"), {"r": run_id}).scalar_one()
+
+
 def seed(app, run_id: str, events: list[tuple[str, str, dict[str, Any]]]) -> None:
     from eap_run_store import EventLog
 
     log = EventLog(app.state.database_engine)
+    tenant_id = _tenant_of_run(app, run_id)
     for key, type_, data in events:
-        log.append(uuid.UUID(run_id), key, type_, data)
+        log.append(tenant_id, uuid.UUID(run_id), key, type_, data)
 
 
 FULL_RUN = [
@@ -155,6 +164,35 @@ FULL_RUN = [
 
 @requires_pg
 class TestStartRun:
+    def test_run_input_is_limited_by_utf8_bytes(self, pg, tenant_of):
+        client, _ = pg
+        _, h = tenant_of()
+        agent_id = make_agent(client, h)
+        assert start(client, h, agent_id, input="\u754c" * 10922).status_code == 201
+        assert start(client, h, agent_id, input="\u754c" * 10923).status_code == 422
+
+    def test_oversized_enqueue_payload_is_413_without_creating_run(self, pg, tenant_of, monkeypatch):
+        client, app = pg
+        _, h = tenant_of()
+        agent_id = make_agent(client, h)
+
+        with app.state.database_engine.connect() as conn:
+            spec = conn.execute(
+                text("SELECT spec FROM agent_versions WHERE agent_id = :agent_id AND version = 1"),
+                {"agent_id": agent_id},
+            ).scalar_one()
+        spec_bytes = len(json.dumps(spec).encode("utf-8"))
+        monkeypatch.setenv("EAP_MAX_RUN_PAYLOAD_BYTES", str(spec_bytes + 4))
+
+        accepted_id = str(uuid.uuid4())
+        rejected_id = str(uuid.uuid4())
+        assert start(client, h, agent_id, accepted_id, input="1234").status_code == 201
+        response = start(client, h, agent_id, rejected_id, input="12345")
+        assert response.status_code == 413
+        assert "payload" in response.json()["detail"].lower()
+        with app.state.database_engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM runs WHERE id = :id"), {"id": rejected_id}).scalar_one() == 0
+
     def test_created_and_enqueued_exactly_per_contract(self, pg, tenant_of, fake_dbos):
         client, _ = pg
         tenant, h = tenant_of()
@@ -340,7 +378,7 @@ class TestStream:
         seed(app, run_id, FULL_RUN)
         from eap_run_store import RunStore
 
-        RunStore(app.state.database_engine).set_status(uuid.UUID(run_id), "completed", "done")
+        RunStore(app.state.database_engine).set_status(_tenant_of_run(app, run_id), uuid.UUID(run_id), "completed", "done")
         # Resuming after the final event: only a status frame, then the stream ends.
         frames = read_all_frames(client, f"/api/v1/runs/{run_id}/stream", {**h, "Last-Event-ID": "4"})
         assert [(f.event, f.data["display_status"]) for f in frames] == [("status", "completed")]
@@ -420,3 +458,133 @@ class TestStreamGenerator:
             )
         )
         assert len(chunks) == 1 and chunks[0].startswith("event: status\n")
+
+    def test_maximum_lifetime_closes_nonterminal_stream_cleanly(self):
+        run = {"id": "r1", "status": "running", "display_status": "running"}
+        started = time.monotonic()
+        chunks = _collect(
+            run_event_stream(
+                run_id="r1", after_seq=-1, load_events=lambda after: [], load_run=lambda: run,
+                delta_source=no_deltas,
+                settings=StreamSettings(poll_interval=0.01, heartbeat_interval=30.0, max_lifetime=0.04),
+            )
+        )
+        assert len(chunks) == 1 and chunks[0].startswith("event: status\n")
+        assert time.monotonic() - started < 0.5
+
+
+def test_stream_limiter_enforces_caps_and_releases_slots():
+    limiter_type = getattr(sse, "StreamLimiter", None)
+    assert limiter_type is not None, "SSE admission limiter is missing"
+    limiter = limiter_type(max_global=2, max_per_principal=1)
+
+    first = limiter.acquire("tenant:alice")
+    assert first is not None
+    assert limiter.acquire("tenant:alice") is None
+    second = limiter.acquire("tenant:bob")
+    assert second is not None
+    assert limiter.acquire("tenant:carol") is None
+    first.release()
+    replacement = limiter.acquire("tenant:alice")
+    assert replacement is not None
+    replacement.release()
+    second.release()
+    assert limiter.active == 0
+
+
+def test_stream_slot_is_released_on_end_and_disconnect():
+    async def scenario():
+        limiter = sse.StreamLimiter(max_global=1, max_per_principal=1)
+
+        async def finite():
+            yield "done"
+
+        lease = limiter.acquire("tenant:alice")
+        assert [chunk async for chunk in sse.release_stream_slot(finite(), lease)] == ["done"]
+        assert limiter.active == 0
+
+        async def ongoing():
+            yield "first"
+            await asyncio.Event().wait()
+
+        lease = limiter.acquire("tenant:alice")
+        stream = sse.release_stream_slot(ongoing(), lease)
+        assert await anext(stream) == "first"
+        await stream.aclose()
+        assert limiter.active == 0
+
+    asyncio.run(scenario())
+
+
+@requires_pg
+@pytest.mark.parametrize(
+    ("max_global", "max_per_principal", "holder"),
+    [(2, 1, "same"), (1, 10, "other")],
+)
+def test_stream_caps_return_429_before_opening_stream(
+    pg, tenant_of, max_global, max_per_principal, holder
+):
+    client, app = pg
+    _, h = tenant_of()
+    agent_id = make_agent(client, h)
+    run_id = start(client, h, agent_id).json()["run_id"]
+    limiter_type = getattr(sse, "StreamLimiter", None)
+    assert limiter_type is not None, "SSE admission limiter is missing"
+    app.state.stream_limiter = limiter_type(
+        max_global=max_global, max_per_principal=max_per_principal
+    )
+    principal = h["Authorization"].removeprefix("Bearer dev:")
+    held = app.state.stream_limiter.acquire(principal if holder == "same" else "other:bob")
+    try:
+        response = client.get(f"/api/v1/runs/{run_id}/stream", headers=h)
+        assert response.status_code == 429
+        assert "stream" in response.json()["detail"].lower()
+    finally:
+        held.release()
+
+
+def test_concurrent_delta_subscribers_share_one_connection_and_route_by_run(monkeypatch):
+    class Notify:
+        def __init__(self, payload):
+            self.payload = payload
+
+    class FakeConnection:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+
+        async def execute(self, statement):
+            assert statement == "LISTEN eap_run_deltas"
+
+        async def close(self):
+            pass
+
+        async def notifies(self):
+            while True:
+                yield await self.queue.get()
+
+    connections = []
+
+    class AsyncConnection:
+        @staticmethod
+        async def connect(conninfo, autocommit):
+            connection = FakeConnection()
+            connections.append(connection)
+            return connection
+
+    monkeypatch.setitem(sys.modules, "psycopg", type("Psycopg", (), {"AsyncConnection": AsyncConnection}))
+
+    async def scenario():
+        source = sse.PostgresDeltaSource("postgresql://unused")
+        async with source("run-a") as a, source("run-b") as b:
+            for _ in range(100):
+                if connections:
+                    break
+                await asyncio.sleep(0.001)
+            assert len(connections) == 1
+            await connections[0].queue.put(Notify(json.dumps({"run_id": "run-a", "delta": "A"})))
+            assert await asyncio.wait_for(anext(a), 0.2) == {"run_id": "run-a", "delta": "A"}
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(b), 0.02)
+        await source.close()
+
+    asyncio.run(scenario())

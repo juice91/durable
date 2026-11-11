@@ -9,6 +9,18 @@ from fastapi.testclient import TestClient
 from eap_api.app import create_app
 
 
+@pytest.fixture(autouse=True)
+def dev_auth_mode(monkeypatch: pytest.MonkeyPatch):
+    """API tests explicitly opt in to the local-only authentication stub."""
+    monkeypatch.setenv("EAP_AUTH_MODE", "dev")
+
+
+@pytest.fixture(autouse=True)
+def allowed_models(monkeypatch: pytest.MonkeyPatch):
+    """Model allowlist for API tests: the scripted test models plus the `openai:gpt-4` fixtures use."""
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*,openai:gpt-4")
+
+
 def get_auth_header(tenant: str, user: str) -> dict[str, str]:
     """Generate an Authorization header for testing."""
     return {"Authorization": f"Bearer dev:{tenant}:{user}"}

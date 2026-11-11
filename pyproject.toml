@@ -53,3 +53,7 @@ name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
 source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker"]
 forbidden_modules = ["opentelemetry"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "apps/api", "apps/worker", "tests"]
+norecursedirs = ["node_modules", ".venv", ".next", "spikes", "firstmate", "conversation-export"]
