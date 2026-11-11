@@ -32,6 +32,8 @@ class ModelRef(BaseModel):
         """Validate provider is non-empty."""
         if not v:
             raise ValueError("provider cannot be empty")
+        if len(v) > 128:
+            raise ValueError("provider must be at most 128 characters")
         return v
 
     @field_validator("name")
@@ -40,6 +42,8 @@ class ModelRef(BaseModel):
         """Validate name is non-empty."""
         if not v:
             raise ValueError("name cannot be empty")
+        if len(v) > 128:
+            raise ValueError("name must be at most 128 characters")
         return v
 
 
@@ -80,6 +84,14 @@ class AgentSpec(BaseModel):
             raise ValueError("name cannot be empty")
         if len(v) > 100:
             raise ValueError("name must be at most 100 characters")
+        return v
+
+    @field_validator("instructions")
+    @classmethod
+    def validate_instructions(cls, v):
+        """Keep workflow instructions within the durable payload budget."""
+        if len(v.encode("utf-8")) > 32 * 1024:
+            raise ValueError("instructions must be at most 32 KiB in UTF-8")
         return v
 
     @field_validator("tools", mode="before")

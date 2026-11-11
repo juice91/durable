@@ -5,7 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from eap_schemas import AgentSpec
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AgentCreate(BaseModel):
@@ -94,3 +94,10 @@ class RunCreate(BaseModel):
     run_id: UUID  # client-generated; retrying with the same run_id is idempotent
     input: str
     version: int | None = Field(default=None, ge=1)
+
+    @field_validator("input")
+    @classmethod
+    def validate_input_size(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 32 * 1024:
+            raise ValueError("input must be at most 32 KiB in UTF-8")
+        return value

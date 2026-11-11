@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from typing import Annotated, Any
 
@@ -21,7 +22,17 @@ from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.schemas import ErrorDetail, RunCreate
-from eap_api.sse import DeltaSource, StreamSettings, event_json, get_delta_source, get_stream_settings, run_event_stream
+from eap_api.sse import (
+    DeltaSource,
+    StreamLimiter,
+    StreamSettings,
+    event_json,
+    get_delta_source,
+    get_stream_limiter,
+    get_stream_settings,
+    release_stream_slot,
+    run_event_stream,
+)
 from eap_run_store import EventLog, RunIdConflict, RunStore
 
 log = logging.getLogger("eap_api")
@@ -110,8 +121,17 @@ def start_run(
         version_num = latest
     else:
         version_num = body.version
-    if _version_row(db, agent_id, version_num) is None:
+    version_row = _version_row(db, agent_id, version_num)
+    if version_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    spec_json = json.dumps(version_row.spec)
+    payload_bytes = len(spec_json.encode("utf-8")) + len(body.input.encode("utf-8"))
+    max_payload_bytes = int(os.environ.get("EAP_MAX_RUN_PAYLOAD_BYTES", str(256 * 1024)))
+    if payload_bytes > max_payload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Run payload exceeds the {max_payload_bytes}-byte enqueue limit",
+        )
 
     try:
         run_id, created = run_store.create_run(tenant_id, agent_id, version_num, body.input, body.run_id)
@@ -131,13 +151,14 @@ def start_run(
     # Always launch what the stored row says, so a retry starts exactly the run that was recorded.
     version_row = _version_row(db, agent_id, run["agent_version"])
     assert version_row is not None  # versions are immutable and never deleted
+    spec_json = json.dumps(version_row.spec)
     try:
         launcher.launch(
             run_id=run_id,
             tenant_id=tenant_id,
             agent_id=agent_id,
             version=run["agent_version"],
-            spec_json=json.dumps(version_row.spec),
+            spec_json=spec_json,
             input_text=run["input"],
         )
     except Exception:
@@ -181,6 +202,7 @@ def stream_run(
     principal: PrincipalDep,
     stores: StoresDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
+    limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
     after_seq: int = -1,
     last_event_id: Annotated[str | None, Header()] = None,
@@ -195,14 +217,24 @@ def stream_run(
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Last-Event-ID must be an integer seq")
 
+    lease = limiter.acquire(f"{principal.tenant_id}:{principal.user_id}")
+    if lease is None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Concurrent SSE stream limit reached; retry after another stream closes",
+        )
+
     return StreamingResponse(
-        run_event_stream(
-            run_id=str(run_id),
-            after_seq=after_seq,
-            load_events=lambda after: event_log.list_events(tenant_id, run_id, after_seq=after),
-            load_run=lambda: run_store.get_run(tenant_id, run_id),
-            delta_source=delta_source,
-            settings=settings,
+        release_stream_slot(
+            run_event_stream(
+                run_id=str(run_id),
+                after_seq=after_seq,
+                load_events=lambda after: event_log.list_events(tenant_id, run_id, after_seq=after),
+                load_run=lambda: run_store.get_run(tenant_id, run_id),
+                delta_source=delta_source,
+                settings=settings,
+            ),
+            lease,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

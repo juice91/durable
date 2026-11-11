@@ -40,6 +40,16 @@ class TestModelRef:
             ModelRef(provider="openai", name="")
         assert "name" in str(exc_info.value).lower()
 
+    @pytest.mark.parametrize("field", ["provider", "name"])
+    def test_model_reference_fields_are_limited_to_128_characters(self, field):
+        values = {"provider": "p", "name": "n"}
+        values[field] = "x" * 128
+        assert getattr(ModelRef(**values), field) == "x" * 128
+
+        values[field] += "x"
+        with pytest.raises(ValidationError):
+            ModelRef(**values)
+
     def test_extra_field_rejected(self):
         """Extra fields should be rejected."""
         with pytest.raises(ValidationError) as exc_info:
@@ -160,6 +170,13 @@ class TestAgentSpec:
         with pytest.raises(ValidationError) as exc_info:
             AgentSpec(name="a" * 101, instructions="", model=ModelRef(provider="openai", name="gpt-4"))
         assert "name" in str(exc_info.value).lower()
+
+    def test_instructions_are_limited_by_utf8_bytes(self):
+        model = ModelRef(provider="openai", name="gpt-4")
+        assert len(AgentSpec(name="agent", instructions="\u754c" * 10922, model=model).instructions.encode()) == 32766
+
+        with pytest.raises(ValidationError):
+            AgentSpec(name="agent", instructions="\u754c" * 10923, model=model)
 
     def test_tool_id_format_valid(self):
         """Valid tool id format."""

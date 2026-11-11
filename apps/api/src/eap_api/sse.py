@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
@@ -34,6 +36,7 @@ DELTA_CHANNEL = "eap_run_deltas"
 TERMINAL_EVENT_TYPES = frozenset({"run_completed", "run_failed"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "needs_attention"})
 _MAX_PENDING_DELTAS = 1000
+_LIMITER_INIT_LOCK = threading.Lock()
 
 # A delta source opens a subscription for one run: entering it must start listening (so nothing
 # sent after replay begins is lost) and yields an async iterator of delta payload dicts.
@@ -44,10 +47,11 @@ DeltaSource = Callable[[str], AbstractAsyncContextManager[AsyncIterator[dict[str
 class StreamSettings:
     poll_interval: float = 0.5
     heartbeat_interval: float = 10.0
+    max_lifetime: float = 3600.0
 
 
 def get_stream_settings() -> StreamSettings:
-    return StreamSettings()
+    return StreamSettings(max_lifetime=float(os.environ.get("EAP_SSE_MAX_LIFETIME_S", "3600")))
 
 
 def get_delta_source(request: Request) -> DeltaSource:
@@ -55,31 +59,152 @@ def get_delta_source(request: Request) -> DeltaSource:
 
 
 class PostgresDeltaSource:
-    """One LISTEN connection per stream on the app database (where the worker NOTIFYs)."""
+    """One reconnecting LISTEN connection that fans deltas out to all local subscribers."""
 
     def __init__(self, conninfo: str) -> None:
         self.conninfo = conninfo
+        self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        self._listener_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
 
     @asynccontextmanager
     async def __call__(self, run_id: str) -> AsyncIterator[AsyncIterator[dict[str, Any]]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_MAX_PENDING_DELTAS)
+        async with self._lock:
+            self._subscribers.setdefault(run_id, set()).add(queue)
+            if self._listener_task is None or self._listener_task.done():
+                self._listener_task = asyncio.create_task(self._listen_forever())
+        try:
+            yield self._iterate(queue)
+        finally:
+            async with self._lock:
+                queues = self._subscribers.get(run_id)
+                if queues is not None:
+                    queues.discard(queue)
+                    if not queues:
+                        self._subscribers.pop(run_id, None)
+
+    async def _listen_forever(self) -> None:
         import psycopg
 
-        conn = await psycopg.AsyncConnection.connect(self.conninfo, autocommit=True)
+        while True:
+            conn = None
+            try:
+                conn = await psycopg.AsyncConnection.connect(self.conninfo, autocommit=True)
+                await conn.execute(f"LISTEN {DELTA_CHANNEL}")
+                async for notify in conn.notifies():
+                    self._dispatch(notify.payload)
+                raise ConnectionError("delta LISTEN connection closed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - reconnecting listener must survive database outages
+                log.warning("delta LISTEN connection ended; reconnecting", exc_info=True)
+                await asyncio.sleep(1.0)
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        await conn.close()
+
+    def _dispatch(self, raw_payload: str) -> None:
         try:
-            await conn.execute(f"LISTEN {DELTA_CHANNEL}")
-            yield self._iterate(conn, run_id)
-        finally:
-            await conn.close()
+            payload = json.loads(raw_payload)
+        except ValueError:
+            return
+        if not isinstance(payload, dict) or not isinstance(payload.get("run_id"), str):
+            return
+        for queue in tuple(self._subscribers.get(payload["run_id"], ())):
+            if not queue.full():
+                queue.put_nowait(payload)
 
     @staticmethod
-    async def _iterate(conn: Any, run_id: str) -> AsyncIterator[dict[str, Any]]:
-        async for notify in conn.notifies():
-            try:
-                payload = json.loads(notify.payload)
-            except ValueError:
-                continue
-            if isinstance(payload, dict) and payload.get("run_id") == run_id:
-                yield payload
+    async def _iterate(queue: asyncio.Queue[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+        while True:
+            yield await queue.get()
+
+    @property
+    def subscriber_count(self) -> int:
+        return sum(len(queues) for queues in self._subscribers.values())
+
+    async def close(self) -> None:
+        task, self._listener_task = self._listener_task, None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+class StreamLease:
+    """One admitted stream slot; release is idempotent for disconnect-safe cleanup."""
+
+    def __init__(self, limiter: "StreamLimiter", principal: str) -> None:
+        self._limiter = limiter
+        self._principal = principal
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._limiter._release(self._principal)
+
+
+class StreamLimiter:
+    """Process-local global and per-principal SSE admission control."""
+
+    def __init__(self, max_global: int, max_per_principal: int) -> None:
+        self.max_global = max_global
+        self.max_per_principal = max_per_principal
+        self._active = 0
+        self._by_principal: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "StreamLimiter":
+        return cls(
+            max_global=int(os.environ.get("EAP_SSE_MAX_STREAMS_GLOBAL", "200")),
+            max_per_principal=int(os.environ.get("EAP_SSE_MAX_STREAMS_PER_PRINCIPAL", "10")),
+        )
+
+    def acquire(self, principal: str) -> StreamLease | None:
+        with self._lock:
+            if self._active >= self.max_global:
+                return None
+            if self._by_principal.get(principal, 0) >= self.max_per_principal:
+                return None
+            self._active += 1
+            self._by_principal[principal] = self._by_principal.get(principal, 0) + 1
+        return StreamLease(self, principal)
+
+    def _release(self, principal: str) -> None:
+        with self._lock:
+            count = self._by_principal[principal] - 1
+            self._active -= 1
+            if count:
+                self._by_principal[principal] = count
+            else:
+                self._by_principal.pop(principal)
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+
+def get_stream_limiter(request: Request) -> StreamLimiter:
+    limiter = getattr(request.app.state, "stream_limiter", None)
+    if limiter is None:
+        with _LIMITER_INIT_LOCK:
+            limiter = getattr(request.app.state, "stream_limiter", None)
+            if limiter is None:
+                limiter = request.app.state.stream_limiter = StreamLimiter.from_env()
+    return limiter
+
+
+async def release_stream_slot(stream: AsyncIterator[str], lease: StreamLease) -> AsyncIterator[str]:
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        lease.release()
 
 
 @asynccontextmanager
@@ -117,6 +242,7 @@ async def run_event_stream(
 ) -> AsyncIterator[str]:
     """Yield SSE frames for one run. `load_events`/`load_run` are blocking and run in a thread."""
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_MAX_PENDING_DELTAS)
+    expires_at = time.monotonic() + settings.max_lifetime
 
     async def pump(deltas: AsyncIterator[dict[str, Any]]) -> None:
         try:
@@ -138,7 +264,11 @@ async def run_event_stream(
             next_heartbeat = time.monotonic() + settings.heartbeat_interval
 
             while True:
+                if time.monotonic() >= expires_at:
+                    return
                 for event in await asyncio.to_thread(load_events, last_seq):
+                    if time.monotonic() >= expires_at:
+                        return
                     last_seq = event.seq
                     yield _frame("run_event", event_json(event), event.seq)
                     if event.type in TERMINAL_EVENT_TYPES:
@@ -153,6 +283,8 @@ async def run_event_stream(
                     # The worker writes the end event before the terminal status, so one more read
                     # picks up anything written since the read above; then nothing more can come.
                     for event in await asyncio.to_thread(load_events, last_seq):
+                        if time.monotonic() >= expires_at:
+                            return
                         last_seq = event.seq
                         yield _frame("run_event", event_json(event), event.seq)
                         if event.type in TERMINAL_EVENT_TYPES:
@@ -162,12 +294,16 @@ async def run_event_stream(
                 # Until the next poll: forward deltas as they arrive, heartbeat when due.
                 poll_at = time.monotonic() + settings.poll_interval
                 while (now := time.monotonic()) < poll_at:
+                    if now >= expires_at:
+                        return
                     if now >= next_heartbeat:
                         yield ": heartbeat\n\n"
                         yield _status_frame(run)
                         next_heartbeat = now + settings.heartbeat_interval
                     try:
-                        delta = await asyncio.wait_for(queue.get(), min(poll_at, next_heartbeat) - now)
+                        delta = await asyncio.wait_for(
+                            queue.get(), min(poll_at, next_heartbeat, expires_at) - now
+                        )
                     except TimeoutError:
                         continue
                     yield _frame("delta", delta)
