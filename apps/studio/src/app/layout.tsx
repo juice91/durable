@@ -1,8 +1,5 @@
+import "./globals.css";
 import { Layout } from "@/components/layout/Layout";
-import { EmptyState } from "@/components/shared/EmptyState";
-import { navSections, allNavItems } from "@/lib/nav";
-
-const pages = allNavItems.map((item) => item.href);
 
 export const metadata = {
   title: "AI Platform Studio",

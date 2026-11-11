@@ -1,5 +1,4 @@
 "use client";
-import { Layout } from "@/components/layout/Layout";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
@@ -20,8 +19,7 @@ export default function NewAgentPage() {
   };
 
   return (
-    <Layout>
-      <div className="max-w-3xl mx-auto">
+    <div className="max-w-3xl mx-auto">
         <h1 className="text-2xl font-bold mb-6">New Agent</h1>
         <div className="mb-4">
           {error && (
@@ -31,7 +29,6 @@ export default function NewAgentPage() {
           )}
         </div>
         <AgentEditor onSubmit={handleSubmit} submitLabel="Create" />
-      </div>
-    </Layout>
+    </div>
   );
 }

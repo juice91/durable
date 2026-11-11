@@ -9,12 +9,16 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.35",
     "next": "15.5.29",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@next/eslint-plugin-next": "^15.5.29",
+    "@tailwindcss/postcss": "^4.3.5",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",

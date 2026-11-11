@@ -1,6 +1,4 @@
 "use client";
-import { Layout } from "@/components/layout/Layout";
-import { EmptyState } from "@/components/shared/EmptyState";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
@@ -39,26 +37,22 @@ export default function AgentsPage() {
 
   if (loading) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-gray-500">Loading agents...</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-gray-500">Loading agents...</p>
+      </div>
     );
   }
 
   if (error) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-red-500">{error}</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-red-500">{error}</p>
+      </div>
     );
   }
 
   return (
-    <Layout>
+    <>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Agents</h1>
         <button
@@ -69,6 +63,6 @@ export default function AgentsPage() {
         </button>
       </div>
       <AgentsListUI agents={agents} onSelect={handleAgentSelect} />
-    </Layout>
+    </>
   );
 }

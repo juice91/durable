@@ -1,8 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Layout } from "@/components/layout/Layout";
-import { useRouter, useParams, usePathname } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import { getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
@@ -88,27 +87,22 @@ export default function RunDetailPage() {
 
   if (loadError && !run) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-red-500">{loadError}</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-red-500">{loadError}</p>
+      </div>
     );
   }
 
   if (!run) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-gray-500">Loading run...</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-gray-500">Loading run...</p>
+      </div>
     );
   }
 
   return (
-    <Layout>
-      <div className="max-w-4xl mx-auto">
+    <div className="max-w-4xl mx-auto">
         <div className="mb-6">
           <button
             onClick={() => router.push("/agents")}
@@ -137,7 +131,6 @@ export default function RunDetailPage() {
           <h2 className="text-lg font-semibold mb-4">Event Timeline</h2>
           <EventTimeline events={events} currentPartialText={partialText} />
         </div>
-      </div>
-    </Layout>
+    </div>
   );
 }

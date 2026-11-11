@@ -1,6 +1,5 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { Layout } from "@/components/layout/Layout";
 import { useRouter, useParams } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import type { Agent, AgentVersion, AgentSpec } from "@/lib/api";
@@ -86,27 +85,22 @@ export default function AgentDetailPage() {
 
   if (loadError && !agent) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-red-500">{loadError}</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-red-500">{loadError}</p>
+      </div>
     );
   }
 
   if (!agent) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <p className="text-gray-500">Loading...</p>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <p className="text-gray-500">Loading...</p>
+      </div>
     );
   }
 
   return (
-    <Layout>
-      <div className="max-w-3xl mx-auto">
+    <div className="max-w-3xl mx-auto">
         <div className="mb-6">
           <button
             onClick={() => router.push("/agents")}
@@ -159,7 +153,6 @@ export default function AgentDetailPage() {
         </div>
 
         <AgentVersionsPanel versions={versions} />
-      </div>
-    </Layout>
+    </div>
   );
 }
