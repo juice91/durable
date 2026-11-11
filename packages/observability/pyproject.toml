@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-observability"
+version = "0.1.0"
+description = "OpenTelemetry observability for EAP"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "pydantic-ai-slim>=2.67.0",
+    "fastapi>=0.115.0",
+]
+
+[project.scripts]
+eap-observability = "eap_observability.__main__:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
