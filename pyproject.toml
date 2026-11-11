@@ -11,6 +11,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=7",
+    "import-linter>=2.0",
 ]
 
 [tool.uv.workspace]
@@ -18,3 +19,37 @@ members = ["packages/*", "apps/api", "apps/worker"]
 
 [tool.uv.sources]
 eap-schemas = { workspace = true }
+
+[tool.importlinter]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Contracts layer (eap_schemas) depends on nothing else"
+type = "forbidden"
+source_modules = ["eap_schemas"]
+forbidden_modules = ["eap_runtime", "eap_run_store", "eap_api", "eap_worker", "sqlalchemy", "fastapi", "pydantic_ai", "dbos"]
+
+[[tool.importlinter.contracts]]
+name = "Agent runtime has no persistence, web or DBOS"
+type = "forbidden"
+source_modules = ["eap_runtime"]
+forbidden_modules = ["eap_run_store", "eap_api", "eap_worker", "sqlalchemy", "fastapi", "dbos"]
+
+[[tool.importlinter.contracts]]
+name = "Run store has no runtime, web, agent or DBOS"
+type = "forbidden"
+source_modules = ["eap_run_store"]
+forbidden_modules = ["eap_runtime", "eap_api", "eap_worker", "fastapi", "pydantic_ai", "dbos"]
+
+[[tool.importlinter.contracts]]
+name = "Control plane never imports orchestration or the runtime"
+type = "forbidden"
+source_modules = ["eap_api"]
+forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
+
+[[tool.importlinter.contracts]]
+name = "Only eap_observability may import OpenTelemetry"
+type = "forbidden"
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker"]
+forbidden_modules = ["opentelemetry"]

@@ -25,7 +25,7 @@ def engine():
     test_db_url = _get_test_db_url()
     eng = create_engine(test_db_url)
     
-    from eap_worker.store import create_tables
+    from eap_run_store import create_tables
     create_tables(eng)
     
     yield eng
@@ -42,27 +42,27 @@ def test_tenant():
 @pytest.fixture
 def run_store(engine, test_tenant):
     """Create a RunStore for testing."""
-    from eap_worker.store import RunStore
+    from eap_run_store import RunStore
     return RunStore(engine)
 
 
 @pytest.fixture
 def event_log(engine):
     """Create an EventLog for testing."""
-    from eap_worker.store import EventLog
+    from eap_run_store import EventLog
     return EventLog(engine)
 
 
 @pytest.fixture
 def side_effect_store(engine, test_tenant):
     """Create a PostgresSideEffectStore for testing."""
-    from eap_worker.store import PostgresSideEffectStore
+    from eap_run_store import PostgresSideEffectStore
     return PostgresSideEffectStore(engine, test_tenant)
 
 
 def cleanup_run(engine, run_id):
     """Clean up a run and its events."""
-    from eap_worker.store import ExecutionEventModel, RunModel
+    from eap_run_store import ExecutionEventModel, RunModel
     with engine.begin() as conn:
         conn.execute(
             ExecutionEventModel.__table__.delete().where(ExecutionEventModel.run_id == str(run_id))
@@ -72,7 +72,7 @@ def cleanup_run(engine, run_id):
 
 def cleanup_side_effects(engine, tenant_id, key=None):
     """Clean up side effects."""
-    from eap_worker.store import SideEffectModel
+    from eap_run_store import SideEffectModel
     with engine.begin() as conn:
         if key:
             conn.execute(
@@ -91,7 +91,7 @@ def cleanup_side_effects(engine, tenant_id, key=None):
 
 def cleanup_side_effects_by_tenant(engine, tenant_id, key=None):
     """Clean up side effects by tenant."""
-    from eap_worker.store import SideEffectModel
+    from eap_run_store import SideEffectModel
     with engine.begin() as conn:
         if key:
             conn.execute(

@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from eap_schemas import RunEvent, RunEventType
-from eap_worker.store import (
+from eap_run_store import (
     EventLog,
     PostgresSideEffectStore,
     RunIdConflict,
@@ -186,7 +186,7 @@ def test_heartbeat_and_display_status(run_store, test_tenant):
     assert run["display_status"] == "running"
     
     # Set heartbeat_at to 30 seconds ago (simulate old heartbeat)
-    from eap_worker.store import RunModel
+    from eap_run_store import RunModel
     from datetime import datetime, timedelta, timezone
     old_heartbeat = datetime.now(timezone.utc) - timedelta(seconds=30)
     with run_store.engine.begin() as conn:
@@ -336,7 +336,7 @@ def test_concurrent_appends_same_key_one_created(event_log, run_store, test_tena
     assert created_count == 1, f"Expected exactly 1 created=True, got {created_count}"
     
     # Verify only one row in database
-    from eap_worker.store import ExecutionEventModel
+    from eap_run_store import ExecutionEventModel
     with event_log.engine.begin() as conn:
         count = conn.execute(
             ExecutionEventModel.__table__.select().where(
