@@ -13,6 +13,7 @@ from eap_api.database import get_engine, init_database
 async def lifespan(app: FastAPI):
     """Lifespan context manager - database is already initialized in create_app."""
     yield
+    app.state.run_launcher.close()
 
 
 def create_app(database_url: str | None = None) -> FastAPI:
@@ -44,7 +45,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # Import and register routes
     from eap_api.routes import router as agents_router
     
+    from eap_api.routes.runs import router as runs_router
+
     app.include_router(agents_router, prefix="/api/v1")
+    app.include_router(runs_router, prefix="/api/v1")
     
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
@@ -60,5 +64,20 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # Store engine in app state for later use
     app.state.database_engine = engine
     app.state.database_url = database_url
+
+    # Runs: Postgres only (eap_run_store). The DBOS client and LISTEN connections open lazily.
+    from eap_api.launcher import DBOSRunLauncher, LauncherSettings
+    from eap_api.sse import PostgresDeltaSource, no_deltas
+
+    app.state.run_launcher = DBOSRunLauncher(LauncherSettings.from_env())
+    if engine.dialect.name == "postgresql":
+        from eap_run_store import EventLog, RunStore
+
+        app.state.run_stores = (RunStore(engine), EventLog(engine))
+        conninfo = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+        app.state.delta_source = PostgresDeltaSource(conninfo)
+    else:
+        app.state.run_stores = None
+        app.state.delta_source = no_deltas
     
     return app

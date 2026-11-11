@@ -39,5 +39,9 @@ def get_session(request: Request) -> Generator[Session, None, None]:
 
 
 def init_database(engine: create_engine) -> None:
-    """Initialize the database by creating all tables."""
+    """Initialize the database by creating all tables (run tables only on Postgres)."""
     create_all_tables(engine)
+    if engine.dialect.name == "postgresql":
+        from eap_run_store import create_tables as create_run_tables
+
+        create_run_tables(engine)

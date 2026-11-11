@@ -249,6 +249,8 @@ name = "eap-api"
 version = "0.1.0"
 source = { editable = "apps/api" }
 dependencies = [
+    { name = "dbos" },
+    { name = "eap-run-store" },
     { name = "eap-schemas" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary"] },
@@ -264,6 +266,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dbos", specifier = ">=3.5.0" },
+    { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },

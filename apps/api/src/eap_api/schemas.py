@@ -84,3 +84,13 @@ class ErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     detail: str
+
+
+class RunCreate(BaseModel):
+    """Body of POST /agents/{agent_id}/runs. `version` null means the latest published version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID  # client-generated; retrying with the same run_id is idempotent
+    input: str
+    version: int | None = Field(default=None, ge=1)
