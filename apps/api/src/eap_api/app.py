@@ -26,6 +26,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     Returns:
         Configured FastAPI app instance.
     """
+    from eap_api.auth import require_dev_auth_mode
+
+    require_dev_auth_mode()
+
     app = FastAPI(
         title="EAP Control Plane API",
         description="Control-plane API for the Enterprise Agent Platform",

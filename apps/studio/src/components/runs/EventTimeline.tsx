@@ -21,7 +21,7 @@ export function EventTimeline({ events, currentPartialText }: EventTimelineProps
 
   return (
     <div className="space-y-4">
-      {events.map((event, index) => (
+      {events.map((event) => (
         <EventItem key={event.seq} event={event} />
       ))}
 
@@ -52,9 +52,9 @@ function EventItem({ event }: EventItemProps) {
         return (
           <div className="text-sm text-gray-600">
             Run started
-            {event.data && (event.data as any).input && (
+            {event.data.input && (
               <span className="block mt-1 text-xs font-mono text-gray-500">
-                Input: {(event.data as any).input}
+                Input: {event.data.input}
               </span>
             )}
           </div>
@@ -63,7 +63,7 @@ function EventItem({ event }: EventItemProps) {
         return (
           <div className="text-sm text-gray-800">
             <span className="font-semibold">Model response:</span>
-            <p className="mt-1 text-gray-700">{(event.data as any).text}</p>
+            <p className="mt-1 text-gray-700">{event.data.text}</p>
           </div>
         );
       case "tool_call":
@@ -71,10 +71,10 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm">
             <span className="font-semibold text-purple-700">Tool call:</span>
             <span className="text-purple-600 ml-1">
-              {(event.data as any).tool_name}
+              {event.data.tool_name}
             </span>
             <pre className="mt-1 text-xs text-gray-500 bg-gray-100 p-2 rounded">
-              {JSON.stringify((event.data as any).tool_args, null, 2)}
+              {JSON.stringify(event.data.args, null, 2)}
             </pre>
           </div>
         );
@@ -83,7 +83,7 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm">
             <span className="font-semibold text-green-700">Tool result:</span>
             <pre className="mt-1 text-xs text-gray-500 bg-gray-100 p-2 rounded">
-              {JSON.stringify((event.data as any).tool_result, null, 2)}
+              {JSON.stringify(event.data.content, null, 2)}
             </pre>
           </div>
         );
@@ -98,7 +98,7 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm text-red-700 font-semibold">
             Run failed
             <span className="block mt-1 text-red-600">
-              {(event.data as any).error || "Unknown error"}
+              {event.data.error || "Unknown error"}
             </span>
           </div>
         );

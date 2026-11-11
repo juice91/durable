@@ -15,6 +15,7 @@ import sys
 
 def main() -> int:
     agent_id, run_id, input_text, tenant = sys.argv[1:5]
+    os.environ["EAP_AUTH_MODE"] = "dev"
 
     from fastapi.testclient import TestClient
 

@@ -1,29 +1,69 @@
 // Typed client for runs API with SSE streaming support
-// Reuses auth/base-URL logic by duplicating minimal constants (api.ts doesn't export helpers)
-
 import { parseSSE } from "./sse";
 
 export const BASE_URL = process.env.NEXT_PUBLIC_EAP_API_URL || "http://localhost:8000";
-export const TOKEN = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN || "Bearer dev:acme:alice";
+
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function apiHeaders(extra: HeadersInit = {}): HeadersInit {
+  const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
+  if (!token) throw new ApiError(0, "No API credentials configured");
+  return { Authorization: token, ...extra };
+}
+
+async function apiErrorFromResponse(response: Response): Promise<ApiError> {
+  let message = `HTTP ${response.status}`;
+  try {
+    const data = await response.json();
+    if (typeof data.detail === "string") message = data.detail;
+  } catch {
+    // Keep the status fallback for a non-JSON response.
+  }
+  return new ApiError(response.status, message);
+}
 
 export type RunStatus = "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
 
 export interface Run {
-  id: string;
-  status: string;
-  display_status: RunStatus;
+  run_id: string;
   agent_id: string;
   version: number | null;
-  created_at?: string;
-  updated_at?: string;
-  heartbeat_at?: string;
+  status: string;
+  display_status: RunStatus;
+  input: string;
+  output: string | null;
+  error: string | null;
+  heartbeat_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RunEventData {
+  input?: string;
+  version?: number;
+  agent_id?: string;
+  text?: string;
+  message?: unknown;
+  model_request?: number;
+  tool_name?: string;
+  tool_call_id?: string;
+  args?: Record<string, unknown>;
+  status?: string;
+  content?: unknown;
+  output?: string;
   error?: string;
+  [key: string]: unknown;
 }
 
 export interface RunEvent {
   seq: number;
   type: "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed";
-  data: unknown;
+  data: RunEventData;
   ts: string;
 }
 
@@ -77,14 +117,13 @@ export async function startRun(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: TOKEN,
+      ...apiHeaders(),
     },
     body: JSON.stringify({ run_id: runId, input, version }),
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to start run: ${response.status} ${errText}`);
+    throw await apiErrorFromResponse(response);
   }
 
   return response.json();
@@ -92,14 +131,11 @@ export async function startRun(
 
 export async function getRun(runId: string): Promise<Run> {
   const response = await fetch(`${BASE_URL}/api/v1/runs/${runId}`, {
-    headers: {
-      Authorization: TOKEN,
-    },
+    headers: apiHeaders(),
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to get run: ${response.status} ${errText}`);
+    throw await apiErrorFromResponse(response);
   }
 
   return response.json();
@@ -111,14 +147,11 @@ export async function listEvents(runId: string, afterSeq?: number): Promise<RunE
     : `${BASE_URL}/api/v1/runs/${runId}/events`;
 
   const response = await fetch(url, {
-    headers: {
-      Authorization: TOKEN,
-    },
+    headers: apiHeaders(),
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to list events: ${response.status} ${errText}`);
+    throw await apiErrorFromResponse(response);
   }
 
   return response.json();
@@ -141,6 +174,7 @@ export function subscribeRun(
   handlers: SubscribeHandlers,
   opts: SubscribeOptions = {}
 ): () => void {
+  const authHeaders = apiHeaders({ Accept: "text/event-stream" }) as Record<string, string>;
   const baseDelay = opts.baseDelayMs ?? 500;
   const maxDelay = opts.maxDelayMs ?? 10_000;
   const url = `${BASE_URL}/api/v1/runs/${encodeURIComponent(runId)}/stream`;
@@ -171,7 +205,7 @@ export function subscribeRun(
     while (!stopped) {
       const ac = new AbortController();
       controller = ac;
-      const headers: Record<string, string> = { Authorization: TOKEN, Accept: "text/event-stream" };
+      const headers: Record<string, string> = { ...authHeaders };
       if (lastSeq >= 0) headers["Last-Event-ID"] = String(lastSeq);
 
       let progressed = false;
@@ -284,7 +318,8 @@ export function deltaReducer(state: PartialTextMap | undefined, action: DeltaAct
   }
 
   if (action.type === "model_message") {
-    const { model_request } = action.payload.data as { model_request: number };
+    const { model_request } = action.payload.data;
+    if (model_request === undefined) return state || {};
     const key = String(model_request);
 
     const newState = { ...state };

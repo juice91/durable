@@ -9,7 +9,7 @@ const originalFetch = global.fetch;
 describe("api client", () => {
   beforeEach(() => {
     delete process.env.NEXT_PUBLIC_EAP_API_URL;
-    delete process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
+    process.env.NEXT_PUBLIC_EAP_DEV_TOKEN = "Bearer dev:test-tenant:test-user";
     global.fetch = vi.fn();
   });
 
@@ -18,6 +18,7 @@ describe("api client", () => {
   });
 
   it("sends the auth header and base URL", async () => {
+    process.env.NEXT_PUBLIC_EAP_DEV_TOKEN = "Bearer dev:test-tenant:test-user";
     const mockAgents: any[] = [{ id: "1", name: "Test", draft_spec: {} as any, latest_version: null }];
     (global.fetch as any).mockResolvedValueOnce({
       ok: true,
@@ -30,11 +31,22 @@ describe("api client", () => {
       "http://localhost:8000/api/v1/agents",
       expect.objectContaining({
         headers: expect.objectContaining({
-          Authorization: "Bearer dev:acme:alice",
+          Authorization: "Bearer dev:test-tenant:test-user",
           "Content-Type": "application/json",
         }),
       })
     );
+  });
+
+  it("fails clearly without configured API credentials", async () => {
+    delete process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
+    await expect(api.agents.list()).rejects.toEqual(
+      expect.objectContaining({
+        name: "ApiError",
+        message: "No API credentials configured",
+      })
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("wraps spec in {spec} for POST /api/v1/agents", async () => {

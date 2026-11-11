@@ -36,35 +36,42 @@ export class ApiError extends Error {
   }
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_EAP_API_URL || "http://localhost:8000";
-const DEFAULT_TOKEN = "Bearer dev:acme:alice";
-const TOKEN = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN || DEFAULT_TOKEN;
+export const BASE_URL = process.env.NEXT_PUBLIC_EAP_API_URL || "http://localhost:8000";
+
+export function apiHeaders(extra: HeadersInit = {}): HeadersInit {
+  const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
+  if (!token) {
+    throw new ApiError(0, "No API credentials configured");
+  }
+  return { Authorization: token, ...extra };
+}
+
+export async function apiErrorFromResponse(response: Response): Promise<ApiError> {
+  let message = `HTTP ${response.status}`;
+  try {
+    const data = await response.json();
+    if (response.status === 422 && Array.isArray(data.detail)) {
+      message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
+    } else if (typeof data.detail === "string") {
+      message = data.detail;
+    }
+  } catch {
+    // Keep the HTTP status fallback when the response is not JSON.
+  }
+  return new ApiError(response.status, message);
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${BASE_URL}${path}`;
   const headers: HeadersInit = {
     "Content-Type": "application/json",
-    Authorization: TOKEN,
-    ...(options?.headers || {}),
+    ...apiHeaders(options?.headers || {}),
   };
 
   const response = await fetch(url, { ...options, headers });
 
   if (!response.ok) {
-    let message = `HTTP ${response.status}`;
-    try {
-      const data = await response.json();
-      if (response.status === 422 && Array.isArray(data.detail)) {
-        message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
-      } else if (response.status === 409 && typeof data.detail === "string") {
-        message = data.detail;
-      } else if (data.detail) {
-        message = String(data.detail);
-      }
-    } catch {
-      // ignore JSON parse errors
-    }
-    throw new ApiError(response.status, message);
+    throw await apiErrorFromResponse(response);
   }
 
   return response.json();

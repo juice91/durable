@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter, useParams } from "next/navigation";
-import { getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer } from "@/lib/runs";
+import { ApiError, getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
 
@@ -28,7 +28,7 @@ export default function RunDetailPage() {
         setEvents(eventsData);
         setLoadError(null);
       } catch (err: unknown) {
-        if (err instanceof Error && (err as any).status === 404) {
+        if (err instanceof ApiError && err.status === 404) {
           setLoadError("Run not found");
         } else {
           setLoadError("Failed to load run");
@@ -112,7 +112,7 @@ export default function RunDetailPage() {
           </button>
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold">Run {run.id}</h1>
+              <h1 className="text-2xl font-bold">Run {run.run_id}</h1>
               <p className="text-sm text-gray-500 mt-1">
                 Agent: {run.agent_id} | Version: {run.version ?? "latest"}
               </p>

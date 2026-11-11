@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { subscribeRun, type RunEvent, type RunDelta, type RunStatusFrame } from "./runs";
+import { ApiError, getRun, subscribeRun, type RunEvent, type RunDelta, type RunStatusFrame } from "./runs";
 
 // Frames exactly as apps/api/src/eap_api/sse.py writes them.
 const enc = new TextEncoder();
@@ -87,10 +87,12 @@ function collect() {
 
 describe("subscribeRun", () => {
   beforeEach(() => {
+    process.env.NEXT_PUBLIC_EAP_DEV_TOKEN = "Bearer dev:acme:alice";
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   });
 
   afterEach(() => {
+    delete process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -362,5 +364,47 @@ describe("subscribeRun", () => {
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(c.ends).toEqual(["terminal_status"]);
+  });
+});
+
+describe("getRun", () => {
+  beforeEach(() => {
+    process.env.NEXT_PUBLIC_EAP_DEV_TOKEN = "Bearer dev:acme:alice";
+  });
+
+  afterEach(() => {
+    delete process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the API wire shape with run_id", async () => {
+    const wireRun = {
+      run_id: "0593b408-e845-4b31-9874-cae982e81b4e",
+      agent_id: "853b7576-7cca-49af-a396-97089a390396",
+      version: 1,
+      status: "completed",
+      display_status: "completed",
+      input: "Customers in Europe see prices in USD instead of EUR on checkout.",
+      output:
+        "\n\nI've created a ticket for this issue: **TCK-6E5549094063**. Our team will look into the currency display problem for European customers.",
+      error: null,
+      heartbeat_at: "2026-11-11T17:38:15.926448+00:00",
+      created_at: "2026-11-11T17:38:05.795192+00:00",
+      updated_at: "2026-11-11T17:38:18.962035+00:00",
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(wireRun), { status: 200 })));
+
+    await expect(getRun(wireRun.run_id)).resolves.toEqual(wireRun);
+  });
+
+  it("throws ApiError carrying the response status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ detail: "Run not found" }), { status: 404 }))
+    );
+
+    await expect(getRun("missing")).rejects.toEqual(
+      expect.objectContaining<ApiError>({ status: 404, message: "Run not found" })
+    );
   });
 });

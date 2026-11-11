@@ -1,5 +1,6 @@
 """Authentication dependency for the API."""
 
+import os
 import re
 from typing import Annotated
 
@@ -16,6 +17,15 @@ class Principal(BaseModel):
 
 # Regex for tenant/user: non-empty, [A-Za-z0-9_-]+
 TENANT_USER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+AUTH_CONFIGURATION_ERROR = (
+    "no production authentication is configured; set EAP_AUTH_MODE=dev for local development only"
+)
+
+
+def require_dev_auth_mode() -> None:
+    """Refuse to expose the forgeable local auth scheme unless explicitly enabled."""
+    if os.environ.get("EAP_AUTH_MODE") != "dev":
+        raise RuntimeError(AUTH_CONFIGURATION_ERROR)
 
 
 async def current_principal(
@@ -27,6 +37,8 @@ async def current_principal(
     Returns Principal with tenant_id and user_id.
     Raises 401 if missing or malformed.
     """
+    require_dev_auth_mode()
+
     if authorization is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

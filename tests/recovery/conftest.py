@@ -266,6 +266,7 @@ class Harness:
         self.workers: list[WorkerProcess] = []
         self.listeners: list[DeltaListener] = []
         self.env = {
+            "EAP_AUTH_MODE": "dev",
             "EAP_DATABASE_URL": APP_DB_URL,
             "EAP_DBOS_URL": DBOS_DB_URL,
             "EAP_DBOS_SYSTEM_SCHEMA": self.schema,
