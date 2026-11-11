@@ -11,6 +11,7 @@ members = [
     "eap-agent-runtime",
     "eap-api",
     "eap-schemas",
+    "eap-worker",
     "pydanticos",
 ]
 
@@ -112,6 +113,37 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2" }]
+
+[[package]]
+name = "eap-worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "eap-agent-runtime" },
+    { name = "eap-schemas" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-agent-runtime", editable = "packages/agent-runtime" },
+    { name = "eap-schemas", editable = "packages/shared-schemas" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+]
 
 [[package]]
 name = "fastapi"
