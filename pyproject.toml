@@ -1,0 +1,20 @@
+[project]
+name = "pydanticos"
+version = "0.1.0"
+description = "PydanticOS - Enterprise Agent Platform"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "eap-schemas",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7",
+]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+eap-schemas = { workspace = true }
