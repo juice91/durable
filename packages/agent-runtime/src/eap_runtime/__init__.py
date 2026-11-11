@@ -12,6 +12,7 @@ from eap_runtime._side_effects import (
 )
 from eap_runtime._types import RunDeps
 from eap_runtime._builder import build_agent
+from eap_runtime._toolset import check_spec_tools, toolset_for_spec
 
 __all__ = [
     "ToolRegistry",
@@ -26,4 +27,6 @@ __all__ = [
     "RunDeps",
     "build_agent",
     "default_registry",
+    "check_spec_tools",
+    "toolset_for_spec",
 ]

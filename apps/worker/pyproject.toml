@@ -12,6 +12,8 @@ dependencies = [
     "eap-schemas",
     "eap-agent-runtime",
     "eap-run-store",
+    "pydantic-ai-slim[dbos,openai]>=2.67.0",
+    "dbos>=3.5.0",
 ]
 
 [tool.uv.sources]

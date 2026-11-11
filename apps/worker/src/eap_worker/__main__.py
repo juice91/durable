@@ -1,0 +1,39 @@
+"""`python -m eap_worker`: launch DBOS (recovering this executor's pending runs) and serve the queue."""
+
+from __future__ import annotations
+
+import logging
+import signal
+import sys
+import threading
+
+from dbos import DBOS
+
+from eap_worker.app import launch
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    stop = threading.Event()
+
+    def _stop(signum: int, _frame: object) -> None:
+        logging.getLogger("eap_worker").info("signal %s: shutting down", signum)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    settings = launch()
+    logging.getLogger("eap_worker").info(
+        "eap-worker ready: executor_id=%s app_version=%s schema=%s",
+        settings.executor_id,
+        settings.app_version,
+        settings.dbos_system_schema,
+    )
+    print("EAP_WORKER_READY", flush=True)
+    stop.wait()
+    DBOS.destroy(destroy_registry=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -180,7 +180,8 @@ class AgentVersion(BaseModel):
 
 RunEventType = Literal[
     "run_started",
-    "text_delta",
+    "text_delta",  # transient only: sent over NOTIFY, never stored
+    "model_message",
     "tool_call",
     "tool_result",
     "run_completed",

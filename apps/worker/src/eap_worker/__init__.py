@@ -1,4 +1,4 @@
-"""Worker runtime for the Enterprise Agent Platform."""
+"""Worker for the Enterprise Agent Platform: durable agent runs on DBOS + Pydantic AI.
 
-# Store moved to eap_run_store package
-# This empty __init__.py allows the package to be imported without code
+Run it with `python -m eap_worker` (or `scripts/dev-worker.sh` for a restart loop).
+"""
