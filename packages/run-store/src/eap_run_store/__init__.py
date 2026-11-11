@@ -5,6 +5,7 @@ from eap_run_store.store import (
     EventLog,
     PostgresSideEffectStore,
     RunIdConflict,
+    RunNotFound,
     create_tables,
     get_side_effect_store,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "EventLog",
     "PostgresSideEffectStore",
     "RunIdConflict",
+    "RunNotFound",
     "create_tables",
     "get_side_effect_store",
     "Base",

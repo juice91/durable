@@ -128,18 +128,18 @@ def test_set_status_round_trip(run_store, test_tenant):
     )
     
     # Update status to running
-    run_store.set_status(run_id, "running")
+    run_store.set_status(test_tenant, run_id, "running")
     run = run_store.get_run(test_tenant, run_id)
     assert run["status"] == "running"
     
     # Update status to completed with output
-    run_store.set_status(run_id, "completed", output="test output")
+    run_store.set_status(test_tenant, run_id, "completed", output="test output")
     run = run_store.get_run(test_tenant, run_id)
     assert run["status"] == "completed"
     assert run["output"] == "test output"
     
     # Update status to failed with error
-    run_store.set_status(run_id, "failed", error="test error")
+    run_store.set_status(test_tenant, run_id, "failed", error="test error")
     run = run_store.get_run(test_tenant, run_id)
     assert run["status"] == "failed"
     assert run["error"] == "test error"
@@ -178,7 +178,7 @@ def test_heartbeat_and_display_status(run_store, test_tenant):
         input="test input",
         run_id=run_id
     )
-    run_store.set_status(run_id, "running")
+    run_store.set_status(test_tenant, run_id, "running")
     
     # Fresh heartbeat -> display_status should be 'running'
     run = run_store.get_run(test_tenant, run_id)
@@ -202,7 +202,7 @@ def test_heartbeat_and_display_status(run_store, test_tenant):
     assert run["display_status"] == "recovering"
     
     # Now do a real heartbeat
-    run_store.heartbeat(run_id)
+    run_store.heartbeat(test_tenant, run_id)
     run = run_store.get_run(test_tenant, run_id)
     assert run["status"] == "running"
     assert run["display_status"] == "running"
@@ -223,9 +223,9 @@ def test_sequential_appends_get_seq_0_1_2(event_log, run_store, test_tenant):
         run_id=run_id
     )
     
-    event1, created1 = event_log.append(run_id, "start", "run_started", {"step": 1})
-    event2, created2 = event_log.append(run_id, "a", "text_delta", {"text": "hello"})
-    event3, created3 = event_log.append(run_id, "b", "tool_call", {"tool": "test_tool"})
+    event1, created1 = event_log.append(test_tenant, run_id, "start", "run_started", {"step": 1})
+    event2, created2 = event_log.append(test_tenant, run_id, "a", "text_delta", {"text": "hello"})
+    event3, created3 = event_log.append(test_tenant, run_id, "b", "tool_call", {"tool": "test_tool"})
     
     assert created1 is True
     assert created2 is True
@@ -253,9 +253,9 @@ def test_append_duplicate_event_key_no_seq_gap(event_log, run_store, test_tenant
     )
     
     # Append 'start', 'a', 'b' -> seq 0, 1, 2
-    event_log.append(run_id, "start", "run_started", {})
-    event_a, created_a = event_log.append(run_id, "a", "text_delta", {"index": 0})
-    event_b, created_b = event_log.append(run_id, "b", "tool_call", {})
+    event_log.append(test_tenant, run_id, "start", "run_started", {})
+    event_a, created_a = event_log.append(test_tenant, run_id, "a", "text_delta", {"index": 0})
+    event_b, created_b = event_log.append(test_tenant, run_id, "b", "tool_call", {})
     
     assert created_a is True
     assert created_b is True
@@ -263,12 +263,12 @@ def test_append_duplicate_event_key_no_seq_gap(event_log, run_store, test_tenant
     assert event_b.seq == 2  # 'b' is the third append
     
     # Re-append 'a' - should not consume a seq
-    event_a_again, created_a_again = event_log.append(run_id, "a", "text_delta", {"index": 0})
+    event_a_again, created_a_again = event_log.append(test_tenant, run_id, "a", "text_delta", {"index": 0})
     assert created_a_again is False
     assert event_a_again.seq == 1  # seq unchanged
     
     # Append 'c' - should get seq 3 (not 4)
-    event_c, created_c = event_log.append(run_id, "c", "tool_result", {})
+    event_c, created_c = event_log.append(test_tenant, run_id, "c", "tool_result", {})
     assert created_c is True
     assert event_c.seq == 3  # no gap
 
@@ -291,7 +291,7 @@ def test_concurrent_appends_distinct_keys_no_gaps(event_log, run_store, test_ten
     
     def append_event(i):
         event_key = f"event_{i}"
-        event, created = event_log.append(run_id, event_key, "text_delta", {"index": i})
+        event, created = event_log.append(test_tenant, run_id, event_key, "text_delta", {"index": i})
         with lock:
             events.append(event)
     
@@ -322,7 +322,7 @@ def test_concurrent_appends_same_key_one_created(event_log, run_store, test_tena
     lock = threading.Lock()
     
     def append_same_key():
-        event, created = event_log.append(run_id, "same_key", "text_delta", {})
+        event, created = event_log.append(test_tenant, run_id, "same_key", "text_delta", {})
         with lock:
             results.append((event, created))
     
@@ -360,10 +360,10 @@ def test_list_events_after_seq(event_log, run_store, test_tenant):
         run_id=run_id
     )
     
-    event_log.append(run_id, "start", "run_started", {})
-    event_log.append(run_id, "a", "text_delta", {"index": 0})
-    event_log.append(run_id, "b", "text_delta", {"index": 1})
-    event_log.append(run_id, "c", "text_delta", {"index": 2})
+    event_log.append(test_tenant, run_id, "start", "run_started", {})
+    event_log.append(test_tenant, run_id, "a", "text_delta", {"index": 0})
+    event_log.append(test_tenant, run_id, "b", "text_delta", {"index": 1})
+    event_log.append(test_tenant, run_id, "c", "text_delta", {"index": 2})
     
     events = event_log.list_events(test_tenant, run_id, after_seq=1)
     
@@ -386,10 +386,112 @@ def test_cross_tenant_list_events_is_empty(event_log, run_store, test_tenant):
         run_id=run_id
     )
     
-    event_log.append(run_id, "start", "run_started", {})
+    event_log.append(test_tenant, run_id, "start", "run_started", {})
     
     events = event_log.list_events(other_tenant, run_id)
     assert events == []
+
+
+# ============ Tenant ownership on mutations ============
+
+
+def _snapshot(engine, run_id):
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        run = conn.execute(
+            text("SELECT tenant_id, status, output, error, heartbeat_at, updated_at FROM runs WHERE id = :r"),
+            {"r": str(run_id)},
+        ).one()
+        events = conn.execute(
+            text("SELECT tenant_id, seq, event_key, type, data FROM execution_events WHERE run_id = :r ORDER BY seq"),
+            {"r": str(run_id)},
+        ).all()
+    return tuple(run), [tuple(e) for e in events]
+
+
+@pytest.fixture
+def owned_run(run_store, event_log, test_tenant):
+    run_id = uuid4()
+    run_store.create_run(test_tenant, uuid4(), 1, "owned input", run_id)
+    run_store.set_status(test_tenant, run_id, "running")
+    run_store.heartbeat(test_tenant, run_id)
+    event_log.append(test_tenant, run_id, "start", "run_started", {"input": "owned input"})
+    return run_id
+
+
+def test_set_status_other_tenant_raises_and_changes_nothing(run_store, test_tenant, owned_run):
+    from eap_run_store import RunNotFound
+
+    before = _snapshot(run_store.engine, owned_run)
+    with pytest.raises(RunNotFound):
+        run_store.set_status("intruder_" + test_tenant, owned_run, "completed", output="pwned", error="x")
+    assert _snapshot(run_store.engine, owned_run) == before
+    assert run_store.get_run(test_tenant, owned_run)["status"] == "running"
+
+
+def test_heartbeat_other_tenant_raises_and_changes_nothing(run_store, test_tenant, owned_run):
+    from eap_run_store import RunNotFound
+
+    before = _snapshot(run_store.engine, owned_run)
+    with pytest.raises(RunNotFound):
+        run_store.heartbeat("intruder_" + test_tenant, owned_run)
+    assert _snapshot(run_store.engine, owned_run) == before
+
+
+def test_append_other_tenant_raises_and_writes_nothing(event_log, run_store, test_tenant, owned_run):
+    from eap_run_store import RunNotFound
+
+    before = _snapshot(run_store.engine, owned_run)
+    with pytest.raises(RunNotFound):
+        event_log.append("intruder_" + test_tenant, owned_run, "end", "run_completed", {"output": "pwned"})
+    # Even a key that already exists under the owner is not readable/replayable by another tenant.
+    with pytest.raises(RunNotFound):
+        event_log.append("intruder_" + test_tenant, owned_run, "start", "run_started", {})
+    assert _snapshot(run_store.engine, owned_run) == before
+
+
+def test_mutations_on_missing_run_raise(run_store, event_log, test_tenant):
+    from eap_run_store import RunNotFound
+
+    missing = uuid4()
+    with pytest.raises(RunNotFound):
+        run_store.set_status(test_tenant, missing, "running")
+    with pytest.raises(RunNotFound):
+        run_store.heartbeat(test_tenant, missing)
+    with pytest.raises(RunNotFound):
+        event_log.append(test_tenant, missing, "start", "run_started", {})
+
+
+def test_mutations_require_tenant(run_store, event_log, owned_run):
+    with pytest.raises(ValueError):
+        run_store.set_status("", owned_run, "completed")
+    with pytest.raises(ValueError):
+        run_store.heartbeat("", owned_run)
+    with pytest.raises(ValueError):
+        event_log.append("", owned_run, "x", "run_started", {})
+
+
+def test_events_carry_the_runs_tenant(event_log, run_store, test_tenant, owned_run):
+    event_log.append(test_tenant, owned_run, "a", "model_message", {"text": "hi"})
+    _, events = _snapshot(run_store.engine, owned_run)
+    assert [e[0] for e in events] == [test_tenant, test_tenant]
+
+
+def test_event_tenant_must_match_run_tenant_at_db_level(run_store, test_tenant, owned_run):
+    """The composite (tenant_id, run_id) FK rejects an event row whose tenant is not the run's."""
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        with run_store.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO execution_events (tenant_id, run_id, seq, event_key, type, data, ts) "
+                    "VALUES (:t, :r, 99, 'forged', 'run_completed', '{}'::jsonb, now())"
+                ),
+                {"t": "intruder_" + test_tenant, "r": str(owned_run)},
+            )
 
 
 # ============ PostgresSideEffectStore Tests ============

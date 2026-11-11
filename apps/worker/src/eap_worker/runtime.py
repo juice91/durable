@@ -23,7 +23,7 @@ from eap_runtime import RunDeps, ToolRegistry, default_registry
 from eap_schemas import AgentSpec
 from eap_worker.config import DELTA_CHANNEL, WorkerSettings
 from eap_worker.crash import crash_point
-from eap_worker.tickets import FakeExternalTicketService, create_ticket_tables
+from eap_worker.tickets import FakeExternalTicketService, TenantTicketService, create_ticket_tables
 
 log = logging.getLogger("eap_worker")
 
@@ -43,7 +43,7 @@ class _CrashAfterCallTicketService:
     """Wraps the external service so the `after_tool_call` crash point sits between the external
     call returning and its result being recorded (side_effects.complete + DBOS checkpoint)."""
 
-    def __init__(self, inner: FakeExternalTicketService) -> None:
+    def __init__(self, inner: TenantTicketService) -> None:
         self.inner = inner
 
     def create(self, title: str, body: str, *, idempotency_key: str) -> dict:
@@ -76,7 +76,7 @@ class WorkerRuntime:
             tenant_id=tenant_id,
             run_id=UUID(run_id),
             side_effects=PostgresSideEffectStore(self.engine, tenant_id),
-            ticket_service=_CrashAfterCallTicketService(self.tickets),
+            ticket_service=_CrashAfterCallTicketService(self.tickets.for_tenant(tenant_id)),
             spec=spec,
             allowed_tools=self.allowed_tools,
         )

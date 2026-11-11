@@ -135,34 +135,35 @@ async def start_run_step(run_id: str, tenant_id: str, agent_id: str, version: in
 
     def work() -> None:
         # The API inserts the row first (client-supplied run_id); this is an idempotent safety net.
+        # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         rt.run_store.create_run(tenant_id, UUID(agent_id), version, input_text, UUID(run_id))
-        rt.run_store.set_status(UUID(run_id), "running")
-        rt.run_store.heartbeat(UUID(run_id))
+        rt.run_store.set_status(tenant_id, UUID(run_id), "running")
+        rt.run_store.heartbeat(tenant_id, UUID(run_id))
 
     await asyncio.to_thread(work)
 
 
 @DBOS.step(name="eap.append_event")
-async def append_event_step(run_id: str, event_key: str, type: str, data: dict[str, Any]) -> int:
+async def append_event_step(run_id: str, tenant_id: str, event_key: str, type: str, data: dict[str, Any]) -> int:
     rt = get_runtime()
-    event, _created = await asyncio.to_thread(rt.event_log.append, UUID(run_id), event_key, type, data)
+    event, _created = await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data)
     crash_point("after_event_write", event_key=event_key)
     return event.seq
 
 
 @DBOS.step(name="eap.finish_run")
-async def finish_run_step(run_id: str, status: str, output: str | None, error: str | None) -> None:
+async def finish_run_step(run_id: str, tenant_id: str, status: str, output: str | None, error: str | None) -> None:
     rt = get_runtime()
-    await asyncio.to_thread(rt.run_store.set_status, UUID(run_id), status, output, error)
+    await asyncio.to_thread(rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error)
 
 
-async def _heartbeat(run_id: str) -> None:
+async def _heartbeat(run_id: str, tenant_id: str) -> None:
     """Liveness only (not durable): runs.heartbeat_at every 5 s while this process drives the run."""
     rt = get_runtime()
     while True:
         await asyncio.sleep(HEARTBEAT_SECONDS)
         try:
-            await asyncio.to_thread(rt.run_store.heartbeat, UUID(run_id))
+            await asyncio.to_thread(rt.run_store.heartbeat, tenant_id, UUID(run_id))
         except Exception:  # noqa: BLE001 - a missed heartbeat must never fail the run
             log.warning("heartbeat failed for run %s", run_id, exc_info=True)
 
@@ -207,7 +208,7 @@ def _is_side_effect_unknown(exc: BaseException) -> bool:
     return False
 
 
-async def _record_tool_results(run_id: str, calls: list[ToolCallPart], *sources: list[Any]) -> None:
+async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCallPart], *sources: list[Any]) -> None:
     results = _find_tool_results({c.tool_call_id for c in calls}, *sources)
     for call in calls:
         part = results.get(call.tool_call_id)
@@ -227,11 +228,12 @@ async def _record_tool_results(run_id: str, calls: list[ToolCallPart], *sources:
             }
         else:
             data = {"tool_call_id": call.tool_call_id, "tool_name": call.tool_name, "status": "no_result"}
-        await append_event_step(run_id, f"tool:{call.tool_call_id}:result", "tool_result", data)
+        await append_event_step(run_id, tenant_id, f"tool:{call.tool_call_id}:result", "tool_result", data)
 
 
 async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
     spec = deps.spec
+    tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
     if spec.model_settings.temperature is not None:
         settings["temperature"] = spec.model_settings.temperature
@@ -249,7 +251,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
         async for node in run:
             if pending:
                 request_parts = list(node.request.parts) if Agent.is_model_request_node(node) else []
-                await _record_tool_results(run_id, pending, request_parts, _all_parts(run.all_messages()))
+                await _record_tool_results(run_id, tenant_id, pending, request_parts, _all_parts(run.all_messages()))
                 pending = []
             if Agent.is_call_tools_node(node):
                 # The model request that produced this response is already checkpointed.
@@ -258,6 +260,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
                 text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
                 await append_event_step(
                     run_id,
+                    tenant_id,
                     f"model:{n}:final",
                     "model_message",
                     {"model_request": n, "text": text, "message": _message_json(response)},
@@ -265,6 +268,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
                 for call in calls:
                     await append_event_step(
                         run_id,
+                        tenant_id,
                         f"tool:{call.tool_call_id}:call",
                         "tool_call",
                         {
@@ -276,7 +280,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
                 pending = calls
                 n += 1
         if pending:
-            await _record_tool_results(run_id, pending, _all_parts(run.all_messages()))
+            await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
         assert run.result is not None
         return run.result.output
 
@@ -295,12 +299,15 @@ async def agent_run(
 ) -> dict[str, Any]:
     await start_run_step(run_id, tenant_id, agent_id, version, input_text)
     await append_event_step(
-        run_id, "start", "run_started", {"agent_id": agent_id, "version": version, "input": input_text}
+        run_id, tenant_id, "start", "run_started", {"agent_id": agent_id, "version": version, "input": input_text}
     )
-    heartbeat = asyncio.create_task(_heartbeat(run_id))
+    heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
         rt = get_runtime()
         spec = _parse_spec(spec_json)
+        # Model governance: re-checked here (not only at publish) because the policy may have
+        # changed since the version was published. Fails before any model request is made.
+        rt.settings.allowed_models.check(spec.model.provider, spec.model.name)
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
         output = await _drive_agent(run_id, rt.deps_for(run_id, tenant_id, spec), input_text)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
@@ -308,15 +315,15 @@ async def agent_run(
         error = f"{type(exc).__name__}: {exc}"
         log.warning("run %s %s: %s", run_id, status, error)
         heartbeat.cancel()
-        await append_event_step(run_id, "end", "run_failed", {"status": status, "error": error})
-        await finish_run_step(run_id, status, None, error)
+        await append_event_step(run_id, tenant_id, "end", "run_failed", {"status": status, "error": error})
+        await finish_run_step(run_id, tenant_id, status, None, error)
         return {"status": status, "error": error}
     finally:
         heartbeat.cancel()
     # End event before the terminal status: a reader that sees a terminal status always finds the
     # complete event log.
-    await append_event_step(run_id, "end", "run_completed", {"output": output})
-    await finish_run_step(run_id, "completed", output, None)
+    await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
+    await finish_run_step(run_id, tenant_id, "completed", output, None)
     return {"status": "completed", "output": output}
 
 

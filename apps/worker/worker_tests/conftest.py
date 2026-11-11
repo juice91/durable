@@ -104,8 +104,8 @@ def cleanup_tenant(engine, tenant_id: str) -> None:
         run_ids = [r[0] for r in conn.execute(text("SELECT id FROM runs WHERE tenant_id = :t"), {"t": tenant_id})]
         for run_id in run_ids:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
-            conn.execute(text("DELETE FROM fake_external_tickets WHERE idempotency_key LIKE :p"), {"p": f"{run_id}:%"})
-            conn.execute(text("DELETE FROM fake_external_ticket_calls WHERE idempotency_key LIKE :p"), {"p": f"{run_id}:%"})
+        conn.execute(text("DELETE FROM fake_external_tickets WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM fake_external_ticket_calls WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})
 

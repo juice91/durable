@@ -17,7 +17,7 @@ import pytest
 from dbos import DBOSClient
 from sqlalchemy import text
 
-from tests.conftest import (
+from worker_tests.conftest import (
     APP_DB_URL,
     DBOS_DB_URL,
     drop_schema,
@@ -107,8 +107,8 @@ def test_crash_after_tool_call_recovers_in_fresh_process(worker, tenant, crash_s
 
         # 1. The worker dies right after the external call returned, before the result was recorded.
         assert first.wait_exit() == 137, (tmp_path / "worker1.log").read_text()
-        assert worker.tickets.ticket_count(f"{run_id}:") == 1
-        assert worker.tickets.call_count(f"{run_id}:") == 1
+        assert worker.tickets.ticket_count(tenant, f"{run_id}:") == 1
+        assert worker.tickets.call_count(tenant, f"{run_id}:") == 1
         with worker.engine.connect() as conn:
             states = conn.execute(
                 text("SELECT state FROM side_effects WHERE tenant_id = :t"), {"t": tenant}
@@ -126,8 +126,8 @@ def test_crash_after_tool_call_recovers_in_fresh_process(worker, tenant, crash_s
 
         # Exactly one external effect; the tool step is at-least-once, so the idempotent service
         # saw the same key twice and deduplicated it.
-        assert worker.tickets.ticket_count(f"{run_id}:") == 1
-        assert worker.tickets.call_count(f"{run_id}:") == 2
+        assert worker.tickets.ticket_count(tenant, f"{run_id}:") == 1
+        assert worker.tickets.call_count(tenant, f"{run_id}:") == 2
 
         events = event_rows(worker.engine, run_id)
         assert [e[0] for e in events] == list(range(len(events)))

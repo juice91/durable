@@ -10,7 +10,7 @@ import psycopg
 import pytest
 from pydantic_ai import RunContext
 
-from tests.conftest import APP_DB_URL, APP_VERSION, enqueue_run, event_rows, ticket_spec, wait_for, wait_terminal
+from worker_tests.conftest import APP_DB_URL, APP_VERSION, enqueue_run, event_rows, ticket_spec, wait_for, wait_terminal
 
 
 @pytest.fixture
@@ -80,8 +80,8 @@ def test_ticket_run_completes_with_contract_events(worker, client, run_store, te
         assert events[5][3]["output"] == run["output"] == events[4][3]["text"]
 
         # Exactly one external ticket, created once, under the run's idempotency key.
-        assert worker.tickets.ticket_count(f"{run_id}:") == 1
-        assert worker.tickets.call_count(f"{run_id}:") == 1
+        assert worker.tickets.ticket_count(tenant, f"{run_id}:") == 1
+        assert worker.tickets.call_count(tenant, f"{run_id}:") == 1
 
         # Live deltas: only request 1 streams text; one attempt; they add up to the final message.
         deltas = wait_for(lambda: listener.for_run(run_id), timeout=5, what="deltas")
@@ -116,8 +116,8 @@ def test_same_run_id_twice_is_one_workflow_and_one_run(worker, client, run_store
         assert conn.execute(text("SELECT count(*) FROM runs WHERE id = :r"), {"r": str(run_id)}).scalar_one() == 1
     events = event_rows(worker.engine, run_id)
     assert [e[0] for e in events] == list(range(6))
-    assert worker.tickets.ticket_count(f"{run_id}:") == 1
-    assert worker.tickets.call_count(f"{run_id}:") == 1
+    assert worker.tickets.ticket_count(tenant, f"{run_id}:") == 1
+    assert worker.tickets.call_count(tenant, f"{run_id}:") == 1
 
 
 def test_tool_not_in_registry_fails_the_run(worker, client, run_store, tenant):
@@ -131,7 +131,7 @@ def test_tool_not_in_registry_fails_the_run(worker, client, run_store, tenant):
     events = event_rows(worker.engine, run_id)
     assert [(e[0], e[1], e[2]) for e in events] == [(0, "start", "run_started"), (1, "end", "run_failed")]
     assert "UnknownToolError" in events[1][3]["error"]
-    assert worker.tickets.call_count(f"{run_id}:") == 0
+    assert worker.tickets.call_count(tenant, f"{run_id}:") == 0
 
 
 def test_tool_not_allowlisted_fails_the_run(worker, client, run_store, tenant, monkeypatch):
@@ -145,7 +145,7 @@ def test_tool_not_allowlisted_fails_the_run(worker, client, run_store, tenant, m
     events = event_rows(worker.engine, run_id)
     assert [e[2] for e in events] == ["run_started", "run_failed"]
     assert "ToolNotAllowedError" in events[1][3]["error"]
-    assert worker.tickets.call_count(f"{run_id}:") == 0
+    assert worker.tickets.call_count(tenant, f"{run_id}:") == 0
 
 
 def test_text_only_model_run(worker, client, run_store, tenant):

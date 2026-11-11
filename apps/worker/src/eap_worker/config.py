@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from eap_schemas.models_policy import ModelPolicy
+
 QUEUE_NAME = "eap-agent-runs"
 WORKFLOW_NAME = "eap.agent_run"
 DELTA_CHANNEL = "eap_run_deltas"
@@ -23,6 +25,8 @@ class WorkerSettings:
     allowed_tools: frozenset[str] | None
     litellm_base_url: str | None
     litellm_api_key: str | None = field(repr=False)  # secret: never in repr/logs
+    # Platform model allowlist (EAP_ALLOWED_MODELS); default `test:*` only.
+    allowed_models: ModelPolicy = field(default_factory=lambda: ModelPolicy.parse(None))
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -42,4 +46,5 @@ class WorkerSettings:
             litellm_base_url=os.environ.get("EAP_LITELLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
             # Never logged or printed; see apps/worker/.env.example for how to load it.
             litellm_api_key=os.environ.get("EAP_LITELLM_API_KEY") or os.environ.get("LITELLM_API_KEY"),
+            allowed_models=ModelPolicy.from_env(),
         )

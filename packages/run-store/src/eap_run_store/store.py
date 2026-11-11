@@ -8,7 +8,8 @@ from sqlalchemy import (
     JSON,
     Column,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     create_engine,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
@@ -63,16 +65,21 @@ class RunModel(Base):
         "updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
+    __table_args__ = (
+        # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
+        UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),
+    )
+
 
 class ExecutionEventModel(Base):
-    """Model for execution_events table."""
+    """Model for execution_events table. Owned by the run's tenant (composite FK to runs)."""
 
     __tablename__ = "execution_events"
 
+    tenant_id: Mapped[StrAnnotated] = mapped_column("tenant_id", String, nullable=False)
     run_id: Mapped[UUIDAnnotated] = mapped_column(
         "run_id",
         String,
-        ForeignKey("runs.id"),
         primary_key=True,
     )
     seq: Mapped[int] = mapped_column("seq", Integer, primary_key=True)
@@ -83,6 +90,12 @@ class ExecutionEventModel(Base):
 
     __table_args__ = (
         UniqueConstraint("run_id", "event_key", name="uq_run_event_key"),
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["runs.tenant_id", "runs.id"],
+            name="fk_execution_events_tenant_run",
+        ),
+        Index("ix_execution_events_tenant_run", "tenant_id", "run_id"),
     )
 
 
@@ -106,6 +119,18 @@ class SideEffectModel(Base):
 def create_tables(engine):
     """Create all tables in the database."""
     Base.metadata.create_all(engine)
+
+
+class RunNotFound(ValueError):
+    """No run with this id belongs to the given tenant (it may not exist, or belong to another tenant).
+
+    Raised by every mutation that takes (tenant_id, run_id); nothing is changed when it is raised.
+    """
+
+    def __init__(self, tenant_id: str, run_id: UUID | str):
+        self.tenant_id = tenant_id
+        self.run_id = run_id
+        super().__init__(f"Run not found for tenant {tenant_id!r}: {run_id}")
 
 
 def _run_event_from_model(model: ExecutionEventModel) -> RunEvent:
@@ -184,30 +209,37 @@ class RunStore:
             session.commit()
             return UUID(existing.id), False
 
-    def set_status(self, run_id: UUID, status: str, output: str | None = None, error: str | None = None) -> None:
-        """Update run status and optionally output or error."""
-        with self.Session() as session:
-            run = session.execute(
-                select(RunModel).where(RunModel.id == str(run_id))
-            ).scalar_one_or_none()
-            if run is None:
-                raise ValueError(f"Run not found: {run_id}")
-            run.status = status
-            if output is not None:
-                run.output = output
-            if error is not None:
-                run.error = error
-            session.commit()
+    def set_status(
+        self, tenant_id: str, run_id: UUID, status: str, output: str | None = None, error: str | None = None
+    ) -> None:
+        """Update run status and optionally output or error, only for a run owned by `tenant_id`.
 
-    def heartbeat(self, run_id: UUID) -> None:
-        """Update the heartbeat timestamp for a run."""
+        Raises RunNotFound (and changes nothing) if the run does not exist or belongs to another tenant.
+        """
+        values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
+        if output is not None:
+            values["output"] = output
+        if error is not None:
+            values["error"] = error
+        self._update_owned(tenant_id, run_id, values)
+
+    def heartbeat(self, tenant_id: str, run_id: UUID) -> None:
+        """Update the heartbeat timestamp for a run owned by `tenant_id` (RunNotFound otherwise)."""
+        self._update_owned(tenant_id, run_id, {"heartbeat_at": datetime.now(timezone.utc)})
+
+    def _update_owned(self, tenant_id: str, run_id: UUID, values: dict[str, Any]) -> None:
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
         with self.Session() as session:
-            run = session.execute(
-                select(RunModel).where(RunModel.id == str(run_id))
-            ).scalar_one_or_none()
-            if run is None:
-                raise ValueError(f"Run not found: {run_id}")
-            run.heartbeat_at = datetime.now(timezone.utc)
+            updated = session.execute(
+                update(RunModel)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+                .values(**values)
+                .returning(RunModel.id)
+            ).fetchone()
+            if updated is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
             session.commit()
 
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
@@ -252,22 +284,31 @@ class EventLog:
         self.engine = engine
         self.Session = sessionmaker(bind=engine)
 
-    def append(self, run_id: UUID, event_key: str, type: RunEventType, data: dict | None = None) -> tuple[RunEvent, bool]:
-        """Append an event to a run. Seq is assigned atomically.
-        
+    def append(
+        self, tenant_id: str, run_id: UUID, event_key: str, type: RunEventType, data: dict | None = None
+    ) -> tuple[RunEvent, bool]:
+        """Append an event to a run owned by `tenant_id`. Seq is assigned atomically.
+
         Returns (RunEvent, created: bool) where created=False if the event_key already exists.
         A repeated key never consumes a seq number.
+        Raises RunNotFound (and writes nothing) if the run does not exist or belongs to another tenant.
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
         with self.Session() as session:
-            # Lock the runs row to ensure seq uniqueness
-            session.execute(
-                text("SELECT id FROM runs WHERE id = :run_id FOR UPDATE"),
-                {"run_id": str(run_id)}
-            )
+            # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
+            owned = session.execute(
+                text("SELECT id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+                {"run_id": str(run_id), "tenant_id": tenant_id},
+            ).fetchone()
+            if owned is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
 
             # Check if event with this event_key already exists
             existing_event = session.execute(
                 select(ExecutionEventModel).where(
+                    ExecutionEventModel.tenant_id == tenant_id,
                     ExecutionEventModel.run_id == str(run_id),
                     ExecutionEventModel.event_key == event_key
                 )
@@ -287,6 +328,7 @@ class EventLog:
 
             # Create the event
             event_model = ExecutionEventModel(
+                tenant_id=tenant_id,
                 run_id=str(run_id),
                 seq=new_seq,
                 event_key=event_key,
@@ -312,7 +354,11 @@ class EventLog:
             # Get events
             events = session.execute(
                 select(ExecutionEventModel)
-                .where(ExecutionEventModel.run_id == str(run_id), ExecutionEventModel.seq > after_seq)
+                .where(
+                    ExecutionEventModel.tenant_id == tenant_id,
+                    ExecutionEventModel.run_id == str(run_id),
+                    ExecutionEventModel.seq > after_seq,
+                )
                 .order_by(ExecutionEventModel.seq)
             ).scalars().all()
 

@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from tests.conftest import APP_VERSION, enqueue_run, event_rows, ticket_spec, wait_terminal
+from worker_tests.conftest import APP_VERSION, enqueue_run, event_rows, ticket_spec, wait_terminal
 
 HAS_KEY = bool(os.environ.get("EAP_LITELLM_API_KEY") or os.environ.get("LITELLM_API_KEY"))
 

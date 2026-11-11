@@ -14,6 +14,7 @@ from eap_api.database import get_session
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail
 from eap_schemas import AgentSpec, canonical_spec_hash
+from eap_schemas.models_policy import ModelPolicy
 
 router = APIRouter()
 
@@ -223,6 +224,18 @@ def publish_version(
     )
 
     spec = AgentSpec.model_validate(agent.draft_spec)
+
+    # Model governance: only allowlisted models (EAP_ALLOWED_MODELS) can be published. The worker
+    # re-checks before every model call, since the policy can change after publish.
+    if not ModelPolicy.from_env().allows(spec.model.provider, spec.model.name):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"model '{spec.model.provider}:{spec.model.name}' is not allowed on this platform "
+                "(not in the EAP_ALLOWED_MODELS allowlist)"
+            ),
+        )
+
     draft_hash = canonical_spec_hash(spec)
 
     if latest is not None:

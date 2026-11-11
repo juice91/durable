@@ -10,6 +10,10 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
                  with SDK (transport) retries off; DBOS's model step retry policy owns retrying.
 - anything else is left to Pydantic AI's `infer_model`.
+
+Every id must also pass the platform model allowlist (EAP_ALLOWED_MODELS, default `test:*`). The
+workflow checks it before the agent starts; the resolver checks it again so no code path can build
+a model that the policy forbids.
 """
 
 from __future__ import annotations
@@ -136,6 +140,7 @@ def make_resolver(settings_getter: Any):
         if model_id == PLACEHOLDER_MODEL:
             raise RuntimeError("agent run started without a per-run model from the spec")
         provider, _, name = model_id.partition(":")
+        settings_getter().allowed_models.check(provider, name)  # raises ModelNotAllowed
         if provider == "test":
             if name == "ticket":
                 return scripted_ticket_model()

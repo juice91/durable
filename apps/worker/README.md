@@ -27,7 +27,7 @@ model step:
 
 ## Tests
 
-`uv run pytest apps/worker/tests -q` needs the dev Postgres (`bash scripts/dev-db.sh up`). Each
+`uv run pytest apps/worker -q` needs the dev Postgres (`bash scripts/dev-db.sh up`). Each
 session uses a private DBOS system schema and drops it. `test_live_litellm.py` runs only when
 `EAP_LITELLM_API_KEY` or `LITELLM_API_KEY` is set.
 
