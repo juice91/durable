@@ -1,0 +1,10 @@
+{
+  "extends": "next/core-web-vitals",
+  "rules": {
+    "react/self-closing-comp": "error",
+    "react/react-in-jsx-scope": "off",
+    "react/jsx-fragments": "error",
+    "react/require-default-props": "off",
+    "react/display-name": "off"
+  }
+}
