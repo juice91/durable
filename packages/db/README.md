@@ -19,7 +19,11 @@ DBOS's own system database (`eap_dbos`) is managed by DBOS and is not covered he
   `0002_conversations.py` adds `conversations` and the nullable `runs.conversation_id`, `runs.turn`
   (composite FK to `conversations(tenant_id, id)`, UNIQUE `(conversation_id, turn)`) and
   `runs.messages`.
-- `src/eap_db/metadata.py` — the target metadata: the union of `eap_api.models.Base.metadata`,
+  `0004_mcp_servers.py` adds `mcp_servers` and `mcp_server_secrets` (encrypted MCP header values,
+  composite FK to `mcp_servers(tenant_id, id)`, ON DELETE CASCADE); models in
+  `apps/api/src/eap_api/mcp_servers/models.py`.
+- `src/eap_db/metadata.py` — the target metadata: the union of `eap_api.models.Base.metadata` (which
+  also holds `eap_api.mcp_servers.models`),
   `eap_run_store.Base.metadata` and `eap_worker.tickets.metadata`. Tables are defined only in those
   modules; this package never duplicates them.
 - `src/eap_db/__init__.py` — `require_schema_at_head(engine)`, the startup check the API and worker

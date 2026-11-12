@@ -10,6 +10,7 @@ from sqlalchemy import MetaData
 
 def target_metadata() -> list[MetaData]:
     from eap_api.models import Base as ApiBase  # agents, agent_versions
+    import eap_api.mcp_servers.models  # noqa: F401 - mcp_servers, mcp_server_secrets (on ApiBase)
     from eap_run_store import Base as RunStoreBase  # runs, execution_events, side_effects
     from eap_worker.tickets import metadata as tickets_metadata  # fake_external_tickets, fake_external_ticket_calls
 

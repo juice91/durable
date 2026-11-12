@@ -73,6 +73,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(conversations_router, prefix="/api/v1")
 
+    # MCP server registry; a malformed EAP_SECRETS_KEY fails startup here (an unset one is a warning).
+    from eap_api.routes.mcp_servers import check_secrets_configuration, router as mcp_servers_router
+
+    check_secrets_configuration()
+    app.include_router(mcp_servers_router, prefix="/api/v1")
+
     from eap_api.routes.tools import router as tools_router
 
     app.include_router(tools_router, prefix="/api/v1")

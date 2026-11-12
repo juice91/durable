@@ -123,3 +123,86 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
     finally:
         engine.dispose()
         drop_schema(base, schema)
+
+
+def test_single_head_is_the_mcp_servers_revision():
+    assert head_revisions() == {"0004_mcp_servers"}
+
+
+@requires_schema
+def test_mcp_servers_revision_keeps_existing_rows_and_round_trips():
+    """0003 -> 0004 on a database with rows: nothing existing changes; the new tables are
+    tenant-composite (a secret cannot point at another tenant's server) and cascade on delete;
+    downgrade to 0003 removes exactly the two new tables."""
+    from alembic import command
+    from sqlalchemy.exc import IntegrityError
+
+    from eap_db import alembic_config
+
+    base = _base_url()
+    schema = f"eap_test_0004_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(base)
+    with admin.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    admin.dispose()
+    engine = create_engine(schema_url(base, schema))
+    counted = ("agents", "agent_versions", "runs", "execution_events", "conversations", "side_effects")
+    try:
+        with engine.begin() as conn:
+            command.upgrade(alembic_config(conn), "0003")
+            conn.execute(text(
+                "INSERT INTO agents (id, tenant_id, name, archived, created_at, updated_at) "
+                "VALUES ('a1', 't1', 'A', false, now(), now())"
+            ))
+            conn.execute(text(
+                "INSERT INTO runs (id, tenant_id, agent_id, agent_version, status, input, created_at, updated_at) "
+                "VALUES ('r1', 't1', 'a1', 1, 'completed', 'hi', now(), now())"
+            ))
+            before = {t: conn.execute(text(f"SELECT count(*) FROM {t}")).scalar_one() for t in counted}
+        with engine.begin() as conn:
+            command.upgrade(alembic_config(conn), "head")
+        with engine.connect() as conn:
+            assert {t: conn.execute(text(f"SELECT count(*) FROM {t}")).scalar_one() for t in counted} == before
+            assert schema_diff(conn) == []
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO mcp_servers (id, tenant_id, name, url, created_at, updated_at) "
+                "VALUES ('s1', 't1', 'docs', 'https://example.com/mcp', now(), now())"
+            ))
+            row = conn.execute(text("SELECT transport, enabled, last_status FROM mcp_servers")).one()
+            assert tuple(row) == ("streamable_http", True, None)
+            conn.execute(text(
+                "INSERT INTO mcp_server_secrets (tenant_id, server_id, header_name, ciphertext, key_id) "
+                "VALUES ('t1', 's1', 'authorization', '\\x00'::bytea, 'k')"
+            ))
+        for statement in (
+            # another tenant's server id
+            "INSERT INTO mcp_server_secrets (tenant_id, server_id, header_name, ciphertext, key_id) "
+            "VALUES ('t2', 's1', 'authorization', '\\x00'::bytea, 'k')",
+            # same name twice in one tenant
+            "INSERT INTO mcp_servers (id, tenant_id, name, url, created_at, updated_at) "
+            "VALUES ('s2', 't1', 'docs', 'https://example.com/mcp', now(), now())",
+            # only streamable_http
+            "INSERT INTO mcp_servers (id, tenant_id, name, url, transport, created_at, updated_at) "
+            "VALUES ('s3', 't1', 'cmd', 'https://example.com/mcp', 'stdio', now(), now())",
+        ):
+            with pytest.raises(IntegrityError), engine.begin() as conn:
+                conn.execute(text(statement))
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO mcp_servers (id, tenant_id, name, url, created_at, updated_at) "
+                "VALUES ('s4', 't2', 'docs', 'https://example.com/mcp', now(), now())"
+            ))  # the same name in another tenant is fine
+            conn.execute(text("DELETE FROM mcp_servers WHERE id = 's1'"))
+            assert conn.execute(text("SELECT count(*) FROM mcp_server_secrets")).scalar_one() == 0
+        with engine.begin() as conn:
+            command.downgrade(alembic_config(conn), "0003")
+        with engine.connect() as conn:
+            tables = set(conn.execute(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = :s"), {"s": schema}
+            ).scalars())
+            assert not {"mcp_servers", "mcp_server_secrets"} & tables
+            assert {t: conn.execute(text(f"SELECT count(*) FROM {t}")).scalar_one() for t in counted} == before
+    finally:
+        engine.dispose()
+        drop_schema(base, schema)

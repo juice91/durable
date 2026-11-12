@@ -19,15 +19,21 @@ dependencies = [
     "eap-observability",
     "dbos>=3.5.0",
     "uvicorn>=0.34.0",
+    "eap-secrets",
+    # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
+    "fastmcp-slim[client]>=3.3.0,<5",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.24",
+    # A local MCP server for the connection-test tests.
+    "fastmcp-slim[server]>=3.3.0,<5",
 ]
 
 [tool.uv.sources]
 eap-run-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
+eap-secrets = { workspace = true }

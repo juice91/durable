@@ -21,7 +21,7 @@ members = ["packages/*", "apps/api", "apps/worker"]
 eap-schemas = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -51,12 +51,21 @@ forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
 [[tool.importlinter.contracts]]
 name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets"]
 forbidden_modules = ["opentelemetry"]
 # Direct imports only: the sanctioned path is eap_api/eap_worker -> eap_observability -> opentelemetry.
 # Every other root package is a source here, so any indirect chain must still end in a direct
 # import by eap_observability; this keeps the rule exactly "only eap_observability imports OTel".
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Secrets and outbound policy have no web, database, agent or platform imports"
+type = "forbidden"
+source_modules = ["eap_secrets"]
+forbidden_modules = [
+    "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability",
+    "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos",
+]
 
 [[tool.importlinter.contracts]]
 name = "eap_worker must not import eap_api"
