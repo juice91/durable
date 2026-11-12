@@ -35,7 +35,12 @@ export const DashboardIcon = createSvgIcon(
 
 export const UsersIcon = createSvgIcon(
   "Users",
-  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />,
+  <>
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+  </>,
   "line"
 );
 
@@ -47,7 +52,17 @@ export const PlayIcon = createSvgIcon(
 
 export const GitGraphIcon = createSvgIcon(
   "GitGraph",
-  <path d="M6 3v12" />,
+  <>
+    <path d="M6 3v12" />
+    <circle cx="6" cy="3" r="2" />
+    <circle cx="6" cy="9" r="2" />
+    <circle cx="6" cy="15" r="2" />
+    <path d="M12 3v12" />
+    <circle cx="12" cy="9" r="2" />
+    <circle cx="12" cy="15" r="2" />
+    <path d="M6 9h6" />
+    <path d="M6 15h6" />
+  </>,
   "line"
 );
 
@@ -65,7 +80,11 @@ export const CpuIcon = createSvgIcon(
 
 export const BoxIcon = createSvgIcon(
   "Box",
-  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />,
+  <>
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+    <path d="M3.27 6.96 12 12.01l8.73-5.05" />
+    <path d="M12 22.08V12" />
+  </>,
   "line"
 );
 
@@ -83,7 +102,11 @@ export const FileTextIcon = createSvgIcon(
 
 export const BarChartIcon = createSvgIcon(
   "BarChart",
-  <line x1="18" y1="20" x2="18" y2="10" />,
+  <>
+    <line x1="12" y1="20" x2="12" y2="10" />
+    <line x1="18" y1="20" x2="18" y2="4" />
+    <line x1="6" y1="20" x2="6" y2="16" />
+  </>,
   "line"
 );
 

@@ -21,7 +21,7 @@ members = ["packages/*", "apps/api", "apps/worker"]
 eap-schemas = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -51,8 +51,14 @@ forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
 [[tool.importlinter.contracts]]
 name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db"]
 forbidden_modules = ["opentelemetry"]
+
+[[tool.importlinter.contracts]]
+name = "eap_worker must not import eap_api"
+type = "forbidden"
+source_modules = ["eap_worker"]
+forbidden_modules = ["eap_api"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages", "apps/api", "apps/worker", "tests"]

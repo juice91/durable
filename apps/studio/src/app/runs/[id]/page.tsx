@@ -96,7 +96,7 @@ export default function RunDetailPage() {
   if (!run) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-gray-500">Loading run...</p>
+        <p className="text-card-foreground/60">Loading run...</p>
       </div>
     );
   }
@@ -106,14 +106,14 @@ export default function RunDetailPage() {
         <div className="mb-6">
           <button
             onClick={() => router.push("/agents")}
-            className="text-sm text-gray-600 hover:text-gray-900 mb-4 inline-flex items-center"
+            className="text-sm text-card-foreground/80 hover:text-card-foreground mb-4 inline-flex items-center"
           >
             ← Back to agents
           </button>
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold">Run {run.run_id}</h1>
-              <p className="text-sm text-gray-500 mt-1">
+              <h1 className="text-2xl font-bold text-card-foreground">Run {run.run_id}</h1>
+              <p className="text-sm text-muted-foreground mt-1">
                 Agent: {run.agent_id} | Version: {run.version ?? "latest"}
               </p>
             </div>
@@ -127,8 +127,8 @@ export default function RunDetailPage() {
           )}
         </div>
 
-        <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-lg font-semibold mb-4">Event Timeline</h2>
+        <div className="bg-card rounded-lg shadow p-6">
+          <h2 className="text-lg font-semibold mb-4 text-card-foreground">Event Timeline</h2>
           <EventTimeline events={events} currentPartialText={partialText} />
         </div>
     </div>

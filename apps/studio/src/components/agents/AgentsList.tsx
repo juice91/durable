@@ -28,7 +28,7 @@ export function AgentsListUI({ agents, onSelect }: AgentsListUIProps) {
       {agents.map((agent) => (
         <Card
           key={agent.id}
-          className="p-4 hover:bg-gray-50 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md"
+          className="p-4 hover:bg-accent cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent-foreground rounded-md"
           onClick={() => onSelect(agent.id)}
           tabIndex={0}
           onKeyDown={(e) => {
@@ -40,12 +40,12 @@ export function AgentsListUI({ agents, onSelect }: AgentsListUIProps) {
         >
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-medium text-gray-900">{agent.name}</h3>
-              <p className="text-sm text-gray-500">
+              <h3 className="font-medium text-card-foreground">{agent.name}</h3>
+              <p className="text-sm text-muted-foreground">
                 {agent.latest_version !== null ? `Version ${agent.latest_version}` : "Draft"}
               </p>
             </div>
-            <span className="text-gray-400">→</span>
+            <span className="text-muted-foreground">→</span>
           </div>
         </Card>
       ))}

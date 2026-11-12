@@ -10,12 +10,12 @@ interface StatusPillProps {
 }
 
 const statusStyles: Record<Status, string> = {
-  queued: "bg-gray-100 text-gray-800",
-  running: "bg-blue-100 text-blue-800",
-  recovering: "bg-yellow-100 text-yellow-800",
-  completed: "bg-green-100 text-green-800",
-  failed: "bg-red-100 text-red-800",
-  needs_attention: "bg-orange-100 text-orange-800",
+  queued: "bg-muted text-card-foreground",
+  running: "bg-accent text-accent-foreground",
+  recovering: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
+  completed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  failed: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+  needs_attention: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
 };
 
 export function StatusPill({ status, showRecoveringNotice = false }: StatusPillProps) {
@@ -27,7 +27,7 @@ export function StatusPill({ status, showRecoveringNotice = false }: StatusPillP
         {displayText}
       </span>
       {showRecoveringNotice && status === "recovering" && (
-        <span className="text-xs text-yellow-600">
+        <span className="text-xs text-yellow-600 dark:text-yellow-400">
           Worker is restarting, events may be delayed
         </span>
       )}

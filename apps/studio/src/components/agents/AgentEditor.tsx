@@ -112,7 +112,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
+        <label htmlFor="name" className="block text-sm font-medium text-card-foreground mb-1">
           Name
         </label>
         <input
@@ -123,13 +123,13 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
             setName(e.target.value);
             updateDirtyState();
           }}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
           required
         />
       </div>
 
       <div>
-        <label htmlFor="instructions" className="block text-sm font-medium text-gray-700 mb-1">
+        <label htmlFor="instructions" className="block text-sm font-medium text-card-foreground mb-1">
           Instructions
         </label>
         <textarea
@@ -140,14 +140,14 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
             updateDirtyState();
           }}
           rows={6}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
           required
         />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label htmlFor="provider" className="block text-sm font-medium text-gray-700 mb-1">
+          <label htmlFor="provider" className="block text-sm font-medium text-card-foreground mb-1">
             Model provider
           </label>
           <input
@@ -158,12 +158,12 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
               setProvider(e.target.value);
               updateDirtyState();
             }}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
             required
           />
         </div>
         <div>
-          <label htmlFor="modelName" className="block text-sm font-medium text-gray-700 mb-1">
+          <label htmlFor="modelName" className="block text-sm font-medium text-card-foreground mb-1">
             Model name
           </label>
           <input
@@ -174,29 +174,29 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
               setModelName(e.target.value);
               updateDirtyState();
             }}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
             required
           />
         </div>
       </div>
 
       <div>
-        <span className="block text-sm font-medium text-gray-700 mb-2">
+        <span className="block text-sm font-medium text-card-foreground mb-2">
           Tools
         </span>
         <div className="flex flex-wrap gap-2">
           {AVAILABLE_TOOLS.map((tool) => (
-            <label key={tool} className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-md bg-white hover:bg-gray-50 cursor-pointer">
+            <label key={tool} className="inline-flex items-center px-3 py-2 border border-border rounded-md bg-card hover:bg-accent cursor-pointer">
               <input
                 type="checkbox"
-                className="form-checkbox h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                className="form-checkbox h-4 w-4 text-accent-foreground focus:ring-accent-foreground border-border rounded"
                 checked={selectedTools.includes(tool)}
                 onChange={() => {
                   toggleTool(tool);
                   updateDirtyState();
                 }}
               />
-              <span className="ml-2 text-sm text-gray-700">{tool}</span>
+              <span className="ml-2 text-sm text-card-foreground">{tool}</span>
             </label>
           ))}
         </div>
@@ -204,7 +204,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label htmlFor="temperature" className="block text-sm font-medium text-gray-700 mb-1">
+          <label htmlFor="temperature" className="block text-sm font-medium text-card-foreground mb-1">
             Temperature (0–2)
           </label>
           <input
@@ -218,11 +218,11 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
               setTemperature(e.target.value);
               updateDirtyState();
             }}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
           />
         </div>
         <div>
-          <label htmlFor="maxTokens" className="block text-sm font-medium text-gray-700 mb-1">
+          <label htmlFor="maxTokens" className="block text-sm font-medium text-card-foreground mb-1">
             Max tokens (optional)
           </label>
           <input
@@ -234,7 +234,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
               setMaxTokens(e.target.value);
               updateDirtyState();
             }}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
           />
         </div>
       </div>
@@ -243,7 +243,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
         <button
           type="submit"
           disabled={submitting}
-          className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full px-4 py-2 bg-accent text-accent-foreground rounded-md hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent-foreground focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {submitting ? "Saving..." : submitLabel}
         </button>

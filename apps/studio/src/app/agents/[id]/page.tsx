@@ -94,7 +94,7 @@ export default function AgentDetailPage() {
   if (!agent) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-gray-500">Loading...</p>
+        <p className="text-card-foreground/60">Loading...</p>
       </div>
     );
   }
@@ -104,12 +104,12 @@ export default function AgentDetailPage() {
         <div className="mb-6">
           <button
             onClick={() => router.push("/agents")}
-            className="text-sm text-gray-600 hover:text-gray-900 mb-4 inline-flex items-center"
+            className="text-sm text-card-foreground/80 hover:text-card-foreground mb-4 inline-flex items-center"
           >
             ← Back to agents
           </button>
-          <h1 className="text-2xl font-bold">Edit Agent</h1>
-          <p className="text-sm text-gray-500 mt-1">ID: {agent.id}</p>
+          <h1 className="text-2xl font-bold text-card-foreground">Edit Agent</h1>
+          <p className="text-sm text-muted-foreground mt-1">ID: {agent.id}</p>
         </div>
 
         {saveError && (
@@ -119,7 +119,7 @@ export default function AgentDetailPage() {
         )}
 
         <div className="mb-8">
-          <h2 className="text-lg font-semibold mb-3">Edit Agent</h2>
+          <h2 className="text-lg font-semibold mb-3 text-card-foreground">Edit Agent</h2>
           {lastPublishResult?.type === "success" && (
             <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-md text-green-700 text-sm">
               Version {lastPublishResult.version} published

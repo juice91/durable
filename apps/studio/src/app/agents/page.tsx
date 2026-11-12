@@ -38,7 +38,7 @@ export default function AgentsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-gray-500">Loading agents...</p>
+        <p className="text-card-foreground/60">Loading agents...</p>
       </div>
     );
   }
@@ -54,10 +54,10 @@ export default function AgentsPage() {
   return (
     <>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Agents</h1>
+        <h1 className="text-2xl font-bold text-card-foreground">Agents</h1>
         <button
           onClick={handleNewAgent}
-          className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+          className="inline-flex items-center px-4 py-2 bg-accent text-accent-foreground rounded-md hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent-foreground focus:ring-offset-2"
         >
           New agent
         </button>

@@ -152,4 +152,33 @@ describe("RunDetailPage", () => {
     expect(screen.getByText(/European customers see USD instead of EUR on checkout/)).toBeInTheDocument();
     expect(screen.getByText(/TCK-6E5549094063/)).toBeInTheDocument();
   });
+
+  it("renders markdown in model messages", async () => {
+    const mockEvents: RunEvent[] = [
+      {
+        seq: 1,
+        type: "model_message",
+        data: {
+          text: "Created **TCK-12345** for the issue.",
+        },
+        ts: "2026-11-12T00:00:00Z",
+      },
+    ];
+
+    const mockRun: Run = {
+      ...ticketRun,
+      output: "Created **TCK-12345** for the issue.",
+    };
+
+    (getRun as any).mockResolvedValueOnce(mockRun);
+    (listEvents as any).mockResolvedValueOnce(mockEvents);
+
+    render(<RunDetailPage />);
+
+    await screen.findByText("Event Timeline");
+    // Markdown should be rendered as <strong> tag, not raw **text**
+    const strongText = await screen.findByText("TCK-12345");
+    expect(strongText.tagName).toBe("STRONG");
+    expect(screen.queryByText(/\*\*TCK-12345\*\*/)).not.toBeInTheDocument();
+  });
 });

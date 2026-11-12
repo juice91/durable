@@ -1,5 +1,7 @@
 """Tests for spec violations - all should fail initially."""
 
+import pytest
+
 from uuid import uuid4
 
 from pydantic_ai.models.test import TestModel
@@ -67,12 +69,8 @@ def test_model_inference_unknown_provider():
     registry = ToolRegistry()
     allowed_tools = set()
     
-    try:
+    with pytest.raises(ValueError, match="unknown"):
         build_agent(spec, registry, allowed_tools=allowed_tools)
-        assert False, "Should have raised an error for unknown provider"
-    except Exception as e:
-        # Should raise something - not silently use TestModel
-        assert True
 
 
 def test_model_settings_applied():
