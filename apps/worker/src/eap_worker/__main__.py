@@ -8,6 +8,7 @@ import sys
 import threading
 
 from dbos import DBOS
+from eap_observability import shutdown_telemetry
 
 from eap_worker.app import launch
 
@@ -32,6 +33,7 @@ def main() -> int:
     print("EAP_WORKER_READY", flush=True)
     stop.wait()
     DBOS.destroy(destroy_registry=False)
+    shutdown_telemetry()  # flush the last spans and log records
     return 0
 
 

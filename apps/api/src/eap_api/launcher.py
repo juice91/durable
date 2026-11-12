@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
+from eap_observability import dbos_trace_attributes
 from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
@@ -43,7 +44,15 @@ class LauncherSettings:
 
 class RunLauncher(Protocol):
     def launch(
-        self, *, run_id: UUID, tenant_id: str, agent_id: UUID, version: int, spec_json: str, input_text: str
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        agent_id: UUID,
+        version: int,
+        spec_json: str,
+        input_text: str,
+        traceparent: str | None = None,
     ) -> None: ...
 
     def close(self) -> None: ...
@@ -72,14 +81,27 @@ class DBOSRunLauncher:
             return self._client
 
     def launch(
-        self, *, run_id: UUID, tenant_id: str, agent_id: UUID, version: int, spec_json: str, input_text: str
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        agent_id: UUID,
+        version: int,
+        spec_json: str,
+        input_text: str,
+        traceparent: str | None = None,
     ) -> None:
-        options = {
+        options: dict[str, Any] = {
             "queue_name": QUEUE_NAME,
             "workflow_name": WORKFLOW_NAME,
             "workflow_id": str(run_id),
             "app_version": self.settings.app_version,
         }
+        # The run's stored request traceparent, as a DBOS workflow attribute: DBOS parents its
+        # workflow span on it (durably, so recovery stays on the trace). Absent when telemetry is off.
+        attributes = dbos_trace_attributes(traceparent)
+        if attributes is not None:
+            options["attributes"] = attributes
         self._get_client().enqueue(options, str(run_id), tenant_id, str(agent_id), version, spec_json, input_text)
 
     def close(self) -> None:

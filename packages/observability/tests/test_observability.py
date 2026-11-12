@@ -1,173 +1,180 @@
-import os
+"""eap_observability: setup is a no-op without an endpoint; run spans join a stored traceparent;
+logs carry the trace id; Pydantic AI spans leave content out."""
+
+from __future__ import annotations
+
+import logging
+import re
+
 import pytest
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry import trace as trace_api
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry import trace
+from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
-from eap_observability import (
-    setup_telemetry,
-    instrument_pydantic_ai,
-    instrument_fastapi,
-    dbos_otel_config,
-    current_trace_id,
-    run_span,
-)
+import eap_observability as obs
+from eap_observability.agents import instrument_pydantic_ai, uninstrument_pydantic_ai
+
+TRACEPARENT = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
+
+
+@pytest.fixture(autouse=True)
+def _clean(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    obs.shutdown_telemetry()
+    yield
+    uninstrument_pydantic_ai()
+    obs.shutdown_telemetry()
 
 
 @pytest.fixture
-def custom_tracer_provider():
-    """Create a custom tracer provider with in-memory exporter for each test."""
-    # Reset the global provider to ensure each test gets its own provider
-    import eap_observability
-    eap_observability._global_provider = None
-    
+def spans():
     exporter = InMemorySpanExporter()
-    provider = setup_telemetry("test-service", exporter=exporter)
-    return provider, exporter
+    provider = obs.setup_telemetry("test-service", exporter=exporter)
+    assert provider is not None
+
+    def finished():
+        provider.force_flush()
+        return exporter.get_finished_spans()
+
+    return provider, finished
 
 
-def test_setup_telemetry_idempotent_returns_same_provider(custom_tracer_provider):
-    """Calling setup_telemetry twice returns the same provider without replacing global."""
-    provider1, exporter = custom_tracer_provider
-    provider2 = setup_telemetry("test-service", exporter=exporter)
-    
-    assert provider1 is provider2
+# --------------------------------------------------------------------------- off by default
 
 
-def test_no_endpoint_no_exporter_creates_noop_provider():
-    """When no endpoint and no exporter, telemetry is a no-op provider with no spans exported."""
-    # Reset global provider for this test
-    import eap_observability
-    eap_observability._global_provider = None
-    
-    exporter = InMemorySpanExporter()
-    
-    os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
-    
-    # No endpoint and no exporter -> no-op provider
-    provider = setup_telemetry("test-service")
-    
-    # The no-op provider has no span processors, so spans aren't exported
-    # We verify by checking the provider has no span processors
-    assert len(list(provider._active_span_processor._span_processors)) == 0
-    
-    tracer = provider.get_tracer("test")
-    with tracer.start_as_current_span("test-span"):
-        pass
-    
-    # Exporter should have no spans because no span processor was attached
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 0
-
-
-def test_instrument_pydantic_ai_creates_spans(custom_tracer_provider):
-    """After instrument_pydantic_ai, agent runs produce spans."""
-    provider, exporter = custom_tracer_provider
-    
-    os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
-    instrument_pydantic_ai(tracer_provider=provider)
-    
-    agent = Agent(TestModel(), output_type=str)
-    
-    # Run with TestModel
-    result = agent.run_sync("Hello")
-    
-    # Flush spans to ensure batch export completes
-    provider.force_flush()
-    
-    spans = exporter.get_finished_spans()
-    assert len(spans) > 0
-    
-    # Find spans related to agent run
-    agent_spans = [s for s in spans if "agent" in s.name.lower()]
-    assert len(agent_spans) > 0
-
-
-def test_instrument_pydantic_ai_excludes_content_by_default(custom_tracer_provider):
-    """By default, prompt content should not be in span attributes."""
-    provider, exporter = custom_tracer_provider
-    
-    os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
-    instrument_pydantic_ai(tracer_provider=provider)
-    
-    agent = Agent(TestModel(), output_type=str)
-    result = agent.run_sync("Hello with sensitive data")
-    
-    spans = exporter.get_finished_spans()
-    # Find model request spans
-    model_spans = [s for s in spans if "model" in s.name.lower()]
-    
-    for span in model_spans:
-        # Prompt text should not be in attributes by default
-        attributes = dict(span.attributes or {})
-        # When include_content=False (default), we expect no input_messages or similar
-        assert "llm.input_messages" not in attributes or attributes["llm.input_messages"] == "[]"
-
-
-def test_instrument_fastapi_creates_server_span(custom_tracer_provider):
-    """After instrument_fastapi, FastAPI requests produce server spans."""
-    provider, exporter = custom_tracer_provider
-    
-    os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
-    
+def test_without_endpoint_everything_is_a_noop():
+    root_handlers = list(logging.getLogger().handlers)
+    assert obs.setup_telemetry("eap-api") is None
+    assert obs.tracer_provider() is None
+    assert obs.setup_logging("eap-api") is False
+    assert logging.getLogger().handlers == root_handlers
+    assert instrument_pydantic_ai() is False
     app = FastAPI()
-    
-    @app.get("/test")
-    def test_endpoint():
-        return {"status": "ok"}
-    
-    instrument_fastapi(app, tracer_provider=provider)
-    
-    client = TestClient(app)
-    response = client.get("/test")
-    assert response.status_code == 200
-    
-    # Flush spans to ensure batch export completes
-    provider.force_flush()
-    
-    spans = exporter.get_finished_spans()
-    # Should have at least one HTTP span
-    assert len(spans) >= 1
-    # Verify we have HTTP-related spans
-    http_spans = [s for s in spans if "http" in s.name.lower()]
-    assert len(http_spans) >= 1
+    obs.instrument_fastapi(app)
+    assert not getattr(app, "_is_instrumented_by_opentelemetry", False)
+    assert obs.dbos_otel_config(None) == {}
+    assert obs.dbos_trace_attributes(None) is None
+    with obs.run_span("r", "t", "a", 1, traceparent=None) as span:
+        assert not span.is_recording()
 
 
-def test_run_span_sets_attributes_and_current_trace_id(custom_tracer_provider):
-    """run_span sets the four attributes and current_trace_id returns the span's trace id."""
-    provider, exporter = custom_tracer_provider
-    
-    with run_span(run_id="run-123", tenant_id="tenant-456", agent_id="agent-789", version="v1", tracer_provider=provider):
-        trace_id = current_trace_id()
-        assert trace_id is not None
-        assert len(trace_id) == 32  # 32 hex characters
-    
-    # Flush spans to ensure batch export completes
-    provider.force_flush()
-    
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    
-    span = spans[0]
-    attributes = dict(span.attributes or {})
-    assert attributes["eap.run_id"] == "run-123"
-    assert attributes["eap.tenant_id"] == "tenant-456"
-    assert attributes["eap.agent_id"] == "agent-789"
-    assert attributes["eap.agent_version"] == "v1"
+def test_blank_endpoint_counts_as_unset(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "  ")
+    assert obs.otlp_endpoint_from_env() is None
+    assert obs.setup_telemetry("eap-api") is None
 
 
-def test_dbos_otel_config_none_returns_empty_dict():
-    """dbos_otel_config(None) should return empty dict."""
-    result = dbos_otel_config(None)
-    assert result == {}
+def test_endpoint_from_env_enables_otlp_exporters(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+    provider = obs.setup_telemetry("eap-api")
+    assert provider is not None
+    assert provider.resource.attributes["service.name"] == "eap-api"
+    assert obs.setup_telemetry("eap-api") is provider  # idempotent
 
 
-def test_dbos_otel_config_with_endpoint():
-    """dbos_otel_config with endpoint contains enable_otlp True."""
-    result = dbos_otel_config("http://localhost:4317")
-    assert result.get("enable_otlp") is True
-    assert "otlp_traces_endpoints" in result
-    assert result["otlp_traces_endpoints"] == "http://localhost:4317"
+def test_dbos_config_reuses_our_providers():
+    # No DBOS endpoints: DBOS exports through the global providers instead of a second exporter.
+    assert obs.dbos_otel_config("http://127.0.0.1:4318") == {"enable_otlp": True}
+
+
+def test_dbos_trace_attributes_carry_the_traceparent():
+    tp = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    assert obs.dbos_trace_attributes(tp) == {"dbos.otelContext": {"traceparent": tp}}
+
+
+# --------------------------------------------------------------------------- spans
+
+
+def test_current_trace_context_outside_and_inside_a_span(spans):
+    provider, _ = spans
+    assert obs.current_trace_context() == (None, None)
+    with provider.get_tracer("t").start_as_current_span("request") as span:
+        trace_id, traceparent = obs.current_trace_context()
+        ctx = span.get_span_context()
+    assert trace_id == format(ctx.trace_id, "032x")
+    m = TRACEPARENT.match(traceparent)
+    assert m and m.group(1) == trace_id and m.group(2) == format(ctx.span_id, "016x")
+
+
+def test_run_span_attributes(spans):
+    _, finished = spans
+    with obs.run_span("run-1", "tenant-1", "agent-1", 3):
+        assert obs.current_trace_id() is not None
+    (span,) = finished()
+    assert span.name == "eap.run"
+    assert dict(span.attributes) == {
+        "eap.run_id": "run-1", "eap.tenant_id": "tenant-1", "eap.agent_id": "agent-1", "eap.agent_version": 3,
+    }
+
+
+def test_run_span_is_a_child_of_the_stored_traceparent(spans):
+    provider, finished = spans
+    with provider.get_tracer("t").start_as_current_span("api request"):
+        trace_id, traceparent = obs.current_trace_context()
+    # Later, elsewhere (the worker), with no ambient span:
+    with obs.run_span("run-1", "t", "a", 1, traceparent=traceparent) as span:
+        obs.set_run_outcome(span, "failed", "boom")
+    run = next(s for s in finished() if s.name == "eap.run")
+    assert format(run.context.trace_id, "032x") == trace_id
+    assert format(run.parent.span_id, "016x") == TRACEPARENT.match(traceparent).group(2)
+    assert run.attributes["eap.run_status"] == "failed"
+    assert run.status.status_code == trace.StatusCode.ERROR
+
+
+def test_unreadable_traceparent_falls_back_to_a_new_trace(spans):
+    _, finished = spans
+    with obs.run_span("run-1", "t", "a", 1, traceparent="garbage"):
+        pass
+    (run,) = finished()
+    assert run.parent is None
+
+
+def test_instrument_fastapi_creates_server_span(spans):
+    provider, finished = spans
+    app = FastAPI()
+
+    @app.get("/ping")
+    def ping():
+        return {"trace": obs.current_trace_context()[1]}
+
+    obs.instrument_fastapi(app)
+    traceparent = TestClient(app).get("/ping").json()["trace"]
+    server = [s for s in finished() if s.kind == trace.SpanKind.SERVER]
+    assert len(server) == 1
+    # The handler sees the server span as current: that is what the API stores on a run.
+    assert TRACEPARENT.match(traceparent).group(2) == format(server[0].context.span_id, "016x")
+
+
+def test_pydantic_ai_spans_exclude_content(spans):
+    _, finished = spans
+    assert instrument_pydantic_ai() is True
+    Agent(TestModel(), output_type=str).run_sync("my secret is hunter2")
+    exported = finished()
+    names = [s.name for s in exported]
+    assert any(n.startswith("chat ") for n in names), names
+    for s in exported:
+        assert "hunter2" not in repr(dict(s.attributes or {})), s.name
+
+
+# --------------------------------------------------------------------------- logs
+
+
+def test_logs_carry_trace_and_span_ids(spans):
+    exporter = InMemoryLogRecordExporter()
+    assert obs.setup_logging("test-service", exporter=exporter) is True
+    log = logging.getLogger("eap_test.logs")
+    with obs.run_span("run-1", "t", "a", 1) as span:
+        log.info("inside the run")
+    log.info("outside")
+    obs._state.logger_provider.force_flush()
+    records = {r.log_record.body: r.log_record for r in exporter.get_finished_logs()}
+    inside = records["inside the run"]
+    assert inside.trace_id == span.get_span_context().trace_id
+    assert inside.span_id == span.get_span_context().span_id
+    assert records["outside"].trace_id == 0
+    obs.shutdown_telemetry()
+    assert all(not type(h).__name__ == "LoggingHandler" for h in logging.getLogger().handlers)

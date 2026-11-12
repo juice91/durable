@@ -21,6 +21,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
+from eap_observability import current_trace_context
+
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.routes.runs import (
@@ -111,7 +113,11 @@ def start_turn(
     launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
 ) -> JSONResponse:
     """Start the next turn. 201 created, 200 for a retry of the same turn (same run_id and input),
-    409 while the previous turn is not terminal or when run_id is used by a different request."""
+    409 while the previous turn is not terminal or when run_id is used by a different request.
+
+    The request's trace id and traceparent are stored on the run; the worker's run span joins that
+    trace, and the response carries `trace_id`.
+    """
     run_store, _ = stores
     tenant_id = principal.tenant_id
     conv = _conversation_or_404(run_store, tenant_id, conversation_id)
@@ -122,9 +128,14 @@ def start_turn(
 
     version_num = resolve_version(db, agent_id, body.version)
     check_payload_size(db, agent_id, version_num, body.input)
+    # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
+    trace_id, traceparent = current_trace_context()
 
     try:
-        run_id, created = run_store.create_turn(tenant_id, conversation_id, version_num, body.input, body.run_id)
+        run_id, created = run_store.create_turn(
+            tenant_id, conversation_id, version_num, body.input, body.run_id,
+            trace_id=trace_id, traceparent=traceparent,
+        )
     except ConversationNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     except RunIdConflict:

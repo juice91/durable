@@ -53,6 +53,10 @@ name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
 source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db"]
 forbidden_modules = ["opentelemetry"]
+# Direct imports only: the sanctioned path is eap_api/eap_worker -> eap_observability -> opentelemetry.
+# Every other root package is a source here, so any indirect chain must still end in a direct
+# import by eap_observability; this keeps the rule exactly "only eap_observability imports OTel".
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "eap_worker must not import eap_api"

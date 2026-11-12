@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 
+from eap_observability import instrument_fastapi, setup_logging, setup_telemetry
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -32,11 +33,23 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     require_dev_auth_mode()
 
+    # Traces and logs over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a no-op. The
+    # request span's traceparent is stored on each run so the worker joins the same trace.
+    tracer_provider = setup_telemetry("eap-api")
+    if tracer_provider is not None:
+        setup_logging("eap-api")
+
     app = FastAPI(
         title="EAP Control Plane API",
         description="Control-plane API for the Enterprise Agent Platform",
         version="1.0.0",
         lifespan=lifespan,
+        # FastAPI's native OpenTelemetry follows any global provider; pin it to ours, or off.
+        telemetry=(
+            {"tracer_provider": tracer_provider}
+            if tracer_provider is not None
+            else {"tracing": False, "metrics": False, "logs": False}
+        ),
     )
     
     # CORS middleware - allow http://localhost:3000
@@ -90,5 +103,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.run_stores = (RunStore(engine), EventLog(engine))
     conninfo = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
     app.state.delta_source = PostgresDeltaSource(conninfo)
+
+    instrument_fastapi(app)  # the request server span; no-op when telemetry is off
 
     return app

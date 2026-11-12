@@ -106,6 +106,10 @@ class RunModel(Base):
     # The run's own new Pydantic AI messages (ModelMessagesTypeAdapter JSON), written once when it
     # completes. A later turn's history is built from these.
     messages: Mapped[list | None] = mapped_column("messages", JSONB, nullable=True)
+    # The creating API request's trace context (NULL when telemetry was off): the worker opens the
+    # run's span as a child of `traceparent`, and the Studio links to the trace by `trace_id`.
+    trace_id: Mapped[StrAnnotated | None] = mapped_column("trace_id", String, nullable=True)
+    traceparent: Mapped[StrAnnotated | None] = mapped_column("traceparent", String, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -117,6 +121,8 @@ class RunModel(Base):
         ),
         UniqueConstraint("conversation_id", "turn", name="uq_runs_conversation_turn"),
         CheckConstraint("(conversation_id IS NULL) = (turn IS NULL)", name="ck_runs_conversation_turn"),
+        # The tenant's runs, newest first (GET /runs).
+        Index("ix_runs_tenant_created", "tenant_id", "created_at"),
     )
 
 
@@ -258,6 +264,8 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
         "updated_at": run.updated_at,
         "conversation_id": run.conversation_id,
         "turn": run.turn,
+        "trace_id": run.trace_id,
+        "traceparent": run.traceparent,
     }
 
 
@@ -268,14 +276,26 @@ class RunStore:
         self.engine = engine
         self.Session = sessionmaker(bind=engine)
 
-    def create_run(self, tenant_id: str, agent_id: UUID, agent_version: int, input: str, run_id: UUID) -> tuple[UUID, bool]:
+    def create_run(
+        self,
+        tenant_id: str,
+        agent_id: UUID,
+        agent_version: int,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
         """Create a new run. Idempotent: same run_id returns existing without creating second row.
-        
+
+        `trace_id`/`traceparent` are the creating API request's trace context (None when telemetry
+        is off); an existing row keeps the values it was created with.
+
         Returns (UUID, created: bool) where created=False if the run already exists for this tenant.
         Raises RunIdConflict if the run_id exists under a different tenant.
         """
         from sqlalchemy.dialects.postgresql import insert
-        
+
         with self.Session() as session:
             # Use PostgreSQL INSERT ... ON CONFLICT ... RETURNING for atomic operation
             stmt = insert(RunModel).values(
@@ -285,6 +305,8 @@ class RunStore:
                 agent_version=agent_version,
                 status="queued",
                 input=input,
+                trace_id=trace_id,
+                traceparent=traceparent,
             ).on_conflict_do_nothing(
                 constraint="runs_pkey"
             ).returning(
@@ -372,6 +394,28 @@ class RunStore:
             ).scalar_one_or_none()
             return None if run is None else _run_dict(run)
 
+    def list_runs(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 50,
+        before: datetime | None = None,
+        agent_id: UUID | str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """The tenant's runs, newest first: at most `limit`, created strictly before `before`,
+        optionally only one agent's and/or one status's."""
+        query = select(RunModel).where(RunModel.tenant_id == tenant_id)
+        if before is not None:
+            query = query.where(RunModel.created_at < before)
+        if agent_id is not None:
+            query = query.where(RunModel.agent_id == str(agent_id))
+        if status is not None:
+            query = query.where(RunModel.status == status)
+        query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
+        with self.Session() as session:
+            return [_run_dict(r) for r in session.execute(query).scalars()]
+
     # ------------------------------------------------------------------ conversations
 
     def create_conversation(
@@ -451,7 +495,14 @@ class RunStore:
             return [_run_dict(r) for r in runs]
 
     def create_turn(
-        self, tenant_id: str, conversation_id: UUID | str, agent_version: int, input: str, run_id: UUID
+        self,
+        tenant_id: str,
+        conversation_id: UUID | str,
+        agent_version: int,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
     ) -> tuple[UUID, bool]:
         """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
 
@@ -460,6 +511,7 @@ class RunStore:
         the latest turn must be terminal (else TurnInProgress) and the new run gets turn = latest + 1.
         Raises ConversationNotFound for another tenant's or an unknown conversation, RunIdConflict
         if `run_id` belongs to another tenant.
+        `trace_id`/`traceparent` as in create_run.
         """
         from sqlalchemy.dialects.postgresql import insert
 
@@ -502,6 +554,8 @@ class RunStore:
                     turn=(latest.turn if latest is not None else 0) + 1,
                     created_at=now,
                     updated_at=now,
+                    trace_id=trace_id,
+                    traceparent=traceparent,
                 )
                 .on_conflict_do_nothing(constraint="runs_pkey")
                 .returning(RunModel.id)

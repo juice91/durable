@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dbos import DBOS, DBOSConfig
+from eap_observability import dbos_otel_config, otlp_endpoint_from_env, setup_logging, setup_telemetry
+from eap_observability.agents import instrument_pydantic_ai
 
 from eap_worker.config import QUEUE_NAME, WorkerSettings
 from eap_worker.runtime import configure_runtime
@@ -15,7 +17,7 @@ APP_NAME = "eap-worker"
 
 
 def dbos_config(settings: WorkerSettings) -> DBOSConfig:
-    return {
+    config: DBOSConfig = {
         "name": APP_NAME,
         "system_database_url": settings.dbos_system_database_url,
         "dbos_system_schema": settings.dbos_system_schema,
@@ -26,6 +28,19 @@ def dbos_config(settings: WorkerSettings) -> DBOSConfig:
         "executor_id": settings.executor_id,
         "run_admin_server": False,
     }
+    # DBOS workflow/step spans and DBOS logs, through the providers setup_worker_telemetry installed.
+    config.update(dbos_otel_config(otlp_endpoint_from_env()))  # type: ignore[typeddict-item]
+    return config
+
+
+def setup_worker_telemetry() -> bool:
+    """Traces (incl. Pydantic AI model requests and tool calls, without content) and logs over OTLP
+    when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise nothing. Must run before DBOS is constructed."""
+    if setup_telemetry("eap-worker") is None:
+        return False
+    setup_logging("eap-worker")
+    instrument_pydantic_ai(include_content=False)
+    return True
 
 
 def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
@@ -33,6 +48,7 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     and launch it (recovery runs here)."""
     settings = settings or WorkerSettings.from_env()
     configure_runtime(settings)
+    setup_worker_telemetry()
     DBOS(config=dbos_config(settings))
     DBOS.launch()
     # DBOS 3.5 queues are database-backed: declared with register_queue once the system DB is up

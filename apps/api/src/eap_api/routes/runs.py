@@ -1,4 +1,4 @@
-"""Run routes: start a run, read it, read its events, stream it (SSE with replay).
+"""Run routes: start a run, list runs, read one, read its events, stream it (SSE with replay).
 
 Runs and events live in Postgres (eap_run_store, JSONB + row locks); on any other database these
 routes answer 503. Every lookup is tenant-scoped: another tenant's or an unknown id is a 404.
@@ -10,12 +10,15 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+
+from eap_observability import current_trace_context
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
@@ -67,6 +70,7 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "updated_at": iso(run["updated_at"]),
         "conversation_id": run.get("conversation_id"),
         "turn": run.get("turn"),
+        "trace_id": run.get("trace_id"),
     }
 
 
@@ -125,6 +129,7 @@ def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run:
             version=run["agent_version"],
             spec_json=json.dumps(version_row.spec),
             input_text=run["input"],
+            traceparent=run.get("traceparent"),
         )
     except Exception:
         log.exception("enqueue failed for run %s", run["id"])
@@ -132,6 +137,7 @@ def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Run recorded but could not be started; retry the same request (same run_id)",
         )
+    log.info("run %s queued: tenant=%s agent=%s version=%s", run["id"], tenant_id, run["agent_id"], run["agent_version"])
 
 
 def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] | None = None) -> JSONResponse:
@@ -143,6 +149,7 @@ def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] |
             "display_status": run["display_status"],
             "agent_id": str(run["agent_id"]),
             "version": run["agent_version"],
+            "trace_id": run["trace_id"],
             **(extra or {}),
         },
     )
@@ -163,6 +170,9 @@ def start_run(
     attempted in both cases, so a crash between insert and enqueue heals when the client retries;
     DBOS attaches a repeated workflow_id to the existing workflow. A run without a conversation;
     conversation turns start through POST /conversations/{id}/runs.
+
+    The request's trace id and traceparent are stored on the run; the worker's run span joins that
+    trace, and the response carries `trace_id`.
     """
     run_store, _ = stores
     tenant_id = principal.tenant_id
@@ -174,9 +184,14 @@ def start_run(
 
     version_num = resolve_version(db, agent_id, body.version)
     check_payload_size(db, agent_id, version_num, body.input)
+    # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
+    trace_id, traceparent = current_trace_context()
 
     try:
-        run_id, created = run_store.create_run(tenant_id, agent_id, version_num, body.input, body.run_id)
+        run_id, created = run_store.create_run(
+            tenant_id, agent_id, version_num, body.input, body.run_id,
+            trace_id=trace_id, traceparent=traceparent,
+        )
     except RunIdConflict:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
     run = _get_run_or_404(run_store, tenant_id, run_id)
@@ -193,6 +208,23 @@ def start_run(
 
     launch_recorded_run(db, launcher, tenant_id, run)
     return started_response(run, created)
+
+
+@router.get("/runs")
+def list_runs(
+    principal: PrincipalDep,
+    stores: StoresDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[datetime | None, Query(description="created_at cursor: the previous page's next_before")] = None,
+    agent_id: uuid.UUID | None = None,
+    run_status: Annotated[str | None, Query(alias="status")] = None,
+) -> JSONResponse:
+    """The tenant's runs, newest first (the Studio Traces and Logs pages). `next_before` is the
+    created_at of the last item when a full page came back (pass it as `before`), else null."""
+    run_store, _ = stores
+    runs = run_store.list_runs(principal.tenant_id, limit=limit, before=before, agent_id=agent_id, status=run_status)
+    next_before = runs[-1]["created_at"].isoformat() if len(runs) == limit else None
+    return JSONResponse(content={"items": [_run_json(r) for r in runs], "next_before": next_before})
 
 
 @router.get("/runs/{run_id}")

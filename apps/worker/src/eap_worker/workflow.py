@@ -14,6 +14,8 @@ never disagree on the call shape, and workflows already queued or in flight reco
 Step layout of a run (each line is a DBOS step, so recovery replays recorded results):
 
     eap.start_run                       ensure the runs row, status -> running; returns the turn link
+                                        and the stored request traceparent
+    --- from here on, inside the `eap.run` span (child of the API request span) ---
     eap.append_event   start            run_started
     eap.load_history                    only for a conversation turn: the earlier COMPLETED turns'
                                         stored messages, passed to the agent as message_history
@@ -30,6 +32,12 @@ Step layout of a run (each line is a DBOS step, so recovery replays recorded res
 Durable events are written by our own steps from replayed data (never from inside the model
 step), so a re-executed model request can never leave a stored message that differs from the
 checkpointed one. Event keys are deterministic, and EventLog.append is idempotent per key.
+
+Tracing: the API stores its request span's W3C traceparent on the run row. `eap.start_run` reads it
+(so a replay uses the checkpointed value) and the rest of the run executes inside
+`run_span(..., traceparent=...)`, so every later step, model request and tool call is in the API
+request's trace. Spans are not durable state: a recovered run simply opens another `eap.run` span.
+A checkpoint written before tracing existed (None, or no "traceparent" key) runs untraced.
 """
 
 from __future__ import annotations
@@ -63,6 +71,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
+from eap_observability import run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
 from eap_schemas import AgentSpec
 from eap_worker.config import WORKFLOW_NAME
@@ -144,20 +153,23 @@ agent: Agent[WorkerDeps, str] = Agent(
 @DBOS.step(name="eap.start_run")
 async def start_run_step(
     run_id: str, tenant_id: str, agent_id: str, version: int, input_text: str
-) -> dict[str, Any] | None:
-    """Returns {"conversation_id", "turn"} for a conversation turn, None for a standalone run."""
+) -> dict[str, Any]:
+    """Returns {"conversation_id", "turn", "traceparent"}; conversation_id/turn are None for a
+    standalone run, traceparent is None when the API had telemetry off."""
     rt = get_runtime()
 
-    def work() -> dict[str, Any] | None:
+    def work() -> dict[str, Any]:
         # The API inserts the row first (client-supplied run_id); this is an idempotent safety net.
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         rt.run_store.create_run(tenant_id, UUID(agent_id), version, input_text, UUID(run_id))
         rt.run_store.set_status(tenant_id, UUID(run_id), "running")
         rt.run_store.heartbeat(tenant_id, UUID(run_id))
-        run = rt.run_store.get_run(tenant_id, UUID(run_id))
-        if run is None or run["conversation_id"] is None:
-            return None
-        return {"conversation_id": run["conversation_id"], "turn": run["turn"]}
+        run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
+        return {
+            "conversation_id": run.get("conversation_id"),
+            "turn": run.get("turn"),
+            "traceparent": run.get("traceparent"),
+        }
 
     return await asyncio.to_thread(work)
 
@@ -368,12 +380,29 @@ async def agent_run(
     spec_json: str | dict[str, Any],
     input_text: str,
 ) -> dict[str, Any]:
-    link = await start_run_step(run_id, tenant_id, agent_id, version, input_text)
+    link = await start_run_step(run_id, tenant_id, agent_id, version, input_text) or {}
+    with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
+        log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
+        result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)
+        set_run_outcome(span, result["status"], result.get("error"))
+        log.info("run %s %s", run_id, result["status"])
+        return result
+
+
+async def _run_body(
+    run_id: str,
+    tenant_id: str,
+    agent_id: str,
+    version: int,
+    spec_json: str | dict[str, Any],
+    input_text: str,
+    link: dict[str, Any],
+) -> dict[str, Any]:
     await append_event_step(
         run_id, tenant_id, "start", "run_started", {"agent_id": agent_id, "version": version, "input": input_text}
     )
     history: list[ModelMessage] | None = None
-    if link is not None:
+    if link.get("conversation_id") is not None:
         history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
         history = ModelMessagesTypeAdapter.validate_python(history_json)
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))

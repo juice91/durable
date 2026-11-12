@@ -13,8 +13,9 @@ dependencies = [
     "eap-agent-runtime",
     "eap-run-store",
     "eap-db",
+    "eap-observability",
     "pydantic-ai-slim[dbos,openai]>=2.67.0",
-    "dbos>=3.5.0",
+    "dbos[otel]>=3.5.0",
 ]
 
 [tool.uv.sources]
@@ -22,3 +23,4 @@ eap-schemas = { workspace = true }
 eap-agent-runtime = { workspace = true }
 eap-run-store = { workspace = true }
 eap-db = { workspace = true }
+eap-observability = { workspace = true }

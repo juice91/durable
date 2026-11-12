@@ -201,6 +201,7 @@ class TestStartRun:
         assert r.status_code == 201, r.text
         assert r.json() == {
             "run_id": run_id, "status": "queued", "display_status": "queued", "agent_id": agent_id, "version": 1,
+            "trace_id": None,  # telemetry off in tests (no OTEL_EXPORTER_OTLP_ENDPOINT)
         }
         assert len(fake_dbos.calls) == 1
         options, args = fake_dbos.calls[0]

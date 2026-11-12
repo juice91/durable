@@ -117,7 +117,7 @@ class TestTurns:
         assert r.status_code == 201, r.text
         assert r.json() == {
             "run_id": run1, "status": "queued", "display_status": "queued", "agent_id": agent_id, "version": 1,
-            "conversation_id": conv_id, "turn": 1,
+            "trace_id": None, "conversation_id": conv_id, "turn": 1,
         }
         # The hand-off contract's six positional args are unchanged; the worker reads the
         # conversation link from the run row.
