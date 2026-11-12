@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runToThread } from "./thread";
+import { conversationToThread, runToThread } from "./thread";
 import type { ThreadMessage } from "@assistant-ui/react";
 
 // Type definitions matching the runs.ts exports
@@ -297,5 +297,41 @@ describe("runToThread", () => {
     // Should have only tool-call part, no text part since there's no text
     expect(thread.messages[1].content).toHaveLength(1);
     expect(thread.messages[1].content[0]).toMatchObject({ type: "tool-call" });
+  });
+});
+
+describe("conversationToThread", () => {
+  const turn = (runId: string, input: string, answer?: string) => ({
+    runId,
+    input,
+    events: answer === undefined
+      ? []
+      : [
+          mkEvent("run_started", { input }, 0),
+          mkEvent("model_message", { model_request: 0, text: answer }, 1),
+          mkEvent("run_completed", { output: answer }, 2),
+        ],
+  });
+
+  it("puts every turn in one thread, in order, with ids unique across turns", () => {
+    const { messages } = conversationToThread([
+      turn("run-1", "My name is Ada.", "Hi Ada"),
+      turn("run-2", "What is my name?", "Ada"),
+    ]);
+    const texts = messages.map((m) => [m.role, (m.content[0] as { text: string }).text]);
+    expect(texts).toEqual([
+      ["user", "My name is Ada."],
+      ["assistant", "Hi Ada"],
+      ["user", "What is my name?"],
+      ["assistant", "Ada"],
+    ]);
+    expect(new Set(messages.map((m) => m.id)).size).toBe(messages.length);
+  });
+
+  it("shows a just-sent turn's input before its run_started event arrives", () => {
+    const { messages } = conversationToThread([turn("run-1", "One", "Uno"), turn("run-2", "Two")]);
+    expect(messages).toHaveLength(3);
+    expect(messages[2].role).toBe("user");
+    expect((messages[2].content[0] as { text: string }).text).toBe("Two");
   });
 });

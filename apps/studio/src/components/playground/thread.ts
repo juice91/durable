@@ -15,8 +15,9 @@ export type PartialTextMap = {
   };
 };
 
-// Convert a run's events and partial text to assistant-ui thread messages
-export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap): {
+// Convert a run's events and partial text to assistant-ui thread messages. `idPrefix` keeps message
+// ids unique when several runs (conversation turns) share one thread.
+export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap, idPrefix = ""): {
   messages: ThreadMessage[];
 } {
   const messages: ThreadMessage[] = [];
@@ -67,7 +68,7 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
       const inputText = typeof inputData.input === "string" ? inputData.input : JSON.stringify(inputData.input);
 
       userMessage = {
-        id: `user-${event.seq}`,
+        id: `${idPrefix}user-${event.seq}`,
         createdAt: new Date(event.ts),
         role: "user" as const,
         content: [{ type: "text" as const, text: inputText }],
@@ -146,7 +147,7 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
       if (embeddedToolCallIds.has(toolCall.tool_call_id)) continue;
       const result = standaloneToolResults.get(toolCall.tool_call_id);
       messages.push({
-        id: `assistant-tool-${toolCall.tool_call_id}`,
+        id: `${idPrefix}assistant-tool-${toolCall.tool_call_id}`,
         createdAt: new Date(event.ts),
         role: "assistant",
         content: [{
@@ -208,7 +209,7 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
 
     // Create the final assistant message with correct content type
     const finalMessage: ThreadMessage = {
-      id: `assistant-${currentModelRequest.modelRequest}`,
+      id: `${idPrefix}assistant-${currentModelRequest.modelRequest}`,
       createdAt: new Date(),
       role: "assistant" as const,
       content,
@@ -224,5 +225,34 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
     messages.push(finalMessage);
   }
 
+  return { messages };
+}
+
+/** One conversation turn: a run, the message that started it, its durable events and live partials. */
+export type ThreadTurn = {
+  runId: string;
+  input: string;
+  events: RunEvent[];
+  partials?: PartialTextMap;
+};
+
+// Convert a conversation's turns, in order, to one assistant-ui thread. A turn whose run_started event
+// has not arrived yet shows its input as the user message, so a sent message appears at once.
+export function conversationToThread(turns: ThreadTurn[]): { messages: ThreadMessage[] } {
+  const messages: ThreadMessage[] = [];
+  for (const turn of turns) {
+    const prefix = `${turn.runId}:`;
+    if (!turn.events.some((event) => event.type === "run_started")) {
+      messages.push({
+        id: `${prefix}user-pending`,
+        createdAt: new Date(),
+        role: "user",
+        content: [{ type: "text", text: turn.input }],
+        attachments: [],
+        metadata: { custom: {} },
+      });
+    }
+    messages.push(...runToThread(turn.events, turn.partials ?? {}, prefix).messages);
+  }
   return { messages };
 }

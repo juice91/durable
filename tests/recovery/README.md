@@ -54,6 +54,7 @@ the answer text. A healthy run stores six events:
 | 3a | `after_event_write` for `tool:*:result`: the event committed to `eap_app`, but `eap.append_event` has no checkpoint in `eap_dbos` | The re-executed append hits `ON CONFLICT (run_id, event_key)`. The stored row keeps its seq (3) and data, no seq is consumed, and nothing is duplicated. |
 | 3b | `after_event_write` for `model:*:final` (first match: `model:0:final`, seq 1) | The same, for a model event written from the checkpointed response. The tool runs for the first time after recovery (1 call). |
 | 4 | API: `runs` row committed, process dies before the enqueue | The orphan row stays `queued`, with no workflow and no events, while a live worker polls. Retrying the same POST returns 200 (the row already existed), enqueues `run_id` as the workflow id, and the run completes once. A further retry after completion is a no-op: one workflow, one runs row, the same events, 1 call. |
+| 5 | `model_request` during turn 2 of a three-turn conversation (`test_conversation_crash.py`, `test:history` agent, no tools) | Turn 3 is refused with 409 while turn 2 recovers, and retrying turn 2's POST is idempotent (200). After recovery each turn appears once, in order. Turn 3's answer lists all three prompts, so it carries the fact from turn 1. Every turn's events are `start, model:0:final, end` and replay over SSE. Another tenant gets 404 on the conversation. Scenario 5 checks its own story, not the ticket invariants above. |
 
 ### Why scenario 4 kills a separate API process
 

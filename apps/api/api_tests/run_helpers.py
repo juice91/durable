@@ -94,6 +94,7 @@ def cleanup_tenant(engine: Any, tenant_id: str) -> None:
         for run_id in run_ids:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(
             text("DELETE FROM agent_versions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :t)"),

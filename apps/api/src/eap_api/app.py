@@ -55,6 +55,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
+
+    from eap_api.routes.conversations import router as conversations_router
+
+    app.include_router(conversations_router, prefix="/api/v1")
     
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

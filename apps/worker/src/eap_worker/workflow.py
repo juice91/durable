@@ -4,10 +4,19 @@ Hand-off contract (docs/plans/2026-11-11-milestone-1-vertical-slice.md): the API
 `eap.agent_run` on queue `eap-agent-runs` with workflow_id = run_id and positional args
 `(run_id, tenant_id, agent_id, version, spec_json, input_text)`.
 
+Conversation turns (milestone 2) use exactly the same six arguments. Whether a run is a turn, and
+which one, is carried in the run row (runs.conversation_id, runs.turn), which the API writes under
+the conversation's lock before it enqueues. `eap.start_run` returns that link, so it is checkpointed
+with the step; a workflow enqueued before conversations existed recorded `None` there and replays as
+a standalone run. Keeping the arguments unchanged means an API and a worker of different releases
+never disagree on the call shape, and workflows already queued or in flight recover unchanged.
+
 Step layout of a run (each line is a DBOS step, so recovery replays recorded results):
 
-    eap.start_run                       ensure the runs row, status -> running
+    eap.start_run                       ensure the runs row, status -> running; returns the turn link
     eap.append_event   start            run_started
+    eap.load_history                    only for a conversation turn: the earlier COMPLETED turns'
+                                        stored messages, passed to the agent as message_history
     eap-agent__dynamic_toolset__eap-spec-tools.get_tools
     eap-agent__model.request_stream     model request n (deltas NOTIFY'd live inside)
     eap.append_event   model:{n}:final  model_message (from the checkpointed response)
@@ -26,7 +35,9 @@ checkpointed one. Event keys are deterministic, and EventLog.append is idempoten
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -46,6 +57,7 @@ from pydantic_ai.messages import (
     TextPartDelta,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import DynamicToolset, FunctionToolset
@@ -130,17 +142,65 @@ agent: Agent[WorkerDeps, str] = Agent(
 
 
 @DBOS.step(name="eap.start_run")
-async def start_run_step(run_id: str, tenant_id: str, agent_id: str, version: int, input_text: str) -> None:
+async def start_run_step(
+    run_id: str, tenant_id: str, agent_id: str, version: int, input_text: str
+) -> dict[str, Any] | None:
+    """Returns {"conversation_id", "turn"} for a conversation turn, None for a standalone run."""
     rt = get_runtime()
 
-    def work() -> None:
+    def work() -> dict[str, Any] | None:
         # The API inserts the row first (client-supplied run_id); this is an idempotent safety net.
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         rt.run_store.create_run(tenant_id, UUID(agent_id), version, input_text, UUID(run_id))
         rt.run_store.set_status(tenant_id, UUID(run_id), "running")
         rt.run_store.heartbeat(tenant_id, UUID(run_id))
+        run = rt.run_store.get_run(tenant_id, UUID(run_id))
+        if run is None or run["conversation_id"] is None:
+            return None
+        return {"conversation_id": run["conversation_id"], "turn": run["turn"]}
 
-    await asyncio.to_thread(work)
+    return await asyncio.to_thread(work)
+
+
+def max_history_bytes() -> int:
+    # DBOS checkpoints the step output; keep it well under the 2 MB guidance.
+    return int(os.environ.get("EAP_MAX_HISTORY_BYTES", str(1_000_000)))
+
+
+def _turn_messages(turn: dict[str, Any]) -> list[dict[str, Any]]:
+    """A completed turn's messages as JSON: its stored messages, else its input and output."""
+    if turn["messages"]:
+        return list(turn["messages"])
+    ts = turn["created_at"]
+    fallback: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(turn["input"] or "", timestamp=ts)]),
+        ModelResponse(parts=[TextPart(turn["output"] or "")], timestamp=ts),
+    ]
+    return ModelMessagesTypeAdapter.dump_python(fallback, mode="json")
+
+
+@DBOS.step(name="eap.load_history")
+async def load_history_step(run_id: str, tenant_id: str, conversation_id: str, turn: int) -> list[dict[str, Any]]:
+    """The message history for turn `turn`: the conversation's earlier COMPLETED turns, oldest first.
+
+    Built only from durable data (runs.messages of those turns) and checkpointed as this step's
+    output, so a recovered workflow gives the agent exactly the history the first attempt had. When
+    the history exceeds EAP_MAX_HISTORY_BYTES, the oldest whole turns are left out.
+    """
+    rt = get_runtime()
+    turns = await asyncio.to_thread(rt.run_store.completed_turns_before, tenant_id, conversation_id, turn)
+    per_turn = [_turn_messages(t) for t in turns]
+    budget = max_history_bytes()
+    kept: list[list[dict[str, Any]]] = []
+    for messages in reversed(per_turn):
+        size = len(json.dumps(messages, default=str))
+        if size > budget:
+            break
+        budget -= size
+        kept.append(messages)
+    if len(kept) < len(per_turn):
+        log.warning("run %s: history truncated to the last %d of %d turns", run_id, len(kept), len(per_turn))
+    return [m for messages in reversed(kept) for m in messages]
 
 
 @DBOS.step(name="eap.append_event")
@@ -152,9 +212,16 @@ async def append_event_step(run_id: str, tenant_id: str, event_key: str, type: s
 
 
 @DBOS.step(name="eap.finish_run")
-async def finish_run_step(run_id: str, tenant_id: str, status: str, output: str | None, error: str | None) -> None:
+async def finish_run_step(
+    run_id: str,
+    tenant_id: str,
+    status: str,
+    output: str | None,
+    error: str | None,
+    messages: list[dict[str, Any]] | None = None,
+) -> None:
     rt = get_runtime()
-    await asyncio.to_thread(rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error)
+    await asyncio.to_thread(rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages)
 
 
 async def _heartbeat(run_id: str, tenant_id: str) -> None:
@@ -231,7 +298,10 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
         await append_event_step(run_id, tenant_id, f"tool:{call.tool_call_id}:result", "tool_result", data)
 
 
-async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
+async def _drive_agent(
+    run_id: str, deps: WorkerDeps, input_text: str, history: list[ModelMessage] | None = None
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run the agent; returns (output, this run's new messages as JSON)."""
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
@@ -244,6 +314,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
     pending: list[ToolCallPart] = []
     async with agent.iter(
         input_text,
+        message_history=history or None,
         deps=deps,
         model=model_id_for(spec.model.provider, spec.model.name),
         model_settings=settings,
@@ -282,7 +353,7 @@ async def _drive_agent(run_id: str, deps: WorkerDeps, input_text: str) -> str:
         if pending:
             await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
         assert run.result is not None
-        return run.result.output
+        return run.result.output, ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")
 
 
 # --------------------------------------------------------------------------- the workflow
@@ -297,10 +368,14 @@ async def agent_run(
     spec_json: str | dict[str, Any],
     input_text: str,
 ) -> dict[str, Any]:
-    await start_run_step(run_id, tenant_id, agent_id, version, input_text)
+    link = await start_run_step(run_id, tenant_id, agent_id, version, input_text)
     await append_event_step(
         run_id, tenant_id, "start", "run_started", {"agent_id": agent_id, "version": version, "input": input_text}
     )
+    history: list[ModelMessage] | None = None
+    if link is not None:
+        history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
+        history = ModelMessagesTypeAdapter.validate_python(history_json)
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
         rt = get_runtime()
@@ -309,7 +384,7 @@ async def agent_run(
         # changed since the version was published. Fails before any model request is made.
         rt.settings.allowed_models.check(spec.model.provider, spec.model.name)
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
-        output = await _drive_agent(run_id, rt.deps_for(run_id, tenant_id, spec), input_text)
+        output, new_messages = await _drive_agent(run_id, rt.deps_for(run_id, tenant_id, spec), input_text, history)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         status = "needs_attention" if _is_side_effect_unknown(exc) else "failed"
         error = f"{type(exc).__name__}: {exc}"
@@ -323,8 +398,8 @@ async def agent_run(
     # End event before the terminal status: a reader that sees a terminal status always finds the
     # complete event log.
     await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
-    await finish_run_step(run_id, tenant_id, "completed", output, None)
+    await finish_run_step(run_id, tenant_id, "completed", output, None, new_messages)
     return {"status": "completed", "output": output}
 
 
-__all__ = ["agent", "agent_run", "AGENT_NAME", "TOOLSET_ID"]
+__all__ = ["agent", "agent_run", "load_history_step", "AGENT_NAME", "TOOLSET_ID"]

@@ -1,0 +1,74 @@
+// Typed client for conversations: a thread with one agent whose turns are runs.
+import { BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
+import type { Run } from "./runs";
+
+export interface Conversation {
+  id: string;
+  agent_id: string;
+  title: string | null;
+  turn_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A run that is a conversation turn (turn numbers start at 1). */
+export interface ConversationRun extends Run {
+  conversation_id: string | null;
+  turn: number | null;
+}
+
+export interface ConversationDetail extends Conversation {
+  /** The conversation's runs, in turn order. */
+  runs: ConversationRun[];
+}
+
+export interface StartedTurn {
+  run_id: string;
+  status: string;
+  display_status: Run["display_status"];
+  agent_id: string;
+  version: number;
+  conversation_id: string;
+  turn: number;
+}
+
+async function send<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...apiHeaders(init.headers ?? {}) },
+  });
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** Create a conversation; `conversationId` (client-generated) makes a retry idempotent. */
+export function createConversation(
+  agentId: string,
+  title: string | null,
+  conversationId?: string,
+): Promise<Conversation> {
+  return send(`/api/v1/agents/${encodeURIComponent(agentId)}/conversations`, {
+    method: "POST",
+    body: JSON.stringify({ title, ...(conversationId ? { conversation_id: conversationId } : {}) }),
+  });
+}
+
+export function getConversation(conversationId: string): Promise<ConversationDetail> {
+  return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}`);
+}
+
+export function listConversations(agentId?: string): Promise<Conversation[]> {
+  const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+  return send(`/api/v1/conversations${query}`);
+}
+
+/**
+ * Start the next turn. Idempotent on `runId`: retrying the same turn returns it (200) and re-enqueues
+ * it, so a turn whose start was interrupted heals. The API answers 409 while the previous turn runs.
+ */
+export function startTurn(conversationId: string, runId: string, input: string): Promise<StartedTurn> {
+  return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}/runs`, {
+    method: "POST",
+    body: JSON.stringify({ run_id: runId, input }),
+  });
+}

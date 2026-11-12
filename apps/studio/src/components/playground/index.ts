@@ -1,1 +1,1 @@
-export { runToThread } from "./thread";
+export { conversationToThread, runToThread, type ThreadTurn } from "./thread";

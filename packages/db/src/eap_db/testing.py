@@ -70,7 +70,21 @@ def drop_schema(base_url: str, schema: str) -> None:
         engine.dispose()
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_load_initial_conftests(early_config: pytest.Config, parser: pytest.Parser, args: list[str]) -> None:
+    # Runs before the conftest.py files next to the given paths are imported (e.g.
+    # `pytest tests/recovery` or `pytest apps/worker/worker_tests`), and those read the database URL
+    # at import time. Setting up here means they already see the migrated schema.
+    _setup(early_config)
+
+
 def pytest_configure(config: pytest.Config) -> None:
+    _setup(config)  # no-op when pytest_load_initial_conftests already ran
+
+
+def _setup(config: pytest.Config) -> None:
+    if "schema" in _state:
+        return
     if hasattr(config, "workerinput"):  # pragma: no cover - xdist workers inherit the controller's env
         return
     base_url = os.environ.get("EAP_TEST_DATABASE_URL") or DEFAULT_TEST_DATABASE_URL

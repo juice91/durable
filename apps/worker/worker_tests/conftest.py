@@ -107,6 +107,7 @@ def cleanup_tenant(engine, tenant_id: str) -> None:
         conn.execute(text("DELETE FROM fake_external_tickets WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM fake_external_ticket_calls WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})
 
 

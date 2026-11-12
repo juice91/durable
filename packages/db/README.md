@@ -16,6 +16,9 @@ DBOS's own system database (`eap_dbos`) is managed by DBOS and is not covered he
   `EAP_DATABASE_URL`.
 - `src/eap_db/migrations/` — `env.py` and `versions/`. `0001_baseline.py` is the schema as milestone 1
   left it, including the tenant columns, composite keys and indexes from `scripts/migrate-dev-db.sql`.
+  `0002_conversations.py` adds `conversations` and the nullable `runs.conversation_id`, `runs.turn`
+  (composite FK to `conversations(tenant_id, id)`, UNIQUE `(conversation_id, turn)`) and
+  `runs.messages`.
 - `src/eap_db/metadata.py` — the target metadata: the union of `eap_api.models.Base.metadata`,
   `eap_run_store.Base.metadata` and `eap_worker.tickets.metadata`. Tables are defined only in those
   modules; this package never duplicates them.

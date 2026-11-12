@@ -2,10 +2,12 @@
 
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+import json
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKeyConstraint,
@@ -17,6 +19,7 @@ from sqlalchemy import (
     create_engine,
     select,
     text,
+    func,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -34,8 +37,41 @@ StrAnnotated = str
 UUIDAnnotated = UUID
 
 
+def _json_param(value: Any):
+    from sqlalchemy import literal
+
+    return literal(json.dumps(value), type_=Text)
+
+
 class Base(DeclarativeBase):
     """Base class for all database models. Alembic (packages/db) creates and migrates these tables."""
+
+
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
+
+
+class ConversationModel(Base):
+    """A tenant-owned thread with one agent. Its turns are runs (runs.conversation_id, runs.turn)."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[StrAnnotated] = mapped_column("id", String, primary_key=True)
+    tenant_id: Mapped[StrAnnotated] = mapped_column("tenant_id", String, nullable=False)
+    # Like runs.agent_id: no foreign key, because agents belong to the API's own metadata.
+    agent_id: Mapped[StrAnnotated] = mapped_column("agent_id", String, nullable=False)
+    title: Mapped[StrAnnotated | None] = mapped_column("title", Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        "updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        # Lets runs reference (tenant_id, conversation_id), so a run can only join its own tenant's thread.
+        UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id_id"),
+        Index("ix_conversations_tenant_updated", "tenant_id", "updated_at"),
+    )
 
 
 class RunModel(Base):
@@ -64,10 +100,23 @@ class RunModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         "updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
+    # Conversation turn: both null for a standalone run, both set for a turn (turn numbers start at 1).
+    conversation_id: Mapped[StrAnnotated | None] = mapped_column("conversation_id", String, nullable=True)
+    turn: Mapped[int | None] = mapped_column("turn", Integer, nullable=True)
+    # The run's own new Pydantic AI messages (ModelMessagesTypeAdapter JSON), written once when it
+    # completes. A later turn's history is built from these.
+    messages: Mapped[list | None] = mapped_column("messages", JSONB, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
         UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_runs_tenant_conversation",
+        ),
+        UniqueConstraint("conversation_id", "turn", name="uq_runs_conversation_turn"),
+        CheckConstraint("(conversation_id IS NULL) = (turn IS NULL)", name="ck_runs_conversation_turn"),
     )
 
 
@@ -147,6 +196,71 @@ class RunIdConflict(Exception):
         super().__init__(f"Run ID {run_id} already exists under a different tenant")
 
 
+class ConversationNotFound(ValueError):
+    """No conversation with this id belongs to the tenant (unknown, or another tenant's)."""
+
+    def __init__(self, tenant_id: str, conversation_id: UUID | str):
+        self.tenant_id = tenant_id
+        self.conversation_id = str(conversation_id)
+        super().__init__(f"Conversation not found for tenant {tenant_id!r}: {conversation_id}")
+
+
+class ConversationIdConflict(Exception):
+    """A client-supplied conversation id already exists under a different tenant."""
+
+    def __init__(self, conversation_id: UUID | str):
+        self.conversation_id = str(conversation_id)
+        super().__init__(f"Conversation ID {conversation_id} already exists under a different tenant")
+
+
+class TurnInProgress(Exception):
+    """The conversation's latest turn has not reached a terminal status yet."""
+
+    def __init__(self, conversation_id: str, run_id: str, status: str):
+        self.conversation_id = conversation_id
+        self.run_id = run_id
+        self.status = status
+        super().__init__(f"Conversation {conversation_id} is busy: turn run {run_id} is {status}")
+
+
+def _iso_conversation(conv: ConversationModel, turn_count: int) -> dict[str, Any]:
+    return {
+        "id": conv.id,
+        "tenant_id": conv.tenant_id,
+        "agent_id": conv.agent_id,
+        "title": conv.title,
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+        "turn_count": turn_count,
+    }
+
+
+def _display_status(run: RunModel) -> str:
+    if run.status == "running" and run.heartbeat_at is not None:
+        if (datetime.now(timezone.utc) - run.heartbeat_at).total_seconds() > 20:
+            return "recovering"
+    return run.status
+
+
+def _run_dict(run: RunModel) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "tenant_id": run.tenant_id,
+        "agent_id": run.agent_id,
+        "agent_version": run.agent_version,
+        "status": run.status,
+        "display_status": _display_status(run),
+        "input": run.input,
+        "output": run.output,
+        "error": run.error,
+        "heartbeat_at": run.heartbeat_at,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+        "conversation_id": run.conversation_id,
+        "turn": run.turn,
+    }
+
+
 class RunStore:
     """Store for durable runs."""
 
@@ -205,10 +319,18 @@ class RunStore:
             return UUID(existing.id), False
 
     def set_status(
-        self, tenant_id: str, run_id: UUID, status: str, output: str | None = None, error: str | None = None
+        self,
+        tenant_id: str,
+        run_id: UUID,
+        status: str,
+        output: str | None = None,
+        error: str | None = None,
+        messages: list[Any] | None = None,
     ) -> None:
-        """Update run status and optionally output or error, only for a run owned by `tenant_id`.
+        """Update run status and optionally output, error or messages, only for a run owned by `tenant_id`.
 
+        `messages` is written once: a repeated call (a re-executed finish step) keeps the first value,
+        so the history later turns read never changes after it was first recorded.
         Raises RunNotFound (and changes nothing) if the run does not exist or belongs to another tenant.
         """
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
@@ -216,6 +338,8 @@ class RunStore:
             values["output"] = output
         if error is not None:
             values["error"] = error
+        if messages is not None:
+            values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
         self._update_owned(tenant_id, run_id, values)
 
     def heartbeat(self, tenant_id: str, run_id: UUID) -> None:
@@ -238,38 +362,190 @@ class RunStore:
             session.commit()
 
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
-        """Get a run by ID. Returns None if not found or belongs to another tenant."""
+        """Get a run by ID. Returns None if not found or belongs to another tenant.
+
+        display_status is `recovering` for a running run whose heartbeat is older than 20 s.
+        """
         with self.Session() as session:
             run = session.execute(
                 select(RunModel).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
             ).scalar_one_or_none()
-            if run is None:
-                return None
-            
-            # Calculate display_status
-            status = run.status
-            display_status = status
-            if status == "running" and run.heartbeat_at is not None:
-                # Check if heartbeat is older than 20 seconds
-                now = datetime.now(timezone.utc)
-                delta = (now - run.heartbeat_at).total_seconds()
-                if delta > 20:
-                    display_status = "recovering"
-            
-            return {
-                "id": run.id,
-                "tenant_id": run.tenant_id,
-                "agent_id": run.agent_id,
-                "agent_version": run.agent_version,
-                "status": status,
-                "display_status": display_status,
-                "input": run.input,
-                "output": run.output,
-                "error": run.error,
-                "heartbeat_at": run.heartbeat_at,
-                "created_at": run.created_at,
-                "updated_at": run.updated_at,
-            }
+            return None if run is None else _run_dict(run)
+
+    # ------------------------------------------------------------------ conversations
+
+    def create_conversation(
+        self,
+        tenant_id: str,
+        agent_id: UUID | str,
+        title: str | None = None,
+        conversation_id: UUID | str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create a conversation; idempotent on a client-supplied `conversation_id`.
+
+        Returns (conversation, created). Raises ConversationIdConflict if the id belongs to another tenant.
+        """
+        from sqlalchemy.dialects.postgresql import insert
+
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        conv_id = str(conversation_id or uuid4())
+        now = datetime.now(timezone.utc)
+        with self.Session() as session:
+            inserted = session.execute(
+                insert(ConversationModel)
+                .values(id=conv_id, tenant_id=tenant_id, agent_id=str(agent_id), title=title, created_at=now, updated_at=now)
+                .on_conflict_do_nothing(constraint="conversations_pkey")
+                .returning(ConversationModel.id)
+            ).fetchone()
+            session.commit()
+            existing = session.get(ConversationModel, conv_id)
+            if existing is None or existing.tenant_id != tenant_id:
+                raise ConversationIdConflict(conv_id)
+            return _iso_conversation(existing, self._turn_count(session, conv_id)), inserted is not None
+
+    @staticmethod
+    def _turn_count(session, conversation_id: str) -> int:
+        return session.execute(
+            select(func.count()).select_from(RunModel).where(RunModel.conversation_id == conversation_id)
+        ).scalar_one()
+
+    def get_conversation(self, tenant_id: str, conversation_id: UUID | str) -> dict[str, Any] | None:
+        """The tenant's conversation, or None (unknown, or another tenant's)."""
+        with self.Session() as session:
+            conv = session.execute(
+                select(ConversationModel).where(
+                    ConversationModel.id == str(conversation_id), ConversationModel.tenant_id == tenant_id
+                )
+            ).scalar_one_or_none()
+            return None if conv is None else _iso_conversation(conv, self._turn_count(session, conv.id))
+
+    def list_conversations(self, tenant_id: str, agent_id: UUID | str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """The tenant's conversations, most recently active first."""
+        counts = (
+            select(RunModel.conversation_id, func.count().label("n"))
+            .where(RunModel.tenant_id == tenant_id, RunModel.conversation_id.is_not(None))
+            .group_by(RunModel.conversation_id)
+            .subquery()
+        )
+        query = (
+            select(ConversationModel, func.coalesce(counts.c.n, 0))
+            .outerjoin(counts, counts.c.conversation_id == ConversationModel.id)
+            .where(ConversationModel.tenant_id == tenant_id)
+            .order_by(ConversationModel.updated_at.desc(), ConversationModel.id)
+            .limit(limit)
+        )
+        if agent_id is not None:
+            query = query.where(ConversationModel.agent_id == str(agent_id))
+        with self.Session() as session:
+            return [_iso_conversation(conv, n) for conv, n in session.execute(query).all()]
+
+    def list_turns(self, tenant_id: str, conversation_id: UUID | str) -> list[dict[str, Any]]:
+        """The conversation's runs in turn order ([] for another tenant's conversation)."""
+        with self.Session() as session:
+            runs = session.execute(
+                select(RunModel)
+                .where(RunModel.tenant_id == tenant_id, RunModel.conversation_id == str(conversation_id))
+                .order_by(RunModel.turn)
+            ).scalars().all()
+            return [_run_dict(r) for r in runs]
+
+    def create_turn(
+        self, tenant_id: str, conversation_id: UUID | str, agent_version: int, input: str, run_id: UUID
+    ) -> tuple[UUID, bool]:
+        """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
+
+        Under the conversation's row lock: if `run_id` already exists for this tenant it is returned
+        as (run_id, False) whatever it is (the caller checks that it is the same request); otherwise
+        the latest turn must be terminal (else TurnInProgress) and the new run gets turn = latest + 1.
+        Raises ConversationNotFound for another tenant's or an unknown conversation, RunIdConflict
+        if `run_id` belongs to another tenant.
+        """
+        from sqlalchemy.dialects.postgresql import insert
+
+        conv_id = str(conversation_id)
+        with self.Session() as session:
+            conv = session.execute(
+                select(ConversationModel)
+                .where(ConversationModel.id == conv_id, ConversationModel.tenant_id == tenant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if conv is None:
+                session.rollback()
+                raise ConversationNotFound(tenant_id, conv_id)
+
+            existing = session.get(RunModel, str(run_id))
+            if existing is not None:
+                session.rollback()
+                if existing.tenant_id != tenant_id:
+                    raise RunIdConflict(run_id)
+                return UUID(existing.id), False
+
+            latest = session.execute(
+                select(RunModel).where(RunModel.conversation_id == conv_id).order_by(RunModel.turn.desc()).limit(1)
+            ).scalar_one_or_none()
+            if latest is not None and latest.status not in TERMINAL_RUN_STATUSES:
+                session.rollback()
+                raise TurnInProgress(conv_id, latest.id, latest.status)
+
+            now = datetime.now(timezone.utc)
+            inserted = session.execute(
+                insert(RunModel)
+                .values(
+                    id=str(run_id),
+                    tenant_id=tenant_id,
+                    agent_id=conv.agent_id,
+                    agent_version=agent_version,
+                    status="queued",
+                    input=input,
+                    conversation_id=conv_id,
+                    turn=(latest.turn if latest is not None else 0) + 1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(constraint="runs_pkey")
+                .returning(RunModel.id)
+            ).fetchone()
+            if inserted is None:
+                # The same run_id was inserted concurrently by a path that does not take this lock
+                # (a standalone run): report it like any existing run.
+                session.rollback()
+                raced = self.get_run(tenant_id, run_id)
+                if raced is None:
+                    raise RunIdConflict(run_id)
+                return UUID(raced["id"]), False
+            conv.updated_at = now
+            session.commit()
+            return run_id, True
+
+    def completed_turns_before(self, tenant_id: str, conversation_id: UUID | str, turn: int) -> list[dict[str, Any]]:
+        """The COMPLETED turns numbered below `turn`, in order: what a turn's message history is built from.
+
+        Each item: turn, run_id, input, output, messages (the run's stored new messages, or None for a
+        run completed without them), created_at.
+        """
+        with self.Session() as session:
+            runs = session.execute(
+                select(RunModel)
+                .where(
+                    RunModel.tenant_id == tenant_id,
+                    RunModel.conversation_id == str(conversation_id),
+                    RunModel.turn < turn,
+                    RunModel.status == "completed",
+                )
+                .order_by(RunModel.turn)
+            ).scalars().all()
+            return [
+                {
+                    "turn": r.turn,
+                    "run_id": r.id,
+                    "input": r.input,
+                    "output": r.output,
+                    "messages": r.messages,
+                    "created_at": r.created_at,
+                }
+                for r in runs
+            ]
 
 
 class EventLog:

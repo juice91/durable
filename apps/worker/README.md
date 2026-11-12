@@ -17,7 +17,9 @@ packages/db/alembic.ini upgrade head` if not (see `packages/db/README.md`).
 A spec's `model: {provider, name}` becomes the model id `provider:name`, resolved inside each
 model step:
 
-- `test:ticket`, `test:first-tool`, `test:<anything>` — deterministic scripted models used by tests.
+- `test:ticket`, `test:first-tool`, `test:history`, `test:<anything>` — deterministic scripted models
+  used by tests. `test:history` answers with every user prompt it was given, which shows the
+  conversation history a turn received.
 - `litellm:<name>` — OpenAI-compatible gateway (SDK retries off; the DBOS model step retries).
   Base URL from `EAP_LITELLM_BASE_URL` (fallback `OPENAI_BASE_URL`), key from
   `EAP_LITELLM_API_KEY` (fallback `LITELLM_API_KEY`). The platform key is scoped to
@@ -28,6 +30,17 @@ model step:
   The public URL `https://llm-gateway.example.com/v1` sits behind Cloudflare, which cuts any single
   request at ~300 s. For local development use the SSH tunnel `http://127.0.0.1:14001/v1`, which
   has no such limit.
+
+## Conversations
+
+A run that is a conversation turn is enqueued with the same six arguments as any run; its row carries
+`conversation_id` and `turn`. `eap.start_run` returns that link (checkpointed), and for a turn the
+workflow then runs `eap.load_history`: the conversation's earlier **completed** turns' stored
+messages (`runs.messages`, written once by `eap.finish_run`), oldest first, capped at
+`EAP_MAX_HISTORY_BYTES` (default 1 000 000; the oldest whole turns are dropped first). The step's
+output is the `message_history` passed to `agent.iter`, so a recovered turn replays exactly the
+history its first attempt had. A run without a conversation skips the step and keeps the milestone 1
+step layout.
 
 ## Tests
 

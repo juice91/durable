@@ -65,6 +65,8 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "heartbeat_at": iso(run["heartbeat_at"]),
         "created_at": iso(run["created_at"]),
         "updated_at": iso(run["updated_at"]),
+        "conversation_id": run.get("conversation_id"),
+        "turn": run.get("turn"),
     }
 
 
@@ -83,6 +85,69 @@ def _version_row(db: Session, agent_id: uuid.UUID, version: int) -> AgentVersion
     )
 
 
+def resolve_version(db: Session, agent_id: uuid.UUID | str, requested: int | None) -> int:
+    """The requested published version, or the latest one when `requested` is None (409 if none, 404 if unknown)."""
+    if requested is None:
+        latest = db.query(func.max(AgentVersionModel.version)).filter(AgentVersionModel.agent_id == str(agent_id)).scalar()
+        if latest is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent has no published version")
+        return latest
+    if _version_row(db, agent_id, requested) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return requested
+
+
+def check_payload_size(db: Session, agent_id: uuid.UUID | str, version: int, input_text: str) -> None:
+    version_row = _version_row(db, agent_id, version)
+    assert version_row is not None
+    payload_bytes = len(json.dumps(version_row.spec).encode("utf-8")) + len(input_text.encode("utf-8"))
+    max_payload_bytes = int(os.environ.get("EAP_MAX_RUN_PAYLOAD_BYTES", str(256 * 1024)))
+    if payload_bytes > max_payload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Run payload exceeds the {max_payload_bytes}-byte enqueue limit",
+        )
+
+
+def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run: dict[str, Any]) -> None:
+    """Enqueue exactly what the stored row says (hand-off contract), so a retry starts the recorded run.
+
+    Called whether or not this request created the row: DBOS attaches a repeated workflow_id to the
+    existing workflow, so a crash between insert and enqueue heals when the client retries.
+    """
+    version_row = _version_row(db, run["agent_id"], run["agent_version"])
+    assert version_row is not None  # versions are immutable and never deleted
+    try:
+        launcher.launch(
+            run_id=uuid.UUID(str(run["id"])),
+            tenant_id=tenant_id,
+            agent_id=uuid.UUID(str(run["agent_id"])),
+            version=run["agent_version"],
+            spec_json=json.dumps(version_row.spec),
+            input_text=run["input"],
+        )
+    except Exception:
+        log.exception("enqueue failed for run %s", run["id"])
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Run recorded but could not be started; retry the same request (same run_id)",
+        )
+
+
+def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] | None = None) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        content={
+            "run_id": str(run["id"]),
+            "status": run["status"],
+            "display_status": run["display_status"],
+            "agent_id": str(run["agent_id"]),
+            "version": run["agent_version"],
+            **(extra or {}),
+        },
+    )
+
+
 @router.post("/agents/{agent_id}/runs", status_code=status.HTTP_201_CREATED, responses={409: {"model": ErrorDetail}})
 def start_run(
     agent_id: uuid.UUID,
@@ -96,7 +161,8 @@ def start_run(
 
     201 when this call created the run, 200 when the same tenant already has it. The enqueue is
     attempted in both cases, so a crash between insert and enqueue heals when the client retries;
-    DBOS attaches a repeated workflow_id to the existing workflow.
+    DBOS attaches a repeated workflow_id to the existing workflow. A run without a conversation;
+    conversation turns start through POST /conversations/{id}/runs.
     """
     run_store, _ = stores
     tenant_id = principal.tenant_id
@@ -106,26 +172,8 @@ def start_run(
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    if body.version is None:
-        latest = (
-            db.query(func.max(AgentVersionModel.version)).filter(AgentVersionModel.agent_id == str(agent_id)).scalar()
-        )
-        if latest is None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent has no published version")
-        version_num = latest
-    else:
-        version_num = body.version
-    version_row = _version_row(db, agent_id, version_num)
-    if version_row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    spec_json = json.dumps(version_row.spec)
-    payload_bytes = len(spec_json.encode("utf-8")) + len(body.input.encode("utf-8"))
-    max_payload_bytes = int(os.environ.get("EAP_MAX_RUN_PAYLOAD_BYTES", str(256 * 1024)))
-    if payload_bytes > max_payload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"Run payload exceeds the {max_payload_bytes}-byte enqueue limit",
-        )
+    version_num = resolve_version(db, agent_id, body.version)
+    check_payload_size(db, agent_id, version_num, body.input)
 
     try:
         run_id, created = run_store.create_run(tenant_id, agent_id, version_num, body.input, body.run_id)
@@ -137,41 +185,14 @@ def start_run(
         run["agent_id"] != str(agent_id)
         or run["input"] != body.input
         or (body.version is not None and run["agent_version"] != body.version)
+        or run["conversation_id"] is not None
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
         )
 
-    # Always launch what the stored row says, so a retry starts exactly the run that was recorded.
-    version_row = _version_row(db, agent_id, run["agent_version"])
-    assert version_row is not None  # versions are immutable and never deleted
-    spec_json = json.dumps(version_row.spec)
-    try:
-        launcher.launch(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            version=run["agent_version"],
-            spec_json=spec_json,
-            input_text=run["input"],
-        )
-    except Exception:
-        log.exception("enqueue failed for run %s", run_id)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Run recorded but could not be started; retry the same request (same run_id)",
-        )
-
-    return JSONResponse(
-        status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
-        content={
-            "run_id": str(run_id),
-            "status": run["status"],
-            "display_status": run["display_status"],
-            "agent_id": str(agent_id),
-            "version": run["agent_version"],
-        },
-    )
+    launch_recorded_run(db, launcher, tenant_id, run)
+    return started_response(run, created)
 
 
 @router.get("/runs/{run_id}")

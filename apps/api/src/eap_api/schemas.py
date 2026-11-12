@@ -101,3 +101,16 @@ class RunCreate(BaseModel):
         if len(value.encode("utf-8")) > 32 * 1024:
             raise ValueError("input must be at most 32 KiB in UTF-8")
         return value
+
+
+class ConversationCreate(BaseModel):
+    """Body of POST /agents/{agent_id}/conversations. `conversation_id` makes a retry idempotent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
+    conversation_id: UUID | None = None
+
+
+class TurnCreate(RunCreate):
+    """Body of POST /conversations/{id}/runs: the next turn, same fields as a run start."""

@@ -316,8 +316,8 @@ class Harness:
 
     # ---- API
 
-    def create_published_agent(self) -> str:
-        r = self.client.post("/api/v1/agents", json={"spec": TICKET_SPEC}, headers=self.headers)
+    def create_published_agent(self, spec: dict[str, Any] | None = None) -> str:
+        r = self.client.post("/api/v1/agents", json={"spec": spec or TICKET_SPEC}, headers=self.headers)
         assert r.status_code == 201, r.text
         agent_id = r.json()["id"]
         r = self.client.post(f"/api/v1/agents/{agent_id}/versions", headers=self.headers)
@@ -331,6 +331,20 @@ class Harness:
             f"/api/v1/agents/{agent_id}/runs",
             json={"run_id": run_id, "input": input_text, "version": None},
             headers=self.headers,
+        )
+
+    def create_conversation(self, agent_id: str) -> str:
+        r = self.client.post(f"/api/v1/agents/{agent_id}/conversations", json={}, headers=self.headers)
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    def post_turn(self, conversation_id: str, run_id: str, input_text: str, headers: dict[str, str] | None = None) -> Any:
+        if run_id not in self.run_ids:
+            self.run_ids.append(run_id)
+        return self.client.post(
+            f"/api/v1/conversations/{conversation_id}/runs",
+            json={"run_id": run_id, "input": input_text},
+            headers=headers or self.headers,
         )
 
     def sse(self, run_id: str, *, after_seq: int | None = None, last_event_id: int | None = None) -> list[Frame]:
@@ -431,6 +445,7 @@ class Harness:
                         if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
                             conn.execute(text(f"DELETE FROM {table} WHERE idempotency_key LIKE :p"), {"p": f"{run_id}:%"})
                 conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": self.tenant})
+                conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(
                     text("DELETE FROM agent_versions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :t)"),
