@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { AVAILABLE_TOOLS, ToolName } from "./tools";
+import { listTools, type ToolDefinition } from "@/lib/tools";
 
 interface AgentSpec {
   spec_version: 1;
@@ -33,6 +33,14 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
   const [maxTokens, setMaxTokens] = useState<string>(initialData?.model_settings?.max_tokens?.toString() || "");
   const [submitting, setSubmitting] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
+  const [tools, setTools] = useState<ToolDefinition[]>([]);
+  const [toolsError, setToolsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listTools()
+      .then(setTools)
+      .catch((error: unknown) => setToolsError(error instanceof Error ? error.message : "Failed to load tools"));
+  }, []);
 
   const toggleTool = (tool: string) => {
     setSelectedTools((prev) =>
@@ -185,21 +193,25 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
           Tools
         </span>
         <div className="flex flex-wrap gap-2">
-          {AVAILABLE_TOOLS.map((tool) => (
-            <label key={tool} className="inline-flex items-center px-3 py-2 border border-border rounded-md bg-card hover:bg-accent cursor-pointer">
+          {tools.map((tool) => (
+            <label key={tool.id} className={`inline-flex items-center px-3 py-2 border border-border rounded-md bg-card ${tool.allowed ? "hover:bg-accent cursor-pointer" : "cursor-not-allowed opacity-60"}`}>
               <input
                 type="checkbox"
+                aria-label={`${tool.title} (${tool.id})`}
                 className="form-checkbox h-4 w-4 text-accent-foreground focus:ring-accent-foreground border-border rounded"
-                checked={selectedTools.includes(tool)}
+                checked={selectedTools.includes(tool.id)}
+                disabled={!tool.allowed}
                 onChange={() => {
-                  toggleTool(tool);
+                  toggleTool(tool.id);
                   updateDirtyState();
                 }}
               />
-              <span className="ml-2 text-sm text-card-foreground">{tool}</span>
+              <span className="ml-2 text-sm text-card-foreground">{tool.title} ({tool.id})</span>
+              {!tool.allowed ? <span className="ml-2 text-xs text-muted-foreground">Disabled by platform policy</span> : null}
             </label>
           ))}
         </div>
+        {toolsError ? <p role="alert" className="mt-2 text-xs text-destructive">{toolsError}</p> : null}
       </div>
 
       <div className="grid grid-cols-2 gap-4">

@@ -3,13 +3,16 @@ import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { AgentEditor } from "./AgentEditor";
-import { AVAILABLE_TOOLS } from "./tools";
+import { listTools } from "@/lib/tools";
+
+vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 
 describe("AgentEditor", () => {
   const mockSubmit = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(listTools).mockReturnValue(new Promise<never>(() => undefined));
   });
 
   it("renders all form fields with labels", () => {
@@ -25,12 +28,26 @@ describe("AgentEditor", () => {
     expect(screen.getByText("Create")).toBeInTheDocument();
   });
 
-  it("allows selecting tools", () => {
+  it("lists tools from the API and allows selecting an allowed tool", async () => {
+    vi.mocked(listTools).mockResolvedValue([
+      { id: "clock.now", title: "Current time", description: "Reads the clock", side_effect: false, external_idempotent: true, input_schema: { type: "object", properties: {} }, allowed: true },
+    ]);
     render(<AgentEditor onSubmit={mockSubmit} submitLabel="Create" />);
 
-    const toolCheckbox = screen.getByLabelText(AVAILABLE_TOOLS[0]);
+    const toolCheckbox = await screen.findByLabelText("Current time (clock.now)");
     expect(toolCheckbox).not.toBeChecked();
-    expect(screen.getByLabelText(AVAILABLE_TOOLS[0])).toBeInTheDocument();
+    fireEvent.click(toolCheckbox);
+    expect(toolCheckbox).toBeChecked();
+  });
+
+  it("shows disallowed tools disabled with a reason", async () => {
+    vi.mocked(listTools).mockResolvedValue([
+      { id: "tickets.create", title: "Create ticket", description: "Disabled by policy", side_effect: true, external_idempotent: false, input_schema: { type: "object", properties: {} }, allowed: false },
+    ]);
+    render(<AgentEditor onSubmit={mockSubmit} submitLabel="Create" />);
+
+    expect(await screen.findByLabelText("Create ticket (tickets.create)")).toBeDisabled();
+    expect(screen.getByText("Disabled by platform policy")).toBeInTheDocument();
   });
 
   it("handles temperature input", () => {
