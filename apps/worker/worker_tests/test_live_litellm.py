@@ -20,12 +20,14 @@ pytestmark = pytest.mark.skipif(not HAS_KEY, reason="no EAP_LITELLM_API_KEY / LI
 def test_live_qwen_one_turn(worker, client, tenant, monkeypatch):
     from dataclasses import replace
 
+    from eap_schemas.models_policy import ModelPolicy
     from eap_worker.config import WorkerSettings
 
     env = WorkerSettings.from_env()
     base_url = env.litellm_base_url or "http://127.0.0.1:14001/v1"
     monkeypatch.setattr(worker, "settings", replace(worker.settings, litellm_base_url=base_url,
-                                                     litellm_api_key=env.litellm_api_key))
+                                                     litellm_api_key=env.litellm_api_key,
+                                                     allowed_models=ModelPolicy.parse("litellm:qwen3.8-thinking")))
     spec = ticket_spec(tools=())
     spec["model"] = {"provider": "litellm", "name": "qwen3.8-thinking"}
     spec["instructions"] = "Answer in one short sentence."
