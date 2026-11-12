@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import RunDetailPage from "./page";
-import { ApiError, getRun, listEvents, type Run, type RunEvent } from "@/lib/runs";
+import {
+  ApiError,
+  getRun,
+  listEvents,
+  subscribeRun,
+  type Run,
+  type RunEvent,
+  type SubscribeHandlers,
+} from "@/lib/runs";
 import * as grafanaLib from "@/lib/grafana";
 
 vi.mock("next/navigation", () => ({
@@ -77,8 +85,14 @@ const ticketEvents = [
 ] satisfies RunEvent[];
 
 describe("RunDetailPage", () => {
+  let handlers: SubscribeHandlers;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(subscribeRun).mockImplementation((_runId, nextHandlers) => {
+      handlers = nextHandlers;
+      return vi.fn();
+    });
   });
 
   it("shows loading state while fetching run", async () => {
@@ -122,6 +136,73 @@ describe("RunDetailPage", () => {
     render(<RunDetailPage />);
 
     expect(await screen.findByText("Running")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["completed", "run_completed", { output: "Done" }, "Completed", null],
+    ["failed", "run_failed", { status: "failed", error: "Provider unavailable" }, "Failed", "Provider unavailable"],
+    [
+      "needs attention",
+      "run_failed",
+      { status: "needs_attention", error: "Side effect outcome is unknown" },
+      "Needs Attention",
+      "Side effect outcome is unknown",
+    ],
+  ] as const)(
+    "shows %s from a live terminal event without a status frame",
+    async (_caseName, type, data, expectedStatus, expectedError) => {
+      const mockRun: Run = {
+        ...ticketRun,
+        status: "running",
+        display_status: "running",
+        error: null,
+        heartbeat_at: new Date().toISOString(),
+      };
+      vi.mocked(getRun).mockResolvedValueOnce(mockRun);
+      vi.mocked(listEvents).mockResolvedValueOnce([]);
+
+      render(<RunDetailPage />);
+      await waitFor(() => expect(subscribeRun).toHaveBeenCalled());
+
+      act(() => {
+        handlers.onEvent?.({
+          seq: 1,
+          type,
+          data,
+          ts: "2026-11-13T00:00:00Z",
+        });
+      });
+
+      expect(await screen.findByText(expectedStatus)).toBeInTheDocument();
+      if (expectedError) {
+        expect(screen.getByRole("alert")).toHaveTextContent(expectedError);
+      }
+    },
+  );
+
+  it("falls back to failed when a live run_failed event has an invalid status", async () => {
+    vi.mocked(getRun).mockResolvedValueOnce({
+      ...ticketRun,
+      status: "running",
+      display_status: "running",
+      error: null,
+      heartbeat_at: new Date().toISOString(),
+    });
+    vi.mocked(listEvents).mockResolvedValueOnce([]);
+
+    render(<RunDetailPage />);
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalled());
+    act(() => {
+      handlers.onEvent?.({
+        seq: 1,
+        type: "run_failed",
+        data: { status: "completed", error: "Invalid status" },
+        ts: "2026-11-13T00:00:00Z",
+      });
+    });
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Invalid status");
   });
 
   it("shows recovering notice when heartbeat is old", async () => {

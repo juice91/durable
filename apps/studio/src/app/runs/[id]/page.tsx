@@ -7,6 +7,10 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 
+function failedEventStatus(status: unknown): "failed" | "needs_attention" {
+  return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
 export default function RunDetailPage() {
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -60,6 +64,25 @@ export default function RunDetailPage() {
           setPartialText((prev) => deltaReducer(prev, { type: "model_message", payload: event }));
         } else if (event.type === "run_completed" || event.type === "run_failed") {
           setPartialText((prev) => deltaReducer(prev, { type: event.type === "run_completed" ? "done" : "failed" }));
+          setRun((prev) => {
+            if (!prev) return null;
+            if (event.type === "run_completed") {
+              return {
+                ...prev,
+                status: "completed",
+                display_status: "completed",
+                output: typeof event.data.output === "string" ? event.data.output : prev.output,
+                error: null,
+              };
+            }
+            const terminalStatus = failedEventStatus(event.data.status);
+            return {
+              ...prev,
+              status: terminalStatus,
+              display_status: terminalStatus,
+              error: typeof event.data.error === "string" ? event.data.error : prev.error,
+            };
+          });
         }
       },
       onDelta: (delta) => {
@@ -147,6 +170,14 @@ export default function RunDetailPage() {
           {status === "recovering" && (
             <div className="mt-4 p-3 bg-muted border border-border rounded-md text-muted-foreground text-sm">
               ⚠️ The worker is restarting. Events may be delayed as the system recovers.
+            </div>
+          )}
+          {(status === "failed" || status === "needs_attention") && (
+            <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {run.error ||
+                (status === "needs_attention"
+                  ? "This run needs attention before it can continue."
+                  : "The run failed.")}
             </div>
           )}
         </div>

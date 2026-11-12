@@ -4,6 +4,7 @@ import "@testing-library/jest-dom";
 import { render, screen, waitFor } from "@testing-library/react";
 import TracesPage from "./page";
 import { listRuns } from "@/lib/runs";
+import { api } from "@/lib/api";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -16,6 +17,10 @@ vi.mock("@/lib/runs", async (importOriginal) => {
     listRuns: vi.fn(),
   };
 });
+
+vi.mock("@/lib/api", () => ({
+  api: { agents: { list: vi.fn() } },
+}));
 
 describe("TracesPage", () => {
   const mockRuns = [
@@ -44,6 +49,20 @@ describe("TracesPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.agents.list).mockResolvedValue([
+      {
+        id: "agent-1",
+        name: "Support assistant",
+        draft_spec: {
+          spec_version: 1,
+          name: "Support assistant",
+          instructions: "Help customers",
+          model: { provider: "openai", name: "gpt-4.1-mini" },
+          tools: [],
+        },
+        latest_version: 1,
+      },
+    ]);
   });
 
   it("renders the traces page title and header", async () => {
@@ -78,5 +97,14 @@ describe("TracesPage", () => {
         status: undefined,
       });
     });
+  });
+
+  it("shows the agent name instead of its UUID", async () => {
+    vi.mocked(listRuns).mockResolvedValue(mockResponse as any);
+
+    render(<TracesPage />);
+
+    expect(await screen.findByText("Support assistant")).toBeInTheDocument();
+    expect(screen.queryByText("agent-1")).not.toBeInTheDocument();
   });
 });

@@ -52,6 +52,10 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
   "needs_attention",
 ]);
 
+function failedEventStatus(status: unknown): "failed" | "needs_attention" {
+  return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
 function messageText(message: AppendMessage): string {
   return message.content
     .filter((part): part is Extract<typeof part, { type: "text" }> =>
@@ -198,7 +202,10 @@ export default function PlaygroundPage() {
               partials = deltaReducer(partials, {
                 type: nextEvent.type === "run_completed" ? "done" : "failed",
               });
-              displayStatus = nextEvent.type === "run_completed" ? "completed" : "failed";
+              displayStatus =
+                nextEvent.type === "run_completed"
+                  ? "completed"
+                  : failedEventStatus(nextEvent.data.status);
             }
             const error =
               nextEvent.type === "run_failed" && typeof nextEvent.data.error === "string"

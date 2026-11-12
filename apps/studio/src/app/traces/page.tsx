@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { listRuns, type Run } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
+import { api } from "@/lib/api";
 
 type FilterStatus = "all" | "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
 
@@ -13,7 +14,20 @@ export default function TracesPage() {
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterStatus>("all");
+  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const router = useRouter();
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.agents.list().then((agents) => {
+      if (!cancelled) {
+        setAgentNames(Object.fromEntries(agents.map((agent) => [agent.id, agent.name])));
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadRuns = useCallback(async (before?: string) => {
     setLoading(true);
@@ -101,7 +115,10 @@ export default function TracesPage() {
                       <td className="px-4 py-3 font-mono text-xs">
                         {new Date(run.created_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 font-medium">{run.agent_id}</td>
+                      <td className="px-4 py-3 font-medium">
+                        {agentNames[run.agent_id] ??
+                          `${run.agent_id.slice(0, 8)}${run.agent_id.length > 8 ? "..." : ""}`}
+                      </td>
                       <td className="px-4 py-3">
                         <StatusPill status={run.display_status as any} />
                       </td>

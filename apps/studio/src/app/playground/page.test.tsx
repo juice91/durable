@@ -262,6 +262,46 @@ describe("PlaygroundPage", () => {
     await waitFor(() => expect(composer()).toBeEnabled());
   });
 
+  it.each([
+    ["completed", "run_completed", { output: "Done" }, "Completed", null],
+    ["failed", "run_failed", { status: "failed", error: "Provider unavailable" }, "Failed", "Provider unavailable"],
+    [
+      "needs attention",
+      "run_failed",
+      { status: "needs_attention", error: "Side effect outcome is unknown" },
+      "Needs Attention",
+      "Side effect outcome is unknown",
+    ],
+  ] as const)(
+    "shows %s from a live terminal event without a status frame",
+    async (_caseName, type, data, expectedStatus, expectedError) => {
+      await renderReady();
+      await sendMessage();
+
+      act(() => {
+        handlers.onEvent?.(event(2, type, data));
+      });
+
+      expect(await screen.findByText(expectedStatus)).toBeInTheDocument();
+      await waitFor(() => expect(composer()).toBeEnabled());
+      if (expectedError) {
+        expect(screen.getByRole("alert")).toHaveTextContent(expectedError);
+      }
+    },
+  );
+
+  it("falls back to failed when a run_failed event has an invalid status", async () => {
+    await renderReady();
+    await sendMessage();
+
+    act(() => {
+      handlers.onEvent?.(event(2, "run_failed", { status: "completed", error: "Invalid status" }));
+    });
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Invalid status");
+  });
+
   it("shows recovery only while the server display status is recovering", async () => {
     await renderReady();
     await sendMessage();
