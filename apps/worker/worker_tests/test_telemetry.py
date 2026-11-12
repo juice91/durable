@@ -13,6 +13,7 @@ import uuid
 import pytest
 from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic_ai import RunContext
 
 import eap_observability as obs
 from eap_observability.agents import instrument_pydantic_ai, uninstrument_pydantic_ai
@@ -124,3 +125,104 @@ def test_worker_telemetry_setup_is_a_noop_without_an_endpoint(monkeypatch):
     obs.shutdown_telemetry()
     assert setup_worker_telemetry() is False
     assert obs.tracer_provider() is None
+
+
+# --------------------------------------------------------------------------- failures leak nothing
+
+PROMPT = "SENTINEL-PROMPT my card number is 4111"
+KEY = "sk-SENTINEL0123456789abcdef"
+BEARER = "Bearer SENTINELtoken0123456789"
+SENTINELS = ("SENTINEL",)  # every prompt and secret sentinel contains it
+
+
+def _leaks(text: str) -> list[str]:
+    return [s for s in SENTINELS if s in text]
+
+
+@pytest.fixture
+def dbos_style_log_handler(telemetry):
+    """What DBOS's enable_otlp installs: its own OTel handler on the non-propagating `dbos` logger."""
+    import logging
+
+    from opentelemetry.instrumentation.logging.handler import LoggingHandler
+
+    handler = LoggingHandler(logger_provider=obs._state.logger_provider)
+    dbos_logger = logging.getLogger("dbos")
+    dbos_logger.addHandler(handler)
+    yield
+    dbos_logger.removeHandler(handler)
+
+
+def _assert_nothing_leaked(worker, tenant, run_id, finished) -> tuple[dict, list]:
+    from worker_tests.conftest import event_rows
+
+    run = worker.run_store.get_run(tenant, run_id)
+    assert run["status"] == "failed", run
+    assert not _leaks(run["error"]), run["error"]
+    (failed,) = [e for e in event_rows(worker.engine, run_id) if e[2] == "run_failed"]
+    assert not _leaks(repr(failed[3])), failed[3]
+
+    spans, logs = finished()
+    for s in spans:
+        text = repr(dict(s.attributes or {})) + repr([(e.name, dict(e.attributes or {})) for e in s.events])
+        text += repr(s.status.description)
+        assert not _leaks(text), (s.name, text)
+    for r in logs:
+        text = repr(r.body) + repr(dict(r.attributes or {}))
+        assert not _leaks(text), text
+    (run_span,) = [s for s in spans if s.name == "eap.run" and s.attributes["eap.run_id"] == str(run_id)]
+    assert run_span.attributes["eap.run_status"] == "failed"
+    failure_logs = [r for r in logs if (r.attributes or {}).get("eap.run_id") == str(run_id)
+                    and (r.attributes or {}).get("eap.error_code")]
+    assert len(failure_logs) == 1, [r.body for r in logs]
+    return run, failure_logs[0].attributes
+
+
+def test_provider_failure_exports_no_prompt_or_secret(worker, client, tenant, telemetry, dbos_style_log_handler,
+                                                       monkeypatch):
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai.models.function import FunctionModel
+
+    import eap_worker.models as models
+
+    def failing_model():
+        def fail(messages, info):
+            raise ModelHTTPError(401, "echo", body={"error": f"{BEARER} key {KEY} rejected: {models._last_prompt(messages)}"})
+
+        async def stream(messages, info):
+            fail(messages, info)
+            yield ""  # pragma: no cover
+
+        return FunctionModel(fail, stream_function=stream, model_name="failing")
+
+    monkeypatch.setattr(models, "scripted_echo_model", failing_model)
+    _, finished = telemetry
+    run_id = enqueue_run(client, worker.run_store, tenant_id=tenant, spec=ticket_spec(tools=(), model="echo"),
+                         input_text=PROMPT, app_version=APP_VERSION)
+    wait_terminal(worker.run_store, tenant, run_id)
+    run, attrs = _assert_nothing_leaked(worker, tenant, run_id, finished)
+    assert run["error"].startswith("ModelHTTPError:") and "401" in run["error"]
+    assert attrs["eap.error_code"] == "model_http_error"
+    assert attrs["exception.type"] == "ModelHTTPError"
+    assert attrs["eap.tenant_id"] == tenant
+
+
+def test_tool_failure_exports_no_prompt_or_secret(worker, client, tenant, telemetry, dbos_style_log_handler,
+                                                   monkeypatch):
+    tool_id = "sentinel.leak"
+
+    def leak(ctx: RunContext) -> str:
+        raise RuntimeError(f"upstream rejected {ctx.prompt!r}; Authorization: {BEARER}; api_key={KEY}")
+
+    if tool_id not in worker.registry.tool_ids():
+        worker.registry.register(tool_id, leak, description="always fails")
+    monkeypatch.setitem(worker.__dict__, "allowed_tools", frozenset(worker.registry.tool_ids()))
+    _, finished = telemetry
+    run_id = enqueue_run(client, worker.run_store, tenant_id=tenant,
+                         spec=ticket_spec(tools=(tool_id,), model="first-tool"),
+                         input_text=PROMPT, app_version=APP_VERSION)
+    wait_terminal(worker.run_store, tenant, run_id)
+    run, attrs = _assert_nothing_leaked(worker, tenant, run_id, finished)
+    assert run["error"].startswith("RuntimeError:")
+    assert attrs["eap.error_code"] == "internal_error"
+    assert attrs["exception.type"] == "RuntimeError"

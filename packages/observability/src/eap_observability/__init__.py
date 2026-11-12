@@ -9,6 +9,10 @@ Everything is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (or a test passe
 `setup_telemetry` returns None, `setup_logging` returns False, nothing global is touched, and
 `run_span` yields a non-recording span.
 
+Nothing exported carries exception text, prompts or credentials: both pipelines pass through the
+redacting processor/exporter in `eap_observability.redaction`, and handled failures are logged with
+`log_failure` (error code + exception type + ids). See that module.
+
 Pydantic AI instrumentation lives in `eap_observability.agents`, so importing this module never
 imports pydantic_ai (the control plane must not).
 """
@@ -34,6 +38,15 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from opentelemetry.trace import Span, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+from eap_observability.redaction import (
+    LOCAL_ONLY_LOG_ATTRIBUTE,
+    RedactingLogProcessor,
+    RedactingSpanExporter,
+    exception_type,
+    log_failure,
+    redact,
+)
 
 ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 # DBOS 3.5 reads a W3C carrier from this workflow attribute and parents the workflow span on it
@@ -83,7 +96,7 @@ def setup_telemetry(
         assert endpoint is not None
         exporter = OTLPSpanExporter(endpoint=_signal_url(endpoint, "traces"))
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    provider.add_span_processor(BatchSpanProcessor(RedactingSpanExporter(exporter)))
     # Global, so DBOS (which uses trace.get_tracer) exports through this provider too. OpenTelemetry
     # allows setting it once per process; later calls (tests) keep using the explicit provider.
     trace.set_tracer_provider(provider)
@@ -118,7 +131,9 @@ def setup_logging(
         assert endpoint is not None
         exporter = OTLPLogExporter(endpoint=_signal_url(endpoint, "logs"))
     provider = LoggerProvider(resource=Resource.create({"service.name": service_name}))
-    provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    # Every record on this provider (ours, and other libraries' handlers such as DBOS's) is cleaned
+    # before export: no exception text, tracebacks, credentials or local-only records.
+    provider.add_log_record_processor(RedactingLogProcessor(BatchLogRecordProcessor(exporter)))
     # Global, so DBOS's own log handler (enable_otlp) exports through it instead of warning.
     set_logger_provider(provider)
     handler = LoggingHandler(level=level, logger_provider=provider)
@@ -224,17 +239,26 @@ def run_span(
         yield span
 
 
-def set_run_outcome(span: Span, status: str, error: str | None = None) -> None:
-    """Record the run's terminal status on its span; anything but `completed` marks it an error."""
+def set_run_outcome(span: Span, status: str, error_code: str | None = None) -> None:
+    """Record the run's terminal status on its span; anything but `completed` marks it an error.
+
+    `error_code` is a stable code (never exception text); it becomes `eap.error_code` and the status
+    description."""
     span.set_attribute("eap.run_status", status)
+    if error_code:
+        span.set_attribute("eap.error_code", error_code)
     if status == "completed":
         span.set_status(Status(StatusCode.OK))
     else:
-        span.set_status(Status(StatusCode.ERROR, error or status))
+        span.set_status(Status(StatusCode.ERROR, error_code or status))
 
 
 __all__ = [
     "DBOS_OTEL_CARRIER_ATTRIBUTE",
+    "LOCAL_ONLY_LOG_ATTRIBUTE",
+    "exception_type",
+    "log_failure",
+    "redact",
     "current_trace_context",
     "current_trace_id",
     "dbos_otel_config",

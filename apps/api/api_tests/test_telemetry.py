@@ -126,3 +126,33 @@ def test_request_logs_carry_the_trace_id(traced):
     queued = [r for r in logs() if isinstance(r.body, str) and r.body.startswith("run ") and "queued" in r.body]
     assert queued, [r.body for r in logs()]
     assert format(queued[-1].trace_id, "032x") == trace_id
+
+
+def test_enqueue_failure_exports_no_exception_text(traced, monkeypatch):
+    """The enqueue error may carry a DSN password or token; only its type and a code are exported."""
+    client, _, fake, tenant, spans, logs = traced
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+
+    def fail(options, *args):
+        raise ConnectionError(
+            "could not connect to postgresql://eap_dbos:SENTINELpw@db/eap_dbos "
+            "(Authorization: Bearer SENTINELtoken0123; key sk-SENTINEL0123456789abcdef; input SENTINEL-PROMPT)"
+        )
+
+    monkeypatch.setattr(fake, "enqueue", fail)
+    run_id = str(uuid.uuid4())
+    r = start(client, h, agent_id, run_id, input="SENTINEL-PROMPT my card is 4111")
+    assert r.status_code == 503
+    assert "SENTINEL" not in r.text
+    exported = logs()
+    for rec in exported:
+        text = repr(rec.body) + repr(dict(rec.attributes or {}))
+        assert "SENTINEL" not in text, text
+    for s in spans():
+        text = repr(dict(s.attributes or {})) + repr([dict(e.attributes or {}) for e in s.events])
+        assert "SENTINEL" not in text + repr(s.status.description), (s.name, text)
+    (failure,) = [rec for rec in exported if (rec.attributes or {}).get("eap.error_code") == "enqueue_failed"]
+    assert failure.attributes["exception.type"] == "ConnectionError"
+    assert failure.attributes["eap.run_id"] == run_id
+    assert failure.attributes["eap.tenant_id"] == tenant

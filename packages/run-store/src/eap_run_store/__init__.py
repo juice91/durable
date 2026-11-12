@@ -1,5 +1,6 @@
 """Postgres store for durable runs and event logging."""
 
+from eap_run_store.cursor import InvalidRunCursor, RunCursor
 from eap_run_store.store import (
     RunStore,
     EventLog,
@@ -21,6 +22,8 @@ from eap_run_store.store import (
 )
 
 __all__ = [
+    "InvalidRunCursor",
+    "RunCursor",
     "RunStore",
     "EventLog",
     "PostgresSideEffectStore",

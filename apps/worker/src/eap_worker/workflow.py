@@ -38,6 +38,10 @@ Tracing: the API stores its request span's W3C traceparent on the run row. `eap.
 `run_span(..., traceparent=...)`, so every later step, model request and tool call is in the API
 request's trace. Spans are not durable state: a recovered run simply opens another `eap.run` span.
 A checkpoint written before tracing existed (None, or no "traceparent" key) runs untraced.
+
+Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
+into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
+the run span get only the code, the exception type and the run/tenant ids.
 """
 
 from __future__ import annotations
@@ -71,11 +75,12 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
-from eap_observability import run_span, set_run_outcome
+from eap_observability import log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
 from eap_schemas import AgentSpec
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
+from eap_worker.errors import classify
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.runtime import WorkerDeps, get_runtime
 
@@ -243,8 +248,8 @@ async def _heartbeat(run_id: str, tenant_id: str) -> None:
         await asyncio.sleep(HEARTBEAT_SECONDS)
         try:
             await asyncio.to_thread(rt.run_store.heartbeat, tenant_id, UUID(run_id))
-        except Exception:  # noqa: BLE001 - a missed heartbeat must never fail the run
-            log.warning("heartbeat failed for run %s", run_id, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - a missed heartbeat must never fail the run
+            log_failure(log, "heartbeat failed", exc, code="heartbeat_failed", run_id=run_id, tenant_id=tenant_id)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -384,7 +389,7 @@ async def agent_run(
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
         result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)
-        set_run_outcome(span, result["status"], result.get("error"))
+        set_run_outcome(span, result["status"], result.get("error_code"))
         log.info("run %s %s", run_id, result["status"])
         return result
 
@@ -415,13 +420,19 @@ async def _run_body(
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
         output, new_messages = await _drive_agent(run_id, rt.deps_for(run_id, tenant_id, spec), input_text, history)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
-        status = "needs_attention" if _is_side_effect_unknown(exc) else "failed"
-        error = f"{type(exc).__name__}: {exc}"
-        log.warning("run %s %s: %s", run_id, status, error)
+        failure = classify(exc)
+        status = "needs_attention" if _is_side_effect_unknown(exc) else failure.status
+        log_failure(
+            log, f"run {status}", exc, code=failure.code, error_type=failure.error_type,
+            run_id=run_id, tenant_id=tenant_id,
+        )
         heartbeat.cancel()
-        await append_event_step(run_id, tenant_id, "end", "run_failed", {"status": status, "error": error})
-        await finish_run_step(run_id, tenant_id, status, None, error)
-        return {"status": status, "error": error}
+        await append_event_step(
+            run_id, tenant_id, "end", "run_failed",
+            {"status": status, "error": failure.error, "error_code": failure.code},
+        )
+        await finish_run_step(run_id, tenant_id, status, None, failure.error)
+        return {"status": status, "error": failure.error, "error_code": failure.code}
     finally:
         heartbeat.cancel()
     # End event before the terminal status: a reader that sees a terminal status always finds the

@@ -1,7 +1,9 @@
-"""GET /api/v1/runs: the tenant's runs newest first, created_at cursor, agent/status filters."""
+"""GET /api/v1/runs: the tenant's runs newest first, opaque (created_at, id) cursor, agent/status filters."""
 
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -72,9 +74,97 @@ def test_cursor_pages_through_everything_once(pg, tenant_of):
         before = body["next_before"]
         if before is None:
             break
-        assert before == body["items"][-1]["created_at"]
+        assert before != body["items"][-1]["created_at"]  # opaque, not a bare timestamp
     assert seen == ids[::-1]
     assert pages == 3
+
+
+def _tie(app, run_ids: list[str], when: datetime) -> None:
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET created_at = :t WHERE id = ANY(:r)"), {"t": when, "r": run_ids})
+
+
+def _page_all(client, h, limit: int, **filters) -> tuple[list[str], int]:
+    seen, before, pages = [], None, 0
+    while True:
+        body = _list(client, h, limit=limit, **filters, **({"before": before} if before else {}))
+        seen += [i["run_id"] for i in body["items"]]
+        pages += 1
+        before = body["next_before"]
+        if before is None:
+            return seen, pages
+        assert pages < 50, "cursor does not advance"
+
+
+def test_cursor_pages_through_tied_created_at_exactly_once(pg, tenant_of):
+    """More rows share one created_at than fit on a page: none is skipped or repeated."""
+    client, app = pg
+    _, h = tenant_of()
+    agent_id = make_agent(client, h)
+    newer = _start_runs(client, app, h, agent_id, 2, offset=100)
+    tied = _start_runs(client, app, h, agent_id, 7, offset=50)
+    older = _start_runs(client, app, h, agent_id, 1, offset=0)
+    _tie(app, tied, BASE + timedelta(minutes=50))
+    expected = newer[::-1] + sorted(tied, reverse=True) + older  # created_at DESC, id DESC
+    for limit in (1, 2, 3, 7, 10):
+        seen, _ = _page_all(client, h, limit)
+        assert len(seen) == len(set(seen)) == 10, (limit, seen)
+        assert seen == expected, limit
+
+
+def test_cursor_with_every_row_tied_and_a_filter(pg, tenant_of):
+    client, app = pg
+    _, h = tenant_of()
+    a1, a2 = make_agent(client, h), make_agent(client, h)
+    mine = _start_runs(client, app, h, a1, 5)
+    other = _start_runs(client, app, h, a2, 3)
+    _tie(app, mine + other, BASE)
+    seen, pages = _page_all(client, h, 2, agent_id=a1)
+    assert seen == sorted(mine, reverse=True)
+    assert pages == 3
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def test_malformed_cursor_is_422(pg, tenant_of):
+    client, app = pg
+    _, h = tenant_of()
+    _start_runs(client, app, h, make_agent(client, h), 2)
+    good = _list(client, h, limit=1)["next_before"]
+    assert client.get("/api/v1/runs", params={"before": good}, headers=h).status_code == 200
+    bad = [
+        "not-a-date",
+        "!!!",
+        BASE.isoformat(),  # the old timestamp-only cursor
+        _b64(b"not json"),
+        _b64(json.dumps([BASE.isoformat()]).encode()),
+        _b64(json.dumps({"t": BASE.isoformat()}).encode()),
+        _b64(json.dumps({"t": "yesterday", "id": str(uuid.uuid4())}).encode()),
+        _b64(json.dumps({"t": BASE.isoformat(), "id": "not-a-uuid"}).encode()),
+        _b64(json.dumps({"t": "2026-01-01T00:00:00", "id": str(uuid.uuid4())}).encode()),  # naive
+        good[:-3],
+        good + "x" * 600,
+    ]
+    for cursor in bad:
+        r = client.get("/api/v1/runs", params={"before": cursor}, headers=h)
+        assert r.status_code == 422, (cursor, r.status_code, r.text)
+
+
+def test_a_cursor_never_crosses_tenants(pg, tenant_of):
+    client, app = pg
+    _, h1 = tenant_of()
+    _, h2 = tenant_of()
+    mine = _start_runs(client, app, h1, make_agent(client, h1), 3)
+    theirs = _start_runs(client, app, h2, make_agent(client, h2), 3)
+    _tie(app, mine + theirs, BASE)
+    cursor = _list(client, h1, limit=1)["next_before"]
+    # Tenant 2 replaying tenant 1's cursor sees only its own rows below that position.
+    body = _list(client, h2, limit=200, before=cursor)
+    assert {i["run_id"] for i in body["items"]} <= set(theirs)
+    seen, _ = _page_all(client, h1, 1)
+    assert seen == sorted(mine, reverse=True)
 
 
 def test_filters_by_agent_and_status(pg, tenant_of):

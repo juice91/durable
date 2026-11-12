@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -18,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from eap_observability import current_trace_context
+from eap_observability import current_trace_context, log_failure
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
@@ -36,7 +35,8 @@ from eap_api.sse import (
     release_stream_slot,
     run_event_stream,
 )
-from eap_run_store import EventLog, RunIdConflict, RunStore
+from eap_run_store import EventLog, InvalidRunCursor, RunCursor, RunIdConflict, RunStore
+from eap_run_store.cursor import MAX_CURSOR_LENGTH
 
 log = logging.getLogger("eap_api")
 
@@ -131,8 +131,12 @@ def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run:
             input_text=run["input"],
             traceparent=run.get("traceparent"),
         )
-    except Exception:
-        log.exception("enqueue failed for run %s", run["id"])
+    except Exception as exc:
+        # Type and code only: the error can quote the DBOS database URL or the enqueued payload.
+        log_failure(
+            log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
+            run_id=run["id"], tenant_id=tenant_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Run recorded but could not be started; retry the same request (same run_id)",
@@ -215,15 +219,29 @@ def list_runs(
     principal: PrincipalDep,
     stores: StoresDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    before: Annotated[datetime | None, Query(description="created_at cursor: the previous page's next_before")] = None,
+    before: Annotated[
+        str | None,
+        Query(max_length=MAX_CURSOR_LENGTH, description="Opaque cursor: the previous page's next_before, verbatim"),
+    ] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[str | None, Query(alias="status")] = None,
 ) -> JSONResponse:
-    """The tenant's runs, newest first (the Studio Traces and Logs pages). `next_before` is the
-    created_at of the last item when a full page came back (pass it as `before`), else null."""
+    """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
+    (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
+    position when a full page came back (pass it back verbatim as `before`), else null. A cursor
+    this API did not issue is a 422."""
     run_store, _ = stores
-    runs = run_store.list_runs(principal.tenant_id, limit=limit, before=before, agent_id=agent_id, status=run_status)
-    next_before = runs[-1]["created_at"].isoformat() if len(runs) == limit else None
+    cursor = None
+    if before is not None:
+        try:
+            cursor = RunCursor.decode(before)
+        except InvalidRunCursor:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="before is not a valid cursor; pass the previous page's next_before verbatim",
+            )
+    runs = run_store.list_runs(principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=run_status)
+    next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
     return JSONResponse(content={"items": [_run_json(r) for r in runs], "next_before": next_before})
 
 

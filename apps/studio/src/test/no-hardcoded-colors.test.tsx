@@ -48,16 +48,16 @@ function findNonPlaygroundFiles(dir: string, files: string[] = []): string[] {
 describe("Non-playground components", () => {
   it("should not use hardcoded color classes", () => {
     const allFiles = [...findNonPlaygroundFiles(componentsDir), ...findNonPlaygroundFiles(appDir)];
-    
+
     const violations: Array<{ file: string; lines: Array<{ line: number; content: string }> }> = [];
-    
+
     for (const file of allFiles) {
       if (isPlaygroundFile(file)) continue;
-      
+
       const content = fs.readFileSync(file, "utf-8");
       const lines = content.split("\n");
       const fileViolations: Array<{ line: number; content: string }> = [];
-      
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         for (const pattern of problematicPatterns) {
@@ -66,12 +66,12 @@ describe("Non-playground components", () => {
           }
         }
       }
-      
+
       if (fileViolations.length > 0) {
         violations.push({ file: path.relative(process.cwd(), file), lines: fileViolations });
       }
     }
-    
+
     if (violations.length > 0) {
       console.log("\nHardcoded color violations found:");
       violations.forEach(({ file, lines }) => {

@@ -28,6 +28,7 @@ from typing import Any
 
 from fastapi import Request
 
+from eap_observability import log_failure
 from eap_schemas import RunEvent
 
 log = logging.getLogger("eap_api")
@@ -97,8 +98,9 @@ class PostgresDeltaSource:
                 raise ConnectionError("delta LISTEN connection closed")
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - reconnecting listener must survive database outages
-                log.warning("delta LISTEN connection ended; reconnecting", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 - reconnecting listener must survive database outages
+                # The error can quote the conninfo; only its type is logged.
+                log_failure(log, "delta LISTEN connection ended; reconnecting", exc, code="delta_listen_failed")
                 await asyncio.sleep(1.0)
             finally:
                 if conn is not None:
@@ -249,8 +251,8 @@ async def run_event_stream(
             async for delta in deltas:
                 if delta.get("run_id") == run_id and not queue.full():
                     queue.put_nowait(delta)
-        except Exception:  # noqa: BLE001 - losing live deltas must not end the durable stream
-            log.warning("delta subscription for run %s ended", run_id, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - losing live deltas must not end the durable stream
+            log_failure(log, "delta subscription ended", exc, code="delta_subscription_failed", run_id=run_id)
 
     async with delta_source(run_id) as deltas:
         pump_task = asyncio.create_task(pump(deltas))

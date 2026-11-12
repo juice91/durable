@@ -625,3 +625,45 @@ def test_concurrent_side_effect_reserve_distinct_keys(event_log, side_effect_sto
     
     new_count = sum(1 for _, state, _ in results if state == "new")
     assert new_count == 10, f"Expected all 10 to be 'new', got {new_count}"
+
+
+# ============ list_runs cursor ============
+
+def test_list_runs_cursor_survives_tied_created_at(run_store, engine, test_tenant):
+    """(created_at, id) keyset paging: 7 rows sharing one timestamp, pages of 3, each row once."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import text
+
+    from eap_run_store import RunCursor
+
+    agent_id = uuid4()
+    ids = [str(run_store.create_run(test_tenant, agent_id, 1, "x", uuid4())[0]) for _ in range(7)]
+    tied = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET created_at = :t WHERE id = ANY(:r)"), {"t": tied, "r": ids})
+
+    seen, before = [], None
+    while True:
+        page = run_store.list_runs(test_tenant, limit=3, before=before)
+        seen += [str(r["id"]) for r in page]
+        if len(page) < 3:
+            break
+        before = RunCursor.after(page[-1])
+    assert seen == sorted(ids, reverse=True)
+    # Another tenant's position cursor never yields this tenant's rows.
+    assert run_store.list_runs("other_" + test_tenant, limit=50, before=RunCursor(tied, ids[0])) == []
+
+
+def test_run_cursor_round_trips_and_rejects_garbage():
+    from datetime import datetime, timezone
+
+    from eap_run_store import InvalidRunCursor, RunCursor
+
+    cursor = RunCursor(datetime(2026, 1, 1, 12, 30, 1, 123456, tzinfo=timezone.utc), str(uuid4()))
+    token = cursor.encode()
+    assert RunCursor.decode(token) == cursor
+    assert all(c.isalnum() or c in "-_" for c in token)  # URL-safe, no padding
+    for bad in ("", "!!!", "2026-01-01T00:00:00+00:00", token[:-4], token + "x" * 600, "e30"):
+        with pytest.raises(InvalidRunCursor):
+            RunCursor.decode(bad)

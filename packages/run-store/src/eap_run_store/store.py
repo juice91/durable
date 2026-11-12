@@ -20,9 +20,12 @@ from sqlalchemy import (
     select,
     text,
     func,
+    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+
+from eap_run_store.cursor import RunCursor
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -399,15 +402,19 @@ class RunStore:
         tenant_id: str,
         *,
         limit: int = 50,
-        before: datetime | None = None,
+        before: RunCursor | None = None,
         agent_id: UUID | str | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
-        """The tenant's runs, newest first: at most `limit`, created strictly before `before`,
-        optionally only one agent's and/or one status's."""
+        """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
+        `before` position in that order (RunCursor.after(last row of the previous page)),
+        optionally only one agent's and/or one status's.
+
+        The cursor is the pair, not the timestamp alone, so rows sharing a created_at are never
+        skipped or repeated across pages."""
         query = select(RunModel).where(RunModel.tenant_id == tenant_id)
         if before is not None:
-            query = query.where(RunModel.created_at < before)
+            query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if agent_id is not None:
             query = query.where(RunModel.agent_id == str(agent_id))
         if status is not None:
