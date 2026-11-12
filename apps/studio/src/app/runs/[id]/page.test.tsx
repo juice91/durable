@@ -4,6 +4,7 @@ import "@testing-library/jest-dom";
 import { render, screen } from "@testing-library/react";
 import RunDetailPage from "./page";
 import { ApiError, getRun, listEvents, type Run, type RunEvent } from "@/lib/runs";
+import * as grafanaLib from "@/lib/grafana";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -21,6 +22,11 @@ vi.mock("@/lib/runs", async (importOriginal) => {
     deltaReducer: vi.fn((state) => state),
   };
 });
+
+vi.mock("@/lib/grafana", () => ({
+  buildTraceLink: vi.fn((traceId) => `http://grafana/explore?trace=${traceId}`),
+  buildLogsLink: vi.fn((traceId) => `http://grafana/explore?logs=${traceId}`),
+}))
 
 vi.mock("@/lib/sse", () => ({
   parseSSE: vi.fn(),
@@ -180,5 +186,47 @@ describe("RunDetailPage", () => {
     const strongText = await screen.findByText("TCK-12345");
     expect(strongText.tagName).toBe("STRONG");
     expect(screen.queryByText(/\*\*TCK-12345\*\*/)).not.toBeInTheDocument();
+  });
+
+  it("renders Trace and Logs links when trace_id is present", async () => {
+    const runWithTrace: Run = {
+      ...ticketRun,
+      trace_id: "trace-test-123",
+      conversation_id: "conv-test",
+      turn: 1,
+    };
+
+    (getRun as any).mockResolvedValueOnce(runWithTrace);
+    (listEvents as any).mockResolvedValueOnce([]);
+
+    render(<RunDetailPage />);
+
+    await screen.findByText("Run 0593b408-e845-4b31-9874-cae982e81b4e");
+
+    expect(screen.getByRole("link", { name: /trace/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /logs/i })).toBeInTheDocument();
+    expect(grafanaLib.buildTraceLink).toHaveBeenCalledWith("trace-test-123");
+    expect(grafanaLib.buildLogsLink).toHaveBeenCalledWith("trace-test-123");
+  });
+
+  it("does not render Trace and Logs links when trace_id is null", async () => {
+    const runWithoutTrace: Run = {
+      ...ticketRun,
+      trace_id: null,
+      conversation_id: "conv-test",
+      turn: 1,
+    };
+
+    (getRun as any).mockResolvedValueOnce(runWithoutTrace);
+    (listEvents as any).mockResolvedValueOnce([]);
+
+    render(<RunDetailPage />);
+
+    await screen.findByText("Run 0593b408-e845-4b31-9874-cae982e81b4e");
+
+    expect(screen.queryByRole("link", { name: /trace/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /logs/i })).not.toBeInTheDocument();
+    expect(grafanaLib.buildTraceLink).not.toHaveBeenCalled();
+    expect(grafanaLib.buildLogsLink).not.toHaveBeenCalled();
   });
 });

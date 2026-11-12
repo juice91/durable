@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter, useParams } from "next/navigation";
-import { ApiError, getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer } from "@/lib/runs";
+import { ApiError, getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer, type RunStatus } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
+import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 
 export default function RunDetailPage() {
   const [run, setRun] = useState<Run | null>(null);
@@ -15,6 +16,7 @@ export default function RunDetailPage() {
   const params = useParams();
 
   const runId = typeof params.id === "string" ? params.id : undefined;
+  const hasTrace = run?.trace_id !== null && run?.trace_id !== undefined;
 
   useEffect(() => {
     if (!runId) return;
@@ -88,7 +90,7 @@ export default function RunDetailPage() {
   if (loadError && !run) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-red-500">{loadError}</p>
+        <p className="text-destructive-foreground">{loadError}</p>
       </div>
     );
   }
@@ -117,11 +119,33 @@ export default function RunDetailPage() {
                 Agent: {run.agent_id} | Version: {run.version ?? "latest"}
               </p>
             </div>
-            <StatusPill status={status} showRecoveringNotice={status === "recovering"} />
+            <div className="flex items-center gap-2">
+              {hasTrace && (
+                <div className="flex items-center gap-2">
+                  <a
+                    href={buildTraceLink(run.trace_id!)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center rounded-md bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted/80"
+                  >
+                    Trace
+                  </a>
+                  <a
+                    href={buildLogsLink(run.trace_id!)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center rounded-md bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted/80"
+                  >
+                    Logs
+                  </a>
+                </div>
+              )}
+              <StatusPill status={status} showRecoveringNotice={status === "recovering"} />
+            </div>
           </div>
 
           {status === "recovering" && (
-            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-yellow-700 text-sm">
+            <div className="mt-4 p-3 bg-muted border border-border rounded-md text-muted-foreground text-sm">
               ⚠️ The worker is restarting. Events may be delayed as the system recovers.
             </div>
           )}

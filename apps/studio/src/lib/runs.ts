@@ -20,7 +20,11 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
   let message = `HTTP ${response.status}`;
   try {
     const data = await response.json();
-    if (typeof data.detail === "string") message = data.detail;
+    if (typeof data.detail === "string") {
+      message = data.detail;
+    } else if (Array.isArray(data.detail)) {
+      message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
+    }
   } catch {
     // Keep the status fallback for a non-JSON response.
   }
@@ -41,6 +45,9 @@ export interface Run {
   heartbeat_at: string | null;
   created_at: string;
   updated_at: string;
+  trace_id: string | null;
+  conversation_id: string | null;
+  turn: number | null;
 }
 
 export interface RunEventData {
@@ -120,6 +127,34 @@ export async function startRun(
       ...apiHeaders(),
     },
     body: JSON.stringify({ run_id: runId, input, version }),
+  });
+
+  if (!response.ok) {
+    throw await apiErrorFromResponse(response);
+  }
+
+  return response.json();
+}
+
+export async function listRuns({
+  limit = 50,
+  before,
+  agentId,
+  status,
+}: {
+  limit?: number;
+  before?: string;
+  agentId?: string;
+  status?: string;
+} = {}): Promise<{ items: Run[]; next_before: string | null }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (before) params.append("before", before);
+  if (agentId) params.append("agent_id", agentId);
+  if (status) params.append("status", status);
+
+  const url = `${BASE_URL}/api/v1/runs?${params.toString()}`;
+  const response = await fetch(url, {
+    headers: apiHeaders(),
   });
 
   if (!response.ok) {
