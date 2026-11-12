@@ -15,6 +15,7 @@ run uv run lint-imports
 run timeout 900 uv run pytest -q
 run env EAP_TEST_DATABASE_URL="${EAP_TEST_DATABASE_URL:-postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app}" uv run pytest apps/api -q
 run pnpm -C apps/studio test
+run timeout 300 bash tests/scripts/dev-lifecycle-test.sh
 
 if [ "$status" -ne 0 ]; then echo "SOME SUITES FAILED"; else echo "ALL SUITES PASSED"; fi
 exit "$status"

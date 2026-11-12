@@ -23,7 +23,7 @@ check_docker_health() {
     local service="$1"
     local compose_dir="${REPO_ROOT}/infrastructure/docker"
     local container_name="eap_${service}"
-    
+
     # Check if container exists (either via docker compose or directly)
     if ! docker compose -f "${compose_dir}/compose.yaml" ps -q "$service" 2>/dev/null | grep -q .; then
         if ! docker inspect "$container_name" >/dev/null 2>&1; then
@@ -31,7 +31,7 @@ check_docker_health() {
             return
         fi
     fi
-    
+
     local status
     status=$(docker inspect --format='{{.State.Health.Status}}' "$container_name" 2>/dev/null || echo "unknown")
     # If status is empty or none, check if container is running
@@ -69,7 +69,7 @@ for service in postgres lgtm worker api studio; do
             container_name="eap_${service}"
             docker_status="stopped"
             health="n/a"
-            
+
             # Check if container exists (either via docker compose or directly)
             if docker compose -f "${compose_dir}/compose.yaml" ps -q "$service" 2>/dev/null | grep -q .; then
                 docker_status="running"
@@ -82,7 +82,7 @@ for service in postgres lgtm worker api studio; do
                     health=$(check_docker_health "$service")
                 fi
             fi
-            
+
             printf "%-12s %-13s %-13s %-13s %s\n" "$service" "$docker_status" "-" "$health" "$(get_service_url $service)"
             ;;
         worker|api|studio)
@@ -92,12 +92,12 @@ for service in postgres lgtm worker api studio; do
             pid="-"
             health="n/a"
             url=$(get_service_url "$service")
-            
+
             if [[ -f "$pid_file" ]]; then
-                pid=$(cat "$pid_file")
-                if check_process "$pid"; then
+                pid=$(pid_file_field "$pid_file" pid)
+                if pid_identity_matches "$pid_file"; then
                     status="running"
-                    
+
                     # Check health if applicable
                     if [[ "$service" == "api" ]]; then
                         if curl -sf "http://127.0.0.1:8000/healthz" > /dev/null 2>&1; then
@@ -115,10 +115,10 @@ for service in postgres lgtm worker api studio; do
                         health="n/a"
                     fi
                 else
-                    status="dead (stale pid)"
+                    status="stale (identity mismatch)"
                 fi
             fi
-            
+
             printf "%-12s %-13s %-13s %-13s %s\n" "$service" "$status" "$pid" "$health" "$url"
             ;;
     esac

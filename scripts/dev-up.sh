@@ -11,8 +11,14 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck source-path=SCRIPTDIR source=dev-lib.sh
 source "${SCRIPT_DIR}/dev-lib.sh"
 
-# Ensure environment is set up for docker-compose
-ensure_env
+# Load optional environment files before filling in clean-checkout defaults.
+ENV_FILE="${REPO_ROOT}/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
 
 # Load optional .dev.env file
 # shellcheck disable=SC1090
@@ -25,9 +31,8 @@ if [[ -f "$DEV_ENV" ]]; then
     set +a
 fi
 
-# Export POSTGRES_* vars for docker-compose to pick up
-export POSTGRES_USER="${POSTGRES_USER:-eap_admin}"
-export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-eap_admin_password}"
+# Export shared defaults before any service or migration starts.
+ensure_env
 
 # If EAP_LITELLM_API_KEY_CMD is set, execute it to get the key
 if [[ -n "${EAP_LITELLM_API_KEY_CMD:-}" ]]; then
@@ -71,8 +76,7 @@ for service in "${SERVICES[@]}"; do
             if [[ "$service" == "postgres" ]]; then
                 # The API and worker refuse to start unless the schema is at the latest migration.
                 echo "[dev-up] Applying database migrations"
-                if ! EAP_DATABASE_URL="${EAP_DATABASE_URL:-postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app}" \
-                    uv run alembic -c "${REPO_ROOT}/packages/db/alembic.ini" upgrade head; then
+                if ! uv run alembic -c "${REPO_ROOT}/packages/db/alembic.ini" upgrade head; then
                     echo "ERROR: database migrations failed" >&2
                     exit 1
                 fi

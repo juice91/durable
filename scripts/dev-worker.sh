@@ -8,7 +8,7 @@
 #      EAP_LITELLM_BASE_URL / EAP_LITELLM_API_KEY, EAP_WORKER_BACKOFF (seconds, default 2).
 # Stop with Ctrl-C (SIGINT/SIGTERM stop the worker and the loop).
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 if [[ -f .env ]]; then
   set -a
