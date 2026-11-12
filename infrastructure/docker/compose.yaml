@@ -1,5 +1,3 @@
-name: eap
-
 services:
   postgres:
     image: postgres:17
@@ -20,5 +18,22 @@ services:
       retries: 5
       start_period: 10s
 
+  lgtm:
+    image: grafana/otel-lgtm@sha256:72e05804790e6e0d8c0b70a6d5ff1f721ef7b203463374631e99aa3429bd0cf6
+    container_name: eap_lgtm
+    ports:
+      - "127.0.0.1:3002:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - lgtm_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
 volumes:
   postgres_data:
+  lgtm_data:

@@ -23,6 +23,10 @@ dist/
 .env
 .env.local
 
+# Development runtime (gitignored)
+.dev/
+.dev.env
+
 # Editors / OS
 .vscode/
 .idea/
