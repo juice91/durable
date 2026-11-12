@@ -46,4 +46,3 @@ def get_session(request: Request) -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
-
