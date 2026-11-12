@@ -3,7 +3,8 @@
 import re
 from typing import Any, Callable
 
-from eap_schemas import AgentSpec
+from eap_schemas import ToolDeclaration
+from pydantic_ai.tools import Tool
 
 
 class UnknownToolError(Exception):
@@ -28,7 +29,7 @@ class ToolRegistry:
     _TOOL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
     def __init__(self) -> None:
-        self._tools: dict[str, tuple[Callable, dict]] = {}
+        self._tools: dict[str, tuple[Callable, ToolDeclaration | None, dict]] = {}
         self._tool_names: dict[str, str] = {}  # derived_name -> tool_id
 
     def _derive_tool_name(self, tool_id: str) -> str:
@@ -37,19 +38,46 @@ class ToolRegistry:
 
     def register(
         self,
-        tool_id: str,
+        declaration: ToolDeclaration | str,
         func: Callable,
         *,
         description: str = "",
         side_effect: bool = False,
         external_idempotent: bool = False,
     ) -> None:
-        """Register a tool with the given ID."""
-        if not self._TOOL_ID_PATTERN.fullmatch(tool_id):
-            raise ValueError(
-                f"Invalid tool_id '{tool_id}': must match "
-                f"^[a-z][a-z0-9_.-]{{0,63}}$"
-            )
+        """Bind an implementation to a declaration.
+
+        String IDs remain supported for dynamically registered test and extension tools. Built-in
+        tools use declarations so their public metadata cannot drift from their implementations.
+        """
+        if isinstance(declaration, str):
+            tool_id = declaration
+            if not self._TOOL_ID_PATTERN.fullmatch(tool_id):
+                raise ValueError(
+                    f"Invalid tool_id '{tool_id}': must match "
+                    f"^[a-z][a-z0-9_.-]{{0,63}}$"
+                )
+            bound_declaration = None
+            metadata = {
+                "description": description,
+                "side_effect": side_effect,
+                "external_idempotent": external_idempotent,
+            }
+        else:
+            tool_id = declaration.id
+            bound_declaration = declaration
+            implementation_schema = Tool(
+                func,
+                name=self._derive_tool_name(tool_id),
+                description=declaration.description,
+            ).tool_def.parameters_json_schema
+            if implementation_schema != declaration.input_json_schema():
+                raise ValueError(f"Tool '{tool_id}' implementation does not match its declaration")
+            metadata = {
+                "description": declaration.description,
+                "side_effect": declaration.side_effect,
+                "external_idempotent": declaration.external_idempotent,
+            }
         if tool_id in self._tools:
             raise ValueError(f"Tool '{tool_id}' is already registered")
         
@@ -62,11 +90,7 @@ class ToolRegistry:
                 f"(both derive to '{derived_name}')"
             )
         
-        self._tools[tool_id] = (func, {
-            "description": description,
-            "side_effect": side_effect,
-            "external_idempotent": external_idempotent,
-        })
+        self._tools[tool_id] = (func, bound_declaration, metadata)
         self._tool_names[derived_name] = tool_id
 
     def get(self, tool_id: str) -> Callable:
@@ -79,7 +103,16 @@ class ToolRegistry:
         """Get metadata for a registered tool."""
         if tool_id not in self._tools:
             raise UnknownToolError(tool_id)
-        return self._tools[tool_id][1]
+        return self._tools[tool_id][2]
+
+    def get_declaration(self, tool_id: str) -> ToolDeclaration:
+        """Get the declaration bound to a registered built-in tool."""
+        if tool_id not in self._tools:
+            raise UnknownToolError(tool_id)
+        declaration = self._tools[tool_id][1]
+        if declaration is None:
+            raise ValueError(f"Tool '{tool_id}' was registered without a declaration")
+        return declaration
 
     def tool_ids(self) -> set[str]:
         """Return all registered tool IDs."""

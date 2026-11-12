@@ -7,6 +7,8 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 from pydantic.functional_validators import model_validator
 
+from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
+
 __all__ = (
     "AgentSpec",
     "AgentVersion",
@@ -14,6 +16,8 @@ __all__ = (
     "ModelSettings",
     "RunEvent",
     "RunEventType",
+    "TOOL_DECLARATIONS",
+    "ToolDeclaration",
     "canonical_spec_hash",
 )
 

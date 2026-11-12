@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic_ai import RunContext
 
+from eap_schemas.tools import TOOL_DECLARATIONS
+
 from eap_runtime._registry import ToolRegistry
 from eap_runtime._side_effects import run_side_effect
 from eap_runtime._types import RunDeps
@@ -53,18 +55,13 @@ def default_registry() -> ToolRegistry:
     registry = ToolRegistry()
 
     registry.register(
-        "clock.now",
+        TOOL_DECLARATIONS["clock.now"],
         _clock_now,
-        description="Returns current UTC ISO time",
-        side_effect=False,
     )
 
     registry.register(
-        "tickets.create",
+        TOOL_DECLARATIONS["tickets.create"],
         _tickets_create,
-        description="Create a new ticket",
-        side_effect=True,
-        external_idempotent=True,
     )
 
     return registry
