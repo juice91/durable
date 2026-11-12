@@ -236,6 +236,17 @@ def publish_version(
             ),
         )
 
+    # Current Anthropic models (Claude Opus 5.5 and later) reject sampling parameters with a 400,
+    # so a spec that sets temperature would fail on every run: refuse it at publish instead.
+    if spec.model.provider == "anthropic" and spec.model_settings.temperature is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"model '{spec.model.provider}:{spec.model.name}' does not accept a temperature "
+                "setting; remove temperature from the agent's model settings"
+            ),
+        )
+
     draft_hash = canonical_spec_hash(spec)
 
     if latest is not None:

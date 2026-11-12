@@ -14,7 +14,7 @@ dependencies = [
     "eap-run-store",
     "eap-db",
     "eap-observability",
-    "pydantic-ai-slim[dbos,openai]>=2.67.0",
+    "pydantic-ai-slim[anthropic,dbos,openai]>=2.67.0",
     "dbos[otel]>=3.5.0",
 ]
 

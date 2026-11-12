@@ -56,3 +56,31 @@ def test_default_policy_allows_only_test_models(client, tenant, monkeypatch, uns
     response = _publish(client, tenant, real_agent)
     assert response.status_code == 422
     assert "openai:gpt-4" in response.json()["detail"]
+
+
+def _agent_with_settings(client, tenant: str, provider: str, name: str, settings: dict) -> str:
+    response = client.post(
+        "/api/v1/agents",
+        json={"spec": {"name": "Settings agent", "model": {"provider": provider, "name": name},
+                       "model_settings": settings}},
+        headers=get_auth_header(tenant, "alice"),
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+def test_publish_anthropic_model_with_temperature_is_422(client, tenant, monkeypatch):
+    # Claude Opus 5.5 and later reject sampling parameters (temperature) with a 400, so the
+    # platform refuses to publish a spec that would fail on every run.
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:claude-opus-5-5")
+    agent_id = _agent_with_settings(client, tenant, "anthropic", "claude-opus-5-5", {"temperature": 0.3})
+    response = _publish(client, tenant, agent_id)
+    assert response.status_code == 422
+    assert "temperature" in response.json()["detail"]
+    assert "anthropic:claude-opus-5-5" in response.json()["detail"]
+
+
+def test_publish_anthropic_model_without_temperature_is_201(client, tenant, monkeypatch):
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:claude-opus-5-5")
+    agent_id = _agent_with_settings(client, tenant, "anthropic", "claude-opus-5-5", {"max_tokens": 2048})
+    assert _publish(client, tenant, agent_id).status_code == 201

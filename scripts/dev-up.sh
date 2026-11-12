@@ -42,6 +42,14 @@ if [[ -n "${EAP_LITELLM_API_KEY_CMD:-}" ]]; then
     unset EAP_LITELLM_API_KEY_CMD
 fi
 
+# If EAP_ANTHROPIC_API_KEY_CMD is set, execute it to get the key for provider 'anthropic' models
+if [[ -n "${EAP_ANTHROPIC_API_KEY_CMD:-}" ]]; then
+    echo "[dev-up] Fetching ANTHROPIC_API_KEY from command"
+    ANTHROPIC_API_KEY=$(eval "$EAP_ANTHROPIC_API_KEY_CMD")
+    export ANTHROPIC_API_KEY
+    unset EAP_ANTHROPIC_API_KEY_CMD
+fi
+
 # Ensure .dev directories exist
 mkdir -p "${REPO_ROOT}/.dev/run" "${REPO_ROOT}/.dev/logs"
 
