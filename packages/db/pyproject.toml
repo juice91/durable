@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-db"
+version = "0.1.0"
+description = "Alembic migrations that own the eap_app database schema"
+readme = "README.md"
+requires-python = ">=3.13"
+# The migration environment (eap_db/migrations/env.py, eap_db/metadata.py) also imports the model
+# modules of eap-api (eap_api.models) and eap-worker (eap_worker.tickets). They are not declared
+# here because both apps depend on eap-db for the startup schema check; the uv workspace installs
+# all of them together, which is where migrations are authored and run.
+dependencies = [
+    "alembic>=1.14",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3",
+    "eap-run-store",
+]
+
+[project.entry-points.pytest11]
+# Every pytest session in the workspace migrates its own throwaway Postgres schema.
+eap_db = "eap_db.testing"
+
+[tool.uv.sources]
+eap-run-store = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_db"]

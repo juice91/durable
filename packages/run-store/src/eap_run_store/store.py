@@ -35,7 +35,7 @@ UUIDAnnotated = UUID
 
 
 class Base(DeclarativeBase):
-    """Base class for all database models."""
+    """Base class for all database models. Alembic (packages/db) creates and migrates these tables."""
 
 
 class RunModel(Base):
@@ -114,11 +114,6 @@ class SideEffectModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         "completed_at", DateTime(timezone=True), nullable=True
     )
-
-
-def create_tables(engine):
-    """Create all tables in the database."""
-    Base.metadata.create_all(engine)
 
 
 class RunNotFound(ValueError):

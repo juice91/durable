@@ -1,6 +1,5 @@
 """Shared test fixtures."""
 
-import os
 import uuid
 
 import pytest
@@ -28,16 +27,15 @@ def get_auth_header(tenant: str, user: str) -> dict[str, str]:
 
 @pytest.fixture
 def client():
-    """Create a test client with a temporary SQLite database or Postgres if EAP_TEST_DATABASE_URL is set."""
-    db_url = os.environ.get("EAP_TEST_DATABASE_URL", f"sqlite:////tmp/eap-test-{uuid.uuid4().hex}.db")
-    app = create_app(database_url=db_url)
+    """A test client on Postgres: the eap_db plugin's freshly migrated session schema."""
+    from .run_helpers import PG_URL
+
+    if not (PG_URL or "").startswith("postgresql"):
+        pytest.skip("the API needs Postgres: start the dev database (bash scripts/dev-db.sh up)")
+    app = create_app(database_url=PG_URL)
     with TestClient(app) as test_client:
         yield test_client
-    
-    # Clean up SQLite files if using SQLite
-    if db_url.startswith("sqlite:///") and "://" not in db_url.replace("sqlite://", ""):
-        if os.path.exists(db_url.replace("sqlite://", "")):
-            os.unlink(db_url.replace("sqlite://", ""))
+    app.state.database_engine.dispose()
 
 
 @pytest.fixture

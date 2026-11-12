@@ -42,13 +42,7 @@ PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
 def require_run_storage(request: Request) -> tuple[RunStore, EventLog]:
-    stores = getattr(request.app.state, "run_stores", None)
-    if stores is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="runs require a Postgres database (EAP_DATABASE_URL)",
-        )
-    return stores
+    return request.app.state.run_stores
 
 
 StoresDep = Annotated[tuple[RunStore, EventLog], Depends(require_run_storage)]

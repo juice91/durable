@@ -29,7 +29,8 @@ def dbos_config(settings: WorkerSettings) -> DBOSConfig:
 
 
 def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
-    """Configure resources, create app tables, construct DBOS and launch it (recovery runs here)."""
+    """Configure resources (failing fast unless eap_app is at the latest migration), construct DBOS
+    and launch it (recovery runs here)."""
     settings = settings or WorkerSettings.from_env()
     configure_runtime(settings)
     DBOS(config=dbos_config(settings))

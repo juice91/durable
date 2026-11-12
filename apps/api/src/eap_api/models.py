@@ -138,11 +138,6 @@ def create_database_engine(database_url: str):
     return create_engine(database_url)
 
 
-def create_all_tables(engine):
-    """Create all tables in the database."""
-    Base.metadata.create_all(engine)
-
-
 def get_sessionmaker(engine):
     """Get a sessionmaker for the engine."""
     return sessionmaker(bind=engine)

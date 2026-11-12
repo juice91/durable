@@ -7,30 +7,19 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, text
 
-# Read database URL from environment or use test default
+# The eap_db pytest plugin points EAP_TEST_DATABASE_URL at this session's freshly migrated schema.
 DATABASE_URL = os.environ.get(
-    "EAP_DATABASE_URL", 
-    "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"
+    "EAP_TEST_DATABASE_URL",
+    "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app",
 )
-
-
-def _get_test_db_url():
-    """Get the test database URL - use eap_app user with eap_app database and _test suffix."""
-    return DATABASE_URL
 
 
 @pytest.fixture(scope="module")
 def engine():
-    """Create a test database engine using the main eap_app database."""
-    test_db_url = _get_test_db_url()
-    eng = create_engine(test_db_url)
-    
-    from eap_run_store import create_tables
-    create_tables(eng)
-    
+    """Engine on the session's migrated schema (Alembic created the tables; tests clean up their rows)."""
+    eng = create_engine(DATABASE_URL)
     yield eng
-    
-    # Do NOT drop tables - tests must clean up their own data
+    eng.dispose()
 
 
 @pytest.fixture

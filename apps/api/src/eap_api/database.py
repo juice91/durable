@@ -7,16 +7,26 @@ from fastapi import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from eap_api.models import Base, create_all_tables
 
-# Database URL from environment with default
-DATABASE_URL = os.environ.get("EAP_DATABASE_URL", "sqlite:///./eap-dev.db")
+def database_url_from_env() -> str:
+    """EAP_DATABASE_URL: the eap_app Postgres database (required; there is no SQLite fallback)."""
+    url = os.environ.get("EAP_DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "EAP_DATABASE_URL is not set; the API needs the eap_app Postgres database, e.g. "
+            "EAP_DATABASE_URL=postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"
+        )
+    return url
 
 
 def get_engine(database_url: str | None = None):
-    """Get the database engine."""
-    url = database_url if database_url is not None else DATABASE_URL
-    return create_engine(url)
+    """Get the database engine (Postgres only: JSONB columns, runs and LISTEN/NOTIFY need it)."""
+    url = database_url if database_url is not None else database_url_from_env()
+    engine = create_engine(url)
+    if engine.dialect.name != "postgresql":
+        engine.dispose()
+        raise RuntimeError(f"EAP_DATABASE_URL must point at Postgres, got a {engine.dialect.name!r} URL")
+    return engine
 
 
 def get_db(engine: create_engine) -> Generator[Session, None, None]:
@@ -37,11 +47,3 @@ def get_session(request: Request) -> Generator[Session, None, None]:
     finally:
         session.close()
 
-
-def init_database(engine: create_engine) -> None:
-    """Initialize the database by creating all tables (run tables only on Postgres)."""
-    create_all_tables(engine)
-    if engine.dialect.name == "postgresql":
-        from eap_run_store import create_tables as create_run_tables
-
-        create_run_tables(engine)

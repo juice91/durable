@@ -8,6 +8,10 @@ Run it: `uv run python -m eap_worker` (blocks), or `bash scripts/dev-worker.sh` 
 that recovers the previous process's pending runs (fixed `EAP_EXECUTOR_ID`). Configuration is in
 `.env.example`.
 
+The worker never creates tables: at startup it checks that `eap_app` is at the latest Alembic
+migration and exits with `database schema is not at the latest migration; run: uv run alembic -c
+packages/db/alembic.ini upgrade head` if not (see `packages/db/README.md`).
+
 ## Models
 
 A spec's `model: {provider, name}` becomes the model id `provider:name`, resolved inside each
@@ -28,7 +32,8 @@ model step:
 ## Tests
 
 `uv run pytest apps/worker -q` needs the dev Postgres (`bash scripts/dev-db.sh up`). Each
-session uses a private DBOS system schema and drops it. `test_live_litellm.py` runs only when
+session uses a private DBOS system schema and a freshly migrated `eap_app` schema (the `eap_db`
+pytest plugin), and drops both. `test_live_litellm.py` runs only when
 `EAP_LITELLM_API_KEY` or `LITELLM_API_KEY` is set.
 
 ## Crash hook

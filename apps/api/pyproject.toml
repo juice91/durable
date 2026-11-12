@@ -15,7 +15,9 @@ dependencies = [
     "pydantic>=2",
     "psycopg[binary]>=3",
     "eap-run-store",
+    "eap-db",
     "dbos>=3.5.0",
+    "uvicorn>=0.34.0",
 ]
 
 [dependency-groups]
@@ -26,3 +28,4 @@ dev = [
 
 [tool.uv.sources]
 eap-run-store = { workspace = true }
+eap-db = { workspace = true }

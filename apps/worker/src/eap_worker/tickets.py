@@ -25,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 
+# The tables are created by Alembic (packages/db), which reads this metadata; nothing here creates them.
 metadata = MetaData()
 
 # The fake service is "external": it has no foreign key into our runs table. It is still tenant-aware
@@ -50,10 +51,6 @@ fake_external_ticket_calls = Table(
     Column("called_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Index("ix_fake_external_ticket_calls_tenant_key", "tenant_id", "idempotency_key"),
 )
-
-
-def create_ticket_tables(engine: Engine) -> None:
-    metadata.create_all(engine)
 
 
 def _ticket_id(tenant_id: str, idempotency_key: str) -> str:

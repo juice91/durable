@@ -2,14 +2,13 @@
 
 The HTTP tests need Postgres (EAP_TEST_DATABASE_URL) and use a fake DBOSClient inside the real
 DBOSRunLauncher, so they check the exact enqueue call of the hand-off contract without DBOS.
-The stream-generator tests and the SQLite 503 test run everywhere.
+The stream-generator tests run everywhere.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 import uuid
@@ -395,16 +394,6 @@ class TestStream:
 
 
 # --------------------------------------------------------------------------- everywhere
-
-
-def test_run_routes_need_postgres(tenant, user):
-    if (os.environ.get("EAP_TEST_DATABASE_URL") or "").startswith("postgresql"):
-        pytest.skip("checks the SQLite behaviour; EAP_TEST_DATABASE_URL points at Postgres")
-    app = create_app(database_url=f"sqlite:////tmp/eap-test-{uuid.uuid4().hex}.db")
-    with TestClient(app) as client:
-        h = get_auth_header(tenant, user)
-        assert client.get(f"/api/v1/runs/{uuid.uuid4()}", headers=h).status_code == 503
-        assert client.get("/healthz").json() == {"status": "ok"}
 
 
 def _event(seq: int, type_: str) -> RunEvent:

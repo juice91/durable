@@ -6,7 +6,6 @@ from eap_run_store.store import (
     PostgresSideEffectStore,
     RunIdConflict,
     RunNotFound,
-    create_tables,
     get_side_effect_store,
 )
 from eap_run_store.store import (
@@ -22,7 +21,6 @@ __all__ = [
     "PostgresSideEffectStore",
     "RunIdConflict",
     "RunNotFound",
-    "create_tables",
     "get_side_effect_store",
     "Base",
     "RunModel",

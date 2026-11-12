@@ -1,3 +1,8 @@
+-- SUPERSEDED (milestone 2): Alembic in packages/db now owns the eap_app schema. This script is folded
+-- into the baseline revision (packages/db/src/eap_db/migrations/versions/0001_baseline.py); a database it
+-- brought up to date is put under Alembic with `uv run alembic -c packages/db/alembic.ini stamp head`
+-- (see packages/db/README.md). Kept as the record of how existing dev databases reached the baseline.
+--
 -- Dev-DB migration for the milestone-1 tenant-ownership fix (review 2026-11-12).
 --
 -- The app creates tables with SQLAlchemy create_all, which never alters existing tables. This brings

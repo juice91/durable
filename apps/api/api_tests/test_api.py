@@ -40,7 +40,7 @@ class TestAuth:
             RuntimeError,
             match="no production authentication is configured; set EAP_AUTH_MODE=dev for local development only",
         ):
-            create_app(database_url="sqlite:///:memory:")
+            create_app(database_url="postgresql+psycopg://unused@localhost:1/unused")
 
     def test_missing_authorization_header(self, client, tenant):
         """Missing Authorization header returns 401."""

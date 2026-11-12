@@ -12,7 +12,6 @@ from eap_run_store import (
     PostgresSideEffectStore,
     RunIdConflict,
     RunStore,
-    create_tables,
 )
 
 # Import cleanup functions from conftest

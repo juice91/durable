@@ -18,12 +18,13 @@ from uuid import UUID
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from eap_run_store import EventLog, PostgresSideEffectStore, RunStore, create_tables
+from eap_db import require_schema_at_head
+from eap_run_store import EventLog, PostgresSideEffectStore, RunStore
 from eap_runtime import RunDeps, ToolRegistry, default_registry
 from eap_schemas import AgentSpec
 from eap_worker.config import DELTA_CHANNEL, WorkerSettings
 from eap_worker.crash import crash_point
-from eap_worker.tickets import FakeExternalTicketService, TenantTicketService, create_ticket_tables
+from eap_worker.tickets import FakeExternalTicketService, TenantTicketService
 
 log = logging.getLogger("eap_worker")
 
@@ -61,9 +62,9 @@ class WorkerRuntime:
         self.tickets = FakeExternalTicketService(self.engine)
         self.registry: ToolRegistry = default_registry()
 
-    def ensure_schema(self) -> None:
-        create_tables(self.engine)
-        create_ticket_tables(self.engine)
+    def check_schema(self) -> None:
+        """Fail fast unless Alembic has migrated eap_app to head; the worker never creates tables."""
+        require_schema_at_head(self.engine)
 
     @cached_property
     def allowed_tools(self) -> frozenset[str]:
@@ -100,8 +101,13 @@ _lock = threading.Lock()
 def configure_runtime(settings: WorkerSettings) -> WorkerRuntime:
     global _runtime
     with _lock:
-        _runtime = WorkerRuntime(settings)
-        _runtime.ensure_schema()
+        runtime = WorkerRuntime(settings)
+        try:
+            runtime.check_schema()
+        except Exception:
+            runtime.engine.dispose()
+            raise
+        _runtime = runtime
         return _runtime
 
 

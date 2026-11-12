@@ -1,17 +1,14 @@
 """FastAPI application factory for the control-plane API."""
 
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from eap_api.database import get_engine, init_database
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager - database is already initialized in create_app."""
+    """Lifespan context manager - the database schema was already checked in create_app."""
     yield
     app.state.run_launcher.close()
 
@@ -21,10 +18,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
     Create and configure the FastAPI application.
     
     Args:
-        database_url: Optional database URL. If None, uses EAP_DATABASE_URL env var.
-    
+        database_url: Optional Postgres URL. If None, uses EAP_DATABASE_URL (required).
+
     Returns:
         Configured FastAPI app instance.
+
+    Raises:
+        RuntimeError: no EAP_DATABASE_URL, or it is not Postgres.
+        eap_db.SchemaNotAtHead: the database is not at the latest Alembic migration. The API never
+            creates or alters tables; `uv run alembic -c packages/db/alembic.ini upgrade head` does.
     """
     from eap_api.auth import require_dev_auth_mode
 
@@ -60,28 +62,29 @@ def create_app(database_url: str | None = None) -> FastAPI:
         """Health check endpoint (no auth required)."""
         return {"status": "ok"}
     
-    # Initialize database with the specified URL (or default)
-    from eap_api.database import get_engine, init_database
+    # Fail fast unless Alembic has migrated the database to head (packages/db owns the schema).
+    from eap_api.database import get_engine
+    from eap_db import require_schema_at_head
+
     engine = get_engine(database_url)
-    init_database(engine)
-    
+    try:
+        require_schema_at_head(engine)
+    except Exception:
+        engine.dispose()
+        raise
+
     # Store engine in app state for later use
     app.state.database_engine = engine
     app.state.database_url = database_url
 
-    # Runs: Postgres only (eap_run_store). The DBOS client and LISTEN connections open lazily.
+    # Runs and events (eap_run_store). The DBOS client and LISTEN connections open lazily.
     from eap_api.launcher import DBOSRunLauncher, LauncherSettings
-    from eap_api.sse import PostgresDeltaSource, no_deltas
+    from eap_api.sse import PostgresDeltaSource
+    from eap_run_store import EventLog, RunStore
 
     app.state.run_launcher = DBOSRunLauncher(LauncherSettings.from_env())
-    if engine.dialect.name == "postgresql":
-        from eap_run_store import EventLog, RunStore
+    app.state.run_stores = (RunStore(engine), EventLog(engine))
+    conninfo = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+    app.state.delta_source = PostgresDeltaSource(conninfo)
 
-        app.state.run_stores = (RunStore(engine), EventLog(engine))
-        conninfo = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
-        app.state.delta_source = PostgresDeltaSource(conninfo)
-    else:
-        app.state.run_stores = None
-        app.state.delta_source = no_deltas
-    
     return app
