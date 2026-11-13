@@ -2,26 +2,13 @@ import { describe, it, expect } from "vitest";
 import { conversationToThread, runToThread } from "./thread";
 import type { ThreadMessage } from "@assistant-ui/react";
 
-// Type definitions matching the runs.ts exports
-type RunEvent = {
-  seq: number;
-  type: "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed";
-  data: unknown;
-  ts: string;
-};
-
-type PartialTextMap = {
-  [modelRequest: string]: {
-    text: string;
-    attempt: string;
-  };
-};
+import type { PartialTextMap, RunEvent, RunEventData } from "@/lib/runs";
 
 // Helper to create events
 const mkEvent = (type: RunEvent["type"], data: unknown, seq: number = 1): RunEvent => ({
   seq,
   type,
-  data,
+  data: data as RunEventData,
   ts: "2025-01-01T00:00:00.000Z",
 });
 

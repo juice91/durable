@@ -67,6 +67,14 @@ source of truth; the message is only a wake-up, and the wait re-checks the decis
 EAP_APPROVAL_POLL_SECONDS (3600), so a lost wake-up delays, never loses, a decision. At the
 deadline the worker records step_timed_out under the same key; whoever writes the key first wins.
 Rejection fails the run with `approval_rejected`, a timeout with `approval_timeout`.
+
+Known limitation, cancellation (there is no product cancel API yet): cancelling a run's DBOS
+workflow (DBOS.cancel_workflow) does not cascade to its children. While a parallel step awaits its
+branches, a cancelled parent cancels only the branches after the one it is awaiting at that moment
+(best effort, in `_parallel`); the branch being awaited, and anything it already started (a child
+agent run, an approval wait), keeps running until it ends on its own. Child agent runs of agent
+steps are never cancelled with the parent either. A cancel API must cancel the run's whole tree
+(branch workflows `{run_id}:{step}:{branch}` and child runs) explicitly.
 """
 
 from __future__ import annotations
@@ -255,10 +263,26 @@ async def resolve_agent_step(
 ) -> dict[str, Any]:
     """Resolve the agent version ONCE (pinned, or the latest published when None) and create the
     child agent run row. Returns {"found": False} or {"found": True, "version", "spec_json",
-    "child_run_id"}; checkpointed, so a replay never re-resolves 'latest'."""
+    "child_run_id"}; checkpointed, so a replay never re-resolves 'latest'.
+
+    The agent must exist and not be archived only when the child row is CREATED. A re-executed
+    step (killed after `after_child_run_insert`, before the checkpoint) finds the child row and
+    reloads the version that row names, even if the agent has been archived since: the run
+    already committed to that agent version."""
     rt = get_runtime()
+    child = child_run_id(run_id, step_id)
+
+    def pinned(agent_version: Any) -> dict[str, Any]:
+        with rt.engine.connect() as conn:
+            row = conn.execute(_AGENT_VERSION, {"a": agent_id, "t": tenant_id, "v": agent_version}).fetchone()
+        if row is None:
+            return {"found": False}
+        return {"found": True, "version": row.version, "spec_json": json.dumps(row.spec), "child_run_id": child}
 
     def work() -> dict[str, Any]:
+        existing = rt.run_store.get_run(tenant_id, uuid.UUID(child))
+        if existing is not None:
+            return pinned(existing.get("agent_version"))
         with rt.engine.connect() as conn:
             if conn.execute(_AGENT, {"a": agent_id, "t": tenant_id}).fetchone() is None:
                 return {"found": False}
@@ -268,22 +292,15 @@ async def resolve_agent_step(
                 row = conn.execute(_AGENT_VERSION, {"a": agent_id, "t": tenant_id, "v": version}).fetchone()
         if row is None:
             return {"found": False}
-        child = child_run_id(run_id, step_id)
         _, created = rt.run_store.create_child_agent_run(
             tenant_id, agent_id, row.version, input_text, uuid.UUID(child), run_id, step_id, traceparent=traceparent
         )
         crash_point("after_child_run_insert", event_key=f"step:{step_id}:child")
         if not created:
-            # A re-executed step (killed after the insert, before the checkpoint): the child row
-            # already names the version this step resolved first; never re-resolve 'latest'.
+            # Lost a race with a concurrent attempt that inserted first: that row's version wins.
             existing = rt.run_store.get_run(tenant_id, uuid.UUID(child)) or {}
             if existing.get("agent_version") != row.version:
-                with rt.engine.connect() as conn:
-                    row = conn.execute(
-                        _AGENT_VERSION, {"a": agent_id, "t": tenant_id, "v": existing.get("agent_version")}
-                    ).fetchone()
-                if row is None:
-                    return {"found": False}
+                return pinned(existing.get("agent_version"))
         return {"found": True, "version": row.version, "spec_json": json.dumps(row.spec), "child_run_id": child}
 
     return await asyncio.to_thread(work)
@@ -574,6 +591,10 @@ class _Interpreter:
             for sid, value in result["outputs"].items():
                 self.outputs[sid] = value
                 self.context_bytes += json_size(value)
+        # Each branch checked its own outputs against the cap from the parent's context; together
+        # they may still exceed it. Fail the parallel step here, before the join or any later step.
+        if self.context_bytes > self.limits["max_context_bytes"]:
+            raise WorkflowStepError("workflow_context_too_large", step.id)
         return None
 
     async def _approval(self, step: ApprovalStep) -> Any:

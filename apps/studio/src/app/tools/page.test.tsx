@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ToolsPage from "./page";
-import { listTools } from "@/lib/tools";
+import { listTools, type ToolDefinition } from "@/lib/tools";
 import { startToolRun, ToolRunError, mapToolRunError } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
@@ -18,7 +18,7 @@ vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
 
-const tools = [
+const tools: ToolDefinition[] = [
   {
     id: "tickets.create",
     title: "Create ticket",
@@ -350,11 +350,11 @@ describe("ToolsPage", () => {
     await screen.findByTestId("tool-run-result");
 
     act(() => {
-      handlers.onEvent?.({ seq: 2, type: "run_failed", data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_unknown" }, ts: "" });
+      handlers.onEvent?.({ seq: 2, type: "run_failed", data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_outcome_unknown" }, ts: "" });
       handlers.onEnd?.("run_failed");
     });
     expect(await screen.findByTestId("tool-run-needs-attention")).toHaveTextContent("Needs attention: the tool may have run; check before retrying");
-    expect(screen.getByTestId("tool-run-error-code")).toHaveTextContent("side_effect_unknown");
+    expect(screen.getByTestId("tool-run-error-code")).toHaveTextContent("side_effect_outcome_unknown");
     await waitFor(() => expect(getRun).toHaveBeenCalledWith("run-1"));
     expect(startToolRun).toHaveBeenCalledTimes(1);
   });

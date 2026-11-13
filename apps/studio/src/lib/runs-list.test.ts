@@ -59,7 +59,7 @@ describe("listRuns", () => {
 
     await listRuns({ limit: 25, before: "abc123", agentId: "agent-123", status: "running" });
 
-    const calledUrl = fetch.mock.calls[0][0] as string;
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     expect(calledUrl).toBe("http://localhost:8000/api/v1/runs?limit=25&before=abc123&agent_id=agent-123&status=running");
   });
 
@@ -71,7 +71,7 @@ describe("listRuns", () => {
     const isoTimestamp = "2026-11-12T10:30:00+00:00";
     await listRuns({ before: isoTimestamp });
 
-    const calledUrl = fetch.mock.calls[0][0] as string;
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     expect(calledUrl).toBe("http://localhost:8000/api/v1/runs?limit=50&before=2026-11-12T10%3A30%3A00%2B00%3A00");
   });
 

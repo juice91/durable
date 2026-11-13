@@ -84,9 +84,13 @@ def register(client: TestClient, h: dict[str, str], **body: Any):
 
 class LocalMcpServer:
     """FastMCP over Streamable HTTP in a uvicorn thread. Records request headers; with
-    `required_auth` set it answers 401 unless Authorization matches."""
+    `required_auth` set it answers 401 unless Authorization matches. With `echo` set it also lists
+    a tool `leaky` whose description (plain and base64) and input-schema default contain `echo`
+    (a server echoing a header value into tools/list). With `forms` set, `leaky`'s description is
+    only a base64 blob of JSON containing the secret, and its schema defaults are the two halves
+    of the secret plus its hex, percent-encoded and base64 forms (no plaintext secret)."""
 
-    def __init__(self, required_auth: str | None = None) -> None:
+    def __init__(self, required_auth: str | None = None, echo: str | None = None, *, forms: str | None = None) -> None:
         from fastmcp import FastMCP
 
         mcp = FastMCP("local-test")
@@ -100,6 +104,38 @@ class LocalMcpServer:
         def search_docs(query: str, limit: int = 5) -> list[str]:
             """Search the documentation."""
             return [query][:limit]
+
+        if echo is not None:
+            import base64
+
+            def leaky(token: str = echo) -> str:
+                return token
+
+            encoded = base64.b64encode(echo.encode()).decode()
+            mcp.tool(leaky, description=f"Calls upstream with key {echo} (b64 {encoded}).")
+
+        if forms is not None:
+            import base64
+            from urllib.parse import quote
+
+            secret = forms
+            mid = len(secret) // 2
+            left, right = secret[:mid], secret[mid:]
+            blob = base64.b64encode(json.dumps({"authorization": secret}).encode()).decode()
+            as_hex = secret.encode().hex()
+            as_pct = quote(secret, safe="").lower()
+            as_b64 = base64.b64encode(secret.encode()).decode()
+            self.echoed_forms = {
+                "secret": secret, "left": left, "right": right, "blob": blob,
+                "hex": as_hex, "pct": as_pct, "b64": as_b64,
+            }
+
+            def leaky_forms(
+                part_a: str = left, part_b: str = right, as_hex: str = as_hex, as_pct: str = as_pct, as_b64: str = as_b64
+            ) -> str:
+                return "ok"
+
+            mcp.tool(leaky_forms, name="leaky", description=blob)
 
         inner = mcp.http_app(path="/mcp")
         self.seen_headers: list[dict[str, str]] = []
@@ -132,6 +168,79 @@ class LocalMcpServer:
     def __exit__(self, *exc: object) -> None:
         self.server.should_exit = True
         self.thread.join(timeout=10)
+
+
+class RawHttp:
+    """Loopback HTTP that is not a working MCP server. `jsonrpc` answers HTTP 200 with a JSON-RPC
+    error whose id is the request's. Otherwise every method gets `status` (and `location`)."""
+
+    def __init__(self, status: int, *, location: str | None = None, jsonrpc: bool = False) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+        self.requests = 0
+
+        class Handler(BaseHTTPRequestHandler):
+            def _reply(self) -> None:
+                outer.requests += 1
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                if jsonrpc:
+                    try:
+                        req = json.loads(raw or b"{}")
+                    except json.JSONDecodeError:
+                        req = {}
+                    payload = json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": req.get("id", 1),
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    }).encode()
+                    code = 200
+                else:
+                    payload = b""
+                    code = status
+                self.send_response(code)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if payload:
+                    self.wfile.write(payload)
+
+            do_GET = do_POST = do_DELETE = _reply  # noqa: N815 - http.server API
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}/mcp"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+
+    def __enter__(self) -> RawHttp:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._thread.join(timeout=5)
+
+
+def _joined_strings(obj: Any, *, keys: bool) -> str:
+    """String leaves of a JSON value, optionally including dict keys, concatenated in order."""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        parts = []
+        for key, value in obj.items():
+            if keys:
+                parts.append(str(key))
+            parts.append(_joined_strings(value, keys=keys))
+        return "".join(parts)
+    if isinstance(obj, list):
+        return "".join(_joined_strings(item, keys=keys) for item in obj)
+    return ""
 
 
 @pytest.fixture
@@ -384,6 +493,78 @@ class TestConnection:
         stored = client.get(f"{BASE}/{server['id']}", headers=h).json()
         assert stored["last_status"] == "ok" and stored["last_error_code"] is None
         assert stored["last_checked_at"] is not None
+
+    def test_tool_listing_echoing_the_header_secret_is_redacted(
+        self, app_client, tenant_headers, dev_allow_loopback
+    ):
+        """A server that echoes its header value into tools/list (description, schema default) never
+        gets it into the connection test's response: the listing is scrubbed like tool results."""
+        import base64
+
+        client, _ = app_client
+        _, h = tenant_headers()
+        with hard_timeout(60), LocalMcpServer(required_auth=f"Bearer {SENTINEL}", echo=SENTINEL) as mcp:
+            server = register(client, h, url=mcp.url, headers={"Authorization": f"Bearer {SENTINEL}"}).json()
+            r = client.post(f"{BASE}/{server['id']}/test", headers=h)
+        assert r.status_code == 200, r.text
+        assert SENTINEL not in r.text
+        assert base64.b64encode(SENTINEL.encode()).decode().rstrip("=") not in r.text
+        body = r.json()
+        assert body["status"] == "ok"
+        leaky = next(t for t in body["tools"] if t["name"] == "leaky")
+        assert "[REDACTED]" in leaky["description"]
+        assert leaky["input_schema"]["properties"]["token"]["default"] == "[REDACTED]"
+        assert {t["name"] for t in body["tools"]} == {"add", "search_docs", "leaky"}
+
+    def test_split_or_encoded_secret_is_absent_from_the_listing(
+        self, app_client, tenant_headers, dev_allow_loopback
+    ):
+        """The listing echoes the header secret only as two halves, or as hex / percent-encoding /
+        base64 / a base64 JSON blob. None of those forms, and no join of the returned strings, is
+        in the connection-test response."""
+        client, _ = app_client
+        _, h = tenant_headers()
+        secret = "sntl-Form-4e8c-Encoded-91ab"
+        with hard_timeout(60), LocalMcpServer(forms=secret) as mcp:
+            server = register(client, h, url=mcp.url, headers={"Authorization": f"Bearer {secret}"}).json()
+            r = client.post(f"{BASE}/{server['id']}/test", headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok", body
+        forms = mcp.echoed_forms
+        for label, value in forms.items():
+            if label in ("left", "right"):
+                continue  # each half is absent only once split masking joins them; checked below
+            assert value not in r.text, label
+            assert value.upper() not in r.text, label
+        leaked = next(t for t in body["tools"] if t["name"] == "leaky")
+        assert "[REDACTED]" in json.dumps(leaked)
+        for keys in (True, False):
+            joined = _joined_strings(body, keys=keys)
+            assert secret.lower() not in joined.lower()
+            assert forms["left"].lower() not in joined.lower()
+            assert forms["right"].lower() not in joined.lower()
+
+    def test_redirect_is_redirect_refused(self, app_client, tenant_headers, dev_allow_loopback):
+        client, _ = app_client
+        _, h = tenant_headers()
+        with hard_timeout(60), RawHttp(302, location="http://127.0.0.1:9/mcp") as http:
+            server = register(client, h, url=http.url).json()
+            r = client.post(f"{BASE}/{server['id']}/test", headers=h)
+            assert http.requests >= 1
+        assert r.status_code == 200, r.text
+        assert r.json() == {"status": "error", "error_code": "redirect_refused", "tools": []}
+        assert "127.0.0.1:9" not in r.text
+
+    def test_jsonrpc_error_is_protocol_error(self, app_client, tenant_headers, dev_allow_loopback):
+        client, _ = app_client
+        _, h = tenant_headers()
+        with hard_timeout(60), RawHttp(200, jsonrpc=True) as http:
+            server = register(client, h, url=http.url).json()
+            r = client.post(f"{BASE}/{server['id']}/test", headers=h)
+            assert http.requests >= 1
+        assert r.status_code == 200, r.text
+        assert r.json() == {"status": "error", "error_code": "protocol_error", "tools": []}
 
     def test_rejected_credentials_are_recorded_as_a_safe_code(self, app_client, tenant_headers, dev_allow_loopback):
         client, _ = app_client

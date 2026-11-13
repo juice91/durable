@@ -36,6 +36,9 @@ export interface StepDetail {
   deadline: string | null;
   timeoutHours: number | null;
   decision: StepDecision | null;
+  /** Why a `skipped` step was skipped: an untaken branch arm, or the run completed before
+   * reaching it (the completion sweep). Null unless state is `skipped`. */
+  skipReason: "branch_not_taken" | "run_ended" | null;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -98,6 +101,7 @@ function emptyDetail(stepId: string, stepType: StepType | null): StepDetail {
     deadline: null,
     timeoutHours: null,
     decision: null,
+    skipReason: null,
     startedAt: null,
     endedAt: null,
   };
@@ -265,12 +269,17 @@ export function deriveRunView(
         if (ins.every((e) => deadEdges.has(e.id))) {
           skipped.add(target);
           d.state = "skipped";
+          d.skipReason = "branch_not_taken";
           changed = true;
         }
       }
     }
     if (effective === "completed") {
-      for (const d of Object.values(steps)) if (d.state === "pending") d.state = "skipped";
+      for (const d of Object.values(steps)) {
+        if (d.state !== "pending") continue;
+        d.state = "skipped";
+        d.skipReason = "run_ended";
+      }
     }
   }
 

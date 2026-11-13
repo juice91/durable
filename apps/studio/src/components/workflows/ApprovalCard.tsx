@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
 import { decideApproval, MAX_APPROVAL_COMMENT, type ApprovalDecisionResult } from "@/lib/workflows";
@@ -12,8 +12,9 @@ interface ApprovalCardProps {
   stepId: string;
   prompt: string | null;
   deadline: string | null;
-  /** Reload the run's events (after a 409, or once a decision is recorded). */
-  onRefresh: () => void;
+  /** Reload the run's events (after a 409, or once a decision is recorded). The buttons stay
+   * disabled until a returned promise settles, so a second click cannot race the refresh. */
+  onRefresh: () => void | Promise<unknown>;
   onDecided?: (result: ApprovalDecisionResult) => void;
 }
 
@@ -32,6 +33,13 @@ export function ApprovalCard({ runId, stepId, prompt, deadline, onRefresh, onDec
   const [dialogError, setDialogError] = useState<string | null>(null);
   const tooLong = comment.length > MAX_APPROVAL_COMMENT;
   const commentId = `approval-comment-${stepId}`;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const decide = async (decision: "approve" | "reject") => {
     if (busy || tooLong) return;
@@ -42,7 +50,9 @@ export function ApprovalCard({ runId, stepId, prompt, deadline, onRefresh, onDec
       const result = await decideApproval(runId, stepId, decision, comment);
       setConfirmReject(false);
       onDecided?.(result);
-      onRefresh();
+      // Stay busy until the view has reloaded: the step is no longer waiting, and a second
+      // click before the card disappears would only earn a 409.
+      await Promise.resolve(onRefresh()).catch(() => undefined);
     } catch (reason: unknown) {
       const status = reason instanceof ApiError ? reason.status : null;
       let message: string;
@@ -59,7 +69,7 @@ export function ApprovalCard({ runId, stepId, prompt, deadline, onRefresh, onDec
       if (decision === "reject" && status !== 409 && status !== 404) setDialogError(message);
       else setError(message);
     } finally {
-      setBusy(null);
+      if (mounted.current) setBusy(null);
     }
   };
 

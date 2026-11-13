@@ -212,7 +212,7 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
       {view.waiting.length > 0 ? (
         <section aria-label="Waiting approvals" className="space-y-3">
           {view.waiting.map((id) => (
-            <ApprovalCard key={id} runId={runId} stepId={id} prompt={view.steps[id]?.prompt ?? null} deadline={view.steps[id]?.deadline ?? null} onRefresh={() => void refresh()} />
+            <ApprovalCard key={id} runId={runId} stepId={id} prompt={view.steps[id]?.prompt ?? null} deadline={view.steps[id]?.deadline ?? null} onRefresh={refresh} />
           ))}
         </section>
       ) : null}
@@ -228,7 +228,7 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
 
       <details className="rounded-md border border-border bg-card p-3">
         <summary className="cursor-pointer text-sm font-semibold text-card-foreground">Events ({events.length})</summary>
-        <div className="mt-3"><EventTimeline events={events} currentPartialText={{}} /></div>
+        <div className="mt-3"><EventTimeline events={events} currentPartialText={{}} status={view.status} /></div>
       </details>
     </div>
   );

@@ -54,6 +54,9 @@ const ticketRun = {
   heartbeat_at: "2026-11-11T17:38:15.926448+00:00",
   created_at: "2026-11-11T17:38:05.795192+00:00",
   updated_at: "2026-11-11T17:38:18.962035+00:00",
+  trace_id: null,
+  conversation_id: null,
+  turn: null,
 } satisfies Run;
 
 // Copied from GET /api/v1/runs/0593b408-e845-4b31-9874-cae982e81b4e/events.
@@ -109,6 +112,25 @@ describe("RunDetailPage", () => {
     render(<RunDetailPage />);
 
     expect(await screen.findByText("Run not found")).toBeInTheDocument();
+  });
+
+  it("labels a workflow run with its workflow, not 'Agent: null | Version: latest'", async () => {
+    (getRun as any).mockResolvedValueOnce({
+      ...ticketRun, kind: "workflow", agent_id: null, version: null, workflow_id: "wf-abcdef123456", workflow_version: 3,
+    });
+    (listEvents as any).mockResolvedValueOnce([]);
+    render(<RunDetailPage />);
+    const link = await screen.findByRole("link", { name: "Workflow: wf-abcde... v3" });
+    expect(link).toHaveAttribute("href", `/workflows/wf-abcdef123456/runs/${ticketRun.run_id}`);
+    expect(screen.queryByText(/Agent: null|Version: latest/)).toBeNull();
+  });
+
+  it("shows a workflow's child agent run as part of its workflow run", async () => {
+    (getRun as any).mockResolvedValueOnce({ ...ticketRun, kind: "agent", parent_run_id: "parent-run-0001", parent_step_id: "classify" });
+    (listEvents as any).mockResolvedValueOnce([]);
+    render(<RunDetailPage />);
+    expect(await screen.findByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
+    expect(screen.getByText(/version: 1/i)).toBeInTheDocument();
   });
 
   it("renders run header with agent info", async () => {

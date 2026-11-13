@@ -15,7 +15,9 @@ import {
   listEvents,
   startRun,
   subscribeRun,
+  type Run,
   type RunEvent,
+  type RunEventData,
   type SubscribeHandlers,
 } from "@/lib/runs";
 
@@ -79,19 +81,28 @@ const agents = [
   },
 ];
 
-const run = (id: string, display_status = "running") => ({
-  id,
+const run = (id: string, display_status: Run["display_status"] = "running"): Run => ({
+  run_id: id,
   status: display_status,
-  display_status: display_status as "running" | "recovering" | "completed",
+  display_status,
   agent_id: "agent-1",
   version: 1,
+  input: "",
+  output: null,
+  error: null,
+  heartbeat_at: null,
+  created_at: "2026-11-12T00:00:00Z",
+  updated_at: "2026-11-12T00:00:00Z",
+  trace_id: null,
+  conversation_id: null,
+  turn: null,
 });
 
 const event = (
   seq: number,
   type: RunEvent["type"],
   data: unknown,
-): RunEvent => ({ seq, type, data, ts: "2026-11-12T00:00:00Z" });
+): RunEvent => ({ seq, type, data: data as RunEventData, ts: "2026-11-12T00:00:00Z" });
 
 let handlers: SubscribeHandlers;
 const unsubscribe = vi.fn();
@@ -132,6 +143,7 @@ const turnRun = (
   heartbeat_at: null,
   created_at: "2026-11-12T00:00:00Z",
   updated_at: "2026-11-12T00:00:00Z",
+  trace_id: null,
   conversation_id: "conv-1",
   turn,
 });

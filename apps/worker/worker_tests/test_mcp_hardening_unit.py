@@ -282,7 +282,8 @@ def test_secret_straddling_the_actual_cut_leaves_no_prefix(secret, back):
 
 @pytest.mark.parametrize("back", [3, 20, 60, 140, 200])
 def test_base64_blob_straddling_the_cut_leaves_no_decodable_prefix(back):
-    from eap_worker.mcp import MAX_RESULT_CHARS, _decodings
+    from eap_secrets.redaction import _decodings
+    from eap_worker.mcp import MAX_RESULT_CHARS
 
     blob = base64.b64encode(json.dumps({"auth": f"Bearer {LONG_SECRET}"}).encode()).decode()
     head = '{"t": "'
@@ -373,3 +374,81 @@ def test_hex_pieces_split_across_values_are_masked_in_any_case(case):
     assert SECRET.lower() not in decoded.lower()
     assert hexed.lower() not in joined.lower()
     _assert_no_rebuild(stored)
+
+
+# --------------------------------------------------------------------------- redirects: redirect_refused
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirect_is_refused_unread_as_redirect_refused(status):
+    """A 3xx answer raises RedirectRefused in the response hook (body unread), and the worker's
+    failure code is redirect_refused, the code the API's connection test reports."""
+    import asyncio
+
+    from eap_worker.mcp import RedirectRefused, failure_code, refuse_redirect as _refuse_redirect
+
+    stream = _CountingStream()
+    response = httpx2.Response(status, headers={"location": "http://127.0.0.1:1/mcp"}, stream=stream)
+    with pytest.raises(RedirectRefused) as raised:
+        asyncio.run(_refuse_redirect(response))
+    assert stream.reads == 0
+    assert failure_code(raised.value) == "redirect_refused"
+
+
+@pytest.mark.parametrize("status", [200, 202, 400, 404, 500])
+def test_non_redirect_answer_passes_the_redirect_hook(status):
+    import asyncio
+
+    from eap_worker.mcp import refuse_redirect as _refuse_redirect
+
+    asyncio.run(_refuse_redirect(httpx2.Response(status)))
+
+
+def test_redirect_refused_is_found_through_wrapping_and_groups():
+    """The MCP SDK / anyio wrap transport errors; the code is found anywhere in the chain."""
+    from eap_worker.mcp import RedirectRefused, failure_code
+
+    try:
+        try:
+            raise RedirectRefused()
+        except RedirectRefused as inner:
+            raise RuntimeError("Connection closed") from inner
+    except RuntimeError as outer:
+        assert failure_code(outer) == "redirect_refused"
+    assert failure_code(BaseExceptionGroup("tg", [RuntimeError("x"), RedirectRefused()])) == "redirect_refused"
+
+
+def test_status_error_for_a_redirect_is_redirect_refused():
+    from eap_worker.mcp import failure_code
+
+    request = httpx2.Request("POST", "http://127.0.0.1:1/mcp")
+    error = httpx2.HTTPStatusError("302", request=request, response=httpx2.Response(302, request=request))
+    assert failure_code(error) == "redirect_refused"
+    plain = httpx2.HTTPStatusError("500", request=request, response=httpx2.Response(500, request=request))
+    assert failure_code(plain) == "http_status"
+
+
+def test_worker_http_client_refuses_redirects_through_its_hooks():
+    """The client the toolset uses (policy client + hooks) raises RedirectRefused on a 302 and never
+    requests the Location."""
+    import asyncio
+
+    from eap_worker.mcp import RedirectRefused, _http_client_factory
+
+    seen: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(str(request.url))
+        return httpx2.Response(302, headers={"location": "http://127.0.0.1:2/elsewhere"})
+
+    class _Policy:
+        def httpx_client_factory(self, **kwargs: Any) -> httpx2.AsyncClient:
+            return httpx2.AsyncClient(transport=httpx2.MockTransport(handler), follow_redirects=False)
+
+    async def go() -> None:
+        async with _http_client_factory(_Policy())() as client:  # type: ignore[arg-type]
+            await client.post("http://127.0.0.1:1/mcp", json={})
+
+    with pytest.raises(RedirectRefused):
+        asyncio.run(go())
+    assert seen == ["http://127.0.0.1:1/mcp"]

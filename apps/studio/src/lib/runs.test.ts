@@ -404,7 +404,7 @@ describe("getRun", () => {
     );
 
     await expect(getRun("missing")).rejects.toEqual(
-      expect.objectContaining<ApiError>({ status: 404, message: "Run not found" })
+      expect.objectContaining<Partial<ApiError>>({ status: 404, message: "Run not found" })
     );
   });
 });

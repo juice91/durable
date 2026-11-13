@@ -121,6 +121,11 @@ describe("deriveRunView", () => {
     ], "running");
     expect(view.status).toBe("completed");
     expect(view.steps.approve.state).toBe("skipped");
+    // approve lost the branch; classify and lookup were swept when the run completed.
+    expect(view.steps.approve.skipReason).toBe("branch_not_taken");
+    expect(view.steps.classify).toMatchObject({ state: "skipped", skipReason: "run_ended" });
+    expect(view.steps.lookup).toMatchObject({ state: "skipped", skipReason: "run_ended" });
+    expect(view.steps.summarize.skipReason).toBeNull();
     expect(view.output).toBe("done");
   });
 

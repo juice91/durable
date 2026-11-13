@@ -553,15 +553,25 @@ def test_w4c_sigkill_while_a_parallel_branch_waits_then_approve_while_down(
         ],
     }
     workflow_id = h.create_published_workflow(spec)
-    first = h.start_worker("worker1", extra_env=WF_ENV)
+    # A long poll (checkpointed with the run's limits): once the branch blocks in DBOS.recv it stays
+    # there, so the kill below lands inside recv and not in the decision / clock steps around it.
+    first = h.start_worker("worker1", extra_env={**WF_ENV, "EAP_APPROVAL_POLL_SECONDS": "600"})
     run_id = start_run(h, workflow_id)
     waiting = h.wait_event(run_id, "step:gate:waiting")
     h.wait_event(run_id, "step:b:completed")
-    # The exact point: the branch workflow has recorded its step_waiting event AND checkpointed the
-    # first decision check after it (eap.workflow_approval_decision), so it is in its wait loop.
+    # The exact point: DBOS.recv records its durable timeout (a `DBOS.sleep` operation) right before
+    # it blocks, and records `DBOS.recv` only once it consumes a message. So the branch workflow is
+    # inside recv exactly when its newest operation is that DBOS.sleep, preceded by the loop's
+    # eap.workflow_approval_decision and eap.workflow_clock checks.
     branch = f"{run_id}:fan:gate"
-    wait_for(lambda: any(name == "eap.workflow_approval_decision" for _, name in h.dbos_steps(branch)),
-             timeout=30, what="the branch's first approval decision check")
+
+    def in_recv() -> list[str] | None:
+        names = [name for _, name in h.dbos_steps(branch)]
+        tail = names[-3:]
+        return names if tail == ["eap.workflow_approval_decision", "eap.workflow_clock", "DBOS.sleep"] else None
+
+    in_recv_ops = wait_for(in_recv, timeout=30, what="the branch to block in DBOS.recv")
+    assert "DBOS.recv" not in in_recv_ops, in_recv_ops
     assert "step:gate:decision" not in _keys(h.events(run_id))
     first.proc.kill()
     assert first.proc.wait(timeout=10) == -9
@@ -583,7 +593,8 @@ def test_w4c_sigkill_while_a_parallel_branch_waits_then_approve_while_down(
     assert payload == {"gate": {"approved": True, "decided_by": "alice", "comment": "ok"},
                        "right": "Echo: printer on fire"}
     assert h.decide(run_id, "gate").status_code == 409
-    report("W4c SIGKILL while a branch waits, approved while down: completed once via the branch workflow")
+    report("W4c SIGKILL inside the branch's DBOS.recv (newest op DBOS.sleep), approved while down: "
+           "completed once via the branch workflow")
 
 
 # One recorded hour. Long enough that the worker can be killed and a fresh one can be ready while
@@ -821,6 +832,44 @@ def test_w5_kill_after_child_run_insert_then_publish_v2(wf: Harness, report: Cal
     child = h.client.get(f"/api/v1/runs/{child_id}", headers=h.headers).json()
     assert child["version"] == 1 and child["parent_run_id"] == run_id and child["parent_step_id"] == "ask"
     report("W5 after_child_run_insert + v2 published: child ran v1 once, output 'Echo: hello'")
+
+
+def test_w5b_kill_after_child_run_insert_then_archive_agent(wf: Harness, report: Callable[[str], None]) -> None:
+    """kill -9 after the child agent run row (naming v1) is inserted, before the step checkpoints;
+    the agent is archived while the worker is down. The re-executed eap.workflow_resolve_agent
+    finds the child row and reloads v1 from it: the existence check guards only the create path,
+    so recovery completes instead of failing the step agent_not_found."""
+    h = wf
+    spec = {
+        "name": "One agent, archived mid-run",
+        "input_schema": {"type": "object"},
+        "start": "ask",
+        "steps": [{"id": "ask", "type": "agent", "agent_id": h.agent_id, "input": {"prompt": "hello"}}],  # type: ignore[attr-defined]
+    }
+    workflow_id = h.create_published_workflow(spec)
+    run_id, before = crash_run(
+        h, workflow_id, crash_at="after_child_run_insert", event_key="step:ask:child", input_value={}
+    )
+    assert _keys(before) == ["start", "step:ask:started"]
+    children = h.child_runs(run_id)
+    assert [(c[1], c[3]) for c in children] == [("ask", 1)], children
+
+    from sqlalchemy import text
+
+    with h.engine.begin() as conn:
+        archived = conn.execute(
+            text("UPDATE agents SET archived = TRUE WHERE id = :a RETURNING id"), {"a": h.agent_id}  # type: ignore[attr-defined]
+        ).fetchall()
+    assert len(archived) == 1
+
+    recover(h)
+    facts = assert_exactly_once(
+        h, run_id, status="completed", agent_steps=["ask"], tickets=0, calls=0,
+        keys=["start", "step:ask:started", "step:ask:completed", "end"], reconnect_from=before[-1].seq,
+    )
+    assert facts["run"]["output"] == '"Echo: hello"'
+    assert facts["children"][0][0] == children[0][0] and facts["children"][0][3] == 1
+    report("W5b after_child_run_insert + agent archived: recovery reloaded v1 from the child row, completed once")
 
 
 # --------------------------------------------------------------------------- W6: the API process dies

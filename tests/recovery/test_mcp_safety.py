@@ -458,9 +458,10 @@ def test_m11_redirects_are_never_followed(harness: Harness, report: Callable[[st
                 assert location not in str(run["error"]) and str(port) not in str(run["error"])
                 assert tool_results(h, run_id) == []  # never got as far as a call
                 inner = str(run["error"]).rsplit(": ", 1)[-1]
-                # The worker classifies the refused redirect as connect_failed (the API says
-                # redirect_refused); either way nothing was followed and no call was sent.
-                assert inner.endswith("(connect_failed)"), inner
+                # The worker names the refused redirect redirect_refused, like the API's connection
+                # test; nothing was followed and no call was sent.
+                assert inner.endswith("(redirect_refused)"), inner
+                assert any("error_code=redirect_refused" in w.log() for w in h.workers), h.worker_logs()
                 outcomes[status] = (test_code, end.data["error_code"], inner)
     report(f"M11 302/307 to an allowlisted second port: 0 connections followed; "
            f"(connection test code, run error_code, worker's inner code) = {outcomes}")
@@ -706,6 +707,96 @@ def test_m10_kill_after_the_mcp_server_answered(harness: Harness, report: Callab
     assert_no_secret("events", repr([e.data for e in events]), [sentinel])
     report("M10 after_tool_call on an MCP side effect: needs_attention once, server called once, "
            "no request after recovery, secret in no worker log")
+
+
+class FixedReply:
+    """Allowlisted HTTP stand-in: a fixed status, or HTTP 200 with a JSON-RPC error (id echoed)."""
+
+    def __init__(self, status: int = 200, *, location: str | None = None, jsonrpc: bool = False) -> None:
+        self.requests = 0
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _reply(self) -> None:
+                outer.requests += 1
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                if jsonrpc:
+                    try:
+                        req = json.loads(raw or b"{}")
+                    except json.JSONDecodeError:
+                        req = {}
+                    payload = json.dumps({
+                        "jsonrpc": "2.0", "id": req.get("id", 1),
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    }).encode()
+                    code = 200
+                else:
+                    payload, code = b"", status
+                self.send_response(code)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if payload:
+                    self.wfile.write(payload)
+
+            do_GET = do_POST = do_DELETE = _reply  # noqa: N815 - http.server API
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/mcp"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self) -> FixedReply:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_connection_test_and_agent_run_report_the_same_failure_code(
+    harness: Harness, report: Callable[[str], None]
+) -> None:
+    """POST /mcp-servers/{id}/test and an agent run against the same server report the same failure
+    code: 401 -> unauthorized, 302 -> redirect_refused, a JSON-RPC error -> protocol_error.
+
+    A TLS failure is not covered here. httpx raises ConnectError whose chain contains no ssl.SSLError
+    (the certificate error is only in the message), and the classifier does not read exception text,
+    so both sides report connect_failed rather than tls_failed."""
+    h = harness
+    env = secrets_env()
+    agreed: list[tuple[str, str]] = []
+    with FixedReply(401) as unauth, FixedReply(302, location="http://127.0.0.1:9/gone") as redir, FixedReply(jsonrpc=True) as rpc:
+        h.start_api(extra_env=env)
+        h.start_worker("worker", extra_env=env)
+        for expected, server, name in (
+            ("unauthorized", unauth, "unauth"),
+            ("redirect_refused", redir, "redir"),
+            ("protocol_error", rpc, "rpcerr"),
+        ):
+            created = h.client.post("/api/v1/mcp-servers", json={"name": name, "url": server.url}, headers=h.headers)
+            assert created.status_code == 201, created.text
+            tested = h.client.post(f"/api/v1/mcp-servers/{created.json()['id']}/test", headers=h.headers)
+            assert tested.status_code == 200, tested.text
+            assert tested.json()["status"] == "error" and tested.json()["tools"] == [], tested.text
+            test_code = tested.json()["error_code"]
+            assert "127.0.0.1:9" not in tested.text
+            agent_id = h.create_published_agent(mcp_agent_spec((name, "lookup_order")))
+            run_id, run = run_agent(h, agent_id, {"tool": "lookup_order", "args": {"order_id": "X1"}})
+            assert run["status"] == "failed", (name, run)
+            end = h.events(run_id)[-1]
+            assert end.type == "run_failed" and end.data["error_code"] == "mcp_tool_unavailable", end.data
+            assert str(run["error"]).endswith(f"({expected})"), run["error"]
+            assert test_code == expected, (name, test_code, run["error"])
+            assert server.requests >= 1
+            agreed.append((name, test_code))
+    report(f"connection test and worker failure codes agree: {agreed}")
 
 
 @pytest.fixture(autouse=True)

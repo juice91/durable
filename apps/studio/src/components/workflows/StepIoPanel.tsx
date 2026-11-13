@@ -56,7 +56,14 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
         </div>
       ) : null}
       {detail.input !== undefined ? <Block label="Input" value={detail.input} testId="step-io-input" /> : null}
-      {detail.hasOutput ? <Block label="Output" value={detail.output} testId="step-io-output" /> : null}
+      {detail.hasOutput ? (
+        type === "parallel" && detail.output === null ? (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Output</h4>
+            <p data-testid="step-io-output" className="mt-1 text-sm text-muted-foreground">No output (parallel step).</p>
+          </div>
+        ) : <Block label="Output" value={detail.output} testId="step-io-output" />
+      ) : null}
       {detail.error || detail.errorCode ? (
         <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">
           {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
@@ -64,7 +71,11 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
         </div>
       ) : null}
       {!detail.started && detail.state === "pending" ? <p className="text-sm text-muted-foreground">This step has not started.</p> : null}
-      {detail.state === "skipped" ? <p className="text-sm text-muted-foreground">Skipped: this branch arm was not taken.</p> : null}
+      {detail.state === "skipped" ? (
+        <p data-testid="step-io-skip-reason" data-skip-reason={detail.skipReason ?? undefined} className="text-sm text-muted-foreground">
+          {detail.skipReason === "run_ended" ? "Not reached: the run ended before this step." : "Skipped: this branch arm was not taken."}
+        </p>
+      ) : null}
     </section>
   );
 }

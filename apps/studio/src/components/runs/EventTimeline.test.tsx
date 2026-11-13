@@ -37,6 +37,32 @@ describe("EventTimeline", () => {
     expect(screen.getByText(/no events yet/i)).toBeInTheDocument();
   });
 
+  it("labels a needs_attention run_failed 'Needs attention', a plain failure 'Run failed'", () => {
+    const failed = (status: string, seq: number): RunEvent => ({
+      seq, type: "run_failed", data: { status, error: "boom", error_code: "side_effect_outcome_unknown" }, ts: "2026-11-13T00:00:00Z",
+    });
+    const { rerender } = render(<EventTimeline events={[failed("needs_attention", 1)]} currentPartialText={{}} />);
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(screen.queryByText("Run failed")).toBeNull();
+    rerender(<EventTimeline events={[failed("failed", 2)]} currentPartialText={{}} />);
+    expect(screen.getByText("Run failed")).toBeInTheDocument();
+    expect(screen.queryByText("Needs attention")).toBeNull();
+  });
+
+  it("renders no events message when empty and still running", () => {
+    render(<EventTimeline events={[]} currentPartialText={{}} status="running" />);
+    expect(screen.getByText(/check back soon/i)).toBeInTheDocument();
+  });
+
+  it.each(["completed", "failed", "needs_attention"] as const)(
+    "renders an ended placeholder, not 'check back soon', for a terminal (%s) run with no events",
+    (status) => {
+      render(<EventTimeline events={[]} currentPartialText={{}} status={status} />);
+      expect(screen.getByText(/no events were recorded\. this run has ended\./i)).toBeInTheDocument();
+      expect(screen.queryByText(/check back soon/i)).not.toBeInTheDocument();
+    },
+  );
+
   it("renders event items", () => {
     render(<EventTimeline events={events} currentPartialText={{}} />);
     expect(screen.getByText("seq 1")).toBeInTheDocument();

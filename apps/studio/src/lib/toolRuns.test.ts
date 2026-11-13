@@ -58,10 +58,10 @@ describe("describeToolRun", () => {
   });
 
   it("takes needs_attention from the run_failed event even if the status frame lags", () => {
-    const view = describeToolRun("running", null, failedEvent({ status: "needs_attention", error: "unknown", error_code: "side_effect_unknown" }));
+    const view = describeToolRun("running", null, failedEvent({ status: "needs_attention", error: "unknown", error_code: "side_effect_outcome_unknown" }));
     expect(view.tone).toBe("attention");
     expect(view.status).toBe("needs_attention");
-    expect(view.errorCode).toBe("side_effect_unknown");
+    expect(view.errorCode).toBe("side_effect_outcome_unknown");
   });
 
   it("shows a failure with its error and error_code", () => {

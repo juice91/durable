@@ -1,7 +1,7 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { type RunEvent, type RunDelta, type PartialTextMap } from "@/lib/runs";
+import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
 
 interface EventItemProps {
   event: RunEvent;
@@ -10,7 +10,12 @@ interface EventItemProps {
 interface EventTimelineProps {
   events: RunEvent[];
   currentPartialText: PartialTextMap;
+  /** The run's display status: a terminal run with no events gets an "ended" placeholder, not
+   * "check back soon" (e.g. a superseded conversation turn that never started). */
+  status?: RunStatus;
 }
+
+const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["completed", "failed", "needs_attention"]);
 
 /** Event payload values are JSON: text stays as is, anything else is shown as pretty JSON (a tool
  * run's input and result are objects, which React cannot render as children). */
@@ -37,8 +42,15 @@ function MarkdownContent({ text }: { text: string }) {
   );
 }
 
-export function EventTimeline({ events, currentPartialText }: EventTimelineProps) {
+export function EventTimeline({ events, currentPartialText, status }: EventTimelineProps) {
   if (events.length === 0) {
+    if (status !== undefined && TERMINAL_STATUSES.has(status)) {
+      return (
+        <div className="p-4 text-card-foreground bg-card rounded-lg text-center">
+          No events were recorded. This run has ended.
+        </div>
+      );
+    }
     return (
       <div className="p-4 text-card-foreground bg-card rounded-lg text-center">
         No events yet. Run started, check back soon.
@@ -104,7 +116,7 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm text-card-foreground">
             <span className="font-semibold">Model response:</span>
             <div className="mt-1">
-              <MarkdownContent text={event.data.text} />
+              <MarkdownContent text={event.data.text ?? ""} />
             </div>
           </div>
         );
@@ -151,7 +163,7 @@ function EventItem({ event }: EventItemProps) {
       case "run_failed":
         return (
           <div className="text-sm text-red-700 dark:text-red-400 font-semibold">
-            Run failed
+            {event.data.status === "needs_attention" ? "Needs attention" : "Run failed"}
             <span className="block mt-1 text-red-600 dark:text-red-300">
               {formatValue(event.data.error || "Unknown error")}
             </span>

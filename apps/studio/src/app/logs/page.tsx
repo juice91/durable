@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { listRuns, type Run } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
+import { RunSubject } from "@/components/runs/RunSubject";
 import { buildLogsLink, buildAllPlatformLogsLink } from "@/lib/grafana";
 
 type FilterStatus = "all" | "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
@@ -92,7 +93,7 @@ export default function LogsPage() {
               <thead className="bg-muted/50">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Time</th>
-                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">Agent</th>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">Agent / Tool / Workflow</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Conversation / Turn</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Duration</th>
@@ -111,7 +112,7 @@ export default function LogsPage() {
                       <td className="px-4 py-3 font-mono text-xs">
                         {new Date(run.created_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 font-medium">{run.agent_id ?? `Tool: ${run.tool_id ?? "unknown"}`}</td>
+                      <td className="px-4 py-3 font-medium"><RunSubject run={run} /></td>
                       <td className="px-4 py-3">
                         <StatusPill status={run.display_status as any} />
                       </td>

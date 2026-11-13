@@ -280,13 +280,13 @@ describe("Tools run acceptance", () => {
     await finish("run-bad", {
       seq: 2,
       type: "run_failed",
-      data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_unknown" },
+      data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_outcome_unknown" },
       ts: "",
     });
     expect(await screen.findByTestId("tool-run-needs-attention")).toHaveTextContent("Needs attention: the tool may have run; check before retrying");
     expect(screen.getByTestId("tool-run-needs-attention")).toHaveTextContent("was not retried automatically");
     expect(screen.getByTestId("tool-run-error")).toHaveTextContent("side effect outcome unknown");
-    expect(screen.getByTestId("tool-run-error-code")).toHaveTextContent("side_effect_unknown");
+    expect(screen.getByTestId("tool-run-error-code")).toHaveTextContent("side_effect_outcome_unknown");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
     expect(startToolRun).toHaveBeenCalledTimes(1);
 

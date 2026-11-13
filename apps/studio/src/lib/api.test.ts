@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
 import { api, ApiError } from "./api";
@@ -51,7 +51,7 @@ describe("api client", () => {
 
   it("wraps spec in {spec} for POST /api/v1/agents", async () => {
     const spec = {
-      spec_version: 1,
+      spec_version: 1 as const,
       name: "Test Agent",
       instructions: "Test",
       model: { provider: "openai", name: "gpt-4" },
@@ -75,7 +75,7 @@ describe("api client", () => {
 
   it("wraps spec in {spec} for PATCH /api/v1/agents/{id}", async () => {
     const spec = {
-      spec_version: 1,
+      spec_version: 1 as const,
       name: "Updated Agent",
       instructions: "Updated instructions",
       model: { provider: "openai", name: "gpt-4" },

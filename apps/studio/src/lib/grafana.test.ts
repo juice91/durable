@@ -17,7 +17,7 @@ describe("grafana link builders", () => {
 
   it("builds trace link with Tempo datasource and default URL", async () => {
     delete process.env.NEXT_PUBLIC_GRAFANA_URL;
-    const { buildTraceLink } = await import("./grafana.ts");
+    const { buildTraceLink } = await import("./grafana");
     const traceId = "abc123";
     const link = buildTraceLink(traceId);
     expect(link).to.include("http://localhost:3002/explore?schemaVersion=1&panes=");
@@ -34,14 +34,14 @@ describe("grafana link builders", () => {
 
   it("builds trace link with custom Grafana URL", async () => {
     process.env.NEXT_PUBLIC_GRAFANA_URL = "http://grafana.example.com";
-    const { buildTraceLink } = await import("./grafana.ts");
+    const { buildTraceLink } = await import("./grafana");
     const link = buildTraceLink("xyz789");
     expect(link).to.include("http://grafana.example.com/explore?");
   });
 
   it("builds logs link with Loki datasource and default URL", async () => {
     delete process.env.NEXT_PUBLIC_GRAFANA_URL;
-    const { buildLogsLink } = await import("./grafana.ts");
+    const { buildLogsLink } = await import("./grafana");
     const traceId = "def456";
     const link = buildLogsLink(traceId);
     expect(link).to.include("http://localhost:3002/explore?schemaVersion=1&panes=");
@@ -56,14 +56,14 @@ describe("grafana link builders", () => {
 
   it("builds logs link with custom Grafana URL", async () => {
     process.env.NEXT_PUBLIC_GRAFANA_URL = "https://my-grafana:3000";
-    const { buildLogsLink } = await import("./grafana.ts");
+    const { buildLogsLink } = await import("./grafana");
     const link = buildLogsLink("ghi789");
     expect(link).to.include("https://my-grafana:3000/explore?");
   });
 
   it("builds all platform logs link with Loki datasource", async () => {
     delete process.env.NEXT_PUBLIC_GRAFANA_URL;
-    const { buildAllPlatformLogsLink } = await import("./grafana.ts");
+    const { buildAllPlatformLogsLink } = await import("./grafana");
     const link = buildAllPlatformLogsLink();
     expect(link).to.include("http://localhost:3002/explore?schemaVersion=1&panes=");
     const panesPart = link.split("panes=")[1];
@@ -77,7 +77,7 @@ describe("grafana link builders", () => {
 
   it("handles trace IDs with special characters in logs query", async () => {
     delete process.env.NEXT_PUBLIC_GRAFANA_URL;
-    const { buildLogsLink } = await import("./grafana.ts");
+    const { buildLogsLink } = await import("./grafana");
     const traceId = "abc/123:def";
     const link = buildLogsLink(traceId);
     const panesPart = link.split("panes=")[1];

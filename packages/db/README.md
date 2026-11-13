@@ -22,8 +22,27 @@ DBOS's own system database (`eap_dbos`) is managed by DBOS and is not covered he
   `0004_mcp_servers.py` adds `mcp_servers` and `mcp_server_secrets` (encrypted MCP header values,
   composite FK to `mcp_servers(tenant_id, id)`, ON DELETE CASCADE); models in
   `apps/api/src/eap_api/mcp_servers/models.py`.
+  `0005_workflows.py` adds `workflows` (tenant-owned drafts, like `agents`) and `workflow_versions`
+  (immutable published specs, UNIQUE `(workflow_id, version)`, composite FK to
+  `workflows(tenant_id, id)`); models in `apps/api/src/eap_api/workflows/models.py`. Downgrade drops
+  both tables, so every workflow definition and published version is deleted.
+  `0006_tool_runs.py` adds `runs.kind` (`'agent'` | `'tool'`, default `'agent'`) and `runs.tool_id`,
+  makes `runs.agent_id` / `runs.agent_version` nullable, adds the `ck_runs_kind_target` check and
+  the indexes `ix_runs_tenant_kind_created` and `ix_runs_tenant_tool_created`. **Downgrade deletes
+  data:** every tool run, its `execution_events` and its `side_effects` reservations
+  (`{run_id}:tool`, `{run_id}:tool_run`), then restores NOT NULL on the agent columns.
+  `0007_workflow_runs.py` adds `runs.workflow_id`, `runs.workflow_version` (kind `'workflow'`),
+  `runs.parent_run_id`, `runs.parent_step_id` (a workflow's agent step runs as a child agent run;
+  composite FK to `runs(tenant_id, id)`), widens `ck_runs_kind_target`, adds `ck_runs_parent_link`
+  and the indexes `ix_runs_tenant_workflow_created` and `ix_runs_parent_run`. Per-step state is not a
+  table: it is derived from the run's events. **Downgrade deletes data:** every workflow run and
+  every child agent run, their `execution_events` and their `side_effects` reservations (keys
+  `{run_id}:...`), then restores the 0006 check and drops the columns.
+  In both downgrades the fake external ticket service's rows are left alone (they stand for an
+  external system). Deleting the rows is deliberate: a later re-upgrade must not hand a reused
+  client `run_id` an old completed result or an old `reserved` reservation.
 - `src/eap_db/metadata.py` — the target metadata: the union of `eap_api.models.Base.metadata` (which
-  also holds `eap_api.mcp_servers.models`),
+  also holds `eap_api.mcp_servers.models` and `eap_api.workflows.models`),
   `eap_run_store.Base.metadata` and `eap_worker.tickets.metadata`. Tables are defined only in those
   modules; this package never duplicates them.
 - `src/eap_db/__init__.py` — `require_schema_at_head(engine)`, the startup check the API and worker

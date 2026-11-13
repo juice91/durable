@@ -30,3 +30,17 @@ export const parallelSpec: WorkflowSpec = {
     { id: "merge", type: "agent", agent_id: AGENT, next: null },
   ],
 };
+
+/** A parallel whose first branch is an approval gate. */
+export const parallelApprovalSpec: WorkflowSpec = {
+  spec_version: 1,
+  name: "Gated fan out",
+  input_schema: { type: "object" },
+  start: "fork",
+  steps: [
+    { id: "fork", type: "parallel", branches: ["gate", "b"], join: "merge" },
+    { id: "gate", type: "approval", prompt: "Ship branch A?", timeout_hours: 2, next: "merge" },
+    { id: "b", type: "tool", tool_id: "x", next: "merge" },
+    { id: "merge", type: "agent", agent_id: AGENT, next: null },
+  ],
+};

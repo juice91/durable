@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunEvent, SubscribeHandlers } from "@/lib/runs";
 import { ApiError } from "@/lib/api";
-import { demoSpec } from "@/test/workflowFixtures";
+import { demoSpec, parallelApprovalSpec } from "@/test/workflowFixtures";
 
 const runsMock = vi.hoisted(() => ({
   getRun: vi.fn(),
@@ -148,6 +148,46 @@ describe("WorkflowRunView", () => {
     act(() => handlers.onEvent?.(ev("run_failed", { status: "needs_attention", error: "unknown", error_code: "side_effect_outcome_unknown", step_id: "lookup" })));
     expect(screen.getByTestId("workflow-run-needs-attention")).toBeInTheDocument();
     expect(stepState("lookup")).toBe("needs_attention");
+  });
+
+  it("shows an approval inside a parallel branch: gate waiting, sibling running, join pending", async () => {
+    wfMock.getWorkflowVersion.mockResolvedValue({ workflow_id: "wf-1", version: 1, spec: parallelApprovalSpec, spec_hash: "pa", created_at: "", created_by: "u" });
+    render(<WorkflowRunView runId="run-1" workflowId="wf-1" />);
+    await screen.findByTestId("workflow-step-gate");
+    act(() => {
+      handlers.onEvent?.(ev("step_started", { step_id: "fork", step_type: "parallel" }));
+      handlers.onEvent?.(ev("step_started", { step_id: "gate", step_type: "approval" }));
+      handlers.onEvent?.(ev("step_waiting", { step_id: "gate", prompt: "Ship branch A?", deadline: "2026-11-13T12:00:00Z", timeout_hours: 2 }));
+      handlers.onEvent?.(ev("step_started", { step_id: "b", step_type: "tool", tool_id: "x" }));
+    });
+    expect(stepState("fork")).toBe("running");
+    expect(stepState("gate")).toBe("waiting");
+    expect(stepState("b")).toBe("running");
+    expect(stepState("merge")).toBe("pending");
+    const card = screen.getByTestId("approval-gate");
+    expect(within(card).getByTestId("approval-prompt-gate")).toHaveTextContent("Ship branch A?");
+    expect(within(card).getByRole("button", { name: "Approve" })).toBeEnabled();
+
+    // The sibling finishing does not release the join while the gate still waits.
+    act(() => handlers.onEvent?.(ev("step_completed", { step_id: "b", output: { ok: true } })));
+    expect(stepState("b")).toBe("completed");
+    expect(stepState("gate")).toBe("waiting");
+    expect(stepState("merge")).toBe("pending");
+    expect(screen.getByTestId("approval-gate")).toBeInTheDocument();
+  });
+
+  it("labels a parallel step's null output instead of printing null", async () => {
+    wfMock.getWorkflowVersion.mockResolvedValue({ workflow_id: "wf-1", version: 1, spec: parallelApprovalSpec, spec_hash: "pa", created_at: "", created_by: "u" });
+    render(<WorkflowRunView runId="run-1" workflowId="wf-1" />);
+    await screen.findByTestId("workflow-step-fork");
+    act(() => {
+      handlers.onEvent?.(ev("step_started", { step_id: "fork", step_type: "parallel" }));
+      handlers.onEvent?.(ev("step_completed", { step_id: "fork", output: null }));
+    });
+    fireEvent.click(within(screen.getByTestId("workflow-step-fork")).getByRole("button"));
+    const output = within(screen.getByTestId("step-io-panel")).getByTestId("step-io-output");
+    expect(output).toHaveTextContent("No output (parallel step).");
+    expect(output).not.toHaveTextContent(/^null$/);
   });
 
   it("reports a missing run and stops following it on unmount", async () => {

@@ -6,6 +6,8 @@ import { listRuns, type Run } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 import { api } from "@/lib/api";
+import { listWorkflows } from "@/lib/workflows";
+import { RunSubject } from "@/components/runs/RunSubject";
 
 type FilterStatus = "all" | "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
 
@@ -15,6 +17,7 @@ export default function TracesPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
+  const [workflowNames, setWorkflowNames] = useState<Record<string, string>>({});
   const router = useRouter();
 
   useEffect(() => {
@@ -24,6 +27,14 @@ export default function TracesPage() {
         setAgentNames(Object.fromEntries(agents.map((agent) => [agent.id, agent.name])));
       }
     }).catch(() => undefined);
+    void Promise.resolve()
+      .then(() => listWorkflows())
+      .then((workflows) => {
+        if (!cancelled && Array.isArray(workflows)) {
+          setWorkflowNames(Object.fromEntries(workflows.map((workflow) => [workflow.id, workflow.name])));
+        }
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -95,7 +106,7 @@ export default function TracesPage() {
               <thead className="bg-muted/50">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Time</th>
-                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">Agent</th>
+                  <th className="px-4 py-3 text-left font-medium text-muted-foreground">Agent / Tool / Workflow</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Conversation / Turn</th>
                   <th className="px-4 py-3 text-left font-medium text-muted-foreground">Duration</th>
@@ -116,10 +127,7 @@ export default function TracesPage() {
                         {new Date(run.created_at).toLocaleString()}
                       </td>
                       <td className="px-4 py-3 font-medium">
-                        {run.agent_id === null
-                          ? `Tool: ${run.tool_id ?? "unknown"}`
-                          : (agentNames[run.agent_id] ??
-                            `${run.agent_id.slice(0, 8)}${run.agent_id.length > 8 ? "..." : ""}`)}
+                        <RunSubject run={run} agentNames={agentNames} workflowNames={workflowNames} />
                       </td>
                       <td className="px-4 py-3">
                         <StatusPill status={run.display_status as any} />

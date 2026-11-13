@@ -1,19 +1,9 @@
 import type { ThreadMessage } from "@assistant-ui/react";
 
-// Type definitions matching the runs.ts exports
-export type RunEvent = {
-  seq: number;
-  type: "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed";
-  data: unknown;
-  ts: string;
-};
+// One definition of the event shapes: the canonical types live in lib/runs.ts.
+import type { PartialTextMap, RunEvent } from "@/lib/runs";
 
-export type PartialTextMap = {
-  [modelRequest: string]: {
-    text: string;
-    attempt: string;
-  };
-};
+export type { PartialTextMap, RunEvent };
 
 // Convert a run's events and partial text to assistant-ui thread messages. `idPrefix` keeps message
 // ids unique when several runs (conversation turns) share one thread.

@@ -138,6 +138,38 @@ def test_parallel_branches_then_join_reads_branch_outputs(worker, client, tenant
     assert wait_event(worker.engine, run_id, "step:fan:completed")["data"]["output"] is None
 
 
+def test_parallel_merge_over_the_context_cap_fails_the_parallel_step(worker, client, tenant, defs, monkeypatch):
+    """Each branch output fits the run's context cap on its own; merged into the parent they do
+    not. The parallel step fails workflow_context_too_large before the join (or anything else) runs."""
+    monkeypatch.setenv("EAP_WORKFLOW_MAX_CONTEXT_BYTES", "60")  # read once, at run start
+    agent_id = publish_agent(worker.engine, tenant, agent_spec())
+    spec = {
+        "name": "Fan out, too much",
+        "input_schema": {"type": "object"},
+        "start": "fan",
+        "steps": [
+            {"id": "fan", "type": "parallel", "branches": ["a", "b"], "join": "join"},
+            {"id": "a", "type": "agent", "agent_id": agent_id, "input": {"p": "x" * 30}, "next": "join"},
+            {"id": "b", "type": "agent", "agent_id": agent_id, "input": {"p": "y" * 30}, "next": "join"},
+            {"id": "join", "type": "agent", "agent_id": agent_id, "input": {"p": "z"}},
+        ],
+    }
+    _, run_id = _start(worker, client, tenant, spec, {})
+    run = wait_terminal(worker.run_store, tenant, run_id)
+    assert run["status"] == "failed", run
+    events = event_rows(worker.engine, run_id)
+    _contiguous(events)
+    keys = [k for _, k, _, _ in events]
+    # Both branches completed (each output is 38 bytes of JSON, under the 60-byte cap) ...
+    assert "step:a:completed" in keys and "step:b:completed" in keys
+    # ... but their merge (76 bytes) is over it: the parallel step fails, the join never starts.
+    failed = next(e for e in events if e[1] == "step:fan:failed")
+    assert failed[3]["error_code"] == "workflow_context_too_large"
+    assert "step:fan:completed" not in keys and "step:join:started" not in keys
+    assert events[-1][3]["error_code"] == "workflow_context_too_large"
+    assert events[-1][3]["step_id"] == "fan"
+
+
 def test_tool_step_input_rejected_and_missing_ref(worker, client, tenant, defs):
     spec = {
         "name": "Bad tool",
@@ -194,6 +226,28 @@ def test_agent_not_found_and_output_schema_mismatch(worker, client, tenant, defs
     events = event_rows(worker.engine, run_id)
     assert events[-2][1] == "step:a:completed"  # the step finished; the run output did not validate
     assert events[-1][3]["error_code"] == "output_invalid" and events[-1][3]["step_id"] is None
+
+
+def test_archived_agent_is_agent_not_found_when_the_child_would_be_created(worker, client, tenant, defs):
+    """The archived check still guards the create path: a fresh step never creates a child run for
+    an archived agent (recovery of an already-created child is the W5b crash test)."""
+    from sqlalchemy import text
+
+    agent_id = publish_agent(worker.engine, tenant, agent_spec())
+    with worker.engine.begin() as conn:
+        conn.execute(text("UPDATE agents SET archived = TRUE WHERE id = :a"), {"a": agent_id})
+    spec = {
+        "name": "Archived",
+        "input_schema": {"type": "object"},
+        "start": "a",
+        "steps": [{"id": "a", "type": "agent", "agent_id": agent_id, "input": {}}],
+    }
+    _, run_id = _start(worker, client, tenant, spec, {})
+    assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "failed"
+    assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "agent_not_found"
+    with worker.engine.connect() as conn:
+        children = conn.execute(text("SELECT id FROM runs WHERE parent_run_id = :r"), {"r": str(run_id)}).fetchall()
+    assert children == []
 
 
 def test_non_finite_input_fails_before_any_step(worker, client, tenant, defs):

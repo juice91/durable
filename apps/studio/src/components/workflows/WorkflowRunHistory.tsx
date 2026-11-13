@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { formatDateTime } from "./ApprovalCard";
@@ -22,29 +22,37 @@ export function formatDuration(startIso: string | null | undefined, endIso: stri
 
 /** The runs of one workflow, newest first, each linking to its live execution view. */
 export function WorkflowRunHistory({ workflowId, refreshKey = 0 }: { workflowId: string; refreshKey?: number }) {
-  const [runs, setRuns] = useState<Run[] | null>(null);
+  // Runs are stored with the workflow they were loaded for, so a page reused for another
+  // workflow (/workflows/A -> /workflows/B) never lists A's runs under B.
+  const [loaded, setLoaded] = useState<{ workflowId: string; runs: Run[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Every load (effect or Refresh button) takes a ticket; only the latest one may write state.
+  const loadSeq = useRef(0);
+  const runs = loaded && loaded.workflowId === workflowId ? loaded.runs : null;
 
-  const load = useCallback(async (isCancelled: () => boolean = () => false) => {
+  const load = useCallback(async () => {
+    const ticket = ++loadSeq.current;
+    const stale = () => ticket !== loadSeq.current;
     setLoading(true);
     try {
       const page = await listWorkflowRuns(workflowId);
-      if (isCancelled()) return;
-      setRuns(page.items);
+      if (stale()) return;
+      setLoaded({ workflowId, runs: page.items });
       setError(null);
     } catch (reason) {
-      if (!isCancelled()) setError(reason instanceof Error ? reason.message : "Failed to load runs");
+      if (!stale()) setError(reason instanceof Error ? reason.message : "Failed to load runs");
     } finally {
-      if (!isCancelled()) setLoading(false);
+      if (!stale()) setLoading(false);
     }
   }, [workflowId]);
 
   useEffect(() => {
-    let cancelled = false;
-    void load(() => cancelled);
+    void load();
     return () => {
-      cancelled = true;
+      // Invalidate whatever is in flight: the workflow changed, a refresh was requested, or the
+      // history unmounted.
+      loadSeq.current += 1;
     };
   }, [load, refreshKey]);
 

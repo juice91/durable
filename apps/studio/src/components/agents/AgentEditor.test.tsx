@@ -90,7 +90,7 @@ describe("AgentEditor", () => {
 
   it("pre-fills with initial data", () => {
     const initialData = {
-      spec_version: 1,
+      spec_version: 1 as const,
       name: "Existing Agent",
       instructions: "Existing instructions",
       model: { provider: "anthropic", name: "claude-3" },

@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 import { ApiError, getRun, listEvents, subscribeRun, type Run, type RunEvent, deltaReducer, type RunStatus } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
+import { RunSubject } from "@/components/runs/RunSubject";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 
 function failedEventStatus(status: unknown): "failed" | "needs_attention" {
@@ -139,9 +140,7 @@ export default function RunDetailPage() {
             <div>
               <h1 className="text-2xl font-bold text-card-foreground">Run {run.run_id}</h1>
               <p className="text-sm text-muted-foreground mt-1">
-                {run.kind === "tool"
-                  ? `Tool: ${run.tool_id ?? "unknown"}`
-                  : `Agent: ${run.agent_id} | Version: ${run.version ?? "latest"}`}
+                <RunSubject run={run} showVersion />
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -186,7 +185,7 @@ export default function RunDetailPage() {
 
         <div className="bg-card rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold mb-4 text-card-foreground">Event Timeline</h2>
-          <EventTimeline events={events} currentPartialText={partialText} />
+          <EventTimeline events={events} currentPartialText={partialText} status={status} />
         </div>
     </div>
   );
