@@ -9,9 +9,14 @@ the request guard's UTF-8, NUL and depth checks. The API extracts the document o
 to reject an unsupported MIME type or unsafe HTML early; chunking and embedding happen in the
 worker. An upload with the same content, metadata, title, source URL and MIME type is a no-op
 (200, `unchanged: true`, no run). A changed one bumps `latest_version` and starts a `kb_ingest` run
-(202), enqueued as `eap.kb_ingest` (eap_api.launcher.KB_INGEST_WORKFLOW_NAME documents the
-arguments). Run creation is idempotent by the optional client `run_id`, like tool runs, and a failed
+(202), enqueued as `eap.kb_ingest` on the `eap-kb-ingest` queue (eap_api.launcher.KB_INGEST_WORKFLOW_NAME
+documents the arguments). Run creation is idempotent by the optional client `run_id`, like tool runs, and a failed
 hand-off answers 503 with the run marked failed so a retry with the same `run_id` re-queues it.
+
+A document key is one URL path segment: no '/', '\\', control characters, surrounding whitespace,
+and not only dots (`.` and `..` would be normalized away by a client, onto the knowledge base). The
+app answers 404, never a 307, to a trailing-slash path (redirect_slashes=False). The document list
+is paged (`limit`, `after`, `next_after`), and GET /knowledge-bases/{id} adds the ingest spend.
 
 Deleting a knowledge base that an agent's latest published version attaches answers 409 with the
 agents, unless `force=true`. Deletes retry once on a deadlock (SQLSTATE 40P01): chunk-row locks
@@ -26,6 +31,8 @@ and a `cost_note` instead of a cost.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -58,6 +65,7 @@ from eap_api.schemas import (
     IngestRunCreate,
     IngestRunResponse,
     KnowledgeBaseCreate,
+    KnowledgeBaseDetailResponse,
     KnowledgeBaseInUse,
     KnowledgeBaseListResponse,
     KnowledgeBaseResponse,
@@ -71,6 +79,7 @@ from eap_api.schemas import (
 from eap_knowledge import ExtractionFailed, UnsupportedMimeType, extract
 from eap_observability import current_trace_context, log_failure
 from eap_run_store import ENQUEUE_FAILED_ERROR, TERMINAL_RUN_STATUSES, RunIdConflict, RunStore
+from eap_run_store.cursor import MAX_CURSOR_LENGTH
 from eap_run_store.knowledge import (
     DocumentNotFound,
     IngestRunConflict,
@@ -224,6 +233,48 @@ def ingest_input(document_id: str, doc_version: int) -> str:
 def reindex_input(generation: int) -> str:
     """The `input` of a reindex run (and the enqueued `input_json`)."""
     return _canonical_json({"reindex": int(generation)})
+
+
+class InvalidDocumentCursor(ValueError):
+    """An `after` cursor this API did not issue."""
+
+
+def encode_document_cursor(document_key: str) -> str:
+    """The opaque cursor positioned at `document_key` (URL-safe base64 of {"k": key}, unpadded)."""
+    raw = json.dumps({"k": document_key}, separators=(",", ":"), ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_document_cursor(token: str) -> str:
+    """The document key a cursor names; InvalidDocumentCursor for anything else."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8"))
+    except (binascii.Error, ValueError) as exc:
+        raise InvalidDocumentCursor("cursor is not valid") from exc
+    if not isinstance(data, dict) or set(data) != {"k"} or not isinstance(data["k"], str) or not data["k"]:
+        raise InvalidDocumentCursor("cursor is not valid")
+    return data["k"]
+
+
+def ingest_totals(store: KnowledgeStore, tenant_id: str, kb_id: str) -> dict[str, Any]:
+    """What the knowledge base's kb_ingest runs have spent: one aggregate over their model requests
+    (ix_runs_tenant_kb_created, then run_model_requests by primary key). Requests of runs still in
+    flight count too. Cost follows the run rule: NULL when any request is unpriced."""
+    with store.engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT count(q.run_id) AS requests,"
+                " coalesce(sum(q.input_tokens + q.output_tokens), 0) AS tokens,"
+                " CASE WHEN count(q.run_id) = count(q.cost_usd) THEN coalesce(sum(q.cost_usd), 0) END AS cost"
+                " FROM runs r JOIN run_model_requests q ON q.run_id = r.id AND q.tenant_id = r.tenant_id"
+                " WHERE r.tenant_id = :t AND r.knowledge_base_id = CAST(:kb AS uuid) AND r.kind = 'kb_ingest'"
+            ),
+            {"t": tenant_id, "kb": kb_id},
+        ).mappings().one()
+    cost = row["cost"]
+    if cost is not None:
+        cost = format(Decimal(cost).quantize(Decimal("0.0000000001")), "f")
+    return {"ingest_requests": int(row["requests"]), "ingest_tokens": int(row["tokens"]), "ingest_cost_usd": cost}
 
 
 T = TypeVar("T")
@@ -588,9 +639,12 @@ def create_knowledge_base(body: KnowledgeBaseCreate, principal: PrincipalDep, st
     return {**kb, "document_count": 0, "chunk_count": 0}
 
 
-@_kb.get("/{kb_id}", response_model=KnowledgeBaseResponse)
+@_kb.get("/{kb_id}", response_model=KnowledgeBaseDetailResponse)
 def get_knowledge_base(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
-    return _kb_or_404(store, principal.tenant_id, kb_id)
+    """The knowledge base with its counts and its ingest spend so far (`ingest_tokens`,
+    `ingest_cost_usd`, `ingest_requests`: see KnowledgeBaseDetailResponse)."""
+    kb = _kb_or_404(store, principal.tenant_id, kb_id)
+    return {**kb, **ingest_totals(store, principal.tenant_id, kb["id"])}
 
 
 @_kb.patch("/{kb_id}", response_model=KnowledgeBaseResponse, responses={409: {"model": ErrorDetail}})
@@ -626,7 +680,7 @@ def delete_knowledge_base(
     """Delete the knowledge base; its documents and chunks cascade, its runs stay. 409
     {detail, agents: [{agent_id, agent_name, version, archived}]} when an agent's latest published
     version attaches it, unless `force=true` (runs of such versions then get a tool error). An
-    in-flight ingest run ends cancelled when it finds the knowledge base gone."""
+    in-flight ingest run ends failed (`ingest_cancelled`) when it finds the knowledge base gone."""
     tenant_id = principal.tenant_id
     kb = _kb_or_404(store, tenant_id, kb_id)
     if not force:
@@ -652,10 +706,32 @@ def delete_knowledge_base(
 
 
 @_kb.get("/{kb_id}/documents", response_model=KnowledgeDocumentListResponse)
-def list_documents(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
-    """The knowledge base's documents (without content) by document_key."""
+def list_documents(
+    kb_id: str,
+    principal: PrincipalDep,
+    store: KnowledgeDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    after: Annotated[
+        str | None,
+        Query(max_length=MAX_CURSOR_LENGTH, description="Opaque cursor: the previous page's next_after, verbatim"),
+    ] = None,
+) -> dict[str, Any]:
+    """The knowledge base's documents (without content) by document_key, `limit` at a
+    time (1–200, default 50). `next_after` is an opaque cursor when a full page came back (pass it
+    back verbatim as `after`), else null. A cursor this API did not issue is a 422."""
     kb = _kb_or_404(store, principal.tenant_id, kb_id)
-    return {"items": store.list_documents(principal.tenant_id, kb["id"])}
+    after_key = None
+    if after is not None:
+        try:
+            after_key = decode_document_cursor(after)
+        except InvalidDocumentCursor:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="after is not a valid cursor; pass the previous page's next_after verbatim",
+            )
+    items = store.list_documents(principal.tenant_id, kb["id"], limit=limit, after=after_key)
+    next_after = encode_document_cursor(items[-1]["document_key"]) if len(items) == limit else None
+    return {"items": items, "next_after": next_after}
 
 
 @_kb.get("/{kb_id}/documents/{document_key}", response_model=KnowledgeDocumentResponse)
@@ -825,7 +901,7 @@ def put_document(
 
 @_kb.delete("/{kb_id}/documents/{document_key}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(kb_id: str, document_key: str, principal: PrincipalDep, store: KnowledgeDep) -> Response:
-    """Delete the document; its chunks cascade. An in-flight ingest run ends cancelled."""
+    """Delete the document; its chunks cascade. An in-flight ingest run ends failed (`ingest_cancelled`)."""
     tenant_id = principal.tenant_id
     kb = _kb_or_404(store, tenant_id, kb_id)
     if not _retry_deadlock_once(lambda: store.delete_document(tenant_id, kb["id"], document_key)):
@@ -1084,7 +1160,7 @@ def _cancel_generation(store: KnowledgeStore, tenant_id: str, kb_id: str, genera
 @_kb.delete("/{kb_id}/reindex", status_code=status.HTTP_204_NO_CONTENT)
 def cancel_reindex(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> Response:
     """Drop the pending generation and its chunks (status back to `ready`); a running reindex run
-    then ends cancelled. 204 also when nothing is pending."""
+    then ends failed (`ingest_cancelled`). 204 also when nothing is pending."""
     kb = _kb_or_404(store, principal.tenant_id, kb_id)
     _retry_deadlock_once(lambda: store.cancel_reindex(principal.tenant_id, kb["id"]))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

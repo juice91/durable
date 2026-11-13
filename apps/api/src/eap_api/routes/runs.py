@@ -321,6 +321,7 @@ def list_runs(
     kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
+    knowledge_base_id: uuid.UUID | None = None,
     parent_run_id: uuid.UUID | None = None,
     created_from: Annotated[datetime | None, Query(alias="from")] = None,
     created_to: Annotated[datetime | None, Query(alias="to")] = None,
@@ -330,8 +331,9 @@ def list_runs(
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest'), `tool_id` and
-    `workflow_id` filter. A workflow's child agent runs are listed only with `parent_run_id`.
+    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest'), `tool_id`,
+    `workflow_id` and `knowledge_base_id` filter (a knowledge base's runs: its kb_ingest runs and its
+    search tester tool runs; add `kind=kb_ingest` for the ingest runs only). A workflow's child agent runs are listed only with `parent_run_id`.
 
     Metrics drill-down (P0.6), same meaning as in GET /metrics/*: `status` may be repeated or
     comma-separated (any of them; at most 10), `from` / `to` bound `created_at` to `[from, to)`
@@ -355,8 +357,8 @@ def list_runs(
     try:
         runs = run_store.list_runs(
             principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=statuses, kind=kind,
-            tool_id=tool_id, workflow_id=workflow_id, parent_run_id=parent_run_id, created_from=start,
-            created_to=end, model=model, provider=provider,
+            tool_id=tool_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
+            parent_run_id=parent_run_id, created_from=start, created_to=end, model=model, provider=provider,
         )
     except MetricsQueryTimeout:
         # Only with `model` / `provider`: that filter runs under the metrics statement timeout.

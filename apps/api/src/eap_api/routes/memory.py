@@ -53,13 +53,21 @@ Rules:
   busy resource (a queued or running turn in one of its conversations: nothing deleted,
   `Retry-After` set, `busy_conversations` listed).
 - Responses and errors never carry memory content except the note or observation being read.
+- The forget audit record never carries the raw resource id (it may be an email address): it logs
+  `eap.resource_hash`, `resource_audit_hash(resource_id)`, the first 16 hex characters of
+  HMAC-SHA256(key=EAP_AUDIT_HASH_SALT, msg=resource_id) when that per-deployment salt is set, else
+  of plain SHA-256(resource_id). An operator who knows a resource id recomputes it to find the
+  record; set the salt so the hash of a guessable id (an email) cannot be looked up offline.
 - Deletes are idempotent: deleting a missing note answers 204; a forget of a resource with nothing
   left answers 200 with zero counts; deleting an observation that is gone answers 404.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import os
 import re
 from typing import Annotated, Any, Literal
 
@@ -331,6 +339,23 @@ def _forget(
     )
 
 
+AUDIT_HASH_SALT_ENV = "EAP_AUDIT_HASH_SALT"
+AUDIT_HASH_HEX_CHARS = 16
+
+
+def resource_audit_hash(resource_id: str) -> str:
+    """The short stable hash an audit record carries instead of a resource id: the first 16 hex
+    characters of HMAC-SHA256 keyed with EAP_AUDIT_HASH_SALT (read per call), or of plain SHA-256
+    when the salt is unset or blank."""
+    data = resource_id.encode("utf-8")
+    salt = os.environ.get(AUDIT_HASH_SALT_ENV, "")
+    if salt.strip():
+        digest = hmac.new(salt.encode("utf-8"), data, hashlib.sha256).hexdigest()
+    else:
+        digest = hashlib.sha256(data).hexdigest()
+    return digest[:AUDIT_HASH_HEX_CHARS]
+
+
 def _audit_forget(
     principal: Principal,
     resource_id: str,
@@ -339,22 +364,24 @@ def _audit_forget(
     outcome: str,
     **counts: int,
 ) -> None:
-    """One audit record per forget call: who, which tenant, resource and agent (or all), the
-    outcome and the counts. Ids and numbers only, never memory content. The tenant also comes from
+    """One audit record per forget call: who, which tenant, the resource (as resource_audit_hash,
+    never the raw id) and agent (or all), the outcome and the counts. Ids, hashes and numbers only,
+    never memory content. The tenant also comes from
     the request's log context (bound at authentication), so the record reaches Loki under it."""
+    resource_hash = resource_audit_hash(resource_id)
     attrs = {
         "eap.audit": "memory_forget",
         "eap.tenant_id": principal.tenant_id,
         "eap.user_id": principal.user_id,
-        "eap.resource_id": resource_id,
+        "eap.resource_hash": resource_hash,
         "eap.agent_id": agent_id or "*",
         "eap.include_conversations": include_conversations,
         "eap.outcome": outcome,
         **{f"eap.{k}": v for k, v in counts.items()},
     }
     log.info(
-        "memory forget %s: tenant=%s user=%s resource=%s agent=%s include_conversations=%s%s",
-        outcome, principal.tenant_id, principal.user_id, resource_id, agent_id or "*", include_conversations,
+        "memory forget %s: tenant=%s user=%s resource_hash=%s agent=%s include_conversations=%s%s",
+        outcome, principal.tenant_id, principal.user_id, resource_hash, agent_id or "*", include_conversations,
         "".join(f" {k}={v}" for k, v in counts.items()),
         extra=attrs,
     )

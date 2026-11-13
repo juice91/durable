@@ -59,7 +59,12 @@ tag in any spelling.
 - The model sees `Working memory updated (version N).` (the same text on a ledger replay).
 
 Privacy: memory content never goes to logs, spans or event data from here (logs carry ids, counts
-and versions). The tool's own call arguments are conversation data like any tool call's.
+and versions). What the turn stores never holds the note either (scrub_memory_messages,
+scrub_memory_message, scrub_memory_tool_args): the block is stripped from every stored request's
+instructions, and update_working_memory's arguments are stored as a fixed placeholder
+(`{"redacted": true, "fields": [schema property names]}`) in runs.messages, the model_message event
+and the tool_call event. So a forget or a note DELETE leaves no copy of the note in the turn data,
+and history token counting never counts it.
 """
 
 from __future__ import annotations
@@ -90,7 +95,15 @@ from eap_run_store import (
     RunNotFound,
     working_memory_ledger_key,
 )
-from eap_schemas.memory import MemoryConfig, WorkingMemoryConfig, WorkingMemoryInvalid
+from eap_schemas.memory import (
+    WORKING_MEMORY_BLOCK_END,
+    WORKING_MEMORY_BLOCK_HEADING,
+    WORKING_MEMORY_BLOCK_LEAD,
+    MemoryConfig,
+    WorkingMemoryConfig,
+    WorkingMemoryInvalid,
+    strip_working_memory_messages,
+)
 from eap_schemas.processors import PiiRedactConfig
 from eap_schemas.tools import UPDATE_WORKING_MEMORY_TOOL_NAME
 from eap_worker.crash import crash_point
@@ -265,8 +278,8 @@ def render_memory_instructions(memory: MemoryContext | None) -> str:
     version = int(note.get("version", 0)) if note is not None else 0
     where = "this conversation" if memory.working_memory_scope == "conversation" else "every conversation with this user"
     lines = [
-        "## Working memory",
-        f"Your persistent notes, kept across {where}. Use them to personalise your answers.",
+        WORKING_MEMORY_BLOCK_HEADING,
+        f"{WORKING_MEMORY_BLOCK_LEAD}{where}. Use them to personalise your answers.",
     ]
     if working.read_only:
         lines.append("These notes are read-only.")
@@ -286,7 +299,7 @@ def render_memory_instructions(memory: MemoryContext | None) -> str:
         f'<working_memory scope="{memory.working_memory_scope}" format="{working.format}" version="{version}">'
     )
     lines.append(escape_note(_note_text(working, note)))
-    lines.append("</working_memory>")
+    lines.append(WORKING_MEMORY_BLOCK_END)
     return "\n".join(lines)
 
 
@@ -295,6 +308,83 @@ def instructions_with_memory(base: str, memory: MemoryContext | None) -> str:
     if not block:
         return base
     return f"{base}\n\n{block}" if base else block
+
+
+# ------------------------------------------------------------------------------- stored messages
+#
+# What a memory turn stores (runs.messages, the model_message and tool_call events) never holds the
+# note: the working memory block is removed from every request's `instructions` (the base
+# instructions stay; the block is re-rendered from eap.load_memory each turn, so history never
+# needs it), and an update_working_memory call's arguments are replaced by a fixed placeholder
+# (the call's result comes from the ledger, so a replay never needs them). Only the stored copies
+# change: the model sees the real instructions and its own arguments during the turn, and the
+# checkpointed model responses are untouched, so the step layout and replay are unchanged.
+
+
+def redacted_tool_args(args: Any, working: WorkingMemoryConfig | None) -> dict[str, Any]:
+    """The stored stand-in for update_working_memory's arguments: `{"redacted": true, "fields":
+    [...]}`, naming schema property names only (`content` in template mode; the patch's top-level
+    keys that are schema properties in schema mode, plus `other_fields`: how many keys were not)."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = None
+    if working is None or working.format != "json":
+        return {"redacted": True, "fields": ["content"]}
+    patch = args.get("patch") if isinstance(args, dict) else None
+    properties = (working.json_schema or {}).get("properties")
+    names = set(properties) if isinstance(properties, Mapping) else set()
+    keys = list(patch) if isinstance(patch, dict) else []
+    out: dict[str, Any] = {"redacted": True, "fields": sorted(k for k in keys if k in names)}
+    other = sum(1 for k in keys if k not in names)
+    if other:
+        out["other_fields"] = other
+    return out
+
+
+def _scrub_response(message: dict[str, Any], working: WorkingMemoryConfig | None) -> dict[str, Any]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return message
+    changed = False
+    out: list[Any] = []
+    for part in parts:
+        if (
+            isinstance(part, dict)
+            and part.get("part_kind") == "tool-call"
+            and part.get("tool_name") == UPDATE_WORKING_MEMORY_TOOL_NAME
+        ):
+            part = {**part, "args": redacted_tool_args(part.get("args"), working)}
+            changed = True
+        out.append(part)
+    return {**message, "parts": out} if changed else message
+
+
+def scrub_memory_message(message: dict[str, Any], memory: MemoryContext | None) -> dict[str, Any]:
+    """One model response's JSON (the model_message event) without update_working_memory arguments."""
+    if memory is None:
+        return message
+    return _scrub_response(message, memory.working)
+
+
+def scrub_memory_messages(messages: list[dict[str, Any]], memory: MemoryContext | None) -> list[dict[str, Any]]:
+    """A memory turn's new messages as stored (runs.messages): no working memory block in any
+    request's instructions, no update_working_memory arguments. Unchanged for a non-memory run."""
+    if memory is None:
+        return messages
+    stripped = strip_working_memory_messages(messages)
+    return [
+        _scrub_response(m, memory.working) if isinstance(m, dict) and m.get("kind") == "response" else m
+        for m in stripped
+    ]
+
+
+def scrub_memory_tool_args(tool_name: str, args: Any, memory: MemoryContext | None) -> Any:
+    """A tool_call event's args: the placeholder for update_working_memory in a memory turn."""
+    if memory is None or tool_name != UPDATE_WORKING_MEMORY_TOOL_NAME:
+        return args
+    return redacted_tool_args(args, memory.working)
 
 
 # ------------------------------------------------------------------------------- redaction
@@ -576,7 +666,11 @@ __all__ = [
     "memory_of",
     "patch_schema",
     "redact_memory_write",
+    "redacted_tool_args",
     "render_memory_instructions",
+    "scrub_memory_message",
+    "scrub_memory_messages",
+    "scrub_memory_tool_args",
     "snapshot_output",
     "with_memory",
     "working_memory_definition",

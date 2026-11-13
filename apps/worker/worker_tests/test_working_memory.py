@@ -165,7 +165,7 @@ def test_remember_in_conversation_one_is_known_in_conversation_two(worker, clien
     events = event_rows(worker.engine, run_id)
     [call] = by_type(events, "tool_call")
     tid = call["tool_call_id"]
-    assert call["args"] == {"patch": {"name": "Ana"}}
+    assert call["args"] == {"redacted": True, "fields": ["name"]}  # never the patch values
     keys = [k for _, k, _, _ in events]
     assert keys == ["start", "model:0:final", f"tool:{tid}:call", f"memory:wm:{tid}", f"tool:{tid}:result",
                     "model:1:final", "end"]

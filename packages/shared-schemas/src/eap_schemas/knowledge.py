@@ -39,12 +39,19 @@ CHUNKER_VERSION = 1
 
 _METADATA_KEY_RE = re.compile(METADATA_KEY_PATTERN)
 
-# Ingest run failure codes (decisions table, "Failure partway").
+# Every failure code an ingest or reindex run (eap.kb_ingest) can end with: runs.error_code in
+# run_failed, and the prefix of a document's / knowledge base's error "<code>: ...". The first four
+# are the decisions table's ("Failure partway"); the rest are the worker's own.
 INGEST_FAILURE_CODES: tuple[str, ...] = (
     "embedding_failed",
     "embedding_model_not_allowed",
     "embedding_dimension_mismatch",
     "ingest_budget_exceeded",
+    "extraction_failed",  # unsupported MIME type, extraction error, no text, invalid chunking config
+    "knowledge_base_limit_exceeded",  # chunk / document caps per knowledge base
+    "ingest_cancelled",  # the document or knowledge base deleted, or the reindex cancelled, mid-run
+    "ingest_not_converged",  # rounds without progress (generation switches kept racing the ingest)
+    "internal_error",  # anything unclassified (a database error after retries, a bug)
 )
 
 MetadataScalar = Union[str, bool, int, float]

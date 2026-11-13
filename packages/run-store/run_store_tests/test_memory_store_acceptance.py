@@ -836,7 +836,8 @@ def test_delete_conversation_leaves_no_secret_and_touches_nothing_else(store, ru
         (e[0], e[1], e[2], e[4]) for e in before["events"] if e[0] in c1_runs]  # type, seq, key stay
     # the other conversation of the same resource, the other resource, the resource note: untouched
     assert rows_of(after, c2_runs + c9_runs) == rows_of(before, c2_runs + c9_runs)
-    assert secret_hits(engine, tenant, c2_runs + c9_runs)["events"] == 14
+    # 12, not 14: memory_updated never names the planted non-schema key (checkpoint review fix).
+    assert secret_hits(engine, tenant, c2_runs + c9_runs)["events"] == 12
     assert [r for r in after["working_memories"] if r[1] == "resource"] == [
         r for r in before["working_memories"] if r[1] == "resource"]
     assert store.delete_conversation(tenant, c1) is False

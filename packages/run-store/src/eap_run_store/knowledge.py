@@ -32,8 +32,10 @@ rows.** No method locks a document and then waits for its knowledge base:
   name the model they embedded with (GenerationModelMismatch otherwise).
 - Embedding writes and finalisation append their event (and usage row) in the same transaction
   (`append_event_in_session`), so data, events and cost commit together or not at all.
-- Retrieval sets `hnsw.ef_search` and `hnsw.iterative_scan` with `SET LOCAL` semantics
-  (`set_config(..., true)`) inside its own transaction, and re-sorts by exact distance.
+- Retrieval sets `hnsw.ef_search`, `hnsw.iterative_scan` and `hnsw.max_scan_tuples` with `SET LOCAL`
+  semantics (`set_config(..., true)`) inside its own transaction, and re-sorts by exact distance. A
+  small knowledge base that the shared index under-fills (fewer than top_k rows) is searched again
+  exactly, in the same transaction (EXACT_SEARCH_MAX_CHUNKS).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -105,6 +108,16 @@ HNSW_M = 16
 HNSW_EF_CONSTRUCTION = 64
 HNSW_MAX_EF_SEARCH = 1000  # pgvector's upper bound for hnsw.ef_search
 MIN_EF_SEARCH = 40
+# Iterative HNSW scans stop after this many visited tuples (pgvector's default, set explicitly so the
+# bound is ours). The index is shared by every tenant and knowledge base of a dimension, so a small
+# knowledge base whose chunks lie behind many nearer foreign rows can exhaust it with fewer than
+# top_k hits: the exact-search fallback below covers that case.
+HNSW_MAX_SCAN_TUPLES = 20_000
+# Exact-search fallback: when the ANN query returns fewer than top_k rows and the attached knowledge
+# bases' active generations hold at most this many chunks (and more than were returned), the search
+# runs again as an exact scan of those chunks (no HNSW index). Override: EAP_KB_EXACT_SEARCH_MAX_CHUNKS.
+EXACT_SEARCH_MAX_CHUNKS = 20_000
+EXACT_SEARCH_MAX_CHUNKS_ENV = "EAP_KB_EXACT_SEARCH_MAX_CHUNKS"
 MAX_SEARCH_TOP_K = 200
 DEFAULT_BATCH_CHUNKS = 64
 DEFAULT_BATCH_TOKENS = 100_000
@@ -265,6 +278,15 @@ class KbChunkModel(Base):
             for dims in HNSW_DIMENSIONS
         ),
     )
+
+
+def exact_search_max_chunks() -> int:
+    """EAP_KB_EXACT_SEARCH_MAX_CHUNKS (default EXACT_SEARCH_MAX_CHUNKS; 0 turns the fallback off)."""
+    raw = os.environ.get(EXACT_SEARCH_MAX_CHUNKS_ENV)
+    try:
+        return max(0, int(raw)) if raw else EXACT_SEARCH_MAX_CHUNKS
+    except ValueError:
+        return EXACT_SEARCH_MAX_CHUNKS
 
 
 # ---------------------------------------------------------------------------------------- errors
@@ -888,19 +910,31 @@ class KnowledgeStore:
             ).mappings().first()
         return None if row is None else _doc_dict(row)
 
-    def list_documents(self, tenant_id: str, kb_id: str) -> list[dict[str, Any]]:
-        """The knowledge base's documents (without content), by document_key."""
+    def list_documents(
+        self, tenant_id: str, kb_id: str, *, limit: int | None = None, after: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The knowledge base's documents (without content), by document_key.
+
+        Keyset pagination: with `after`, only documents whose key sorts strictly after it; with
+        `limit`, at most that many. Served by uq_kb_documents_tenant_kb_key; the ORDER BY and the
+        `>` use the column's (deterministic) collation, so they agree and no key is skipped or
+        repeated between pages. Without both, every document (as before)."""
         kid = _canonical_uuid(kb_id)
         if kid is None:
             return []
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be at least 1")
+        params: dict[str, Any] = {"t": tenant_id, "kb": kid}
+        sql = f"SELECT {_DOC_COLUMNS} FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb"
+        if after is not None:
+            sql += " AND document_key > :after"
+            params["after"] = after
+        sql += " ORDER BY document_key"
+        if limit is not None:
+            sql += " LIMIT :limit"
+            params["limit"] = int(limit)
         with self.engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    f"SELECT {_DOC_COLUMNS} FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb"
-                    " ORDER BY document_key"
-                ),
-                {"t": tenant_id, "kb": kid},
-            ).mappings().all()
+            rows = conn.execute(text(sql), params).mappings().all()
         return [_doc_dict(r) for r in rows]
 
     def delete_document(self, tenant_id: str, kb_id: str, document_key: str) -> bool:
@@ -1771,10 +1805,13 @@ class KnowledgeStore:
     # ------------------------------------------------------------------ retrieval (RM.11)
 
     @staticmethod
-    def _search_sql(dims: int, filter_clauses: Sequence[str], with_min_score: bool) -> str:
+    def _search_sql(dims: int, filter_clauses: Sequence[str], with_min_score: bool, exact: bool = False) -> str:
         # `dims` is one of HNSW_DIMENSIONS (checked), inlined so that the partial index predicate
-        # and the cast match the index definition exactly.
+        # and the cast match the index definition exactly. `exact`: ORDER BY `distance + 0`, an
+        # expression no HNSW index matches, so the chunks are scanned (by the tenant/kb btree) and
+        # sorted by exact distance.
         where = "".join(f" AND {c}" for c in filter_clauses)
+        order_open, order_close = ("(", ") + 0") if exact else ("", "")
         cut = " WHERE hits.distance <= :max_distance" if with_min_score else ""
         return (
             "SELECT * FROM ("
@@ -1788,7 +1825,7 @@ class KnowledgeStore:
             " AND d.active_version = c.doc_version"
             f" WHERE c.tenant_id = :t AND c.kb_id = ANY(CAST(:kb_ids AS uuid[])) AND c.dimensions = {dims}"
             f" AND kb.tenant_id = :t AND kb.embedding_model = :model AND kb.dimensions = {dims}{where}"
-            f" ORDER BY (c.embedding::public.vector({dims})) OPERATOR(public.<=>) CAST(:q AS public.vector({dims}))"
+            f" ORDER BY {order_open}(c.embedding::public.vector({dims})) OPERATOR(public.<=>) CAST(:q AS public.vector({dims})){order_close}"
             " LIMIT :k"
             f") hits{cut} ORDER BY hits.distance, hits.id"
         )
@@ -1803,7 +1840,9 @@ class KnowledgeStore:
         top_k: int,
         min_score: float | None,
         metadata_filter: Mapping[str, Any] | None,
-    ) -> tuple[str, dict[str, Any]] | None:
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """(ANN SQL, exact SQL, params) with this transaction's HNSW settings applied, or None when
+        no knowledge base is eligible."""
         _require_tenant(tenant_id)
         dims = len(query_embedding)
         if dims not in HNSW_DIMENSIONS:
@@ -1834,6 +1873,9 @@ class KnowledgeStore:
         # SET LOCAL equivalents (bindable): reset when this transaction ends.
         session.execute(text("SELECT set_config('hnsw.ef_search', :v, true)"), {"v": str(ef_search)})
         session.execute(text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"))
+        session.execute(
+            text("SELECT set_config('hnsw.max_scan_tuples', :v, true)"), {"v": str(int(HNSW_MAX_SCAN_TUPLES))}
+        )
         params.update(
             {
                 "t": tenant_id,
@@ -1845,7 +1887,24 @@ class KnowledgeStore:
         )
         if min_score is not None:
             params["max_distance"] = 1.0 - float(min_score)
-        return self._search_sql(dims, clauses, min_score is not None), params
+        with_min = min_score is not None
+        return self._search_sql(dims, clauses, with_min), self._search_sql(dims, clauses, with_min, exact=True), params
+
+    @staticmethod
+    def _active_chunk_count(session, params: Mapping[str, Any], limit: int) -> int:
+        """The embedded chunks of the eligible knowledge bases' active generations (every document
+        version: an upper bound), counted up to `limit + 1` only."""
+        return int(
+            session.execute(
+                text(
+                    "SELECT count(*) FROM (SELECT 1 FROM kb_chunks c JOIN knowledge_bases kb"
+                    " ON kb.tenant_id = c.tenant_id AND kb.id = c.kb_id AND kb.active_generation = c.generation"
+                    " WHERE c.tenant_id = :t AND c.kb_id = ANY(CAST(:kb_ids AS uuid[])) AND kb.tenant_id = :t"
+                    " AND c.embedding IS NOT NULL LIMIT :n) x"
+                ),
+                {"t": params["t"], "kb_ids": params["kb_ids"], "n": int(limit) + 1},
+            ).scalar_one()
+        )
 
     def search(
         self,
@@ -1863,8 +1922,15 @@ class KnowledgeStore:
         embedding_model)`, the active generation and document version only, the metadata filter
         (`metadata @> …`: key = value, a list = any of), the dimension predicate and cast of the
         partial HNSW index, `ORDER BY distance LIMIT top_k`, then the `min_score` cut
-        (score = 1 - distance), re-sorted by exact distance. `hnsw.ef_search = max(40, 4 × top_k)`
-        and `hnsw.iterative_scan = relaxed_order` are set for this transaction only.
+        (score = 1 - distance), re-sorted by exact distance. `hnsw.ef_search = max(40, 4 × top_k)`,
+        `hnsw.iterative_scan = relaxed_order` and `hnsw.max_scan_tuples = HNSW_MAX_SCAN_TUPLES` are
+        set for this transaction only.
+
+        Exact-search fallback: the HNSW index is shared by every tenant, so a small knowledge base
+        behind many nearer foreign rows can exhaust the scan with fewer than top_k rows. Then, when
+        those knowledge bases' active chunks number at most EXACT_SEARCH_MAX_CHUNKS
+        (EAP_KB_EXACT_SEARCH_MAX_CHUNKS) and more than were returned, the same query runs again,
+        exactly (no index), in the same transaction. Larger knowledge bases keep the ANN result.
 
         Knowledge bases of another tenant, deleted ones, and ones under another embedding model
         give no rows (use existing_knowledge_base_ids for the "no longer exists" error). Raises
@@ -1878,8 +1944,12 @@ class KnowledgeStore:
             if prepared is None:
                 session.rollback()
                 return []
-            sql, params = prepared
+            sql, exact_sql, params = prepared
             rows = session.execute(text(sql), params).mappings().all()
+            if len(rows) < int(top_k):
+                limit = exact_search_max_chunks()
+                if limit > 0 and len(rows) < self._active_chunk_count(session, params, limit) <= limit:
+                    rows = session.execute(text(exact_sql), params).mappings().all()
             session.commit()
         return [
             SearchHit(
@@ -1913,10 +1983,12 @@ class KnowledgeStore:
         min_score: float | None = None,
         metadata_filter: Mapping[str, Any] | None = None,
         disable_seqscan: bool = True,
+        exact: bool = False,
     ) -> str:
-        """EXPLAIN of exactly the SQL `search` runs, with the same settings (diagnostics and tests:
-        a small table makes the planner prefer a sequential scan, hence `disable_seqscan`). Empty
-        when the search would not query (no eligible knowledge base)."""
+        """EXPLAIN of exactly the SQL `search` runs (`exact`: its exact-search fallback), with the
+        same settings (diagnostics and tests: a small table makes the planner prefer a sequential
+        scan, hence `disable_seqscan`). Empty when the search would not query (no eligible
+        knowledge base)."""
         with self.Session() as session:
             prepared = self._prepare_search(
                 session, tenant_id, knowledge_base_ids, query_embedding, embedding_model, top_k, min_score,
@@ -1925,7 +1997,8 @@ class KnowledgeStore:
             if prepared is None:
                 session.rollback()
                 return ""
-            sql, params = prepared
+            ann_sql, exact_sql, params = prepared
+            sql = exact_sql if exact else ann_sql
             if disable_seqscan:
                 session.execute(text("SET LOCAL enable_seqscan = off"))
             plan = "\n".join(r[0] for r in session.execute(text("EXPLAIN " + sql), params))

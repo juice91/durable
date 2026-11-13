@@ -39,6 +39,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -461,14 +462,17 @@ class MemoryConfig(OmitNoneModel):
         return self.history if self.history is not None else HistoryConfig()
 
     def effective_redact(self, input_processors: tuple[Any, ...] = ()) -> PiiRedactConfig | None:
-        """The redaction config for memory writes: `redact`, else the first input `pii_redact`
-        processor's config (with action forced to redact), else None."""
+        """The redaction config for memory writes: `redact`, else the kinds of EVERY input
+        `pii_redact` processor merged (first appearance order, action forced to redact), else None."""
         if self.redact is not None:
             return self.redact
+        kinds: list[Any] = []
         for processor in input_processors:
             if getattr(processor, "type", None) == "pii_redact":
-                return processor.config.model_copy(update={"action": "redact"})
-        return None
+                kinds.extend(k for k in processor.config.kinds if k not in kinds)
+        if not kinds:
+            return None
+        return PiiRedactConfig(kinds=tuple(kinds), action="redact")
 
     def chat_models(self) -> tuple[ModelRef, ...]:
         """Chat models memory calls (observer), for the model allowlist check."""
@@ -479,7 +483,50 @@ class MemoryConfig(OmitNoneModel):
         return (self.semantic_recall.embedding_model,) if self.semantic_recall is not None else ()
 
 
+# ------------------------------------------------------------------ the instructions block
+
+# The worker (eap_worker.memory.render_memory_instructions) appends this block to a memory turn's
+# instructions: it starts with these two lines and ends with the closing tag (note content escapes
+# `<`, so the tag cannot occur inside it).
+WORKING_MEMORY_BLOCK_HEADING = "## Working memory"
+WORKING_MEMORY_BLOCK_LEAD = "Your persistent notes, kept across "
+WORKING_MEMORY_BLOCK_END = "</working_memory>"
+_WM_BLOCK_RE = re.compile(
+    r"(?:\n\n)?" + re.escape(f"{WORKING_MEMORY_BLOCK_HEADING}\n{WORKING_MEMORY_BLOCK_LEAD}") + r".*?"
+    + re.escape(WORKING_MEMORY_BLOCK_END),
+    re.S,
+)
+
+
+def strip_working_memory_block(instructions: str | None) -> str | None:
+    """`instructions` without the working memory block(s); the base instructions stay."""
+    if not instructions or WORKING_MEMORY_BLOCK_HEADING not in instructions:
+        return instructions
+    return _WM_BLOCK_RE.sub("", instructions)
+
+
+def strip_working_memory_messages(messages: Any) -> Any:
+    """Stored messages (ModelMessage JSON) with the working memory block removed from every
+    request's `instructions`. Returns a new list (unchanged messages are shared); anything that is
+    not a list is returned as is."""
+    if not isinstance(messages, list):
+        return messages
+    out: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("kind") == "request" and isinstance(message.get("instructions"), str):
+            stripped = strip_working_memory_block(message["instructions"])
+            if stripped != message["instructions"]:
+                message = {**message, "instructions": stripped or None}
+        out.append(message)
+    return out
+
+
 __all__ = [
+    "WORKING_MEMORY_BLOCK_END",
+    "WORKING_MEMORY_BLOCK_HEADING",
+    "WORKING_MEMORY_BLOCK_LEAD",
+    "strip_working_memory_block",
+    "strip_working_memory_messages",
     "DEFAULT_WORKING_MEMORY_TEMPLATE",
     "HistoryConfig",
     "MAX_JSON_DEPTH",

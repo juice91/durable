@@ -44,6 +44,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         description="Control-plane API for the Enterprise Agent Platform",
         version="1.0.0",
         lifespan=lifespan,
+        # No 307 to the slash-less path: no route ends in '/', and a client that normalizes a '..'
+        # path segment (DELETE …/documents/.. becomes DELETE /knowledge-bases/{id}/) must get a 404,
+        # not a redirect that fetch follows with the same method onto the knowledge base itself
+        # (RAG milestone checkpoint review, 2026-11-14).
+        redirect_slashes=False,
         # FastAPI's native OpenTelemetry follows any global provider; pin it to ours, or off.
         telemetry=(
             {"tracer_provider": tracer_provider}

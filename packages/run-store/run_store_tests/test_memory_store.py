@@ -581,7 +581,9 @@ def test_delete_conversation_scrubs_events_and_ledger(store, runs, engine, tenan
     other_run = run_of(engine, tenant, other, 1)
     plant(engine, tenant, agent, store, other_run)
     before = usage_state(engine, tenant, run_ids)
-    assert secret_hits(engine, tenant, run_ids) == {"events": 14, "runs": 2, "ledger": 2}
+    # 12, not 14: memory_updated never names the planted non-schema key (changed_keys lists schema
+    # properties only; other keys are a count, checkpoint review fix).
+    assert secret_hits(engine, tenant, run_ids) == {"events": 12, "runs": 2, "ledger": 2}
 
     assert store.delete_conversation(tenant, conv)
     assert secret_hits(engine, tenant, run_ids) == {"events": 0, "runs": 0, "ledger": 0}
@@ -594,7 +596,7 @@ def test_delete_conversation_scrubs_events_and_ledger(store, runs, engine, tenan
     assert kept[1].data == {"model_id": "test:echo", "usage": {"input_tokens": 7, "output_tokens": 3},
                             "redacted": True}
     # another conversation's runs are untouched
-    assert secret_hits(engine, tenant, [other_run]) == {"events": 7, "runs": 1, "ledger": 1}
+    assert secret_hits(engine, tenant, [other_run]) == {"events": 6, "runs": 1, "ledger": 1}  # see above
 
 
 def test_forget_resource_scrubs_key_names_and_conversations(store, runs, engine, tenant, agent):

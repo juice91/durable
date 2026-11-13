@@ -148,6 +148,7 @@ from eap_schemas.memory import (
     WorkingMemoryConfig,
     WorkingMemoryInvalid,
     merge_working_memory,
+    strip_working_memory_messages,
     validate_working_memory_content,
     validate_working_memory_schema,
     validate_working_memory_text,
@@ -501,17 +502,27 @@ class WorkingMemoryWrite:
     scope: str
     format: str
     version: int
-    changed_keys: tuple[str, ...]  # top-level keys a json write touched; () for markdown
+    # Top-level keys a json write touched that are properties of the schema; () for markdown.
+    changed_keys: tuple[str, ...]
     replayed: bool = False  # True: the ledger key existed, nothing was written
     agent_id: str = ""
     scope_key: str = ""
     # The row as this write stored it (RETURNING, same transaction); None on a replay. Never in the
     # ledger or event data.
     note: "WorkingMemory | None" = field(default=None, compare=False, repr=False)
+    # How many touched top-level keys are NOT schema properties (model-invented keys: a count only,
+    # never the key, which is model-written text).
+    other_changed_keys: int = 0
 
     def event_data(self) -> dict[str, Any]:
-        """The default `memory_updated` data: no content, no resource id."""
-        return {"scope": self.scope, "format": self.format, "version": self.version, "changed_keys": list(self.changed_keys)}
+        """The default `memory_updated` data: no content, no resource id, schema property names
+        only (`other_changed_keys`: the count of any other touched keys, when there are some)."""
+        data: dict[str, Any] = {
+            "scope": self.scope, "format": self.format, "version": self.version, "changed_keys": list(self.changed_keys)
+        }
+        if self.other_changed_keys:
+            data["other_changed_keys"] = self.other_changed_keys
+        return data
 
     def ledger_result(self) -> dict[str, Any]:
         return {**self.event_data(), "agent_id": self.agent_id, "scope_key": self.scope_key}
@@ -526,6 +537,7 @@ class WorkingMemoryWrite:
             replayed=True,
             agent_id=result.get("agent_id", ""),
             scope_key=result.get("scope_key", ""),
+            other_changed_keys=int(result.get("other_changed_keys") or 0),
         )
 
 
@@ -662,8 +674,9 @@ def ledger_row_key(ledger_key: str, agent_id: str) -> str:
 
 def turn_approx_tokens(turn: Mapping[str, Any]) -> int:
     """A turn's size for `history.max_tokens`: ceil(chars / 4) of its stored messages JSON
-    (compact), or of input + output for a turn completed without messages."""
-    messages = turn.get("messages")
+    (compact; any working memory block in a request's instructions not counted), or of input +
+    output for a turn completed without messages."""
+    messages = strip_working_memory_messages(turn.get("messages"))
     if messages:
         return _approx_tokens(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
     return _approx_tokens((turn.get("input") or "") + (turn.get("output") or ""))
@@ -822,13 +835,21 @@ def _obs(row: Mapping[str, Any]) -> Observation:
     )
 
 
-def _changed_keys(old: Any, new: Any, patch: Mapping[str, Any] | None) -> tuple[str, ...]:
+def _changed_keys(
+    old: Any, new: Any, patch: Mapping[str, Any] | None, json_schema: Mapping[str, Any] | None = None
+) -> tuple[tuple[str, ...], int]:
+    """(touched top-level keys that are schema properties, sorted; count of the other touched keys)."""
     if patch is not None:
-        return tuple(sorted(patch))
-    if not isinstance(new, dict):
-        return ()
-    base = old if isinstance(old, dict) else {}
-    return tuple(sorted(k for k in set(base) | set(new) if base.get(k, _MISSING) != new.get(k, _MISSING)))
+        touched: set[str] = set(patch)
+    elif isinstance(new, dict):
+        base = old if isinstance(old, dict) else {}
+        touched = {k for k in set(base) | set(new) if base.get(k, _MISSING) != new.get(k, _MISSING)}
+    else:
+        return (), 0
+    properties = json_schema.get("properties") if isinstance(json_schema, Mapping) else None
+    names = set(properties) if isinstance(properties, Mapping) else set()
+    listed = tuple(sorted(k for k in touched if k in names))
+    return listed, len(touched) - len(listed)
 
 
 _MISSING: Any = object()
@@ -1022,8 +1043,9 @@ class MemoryStore:
                         raise ConversationNotFound(tenant_id, scope_key) from None
                     raise
                 if inserted is not None:
+                    listed, other = _changed_keys(None, new, patch, json_schema)
                     result = WorkingMemoryWrite(
-                        scope, fmt, 1, _changed_keys(None, new, patch), False, agent, scope_key, _wm(inserted)
+                        scope, fmt, 1, listed, False, agent, scope_key, _wm(inserted), other
                     )
                     return self._finish_write(session, tenant_id, row_key, event, result)
                 # A concurrent first write won the insert: wait for it, then apply on top of it.
@@ -1042,8 +1064,9 @@ class MemoryStore:
                 ),
                 {**params, "f": fmt, "content": json.dumps(new, ensure_ascii=False), "run": run_id},
             ).mappings().one()
+            listed, other = _changed_keys(old, new, patch, json_schema)
             result = WorkingMemoryWrite(
-                scope, fmt, stored["version"], _changed_keys(old, new, patch), False, agent, scope_key, _wm(stored)
+                scope, fmt, stored["version"], listed, False, agent, scope_key, _wm(stored), other
             )
             return self._finish_write(session, tenant_id, row_key, event, result)
 
@@ -1548,7 +1571,9 @@ class MemoryStore:
                 "run_id": r["id"],
                 "input": r["input"],
                 "output": r["output"],
-                "messages": r["messages"],
+                # A turn stored before RM.12's fix may hold the working memory block in its
+                # instructions: never passed on or counted (the turn re-renders its own block).
+                "messages": strip_working_memory_messages(r["messages"]),
                 "created_at": r["created_at"],
             }
             item["approx_tokens"] = turn_approx_tokens(item)

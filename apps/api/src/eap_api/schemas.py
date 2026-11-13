@@ -141,6 +141,14 @@ class ConversationCreate(BaseModel):
         description="1-128 characters of A-Z, a-z, 0-9, '_', '.', ':', '@' or '-'; default: the caller's user id",
     )
 
+    @field_validator("resource_id")
+    @classmethod
+    def validate_resource_id(cls, value: str | None) -> str | None:
+        """The store's rule (eap_run_store.validate_resource_id): also no dot-only ids (`.`, `..`)."""
+        from eap_run_store import validate_resource_id
+
+        return validate_resource_id(value)
+
     @field_validator("title")
     @classmethod
     def validate_title(cls, value: str | None) -> str | None:
@@ -210,11 +218,16 @@ def kb_name(value: str) -> str:
 
 
 def document_key_problem(key: str) -> str | None:
-    """Why `key` is not a valid document key (1–256 characters, no '/', no control character), or None."""
+    """Why `key` is not a valid document key, or None. A key is 1–256 characters with no '/' or
+    '\\', no control character, no surrounding whitespace, and not only dots: the key is a URL
+    path segment, and a client (or proxy) normalizes `.` and `..` segments away, so a DELETE of
+    document `..` would otherwise reach the knowledge base itself (checkpoint review, 2026-11-14)."""
     if not 1 <= len(key) <= MAX_DOCUMENT_KEY_LENGTH:
         return f"document_key must be 1 to {MAX_DOCUMENT_KEY_LENGTH} characters"
-    if "/" in key or any(not ch.isprintable() for ch in key) or key != key.strip():
-        return "document_key must not contain '/', control characters, or surrounding whitespace"
+    if "/" in key or "\\" in key or any(not ch.isprintable() for ch in key) or key != key.strip():
+        return "document_key must not contain '/', '\\', control characters, or surrounding whitespace"
+    if set(key) == {"."}:
+        return "document_key must not be only dots ('.' and '..' are path segments)"
     return None
 
 
@@ -334,6 +347,18 @@ class KnowledgeBaseResponse(BaseModel):
     chunk_count: int | None = None
 
 
+class KnowledgeBaseDetailResponse(KnowledgeBaseResponse):
+    """GET /knowledge-bases/{id}: the knowledge base plus what its `kb_ingest` runs (ingests and
+    reindexes, finished or in flight) have spent so far, summed over their model requests:
+    `ingest_tokens` (input + output tokens), `ingest_cost_usd` (a decimal string, null when any of
+    those requests had no price, "0.0000000000" when there were none) and `ingest_requests`.
+    Search tester runs are not counted."""
+
+    ingest_tokens: int
+    ingest_cost_usd: str | None
+    ingest_requests: int
+
+
 class KnowledgeBaseListResponse(BaseModel):
     items: list[KnowledgeBaseResponse]
 
@@ -362,7 +387,11 @@ class KnowledgeDocumentResponse(BaseModel):
 
 
 class KnowledgeDocumentListResponse(BaseModel):
+    """A page of documents by document_key. `next_after` is an opaque cursor when a full page came
+    back (pass it back verbatim as `after`), else null."""
+
     items: list[KnowledgeDocumentResponse]
+    next_after: str | None = None
 
 
 class DocumentPutResponse(BaseModel):

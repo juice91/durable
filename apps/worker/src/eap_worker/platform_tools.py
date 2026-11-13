@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -334,8 +335,16 @@ def _cut_utf8(text: str, max_bytes: int) -> str:
 def quote_section(content: str) -> str:
     """Section text with every line prefixed `> `, so no line of retrieved (tenant-uploaded) text can
     start like a source header `[n] ... — url` and forge a citation. The structured sources stay
-    authoritative: clients link `[n]` from `sources[n]`, never from a URL in the model's text."""
-    return "\n".join("> " + line for line in content.split("\n"))
+    authoritative: clients link `[n]` from `sources[n]`, never from a URL in the model's text.
+
+    Lines are split on every line boundary str.splitlines knows (\\r\\n, \\n, \\r, \\v, \\f,
+    \\x1c-\\x1e, \\x85, U+2028, U+2029), not only \\n, so no renderer or model can see a line that
+    starts unquoted; the output uses \\n only."""
+    return "\n".join("> " + line for line in _LINE_BREAKS.split(content))
+
+
+# str.splitlines' boundaries, as a split (a trailing break still yields a final empty line).
+_LINE_BREAKS = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
 def source_record(n: int, hit: SearchHit) -> dict[str, Any]:

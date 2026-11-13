@@ -27,14 +27,16 @@ TOOL_WORKFLOW_NAME = "eap.tool_run"
 # workflow_version_id, input_json)` on the same queue.
 WORKFLOW_RUN_NAME = "eap.workflow_run"
 # Knowledge base ingest runs (RAG and memory milestone, RM.7 enqueues, RM.10 implements):
-# `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on the same queue, workflow_id =
-# run_id. All four arguments are strings. `input_json` is the run's stored `input`, canonical JSON
+# `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on its own queue,
+# KB_INGEST_QUEUE_NAME (`eap-kb-ingest`), so a large ingest or reindex never holds agent-run
+# concurrency slots (checkpoint review, 2026-11-14), workflow_id = run_id. All four arguments are strings. `input_json` is the run's stored `input`, canonical JSON
 # (sorted keys, no spaces), in one of two modes:
 #   ingest:  {"doc_version":<int>,"document_id":"<uuid>"}  ingest that version of the document
 #   reindex: {"reindex":<int>}                             embed the knowledge base's pending
 #                                                          generation <int> (model and dimensions
 #                                                          are the knowledge base's pending_* columns)
 KB_INGEST_WORKFLOW_NAME = "eap.kb_ingest"
+KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 
 
 def approval_topic(step_id: str) -> str:
@@ -111,7 +113,8 @@ class RunLauncher(Protocol):
 
 
 class DBOSRunLauncher:
-    """Enqueues `eap.agent_run`, `eap.tool_run`, `eap.workflow_run` and `eap.kb_ingest` on `eap-agent-runs`. The DBOSClient is created on first use."""
+    """Enqueues `eap.agent_run`, `eap.tool_run` and `eap.workflow_run` on `eap-agent-runs`, and
+    `eap.kb_ingest` on `eap-kb-ingest`. The DBOSClient is created on first use."""
 
     def __init__(self, settings: LauncherSettings, client: Any | None = None) -> None:
         self.settings = settings
@@ -183,7 +186,7 @@ class DBOSRunLauncher:
     ) -> None:
         """Enqueue `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)`, workflow_id = run_id
         (see KB_INGEST_WORKFLOW_NAME for the input modes)."""
-        options = self._options(KB_INGEST_WORKFLOW_NAME, run_id, traceparent)
+        options = self._options(KB_INGEST_WORKFLOW_NAME, run_id, traceparent, queue_name=KB_INGEST_QUEUE_NAME)
         self._get_client().enqueue(options, str(run_id), tenant_id, str(knowledge_base_id), input_json)
 
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None:
@@ -191,9 +194,11 @@ class DBOSRunLauncher:
         wake-up: the decision itself is the run's `step:{step_id}:decision` event."""
         self._get_client().send(workflow_id, {"decision": decision}, approval_topic(step_id))
 
-    def _options(self, workflow_name: str, run_id: UUID, traceparent: str | None) -> dict[str, Any]:
+    def _options(
+        self, workflow_name: str, run_id: UUID, traceparent: str | None, *, queue_name: str = QUEUE_NAME
+    ) -> dict[str, Any]:
         options: dict[str, Any] = {
-            "queue_name": QUEUE_NAME,
+            "queue_name": queue_name,
             "workflow_name": workflow_name,
             "workflow_id": str(run_id),
             "app_version": self.settings.app_version,

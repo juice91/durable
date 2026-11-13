@@ -53,3 +53,43 @@ pytest plugin), and drops both. `test_live_litellm.py` runs only when
 
 `EAP_CRASH_AT` = `model_request` | `after_tool_call` | `after_event_write` calls `os._exit(137)` at
 that point; see `src/eap_worker/crash.py` for exactly where.
+
+## Upgrading
+
+### RAG and memory milestone (RM, 2026-11)
+
+Deploy the API and the worker together, in this order:
+
+1. **Drain in-flight runs first.** Stop new runs (or stop the API), wait until no run is `queued`
+   or `running` (`GET /api/v1/runs?status=queued,running` is empty), then stop the old workers.
+   DBOS recovers a workflow by replaying its recorded step sequence, and this milestone changes it:
+   - a conversation turn of an agent with `memory` runs `eap.load_memory` **instead of**
+     `eap.load_history` (the same slot), and `eap.start_run` now records the conversation's
+     `resource_id`. A turn whose `eap.start_run` was recorded by an older worker must not be
+     recovered by the new one;
+   - P0.17's processor steps (`eap.input_processors`, `eap.output_processors`) are part of the
+     layout the new worker replays; a run started before them cannot be recovered by it either.
+
+   A spec with neither `knowledge_bases` nor `memory` keeps its exact step names, so only memory
+   turns are at risk, but drain everything: it is the only safe rule.
+2. **Swap the Postgres image to pgvector** if the database still runs `postgres:17`: the dev stack
+   uses `pgvector/pgvector:0.8.2-pg17-trixie`, which opens the same volume. Follow
+   `packages/db/README.md` ("pgvector") step by step: it checks the compose project and volume
+   before recreating the container, and takes an optional backup. pgvector 0.8.0 or later is
+   required (iterative index scans).
+3. **Migrate:** `uv run alembic -c packages/db/alembic.ini upgrade head` applies
+   `0011_knowledge_bases` (knowledge bases, documents, chunks with partial HNSW indexes, the
+   `kb_ingest` run kind, `run_model_requests.operation`), `0012_memory` (working memory and
+   observations) and `0013_semantic_recall` (message embeddings). 0011 fails fast with a clear
+   message when the `vector` extension is missing or older than 0.8.0. Workers refuse to start
+   until the schema is at head.
+4. **New queue `eap-kb-ingest`.** The API enqueues `eap.kb_ingest` (document ingests and
+   reindexes) there, not on `eap-agent-runs`; every worker of this version listens on both, with at
+   most `EAP_KB_INGEST_CONCURRENCY` (default 2) ingest runs per worker. An old worker does not
+   listen on `eap-kb-ingest`, which is one more reason not to mix versions. Size
+   `EAP_KB_MAX_INGEST_TOKENS` before the first reindex of a large knowledge base (the rule is in
+   `.dev.env.example`).
+5. **New optional settings** (all in `.dev.env.example`): `EAP_ALLOWED_EMBEDDING_MODELS`,
+   `EAP_EMBEDDING_QUERY_INSTRUCTIONS`, `EAP_KB_*`, the `EAP_LITELLM_EMBEDDING_*` pair, and
+   `EAP_AUDIT_HASH_SALT` (set it per deployment so the forget audit log's resource hash cannot be
+   looked up offline).

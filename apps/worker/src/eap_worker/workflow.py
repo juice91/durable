@@ -102,7 +102,9 @@ checks (so a failure there ends the run with a durable run_failed) and never for
                                         ledger row in one transaction
 
 The recorded note is rendered into the instructions as a delimited "Working memory" block, fixed
-for the turn. A spec without `memory`, a standalone run and a workflow child run keep their exact
+for the turn. It is never stored: runs.messages keep the base instructions only, and
+update_working_memory's arguments are a placeholder there and in the model_message and tool_call
+events (eap_worker.memory.scrub_memory_messages; history re-renders the block from eap.load_memory). A spec without `memory`, a standalone run and a workflow child run keep their exact
 step layout, toolset and full history (up to EAP_MAX_HISTORY_BYTES).
 
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
@@ -151,7 +153,16 @@ from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import InputBlocked, OutputBlocked, classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
-from eap_worker.memory import instructions_with_memory, load_memory_step, memory_context, memory_of, with_memory
+from eap_worker.memory import (
+    instructions_with_memory,
+    load_memory_step,
+    memory_context,
+    memory_of,
+    scrub_memory_message,
+    scrub_memory_messages,
+    scrub_memory_tool_args,
+    with_memory,
+)
 from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
@@ -587,6 +598,8 @@ async def _drive_agent(
 
     if model_id is None:
         model_id = model_id_for(spec.model.provider, spec.model.name)
+    # RM.12: a memory turn stores no copy of the note (eap_worker.memory.scrub_memory_messages).
+    memory = memory_of(deps)
     n = 0
     pending: list[ToolCallPart] = []
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
@@ -610,6 +623,7 @@ async def _drive_agent(
                 text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
                 usage = request_usage_input(model_id, response.model_name, response.usage)
                 message = _message_json(response)
+                message = scrub_memory_message(message, memory)
                 if spec.output_processors:
                     # Thinking is model text no processor checks: never stored, for every response.
                     message = strip_thinking(message)
@@ -651,7 +665,9 @@ async def _drive_agent(
                         {
                             "tool_call_id": call.tool_call_id,
                             "tool_name": call.tool_name,
-                            "args": to_jsonable_python(call.args_as_dict(), fallback=str),
+                            "args": scrub_memory_tool_args(
+                                call.tool_name, to_jsonable_python(call.args_as_dict(), fallback=str), memory
+                            ),
                         },
                     )
                 pending = calls
@@ -659,7 +675,9 @@ async def _drive_agent(
         if pending:
             await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
         assert run.result is not None
-        new_messages = ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")
+        new_messages = scrub_memory_messages(
+            ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json"), memory
+        )
         if not spec.output_processors:
             return run.result.output, new_messages
         if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
@@ -683,8 +701,10 @@ async def agent_run(
         link = await start_run_step(run_id, tenant_id, agent_id, version, input_text, spec_json) or {}
         if link.get("superseded"):
             # Its hand-off failed (the run is failed with ENQUEUE_FAILED_ERROR) and a later turn has
-            # started since: running it now would run two turns at once. No event, no model call, no tool.
-            log.warning("run %s not started: a later turn of its conversation has started", run_id)
+            # started since (running it now would run two turns at once), or its conversation was
+            # deleted meanwhile (a detached run must never write output again). No event, no model
+            # call, no tool.
+            log.warning("run %s not started: a later turn has started or its conversation was deleted", run_id)
             return {"status": "failed", "error": ENQUEUE_FAILED_ERROR, "error_code": "superseded"}
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)

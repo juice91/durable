@@ -2,7 +2,9 @@
 
 Hand-off (apps/api/src/eap_api/launcher.py, KB_INGEST_WORKFLOW_NAME): the API inserts a `runs` row of
 kind 'kb_ingest' and enqueues `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on
-queue `eap-agent-runs` with workflow_id = run_id. `input_json` is the run's canonical input:
+its own queue `eap-kb-ingest` (eap_worker.config.KB_INGEST_QUEUE_NAME; at most
+EAP_KB_INGEST_CONCURRENCY, default 2, running per worker) with workflow_id = run_id. Runs enqueued
+on `eap-agent-runs` before that split still run there. `input_json` is the run's canonical input:
 
     ingest:  {"doc_version": N, "document_id": "<uuid>"}   chunk and embed that version, then switch
     reindex: {"reindex": G}                                 embed the pending generation G, then switch
@@ -47,7 +49,9 @@ Durability:
   ordinal)); a finalisation is one transaction and answers 'already_active' when repeated.
 - Failures are classified inside the steps and checkpointed as text-free failure dicts, so a replay
   takes the same path. `eap.kb_embed_batch` retries the provider itself (EMBED_ATTEMPTS, for
-  embeddings.is_retryable errors: 408/409/429/5xx, connection errors, timeouts) and turns every
+  embeddings.is_retryable errors: 408/409/429/5xx, connection errors, timeouts; a rate limit gets
+  RATE_LIMIT_ATTEMPTS with a longer jittered backoff that honours Retry-After, capped: see
+  embed_retry_delay) and turns every
   provider failure into such a dict: provider exceptions, whose text may echo the input, never reach
   DBOS's retry handler, its logs or its span events. DBOS retries a step only for database deadlocks /
   serialization failures (SQLSTATE 40P01 / 40001; chunk-row locks have no fixed order, see the RM.4
@@ -72,6 +76,8 @@ import asyncio
 import json
 import logging
 import os
+import random
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -111,9 +117,15 @@ MAX_ROUNDS = 50
 MAX_IDLE_ROUNDS = 3
 NOT_CONVERGED = "ingest_not_converged"
 # Provider attempts per batch, inside eap.kb_embed_batch (retryable errors only), with backoff
-# EMBED_RETRY_SECONDS * 2**attempt.
+# EMBED_RETRY_SECONDS * 2**attempt (plus up to 25 % jitter).
 EMBED_ATTEMPTS = 3
 EMBED_RETRY_SECONDS = 1.0
+# A rate limit (HTTP 429 / ModelRateLimitError) gets more attempts and a longer, jittered backoff:
+# RATE_LIMIT_RETRY_SECONDS * 2**attempt, at least the provider's Retry-After, at most
+# RATE_LIMIT_MAX_DELAY_SECONDS per wait (about 3.5 minutes in the worst case over all attempts).
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_RETRY_SECONDS = 2.0
+RATE_LIMIT_MAX_DELAY_SECONDS = 60.0
 
 STEP_RETRY = {"retries_allowed": True, "max_attempts": 3, "interval_seconds": 1.0, "backoff_rate": 2.0}
 
@@ -130,6 +142,8 @@ __all__ = [
     "KB_INGEST_WORKFLOW_NAME",
     "IngestFailed",
     "batch_event_key",
+    "embed_retry_delay",
+    "is_rate_limited",
     "batch_request_key",
     "kb_chunk_step",
     "kb_copy_step",
@@ -220,6 +234,39 @@ def _transient(exc: BaseException) -> bool:
 
 def _store() -> KnowledgeStore:
     return KnowledgeStore(get_runtime().engine)
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """A provider rate limit: HTTP 429 or pydantic-ai's ModelRateLimitError."""
+    from pydantic_ai.exceptions import ModelHTTPError, ModelRateLimitError
+
+    if isinstance(exc, ModelRateLimitError):
+        return True
+    return isinstance(exc, ModelHTTPError) and exc.status_code == 429
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    value = getattr(exc, "retry_after", None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+def embed_retry_delay(exc: BaseException, attempt: int, rand: Callable[[], float] = random.random) -> float:
+    """Seconds to wait before the next embedding attempt (`attempt` is 0 for the first failure).
+
+    A rate limit: RATE_LIMIT_RETRY_SECONDS * 2**attempt with up to 25 % jitter, at least the
+    provider's Retry-After (pydantic-ai's `retry_after`: `retry-after-ms` / `Retry-After`), at most
+    RATE_LIMIT_MAX_DELAY_SECONDS. Anything else: EMBED_RETRY_SECONDS * 2**attempt with up to 25 %
+    jitter. Jitter spreads the retries of concurrent ingests that hit the limit together."""
+    jitter = 1.0 + 0.25 * rand()
+    if not is_rate_limited(exc):
+        return EMBED_RETRY_SECONDS * (2**attempt) * jitter
+    delay = RATE_LIMIT_RETRY_SECONDS * (2**attempt) * jitter
+    after = _retry_after(exc)
+    if after is not None:
+        delay = max(delay, after)
+    return min(delay, RATE_LIMIT_MAX_DELAY_SECONDS)
 
 
 def _failure(code: str, error_type: str, message: str) -> dict[str, Any]:
@@ -490,19 +537,21 @@ async def kb_embed_batch_step(
             texts.append(c.embed_text)
             tokens += c.approx_tokens
     call = None
-    for attempt in range(EMBED_ATTEMPTS):
+    for attempt in range(max(EMBED_ATTEMPTS, RATE_LIMIT_ATTEMPTS)):
         try:
             call = await _embeddings.embed_documents(
                 rt.settings, tenant_id=tenant_id, run_id=run_id, request_key=key, model_id=embedding_model, texts=texts
             )
             break
         except Exception as exc:  # noqa: BLE001 - classified here: a text-free failure dict, never re-raised
-            if is_retryable(exc) and attempt + 1 < EMBED_ATTEMPTS:
+            limited = is_rate_limited(exc)
+            if is_retryable(exc) and attempt + 1 < (RATE_LIMIT_ATTEMPTS if limited else EMBED_ATTEMPTS):
                 log_failure(
-                    log, "kb ingest embedding attempt failed; retrying", exc, code="embedding_retry",
+                    log, "kb ingest embedding attempt failed; retrying", exc,
+                    code="embedding_rate_limited" if limited else "embedding_retry",
                     run_id=run_id, tenant_id=tenant_id,
                 )
-                await asyncio.sleep(EMBED_RETRY_SECONDS * (2**attempt))
+                await asyncio.sleep(embed_retry_delay(exc, attempt))
                 continue
             failure = _embedding_failure(exc, embedding_model)
             log_failure(log, "kb ingest embedding failed", exc, code=failure["code"], run_id=run_id, tenant_id=tenant_id)

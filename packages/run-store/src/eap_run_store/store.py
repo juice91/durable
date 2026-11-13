@@ -410,11 +410,16 @@ class ConversationResourceConflict(ConversationIdConflict):
 
 
 def validate_resource_id(resource_id: str | None) -> str | None:
-    """Return `resource_id` if it is None or matches RESOURCE_ID_PATTERN; raise ValueError otherwise."""
+    """Return `resource_id` if it is None or matches RESOURCE_ID_PATTERN and is not dot-only; raise
+    ValueError otherwise. Dot-only ids (`.`, `..`, ...) are refused like dot-only document keys: a
+    resource id appears in URL paths (`/resources/{resource_id}/...`), where path normalisation would
+    turn them into another route. (The database CHECK keeps migration 0012's pattern.)"""
     if resource_id is None:
         return None
     if not isinstance(resource_id, str) or re.fullmatch(RESOURCE_ID_PATTERN, resource_id) is None:
         raise ValueError("resource_id must be 1 to 128 characters of A-Z, a-z, 0-9, '_', '.', ':', '@' or '-'")
+    if not resource_id.strip("."):
+        raise ValueError("resource_id must not consist of dots only")
     return resource_id
 
 
@@ -813,7 +818,10 @@ class RunStore:
         takes). If a later turn exists, this turn was marked failed by its hand-off and the
         conversation has moved on: it is left unchanged (still failed) and False is returned, so
         the workflow must stop without running it. A run without a conversation (agent, tool or
-        workflow run) never takes the lock and always returns True."""
+        workflow run) never takes the lock and returns True, except a DETACHED turn: its
+        conversation was deleted (delete_conversation set conversation_id, turn and input to NULL
+        on a terminal run, e.g. a failed hand-off that DBOS accepted after all). It is left
+        unchanged and False is returned, so it can never run and write output again."""
         if not tenant_id:
             raise ValueError("tenant_id is required")
         values = {
@@ -831,7 +839,7 @@ class RunStore:
         }
         with self.Session() as session:
             run = session.execute(
-                select(RunModel.conversation_id, RunModel.turn)
+                select(RunModel.conversation_id, RunModel.turn, RunModel.input, RunModel.status)
                 .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
             ).first()
             if run is None:
@@ -840,6 +848,18 @@ class RunStore:
                 session.execute(
                     select(ConversationModel.id).where(ConversationModel.id == run.conversation_id).with_for_update()
                 )
+                # Re-read under the lock (the lock order of create_turn and delete_conversation:
+                # conversation, then runs): a delete that held it has detached this run meanwhile.
+                run = session.execute(
+                    select(RunModel.conversation_id, RunModel.turn, RunModel.input, RunModel.status)
+                    .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+                ).one()
+            if run.conversation_id is None and run.input is None and run.status in TERMINAL_RUN_STATUSES:
+                # Detached by delete_conversation (every run is created with an input; only that
+                # deletion clears it): never revive it.
+                session.rollback()
+                return False
+            if run.conversation_id is not None:
                 later = session.execute(
                     select(RunModel.id)
                     .where(RunModel.conversation_id == run.conversation_id, RunModel.turn > run.turn)

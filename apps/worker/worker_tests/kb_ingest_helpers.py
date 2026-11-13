@@ -54,7 +54,7 @@ def enqueue_kb_ingest(client, run_store, *, tenant_id: str, kb_id: str, input_js
     run_store.create_kb_ingest_run(tenant_id, kb_id, input_json, run_id)
     client.enqueue(
         {
-            "queue_name": "eap-agent-runs",
+            "queue_name": "eap-kb-ingest",
             "workflow_name": "eap.kb_ingest",
             "workflow_id": str(run_id),
             "app_version": app_version,

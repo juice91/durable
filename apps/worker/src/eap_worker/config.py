@@ -17,6 +17,13 @@ TOOL_WORKFLOW_NAME = "eap.tool_run"
 WORKFLOW_RUN_NAME = "eap.workflow_run"
 WORKFLOW_BRANCH_NAME = "eap.workflow_branch"
 DELTA_CHANNEL = "eap_run_deltas"
+# Knowledge base ingest and reindex runs (eap.kb_ingest) have their own queue, so a bulk upload never
+# holds agent-run slots and never sends more than EAP_KB_INGEST_CONCURRENCY embedding workloads at
+# once from one worker. The API (apps/api launcher.KB_INGEST_QUEUE_NAME) enqueues on exactly this
+# name. Runs enqueued on QUEUE_NAME before the split still run there.
+KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
+KB_INGEST_CONCURRENCY_ENV = "EAP_KB_INGEST_CONCURRENCY"
+DEFAULT_KB_INGEST_CONCURRENCY = 2
 
 _DEFAULT_APP_DB = "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"
 _DEFAULT_DBOS_DB = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
@@ -100,3 +107,8 @@ class WorkerSettings:
             ),
             embedding_timeout_s=_positive_float("EAP_EMBEDDING_TIMEOUT_S", DEFAULT_EMBEDDING_TIMEOUT_S),
         )
+
+
+def kb_ingest_concurrency() -> int:
+    """At most this many eap.kb_ingest runs at once per worker process (EAP_KB_INGEST_CONCURRENCY, default 2)."""
+    return _positive_int(KB_INGEST_CONCURRENCY_ENV, DEFAULT_KB_INGEST_CONCURRENCY)

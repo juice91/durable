@@ -6,7 +6,7 @@ from dbos import DBOS, DBOSConfig
 from eap_observability import dbos_otel_config, otlp_endpoint_from_env, setup_logging, setup_telemetry
 from eap_observability.agents import instrument_pydantic_ai
 
-from eap_worker.config import QUEUE_NAME, WorkerSettings
+from eap_worker.config import KB_INGEST_QUEUE_NAME, QUEUE_NAME, WorkerSettings, kb_ingest_concurrency
 from eap_worker.runtime import configure_runtime
 
 # Importing registers the generic agent, its DBOS steps, the queue and the workflow. This must
@@ -58,6 +58,13 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     # DBOS 3.5 queues are database-backed: declared with register_queue once the system DB is up
     # (Queue(...) can no longer be constructed directly). The DBOSClient enqueues by name.
     DBOS.register_queue(QUEUE_NAME, polling_interval_sec=queue_polling_interval())
+    # eap.kb_ingest on its own queue, at most EAP_KB_INGEST_CONCURRENCY (2) running per worker, so a
+    # bulk upload neither starves agent runs nor floods the embedding provider.
+    DBOS.register_queue(
+        KB_INGEST_QUEUE_NAME,
+        worker_concurrency=kb_ingest_concurrency(),
+        polling_interval_sec=queue_polling_interval(),
+    )
     return settings
 
 

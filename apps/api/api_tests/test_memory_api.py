@@ -5,6 +5,8 @@ test_runs.py; memory rows are seeded through MemoryStore."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
 import uuid
 from typing import Any
@@ -15,6 +17,8 @@ from sqlalchemy import text
 
 from eap_run_store import MemoryStore
 from eap_run_store.memory import TurnText
+
+from eap_api.routes.memory import resource_audit_hash
 
 from .run_helpers import requires_pg
 from .test_conversations import create_conversation, finish, new_conversation, turn
@@ -456,10 +460,30 @@ class TestForgetResource:
         assert [getattr(r, "eap.agent_id") for r in records] == [aid, "*"]
         first = records[0]
         assert getattr(first, "eap.tenant_id") == tenant and getattr(first, "eap.user_id") == "alice"
-        assert getattr(first, "eap.resource_id") == "u3" and getattr(first, "eap.outcome") == "done"
+        assert getattr(first, "eap.resource_hash") == resource_audit_hash("u3") and getattr(first, "eap.outcome") == "done"
+        assert not hasattr(first, "eap.resource_id")
+        assert all("u3" not in r.getMessage() for r in records)
         assert getattr(first, "eap.working_memories") == 1 and getattr(first, "eap.message_embeddings") == 1
         assert getattr(records[1], "eap.conversations") == 1
         assert all("note" not in r.getMessage() for r in records)
+
+    def test_forget_audit_logs_a_salted_hash_not_the_email(self, pg, mem_tenant, caplog, monkeypatch):
+        client, _ = pg
+        _, h = mem_tenant()
+        email = "Jane.Doe@example.com"
+        monkeypatch.delenv("EAP_AUDIT_HASH_SALT", raising=False)
+        plain = resource_audit_hash(email)
+        assert plain == hashlib.sha256(email.encode()).hexdigest()[:16]
+        monkeypatch.setenv("EAP_AUDIT_HASH_SALT", "deployment-salt")
+        salted = resource_audit_hash(email)
+        assert salted == hmac.new(b"deployment-salt", email.encode(), hashlib.sha256).hexdigest()[:16]
+        assert salted != plain and resource_audit_hash(email) == salted  # stable
+        with caplog.at_level("INFO", logger="eap_api"):
+            assert client.delete(f"{API}/memory/resources/{email}", headers=h).status_code == 200
+        (record,) = [r for r in caplog.records if getattr(r, "eap.audit", None) == "memory_forget"]
+        assert getattr(record, "eap.resource_hash") == salted
+        assert email not in record.getMessage() and email.lower() not in record.getMessage().lower()
+        assert all(email not in str(v) for v in vars(record).values())
 
     def test_busy_is_409_and_isolation(self, pg, mem_tenant):
         client, app = pg

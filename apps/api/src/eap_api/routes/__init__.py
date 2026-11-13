@@ -218,6 +218,8 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
     """Publish-time policy, applied by publish and by restore (a restore is re-validated under
     today's policy, not the one in force when the source version was published). 422 on the first
     failure."""
+    _check_memory_features(spec)
+
     policy = ModelPolicy.from_env()
     # Model governance: only allowlisted models (EAP_ALLOWED_MODELS) can be published. The worker
     # re-checks before every model call, since the policy can change after publish.
@@ -266,6 +268,29 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
     _check_mcp_servers(db, tenant_id, spec)
     _check_platform_tools(spec)
     _check_knowledge_bases(db, tenant_id, spec)
+
+
+# Memory features the spec can describe (RM.2) but the worker does not run yet. Until RM.13
+# (observational memory) and RM.14 (semantic recall) land, a spec that sets one would publish and
+# then silently do nothing, so publish, restore and draft runs refuse it. RM.13 and RM.14 remove
+# their entry here (the plan's task sections say so).
+UNAVAILABLE_MEMORY_FEATURES: tuple[tuple[str, str], ...] = (
+    ("observational", "observational memory is not available yet"),
+    ("semantic_recall", "semantic recall is not available yet"),
+)
+
+
+def _check_memory_features(spec: AgentSpec) -> None:
+    """422 when the spec sets a memory feature that is not implemented yet (memory.observational,
+    memory.semantic_recall); remove it from the agent's memory settings to publish."""
+    memory = spec.memory
+    if memory is None:
+        return
+    for field, message in UNAVAILABLE_MEMORY_FEATURES:
+        if getattr(memory, field) is not None:
+            raise HTTPException(
+                status_code=422, detail=f"{message}: remove memory.{field} from the agent's memory settings"
+            )
 
 
 def _check_platform_tools(spec: AgentSpec) -> None:
