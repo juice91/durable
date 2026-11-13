@@ -22,6 +22,7 @@ from eap_db import require_schema_at_head
 from eap_run_store import EventLog, PostgresSideEffectStore, RunStore
 from eap_runtime import RequestContext, RunDeps, ToolRegistry, default_registry
 from eap_schemas import AgentSpec
+from eap_schemas.request_context import RESERVED_CONTEXT_NAMES
 from eap_worker.config import DELTA_CHANNEL, WorkerSettings
 from eap_worker.crash import crash_point
 from eap_worker.tickets import FakeExternalTicketService, TenantTicketService
@@ -30,6 +31,14 @@ log = logging.getLogger("eap_worker")
 
 # Postgres NOTIFY payloads must stay under 8000 bytes; deltas larger than this are split.
 _MAX_DELTA_CHARS = 2000
+
+
+def declared_context(spec: AgentSpec, request_context: dict[str, Any] | None) -> dict[str, Any]:
+    """Defence in depth (P0.21): only the keys the spec declares as context fields, never a reserved
+    identity name (tenant_id, user_id, run_id), even if the stored row holds more. The API already
+    validates the context; this guards a tampered or legacy row. Not a step: no layout change."""
+    declared = {f.name for f in spec.context_fields} - RESERVED_CONTEXT_NAMES
+    return {k: v for k, v in (request_context or {}).items() if k in declared}
 
 
 @dataclass(frozen=True)
@@ -83,7 +92,7 @@ class WorkerRuntime:
             ticket_service=_CrashAfterCallTicketService(self.tickets.for_tenant(tenant_id)),
             spec=spec,
             allowed_tools=self.allowed_tools,
-            request_context=RequestContext(request_context),
+            request_context=RequestContext(declared_context(spec, request_context)),
         )
 
     def tool_deps_for(self, run_id: str, tenant_id: str) -> RunDeps:

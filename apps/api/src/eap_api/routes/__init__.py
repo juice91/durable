@@ -297,6 +297,22 @@ def _draft_hash(draft_spec: dict | None) -> str | None:
         return None
 
 
+def validate_stored_draft(draft_spec: dict) -> AgentSpec:
+    """The agent's stored draft as an AgentSpec, or 422 when it no longer validates (e.g. a row
+    written under older rules). Shared by publish and draft runs (run_options._draft_target) so the
+    two answers cannot drift. The detail names the first error's location and Pydantic message; such
+    a message may quote a value from the draft itself, which only the draft's own tenant sees."""
+    try:
+        return AgentSpec.model_validate(draft_spec)
+    except ValidationError as exc:
+        first = exc.errors()[0] if exc.errors() else {"loc": (), "msg": "invalid"}
+        where = ".".join(str(p) for p in first.get("loc", ())) or "spec"
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"The draft is not a valid agent spec ({where}: {first.get('msg', 'invalid')}); fix it in the editor",
+        ) from None
+
+
 @router.post(
     "/agents/{agent_id}/versions",
     status_code=status.HTTP_201_CREATED,
@@ -325,7 +341,7 @@ def publish_version(
     latest_version = _latest_version(db, str(agent_id))
     latest = latest_version.version if latest_version is not None else None
 
-    spec = AgentSpec.model_validate(agent.draft_spec)
+    spec = validate_stored_draft(agent.draft_spec)
 
     _check_publishable(db, principal.tenant_id, spec)
 

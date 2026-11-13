@@ -332,6 +332,7 @@ export function ProcessorsEditor(props: ProcessorsEditorProps) {
       <legend className="px-1 text-sm font-medium text-card-foreground">Processors</legend>
       <p className="text-xs text-muted-foreground">
         Guardrails on the user&apos;s input and on the model&apos;s output. Blocked input or output fails the turn with a fixed message.
+        Tool results and request context values are not processed; moderation checks only the final answer.
       </p>
       {props.catalogError ? <p role="alert" className="text-xs text-destructive">Could not load the processor catalog: {props.catalogError}</p> : null}
       {props.sectionError ? <p role="alert" data-testid="processors-error" className="text-xs text-destructive">{props.sectionError}</p> : null}

@@ -127,3 +127,23 @@ for real. The literal list also covers ULA (`fd00::`, `fc00::`) and 6to4 (`2002:
 | M9 | gzip result, 8 MB result, remote `$ref` in a listed schema | needs_attention after exactly one tools/call for the first two (identity encoding only); the `$ref` is never fetched |
 | M10 | `after_tool_call` on a side-effecting MCP call | needs_attention once, the server is not contacted again, no secret in either worker log |
 | M11 | an allowlisted server answers 302 and 307 to a counting listener on another 127.0.0.1 port | 0 connections reach that listener, through the API connection test (`redirect_refused`) and through a real agent run (`mcp_tool_unavailable`, worker inner code ends with `redirect_refused`, the same code as the API, also in the worker log); the location and port are not in the error |
+
+# Milestone P0 (task P0.21): usage, processors and run options under kill -9
+
+`test_p0_crash_matrix.py` reuses the harness above (in-process API, real worker subprocesses, the
+existing `EAP_CRASH_AT` points; no new crash point was needed). Workers get
+`EAP_MODEL_PRICES_FILE=config/model-prices.test.json`, so every `test:*` request is priced at 2 / 8
+USD per million input / output tokens and the cost arithmetic is checkable. About 80 s.
+
+Every scenario asserts: one DBOS workflow in SUCCESS; contiguous `seq` and no duplicate
+`event_key`; events written before the crash unchanged; one `run_model_requests` row per model
+request (moderation included) matching its event's `usage` / `cost_usd`, rows written before the
+crash unchanged (never re-priced); `runs` and `GET /runs/{id}` totals equal the sum of the rows;
+SSE replay from -1, 0, the pre-crash seq, the midpoint, last-1 and last equals the database.
+
+| # | Kill | Proves |
+|---|------|--------|
+| U1 | `after_event_write` on `model:0:final`, `model:1:final`, `end` (ticket run) | the usage row committed with its event is not duplicated or re-priced; totals are right when the kill precedes `eap.finish_run`; one ticket |
+| P1 | `input_processors` (PII + moderation input chain) | the chain re-runs on the same text: one result event per processor, one moderation usage row, the same redacted input and answer |
+| P2 | `moderation_request`, input and output phase | the moderation model is called again (2 calls: the crash log line proves the first, answered call; the recovered workflow holds exactly one checkpointed `eap-moderator__model.request` step), its usage row and result event are written once; with output processors no delta is published in either attempt |
+| O1 | `after_event_write` on `start` of a run and of a conversation turn with a model override and a request context; the row's model and context are rewritten while no worker runs | the replay answers with the model and context `eap.start_run` recorded; the usage row names that model |
