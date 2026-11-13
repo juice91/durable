@@ -603,12 +603,13 @@ def test_crash_between_run_insert_and_enqueue_is_recovered(pg, tenant_of, fake_d
 
     # The enqueue and the failure mark both fail: the run stays 'queued' with no workflow, exactly
     # as if the API died between creating the run and enqueuing it.
+    original_mark = run_store.mark_enqueue_failed
     monkeypatch.setattr(run_store, "mark_enqueue_failed", mark_fails)
     fake_dbos.fail_times = 1
     run_id = str(uuid.uuid4())
     assert _put(client, headers, kb["id"], run_id=run_id).status_code == 503
-    monkeypatch.undo()
-    monkeypatch.setenv("EAP_ALLOWED_EMBEDDING_MODELS", "test:*,litellm:emb-small=1024")
+    # Restore only this patch (monkeypatch.undo() would also drop the autouse auth and model env).
+    monkeypatch.setattr(run_store, "mark_enqueue_failed", original_mark)
     assert client.get(f"{API}/runs/{run_id}", headers=headers).json()["status"] == "queued"
     assert fake_dbos.calls == []
 
