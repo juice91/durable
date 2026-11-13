@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 import json
+import re
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -93,6 +94,10 @@ RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
     " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
 )
+# conversations.resource_id (0012_memory): the owner a conversation acts for, set once at creation.
+RESOURCE_ID_PATTERN = r"^[A-Za-z0-9_.:@-]{1,128}$"
+# Same text as migration 0012_memory.
+CONVERSATION_RESOURCE_ID_CHECK = "resource_id IS NULL OR resource_id ~ '^[A-Za-z0-9_.:@-]{1,128}$'"
 
 
 class ConversationModel(Base):
@@ -111,6 +116,9 @@ class ConversationModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         "updated_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+    # The resource (user or entity) the conversation belongs to (0012_memory): set once at creation,
+    # never changed. NULL for conversations created before 0012 (resource-scoped memory off).
+    resource_id: Mapped[StrAnnotated | None] = mapped_column("resource_id", String, nullable=True)
 
     __table_args__ = (
         # Lets runs reference (tenant_id, conversation_id), so a run can only join its own tenant's thread.
@@ -119,6 +127,14 @@ class ConversationModel(Base):
         # One agent's conversations in list order (0010_run_options).
         Index(
             "ix_conversations_tenant_agent_updated", "tenant_id", "agent_id", text("updated_at DESC"), text("id DESC")
+        ),
+        CheckConstraint(CONVERSATION_RESOURCE_ID_CHECK, name="ck_conversations_resource_id"),
+        # A resource's conversations (forget-resource).
+        Index(
+            "ix_conversations_tenant_resource",
+            "tenant_id",
+            "resource_id",
+            postgresql_where=text("resource_id IS NOT NULL"),
         ),
     )
 
@@ -308,6 +324,16 @@ class SideEffectModel(Base):
         "completed_at", DateTime(timezone=True), nullable=True
     )
 
+    __table_args__ = (
+        # Prefix deletes of a run's rows (`{run_id}:...`, `wm:{run_id}:...`) with LIKE (0012_memory).
+        Index(
+            "ix_side_effects_tenant_key_pattern",
+            "tenant_id",
+            "key",
+            postgresql_ops={"key": "text_pattern_ops"},
+        ),
+    )
+
 
 class RunNotFound(ValueError):
     """No run with this id belongs to the given tenant (it may not exist, or belong to another tenant).
@@ -371,6 +397,27 @@ class ConversationIdConflict(Exception):
         return f"Conversation ID {self.conversation_id} already exists under a different tenant"
 
 
+class ConversationResourceConflict(ConversationIdConflict):
+    """A client-supplied conversation id already exists in the tenant with another resource_id
+    (resource ids are immutable; API: 409). A subclass of ConversationIdConflict, so a caller that
+    only knows the parent still answers 409."""
+
+    def __init__(self, conversation_id: UUID | str):
+        super().__init__(conversation_id)  # pickle-safe, as RunNotFound
+
+    def __str__(self) -> str:
+        return f"Conversation {self.conversation_id} already exists with a different resource_id"
+
+
+def validate_resource_id(resource_id: str | None) -> str | None:
+    """Return `resource_id` if it is None or matches RESOURCE_ID_PATTERN; raise ValueError otherwise."""
+    if resource_id is None:
+        return None
+    if not isinstance(resource_id, str) or re.fullmatch(RESOURCE_ID_PATTERN, resource_id) is None:
+        raise ValueError("resource_id must be 1 to 128 characters of A-Z, a-z, 0-9, '_', '.', ':', '@' or '-'")
+    return resource_id
+
+
 class TurnInProgress(Exception):
     """The conversation's latest turn has not reached a terminal status yet."""
 
@@ -416,6 +463,7 @@ def _iso_conversation(
         "id": conv.id,
         "tenant_id": conv.tenant_id,
         "agent_id": conv.agent_id,
+        "resource_id": conv.resource_id,
         "title": conv.title,
         "created_at": conv.created_at,
         "updated_at": conv.updated_at,
@@ -984,21 +1032,36 @@ class RunStore:
         agent_id: UUID | str,
         title: str | None = None,
         conversation_id: UUID | str | None = None,
+        *,
+        resource_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create a conversation; idempotent on a client-supplied `conversation_id`.
 
-        Returns (conversation, created). Raises ConversationIdConflict if the id belongs to another tenant.
+        `resource_id` (RESOURCE_ID_PATTERN, else ValueError) is set once and never changed; the API
+        defaults it to the principal's user id. Returns (conversation, created). Raises
+        ConversationIdConflict if the id belongs to another tenant, and its subclass
+        ConversationResourceConflict if the tenant's existing conversation has another resource_id
+        (None and a value differ: a conversation created before 0012 cannot gain one).
         """
         from sqlalchemy.dialects.postgresql import insert
 
         if not tenant_id:
             raise ValueError("tenant_id is required")
+        validate_resource_id(resource_id)
         conv_id = str(conversation_id or uuid4())
         now = datetime.now(timezone.utc)
         with self.Session() as session:
             inserted = session.execute(
                 insert(ConversationModel)
-                .values(id=conv_id, tenant_id=tenant_id, agent_id=str(agent_id), title=title, created_at=now, updated_at=now)
+                .values(
+                    id=conv_id,
+                    tenant_id=tenant_id,
+                    agent_id=str(agent_id),
+                    title=title,
+                    resource_id=resource_id,
+                    created_at=now,
+                    updated_at=now,
+                )
                 .on_conflict_do_nothing(constraint="conversations_pkey")
                 .returning(ConversationModel.id)
             ).fetchone()
@@ -1006,6 +1069,8 @@ class RunStore:
             existing = session.get(ConversationModel, conv_id)
             if existing is None or existing.tenant_id != tenant_id:
                 raise ConversationIdConflict(conv_id)
+            if existing.resource_id != resource_id:
+                raise ConversationResourceConflict(conv_id)
             row = session.execute(self._conversation_select().where(ConversationModel.id == conv_id)).one()
             return self._conversation_from_row(row), inserted is not None
 
