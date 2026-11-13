@@ -1,16 +1,21 @@
-// P0.18 acceptance tests for the Overview Dashboard (complements page.test.tsx, lib/dashboard.test.ts).
+// P0.18 acceptance tests for the Overview Dashboard, migrated by SL.7 to the Metrics page's Overview
+// header (complements overview.test.tsx and lib/metrics.overview.test.ts). Assertions change only
+// where SL.7 changes behaviour: no "Open in Metrics" links (the Overview is on Metrics), latency,
+// tokens and cost cards are not links (their charts are on the page), all four charts, Top agents
+// rows narrow Metrics ("show this agent's metrics"), and the Overview's reading order.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import DashboardPage from "./page";
-import MetricsPage from "./metrics/page";
-import { BreakdownTable } from "@/components/metrics";
-import { DASHBOARD_KPIS } from "@/components/dashboard";
+import MetricsPage from "./page";
+import { ALL_KPIS, BreakdownTable } from "@/components/metrics";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
 import { parsePageState, pageStateToFilters } from "@/lib/metrics";
 import { parseTraceFilters } from "@/lib/traces";
-import { routes } from "@/lib/routes";
+import { legacyTarget, routes } from "@/lib/routes";
+
+/** The KPI cards with a Traces drill-down (one link each); the others are plain cards. */
+const LINKED_KPIS = ["runs", "error_rate"] as const;
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -98,24 +103,22 @@ const RANGES = {
   },
 } as const;
 
-describe("Dashboard links (exact hrefs) and round trips", () => {
+describe("Overview links (exact hrefs) and round trips", () => {
   setup();
   for (const [name, r] of Object.entries(RANGES)) {
-    it(`${name}: KPI cards, header links, agents, failures and view-all`, async () => {
+    it(`${name}: KPI cards, agents, failures and view-all`, async () => {
       search = r.qs;
       mockFetch(okResponder);
-      render(<DashboardPage />);
+      render(<MetricsPage />);
       await screen.findAllByTestId("recent-failure");
-      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: show this agent's metrics" })).toBeInTheDocument());
       const range = `from=${enc(r.from)}&to=${enc(r.to)}`;
       expect(hrefOf("kpi-runs")).toBe(`${routes.traces()}?${range}`);
       expect(hrefOf("kpi-error_rate")).toBe(`${routes.traces()}?status=failed&${range}`);
-      for (const id of ["latency_p95", "tokens", "cost"]) expect(hrefOf(`kpi-${id}`)).toBe(r.metrics);
-      expect(hrefOf("dashboard-open-metrics")).toBe(r.metrics);
-      expect(hrefOf("dashboard-trends-metrics")).toBe(r.metrics);
+      for (const id of ["latency_p50", "latency_p95", "tokens", "cost"]) expect(hrefOf(`kpi-${id}`)).toBeNull();
       const sep = r.metrics.includes("?") ? "&" : "?";
-      expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-1`);
-      expect(screen.getByRole("link", { name: "Intake: open in Metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-2`);
+      expect(screen.getByRole("link", { name: "Support bot: show this agent's metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-1`);
+      expect(screen.getByRole("link", { name: "Intake: show this agent's metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-2`);
       const rows = screen.getAllByTestId("recent-failure");
       expect(rows.map((a) => a.getAttribute("href"))).toEqual([routes.trace("run-f1"), routes.trace("run-n1")]);
       expect(hrefOf("recent-failures-all")).toBe(`${routes.traces()}?status=failed%2Cneeds_attention&${range}`);
@@ -124,16 +127,12 @@ describe("Dashboard links (exact hrefs) and round trips", () => {
     it(`${name}: every target page parses the params back to the same filters`, async () => {
       search = r.qs;
       mockFetch(okResponder);
-      render(<DashboardPage />);
-      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toBeInTheDocument());
+      render(<MetricsPage />);
+      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: show this agent's metrics" })).toBeInTheDocument());
       const dashState = pageStateToFilters(parsePageState(new URLSearchParams(r.qs)), new Date(NOW));
       const parse = (href: string) => new URL(href, "http://x").searchParams;
-      // Metrics targets resolve to the dashboard's own range (and the agent when narrowed).
-      for (const href of [hrefOf("kpi-tokens")!, hrefOf("dashboard-open-metrics")!]) {
-        const f = pageStateToFilters(parsePageState(parse(href)), new Date(NOW));
-        expect([f.from, f.to, f.agent_id]).toEqual([dashState.from, dashState.to, null]);
-      }
-      const agent = screen.getByRole("link", { name: "Support bot: open in Metrics" }).getAttribute("href")!;
+      // The Top agents target resolves to the page's own range, narrowed to the agent.
+      const agent = screen.getByRole("link", { name: "Support bot: show this agent's metrics" }).getAttribute("href")!;
       const fa = pageStateToFilters(parsePageState(parse(agent)), new Date(NOW));
       expect([fa.from, fa.to, fa.agent_id]).toEqual([dashState.from, dashState.to, "a-1"]);
       // Traces targets parse with the Traces page's own parser.
@@ -147,7 +146,7 @@ describe("Dashboard links (exact hrefs) and round trips", () => {
   }
 });
 
-describe("Dashboard chart bar links", () => {
+describe("Overview trends: chart bar links", () => {
   setup();
   const day = (d: number) => enc(`2026-11-${10 + d}T00:00:00.000Z`);
   const bars = (title: string) =>
@@ -155,7 +154,7 @@ describe("Dashboard chart bar links", () => {
 
   it("run bars open those runs, failed bars the failed ones, cost bars the bucket's runs; clicks navigate", async () => {
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(bars("Runs and failures")).toHaveLength(6));
     const runs = bars("Runs and failures");
     const byKey = (key: string) => runs.filter((a) => a.getAttribute("data-series") === key).map((a) => a.getAttribute("href"));
@@ -163,15 +162,16 @@ describe("Dashboard chart bar links", () => {
     expect(byKey("failed")).toEqual([0, 1, 2].map((i) => `${routes.traces()}?status=failed&from=${day(i)}&to=${day(i + 1)}`));
     await waitFor(() => expect(bars("Cost (USD)")).toHaveLength(3));
     expect(bars("Cost (USD)").map((a) => a.getAttribute("href"))).toEqual([0, 1, 2].map((i) => `${routes.traces()}?from=${day(i)}&to=${day(i + 1)}`));
-    expect(screen.queryByTestId("chart-Latency")).toBeNull();
-    expect(screen.queryByTestId("chart-Tokens")).toBeNull();
+    // Metrics shows every chart (the dashboard showed runs and cost only).
+    expect(screen.getByTestId("chart-Latency")).toBeInTheDocument();
+    expect(screen.getByTestId("chart-Tokens")).toBeInTheDocument();
     fireEvent.click(runs.find((a) => a.getAttribute("data-series") === "failed" && a.getAttribute("data-bucket") === "2")!);
     expect(push).toHaveBeenCalledWith(`${routes.traces()}?status=failed&from=${day(2)}&to=${day(3)}`);
   });
 
   it("bar targets parse back with the Traces page's parser", async () => {
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(bars("Runs and failures")).toHaveLength(6));
     const failed = bars("Runs and failures").find((a) => a.getAttribute("data-series") === "failed" && a.getAttribute("data-bucket") === "1")!;
     const f = parseTraceFilters(new URL(failed.getAttribute("href")!, "http://x").searchParams);
@@ -181,7 +181,7 @@ describe("Dashboard chart bar links", () => {
 
 const clean = () => expect(document.body.textContent).not.toMatch(/NaN|Infinity|undefined/);
 
-describe("Dashboard states", () => {
+describe("Overview states", () => {
   setup();
 
   it("an empty tenant: zero cards, empty states, no NaN or Infinity anywhere", async () => {
@@ -192,8 +192,8 @@ describe("Dashboard states", () => {
       if (url.pathname.endsWith("/breakdown")) return { status: 200, body: breakdownFixture("agent", []) };
       return okResponder(url);
     });
-    render(<DashboardPage />);
-    await waitFor(() => expect(screen.getByTestId("dashboard-empty")).toBeInTheDocument());
+    render(<MetricsPage />);
+    await waitFor(() => expect(screen.getByTestId("metrics-empty")).toBeInTheDocument());
     await screen.findByTestId("recent-failures-empty");
     expect(screen.getByText("No agent runs in this period")).toBeInTheDocument();
     for (const id of ["runs", "tokens"]) expect(screen.getByTestId(`kpi-${id}-value`)).toHaveTextContent(/^0$/);
@@ -210,9 +210,9 @@ describe("Dashboard states", () => {
         ? { status: 200, body: summaryFixture({ runs: 5, completed: 3, failed: 2, error_rate: 0.4, latency_p95_ms: 900, requests: 2, input_tokens: 10, output_tokens: 5, cost_usd: "0.5" }, {}) }
         : okResponder(url),
     );
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("5"));
-    for (const id of DASHBOARD_KPIS) {
+    for (const id of ALL_KPIS) {
       const delta = screen.queryByTestId(`kpi-${id}-delta`);
       if (delta) expect(delta.textContent).not.toMatch(/NaN|Infinity|null|undefined/);
     }
@@ -222,7 +222,7 @@ describe("Dashboard states", () => {
     mockFetch((url) =>
       url.pathname.endsWith("/summary") ? { status: 200, body: summaryFixture({ runs: 5 }, null) } : okResponder(url),
     );
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("5"));
     clean();
   });
@@ -235,21 +235,22 @@ describe("Dashboard states", () => {
   for (const [name, path, check] of sections) {
     it(`the ${name} failing leaves the other sections rendered`, async () => {
       mockFetch((url) => (url.pathname.endsWith(path) ? { status: 500, body: { detail: `${name} down` } } : okResponder(url)));
-      render(<DashboardPage />);
+      render(<MetricsPage />);
       await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
       await waitFor(check);
       if (name !== "summary") expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("12");
       if (name !== "runs") await screen.findAllByTestId("recent-failure");
       if (name !== "timeseries") await waitFor(() => expect(screen.getAllByTestId("chart-plot").length).toBeGreaterThan(0));
-      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: show this agent's metrics" })).toBeInTheDocument());
     });
   }
 
   it("the top agents failing leaves KPIs, charts and failures rendered", async () => {
     mockFetch((url) => (url.pathname.endsWith("/breakdown") ? { status: 500, body: { detail: "agents down" } } : okResponder(url)));
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await screen.findAllByTestId("recent-failure");
-    await waitFor(() => expect(screen.getByText("agents down")).toBeInTheDocument());
+    // Both breakdowns (Top agents and By model) fail; each shows the error.
+    await waitFor(() => expect(screen.getAllByText("agents down")).toHaveLength(2));
     expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("12");
     expect(screen.getAllByTestId("chart-plot").length).toBeGreaterThan(0);
   });
@@ -257,7 +258,7 @@ describe("Dashboard states", () => {
   it("an invalid custom range is refused with no fetch, also on Refresh", async () => {
     search = "range=custom&from=2026-11-05T00:00:00Z&to=2026-11-01T00:00:00Z";
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     expect(screen.getByRole("alert")).toHaveTextContent("from must be before to");
     expect(screen.queryByTestId("kpi-runs")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -266,7 +267,7 @@ describe("Dashboard states", () => {
   });
 });
 
-describe("Dashboard behaviour", () => {
+describe("Overview behaviour", () => {
   setup();
 
   it("an older response arriving last does not overwrite a newer range", async () => {
@@ -282,15 +283,15 @@ describe("Dashboard behaviour", () => {
       }
       return okResponder(url);
     });
-    const { rerender } = render(<DashboardPage />);
+    const { rerender } = render(<MetricsPage />);
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(1));
     search = "range=30d";
-    rerender(<DashboardPage />);
+    rerender(<MetricsPage />);
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("222"));
     await act(async () => { releaseOld(); await new Promise((r) => setTimeout(r, 20)); });
     expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("222");
     expect(screen.queryByText("111")).toBeNull();
-    expect(hrefOf("dashboard-open-metrics")).toBe(routes.metrics({ range: "30d" }));
+    expect(screen.getByRole("link", { name: "Support bot: show this agent's metrics" })).toHaveAttribute("href", routes.metrics({ range: "30d", agent_id: "a-1" }));
   });
 
   it("a stale error from the old range does not replace the new data", async () => {
@@ -303,10 +304,10 @@ describe("Dashboard behaviour", () => {
       }
       return okResponder(url);
     });
-    const { rerender } = render(<DashboardPage />);
+    const { rerender } = render(<MetricsPage />);
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(1));
     search = "range=30d";
-    rerender(<DashboardPage />);
+    rerender(<MetricsPage />);
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("12"));
     await act(async () => { failOld(); await new Promise((r) => setTimeout(r, 20)); });
     expect(screen.queryByText("old range failed")).toBeNull();
@@ -315,13 +316,14 @@ describe("Dashboard behaviour", () => {
 
   it("Refresh re-fetches every section", async () => {
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await screen.findAllByTestId("recent-failure");
-    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(1));
+    // Two breakdowns per load: Top agents and By model.
+    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(2));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(2));
     await waitFor(() => expect(callsTo("/timeseries")).toHaveLength(2));
-    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(2));
+    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(4));
     await waitFor(() => expect(calls.filter((u) => u.pathname === "/api/v1/runs")).toHaveLength(2));
   });
 
@@ -334,13 +336,13 @@ describe("Dashboard behaviour", () => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     vi.setSystemTime(new Date(NOW));
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(1));
     const first = callsTo("/summary")[0].searchParams.get("to");
     await advance(5 * 60_000);
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(2));
     expect(callsTo("/summary")[1].searchParams.get("to")).not.toBe(first);
-    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(2));
+    await waitFor(() => expect(callsTo("/breakdown")).toHaveLength(4));
     await waitFor(() => expect(callsTo("/timeseries")).toHaveLength(2));
     await waitFor(() => expect(calls.filter((u) => u.pathname === "/api/v1/runs")).toHaveLength(2));
     const runsCalls = calls.filter((u) => u.pathname === "/api/v1/runs");
@@ -353,7 +355,7 @@ describe("Dashboard behaviour", () => {
     vi.setSystemTime(new Date(NOW));
     search = CUSTOM;
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await waitFor(() => expect(callsTo("/summary")).toHaveLength(1));
     await advance(30 * 60_000);
     expect(dataCalls().filter((u) => u.pathname.endsWith("/summary"))).toHaveLength(1);
@@ -365,21 +367,23 @@ const TABBABLE = "a[href], button:not([disabled]), select:not([disabled]), input
 const tabbables = () =>
   Array.from(document.body.querySelectorAll<HTMLElement>(TABBABLE)).filter((el) => el.getAttribute("tabindex") !== "-1");
 
-describe("Dashboard accessibility", () => {
+describe("Overview accessibility", () => {
   setup();
 
   async function loaded() {
     mockFetch(okResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await screen.findAllByTestId("recent-failure");
-    await waitFor(() => expect(screen.getAllByTestId("chart-plot")).toHaveLength(2));
-    await waitFor(() => expect(screen.getByRole("link", { name: "Intake: open in Metrics" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByTestId("chart-plot").length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Intake: show this agent's metrics" })).toBeInTheDocument());
   }
 
   it("one tab stop per card, per failure row, per agent, and one group per chart (bars are not stops)", async () => {
     await loaded();
     const stops = tabbables();
-    for (const id of DASHBOARD_KPIS) expect(stops.filter((el) => el === screen.getByTestId(`kpi-${id}`))).toHaveLength(1);
+    for (const id of ALL_KPIS) {
+      expect(stops.filter((el) => el === screen.getByTestId(`kpi-${id}`))).toHaveLength((LINKED_KPIS as readonly string[]).includes(id) ? 1 : 0);
+    }
     expect(stops.filter((el) => el.matches("[data-testid=recent-failure]"))).toHaveLength(2);
     for (const a of screen.getAllByTestId("chart-plot")) {
       expect(stops.filter((el) => el === a)).toHaveLength(1);
@@ -393,7 +397,7 @@ describe("Dashboard accessibility", () => {
     const intakeRow = screen.getByTestId("breakdown-row-agent-a-2");
     const intakeStops = stops.filter((el) => intakeRow.contains(el) && el.tagName === "A");
     expect(intakeStops).toEqual([
-      within(intakeRow).getByRole("link", { name: "Intake: open in Metrics" }),
+      within(intakeRow).getByRole("link", { name: "Intake: show this agent's metrics" }),
       within(intakeRow).getByRole("link", { name: "Intake: open 2 failed runs" }),
     ]);
     const failedHref = new URL(intakeStops[1].getAttribute("href")!, "http://x");
@@ -401,24 +405,22 @@ describe("Dashboard accessibility", () => {
     expect(failedHref.searchParams.get("agent_id")).toBe("a-2");
     expect(failedHref.searchParams.get("status")).toBe("failed");
     // Nothing inside a KPI card or failure row is a second stop (no nested links or buttons).
-    for (const el of [...DASHBOARD_KPIS.map((id) => screen.getByTestId(`kpi-${id}`)), ...screen.getAllByTestId("recent-failure")]) {
+    for (const el of [...ALL_KPIS.map((id) => screen.getByTestId(`kpi-${id}`)), ...screen.getAllByTestId("recent-failure")]) {
       expect(el.querySelectorAll(TABBABLE)).toHaveLength(0);
     }
   });
 
-  it("the tab order follows the reading order: header, filters, KPIs, trends, agents, failures", async () => {
+  it("the tab order follows the reading order: filters, KPIs, needs attention, top agents, trends", async () => {
     await loaded();
     const order = (el: Element) => tabbables().indexOf(el as HTMLElement);
     const seq = [
-      screen.getByTestId("dashboard-open-metrics"),
       screen.getByLabelText("Date range"),
       screen.getByTestId("kpi-runs"),
-      screen.getByTestId("kpi-cost"),
-      screen.getByTestId("dashboard-trends-metrics"),
-      screen.getAllByTestId("chart-plot")[0],
-      screen.getByRole("link", { name: "Support bot: open in Metrics" }),
+      screen.getByTestId("kpi-error_rate"),
       screen.getByTestId("recent-failures-all"),
       screen.getAllByTestId("recent-failure")[0],
+      screen.getByRole("link", { name: "Support bot: show this agent's metrics" }),
+      screen.getAllByTestId("chart-plot")[0],
     ].map(order);
     expect(seq.every((n) => n >= 0)).toBe(true);
     expect([...seq].sort((a, b) => a - b)).toEqual(seq);
@@ -426,15 +428,16 @@ describe("Dashboard accessibility", () => {
 
   it("controls and links have accessible names", async () => {
     await loaded();
-    expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Recent failures" })).toBe(screen.getByTestId("recent-failures"));
+    expect(screen.getByRole("heading", { level: 1, name: "Metrics" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Overview" })).toBe(screen.getByTestId("metrics-overview"));
+    expect(screen.getByRole("region", { name: "Needs attention" })).toBe(screen.getByTestId("recent-failures"));
+    expect(screen.getByRole("region", { name: "Top agents" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Trends" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open in Metrics" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Latency, tokens and more in Metrics" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View all 5 in Traces" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^Runs\s*12/ })).toBe(screen.getByTestId("kpi-runs"));
     expect(screen.getByRole("link", { name: /^Error rate\s*27\.3%/ })).toBe(screen.getByTestId("kpi-error_rate"));
-    expect(screen.getByRole("link", { name: /^Cost \(USD\)\s*\$0\.04/ })).toBe(screen.getByTestId("kpi-cost"));
+    expect(screen.getByTestId("kpi-cost")).toHaveTextContent(/^Cost \(USD\)\s*\$0\.04/);
+    expect(screen.getByTestId("kpi-cost").tagName).toBe("DIV");
     const failure = screen.getAllByTestId("recent-failure")[1];
     expect(failure).toHaveAccessibleName(/Support bot.*needs attention.*err run-n1/i);
     expect(screen.getByRole("group", { name: /^Runs and failures chart\./ })).toBeInTheDocument();
@@ -445,7 +448,7 @@ describe("Dashboard accessibility", () => {
   });
 });
 
-describe("Dashboard and Metrics parity with a busy previous period and needs_attention runs", () => {
+describe("Old dashboard links and Metrics parity with a busy previous period and needs_attention runs", () => {
   setup();
   const BUSY = summaryFixture(
     { runs: 20, completed: 10, failed: 4, needs_attention: 3, in_progress: 2, blocked: 1, error_rate: 4 / 17, latency_p50_ms: 900,
@@ -459,7 +462,7 @@ describe("Dashboard and Metrics parity with a busy previous period and needs_att
     mockFetch(busyResponder);
     render(page);
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("20"));
-    const cards = Object.fromEntries(DASHBOARD_KPIS.map((id) => [id, screen.getByTestId(`kpi-${id}`).textContent]));
+    const cards = Object.fromEntries(ALL_KPIS.map((id) => [id, screen.getByTestId(`kpi-${id}`).textContent]));
     const caption = screen.getByTestId("kpi-comparison").textContent;
     const queries = [callsTo("/summary"), callsTo("/timeseries")].map((l) => l.map((u) => u.searchParams.toString()));
     cleanup();
@@ -467,9 +470,12 @@ describe("Dashboard and Metrics parity with a busy previous period and needs_att
   }
 
   for (const qs of ["", "range=30d", CUSTOM]) {
-    it(`same cards (value, delta, hint) and comparison caption (${qs || "default"})`, async () => {
-      search = qs;
-      const dashboard = await read(<DashboardPage />);
+    it(`an old dashboard link lands on the same cards (value, delta, hint) and comparison caption (${qs || "default"})`, async () => {
+      // A bare "/" now opens Agents, so the default range is checked through its explicit form.
+      const target = new URL(legacyTarget("/", new URLSearchParams(qs || "range=7d"))!, "http://x");
+      expect(target.pathname).toBe(routes.metrics());
+      search = target.searchParams.toString();
+      const dashboard = await read(<MetricsPage />);
       search = qs;
       const metrics = await read(<MetricsPage />);
       expect(dashboard.cards).toEqual(metrics.cards);
@@ -483,14 +489,12 @@ describe("Dashboard and Metrics parity with a busy previous period and needs_att
 
   it("the failures count equals failed + needs_attention of the same summary", async () => {
     mockFetch(busyResponder);
-    render(<DashboardPage />);
+    render(<MetricsPage />);
     await screen.findAllByTestId("recent-failure");
     await waitFor(() => expect(screen.getByTestId("recent-failures-all")).toHaveTextContent("View all 7 in Traces"));
     expect(screen.getByTestId("kpi-error_rate-delta")).toHaveTextContent(/down/);
-    cleanup();
-    mockFetch(busyResponder);
-    render(<MetricsPage />);
-    await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("20"));
+    // The same page's error-rate card names the needs-attention runs the count includes.
+    expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("20");
     expect(document.body.textContent).toMatch(/3 needs attention|needs attention:? 3|3 need attention/i);
   });
 });

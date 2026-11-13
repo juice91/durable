@@ -4,7 +4,7 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import PlaygroundPage from "./page";
+import { ChatTab } from "@/components/agentPage/ChatTab";
 import { api } from "@/lib/api";
 import { createConversation, getConversation, listConversations } from "@/lib/conversations";
 import { listEvents, subscribeRun, type RunEvent, type RunEventData, type SubscribeHandlers } from "@/lib/runs";
@@ -16,7 +16,7 @@ import { routes } from "@/lib/routes";
 vi.mock("@/lib/api", () => ({
   BASE_URL: "http://api.test",
   apiHeaders: (extra: HeadersInit = {}) => extra,
-  api: { agents: { list: vi.fn() }, versions: { list: vi.fn() } },
+  api: { agents: { list: vi.fn(), get: vi.fn() }, versions: { list: vi.fn() } },
 }));
 vi.mock("@/lib/metrics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/metrics")>()),
@@ -96,11 +96,19 @@ const choose = (name: string, value: string) =>
   fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
 const lastBody = () => posts.at(-1)?.body;
 
+/** The agent and conversation the route names (`/agents/:id/chat[/:conversationId]`). */
+function routeChat() {
+  const match = /^\/agents\/([^/]+)\/chat(?:\/([^/]+))?/.exec(window.location.pathname);
+  return { agentId: match ? decodeURIComponent(match[1]) : "agent-1", conversationId: match?.[2] ? decodeURIComponent(match[2]) : null };
+}
+
 async function renderReady() {
-  const view = render(<PlaygroundPage />);
-  await screen.findByRole("option", { name: "Support assistant" });
+  const { agentId, conversationId } = routeChat();
+  const view = render(<ChatTab key={`${agentId}/${conversationId}`} agentId={agentId} conversationId={conversationId} />);
+  await screen.findByRole("combobox", { name: "Version" });
   await screen.findByRole("option", { name: "openai:gpt-4.1" });
-  if (window.location.search.includes("agent-3")) await screen.findByRole("option", { name: "v2" });
+  await waitFor(() => expect(api.agents.get).toHaveBeenCalledWith(agentId));
+  if (agentId === "agent-3") await screen.findByRole("option", { name: "v2" });
   return view;
 }
 
@@ -132,7 +140,7 @@ const tierInfo = (agentId: string, version: unknown) => ({
 const ctxKey = (agentId: string) => `eap.playground.context.v1:anon:${agentId}`;
 
 beforeEach(() => {
-  window.history.replaceState({}, "", routes.playground());
+  window.history.replaceState({}, "", routes.agentChat("agent-1"));
   vi.clearAllMocks();
   window.localStorage.clear();
   window.sessionStorage.clear();
@@ -140,6 +148,7 @@ beforeEach(() => {
   refusals = [];
   vi.stubGlobal("fetch", fetchMock);
   vi.mocked(api.agents.list).mockResolvedValue(makeAgents());
+  vi.mocked(api.agents.get).mockImplementation(async (id) => (await api.agents.list()).find((a) => a.id === id)!);
   vi.mocked(api.versions.list).mockImplementation(async (id) => versionsByAgent[id] ?? []);
   vi.mocked(fetchModels).mockResolvedValue(modelList);
   vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => ({
@@ -180,7 +189,7 @@ describe("options sent on each turn (exact POST body)", () => {
     ["draft plus override", { Version: "draft", Model: "test:echo" }, { version: "draft", model: { provider: "test", name: "echo" } }],
   ];
   it.each(cases)("sends %s", async (_label, picks, extra) => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-3" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3"));
     await renderReady();
     for (const [name, value] of Object.entries(picks)) choose(name, value);
     await send();
@@ -197,7 +206,7 @@ describe("options sent on each turn (exact POST body)", () => {
   });
 
   it("does not send an override when the picked model equals the version's own", async () => {
-    window.history.replaceState({}, "", routes.playground({ model: "openai:gpt-4.1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { model: "openai:gpt-4.1" }));
     await renderReady();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("openai:gpt-4.1"));
     choose("Model", "");
@@ -231,7 +240,7 @@ describe("options sent on each turn (exact POST body)", () => {
   });
 
   it("re-reads the options on every turn of one conversation", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-3" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3"));
     await renderReady();
     choose("Version", "v1");
     await send("one");
@@ -328,7 +337,7 @@ describe("acceptance: two turns of one conversation, two models", () => {
       event(2, "run_completed", { output: "ans" }),
     ];
     vi.mocked(listEvents).mockImplementation(async (id) => answered(id === "r1" ? "other:x" : "other:y"));
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1", agent: "agent-3" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
     await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
     expect(texts("turn-badge-model")).toEqual(["openai:gpt-4.1-mini", "openai:gpt-4.1"]);
@@ -462,8 +471,9 @@ describe("reload keeps the options", () => {
 
   it("restores agent, version, model and context after the page is remounted on the same URL", async () => {
     vi.mocked(getRequestContext).mockImplementation(async (id, v) => tierInfo(id, v));
+    // Was choosing agent-3 in the picker; the chat route names the agent now.
+    window.history.replaceState({}, "", routes.agentChat("agent-3"));
     const first = await renderReady();
-    choose("Agent", "agent-3");
     await screen.findByRole("option", { name: "v1" });
     choose("Version", "v1");
     choose("Model", "test:echo");
@@ -472,23 +482,31 @@ describe("reload keeps the options", () => {
     fireEvent.click(await screen.findByRole("button", { name: "JSON" }));
     fireEvent.change(screen.getByLabelText("Request context JSON"), { target: { value: '{"tier":"silver"}' } });
     await waitFor(() => expect(window.sessionStorage.getItem(ctxKey("agent-3"))).toContain("silver"));
-    expect(new URLSearchParams(window.location.search).get("agent")).toBe("agent-3");
+    // Was ?agent=agent-3; the agent is in the path now.
+    expect(window.location.pathname).toMatch(/^\/agents\/agent-3\/chat(\/[^/]+)?$/);
+    expect(new URLSearchParams(window.location.search).get("agent")).toBeNull();
     expect(new URLSearchParams(window.location.search).get("version")).toBe("1");
     first.unmount();
 
     await renderReady();
-    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
+    // Was the Agent picker's value: the remounted tab shows agent-3 itself (its own versions, latest v2).
+    expect(api.agents.get).toHaveBeenLastCalledWith("agent-3");
+    expect(screen.getByRole("option", { name: "Latest (v2)" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("v1"));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("test:echo"));
     await screen.findByRole("button", { name: /1 of 1 set/ });
     await send();
     expect(lastBody()).toMatchObject({ version: 1, model: { provider: "test", name: "echo" }, request_context: { tier: "silver" } });
+    // The conversation the turn went to was created for agent-3.
+    const created = vi.mocked(createConversation).mock.calls;
+    expect(created.length).toBeGreaterThan(0);
+    expect(created.at(-1)?.[0]).toBe("agent-3");
   });
 
   it("keeps a remembered context per agent and does not leak it to another agent", async () => {
     vi.mocked(getRequestContext).mockImplementation(async (id, v) => tierInfo(id, v));
     window.sessionStorage.setItem(ctxKey("agent-3"), JSON.stringify({ value: { tier: "gold" } }));
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1"));
     await renderReady();
     await screen.findByRole("button", { name: /0 of 1 set/ });
     await send();
@@ -499,7 +517,7 @@ describe("reload keeps the options", () => {
     ["an unknown wildcard provider", "mistral:large"],
     ["a model that was never listed", "openai:gpt-5"],
   ])("drops %s from the URL with a note and sends no override", async (_l, model) => {
-    window.history.replaceState({}, "", `${routes.playground()}?agent=agent-1&model=${model}`);
+    window.history.replaceState({}, "", `${routes.agentChat("agent-1")}?model=${model}`);
     await renderReady();
     expect(await screen.findByText(`${model} is not offered here; turns use the version's model.`)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("");
@@ -509,7 +527,7 @@ describe("reload keeps the options", () => {
   });
 
   it("treats the version's own model in the URL as no override, without a note", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", model: "openai:gpt-4.1-mini" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { model: "openai:gpt-4.1-mini" }));
     await renderReady();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue(""));
     expect(screen.queryByText(/is not offered here/)).not.toBeInTheDocument();
@@ -518,7 +536,7 @@ describe("reload keeps the options", () => {
   });
 
   it("falls back to latest for a version number the agent does not have", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", version: 7 }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { version: 7 }));
     await renderReady();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("latest"));
     await send();
@@ -537,7 +555,7 @@ describe("reload keeps the options", () => {
     expect(lastBody()?.request_context).toEqual({ tier: "preset" });
     first.unmount();
     window.sessionStorage.setItem(ctxKey("agent-1"), JSON.stringify({ value: { tier: "mine" } }));
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1"));
     await renderReady();
     await screen.findByRole("button", { name: /1 of 1 set/ });
     await send("q");
@@ -552,7 +570,7 @@ describe("reload keeps the options", () => {
         display_status: "queued", model_overridden: false, model_id: "openai:gpt-4.1-mini",
         request_context: { tier: "bronze" } }] as never,
     });
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1", agent: "agent-3", version: 2, model: "test:echo" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1", version: 2, model: "test:echo" }));
     await renderReady();
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0].url).toBe("http://api.test/api/v1/conversations/conv-1/runs");
@@ -566,7 +584,7 @@ describe("reload keeps the options", () => {
       created_at: baseRun.created_at, updated_at: baseRun.updated_at,
       runs: [{ ...baseRun, run_id: "run-r", turn: 1, input: "x", version: 1, status: "running", display_status: "running" }] as never,
     });
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1", agent: "agent-3" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
     await waitFor(() => expect(subscribeRun).toHaveBeenCalled());
     expect(posts).toHaveLength(0);
@@ -725,7 +743,7 @@ describe("blocked turns", () => {
          event(2, "run_completed", { output: "hello" })]
       : [event(0, "run_started", { input: "[withheld]" }),
          event(1, "run_failed", { status: "failed", error: "blocked by input processors", error_code: "input_blocked" })]);
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1", agent: "agent-3" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
     expect(await screen.findByTestId("turn-blocked")).toHaveAttribute("data-code", "input_blocked");
     expect(screen.getByText("hello")).toBeInTheDocument();
@@ -737,20 +755,22 @@ describe("blocked turns", () => {
 
 describe("draft-only agents", () => {
   const pickDraftAgent = async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-2" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-2"));
     await renderReady();
   };
 
   it("labels the agent and offers only the draft, selected", async () => {
     await pickDraftAgent();
-    expect(screen.getByRole("option", { name: "Draft helper (draft only)" })).toBeInTheDocument();
+    // Was the "Draft helper (draft only)" option of the Agent picker; the agent page's header names the
+    // agent now, so the chat only has to show that the agent was loaded and offers just its draft.
+    expect(api.agents.get).toHaveBeenCalledWith("agent-2");
     const version = screen.getByRole("combobox", { name: "Version" });
     expect(version).toHaveValue("draft");
     expect(within(version).getAllByRole("option").map((o) => o.textContent)).toEqual(["Draft (unpublished)"]);
   });
 
   it("runs the draft on every turn, even when the URL asks for a version", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-2", version: 3 }));
+    window.history.replaceState({}, "", routes.agentChat("agent-2", { version: 3 }));
     await renderReady();
     expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("draft");
     await send("one");
@@ -807,7 +827,9 @@ describe("localStorage unavailable", () => {
 describe("accessibility", () => {
   it("labels every control and starts with no invalid state", async () => {
     await renderReady();
-    for (const name of ["Agent", "Version", "Model"]) {
+    // The Agent picker is gone (the route fixes the agent).
+    expect(screen.queryByRole("combobox", { name: "Agent" })).not.toBeInTheDocument();
+    for (const name of ["Version", "Model"]) {
       expect(screen.getByRole("combobox", { name })).toBeInTheDocument();
     }
     expect(screen.getByLabelText("Version")).toBe(screen.getByRole("combobox", { name: "Version" }));
@@ -847,7 +869,6 @@ describe("accessibility", () => {
     await renderReady();
     await screen.findByRole("button", { name: /No context fields/ });
     const controls = [
-      screen.getByRole("combobox", { name: "Agent" }),
       screen.getByRole("combobox", { name: "Version" }),
       screen.getByRole("combobox", { name: "Model" }),
       screen.getByRole("button", { name: /No context fields/ }),

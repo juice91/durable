@@ -1,10 +1,8 @@
 import {
   AgentsIcon,
-  DashboardIcon,
   LogsIcon,
   McpIcon,
   MetricsIcon,
-  PlaygroundIcon,
   ProcessorsIcon,
   RequestContextIcon,
   SettingsIcon,
@@ -56,9 +54,9 @@ export interface NavItem {
    * the prefix itself and every sub-path: `/agents` matches `/agents/x/chat`, not `/agents-x`.
    */
   match?: readonly string[];
-  /** Active only on exactly its href (the root `/`). */
+  /** Active only on exactly its href, not on its sub-paths. */
   exact?: boolean;
-  /** A page that a later task replaces and removes from the registry (SL.6, SL.7, SL.10). */
+  /** A page that a later task replaces and removes from the registry (SL.10). */
   transitional?: boolean;
   /** Extra palette search words. */
   keywords?: readonly string[];
@@ -67,8 +65,6 @@ export interface NavItem {
 export const navItems: readonly NavItem[] = [
   // Primitives
   { id: "agents", label: "Agents", href: routes.agents(), icon: AgentsIcon, group: "primitives", gKey: "a", keywords: ["assistants"] },
-  // Transitional: SL.6 moves chat onto the agent page and removes this item.
-  { id: "playground", label: "Playground", href: routes.playground(), icon: PlaygroundIcon, group: "primitives", transitional: true, keywords: ["chat"] },
   { id: "workflows", label: "Workflows", href: routes.workflows(), icon: WorkflowsIcon, group: "primitives", gKey: "w" },
   { id: "tools", label: "Tools", href: routes.tools(), icon: ToolsIcon, group: "primitives", gKey: "o" },
   { id: "mcp", label: "MCP Servers", href: routes.mcp(), icon: McpIcon, group: "primitives", gKey: "m", keywords: ["mcp"] },
@@ -76,9 +72,8 @@ export const navItems: readonly NavItem[] = [
   // Transitional: SL.10 turns request context into a composer popover and removes this item.
   { id: "request-context", label: "Request Context", href: routes.requestContext(), icon: RequestContextIcon, group: "primitives", transitional: true },
   // Observability
-  // Transitional: SL.7 folds the dashboard into Metrics and removes this item.
-  { id: "dashboard", label: "Dashboard", href: routes.dashboard(), icon: DashboardIcon, group: "observability", exact: true, transitional: true, keywords: ["overview", "home"] },
-  { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n" },
+  // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
+  { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },
   // Run pages belong to Traces until SL.12 folds them into the trace drawer.
   { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t", match: ["/runs"] },
   { id: "logs", label: "Logs", href: routes.logs(), icon: LogsIcon, group: "observability", gKey: "l" },

@@ -1,4 +1,4 @@
-/* Chart theme tokens for the metrics components (Metrics page, Overview Dashboard).
+/* Chart theme tokens for the metrics components (the Metrics page and its Overview).
  *
  * Same form as the app's theme variables in globals.css: each token is an HSL triple, used as
  * `hsl(var(--viz-...))` through the `--viz-*-color` aliases, and EVERY token has its own dark value

@@ -1,0 +1,1086 @@
+"use client";
+
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  AssistantRuntimeProvider,
+  ComposerPrimitive,
+  MessagePrimitive,
+  ThreadPrimitive,
+  useAuiState,
+  useExternalStoreRuntime,
+  type AppendMessage,
+  type TextMessagePartProps,
+  type ToolCallMessagePartProps,
+} from "@assistant-ui/react";
+import { createPortal } from "react-dom";
+import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  conversationToThread,
+  type ThreadTurn,
+} from "@/components/playground/thread";
+import { ConversationRail } from "@/components/playground/ConversationRail";
+import { ContextPanel } from "@/components/playground/ContextPanel";
+import { RunOptionsBar } from "@/components/playground/RunOptionsBar";
+import { TurnFooter, type TurnView } from "@/components/playground/TurnFooter";
+import {
+  DEFAULT_MODEL_CHOICE,
+  NO_OPTION_ERRORS,
+  choiceFromModelId,
+  classifyTurnError,
+  contextToSend,
+  effectiveVersionRef,
+  hasOutputProcessors,
+  clearPlaygroundContext,
+  loadPlaygroundContext,
+  optionsFromRun,
+  overrideFor,
+  parseUrlState,
+  resolveModelChoice,
+  savePlaygroundContext,
+  stripPreferPresetParam,
+  specModelId,
+  targetSpec,
+  turnBlock,
+  turnLiveText,
+  turnModelId,
+  turnUsage,
+  type ModelChoice,
+  type RunUsageRow,
+  type TurnOptionErrors,
+  type TurnOptions,
+  type VersionRef,
+} from "@/components/playground/runOptions";
+import { TurnStartError, startTurnWithOptions } from "@/components/playground/turnApi";
+import { IDLE_VALIDATION, type ContextValidationState } from "@/components/requestContext";
+import { StatusPill } from "@/components/runs/StatusPill";
+import { api, ApiError, type Agent, type AgentVersion } from "@/lib/api";
+import {
+  createConversation,
+  getConversation,
+  type Conversation,
+} from "@/lib/conversations";
+import { fetchModels, type ModelOption } from "@/lib/metrics";
+import {
+  getRequestContext,
+  loadSavedContext,
+  saveContext,
+  type RequestContextInfo,
+  type RequestContextValue,
+} from "@/lib/requestContext";
+import {
+  deltaReducer,
+  listEvents,
+  subscribeRun,
+  type RunStatus,
+  type SubscribeHandlers,
+} from "@/lib/runs";
+import { usePathname } from "next/navigation";
+import { agentChatPathState, routes } from "@/lib/routes";
+import { useSidePanel } from "@/components/frame/SidePanel";
+import { useAgentPage } from "./AgentPageContext";
+import { AgentChatPanes } from "./AgentChatPanes";
+import { MemoryCard } from "./MemoryCard";
+import { chatUrlFor, effectiveConfig, writeLastAgent, type ChatUrlState } from "./agentPageModel";
+
+/** One turn of the conversation: a run plus what the thread and its badge need to draw it. */
+type Turn = ThreadTurn & {
+  displayStatus: RunStatus;
+  error: string | null;
+  /** The effective model, from the start response or the run row (null until known). */
+  modelId: string | null;
+  modelOverridden: boolean;
+  draft: boolean;
+  version: number | null;
+  /** The run row's usage totals, when the turn was loaded from the API. */
+  row: RunUsageRow | null;
+  /**
+   * Whether live deltas may be shown, fixed when the turn starts: false when the target spec has
+   * output processors (P0.17). null: not known at start (spec not loaded yet, or a turn rebuilt on
+   * reload), worked out from the turn's own version or draft, failing closed while unknown.
+   */
+  liveText: boolean | null;
+};
+
+const TERMINAL_STATUSES = new Set<RunStatus>([
+  "completed",
+  "failed",
+  "needs_attention",
+]);
+
+/** Thread message id → the turn whose badge and notices render under it (its last message). */
+const TurnViewsContext = createContext<ReadonlyMap<string, TurnView>>(new Map());
+
+function failedEventStatus(status: unknown): "failed" | "needs_attention" {
+  return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
+function messageText(message: AppendMessage): string {
+  return message.content
+    .filter((part): part is Extract<typeof part, { type: "text" }> =>
+      part.type === "text",
+    )
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+function ToolCall({ toolName, args, result }: ToolCallMessagePartProps) {
+  return (
+    <div className="my-2 rounded-md border border-border bg-card p-3 text-card-foreground">
+      <p className="text-sm font-semibold">{toolName}</p>
+      <pre className="mt-2 overflow-x-auto text-xs text-muted-foreground">
+        {JSON.stringify(args, null, 2)}
+      </pre>
+      {result !== undefined && (
+        <pre className="mt-2 overflow-x-auto border-t border-border pt-2 text-xs">
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function MarkdownText({ text }: TextMessagePartProps) {
+  return (
+    <div className="space-y-2 break-words [&_a]:text-info-text [&_a]:underline [&_code]:rounded [&_code]:bg-background/60 [&_code]:px-1 [&_pre]:overflow-x-auto [&_ul]:list-disc [&_ul]:pl-5">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function ThreadMessage() {
+  const messageId = useAuiState((s) => s.message.id);
+  const turn = useContext(TurnViewsContext).get(messageId);
+  return (
+    <MessagePrimitive.Root className="flex w-full flex-col">
+      <MessagePrimitive.If user>
+        <div className="ml-auto max-w-[80%] rounded-lg bg-primary px-4 py-3 text-primary-foreground">
+          <MessagePrimitive.Parts components={{ tools: { Fallback: ToolCall } }} />
+        </div>
+      </MessagePrimitive.If>
+      <MessagePrimitive.If assistant>
+        <div className="mr-auto max-w-[80%] rounded-lg bg-muted px-4 py-3 text-foreground">
+          <MessagePrimitive.Parts
+            components={{ Text: MarkdownText, tools: { Fallback: ToolCall } }}
+          />
+        </div>
+      </MessagePrimitive.If>
+      {turn && <TurnFooter turn={turn} />}
+    </MessagePrimitive.Root>
+  );
+}
+
+function PlaygroundThread({
+  messages,
+  disabled,
+  running,
+  onNew,
+}: {
+  messages: ReturnType<typeof conversationToThread>["messages"];
+  disabled: boolean;
+  running: boolean;
+  onNew: (message: AppendMessage) => Promise<void>;
+}) {
+  const runtime = useExternalStoreRuntime({
+    messages,
+    isDisabled: disabled,
+    isRunning: running,
+    onNew,
+  });
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
+        <ThreadPrimitive.Viewport className="mb-4 flex-1 overflow-y-auto rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
+          {messages.length === 0 && (
+            <div className="flex h-full min-h-48 items-center justify-center text-muted-foreground">
+              Start a conversation by sending a message.
+            </div>
+          )}
+          <div className="space-y-4">
+            <ThreadPrimitive.Messages components={{ Message: ThreadMessage }} />
+          </div>
+        </ThreadPrimitive.Viewport>
+
+        <ComposerPrimitive.Root className="flex items-end gap-2">
+          <ComposerPrimitive.Input
+            aria-label="Message"
+            placeholder="Type a message..."
+            rows={2}
+            className="min-h-12 flex-1 resize-none rounded-lg border border-border bg-card px-4 py-3 text-sm text-card-foreground disabled:cursor-not-allowed disabled:bg-muted"
+          />
+          <ComposerPrimitive.Send className="rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
+            Send message
+          </ComposerPrimitive.Send>
+        </ComposerPrimitive.Root>
+      </ThreadPrimitive.Root>
+    </AssistantRuntimeProvider>
+  );
+}
+
+/** Thread message id of each turn's last message, keyed by that id (message ids are `<runId>:...`). */
+function footerMessageIds(messages: readonly { id: string }[]): Map<string, string> {
+  const lastByRun = new Map<string, string>();
+  for (const message of messages) {
+    const colon = message.id.indexOf(":");
+    if (colon > 0) lastByRun.set(message.id.slice(0, colon), message.id);
+  }
+  return new Map(Array.from(lastByRun, ([runId, messageId]) => [messageId, runId]));
+}
+
+/**
+ * The agent and its published versions: from the agent page (loaded once by `AgentLayout`), or
+ * loaded here when the tab renders alone (a test).
+ */
+function useChatAgent(agentId: string): { agent: Agent | undefined; versions: AgentVersion[] | null; agentError: string | null } {
+  const page = useAgentPage();
+  const shared = page !== null && page.agentId === agentId;
+  const [agent, setAgent] = useState<Agent | undefined>(undefined);
+  const [versions, setVersions] = useState<AgentVersion[] | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (shared) return;
+    let cancelled = false;
+    setAgent(undefined);
+    setAgentError(null);
+    api.agents
+      .get(agentId)
+      .then((loaded) => {
+        if (!cancelled) setAgent(loaded);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setAgentError(reason instanceof ApiError && reason.status === 404 ? "Agent not found." : "Failed to load the agent.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, shared]);
+
+  // The agent's published versions (the version selector and each turn's spec).
+  useEffect(() => {
+    if (shared) return;
+    let cancelled = false;
+    setVersions(null);
+    api.versions
+      .list(agentId)
+      .then((items) => {
+        if (!cancelled) setVersions(Array.isArray(items) ? items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setVersions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, shared]);
+
+  if (shared) return { agent: page.agent ?? undefined, versions: page.versions, agentError: null };
+  return { agent, versions, agentError };
+}
+
+export interface ChatTabProps {
+  /** The agent, fixed by the route (`/agents/:id/chat`). */
+  agentId: string;
+  /** The conversation named by the route (`/agents/:id/chat/:conversationId`); none starts a new one. */
+  conversationId?: string | null;
+}
+
+/**
+ * The agent page's Chat tab (SL.6): the P0 playground (conversation list, run options, the
+ * assistant-ui thread with per-turn badges) with the agent fixed by the route. The conversation is in
+ * the path and `?version=&model=` in the query, written back as they change so a reload restores
+ * them. The request context panel shows in the Config panel (or in place when the tab renders alone).
+ * SL.10 reworks the composer and moves request context into it.
+ */
+export function ChatTab({ agentId, conversationId: routeConversationId = null }: ChatTabProps) {
+  const selectedAgentId = agentId;
+  const page = useAgentPage();
+  const reportChatHref = page && page.agentId === agentId ? page.setChatHref : undefined;
+  const pathname = usePathname();
+  const sidePanel = useSidePanel();
+  const { agent: selectedAgent, versions, agentError } = useChatAgent(agentId);
+  const [ready, setReady] = useState(false);
+  // An old link to a conversation of another agent: shown as a notice with a link to that chat.
+  const [otherAgentConversation, setOtherAgentConversation] = useState<{ agentId: string; conversationId: string } | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [runActive, setRunActive] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [railRefresh, setRailRefresh] = useState(0);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const restoredRef = useRef(false);
+  // The conversation named by the URL at load time (read once, on the client).
+  const initialConversationRef = useRef<string | null>(null);
+  // What the address bar shows; each write changes some keys and keeps the others.
+  const urlStateRef = useRef<ChatUrlState>({ conversation: null, version: null, model: null });
+  // Bumped whenever the thread switches (select, new conversation): a load or a turn
+  // start begun for the previous thread must not write into the new one or subscribe.
+  const generationRef = useRef(0);
+  const agentRef = useRef("");
+  // What onDelta needs to decide whether a turn may show unchecked text (see Turn.liveText).
+  const liveTextRef = useRef<{ agent: Agent | undefined; versions: AgentVersion[] | null }>({
+    agent: undefined,
+    versions: null,
+  });
+  // The turn that became blocked while this page watched it: only its notice is announced.
+  const [announceRunId, setAnnounceRunId] = useState<string | null>(null);
+
+  // Run options (P0.19): per turn, version or draft, model override and request context.
+  const [requestedVersion, setRequestedVersion] = useState<VersionRef>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelChoice, setModelChoice] = useState<ModelChoice>(DEFAULT_MODEL_CHOICE);
+  // A model override from the URL, applied once the model list and the target spec are known.
+  const [pendingModelId, setPendingModelId] = useState<string | null>(null);
+  const [modelNotice, setModelNotice] = useState<string | null>(null);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextInfo, setContextInfo] = useState<RequestContextInfo | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextLoadError, setContextLoadError] = useState<string | null>(null);
+  const [contextValue, setContextValue] = useState<RequestContextValue>({});
+  const [contextValidation, setContextValidation] = useState<ContextValidationState>(IDLE_VALIDATION);
+  const [presetAvailable, setPresetAvailable] = useState(false);
+  const [presetMessage, setPresetMessage] = useState<string | null>(null);
+  const [optionErrors, setOptionErrors] = useState<TurnOptionErrors>(NO_OPTION_ERRORS);
+  const [unsentInput, setUnsentInput] = useState<string | null>(null);
+  // The URL is written only after it has been read, so a reload never loses its options.
+  const [urlReady, setUrlReady] = useState(false);
+
+  const latestVersion = selectedAgent?.latest_version ?? null;
+  const versionRef = selectedAgent
+    ? effectiveVersionRef(requestedVersion, latestVersion, versions)
+    : requestedVersion;
+  const spec = selectedAgent ? targetSpec(versionRef, selectedAgent.draft_spec, latestVersion, versions) : null;
+  const defaultModelId = specModelId(spec);
+  const resolvedModel = resolveModelChoice(modelChoice);
+  const chosenModelId = "modelId" in resolvedModel ? resolvedModel.modelId : null;
+  const modelChoiceError = "error" in resolvedModel ? resolvedModel.error : null;
+
+  const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
+
+  /** Writes the chat's state to the address bar (replaceState: no history entry, no navigation). */
+  const writeUrl = useCallback(
+    (patch: Partial<ChatUrlState>) => {
+      if (typeof window === "undefined") return;
+      urlStateRef.current = { ...urlStateRef.current, ...patch };
+      const next = chatUrlFor(window.location.href, agentId, urlStateRef.current);
+      if (next !== `${window.location.pathname}${window.location.search}${window.location.hash}`) window.history.replaceState({}, "", next);
+      // The Chat tab links back here (conversation and options) from the other tabs.
+      reportChatHref?.(next.split("#")[0]);
+    },
+    [agentId, reportChatHref],
+  );
+  const setConversationParam = useCallback((id: string | null) => writeUrl({ conversation: id }), [writeUrl]);
+
+  const stopSubscription = useCallback(() => {
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = null;
+  }, []);
+
+  const updateTurn = useCallback(
+    (runId: string, update: (turn: Turn) => Turn) => {
+      setTurns((current) =>
+        current.map((turn) => (turn.runId === runId ? update(turn) : turn)),
+      );
+    },
+    [],
+  );
+
+  /** Select an agent: its remembered playground context, else its saved preset (P0.16). */
+  const selectAgent = useCallback((agentId: string, preferPreset = false) => {
+    agentRef.current = agentId;
+    const preset = agentId ? loadSavedContext(agentId) : null;
+    // "Use in playground" (`context=preset`): the saved preset replaces the tab's remembered context.
+    if (preferPreset && preset !== null) clearPlaygroundContext(agentId);
+    const remembered = agentId ? loadPlaygroundContext(agentId) : null;
+    setContextValue(remembered ?? preset?.value ?? {});
+    setPresetAvailable(preset !== null);
+    setPresetMessage(remembered === null && preset !== null ? "Using the preset saved for this agent." : null);
+    setContextValidation(IDLE_VALIDATION);
+    setOptionErrors(NO_OPTION_ERRORS);
+    setUnsentInput(null);
+  }, []);
+
+  // Follow one turn's run. Only the latest turn can be in flight, so one subscription is enough.
+  const followRun = useCallback(
+    (runId: string, initialLastSeq?: number) => {
+      stopSubscription();
+      const handlers: SubscribeHandlers = {
+        onEvent: (nextEvent) => {
+          updateTurn(runId, (turn) => {
+            const events = turn.events.some((item) => item.seq === nextEvent.seq)
+              ? turn.events
+              : [...turn.events, nextEvent].sort((a, b) => a.seq - b.seq);
+            let partials = turn.partials ?? {};
+            let displayStatus = turn.displayStatus;
+            if (nextEvent.type === "model_message") {
+              partials = deltaReducer(partials, { type: "model_message", payload: nextEvent });
+            } else if (nextEvent.type === "run_completed" || nextEvent.type === "run_failed") {
+              partials = deltaReducer(partials, {
+                type: nextEvent.type === "run_completed" ? "done" : "failed",
+              });
+              displayStatus =
+                nextEvent.type === "run_completed"
+                  ? "completed"
+                  : failedEventStatus(nextEvent.data.status);
+            }
+            const error =
+              nextEvent.type === "run_failed" && typeof nextEvent.data.error === "string"
+                ? nextEvent.data.error
+                : turn.error;
+            const modelId =
+              turn.modelId ??
+              (nextEvent.type === "model_message" && typeof nextEvent.data.model_id === "string"
+                ? nextEvent.data.model_id
+                : null);
+            return { ...turn, events, partials, displayStatus, error, modelId };
+          });
+          if (nextEvent.type === "run_failed" && turnBlock([nextEvent]) !== null) {
+            setAnnounceRunId(runId);
+          }
+          if (nextEvent.type === "run_completed" || nextEvent.type === "run_failed") {
+            setRunActive(false);
+            refreshRail();
+          }
+        },
+        onDelta: (delta) => {
+          updateTurn(runId, (turn) => {
+            // Defence in depth for P0.17: the worker publishes no deltas for a spec with output
+            // processors; should any arrive anyway, unchecked text never reaches the screen.
+            const { agent, versions: known } = liveTextRef.current;
+            if (!turnLiveText(turn.liveText, turn, agent?.draft_spec, agent?.latest_version ?? null, known)) {
+              return turn;
+            }
+            return {
+              ...turn,
+              partials: deltaReducer(turn.partials ?? {}, { type: "delta", payload: delta }),
+            };
+          });
+        },
+        onStatus: (status) => {
+          updateTurn(runId, (turn) => ({ ...turn, displayStatus: status.display_status }));
+          setRunActive(!TERMINAL_STATUSES.has(status.display_status));
+        },
+        onEnd: (reason) => {
+          if (
+            reason === "run_completed" ||
+            reason === "run_failed" ||
+            reason === "terminal_status" ||
+            reason === "not_found"
+          ) {
+            setRunActive(false);
+          }
+        },
+      };
+      unsubscribeRef.current =
+        initialLastSeq === undefined
+          ? subscribeRun(runId, handlers)
+          : subscribeRun(runId, handlers, { initialLastSeq });
+    },
+    [refreshRail, stopSubscription, updateTurn],
+  );
+
+  // The options the URL names (`?version=&model=`, and `context=preset` from the Request Context
+  // page's "Use in playground"), read once on the client; the conversation comes from the route.
+  useEffect(() => {
+    const initial = parseUrlState(window.location.search);
+    initialConversationRef.current = routeConversationId ?? initial.conversation;
+    urlStateRef.current = { conversation: initialConversationRef.current, version: initial.version, model: initial.model };
+    selectAgent(agentId, initial.preferPreset);
+    stripPreferPresetParam();
+    setRequestedVersion(initial.version);
+    setPendingModelId(initial.model);
+    setReady(true);
+    setUrlReady(true);
+    writeLastAgent(agentId);
+    // Read once per mount: a new route (another conversation or agent) mounts a new tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The model list (allowlist plus scripted test models), once.
+  useEffect(() => {
+    let cancelled = false;
+    fetchModels()
+      .then((items) => {
+        if (!cancelled) setModels(items);
+      })
+      .catch(() => {
+        if (!cancelled) setModelsError("Could not load the model list; turns use the version's model.");
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The target's context fields.
+  const contextVersionKey = String(versionRef);
+  useEffect(() => {
+    let cancelled = false;
+    setContextInfo(null);
+    setContextLoadError(null);
+    if (!selectedAgentId) {
+      setContextLoading(false);
+      return;
+    }
+    setContextLoading(true);
+    const ref: VersionRef = contextVersionKey === "draft" ? "draft" : contextVersionKey === "null" ? null : Number(contextVersionKey);
+    getRequestContext(selectedAgentId, ref)
+      .then((info) => {
+        if (!cancelled) setContextInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setContextLoadError("Could not load this version's context fields.");
+      })
+      .finally(() => {
+        if (!cancelled) setContextLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgentId, contextVersionKey]);
+
+  // Apply a model override named by the URL once it can be checked against the list.
+  const specKnown = spec !== null || versions !== null;
+  useEffect(() => {
+    if (pendingModelId === null || !modelsLoaded || !specKnown) return;
+    const { choice, dropped } = choiceFromModelId(pendingModelId, models, defaultModelId);
+    setModelChoice(choice);
+    setModelNotice(dropped ? `${pendingModelId} is not offered here; turns use the version's model.` : null);
+    setPendingModelId(null);
+  }, [defaultModelId, models, modelsLoaded, pendingModelId, specKnown]);
+
+  // Keep the options in the URL so a reload restores them.
+  const urlModel = pendingModelId ?? chosenModelId;
+  useEffect(() => {
+    if (!urlReady) return;
+    // An agent without a published version always runs its draft; the URL keeps what was asked for
+    // until the agent is known, so a reload before then loses nothing.
+    writeUrl({ version: selectedAgent ? versionRef : requestedVersion, model: urlModel });
+  }, [requestedVersion, selectedAgent, urlModel, urlReady, versionRef, writeUrl]);
+
+  // The Config panel describes the version the chat targets.
+  const setConfigVersion = page?.setConfigVersion;
+  useEffect(() => {
+    setConfigVersion?.(versionRef);
+  }, [setConfigVersion, versionRef]);
+
+  useEffect(() => {
+    agentRef.current = selectedAgentId;
+  }, [selectedAgentId]);
+
+  useEffect(() => {
+    liveTextRef.current = { agent: selectedAgent, versions };
+  }, [selectedAgent, versions]);
+
+  // Rebuild a whole thread from the API and follow its in-flight turn, if any. Used on reload
+  // (?conversation=<id>) and when a conversation is picked in the rail. Leaving a thread whose turn
+  // is streaming only stops this page's subscription: the run goes on server-side and is followed
+  // again when the thread is opened again.
+  const loadConversation = useCallback(
+    async (id: string) => {
+      stopSubscription();
+      const generation = ++generationRef.current;
+      const current = () => generation === generationRef.current;
+      setConversationId(id);
+      setTurns([]);
+      setError(null);
+      setAnnounceRunId(null);
+      setRunActive(true);
+      try {
+        const conversation = await getConversation(id);
+        if (!current()) return;
+        if (conversation.agent_id !== agentRef.current) {
+          // Another agent's conversation (an old link): it opens in that agent's chat, not here, so
+          // none of its events are read.
+          setConversationId(null);
+          setConversationParam(null);
+          setRunActive(false);
+          setOtherAgentConversation({ agentId: conversation.agent_id, conversationId: conversation.id });
+          return;
+        }
+        const loaded = await Promise.all(
+          conversation.runs.map(async (run) => ({
+            run,
+            events: await listEvents(run.run_id),
+          })),
+        );
+        if (!current()) return;
+        setConversationId(conversation.id);
+        setTurns(
+          loaded.map(({ run, events }) => {
+            const row = run as typeof run & RunUsageRow;
+            return {
+              runId: run.run_id,
+              input: run.input,
+              events,
+              partials: {},
+              displayStatus: run.display_status,
+              error: run.error,
+              modelId: turnModelId(events, row),
+              modelOverridden: Boolean(row.model_overridden),
+              draft: Boolean(row.draft),
+              version: run.version,
+              row,
+              liveText: null,
+            };
+          }),
+        );
+        const latest = loaded[loaded.length - 1];
+        if (!latest || TERMINAL_STATUSES.has(latest.run.display_status)) {
+          setRunActive(false);
+          return;
+        }
+        if (latest.run.status === "queued") {
+          // Recorded but maybe never started (the start request was interrupted): retrying the
+          // same turn with the options it was recorded with is idempotent and enqueues it if it
+          // was not.
+          await startTurnWithOptions(
+            conversation.id,
+            latest.run.run_id,
+            latest.run.input,
+            optionsFromRun(latest.run as typeof latest.run & RunUsageRow),
+          ).catch(() => undefined);
+          if (!current()) return;
+        }
+        const lastSeq = latest.events.reduce((max, item) => Math.max(max, item.seq), -1);
+        followRun(latest.run.run_id, lastSeq);
+      } catch {
+        if (current()) {
+          setRunActive(false);
+          setError("Failed to load conversation.");
+        }
+      }
+    },
+    [followRun, setConversationParam, stopSubscription],
+  );
+
+  // Reload: rebuild the thread the route names (`/agents/:id/chat/:conversationId`).
+  useEffect(() => {
+    if (!ready || restoredRef.current) return;
+    restoredRef.current = true;
+    const id = initialConversationRef.current;
+    if (id) void loadConversation(id);
+  }, [ready, loadConversation]);
+
+  // Unmounting drops any pending load or turn start, as a thread switch does.
+  useEffect(
+    () => () => {
+      generationRef.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => stopSubscription, [stopSubscription]);
+
+  const resetConversation = useCallback(() => {
+    stopSubscription();
+    generationRef.current += 1;
+    setConversationId(null);
+    setTurns([]);
+    setRunActive(false);
+    setError(null);
+    setAnnounceRunId(null);
+    setOtherAgentConversation(null);
+    setConversationParam(null);
+  }, [setConversationParam, stopSubscription]);
+
+  // A navigation the chat did not write itself (a link to `/agents/:id/chat`, or to another of this
+  // agent's conversations) while this tab stays mounted: the screen follows the address. The chat's
+  // own replaceState writes are recognised by comparing with what it last wrote.
+  const seenPathnameRef = useRef(pathname);
+  useEffect(() => {
+    if (!ready || !pathname || pathname === seenPathnameRef.current) return;
+    seenPathnameRef.current = pathname;
+    const target = agentChatPathState(pathname);
+    if (!target || target.agentId !== agentId) return;
+    if (target.conversation === urlStateRef.current.conversation) return;
+    if (target.conversation === null) {
+      resetConversation();
+    } else {
+      setOtherAgentConversation(null);
+      urlStateRef.current = { ...urlStateRef.current, conversation: target.conversation };
+      void loadConversation(target.conversation);
+    }
+  }, [agentId, loadConversation, pathname, ready, resetConversation]);
+
+  const handleSelectConversation = useCallback(
+    (conversation: Conversation) => {
+      if (conversation.id === conversationId) return;
+      setOtherAgentConversation(null);
+      setConversationParam(conversation.id);
+      void loadConversation(conversation.id);
+      // On a phone the list is a Sheet over the chat: picking a conversation closes it.
+      if (page && !window.matchMedia?.("(min-width: 1024px)").matches) page.setThreadsOpen(false);
+    },
+    [conversationId, loadConversation, page, setConversationParam],
+  );
+
+  const handleNewMessage = useCallback(
+    async (message: AppendMessage) => {
+      const input = messageText(message);
+      if (!input || !selectedAgentId || runActive) return;
+
+      const agent = selectedAgent;
+      if (!agent) return;
+      if (modelChoiceError) {
+        setOptionErrors((errors) => ({ ...errors, model: modelChoiceError }));
+        setUnsentInput(input);
+        return;
+      }
+
+      const options: TurnOptions = {
+        version: versionRef,
+        model: overrideFor(chosenModelId, defaultModelId),
+        // A target without context fields gets none (a remembered value may hold stale keys).
+        request_context: contextInfo !== null && contextInfo.fields.length === 0 ? null : contextToSend(contextValue),
+      };
+      const runId = crypto.randomUUID();
+      const generation = generationRef.current;
+      const current = () => generation === generationRef.current;
+      setRunActive(true);
+      setError(null);
+      setOptionErrors(NO_OPTION_ERRORS);
+      setUnsentInput(null);
+      setAnnounceRunId(null);
+      stopSubscription();
+      // Known only when the target spec is: the draft's from the agent, a version's from the list.
+      const targetKnown = spec !== null && (options.version === "draft" || versions !== null);
+      setTurns((existing) => [
+        ...existing,
+        {
+          runId,
+          input,
+          events: [],
+          partials: {},
+          displayStatus: "queued",
+          error: null,
+          modelId: options.model ? chosenModelId : defaultModelId,
+          modelOverridden: options.model !== null,
+          draft: options.version === "draft",
+          version: typeof options.version === "number" ? options.version : options.version === null ? agent.latest_version : null,
+          row: null,
+          liveText: targetKnown ? !hasOutputProcessors(spec) : null,
+        },
+      ]);
+
+      try {
+        let id = conversationId;
+        if (id === null) {
+          // No title: the API titles the conversation from its first turn.
+          const created = await createConversation(selectedAgentId, null, crypto.randomUUID());
+          id = created.id;
+          // The send is committed once the conversation exists: if the user switched threads
+          // meanwhile, the turn is still started below (no empty conversation is left behind),
+          // only this page no longer shows it.
+          if (current()) {
+            setConversationId(id);
+            setConversationParam(id);
+          }
+        }
+        const started = await startTurnWithOptions(id, runId, input, options);
+        refreshRail();
+        // The user switched threads meanwhile: the turn is recorded and runs; it shows when its
+        // conversation is opened again.
+        if (!current()) return;
+        updateTurn(runId, (turn) => ({
+          ...turn,
+          displayStatus: started.display_status,
+          modelId: started.model_id ?? turn.modelId,
+          modelOverridden: started.model_overridden ?? turn.modelOverridden,
+          draft: started.draft ?? turn.draft,
+          version: started.draft ? null : (started.version ?? turn.version),
+        }));
+        followRun(runId);
+      } catch (reason) {
+        if (!current()) return;
+        setTurns((existing) => existing.filter((turn) => turn.runId !== runId));
+        setRunActive(false);
+        if (reason instanceof TurnStartError && reason.status === 422) {
+          // Shown next to the control the refusal is about.
+          const errors = classifyTurnError(reason.status, reason.detail, options);
+          setOptionErrors(errors);
+          setUnsentInput(input);
+          if (errors.context) setContextOpen(true);
+        } else if (reason instanceof TurnStartError) {
+          setError(`Failed to send the message: ${reason.message}`);
+        } else {
+          setError("Failed to send the message.");
+        }
+      }
+    },
+    [
+      chosenModelId,
+      contextInfo,
+      contextValue,
+      conversationId,
+      defaultModelId,
+      followRun,
+      modelChoiceError,
+      refreshRail,
+      runActive,
+      selectedAgent,
+      selectedAgentId,
+      setConversationParam,
+      spec,
+      stopSubscription,
+      updateTurn,
+      versionRef,
+      versions,
+    ],
+  );
+
+  const handleVersionChange = (ref: VersionRef) => {
+    setRequestedVersion(ref);
+    setOptionErrors((errors) => ({ ...errors, version: null, context: null, general: null }));
+  };
+
+  const handleModelChoiceChange = (choice: ModelChoice) => {
+    setModelChoice(choice);
+    setModelNotice(null);
+    setOptionErrors((errors) => ({ ...errors, model: null, general: null }));
+  };
+
+  const handleContextChange = (value: RequestContextValue) => {
+    setContextValue(value);
+    setPresetMessage(null);
+    setOptionErrors((errors) => ({ ...errors, context: null }));
+    if (selectedAgentId) savePlaygroundContext(selectedAgentId, value);
+  };
+
+  const handleLoadPreset = () => {
+    const preset = selectedAgentId ? loadSavedContext(selectedAgentId) : null;
+    if (!preset) {
+      setPresetAvailable(false);
+      setPresetMessage("No preset is saved for this agent.");
+      return;
+    }
+    handleContextChange(preset.value);
+    setPresetMessage("Loaded the preset saved for this agent.");
+  };
+
+  const handleSavePreset = () => {
+    if (!selectedAgentId || contextValidation.status !== "valid" || !contextValidation.accepted) return;
+    const saved = saveContext(selectedAgentId, contextValidation.accepted, versionRef);
+    setPresetAvailable(saved !== null || presetAvailable);
+    setPresetMessage(saved ? "Saved as this agent's preset." : "Browser storage is unavailable; the preset was not saved.");
+  };
+
+  const handleClearContext = () => {
+    handleContextChange({});
+  };
+
+  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError);
+  const thread = useMemo(() => conversationToThread(turns), [turns]);
+
+  const turnViews = useMemo(() => {
+    const byRun = new Map(turns.map((turn) => [turn.runId, turn]));
+    const views = new Map<string, TurnView>();
+    for (const [messageId, runId] of footerMessageIds(thread.messages)) {
+      const turn = byRun.get(runId);
+      if (!turn) continue;
+      const running = !TERMINAL_STATUSES.has(turn.displayStatus);
+      const liveText = turnLiveText(
+        turn.liveText,
+        turn,
+        selectedAgent?.draft_spec,
+        selectedAgent?.latest_version ?? null,
+        versions,
+      );
+      const block = turnBlock(turn.events);
+      views.set(messageId, {
+        runId,
+        status: turn.displayStatus,
+        modelId: turn.modelId ?? turnModelId(turn.events, turn.row),
+        modelOverridden: turn.modelOverridden,
+        draft: turn.draft,
+        version: turn.version,
+        usage: turnUsage(turn.events, turn.row),
+        // Text is withheld (processors, or the spec not known yet): say why nothing streams.
+        checking: running && !liveText,
+        liveText,
+        block,
+        announce: block !== null && announceRunId === runId,
+      });
+    }
+    return views;
+  }, [announceRunId, selectedAgent, thread.messages, turns, versions]);
+
+  const latest = turns.length > 0 ? turns[turns.length - 1] : null;
+  const status = latest?.displayStatus;
+  // A blocked turn explains itself under its message; other failures show here.
+  const latestBlocked = latest ? turnBlock(latest.events) !== null : false;
+  const statusError =
+    status === "needs_attention"
+      ? latest?.error || "This run needs attention before it can continue."
+      : status === "failed" && !latestBlocked
+        ? latest?.error || "The run failed."
+        : null;
+  const contextFieldCount = contextInfo ? contextInfo.fields.length : null;
+  const contextValueCount = contextInfo
+    ? Object.keys(contextToSend(contextValue) ?? {}).filter((key) => contextInfo.fields.some((f) => f.name === key)).length
+    : 0;
+  const contextHasErrors = Boolean(optionErrors.context) || contextValidation.status === "invalid";
+  const optionsRefused = Boolean(optionErrors.context || optionErrors.model || optionErrors.version || optionErrors.general);
+
+  // In the agent page, opening the request context opens the Config panel, where it shows.
+  const inAgentPage = page !== null && page.agentId === agentId;
+  const contextShown = contextOpen && (!inAgentPage || sidePanel.open);
+  const toggleContext = () => {
+    if (contextShown) {
+      setContextOpen(false);
+      return;
+    }
+    setContextOpen(true);
+    if (inAgentPage) sidePanel.setOpen(true);
+  };
+  // A refusal that opens the context (422) also opens the Config panel.
+  const openSidePanel = sidePanel.setOpen;
+  useEffect(() => {
+    if (contextOpen && inAgentPage) openSidePanel(true);
+  }, [contextOpen, inAgentPage, openSidePanel]);
+
+  const contextPanel =
+    contextShown && selectedAgentId ? (
+      <ContextPanel
+        agentId={selectedAgentId}
+        versionRef={versionRef}
+        info={contextInfo}
+        loading={contextLoading}
+        loadError={contextLoadError}
+        value={contextValue}
+        onChange={handleContextChange}
+        onValidation={setContextValidation}
+        turnErrors={optionErrors.context}
+        presetAvailable={presetAvailable}
+        onLoadPreset={handleLoadPreset}
+        onSavePreset={handleSavePreset}
+        canSavePreset={contextValidation.status === "valid" && contextValidation.accepted !== null}
+        presetMessage={presetMessage}
+        onClear={handleClearContext}
+      />
+    ) : null;
+
+  const memorySpec = selectedAgent ? effectiveConfig(selectedAgent, versions, versionRef).spec : null;
+  const threads = (
+    <>
+      <div className="flex min-h-0 flex-1 flex-col p-3">
+        <ConversationRail
+          agentId={selectedAgent ? selectedAgentId : ""}
+          selectedId={conversationId}
+          refreshKey={railRefresh}
+          onSelect={handleSelectConversation}
+          onNew={resetConversation}
+        />
+      </div>
+      <MemoryCard spec={memorySpec} />
+    </>
+  );
+
+  return (
+    // Fills the agent page's body: the conversation scrolls inside, so the card itself never scrolls.
+    <div data-testid="playground-page" className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <AgentChatPanes agentId={agentId} threads={threads}>
+        <div data-testid="agent-chat" className="flex h-full min-h-0 min-w-0 flex-1 flex-col p-4">
+          <div className="mb-4">
+            {latest && status ? (
+              <div className="mb-3 flex flex-wrap items-center gap-3" data-testid="chat-run-status">
+                <StatusPill status={status} showRecoveringNotice={status === "recovering"} />
+                <a href={routes.run(latest.runId)} className="text-sm text-info-text hover:underline">
+                  View run
+                </a>
+              </div>
+            ) : null}
+            <RunOptionsBar
+              selectedAgentId={selectedAgent ? selectedAgentId : ""}
+              versions={versions}
+              latestVersion={latestVersion}
+              versionRef={versionRef}
+              onVersionChange={handleVersionChange}
+              versionError={optionErrors.version}
+              defaultModelId={defaultModelId}
+              models={models}
+              modelsError={modelsError}
+              modelChoice={modelChoice}
+              onModelChoiceChange={handleModelChoiceChange}
+              modelError={optionErrors.model ?? modelChoiceError}
+              modelNotice={modelNotice}
+              contextOpen={contextShown}
+              onToggleContext={toggleContext}
+              contextFieldCount={contextFieldCount}
+              contextValueCount={contextValueCount}
+              contextHasErrors={contextHasErrors}
+            />
+
+            {/* In the agent page the panel portals into the Config panel; alone, it shows here. */}
+            {inAgentPage ? (page.requestContextSlot && contextPanel ? createPortal(contextPanel, page.requestContextSlot) : null) : contextPanel}
+
+            {agentError && (
+              <div role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">
+                {agentError}
+              </div>
+            )}
+            {otherAgentConversation && (
+              <div role="alert" data-testid="chat-other-agent" className="mt-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning-text">
+                This conversation belongs to another agent.{" "}
+                <Link
+                  href={routes.agentChat(otherAgentConversation.agentId, { conversation: otherAgentConversation.conversationId })}
+                  className="underline underline-offset-2"
+                >
+                  Open it in that agent&apos;s chat
+                </Link>
+              </div>
+            )}
+
+            {optionErrors.general && (
+              <div role="alert" data-testid="turn-options-error" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">
+                {optionErrors.general}
+              </div>
+            )}
+            {optionsRefused && unsentInput && (
+              <p data-testid="unsent-message" className="mt-2 text-xs text-muted-foreground">
+                Not sent: <span className="font-mono">{unsentInput.length > 120 ? `${unsentInput.slice(0, 120)}…` : unsentInput}</span>
+              </p>
+            )}
+
+            {status === "recovering" && (
+              <div className="mt-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning-text">
+                The worker is restarting. Events may be delayed while the run recovers.
+              </div>
+            )}
+            {(error || statusError) && (
+              <div role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">
+                {error || statusError}
+              </div>
+            )}
+          </div>
+
+          <TurnViewsContext.Provider value={turnViews}>
+            <PlaygroundThread
+              messages={thread.messages}
+              disabled={composerDisabled}
+              running={runActive}
+              onNew={handleNewMessage}
+            />
+          </TurnViewsContext.Provider>
+        </div>
+      </AgentChatPanes>
+    </div>
+  );
+}

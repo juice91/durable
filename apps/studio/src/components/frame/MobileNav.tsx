@@ -9,6 +9,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { overlayClass } from "@/components/ui/Dialog";
 import { IconButton } from "@/components/ui/IconButton";
 import { Kbd } from "@/components/ui/Kbd";
+import { usePaletteChordLabel, usePaletteKeyShortcuts } from "@/components/shortcuts/usePaletteChordLabel";
 import { Button } from "@/components/ui/Button";
 import { useFocusReturn } from "@/components/ui/focusReturn";
 import { useFrame } from "./FrameContext";
@@ -23,6 +24,8 @@ export const MOBILE_NAV_ID = "studio-mobile-nav";
  */
 export function MobileTopBar() {
   const frame = useFrame();
+  const chord = usePaletteChordLabel();
+  const keyShortcuts = usePaletteKeyShortcuts();
   return (
     <header data-testid="mobile-top-bar" className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-canvas px-2 lg:hidden">
       <IconButton
@@ -37,10 +40,10 @@ export function MobileTopBar() {
       <Monogram />
       <span className="min-w-0 flex-1 truncate text-label font-semibold text-foreground">{PRODUCT_NAME}</span>
       {frame?.openPalette ? (
-        <Button variant="ghost" size="sm" onClick={frame.openPalette} aria-keyshortcuts="Meta+K Control+K" data-testid="mobile-search" className="gap-1.5 text-muted-foreground">
+        <Button variant="ghost" size="sm" onClick={frame.openPalette} aria-keyshortcuts={keyShortcuts} data-testid="mobile-search" className="gap-1.5 text-muted-foreground">
           <Search className="size-icon" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
           <span className="sr-only sm:not-sr-only">Search…</span>
-          <Kbd className="hidden sm:inline-flex">⌘K</Kbd>
+          <Kbd className="hidden sm:inline-flex">{chord}</Kbd>
         </Button>
       ) : null}
     </header>

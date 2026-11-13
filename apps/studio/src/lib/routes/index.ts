@@ -36,5 +36,13 @@ export const routes = {
 export type Routes = typeof routes;
 
 export { RouteIdError, seg, withQuery, type RouteQuery } from "./query";
-export type { PlaygroundRouteOptions, RequestContextRouteOptions, RouteVersion } from "./agents";
+export type {
+  AgentChatRouteOptions,
+  AgentEditorRouteOptions,
+  AgentTab,
+  PlaygroundRouteOptions,
+  RequestContextRouteOptions,
+  RouteVersion,
+} from "./agents";
+export { agentChatPathState, agentTabOf } from "./agents";
 export { isSafeTarget, legacyTarget, LEGACY_RULES, type LegacyRule, type LegacySearchParams } from "./legacy";

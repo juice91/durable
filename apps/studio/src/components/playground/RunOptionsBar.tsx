@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import type { Agent, AgentVersion } from "@/lib/api";
+import type { AgentVersion } from "@/lib/api";
 import type { ModelOption } from "@/lib/metrics";
 import {
   isWildcardChoice,
@@ -13,9 +13,9 @@ import {
 } from "./runOptions";
 
 export interface RunOptionsBarProps {
-  agents: Agent[];
+  /** The agent the options apply to (fixed by the agent page's route; the breadcrumb switcher changes
+   * agent). Empty while it loads: the controls are disabled. */
   selectedAgentId: string;
-  onAgentChange: (agentId: string) => void;
 
   /** The selected agent's published versions, newest first; null while loading. */
   versions: AgentVersion[] | null;
@@ -57,12 +57,10 @@ function FieldError({ id, message }: { id: string; message: string | null }) {
   );
 }
 
-/** Agent, version (or draft), model and request-context controls of the playground. */
+/** Version (or draft), model and request-context controls of the agent chat. */
 export function RunOptionsBar(props: RunOptionsBarProps) {
   const {
-    agents,
     selectedAgentId,
-    onAgentChange,
     versions,
     latestVersion,
     versionRef,
@@ -91,24 +89,6 @@ export function RunOptionsBar(props: RunOptionsBarProps) {
 
   return (
     <div className="flex flex-wrap items-start gap-4" data-testid="run-options">
-      <label className="flex flex-col gap-1 text-sm font-medium text-muted-foreground">
-        Agent
-        <select
-          aria-label="Agent"
-          className={selectClass}
-          value={selectedAgentId}
-          onChange={(event) => onAgentChange(event.target.value)}
-        >
-          {agents.length === 0 && <option value="">No agents</option>}
-          {agents.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.name}
-              {agent.latest_version === null && " (draft only)"}
-            </option>
-          ))}
-        </select>
-      </label>
-
       <div className="flex flex-col gap-1">
         <label htmlFor="playground-version" className="text-sm font-medium text-muted-foreground">
           Version

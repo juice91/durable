@@ -166,9 +166,10 @@ export const processors = {
   catalog: () => request<ProcessorCatalog>("/processors"),
   test: (specs: ProcessorSpec[], text: string) =>
     request<ProcessorTestResult>("/processors/test", { method: "POST", body: JSON.stringify({ processors: specs, text }) }),
-  results: (filters: ProcessorResultFilters = {}) => {
+  /** `signal` aborts the request (a page that unmounts while counting). */
+  results: (filters: ProcessorResultFilters = {}, signal?: AbortSignal) => {
     const query = resultsQuery(filters);
-    return request<ProcessorResultsPage>(`/processor-results${query ? `?${query}` : ""}`);
+    return request<ProcessorResultsPage>(`/processor-results${query ? `?${query}` : ""}`, signal ? { signal } : {});
   },
 };
 

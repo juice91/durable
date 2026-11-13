@@ -105,12 +105,27 @@ interface PageCase {
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 
+/** An agent tab page inside `app/agents/[id]/layout.tsx`, as Next renders it. */
+async function inAgentLayout(tab: Promise<{ default: React.ComponentType }>): Promise<{ default: React.ComponentType }> {
+  const [{ default: Layout }, { default: Tab }] = await Promise.all([import("@/app/agents/[id]/layout"), tab]);
+  return {
+    default: function AgentTabPage() {
+      return (
+        <Layout>
+          <Tab />
+        </Layout>
+      );
+    },
+  };
+}
+
 const PAGES: PageCase[] = [
-  { name: "dashboard", path: "/", load: () => import("@/app/page"), h1: "Dashboard", active: "dashboard" },
   { name: "agents", path: "/agents", load: () => import("@/app/agents/page"), h1: "Agents", active: "agents" },
   { name: "agents/new", path: "/agents/new", load: () => import("@/app/agents/new/page"), h1: "New Agent", active: "agents" },
-  { name: "agents/[id]", path: "/agents/a1", params: { id: "a1" }, load: () => import("@/app/agents/[id]/page"), h1: "Edit Agent", active: "agents" },
-  { name: "playground", path: "/playground", load: () => import("@/app/playground/page"), h1: "Playground", active: "playground" },
+  // SL.6: `/agents/:id` and `/playground` redirect; the agent page's tabs render inside its layout.
+  { name: "agent chat", path: "/agents/a1/chat", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/chat/page")), h1: "Support bot", active: "agents" },
+  { name: "agent traces", path: "/agents/a1/traces", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/traces/page")), h1: "Support bot", active: "agents" },
+  { name: "agent editor", path: "/agents/a1/editor", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/editor/page")), h1: "Support bot", active: "agents" },
   { name: "workflows", path: "/workflows", load: () => import("@/app/workflows/page"), h1: "Workflows", active: "workflows" },
   { name: "workflows/[id]", path: "/workflows/w1", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/page"), h1: "Workflow", active: "workflows" },
   { name: "workflow run", path: "/workflows/w1/runs/r1", params: { id: "w1", runId: "r1" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: null, active: "workflows" },
@@ -154,7 +169,9 @@ describe.each(["light", "dark"] as const)("every page inside the frame (%s theme
     expect(active[0].getAttribute("data-nav-id")).toBe(page.active);
     const main = screen.getByRole("main");
     if (page.h1) {
-      const h1s = await within(main).findAllByRole("heading", { level: 1 });
+      // Entity pages show their title once the entity has loaded.
+      await waitFor(() => expect(within(main).getAllByRole("heading", { level: 1 })[0]).toHaveTextContent(page.h1!));
+      const h1s = within(main).getAllByRole("heading", { level: 1 });
       expect(h1s).toHaveLength(1);
       expect(h1s[0]).toHaveTextContent(page.h1);
       const header = within(main).getByTestId("page-header");

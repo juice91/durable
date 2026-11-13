@@ -31,7 +31,7 @@ export function runLabel(
 }
 
 export interface RecentFailuresProps {
-  /** Newest first (GET /runs with status=failed,needs_attention and the dashboard's range). */
+  /** Newest first (GET /runs with status=failed,needs_attention and the Metrics page's range and filters). */
   runs: readonly TraceRun[] | null;
   /** Failed plus needs-attention runs in the period, from the metrics summary; null while unknown. */
   total: number | null;
@@ -41,9 +41,12 @@ export interface RecentFailuresProps {
   workflowNames?: Record<string, string>;
   loading?: boolean;
   error?: string | null;
+  /** The title's heading level: 2 on its own, 3 inside the Metrics Overview section. */
+  headingLevel?: 2 | 3;
 }
 
-/** The newest failed and needs-attention runs of the period; each row opens its trace. */
+/** "Needs attention" in the Metrics Overview: the newest failed and needs-attention runs of the
+ * period; each row opens its trace. */
 export function RecentFailures({
   runs,
   total,
@@ -52,19 +55,21 @@ export function RecentFailures({
   workflowNames = {},
   loading = false,
   error = null,
+  headingLevel = 2,
 }: RecentFailuresProps) {
+  const Heading = headingLevel === 3 ? "h3" : "h2";
   const viewAll = total === null ? "View all in Traces" : `View all ${formatCount(total)} in Traces`;
   return (
     <section
-      className="rounded-lg border border-border bg-card text-card-foreground"
+      className="min-w-0 rounded-lg border border-border bg-card text-card-foreground"
       aria-labelledby="recent-failures-title"
       aria-busy={loading || undefined}
       data-testid="recent-failures"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-4 pb-2">
-        <h2 id="recent-failures-title" className="text-sm font-semibold text-foreground">
-          Recent failures
-        </h2>
+        <Heading id="recent-failures-title" className="text-sm font-semibold text-foreground">
+          Needs attention
+        </Heading>
         <Link
           href={viewAllHref}
           className="rounded-sm text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -79,7 +84,7 @@ export function RecentFailures({
           {error}
         </p>
       ) : loading && !runs ? (
-        <div className="mx-4 mb-4 h-32 rounded-md bg-muted animate-pulse" aria-label="Loading recent failures" />
+        <div className="mx-4 mb-4 h-32 rounded-md bg-muted animate-pulse" aria-label="Loading runs that need attention" />
       ) : !runs || runs.length === 0 ? (
         <p className="px-4 pb-6 pt-2 text-sm text-muted-foreground" data-testid="recent-failures-empty">
           No failed or needs-attention runs in this period.

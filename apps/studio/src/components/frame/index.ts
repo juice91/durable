@@ -19,5 +19,5 @@ export { isModalOpen, isTypingTarget, shouldHandleShortcut } from "./keyboard";
 export { MOBILE_NAV_ID, MobileNavDrawer, MobileTopBar } from "./MobileNav";
 export { documentTitleFor, EntitySwitcher, PageHeader, type Crumb, type EntitySwitcherProps, type PageHeaderProps } from "./PageHeader";
 export { SIDE_PANEL_KEY_STEP, SidePanel, SidePanelProvider, SidePanelSlot, useSidePanel, type SidePanelControls, type SidePanelProps } from "./SidePanel";
-export { Monogram, Sidebar, SIDEBAR_ID, SidebarNav, SidebarToggle, studioVersion, ThemeMenu, type SidebarNavProps } from "./Sidebar";
+export { Monogram, Sidebar, SIDEBAR_ID, SidebarNav, SidebarSearch, SidebarToggle, studioVersion, ThemeMenu, type SidebarNavProps } from "./Sidebar";
 export { useIsWide, useMediaQuery, WIDE_QUERY } from "./useMediaQuery";

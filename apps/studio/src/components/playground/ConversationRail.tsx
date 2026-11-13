@@ -189,7 +189,7 @@ export function ConversationRail({
   return (
     <nav
       aria-label="Conversations"
-      className="flex min-h-0 w-full flex-col border-border md:w-64 md:shrink-0 md:border-r md:pr-4"
+      className="flex min-h-0 w-full min-w-0 flex-1 flex-col"
     >
       <button
         type="button"

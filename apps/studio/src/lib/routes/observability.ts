@@ -1,12 +1,11 @@
 import { seg, withQuery, type RouteQuery } from "./query";
 
 /**
- * Observability pages. Pages that own a filter format (Metrics, Traces, Logs, the dashboard) build
- * their own URLSearchParams and pass them here, so the path lives in one place.
+ * Observability pages. Pages that own a filter format (Metrics, Traces, Logs) build their own
+ * URLSearchParams and pass them here, so the path lives in one place. The former dashboard at `/`
+ * is a legacy redirect since SL.7 (`legacy.ts`); its Overview is the top of Metrics.
  */
 export const observabilityRoutes = {
-  /** `/` (the dashboard today), with its range parameters. */
-  dashboard: (query?: RouteQuery): string => withQuery("/", query),
   /** `/metrics`, with the Metrics page state parameters. */
   metrics: (query?: RouteQuery): string => withQuery("/metrics", query),
   /** `/traces`, with the Traces list filters. */

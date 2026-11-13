@@ -22,7 +22,7 @@ export interface MetricsFilterBarProps {
   agents?: readonly { id: string; name: string }[];
   models?: readonly string[];
   providers?: readonly string[];
-  /** Hide the dimension filters (the dashboard shows only the date range). */
+  /** Hide the dimension filters (date range only). */
   dimensions?: boolean;
   /** Show the interval selector. */
   showInterval?: boolean;

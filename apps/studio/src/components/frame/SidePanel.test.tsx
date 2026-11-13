@@ -217,13 +217,16 @@ describe("SidePanel below 1024 px", () => {
     container.innerHTML = renderToString(ui);
     document.body.appendChild(container);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // React 19 reports some hydration mismatches through onRecoverableError, not console.error.
+    const recoverable = vi.fn();
     let root: Root | undefined;
     await act(async () => {
-      root = hydrateRoot(container, ui);
+      root = hydrateRoot(container, ui, { onRecoverableError: recoverable });
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(container.querySelector('[data-testid="side-panel"]')).toBeNull();
     expect(errors).not.toHaveBeenCalled();
+    expect(recoverable).not.toHaveBeenCalled();
     act(() => root?.unmount());
     container.remove();
   });

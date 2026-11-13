@@ -16,6 +16,8 @@ interface ConfirmDialogProps {
   /** Why the last attempt failed; shown inside the dialog and announced. */
   error?: string | null;
   destructive?: boolean;
+  /** Only the confirm button is disabled (say, while what it acts on is still being checked); Cancel and Escape still work. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -75,7 +77,7 @@ function popDialog(container: HTMLElement) {
  * inert, focus starts on Cancel and is trapped inside, Escape cancels (unless busy), an outside click
  * does nothing, and focus returns to the element that opened it (when that element still exists).
  */
-export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, onConfirm, onCancel }: ConfirmDialogProps) {
+export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, confirmDisabled = false, onConfirm, onCancel }: ConfirmDialogProps) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -148,7 +150,7 @@ export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = 
           {error ? <p role="alert" data-testid="confirm-dialog-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{error}</p> : null}
           <div className="flex flex-wrap justify-end gap-2">
             <Button ref={cancelRef} variant="secondary" disabled={busy} onClick={onCancel}>{cancelLabel}</Button>
-            <Button variant={destructive ? "destructive" : "primary"} disabled={busy} onClick={onConfirm} className={cn(busy && "cursor-not-allowed")}>
+            <Button variant={destructive ? "destructive" : "primary"} disabled={busy || confirmDisabled} onClick={onConfirm} className={cn(busy && "cursor-not-allowed")}>
               {confirmLabel}
             </Button>
           </div>

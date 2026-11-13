@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { localInputToIso } from "@/lib/datetimeLocal";
+import { Badge } from "@/components/ui/Badge";
+import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import {
   formatMatchCounts,
   PROCESSOR_ACTIONS,
@@ -34,29 +35,45 @@ interface FilterForm {
 
 const EMPTY_FILTERS: FilterForm = { agent_id: "", type: "", action: "", phase: "", run_id: "", from: "", to: "" };
 
-function actionClass(action: string | null): string {
-  if (action === "block") return "bg-destructive/10 text-destructive-text";
-  if (action === "allow" || action === null) return "bg-muted text-muted-foreground";
-  return "bg-primary/10 text-primary";
+function actionVariant(action: string | null): "destructive" | "neutral" | "info" {
+  if (action === "block") return "destructive";
+  if (action === "allow" || action === null) return "neutral";
+  return "info";
 }
 
 /** Form values as API filters; a message instead when they cannot be sent. */
-function toFilters(form: FilterForm): ProcessorResultFilters | string {
+function toFilters(form: FilterForm, fixedType?: ProcessorType): ProcessorResultFilters | string {
   const runId = form.run_id.trim();
   if (runId && !UUID_PATTERN.test(runId)) return "Run ID must be a full run UUID.";
   const from = localInputToIso(form.from) ?? undefined;
   const to = localInputToIso(form.to) ?? undefined;
   if (from && to && from >= to) return "From must be before To.";
-  return { agent_id: form.agent_id, type: form.type, action: form.action, phase: form.phase, run_id: runId, from, to };
+  return { agent_id: form.agent_id, type: fixedType ?? form.type, action: form.action, phase: form.phase, run_id: runId, from, to };
 }
 
-/** Recorded processor outcomes, newest first, with filters, run links and paging. Counts only. */
-export function ProcessorResultsTable({ agents, types }: {
+/**
+ * Recorded processor outcomes, newest first, with filters, run links and paging. Counts only.
+ * With `fixedType` (a processor's detail page) every request is narrowed to that type and the
+ * Processor filter is hidden. With `defaultWindowMs`, From starts (and Reset returns) at that long
+ * ago, and "All time" clears the range. The range in force is stated above the table.
+ */
+export function ProcessorResultsTable({ agents, types, fixedType, defaultWindowMs }: {
   agents: { id: string; name: string }[];
   types: Pick<ProcessorDeclaration, "id" | "title">[];
+  fixedType?: ProcessorType;
+  defaultWindowMs?: number;
 }) {
-  const [form, setForm] = useState<FilterForm>(EMPTY_FILTERS);
-  const [applied, setApplied] = useState<ProcessorResultFilters>({});
+  const baseFilters: ProcessorResultFilters = fixedType ? { type: fixedType } : {};
+  /** The default range, recomputed at mount and on Reset: form values and the applied filters. */
+  const defaults = (): { form: FilterForm; applied: ProcessorResultFilters } => {
+    if (!defaultWindowMs) return { form: EMPTY_FILTERS, applied: baseFilters };
+    const from = new Date(Date.now() - defaultWindowMs).toISOString();
+    return { form: { ...EMPTY_FILTERS, from: isoToLocalInput(from) }, applied: { ...baseFilters, from } };
+  };
+  const [initial] = useState(defaults);
+  const [defaultFrom, setDefaultFrom] = useState<string | undefined>(initial.applied.from);
+  const [form, setForm] = useState<FilterForm>(initial.form);
+  const [applied, setApplied] = useState<ProcessorResultFilters>(initial.applied);
   const [items, setItems] = useState<ProcessorResultItem[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,7 +127,7 @@ export function ProcessorResultsTable({ agents, types }: {
 
   const apply = (event: React.FormEvent) => {
     event.preventDefault();
-    const filters = toFilters(form);
+    const filters = toFilters(form, fixedType);
     if (typeof filters === "string") {
       setFormError(filters);
       return;
@@ -120,10 +137,36 @@ export function ProcessorResultsTable({ agents, types }: {
   };
 
   const reset = () => {
-    setForm(EMPTY_FILTERS);
+    const next = defaults();
+    setForm(next.form);
     setFormError(null);
-    setApplied({});
+    setDefaultFrom(next.applied.from);
+    setApplied(next.applied);
   };
+
+  const allTime = () => {
+    const nextForm = { ...form, from: "", to: "" };
+    const filters = toFilters(nextForm, fixedType);
+    setForm(nextForm);
+    if (typeof filters === "string") {
+      setFormError(filters);
+      return;
+    }
+    setFormError(null);
+    setApplied(filters);
+  };
+
+  const when = (iso: string) => new Date(iso).toLocaleString();
+  const windowHours = defaultWindowMs ? Math.round(defaultWindowMs / 3_600_000) : 0;
+  const rangeText = applied.from && applied.to
+    ? `Showing outcomes from ${when(applied.from)} to ${when(applied.to)}.`
+    : applied.from
+      ? applied.from === defaultFrom
+        ? `Showing the last ${windowHours} hours (since ${when(applied.from)}).`
+        : `Showing outcomes since ${when(applied.from)}.`
+      : applied.to
+        ? `Showing outcomes before ${when(applied.to)}.`
+        : "Showing all time.";
 
   const field = <K extends keyof FilterForm>(name: K) => ({
     value: form[name],
@@ -131,7 +174,9 @@ export function ProcessorResultsTable({ agents, types }: {
       setForm((current) => ({ ...current, [name]: event.target.value })),
   });
 
-  const filtered = Object.values(applied).some((value) => value !== undefined && value !== "");
+  const filtered = Object.entries(applied).some(([key, value]) =>
+    value !== undefined && value !== "" && !(fixedType && key === "type") && !(key === "from" && value === defaultFrom));
+  const inDefaultWindow = !filtered && applied.from !== undefined && applied.from === defaultFrom;
 
   return (
     <div className="space-y-4">
@@ -143,13 +188,15 @@ export function ProcessorResultsTable({ agents, types }: {
             {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
           </select>
         </div>
-        <div>
-          <label htmlFor="filter-type" className="block text-xs font-medium text-muted-foreground">Processor</label>
-          <select id="filter-type" className={inputClass} {...field("type")}>
-            <option value="">All types</option>
-            {types.map((type) => <option key={type.id} value={type.id}>{type.title}</option>)}
-          </select>
-        </div>
+        {fixedType ? null : (
+          <div>
+            <label htmlFor="filter-type" className="block text-xs font-medium text-muted-foreground">Processor</label>
+            <select id="filter-type" className={inputClass} {...field("type")}>
+              <option value="">All types</option>
+              {types.map((type) => <option key={type.id} value={type.id}>{type.title}</option>)}
+            </select>
+          </div>
+        )}
         <div>
           <label htmlFor="filter-action" className="block text-xs font-medium text-muted-foreground">Action</label>
           <select id="filter-action" className={inputClass} {...field("action")}>
@@ -183,6 +230,12 @@ export function ProcessorResultsTable({ agents, types }: {
         {formError ? <p role="alert" data-testid="results-filter-error" className="text-sm text-destructive-text sm:col-span-2 lg:col-span-4">{formError}</p> : null}
       </form>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <p data-testid="results-range" className="text-label text-foreground">{rangeText}</p>
+        {applied.from || applied.to ? (
+          <button type="button" className={secondaryButton} onClick={allTime}>All time</button>
+        ) : null}
+      </div>
       <p className="text-xs text-muted-foreground">Outcomes record match counts only. Matched text is never stored, so it cannot be shown here.</p>
 
       {error ? <p role="alert" data-testid="results-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
@@ -190,9 +243,9 @@ export function ProcessorResultsTable({ agents, types }: {
 
       {!loading && !error && items.length === 0 ? (
         <div data-testid="results-empty" className="rounded-lg border border-dashed border-border p-8 text-center">
-          <p className="font-medium text-foreground">{filtered ? "No outcomes match these filters" : "No processor outcomes yet"}</p>
+          <p className="font-medium text-foreground">{filtered ? "No outcomes match these filters" : inDefaultWindow ? `No outcomes in the last ${windowHours} hours` : "No processor outcomes yet"}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            {filtered ? "Change or reset the filters." : "Outcomes appear here once an agent with processors runs."}
+            {filtered ? "Change or reset the filters." : inDefaultWindow ? "Choose All time to see older outcomes." : "Outcomes appear here once an agent with processors runs."}
           </p>
         </div>
       ) : null}
@@ -233,7 +286,7 @@ export function ProcessorResultsTable({ agents, types }: {
                     {item.index !== null ? <span className="ml-1 text-xs text-muted-foreground">#{item.index + 1}</span> : null}
                   </td>
                   <td className="px-3 py-2">
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${actionClass(item.action)}`}>{item.action ?? "unknown"}</span>
+                    <Badge variant={actionVariant(item.action)}>{item.action ?? "unknown"}</Badge>
                   </td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">
                     {item.processor_type === "moderation" && Object.keys(item.match_counts).length === 0

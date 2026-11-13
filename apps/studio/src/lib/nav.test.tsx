@@ -65,9 +65,9 @@ describe("Navigation", () => {
       expect(navSections.find((section) => section.group.id === "settings")!.group.placement).toBe("footer");
     });
 
-    test("transitional items are exactly Playground, Request Context and Dashboard, with no g-key", () => {
+    test("the transitional item is exactly Request Context, with no g-key (SL.6 removed Playground, SL.7 Dashboard)", () => {
       const transitional = navItems.filter((item) => item.transitional);
-      expect(transitional.map((item) => item.id).sort()).toEqual(["dashboard", "playground", "request-context"]);
+      expect(transitional.map((item) => item.id).sort()).toEqual(["request-context"]);
       for (const item of transitional) expect(item.gKey).toBeUndefined();
     });
 
@@ -112,11 +112,11 @@ describe("Navigation", () => {
       expect(isNavItemActive(agents, null)).toBe(false);
     });
 
-    test("the root dashboard is active only on /", () => {
-      const dashboard = byId("dashboard");
-      expect(isNavItemActive(dashboard, "/")).toBe(true);
-      expect(isNavItemActive(dashboard, routes.agents())).toBe(false);
-      expect(activeNavItem("/")?.id).toBe("dashboard");
+    test("no item is active on / (a redirect since SL.7); Metrics carries the dashboard's palette words", () => {
+      expect(navItems.some((item) => item.id === "dashboard")).toBe(false);
+      expect(activeNavItem("/")).toBeNull();
+      expect(isNavItemActive(byId("metrics"), "/")).toBe(false);
+      expect(byId("metrics").keywords).toEqual(expect.arrayContaining(["overview", "dashboard"]));
     });
 
     test("run pages activate Traces; workflow runs activate Workflows", () => {

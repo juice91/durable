@@ -2,7 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import React from "react";
 import "@testing-library/jest-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import AgentDetailPage from "@/app/agents/[id]/page";
+import { EditorTab } from "@/components/agentPage/EditorTab";
+
+// SL.6: the editor page became the agent page's Editor tab; same body, the agent id from the route.
+function AgentDetailPage() {
+  return <EditorTab agentId="a1" />;
+}
 import { api, ApiError, type AgentSpec } from "@/lib/api";
 import { listTools } from "@/lib/tools";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";

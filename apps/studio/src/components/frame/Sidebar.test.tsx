@@ -31,7 +31,7 @@ const sidebar = () => screen.getByTestId("sidebar");
 
 describe("Sidebar", () => {
   test("should render all nav labels as links with correct hrefs", () => {
-    vi.mocked(usePathname).mockReturnValue(routes.dashboard());
+    vi.mocked(usePathname).mockReturnValue(routes.metrics());
     render(<FrameHarness />);
     for (const item of navItems) {
       const link = within(sidebar()).getByRole("link", { name: item.label });
@@ -45,19 +45,19 @@ describe("Sidebar", () => {
     expect(agentsLink?.getAttribute("aria-current")).toBe("page");
   });
 
-  test("should mark active route with aria-current=page for /", () => {
-    vi.mocked(usePathname).mockReturnValue(routes.dashboard());
+  test("should mark active route with aria-current=page for /metrics", () => {
+    vi.mocked(usePathname).mockReturnValue(routes.metrics());
     render(<FrameHarness />);
-    const dashboardLink = sidebar().querySelector(`a[href="${routes.dashboard()}"]`);
-    expect(dashboardLink?.getAttribute("aria-current")).toBe("page");
+    const metricsLink = sidebar().querySelector(`a[href="${routes.metrics()}"]`);
+    expect(metricsLink?.getAttribute("aria-current")).toBe("page");
     expect(sidebar().querySelectorAll('[aria-current="page"]')).toHaveLength(1);
   });
 
   test("an item stays active on its sub-paths", () => {
-    vi.mocked(usePathname).mockReturnValue(routes.agentEditor("a1"));
+    vi.mocked(usePathname).mockReturnValue(routes.agentChat("a1", { conversation: "c1" }));
     render(<FrameHarness />);
     expect(within(sidebar()).getByRole("link", { name: "Agents" })).toHaveAttribute("aria-current", "page");
-    expect(within(sidebar()).getByRole("link", { name: "Playground" })).not.toHaveAttribute("aria-current");
+    expect(within(sidebar()).getByRole("link", { name: "Workflows" })).not.toHaveAttribute("aria-current");
   });
 
   test("groups show their titles in order, with Settings in the footer", () => {

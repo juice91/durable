@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import AgentDetailPage from "./page";
+import { EditorTab } from "@/components/agentPage/EditorTab";
+
+// SL.6: the editor page became the agent page's Editor tab; same body, the agent id from the route.
+function AgentDetailPage() {
+  return <EditorTab agentId="a1" />;
+}
 import { api, ApiError } from "@/lib/api";
 import { useRouter, useParams } from "next/navigation";
 import { compareVersions, restoreVersion } from "@/lib/agentVersions";

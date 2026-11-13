@@ -136,11 +136,14 @@ describe("sidebar no-flash contract", () => {
     document.body.appendChild(container);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const stop = watchSidebarAttribute();
+    // React 19 reports some hydration mismatches through onRecoverableError, not console.error.
+    const recoverable = vi.fn();
     let reactRoot: Root | undefined;
     await act(async () => {
-      reactRoot = hydrateRoot(container, <FrameHarness />);
+      reactRoot = hydrateRoot(container, <FrameHarness />, { onRecoverableError: recoverable });
     });
     expect(errors).not.toHaveBeenCalled();
+    expect(recoverable).not.toHaveBeenCalled();
     expect(stop()).toEqual([]);
     expect(container.querySelector('[data-testid="sidebar"]')).toHaveAttribute("data-collapsed", "true");
     expect(container.querySelector('[data-testid="sidebar-toggle"]')).toHaveAccessibleName("Expand sidebar");

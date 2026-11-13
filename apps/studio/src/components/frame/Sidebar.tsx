@@ -3,7 +3,7 @@
 import React, { useId } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun } from "lucide-react";
+import { Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { activeNavItem, navSections, type NavItem, type NavSection } from "@/lib/nav";
@@ -18,6 +18,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/DropdownMenu";
 import { IconButton } from "@/components/ui/IconButton";
+import { Kbd } from "@/components/ui/Kbd";
+import { usePaletteChordLabel, usePaletteKeyShortcuts } from "@/components/shortcuts/usePaletteChordLabel";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { PRODUCT_NAME } from "./brand";
@@ -240,8 +242,44 @@ export function Sidebar() {
         )}
         <SidebarToggle />
       </div>
+      <SidebarSearch rail={collapsed} />
       <SidebarNav rail={collapsed} />
     </aside>
+  );
+}
+
+/** "Search… ⌘K" ("Ctrl K" off macOS): opens the command palette. Shown once a palette has registered (SL.5). */
+export function SidebarSearch({ rail }: { rail: boolean }) {
+  const frame = useFrame();
+  const chord = usePaletteChordLabel();
+  const keyShortcuts = usePaletteKeyShortcuts();
+  const openPalette = frame?.openPalette;
+  if (!openPalette) return null;
+  const icon = <Search className="size-icon shrink-0" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
+  if (rail) {
+    return (
+      <div className="flex shrink-0 justify-center px-2 pb-1">
+        <IconButton label="Search" shortcut={chord} aria-keyshortcuts={keyShortcuts} tooltipSide="right" onClick={openPalette} data-testid="sidebar-search" icon={icon} />
+      </div>
+    );
+  }
+  return (
+    <div className="shrink-0 px-2 pb-1">
+      <button
+        type="button"
+        onClick={openPalette}
+        aria-keyshortcuts={keyShortcuts}
+        data-testid="sidebar-search"
+        className={cn(
+          "flex h-sidebar-item w-full min-w-0 items-center gap-2 rounded-md border border-border bg-surface px-2 text-label text-muted-foreground hover:bg-fill-hover hover:text-foreground",
+          focusRing,
+        )}
+      >
+        {icon}
+        <span className="min-w-0 flex-1 truncate text-left">Search…</span>
+        <Kbd>{chord}</Kbd>
+      </button>
+    </div>
   );
 }
 

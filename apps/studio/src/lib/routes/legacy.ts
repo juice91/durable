@@ -4,10 +4,14 @@
  * becomes a small server component that awaits `searchParams` and calls
  * `redirect(legacyTarget(pathname, searchParams))`; no middleware.
  *
- * The table is empty until a task retires a URL. Rows are added per the plan's route map, one row
- * group per task in this order: SL.6 (`/agents/:id`, `/playground`), SL.7 (`/`), SL.10
- * (`/request-context`), SL.12 (`/traces/:runId`, `/runs/:id`).
+ * Rows are added per the plan's route map, one row group per task in this order: SL.6
+ * (`/agents/:id`, `/playground`), SL.7 (`/`), SL.10 (`/request-context`), SL.12 (`/traces/:runId`,
+ * `/runs/:id`).
  */
+
+import { agentRoutes, type RouteVersion } from "./agents";
+import { RouteIdError } from "./query";
+import { observabilityRoutes } from "./observability";
 
 export type LegacySearchParams =
   | URLSearchParams
@@ -22,8 +26,59 @@ export interface LegacyRule {
   to: (params: Record<string, string>, search: URLSearchParams) => string | null;
 }
 
-/** Rule rows, first match wins. Empty in SL.3: no URL is retired yet. */
-export const LEGACY_RULES: readonly LegacyRule[] = [];
+/** The retired dashboard's URL parameters: its date range only (it ignored `interval` and the filters). */
+const DASHBOARD_PARAMS: ReadonlySet<string> = new Set(["range", "from", "to"]);
+
+/** A legacy `version` value as the agent chat takes it: "draft" or a positive integer; anything else is dropped. */
+function legacyVersion(raw: string | null): RouteVersion {
+  if (raw === "draft") return "draft";
+  return raw && /^[1-9]\d{0,8}$/.test(raw) ? Number(raw) : null;
+}
+
+/** The agent's chat, or the agents list when an id cannot be a path segment ("." or ".."). */
+function chatOrAgents(agent: string, opts: Parameters<typeof agentRoutes.agentChat>[1] = {}): string {
+  try {
+    return agentRoutes.agentChat(agent, opts);
+  } catch (error) {
+    if (error instanceof RouteIdError) return agentRoutes.agents();
+    throw error;
+  }
+}
+
+/** Rule rows, first match wins. */
+export const LEGACY_RULES: readonly LegacyRule[] = [
+  // SL.6: the agent page. `/agents/:id` was the editor; it now opens the agent's chat
+  // (`/agents/new` is the create form, never a legacy URL).
+  { task: "SL.6", pattern: "/agents/:id", to: ({ id }) => (id === "new" ? null : chatOrAgents(id)) },
+  // SL.6: the playground moved into the agent page's Chat tab, keeping its options. Without an agent
+  // there is nothing to route to on the server: the page's client redirect picks the last-used agent.
+  {
+    task: "SL.6",
+    pattern: "/playground",
+    to: (_params, search) => {
+      const agent = search.get("agent");
+      if (!agent) return null;
+      return chatOrAgents(agent, {
+        conversation: search.get("conversation"),
+        version: legacyVersion(search.get("version")),
+        model: search.get("model"),
+        context: search.get("context"),
+      });
+    },
+  },
+  // SL.7: the dashboard folded into Metrics' Overview. With a dashboard parameter, `/` opens Metrics
+  // on the same range (only the dashboard's own parameters are carried, in their order); a bare `/`
+  // (or one with unrelated parameters) opens Agents.
+  {
+    task: "SL.7",
+    pattern: "/",
+    to: (_params, search) => {
+      const carried = new URLSearchParams();
+      for (const [key, value] of search) if (DASHBOARD_PARAMS.has(key)) carried.append(key, value);
+      return carried.toString() ? observabilityRoutes.metrics(carried) : agentRoutes.agents();
+    },
+  },
+];
 
 /** Next 15 `searchParams` (a record, values possibly arrays) or URLSearchParams, as URLSearchParams. */
 export function toSearchParams(input?: LegacySearchParams | null): URLSearchParams {
@@ -71,7 +126,14 @@ export function legacyTarget(
   for (const rule of rules) {
     const params = matchPattern(rule.pattern, pathname);
     if (!params) continue;
-    const target = rule.to(params, search);
+    let target: string | null;
+    try {
+      target = rule.to(params, search);
+    } catch (error) {
+      // An id no path can carry ("." or ".."): no target from this rule.
+      if (error instanceof RouteIdError) continue;
+      throw error;
+    }
     if (target === null) continue;
     if (isSafeTarget(target)) return target;
     if (process.env.NODE_ENV !== "production") {

@@ -2,7 +2,8 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import PlaygroundPage from "./page";
+import { ChatTab } from "@/components/agentPage/ChatTab";
+import { AgentLayout } from "@/components/agentPage/AgentLayout";
 import { api } from "@/lib/api";
 import {
   createConversation,
@@ -32,8 +33,18 @@ import { getRequestContext, validateRequestContext } from "@/lib/requestContext"
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
 
+// The agent page's switcher navigates with the router. The pathname stays null (as outside the app
+// router) unless a test sets it.
+const navigation = vi.hoisted(() => ({ pathname: null as string | null, push: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => navigation.pathname,
+  useParams: () => ({}),
+  useRouter: () => ({ push: navigation.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(window.location.search),
+}));
+
 vi.mock("@/lib/api", () => ({
-  api: { agents: { list: vi.fn() }, versions: { list: vi.fn() } },
+  api: { agents: { list: vi.fn(), get: vi.fn() }, versions: { list: vi.fn() } },
 }));
 
 vi.mock("@/components/playground/turnApi", async (importOriginal) => {
@@ -165,9 +176,22 @@ function composer() {
   return screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
 }
 
+/** The agent and conversation the route names (`/agents/:id/chat[/:conversationId]`). */
+function routeChat() {
+  const match = /^\/agents\/([^/]+)\/chat(?:\/([^/]+))?/.exec(window.location.pathname);
+  return { agentId: match ? decodeURIComponent(match[1]) : "agent-1", conversationId: match?.[2] ? decodeURIComponent(match[2]) : null };
+}
+
+/** The conversation id in the address bar (it is in the path since SL.6, no longer `?conversation=`). */
+function urlConversation() {
+  return routeChat().conversationId;
+}
+
 async function renderReady() {
-  const view = render(<PlaygroundPage />);
-  await screen.findByRole("option", { name: "Support assistant" });
+  const { agentId, conversationId } = routeChat();
+  const view = render(<ChatTab key={`${agentId}/${conversationId}`} agentId={agentId} conversationId={conversationId} />);
+  await screen.findByRole("combobox", { name: "Version" });
+  await waitFor(() => expect(api.agents.get).toHaveBeenCalledWith(agentId));
   return view;
 }
 
@@ -202,10 +226,10 @@ const turnRun = (
   turn,
 });
 
-function mockConversation(runs: ConversationRun[], events: Record<string, RunEvent[]>) {
+function mockConversation(runs: ConversationRun[], events: Record<string, RunEvent[]>, agentId = "agent-3") {
   vi.mocked(getConversation).mockResolvedValue({
     id: "conv-1",
-    agent_id: "agent-3",
+    agent_id: agentId,
     title: "Earlier chat",
     turn_count: runs.length,
     created_at: "2026-11-12T00:00:00Z",
@@ -222,11 +246,12 @@ const answered = (input: string, answer: string): RunEvent[] => [
 ];
 
 beforeEach(() => {
-  window.history.replaceState({}, "", routes.playground());
+  window.history.replaceState({}, "", routes.agentChat("agent-1"));
   vi.clearAllMocks();
   window.localStorage.clear();
   window.sessionStorage.clear();
   vi.mocked(api.agents.list).mockResolvedValue(agents);
+  vi.mocked(api.agents.get).mockImplementation(async (id) => agents.find((a) => a.id === id)!);
   vi.mocked(api.versions.list).mockImplementation(async (agentId) => versionsByAgent[agentId] ?? []);
   vi.mocked(fetchModels).mockResolvedValue(modelList);
   vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => ({
@@ -297,7 +322,7 @@ describe("PlaygroundPage", () => {
     expect(vi.mocked(startTurn).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(subscribeRun).mock.invocationCallOrder[0],
     );
-    expect(new URLSearchParams(window.location.search).get("conversation")).toBe(conversationId);
+    expect(urlConversation()).toBe(conversationId);
   });
 
   it("sends the second message to the same conversation and keeps both turns in the thread", async () => {
@@ -408,7 +433,7 @@ describe("PlaygroundPage", () => {
         "run-2": [event(0, "run_started", { input: "What is my name?" })],
       },
     );
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
 
     expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
@@ -423,7 +448,9 @@ describe("PlaygroundPage", () => {
     expect(startTurn).not.toHaveBeenCalled();
     expect(createConversation).not.toHaveBeenCalled();
     expect(composer()).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
+    // Was the Agent picker showing agent-3; the agent is the route's now, loaded for the chat.
+    expect(api.agents.get).toHaveBeenCalledWith("agent-3");
+    expect(screen.queryByRole("combobox", { name: "Agent" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View run" })).toHaveAttribute("href", routes.run("run-2"));
 
     act(() => {
@@ -438,7 +465,7 @@ describe("PlaygroundPage", () => {
 
   it("re-posts a turn that was recorded but never started, with the same run_id", async () => {
     mockConversation([turnRun("run-1", 1, "Hello", "queued")], {});
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
 
     await waitFor(() =>
@@ -462,7 +489,7 @@ describe("PlaygroundPage", () => {
       [{ ...turnRun("run-1", 1, "Hi", "completed"), output: "Hey" }],
       { "run-1": answered("Hi", "Hey") },
     );
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
 
     expect(await screen.findByText("Hey")).toBeInTheDocument();
@@ -471,15 +498,35 @@ describe("PlaygroundPage", () => {
   });
 
   it("starts a new conversation and clears the URL when switching agents or pressing New conversation", async () => {
-    const view = await renderReady();
+    // The agent page: header switcher plus the Chat tab, as `app/agents/[id]/layout.tsx` renders them.
+    navigation.pathname = routes.agentChat("agent-1");
+    navigation.push.mockReset();
+    const view = render(
+      <AgentLayout agentId="agent-1">
+        <ChatTab agentId="agent-1" />
+      </AgentLayout>,
+    );
+    await waitFor(() => expect(composer()).toBeEnabled());
     await sendMessage();
-    expect(new URLSearchParams(window.location.search).get("conversation")).not.toBeNull();
+    expect(urlConversation()).not.toBeNull();
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), {
-      target: { value: "agent-3" },
-    });
+    // Was the Agent picker: the breadcrumb switcher goes to the other agent's Chat tab, with no
+    // conversation and none of this agent's options.
+    fireEvent.click(await screen.findByRole("combobox", { name: "Switch agent" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Published helper" }));
+    expect(navigation.push).toHaveBeenCalledWith(routes.agentChat("agent-3"));
+    const target = navigation.push.mock.calls[0][0] as string;
+
+    // Next renders that route: a new agent segment, so the first tab unmounts and agent-3's opens.
+    view.unmount();
+    navigation.pathname = null;
+    window.history.replaceState({}, "", target);
+    const second = await renderReady();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
-    expect(new URLSearchParams(window.location.search).get("conversation")).toBeNull();
+    expect(api.agents.get).toHaveBeenLastCalledWith("agent-3");
+    await waitFor(() => expect(listConversations).toHaveBeenLastCalledWith(expect.objectContaining({ agentId: "agent-3" })));
+    expect(urlConversation()).toBeNull();
+    expect(screen.getByRole("option", { name: "Latest (v2)" })).toBeInTheDocument();
     expect(screen.queryByText("Please create a ticket")).not.toBeInTheDocument();
 
     await sendMessage("Fresh start");
@@ -490,9 +537,9 @@ describe("PlaygroundPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
     expect(screen.queryByText("Fresh start")).not.toBeInTheDocument();
-    expect(new URLSearchParams(window.location.search).get("conversation")).toBeNull();
+    expect(urlConversation()).toBeNull();
 
-    view.unmount();
+    second.unmount();
     expect(unsubscribe).toHaveBeenCalledTimes(2);
   });
 
@@ -527,7 +574,7 @@ describe("PlaygroundPage", () => {
         }),
       ],
     });
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
 
     await renderReady();
 
@@ -545,7 +592,7 @@ describe("PlaygroundPage", () => {
         }),
       ],
     });
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
 
     await renderReady();
 
@@ -601,7 +648,7 @@ describe("PlaygroundPage", () => {
       fireEvent.click(await screen.findByRole("button", { name: /^Earlier chat/ }));
 
       expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
-      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-1");
+      expect(urlConversation()).toBe("conv-1");
       await waitFor(() =>
         expect(screen.getByRole("button", { name: /^Earlier chat/ })).toHaveAttribute("aria-current", "true"),
       );
@@ -623,6 +670,7 @@ describe("PlaygroundPage", () => {
       mockConversation(
         [{ ...turnRun("run-1", 1, "My name is Ada", "completed"), output: "Hello Ada" }],
         { "run-1": answered("My name is Ada", "Hello Ada") },
+        "agent-1",
       );
       fireEvent.click(await screen.findByRole("button", { name: /^Earlier chat/ }));
       expect(unsubscribe).toHaveBeenCalledTimes(1);
@@ -695,7 +743,7 @@ describe("PlaygroundPage", () => {
       });
       expect(screen.queryByText("First question")).not.toBeInTheDocument();
       expect(subscribeRun).not.toHaveBeenCalled();
-      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-b");
+      expect(urlConversation()).toBe("conv-b");
       expect(renameConversation).not.toHaveBeenCalled();
     });
 
@@ -707,6 +755,7 @@ describe("PlaygroundPage", () => {
       mockConversation(
         [{ ...turnRun("run-1", 1, "My name is Ada", "completed"), output: "Hello Ada" }],
         { "run-1": answered("My name is Ada", "Hello Ada") },
+        "agent-1",
       );
       let finishCreate: () => void = () => {};
       vi.mocked(createConversation).mockImplementationOnce(
@@ -740,7 +789,7 @@ describe("PlaygroundPage", () => {
       // ... but the thread the user switched to stays on screen and is not taken over.
       expect(screen.queryByText("Sent before switching")).not.toBeInTheDocument();
       expect(screen.getByText("Hello Ada")).toBeInTheDocument();
-      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-1");
+      expect(urlConversation()).toBe("conv-1");
       expect(subscribeRun).not.toHaveBeenCalled();
       await waitFor(() => expect(composer()).toBeEnabled());
     });
@@ -819,7 +868,9 @@ describe("PlaygroundPage run options (P0.19)", () => {
       request_context: { tier: "gold" },
     });
     const params = new URLSearchParams(window.location.search);
-    expect(params.get("agent")).toBe("agent-1");
+    // Was ?agent=agent-1; the agent is in the path now.
+    expect(window.location.pathname).toMatch(/^\/agents\/agent-1\/chat(\/[^/]+)?$/);
+    expect(params.get("agent")).toBeNull();
     expect(params.get("version")).toBe("1");
     expect(params.get("model")).toBe("openai:gpt-4.1");
   });
@@ -946,9 +997,9 @@ describe("PlaygroundPage run options (P0.19)", () => {
   });
 
   it("restores agent, version and model from the URL on reload", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-3", version: 1, model: "test:echo" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { version: 1, model: "test:echo" }));
     await renderReady();
-    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
+    expect(api.agents.get).toHaveBeenCalledWith("agent-3");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("v1"));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("test:echo"));
     expect(new URLSearchParams(window.location.search).get("model")).toBe("test:echo");
@@ -958,14 +1009,14 @@ describe("PlaygroundPage run options (P0.19)", () => {
   });
 
   it("restores a wildcard model's typed name from the URL", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", model: "anthropic:claude-x" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { model: "anthropic:claude-x" }));
     await renderReady();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("anthropic:*"));
     expect(screen.getByRole("textbox", { name: "Model name" })).toHaveValue("claude-x");
   });
 
   it("drops a URL model the platform does not offer", async () => {
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", model: "openai:gpt-5" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { model: "openai:gpt-5" }));
     await renderReady();
     expect(await screen.findByText(/openai:gpt-5 is not offered here/)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("");
@@ -986,9 +1037,10 @@ describe("PlaygroundPage run options (P0.19)", () => {
   });
 
   it("runs the draft of an agent that has no published version", async () => {
+    // Was choosing agent-2 in the picker; now agent-2's own ChatTab.
+    window.history.replaceState({}, "", routes.agentChat("agent-2"));
     await renderReady();
-    choose("Agent", "agent-2");
-    expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("draft");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("draft"));
     expect(screen.queryByRole("option", { name: /Latest/ })).not.toBeInTheDocument();
     await sendMessage("Hi");
     expect(vi.mocked(createConversation).mock.calls[0][0]).toBe("agent-2");
@@ -1097,7 +1149,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
         ],
       },
     );
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
     await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
     const [first] = screen.getAllByTestId("turn-badge");
@@ -1125,7 +1177,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
       ],
       {},
     );
-    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-3", { conversation: "conv-1" }));
     await renderReady();
     await waitFor(() =>
       expect(startTurn).toHaveBeenCalledWith("conv-1", "run-1", "Hello", {
@@ -1140,7 +1192,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
     const { saveContext } = await import("@/lib/requestContext");
     saveContext("agent-1", { tier: "gold" }, null);
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1"));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
     expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
@@ -1154,7 +1206,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     saveContext("agent-1", { tier: "gold" }, "draft");
     const key = "eap.playground.context.v1:anon:agent-1";
     window.sessionStorage.setItem(key, JSON.stringify({ value: { tier: "silver" } }));
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", version: "draft", context: "preset" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1", { version: "draft", context: "preset" }));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
     expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
@@ -1172,7 +1224,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     const { saveContext } = await import("@/lib/requestContext");
     saveContext("agent-1", { tier: "gold" }, null);
     window.sessionStorage.setItem("eap.playground.context.v1:anon:agent-1", JSON.stringify({ value: { tier: "silver" } }));
-    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
+    window.history.replaceState({}, "", routes.agentChat("agent-1"));
     await renderReady();
     await screen.findByRole("button", { name: /1 of 1 set/ });
     await sendMessage("Hi");

@@ -1,6 +1,7 @@
 import "./globals.css";
 import { inter, jetbrainsMono } from "./fonts";
 import { AppShell } from "@/components/frame/AppShell";
+import { StudioKeyboard } from "@/components/shortcuts/StudioKeyboard";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import { ThemeScript } from "@/components/theme/ThemeScript";
 
@@ -23,7 +24,9 @@ export default function RootLayout({
       </head>
       <body>
         <ThemeProvider>
-          <AppShell>{children}</AppShell>
+          <AppShell>
+            <StudioKeyboard>{children}</StudioKeyboard>
+          </AppShell>
         </ThemeProvider>
       </body>
     </html>

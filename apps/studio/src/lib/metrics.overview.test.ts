@@ -1,15 +1,19 @@
+// The former lib/dashboard.ts helpers (P0.18), merged into lib/metrics.ts by SL.7.
 import { describe, expect, it } from "vitest";
 import {
   ATTENTION_STATUSES,
   attentionCount,
   dashboardParams,
   dashboardPath,
+  metricsAgentHref,
   metricsPageHref,
+  metricsQueryParams,
+  pageStateToFilters,
   parseDashboardState,
+  parsePageState,
   recentFailuresFilters,
   recentFailuresHref,
-} from "./dashboard";
-import { metricsQueryParams, pageStateToFilters, parsePageState } from "./metrics";
+} from "./metrics";
 import { parseTraceFilters } from "./traces";
 import { routes } from "@/lib/routes";
 
@@ -36,15 +40,15 @@ describe("parseDashboardState", () => {
     expect(state).toEqual({ range: "24h", from: null, to: null, interval: null, agent_id: null, model: null, provider: null, kind: null });
   });
 
-  it("round-trips through its own URL", () => {
+  it("round-trips through its own URL, which is now the Metrics page", () => {
     for (const qs of ["", "range=24h", "range=90d", "range=custom&from=2026-11-01T00%3A00%3A00Z&to=2026-11-03T00%3A00%3A00Z"]) {
       const state = parseDashboardState(new URLSearchParams(qs));
       expect(parseDashboardState(dashboardParams(state))).toEqual(state);
     }
-    expect(dashboardPath(parseDashboardState(new URLSearchParams("")))).toBe(routes.dashboard());
-    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=30d")))).toBe(routes.dashboard({ range: "30d" }));
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("")))).toBe(routes.metrics());
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=30d")))).toBe(routes.metrics({ range: "30d" }));
     // One literal URL per helper, so a builder bug is caught.
-    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=24h")))).toBe("/?range=24h");
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=24h")))).toBe("/metrics?range=24h");
   });
 });
 
@@ -73,6 +77,21 @@ describe("metricsPageHref", () => {
     expect(params.get("range")).toBe("24h");
     expect(params.get("agent_id")).toBe("a-1");
     expect(parsePageState(params).agent_id).toBe("a-1");
+  });
+});
+
+describe("metricsAgentHref", () => {
+  it("narrows Metrics to the agent and keeps the range and every other filter", () => {
+    const state = parsePageState(new URLSearchParams("range=30d&model=m-1&kind=agent&interval=day"));
+    const params = query(metricsAgentHref(state, "a:1"));
+    expect(params.get("agent_id")).toBe("a:1");
+    expect(parsePageState(params)).toEqual({ ...state, agent_id: "a:1" });
+    expect(metricsAgentHref(parsePageState(new URLSearchParams("")), "a-1")).toBe(routes.metrics({ agent_id: "a-1" }));
+  });
+
+  it("replaces an agent filter already set", () => {
+    const state = parsePageState(new URLSearchParams("agent_id=a-1"));
+    expect(query(metricsAgentHref(state, "a-2")).getAll("agent_id")).toEqual(["a-2"]);
   });
 });
 

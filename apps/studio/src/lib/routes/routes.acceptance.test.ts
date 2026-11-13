@@ -58,7 +58,6 @@ describe("route builders: ids round-trip", () => {
   it("agent, trace, run and workflow builders keep the id in one segment that decodes back", () => {
     for (const id of PATH_IDS) {
       for (const [path, head] of [
-        [routes.agentEditor(id), "agents"],
         [routes.trace(id), "traces"],
         [routes.run(id), "runs"],
         [routes.workflow(id), "workflows"],
@@ -66,6 +65,14 @@ describe("route builders: ids round-trip", () => {
         expect(path.startsWith(`/${head}/`)).toBe(true);
         expect(path.split("/")).toHaveLength(3);
         expect(decodeSegs(path)).toEqual([head, id]);
+      }
+      // The agent page's tabs (SL.6): the id is the second of three segments.
+      for (const [path, tab] of [
+        [routes.agentEditor(id), "editor"],
+        [routes.agentChat(id), "chat"],
+        [routes.agentTraces(id), "traces"],
+      ] as const) {
+        expect(decodeSegs(path)).toEqual(["agents", id, tab]);
       }
     }
   });
@@ -98,7 +105,7 @@ describe("route builders: ids round-trip", () => {
     }
     for (const id of PATH_IDS.filter((x) => x !== "")) {
       const url = new URL(routes.agentEditor(id), "http://studio.test");
-      expect(url.pathname.split("/")).toHaveLength(3);
+      expect(url.pathname.split("/")).toHaveLength(4);
       expect(decodeURIComponent(url.pathname.split("/")[2])).toBe(id);
     }
   });
@@ -135,7 +142,7 @@ describe("route builders: queries round-trip", () => {
     sp.append("status", "failed,needs_attention");
     sp.append("tag", "a&b");
     sp.append("tag", "😀 =");
-    for (const build of [routes.dashboard, routes.metrics, routes.traces, routes.logs]) {
+    for (const build of [routes.metrics, routes.traces, routes.logs]) {
       const q = new URL(build(sp), "http://x").searchParams;
       expect(q.get("status")).toBe("failed,needs_attention");
       expect(q.getAll("tag")).toEqual(["a&b", "😀 ="]);
@@ -350,9 +357,9 @@ describe("rendered links are unchanged for ordinary ids", () => {
     vi.unstubAllEnvs();
   });
 
-  it("dashboard: empty-state links, failure row and view-all, range replace", async () => {
+  it("metrics overview (the former dashboard): empty-state links, failure row and view-all, range replace", async () => {
     const { breakdownFixture, summaryFixture, timeseriesFixture } = await import("@/components/metrics/metricsFixtures");
-    const { default: DashboardPage } = await import("@/app/page");
+    const { default: MetricsPage } = await import("@/app/metrics/page");
     vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "Bearer test");
     const failed = { ...baseRun, run_id: "run-failed-1", status: "failed", display_status: "failed", error: "boom" };
     let runs: unknown[] = [];
@@ -368,22 +375,20 @@ describe("rendered links are unchanged for ordinary ids", () => {
     }));
     const { listTraceRuns } = await import("@/lib/traces");
     vi.mocked(listTraceRuns).mockImplementation(async () => ({ items: runs, next_before: null }) as never);
-    const first = render(React.createElement(DashboardPage));
-    const empty = await screen.findByTestId("dashboard-empty");
+    const first = render(React.createElement(MetricsPage));
+    const empty = await screen.findByTestId("metrics-empty");
     expect(within(empty).getByRole("link", { name: "Agents" })).toHaveAttribute("href", "/agents");
-    expect(within(empty).getByRole("link", { name: "Playground" })).toHaveAttribute("href", "/playground");
     expect(within(empty).getByRole("link", { name: "Workflows" })).toHaveAttribute("href", "/workflows");
     first.unmount();
     runs = [failed];
     nav.search = "range=30d";
-    render(React.createElement(DashboardPage));
+    render(React.createElement(MetricsPage));
     await waitFor(() => expect(screen.getByTestId("recent-failure")).toHaveAttribute("href", "/traces/run-failed-1"));
     expect(screen.getByTestId("recent-failures-all")).toHaveAttribute("href", expect.stringMatching(/^\/traces\?status=failed%2Cneeds_attention/));
-    expect(screen.getByTestId("dashboard-open-metrics")).toHaveAttribute("href", "/metrics?range=30d");
-    fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "30d" } });
-    expect(nav.replace).toHaveBeenCalledWith("/?range=30d", { scroll: false });
+    fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "24h" } });
+    expect(nav.replace).toHaveBeenCalledWith("/metrics?range=24h", { scroll: false });
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "7d" } });
-    expect(nav.replace).toHaveBeenLastCalledWith("/", { scroll: false });
+    expect(nav.replace).toHaveBeenLastCalledWith("/metrics", { scroll: false });
   });
 
   it("traces list: row link, workflow run link, filter replace", async () => {

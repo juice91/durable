@@ -31,6 +31,9 @@ const MODELS = {
 
 const okResponder: Responder = (url) => {
   if (url.pathname === "/api/v1/models") return { status: 200, body: MODELS };
+  // The Overview's Needs attention list and its run names (SL.7).
+  if (url.pathname === "/api/v1/runs") return { status: 200, body: { items: [], next_before: null } };
+  if (url.pathname === "/api/v1/workflows") return { status: 200, body: [] };
   if (url.pathname.endsWith("/summary")) {
     return { status: 200, body: summaryFixture({ runs: 6, completed: 3, failed: 3, error_rate: 0.5, requests: 2, cost_usd: "0.0100000000" }, { runs: 3 }) };
   }
@@ -134,7 +137,8 @@ describe("MetricsPage", () => {
     expect(await screen.findByTestId("kpi-runs-value")).toHaveTextContent("6");
     expect(screen.getByTestId("kpi-runs-delta")).toHaveTextContent("up 100% from 3");
     expect(screen.getByTestId("kpi-error_rate-value")).toHaveTextContent("50%");
-    expect(await screen.findByRole("link", { name: "Support bot: open matching runs" })).toBeInTheDocument();
+    // The agent breakdown is the Overview's Top agents (SL.7): a row narrows Metrics to the agent.
+    expect(await screen.findByRole("link", { name: "Support bot: show this agent's metrics" })).toHaveAttribute("href", routes.metrics({ agent_id: "a-1" }));
     expect(await screen.findByRole("link", { name: "anthropic:legacy: open matching runs" })).toBeInTheDocument();
     const paths = metricCalls().map((u) => u.pathname + (u.searchParams.get("by") ? `?by=${u.searchParams.get("by")}` : ""));
     expect(paths.sort()).toEqual([

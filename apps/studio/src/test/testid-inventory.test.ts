@@ -34,7 +34,7 @@ const tests = files.filter((f) => isTest(f) && !self(f)).map(read);
  * prefix only. Each entry says where the id is rendered and why it cannot be a literal.
  */
 export const DYNAMIC_PREFIXES: Record<string, string> = {
-  "kpi-": "KpiCard testId={`kpi-${id}`} (MetricsKpis, DashboardKpis), plus its -value and -delta children: one card per KPI id",
+  "kpi-": "KpiCard testId={`kpi-${id}`} (MetricsKpis, the Metrics Overview KPI row), plus its -value and -delta children: one card per KPI id",
   "chart-": "TimeSeriesChart data-testid={`chart-${title}`}: one per chart title",
   "breakdown-row-": "BreakdownTable rows: breakdown-row-<agent|model|provider>",
   "workflow-row-": "Workflows list row per workflow id",

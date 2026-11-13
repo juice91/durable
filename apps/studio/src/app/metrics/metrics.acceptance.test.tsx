@@ -26,6 +26,9 @@ const MODELS = { items: [{ id: "test:echo", provider: "test", name: "echo", wild
 
 const okResponder: Responder = (url) => {
   if (url.pathname === "/api/v1/models") return { status: 200, body: MODELS };
+  // The Overview's Needs attention list and its run names (SL.7).
+  if (url.pathname === "/api/v1/runs") return { status: 200, body: { items: [], next_before: null } };
+  if (url.pathname === "/api/v1/workflows") return { status: 200, body: [] };
   if (url.pathname.endsWith("/summary")) {
     return {
       status: 200,
@@ -128,7 +131,9 @@ describe("MetricsPage acceptance", () => {
     it("breakdown rows link to the agent or model, and failed counts to failed runs", async () => {
       mockFetch(okResponder);
       render(<MetricsPage />);
-      const agent = await screen.findByRole("link", { name: "Support bot: open matching runs" });
+      // Top agents (SL.7) narrows Metrics to the agent; its failed count still opens Traces.
+      const agent = await screen.findByRole("link", { name: "Support bot: show this agent's metrics" });
+      expect(new URL(agent.getAttribute("href")!, "http://x").pathname).toBe(routes.metrics());
       expect(q(agent.getAttribute("href")!)).toMatchObject({ agent_id: "a-1" });
       expect(q(screen.getByRole("link", { name: "Support bot: open 3 failed runs" }).getAttribute("href")!)).toMatchObject({ status: "failed", agent_id: "a-1" });
       const model = await screen.findByRole("link", { name: "test:echo: open matching runs" });
@@ -225,7 +230,9 @@ describe("MetricsPage acceptance", () => {
         return { status: 200, body: breakdownFixture("agent", []) };
       });
       render(<MetricsPage />);
-      expect(await screen.findByTestId("metrics-empty")).toHaveTextContent("No runs or model requests match these filters");
+      // No filters set: the message suggests widening the range or starting a run (SL.7 merged the
+      // dashboard's empty state); with a filter it suggests clearing it (see overview.test.tsx).
+      expect(await screen.findByTestId("metrics-empty")).toHaveTextContent("No runs or model requests in this period");
       expect(within(document.body).getAllByText("No data in this period").length).toBeGreaterThan(0);
     });
 

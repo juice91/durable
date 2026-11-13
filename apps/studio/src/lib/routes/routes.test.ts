@@ -3,10 +3,12 @@ import { ROUTE_AREAS, RouteIdError, routes, withQuery } from "./index";
 
 describe("routes: today's URLs", () => {
   it.each([
-    [routes.dashboard(), "/"],
     [routes.agents(), "/agents"],
     [routes.agentNew(), "/agents/new"],
-    [routes.agentEditor("a1"), "/agents/a1"],
+    [routes.agentEditor("a1"), "/agents/a1/editor"],
+    [routes.agentIndex("a1"), "/agents/a1"],
+    [routes.agentChat("a1"), "/agents/a1/chat"],
+    [routes.agentTraces("a1"), "/agents/a1/traces"],
     [routes.playground(), "/playground"],
     [routes.requestContext(), "/request-context"],
     [routes.workflows(), "/workflows"],
@@ -37,7 +39,7 @@ describe("routes: areas", () => {
 
 describe("routes: encoding", () => {
   it("encodes id segments, including ':' '/' '?' '#' and spaces", () => {
-    expect(routes.agentEditor("ns:agent/1")).toBe("/agents/ns%3Aagent%2F1");
+    expect(routes.agentEditor("ns:agent/1")).toBe("/agents/ns%3Aagent%2F1/editor");
     expect(routes.trace("run:1?x#y")).toBe("/traces/run%3A1%3Fx%23y");
     expect(routes.run("a b")).toBe("/runs/a%20b");
     expect(routes.workflow("wf:1")).toBe("/workflows/wf%3A1");
@@ -52,8 +54,8 @@ describe("routes: encoding", () => {
       expect(() => routes.workflow(id)).toThrow(RouteIdError);
       expect(() => routes.workflowRun("wf", id)).toThrow(RouteIdError);
     }
-    expect(routes.agentEditor("...")).toBe("/agents/...");
-    expect(routes.agentEditor(".a")).toBe("/agents/.a");
+    expect(routes.agentEditor("...")).toBe("/agents/.../editor");
+    expect(routes.agentEditor(".a")).toBe("/agents/.a/editor");
   });
 
   it("round-trips an encoded segment", () => {
@@ -83,8 +85,7 @@ describe("routes: encoding", () => {
     expect(routes.traces(new URLSearchParams())).toBe("/traces");
     expect(routes.logs({ q: "a b", level: undefined, run_id: "r1" })).toBe("/logs?q=a+b&run_id=r1");
     expect(routes.metrics({ range: "30d", agent_id: null })).toBe("/metrics?range=30d");
-    expect(routes.dashboard({ range: "30d" })).toBe("/?range=30d");
-    expect(routes.dashboard({})).toBe("/");
+    expect(routes.metrics({})).toBe("/metrics");
   });
 
   it("withQuery leaves out null, undefined, false and empty strings but keeps 0 and true", () => {

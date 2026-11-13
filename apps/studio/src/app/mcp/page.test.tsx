@@ -1,10 +1,25 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import "@testing-library/jest-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import McpServersPage from "./page";
+import McpServerDetailPage from "./[id]/page";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { routes } from "@/lib/routes";
+
+// SL.8 moved the connection test, the tool list and the header names to /mcp/[id].
+const push = vi.fn();
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ id: "srv-1" }),
+  useRouter: () => ({ push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
+  usePathname: () => "/mcp",
+}));
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, agents: { ...actual.api.agents, list: vi.fn() }, versions: { ...actual.api.versions, get: vi.fn() } } };
+});
 
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
@@ -33,16 +48,23 @@ describe("McpServersPage", () => {
     vi.clearAllMocks();
     vi.mocked(mcpServers.list).mockResolvedValue([server]);
     vi.mocked(mcpServers.get).mockResolvedValue(server);
+    vi.mocked(api.agents.list).mockResolvedValue([]);
+    vi.mocked(api.versions.get).mockRejectedValue(new Error("no version"));
   });
 
   it("lists servers with URL, enabled state, set headers and the last test result", async () => {
     render(<McpServersPage />);
     const row = await screen.findByTestId("mcp-server-row");
-    expect(within(row).getByText("docs")).toBeInTheDocument();
+    expect(row).toHaveAttribute("data-row-id", "srv-1");
+    expect(within(row).getByRole("link", { name: "docs, enabled" })).toHaveAttribute("href", routes.mcpServer("srv-1"));
     expect(within(row).getByText("https://mcp.example.com/mcp")).toBeInTheDocument();
     expect(within(row).getByText("Enabled")).toBeInTheDocument();
-    expect(within(row).getByText("Headers: authorization (set)")).toBeInTheDocument();
     expect(within(row).getByTestId("mcp-last-test")).toHaveTextContent(/private, loopback or link-local/);
+    // Header names left the list (decision "MCP Servers"): the detail's Connection card shows them.
+    expect(row).not.toHaveTextContent("authorization");
+    cleanup();
+    render(<McpServerDetailPage />);
+    expect(await screen.findByTestId("mcp-header-names")).toHaveTextContent("authorization (set)");
   });
 
   it("tests the connection and shows discovered tools with a collapsible schema", async () => {
@@ -50,19 +72,24 @@ describe("McpServersPage", () => {
       status: "ok",
       tools: [{ name: "search", description: "Search the docs", input_schema: { type: "object", properties: { q: { type: "string" } } } }],
     });
-    render(<McpServersPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Test connection" }));
+    render(<McpServerDetailPage />);
+    fireEvent.click(within(await screen.findByTestId("mcp-connection")).getByRole("button", { name: "Test connection" }));
 
     const tool = await screen.findByTestId("mcp-tool");
     expect(within(tool).getByText("search")).toBeInTheDocument();
     expect(within(tool).getByText("Search the docs")).toBeInTheDocument();
-    expect(within(tool).getByText("Input schema")).toBeInTheDocument();
+    // The schema is no longer a <details>: it opens in the tool Sheet.
+    expect(screen.queryByTestId("mcp-tool-sheet")).toBeNull();
+    fireEvent.click(within(tool).getByRole("button", { name: "search" }));
+    const sheet = await screen.findByTestId("mcp-tool-sheet");
+    expect(within(sheet).getByText("Input schema")).toBeInTheDocument();
+    expect(within(sheet).getByTestId("mcp-tool-schema")).toHaveTextContent('"q"');
   });
 
   it("explains an outbound policy refusal from the test", async () => {
     vi.mocked(mcpServers.test).mockResolvedValue({ status: "error", error_code: "address_blocked", tools: [] });
-    render(<McpServersPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Test connection" }));
+    render(<McpServerDetailPage />);
+    fireEvent.click(within(await screen.findByTestId("mcp-connection")).getByRole("button", { name: "Test connection" }));
 
     const error = await screen.findByTestId("mcp-test-error");
     expect(error).toHaveTextContent("Blocked by the outbound policy");
@@ -83,6 +110,8 @@ describe("McpServersPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     const dialog = screen.getByRole("dialog");
     expect(mcpServers.remove).not.toHaveBeenCalled();
+    // Delete waits for the fresh references check that opening the confirm starts.
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete server" })).toBeEnabled());
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete server" }));
 
     await waitFor(() => expect(mcpServers.remove).toHaveBeenCalledWith("srv-1"));
@@ -173,12 +202,17 @@ describe("McpServersPage", () => {
     vi.mocked(mcpServers.setEnabled).mockResolvedValue({ ...server, enabled: false, last_status: "ok", last_error_code: null });
     render(<McpServersPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
-    expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Disable" }));
+    const editDialog = await screen.findByRole("dialog", { name: "Edit docs" });
+    expect(within(editDialog).getByTestId("mcp-server-form")).toBeInTheDocument();
+    // The edit form is a modal Dialog now: a user can no longer reach Disable behind it.
+    expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
+    // Guard test (onSaved): the row changes behind the open form (dispatched directly), then the
+    // unchanged Save (onSaved(null)) must keep the row as it is now.
+    fireEvent.click(screen.getByRole("button", { name: "Disable", hidden: true }));
     const row = screen.getByTestId("mcp-server-row");
     await waitFor(() => expect(within(row).getByText("Disabled")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(within(editDialog).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument());
     expect(mcpServers.update).not.toHaveBeenCalled();
     expect(within(screen.getByTestId("mcp-server-row")).getByText("Disabled")).toBeInTheDocument();
@@ -189,10 +223,14 @@ describe("McpServersPage", () => {
     vi.mocked(mcpServers.remove).mockResolvedValue(undefined);
     render(<McpServersPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByRole("dialog", { name: "Edit docs" });
     expect(screen.getByTestId("mcp-server-form")).toBeInTheDocument();
+    // Unreachable for a user behind the modal; dispatched directly to cover forgetServer's guard.
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete", hidden: true }));
+    const confirm = await screen.findByRole("dialog", { name: "Delete docs?", hidden: true });
+    fireEvent.click(within(confirm).getByRole("button", { name: "Delete server", hidden: true }));
     await waitFor(() => expect(screen.queryByTestId("mcp-server-row")).not.toBeInTheDocument());
     expect(screen.queryByTestId("mcp-server-form")).not.toBeInTheDocument();
     expect(mcpServers.update).not.toHaveBeenCalled();
