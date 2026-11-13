@@ -248,8 +248,11 @@ def test_input_bounds_regex_128_ki_characters_pii_one_million():
     assert truncated.text == "aaaaa"  # max_length has no input bound
 
 
-def test_outcome_reasons_are_exactly_the_three_engine_reasons():
-    assert OUTCOME_REASONS == {INPUT_TOO_LARGE, BUDGET_EXCEEDED, TOO_MANY_MATCHES}
+def test_outcome_reasons_are_exactly_the_engine_and_moderation_reasons():
+    # The three engine reasons plus moderation's two fail-closed reasons (P0.17, worker).
+    assert OUTCOME_REASONS == {
+        INPUT_TOO_LARGE, BUDGET_EXCEEDED, TOO_MANY_MATCHES, "model_not_allowed", "verdict_invalid"
+    }
 
 
 @pytest.mark.parametrize("pattern", [r"\w{500}", r"[a-z]{600}[0-9]{600}", r"(?:\w{200}){5}"])

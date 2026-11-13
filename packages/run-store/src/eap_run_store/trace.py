@@ -10,12 +10,19 @@ Spans (kind, where they come from, start → end):
   under its `workflow_step`): `started_at` (else `created_at`) → `finished_at` (else the `end`
   event); end null while the run is not terminal.
 - `model_request`: request `n` from the run's previous durable event to its `model:{n}:final`
-  event; tokens and cost from that request's `run_model_requests` row (the event's own `usage`,
+  event (output `processor_result` events, written between a response and its `model:{n}:final`,
+  do not count as that previous event: the request spans up to them); tokens and cost from that request's `run_model_requests` row (the event's own `usage`,
   `model_id`, `cost_usd` fields when the row is missing), `usage: null` when neither exists (runs
   recorded before usage existed).
 - `tool_call`: `tool:{id}:call` → `tool:{id}:result` (agent and tool runs), a sibling of the model
   requests under the run, with `attributes.model_request` naming the request that issued it.
-- `processor`: one `processor_result` event (`processor:{phase}:{i}`), zero length.
+- `processor`: one `processor_result` event (`processor:input:{i}`, or
+  `processor:output:{i}:model:{n}` for model request n, `attributes.model_request` = n; older
+  `processor:output:{i}` keys are still read),
+  zero length, named by `processor_type`; attributes phase, index, processor_type, action, reason,
+  match_counts and categories, never text; a moderation check also carries model_id, usage and
+  cost_usd from its usage row (`moderation:input:{i}` or `moderation:output:{i}:model:{n}`, the
+  event key's `:model:{n}` suffix carried over). Status `error` for a block.
 - `workflow_step`: `step:{id}:started` → `step:{id}:completed|failed`; approval steps carry the
   waiting data and the decision. Steps a parallel step's branches ran are nested under that
   parallel step (from the workflow spec, when the caller provides it); all others under the run.
@@ -23,6 +30,9 @@ Spans (kind, where they come from, start → end):
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
 (whose events are idempotent by key) never shows a duplicate span. Spans are listed parents first.
+
+Totals count every model request of the run and its child runs, moderation requests included
+(`moderation_requests` says how many of them were moderation checks).
 
 Status: `ok`, `error`, `running` (not finished yet), `waiting` (an approval step waiting for a
 decision) or `incomplete` (never finished, and the run has ended). Run spans keep the run's own
@@ -279,6 +289,9 @@ def step_parents(spec: dict[str, Any] | None) -> dict[str, str]:
     return parents
 
 
+# processor_result fields shown as span attributes (never the processed or matched text).
+PROCESSOR_ATTRIBUTES = ("processor_type", "action", "reason", "match_counts", "categories")
+
 _RUN_STATUS = {"completed": "ok", "failed": "error", "needs_attention": "error"}
 
 
@@ -462,22 +475,52 @@ class _Builder:
                     {k: data.get(k) for k in ("tool_call_id", "tool_name", "status", "content") if k in data}
                 )
             elif etype == "processor_result":
-                attrs = {k: v for k, v in data.items() if k not in ("text", "input", "output")}
-                attrs["processor_key"] = key
-                status = "error" if data.get("action") == "block" or data.get("blocked") else "ok"
-                self.add(
-                    f"{rid}:{key}", run_span, "processor", str(data.get("type") or key),
-                    event["ts"], event["ts"], status, attrs,
-                )
+                self._processor(rd, event, run_span)
             elif etype == "step_started":
                 self._step(rd, event, by_key, run_span, open_status)
-            previous = event
+            # An output processor checks a response before its model:{n}:final is written: the model
+            # request's span must not start at it (it would collapse to the checks' duration).
+            if not (etype == "processor_result" and key.startswith("processor:output:")):
+                previous = event
         # Child runs whose step span is missing (cannot happen for a consistent log) hang off the run.
         if rd is self.data.root:
             for child in self.data.children:
                 if child.run["id"] not in self.placed_children:
                     self.placed_children.add(child.run["id"])
                     self.run(child, run_span, "child_run")
+
+    def _processor(self, rd: RunData, event: dict[str, Any], run_span: str) -> None:
+        """One `processor_result` event (`processor:{phase}:{i}` or `processor:output:{i}:model:{n}`)
+        as a zero-length span named by its processor type. Only allowlisted fields become attributes
+        (never text); a moderation outcome carries its model request's usage and cost, from the
+        `moderation:{phase}:{i}[:model:{n}]` usage row (else the event's own usage fields)."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        parts = key.split(":")
+        phase = data.get("phase") or (parts[1] if len(parts) > 1 else None)
+        index = data.get("index")
+        if not isinstance(index, int):
+            index = _request_index(key)
+        attrs: dict[str, Any] = {"processor_key": key, "phase": phase, "index": index}
+        for k in PROCESSOR_ATTRIBUTES:
+            if k in data:
+                attrs[k] = data[k]
+        if len(parts) >= 5 and parts[3] == "model":
+            attrs["model_request"] = _request_index(":".join(parts[3:]))
+        is_model_call = data.get("processor_type") == "moderation" or "usage" in data or "model_id" in data
+        if is_model_call:
+            # `processor:output:{i}:model:{n}` -> `moderation:output:{i}:model:{n}` (the worker's key).
+            suffix = ":" + ":".join(parts[3:]) if len(parts) >= 5 and parts[3] == "model" else ""
+            request_key = f"moderation:{phase}:{index}{suffix}"
+            row = rd.requests.get(request_key)
+            if row is not None or "usage" in data:
+                usage, model_attrs = _model_usage(row, data, {})
+                attrs.update(request_key=request_key, **model_attrs, usage=usage)
+        status = "error" if data.get("action") == "block" else "ok"
+        self.add(
+            f"{rid}:{key}", run_span, "processor", str(data.get("processor_type") or data.get("type") or key),
+            event["ts"], event["ts"], status, attrs,
+        )
 
     def _step(
         self, rd: RunData, event: dict[str, Any], by_key: dict[str, Any], run_span: str, open_status: str
@@ -539,7 +582,7 @@ class _Builder:
     # -- totals
 
     def totals(self) -> dict[str, Any]:
-        model_requests = recorded = unpriced = 0
+        model_requests = recorded = unpriced = moderation = 0
         sums = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
         cost = Decimal(0)
         for rd in [self.data.root, *self.data.children]:
@@ -547,6 +590,8 @@ class _Builder:
             keys |= set(rd.requests)
             for request_key in keys:
                 model_requests += 1
+                if request_key.startswith("moderation:"):
+                    moderation += 1
                 row = rd.requests.get(request_key)
                 if row is None:
                     continue
@@ -568,6 +613,7 @@ class _Builder:
         return {
             "runs": 1 + len(self.data.children),
             "model_requests": model_requests,
+            "moderation_requests": moderation,
             "tool_calls": sum(1 for s in self.spans if s["kind"] == "tool_call"),
             **{k: (None if no_usage else v) for k, v in sums.items()},
             "cost_usd": None if (unpriced or unrecorded) else format(cost, "f"),

@@ -56,8 +56,14 @@ MAX_REDACTED_MATCHES = 1_000
 CHAIN_TIME_BUDGET_SECONDS = 5.0
 REGEX_REDACTION_MARKER = "[REDACTED:regex]"
 INPUT_TOO_LARGE = "input_too_large"
+# Moderation (run by the worker) fails closed with these: its model is no longer on the allowlist
+# when the check runs, or its answer is not a valid ModerationVerdict.
+MODERATION_MODEL_NOT_ALLOWED = "model_not_allowed"
+MODERATION_VERDICT_INVALID = "verdict_invalid"
 # Every `reason` an outcome can carry (served as-is by the API; anything else is dropped).
-OUTCOME_REASONS: frozenset[str] = frozenset({INPUT_TOO_LARGE, BUDGET_EXCEEDED, TOO_MANY_MATCHES})
+OUTCOME_REASONS: frozenset[str] = frozenset(
+    {INPUT_TOO_LARGE, BUDGET_EXCEEDED, TOO_MANY_MATCHES, MODERATION_MODEL_NOT_ALLOWED, MODERATION_VERDICT_INVALID}
+)
 
 
 def new_budget(seconds: float = CHAIN_TIME_BUDGET_SECONDS) -> MatchBudget:

@@ -86,7 +86,11 @@ export interface RunEvent {
     | "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed"
     // Workflow runs (task 3.8): one key per step and phase.
     | "step_started" | "step_waiting" | "step_approved" | "step_rejected" | "step_timed_out"
-    | "step_completed" | "step_failed";
+    | "step_completed" | "step_failed"
+    // Processors (P0.17): one per processor that ran, keyed `processor:{phase}:{i}` (or
+    // `processor:output:{i}:model:{n}`). Data: phase, index, processor_type, action, match_counts,
+    // reason, categories; never the processed or matched text.
+    | "processor_result";
   data: RunEventData;
   ts: string;
 }

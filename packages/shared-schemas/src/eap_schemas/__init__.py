@@ -240,6 +240,9 @@ RunEventType = Literal[
     "tool_result",
     "run_completed",
     "run_failed",
+    # Agent runs whose spec has processors (P0.17): one per processor that ran, keyed
+    # `processor:{phase}:{i}`; type, action, match counts and reason codes, never matched text.
+    "processor_result",
     # Workflow runs (eap.workflow_run): one node's lifecycle, keyed `step:{step_id}:<phase>`.
     "step_started",
     "step_waiting",  # an approval step is waiting for a decision

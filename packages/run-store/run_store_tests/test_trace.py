@@ -341,3 +341,82 @@ def test_statement_timeout_raises_trace_query_timeout(engine, run_store, tenant)
     assert isinstance(again, TraceQueryTimeout) and again.timeout_ms == 200
     # The lock is gone: the same read succeeds.
     assert TraceReader(engine, statement_timeout_ms=200).read(tenant, run_id) is not None
+
+
+def test_processor_spans_and_moderation_usage(engine, run_store, event_log, tenant):
+    run_id = uuid4()
+    run_store.create_run(tenant, uuid4(), 1, "my email is a@b.c", run_id)
+    pii = {"phase": "input", "index": 0, "processor_type": "pii_redact", "action": "redact",
+           "match_counts": {"email": 1}, "text": "SECRET a@b.c"}
+    mid = {"phase": "output", "index": 0, "processor_type": "max_length", "action": "pass", "match_counts": {}}
+    mod = {"phase": "output", "index": 1, "processor_type": "moderation", "action": "block",
+           "match_counts": {}, "categories": ["violence"], "model_id": "test:moderation",
+           "usage": {"input_tokens": 7, "output_tokens": 3, "measured": True}, "cost_usd": "0.0005"}
+    _seed(engine, event_log, tenant, run_id, [
+        ("start", "run_started", {"input": "my email is [email]"}),
+        ("processor:input:0", "processor_result", pii),
+        # The worker's order: a response's output processor events come BEFORE its model:{n}:final.
+        ("processor:output:0:model:0", "processor_result", mid),
+        ("model:0:final", "model_message", _model_event(0, "", [("c1", "t")])),
+        ("tool:c1:call", "tool_call", {"tool_call_id": "c1", "tool_name": "t", "args": {}}),
+        ("tool:c1:result", "tool_result", {"tool_call_id": "c1", "tool_name": "t", "status": "ok", "content": 1}),
+        ("processor:output:0:model:1", "processor_result", {**mid, "index": 0}),
+        ("processor:output:1:model:1", "processor_result", mod),
+        ("model:1:final", "model_message", _model_event(1, "FLAG_ME")),
+        ("end", "run_failed", {"status": "failed", "error": "OutputBlocked: x", "error_code": "output_blocked"}),
+    ], {"model:0:final": _usage("model:0", 10, 5, "0.001"), "model:1:final": _usage("model:1", 20, 7, "0.002"),
+        "processor:output:1:model:1": _usage("moderation:output:1:model:1", 7, 3, "0.0005", model="test:moderation")})
+    _finish(engine, run_store, tenant, run_id, status="failed")
+
+    trace = TraceReader(engine).read(tenant, run_id)
+    spans = _by_id(trace)
+    rid = str(run_id)
+    p_in = spans[f"{rid}:processor:input:0"]
+    assert p_in["kind"] == "processor" and p_in["name"] == "pii_redact" and p_in["status"] == "ok"
+    assert p_in["parent_id"] == f"run:{rid}" and p_in["start"] == p_in["end"]
+    assert p_in["attributes"] == {"processor_key": "processor:input:0", "phase": "input", "index": 0,
+                                  "processor_type": "pii_redact", "action": "redact", "match_counts": {"email": 1}}
+    assert p_in["input"] is None and p_in["output"] is None
+    assert "SECRET" not in str(trace)
+    p_mid = spans[f"{rid}:processor:output:0:model:0"]
+    assert p_mid["name"] == "max_length" and p_mid["attributes"]["model_request"] == 0
+    assert "usage" not in p_mid["attributes"]
+    p_mod = spans[f"{rid}:processor:output:1:model:1"]
+    assert p_mod["name"] == "moderation" and p_mod["status"] == "error"
+    attrs = p_mod["attributes"]
+    assert attrs["categories"] == ["violence"] and attrs["request_key"] == "moderation:output:1:model:1"
+    assert attrs["model_request"] == 1
+    # Matched to the usage row (the event carries no price_source; only the row does).
+    assert attrs["price_source"] == "override" and attrs["provider_model_name"] == "scripted"
+    assert attrs["model_id"] == "test:moderation" and attrs["cost_usd"] == "0.0005000000"
+    assert attrs["usage"]["input_tokens"] == 7 and attrs["usage"]["output_tokens"] == 3
+    totals = trace["totals"]
+    assert totals["model_requests"] == 3 and totals["moderation_requests"] == 1
+    assert (totals["input_tokens"], totals["output_tokens"], totals["cost_usd"]) == (37, 15, "0.0035000000")
+
+
+def test_model_span_covers_the_time_up_to_its_output_processor_events(engine, run_store, event_log, tenant):
+    """Output processor events sit between a response and its model:{n}:final; the request's span
+    starts at the previous non-output-processor event, not at the last processor check."""
+    run_id = uuid4()
+    run_store.create_run(tenant, uuid4(), 1, "hi", run_id)
+    check = {"phase": "output", "index": 0, "processor_type": "pii_redact", "action": "allow", "match_counts": {}}
+    _seed(engine, event_log, tenant, run_id, [
+        ("start", "run_started", {"input": "hi"}),                                          # T0 + 0 s
+        ("processor:output:0:model:0", "processor_result", check),                          # T0 + 1 s
+        ("processor:output:1:model:0", "processor_result", {**check, "index": 1}),          # T0 + 2 s
+        ("model:0:final", "model_message", _model_event(0, "Echo: hi")),                    # T0 + 3 s
+        ("end", "run_completed", {"output": "Echo: hi"}),
+    ], {"model:0:final": _usage("model:0", 5, 3, "0.001")})
+    _finish(engine, run_store, tenant, run_id)
+    spans = _by_id(TraceReader(engine).read(tenant, run_id))
+    rid = str(run_id)
+    model = spans[f"{rid}:model:0"]
+    first_check = spans[f"{rid}:processor:output:0:model:0"]
+
+    def at(value) -> datetime:
+        return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+    # From `start` (T0 + 0 s), not from the last check (T0 + 2 s), to model:0:final (T0 + 3 s).
+    assert at(model["start"]) == T0 and at(model["end"]) == T0 + timedelta(seconds=3)
+    assert at(model["start"]) < at(first_check["start"]) == T0 + timedelta(seconds=1) <= at(model["end"])

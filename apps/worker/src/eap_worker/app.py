@@ -12,6 +12,7 @@ from eap_worker.runtime import configure_runtime
 # Importing registers the generic agent, its DBOS steps, the queue and the workflow. This must
 # happen before DBOS.launch() so recovery finds every step and workflow by name.
 from eap_worker import workflow as _workflow  # noqa: F401
+from eap_worker import processors as _processors  # noqa: F401  (eap-moderator, eap.input/output_processors)
 from eap_worker import tool_run as _tool_run  # noqa: F401  (eap.tool_run and its steps)
 from eap_worker import workflow_run as _workflow_run  # noqa: F401  (eap.workflow_run, eap.workflow_branch)
 

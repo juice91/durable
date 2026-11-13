@@ -84,6 +84,48 @@ export function EventTimeline({ events, currentPartialText, status }: EventTimel
   );
 }
 
+/** "3 email, 1 phone" from a processor's match_counts (types with a zero count left out). */
+export function formatMatchCounts(counts: unknown): string {
+  if (counts === null || typeof counts !== "object" || Array.isArray(counts)) return "";
+  return Object.entries(counts as Record<string, unknown>)
+    .filter(([, n]) => typeof n === "number" && n > 0)
+    .map(([kind, n]) => `${n} ${kind}`)
+    .join(", ");
+}
+
+/** One processor outcome as a compact line: phase, processor type, action, then the match counts,
+ * flagged categories or reason. Only these fields are read; the event never carries text, and none
+ * is shown even if it did. */
+function ProcessorLine({ data }: { data: RunEvent["data"] }) {
+  const phase = data.phase === "input" ? "Input" : data.phase === "output" ? "Output" : "";
+  const type = typeof data.processor_type === "string" ? data.processor_type : "processor";
+  const action = typeof data.action === "string" ? data.action : "";
+  const counts = formatMatchCounts(data.match_counts);
+  const categories = Array.isArray(data.categories)
+    ? data.categories.filter((c): c is string => typeof c === "string").join(", ")
+    : "";
+  const reason = typeof data.reason === "string" ? data.reason : "";
+  const detail = [counts, categories && `flagged: ${categories}`, reason && `reason: ${reason}`]
+    .filter(Boolean)
+    .join("; ");
+  const blocked = action === "block";
+  return (
+    <div className="text-sm" data-testid="processor-result">
+      <span className="font-semibold">{`${phase} processor`.trim()}</span>
+      <span className="ml-1 font-mono">{type}</span>
+      {action && (
+        <span className={blocked ? "ml-1 font-semibold text-red-700 dark:text-red-400" : "ml-1 text-muted-foreground"}>
+          {action}
+        </span>
+      )}
+      {typeof data.model_request === "number" && (
+        <span className="ml-1 text-xs text-muted-foreground">(request #{data.model_request})</span>
+      )}
+      {detail && <span className="block mt-1 text-xs text-muted-foreground">{detail}</span>}
+    </div>
+  );
+}
+
 function EventItem({ event }: EventItemProps) {
   const renderContent = () => {
     switch (event.type) {
@@ -169,6 +211,8 @@ function EventItem({ event }: EventItemProps) {
             </span>
           </div>
         );
+      case "processor_result":
+        return <ProcessorLine data={event.data} />;
       default:
         return <JsonBlock value={event.data} />;
     }

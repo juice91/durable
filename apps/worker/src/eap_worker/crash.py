@@ -33,6 +33,14 @@
 - `workflow_waiting`: in a workflow approval step, right after its `step_waiting` event is
   recorded and before the workflow starts waiting for the decision. Filtered by
   `EAP_CRASH_EVENT_KEY` against `step:{step_id}:waiting`.
+- `input_processors` / `output_processors` (P0.17): inside an `eap.input_processors` /
+  `eap.output_processors` step, right after the deterministic chain segment ran (off the event
+  loop) and before the step's result is checkpointed. Recovery re-runs the segment on the same
+  text and gets the same processed text.
+- `moderation_request` (P0.17): inside the moderation model's request step
+  (`eap-moderator__model.request`), right after the moderation model answered and before the step
+  checkpoint. Recovery calls the moderation model again; its usage row is still written once, with
+  the `processor_result` event that follows the step.
 - `after_event_write`: inside the `eap.append_event` DBOS step, right after the durable event
   committed to `eap_app` and before the step's checkpoint reaches `eap_dbos`. Only fires for
   events whose `event_key` matches the glob `EAP_CRASH_EVENT_KEY` (default `*`, i.e. the first
@@ -59,6 +67,9 @@ CRASH_POINTS = frozenset(
         "after_workflow_tool_call",
         "workflow_waiting",
         "after_child_run_insert",
+        "input_processors",
+        "output_processors",
+        "moderation_request",
     }
 )
 

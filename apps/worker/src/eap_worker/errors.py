@@ -38,6 +38,36 @@ class ToolInputInvalid(Exception):
         return f"input does not match tool {self.tool_id!r}"
 
 
+class InputBlocked(Exception):
+    """An input processor (P0.17) blocked the turn's input: the main model is never called. Carries
+    no text, only the processor's position and type (from the published spec)."""
+
+    def __init__(self, index: int, processor_type: str) -> None:
+        self.index = index
+        self.processor_type = processor_type
+        super().__init__(index, processor_type)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"input blocked by input_processors[{self.index}] ({self.processor_type})"
+
+
+class OutputBlocked(Exception):
+    """An output processor (P0.17) blocked a model response: it is never stored or shown."""
+
+    def __init__(self, index: int, processor_type: str) -> None:
+        self.index = index
+        self.processor_type = processor_type
+        super().__init__(index, processor_type)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"output blocked by output_processors[{self.index}] ({self.processor_type})"
+
+
+# The fixed, user-safe messages of a blocked turn (stored as runs.error and in run_failed).
+INPUT_BLOCKED_MESSAGE = "the message was blocked by this agent's input processors"
+OUTPUT_BLOCKED_MESSAGE = "the answer was blocked by this agent's output processors"
+
+
 # Workflow runs (eap_worker.workflow_run): a step or run failure with a stable code and a fixed
 # message. The step id comes from the published spec (validated pattern), never from user input.
 WORKFLOW_FAILURES: dict[str, tuple[str, str]] = {
@@ -110,6 +140,8 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
         "model_not_allowed",
         lambda e: f"model '{_field(e, 'provider')}:{_field(e, 'name')}' is not allowed on this platform",
     ),
+    (InputBlocked, "failed", "input_blocked", lambda e: INPUT_BLOCKED_MESSAGE),
+    (OutputBlocked, "failed", "output_blocked", lambda e: OUTPUT_BLOCKED_MESSAGE),
     (UnknownToolError, "failed", "unknown_tool", lambda e: f"tool '{_field(e, 'tool_id')}' is not registered"),
     (ToolNotAllowedError, "failed", "tool_not_allowed", lambda e: f"tool '{_field(e, 'tool_id')}' is not allowed on this worker"),
     (ToolInputInvalid, "failed", "tool_input_invalid", lambda e: f"the input does not match tool '{_field(e, 'tool_id')}'"),
@@ -169,4 +201,14 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
     return RunFailure(status, code, "WorkflowStepError", message)
 
 
-__all__ = ["WORKFLOW_FAILURES", "RunFailure", "ToolInputInvalid", "WorkflowStepError", "classify"]
+__all__ = [
+    "INPUT_BLOCKED_MESSAGE",
+    "OUTPUT_BLOCKED_MESSAGE",
+    "WORKFLOW_FAILURES",
+    "InputBlocked",
+    "OutputBlocked",
+    "RunFailure",
+    "ToolInputInvalid",
+    "WorkflowStepError",
+    "classify",
+]

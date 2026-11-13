@@ -18,6 +18,17 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
 - `test:context` scripted model that answers with the instructions it was given (the spec's
                  instructions after `{{context.<name>}}` rendering), as one streamed chunk:
                  `Instructions: <rendered instructions>`. Proves run options reach the model.
+- `test:moderation` scripted moderation model (P0.17): answers the moderation verdict JSON for the
+                 text it was given: `{"flagged": true, "categories": ["illicit"]}` when the text
+                 contains `FLAG_ME`, else `{"flagged": false, "categories": []}`.
+- `test:moderation-invalid` scripted moderation model whose answer is not a verdict (`I cannot
+                 classify this.`), to prove an unparsable verdict fails closed.
+- `test:moderation-empty` scripted moderation model with an empty answer: fails closed on the first
+                 (priced) request, never retried.
+- `test:think-first` (P0.17) answers first with thinking only (no text, no tool call), which the
+                 agent re-prompts; then `Echo: <first prompt>`. Models a thinking model's empty answer.
+- `test:think-tool` (P0.17) first thinks `SECRET plan` AND calls the first offered tool with `{}`;
+                 after the tool returned, answers `Done.`. Proves unchecked thinking is never stored.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -46,7 +57,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelResolutionContext
-from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
+from pydantic_ai.messages import ThinkingPart
+from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 from eap_worker.config import WorkerSettings
 
@@ -234,6 +246,74 @@ def scripted_context_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-context")
 
 
+MODERATION_FLAG = "FLAG_ME"
+
+
+def _moderation_answer(messages: list[ModelMessage]) -> str:
+    if MODERATION_FLAG in _last_prompt(messages):
+        return json.dumps({"flagged": True, "categories": ["illicit"]})
+    return json.dumps({"flagged": False, "categories": []})
+
+
+def scripted_moderation_model(mode: str = "valid") -> FunctionModel:
+    """`valid`: the verdict; `invalid`: a sentence that is not one; `empty`: an empty answer."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        answer = {"valid": _moderation_answer(messages), "invalid": "I cannot classify this.", "empty": ""}[mode]
+        return ModelResponse(parts=[TextPart(answer)])
+
+    return FunctionModel(respond, model_name="scripted-moderation" if mode == "valid" else f"scripted-moderation-{mode}")
+
+
+def _answered_before(messages: list[ModelMessage]) -> bool:
+    # The agent re-prompts an empty answer with a user prompt ("Please return text."), so "retried"
+    # means: a response already exists. Standalone runs only (history would count too).
+    return any(isinstance(m, ModelResponse) for m in messages)
+
+
+def _first_prompt(messages: list[ModelMessage]) -> str:
+    for m in messages:
+        if isinstance(m, ModelRequest):
+            for p in m.parts:
+                if isinstance(p, UserPromptPart) and isinstance(p.content, str):
+                    return p.content
+    return ""
+
+
+def scripted_think_first_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not _answered_before(messages):
+            return ModelResponse(parts=[ThinkingPart("pondering")])
+        return ModelResponse(parts=[TextPart(f"Echo: {_first_prompt(messages)}")])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[Any]:
+        if not _answered_before(messages):
+            yield {0: DeltaThinkingPart(content="pondering")}
+            return
+        yield f"Echo: {_first_prompt(messages)}"
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-think-first")
+
+
+THINK_TOOL_THOUGHT = "SECRET plan"
+
+
+def scripted_think_tool_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if info.function_tools and not _tool_returns(messages):
+            return ModelResponse(parts=[ThinkingPart(THINK_TOOL_THOUGHT), ToolCallPart(info.function_tools[0].name, {})])
+        return ModelResponse(parts=[TextPart("Done.")])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[Any]:
+        if info.function_tools and not _tool_returns(messages):
+            yield {0: DeltaThinkingPart(content=THINK_TOOL_THOUGHT)}
+            yield {1: DeltaToolCall(name=info.function_tools[0].name, json_args="{}")}
+            return
+        yield "Done."
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-think-tool")
+
+
 def litellm_model(name: str, settings: WorkerSettings) -> Model:
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -270,6 +350,16 @@ def make_resolver(settings_getter: Any):
                 return scripted_mcp_model()
             if name == "context":
                 return scripted_context_model()
+            if name == "moderation":
+                return scripted_moderation_model()
+            if name == "moderation-invalid":
+                return scripted_moderation_model("invalid")
+            if name == "moderation-empty":
+                return scripted_moderation_model("empty")
+            if name == "think-first":
+                return scripted_think_first_model()
+            if name == "think-tool":
+                return scripted_think_tool_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

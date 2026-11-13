@@ -52,6 +52,31 @@ instructions (`eap_schemas.render_instructions`, `{{context.<name>}}`) and given
 read-only `RunDeps.request_context`; its values never go to spans or logs. A draft run is handed off
 with version 0 and its snapshot as spec_json, so the spec it runs is fixed at enqueue time.
 
+Processors (milestone P0, P0.17; eap_worker.processors): only for a spec with processors, so a spec
+without them keeps the exact step layout above. Input processors run on the turn's input after
+`eap.start_run` and BEFORE `start` (their steps write no events), so run_started, the model, the
+stored messages and the history all see the processed text; one `processor_result` event per
+processor that ran (`processor:input:{i}`) follows `start`. Output processors run on every model
+response that has text, after its model step and before its `model:{n}:final` event: the deterministic
+ones on every such response, and all of them, moderation included, on the final answer (text and no
+tool calls); events `processor:output:{i}:model:{n}`. A response without text (tool calls only, or an
+empty or thinking-only answer the agent retries) is not checked. Thinking parts are dropped from
+every stored response of such a spec (event and runs.messages). A moderation outcome's event
+carries the moderation request's usage row (request key `moderation:input:{i}`, or
+`moderation:output:{i}:model:{n}`). A block ends the run failed with `input_blocked` (no history load, no
+model request) or `output_blocked` (the blocked response's model_message keeps only its usage and
+`"blocked": true`, no text; nothing is stored as output or messages). Failed turns never enter a
+later turn's history. A spec with output processors publishes no NOTIFY deltas.
+
+    eap.start_run
+    eap.input_processors | eap-moderator__model.request ...   (input chain, list order)
+    eap.append_event   start                   run_started (input = the processed text)
+    eap.append_event   processor:input:{i}     processor_result, one per processor that ran
+    ... (history, model request n) ...
+    eap.output_processors | eap-moderator__model.request ...  (on the response's text)
+    eap.append_event   processor:output:{i}:model:{n}   processor_result
+    eap.append_event   model:{n}:final         model_message with the processed text
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -95,10 +120,18 @@ from eap_schemas import AgentSpec
 from eap_schemas.request_context import render_instructions
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
-from eap_worker.errors import classify
+from eap_worker.errors import InputBlocked, OutputBlocked, classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
+from eap_worker.processors import (
+    ChainRun,
+    describe,
+    processed_message,
+    processed_messages,
+    run_chain,
+    strip_thinking,
+)
 from eap_worker.runtime import WorkerDeps, get_runtime
 
 log = logging.getLogger("eap_worker")
@@ -152,10 +185,14 @@ async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     model_request = ctx.run_step - 1  # run_step is 1 for the first model request of a run
     run_id = str(ctx.deps.run_id)
     rt = get_runtime()
+    # Output processors (P0.17): unchecked text must never reach the client, so no live deltas; the
+    # UI waits for the checked model_message. The crash point stays where the delta would go out.
+    live = not ctx.deps.spec.output_processors
     async for event in events:
         text = _text_of(event)
         if text:
-            await asyncio.to_thread(rt.publish_delta, run_id, model_request, attempt, text)
+            if live:
+                await asyncio.to_thread(rt.publish_delta, run_id, model_request, attempt, text)
             crash_point("model_request")
 
 
@@ -184,6 +221,8 @@ agent: Agent[WorkerDeps, str] = Agent(
 
 
 DRAFT_VERSION = 0  # the hand-off `version` of a draft test run (published versions start at 1)
+# run_started's `input` when the input processors blocked the input (or failed): never the raw text.
+WITHHELD_INPUT = "[withheld: blocked by the agent's input processors]"
 
 
 @DBOS.step(name="eap.start_run")
@@ -286,16 +325,19 @@ async def append_event_step(
     type: str,
     data: dict[str, Any],
     usage: dict[str, Any] | None = None,
+    request_key: str | None = None,
 ) -> int:
     """Write one durable event (idempotent per key). `usage` (pricing.request_usage_input) is given
-    only for a model request's `model:{n}:final` event: the request is priced here, the price and
-    tokens are added to the event's data, and its run_model_requests row is written in the event's
-    transaction (first write wins, so a re-executed step never re-prices). Same step, same position:
-    a run without usage and a checkpoint recorded before usage existed replay unchanged."""
+    only for a model request's `model:{n}:final` event, or a moderation outcome's `processor_result`
+    event (with `request_key` `moderation:input:{i}` or `moderation:output:{i}:model:{n}`; default: the event key without `:final`):
+    the request is priced here, the price and tokens are added to the event's data, and its
+    run_model_requests row is written in the event's transaction (first write wins, so a
+    re-executed step never re-prices). Same step, same position: a run without usage and a
+    checkpoint recorded before usage existed replay unchanged."""
     rt = get_runtime()
     row = None
     if usage is not None:
-        row, fields = usage_record(event_key.removesuffix(":final"), usage)
+        row, fields = usage_record(request_key or event_key.removesuffix(":final"), usage)
         data = {**data, **fields}
     event, _created = await asyncio.to_thread(
         rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, row
@@ -410,6 +452,39 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
         await append_event_step(run_id, tenant_id, f"tool:{call.tool_call_id}:result", "tool_result", data)
 
 
+async def _record_processor_results(run_id: str, tenant_id: str, chain: ChainRun, key_suffix: str = "") -> None:
+    """One `processor_result` event per processor that ran (`processor:{phase}:{i}{key_suffix}`); a
+    moderation outcome's event also records its model request's usage
+    (`moderation:{phase}:{i}{key_suffix}`). Output outcomes pass `:model:{n}`, so two responses of a
+    run (e.g. an empty answer the agent retries, then the real one) never share a key."""
+    for record in chain.records:
+        phase = record.data["phase"]
+        key = f"processor:{phase}:{record.index}{key_suffix}"
+        if record.usage is not None:
+            await append_event_step(
+                run_id, tenant_id, key, "processor_result", record.data,
+                usage=record.usage, request_key=f"moderation:{phase}:{record.index}{key_suffix}",
+            )
+        else:
+            await append_event_step(run_id, tenant_id, key, "processor_result", record.data)
+    if chain.blocked_by is not None:
+        log.info("run %s: %s", run_id, describe(chain.blocked_by))
+
+
+def _blocked_error(chain: ChainRun, phase: str) -> Exception:
+    record = chain.blocked_by
+    index, processor_type = (record.index, str(record.data.get("processor_type"))) if record else (-1, "?")
+    return InputBlocked(index, processor_type) if phase == "input" else OutputBlocked(index, processor_type)
+
+
+def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
+    """The spec for the processor decision, or None: an invalid spec fails later, in the run body."""
+    try:
+        return _parse_spec(spec_json)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def effective_model_id(spec: AgentSpec, link: dict[str, Any]) -> str:
     """The run's model: the recorded `model_id` from eap.start_run, else (a checkpoint recorded
     before run options, or a row without one) the spec's model."""
@@ -440,6 +515,8 @@ async def _drive_agent(
         model_id = model_id_for(spec.model.provider, spec.model.name)
     n = 0
     pending: list[ToolCallPart] = []
+    processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
+    final_text: str | None = None
     async with agent.iter(
         input_text,
         message_history=history or None,
@@ -457,13 +534,39 @@ async def _drive_agent(
                 response: ModelResponse = node.model_response
                 calls = [p for p in response.parts if isinstance(p, ToolCallPart)]
                 text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
+                usage = request_usage_input(model_id, response.model_name, response.usage)
+                message = _message_json(response)
+                if spec.output_processors:
+                    # Thinking is model text no processor checks: never stored, for every response.
+                    message = strip_thinking(message)
+                if spec.output_processors and text:
+                    # Only responses with text: an empty or thinking-only answer has nothing to check
+                    # (the agent retries it). Before anything of this response is stored. Moderation
+                    # only on the final answer (text and no tool calls).
+                    final = not calls
+                    chain = await run_chain(
+                        run_id, tenant_id, "output", spec.output_processors, text, moderation=final
+                    )
+                    await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
+                    if chain.text is None:
+                        # Blocked (or failed): keep the request's usage, never its text.
+                        await append_event_step(
+                            run_id, tenant_id, f"model:{n}:final", "model_message",
+                            {"model_request": n, "text": "", "blocked": True}, usage=usage,
+                        )
+                        raise chain.error if chain.error is not None else _blocked_error(chain, "output")
+                    text = chain.text
+                    message = processed_message(message, text)
+                    processed[n] = text
+                    if final:
+                        final_text = text
                 await append_event_step(
                     run_id,
                     tenant_id,
                     f"model:{n}:final",
                     "model_message",
-                    {"model_request": n, "text": text, "message": _message_json(response)},
-                    usage=request_usage_input(model_id, response.model_name, response.usage),
+                    {"model_request": n, "text": text, "message": message},
+                    usage=usage,
                 )
                 for call in calls:
                     await append_event_step(
@@ -482,7 +585,12 @@ async def _drive_agent(
         if pending:
             await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
         assert run.result is not None
-        return run.result.output, ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")
+        new_messages = ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")
+        if not spec.output_processors:
+            return run.result.output, new_messages
+        if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
+            raise OutputBlocked(-1, "unchecked")
+        return final_text, processed_messages(new_messages, processed, strip_thinking_parts=True)
 
 
 # --------------------------------------------------------------------------- the workflow
@@ -524,13 +632,32 @@ async def _run_body(
     started: dict[str, Any] = {"agent_id": agent_id, "version": version, "input": input_text}
     if link.get("is_draft"):
         started["draft"] = True
-    await append_event_step(run_id, tenant_id, "start", "run_started", started)
-    history: list[ModelMessage] | None = None
-    if link.get("conversation_id") is not None:
-        history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
-        history = ModelMessagesTypeAdapter.validate_python(history_json)
+    # Liveness from here on (not a step): a slow input moderation check must not look stalled.
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
+        # Input processors (P0.17), only for a spec that has them: before `start`, so no event, log
+        # or message ever holds text they redact or block. Their events follow `start`.
+        pre: ChainRun | None = None
+        pre_spec = _spec_or_none(spec_json)
+        if pre_spec is not None and pre_spec.input_processors:
+            pre = await run_chain(run_id, tenant_id, "input", pre_spec.input_processors, input_text)
+            started["input"] = pre.text if pre.text is not None else WITHHELD_INPUT
+            started["input_processed"] = True
+        await append_event_step(run_id, tenant_id, "start", "run_started", started)
+        if pre is not None:
+            await _record_processor_results(run_id, tenant_id, pre)
+            if pre.text is not None:
+                input_text = pre.text
+        history: list[ModelMessage] | None = None
+        if link.get("conversation_id") is not None and (pre is None or pre.text is not None):
+            history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
+            history = ModelMessagesTypeAdapter.validate_python(history_json)
+    except BaseException:
+        heartbeat.cancel()
+        raise
+    try:
+        if pre is not None and pre.text is None:  # blocked or failed: the main model is never called
+            raise pre.error if pre.error is not None else _blocked_error(pre, "input")
         rt = get_runtime()
         spec = _parse_spec(spec_json)
         # Model governance: the effective model (an override recorded on the run, else the spec's)
