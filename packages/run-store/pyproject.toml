@@ -12,6 +12,7 @@ dependencies = [
     "eap-schemas",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3",
+    "pgvector>=0.4",
 ]
 
 [tool.uv.sources]

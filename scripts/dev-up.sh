@@ -82,6 +82,12 @@ for service in "${SERVICES[@]}"; do
                 exit 1
             fi
             if [[ "$service" == "postgres" ]]; then
+                # pgvector for volumes created before the pgvector image (the init script covers new
+                # ones). It needs the admin role, so it cannot be done by the migrations.
+                if ! ensure_vector_extension eap_postgres; then
+                    echo "ERROR: the vector extension is missing in eap_app (see above)" >&2
+                    exit 1
+                fi
                 # The API and worker refuse to start unless the schema is at the latest migration.
                 echo "[dev-up] Applying database migrations"
                 if ! uv run alembic -c "${REPO_ROOT}/packages/db/alembic.ini" upgrade head; then

@@ -8,6 +8,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="${SCRIPT_DIR}/../infrastructure/docker"
 
+# ensure_vector_extension and postgres_volume_guard
+# shellcheck source=dev-lib.sh
+# shellcheck source-path=SCRIPTDIR source=dev-lib.sh
+source "${SCRIPT_DIR}/dev-lib.sh"
+
 # Load environment variables from .env file if it exists
 if [[ -f "${SCRIPT_DIR}/../.env" ]]; then
     set -a
@@ -42,8 +47,13 @@ wait_for_healthy() {
 
 cmd_up() {
     echo "Starting PostgreSQL..."
+    if ! docker inspect eap_postgres >/dev/null 2>&1 && ! postgres_volume_guard "${COMPOSE_DIR}/compose.yaml"; then
+        return 1
+    fi
     docker compose -f "${COMPOSE_DIR}/compose.yaml" up -d
     wait_for_healthy
+    # pgvector for volumes created before the pgvector image (the init script covers new ones).
+    ensure_vector_extension eap_postgres
 }
 
 cmd_down() {

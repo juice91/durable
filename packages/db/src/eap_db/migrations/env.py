@@ -20,7 +20,29 @@ if config.config_file_name is not None:  # the CLI (alembic.ini); programmatic c
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
+class SearchPathNotSingleSchema(RuntimeError):
+    def __init__(self, schemas: list[str]) -> None:
+        super().__init__(schemas)
+        self.schemas = schemas
+
+    def __str__(self) -> str:
+        return (
+            f"migrations must run with a search path of exactly one schema, got {self.schemas}: with more, "
+            "unqualified names (alembic_version, DROP ... IF EXISTS, DELETE) can resolve to another "
+            "schema's objects. Reference extension objects as public.vector instead of adding public."
+        )
+
+
+def _require_single_schema(connection) -> None:
+    # The test plugin puts `public` after the session schema so that pgvector resolves at runtime;
+    # such a URL must never migrate (eap_db.testing). A plain URL has just one existing schema.
+    schemas = list(connection.exec_driver_sql("SELECT current_schemas(false)").scalar_one())
+    if len(schemas) != 1:
+        raise SearchPathNotSingleSchema(schemas)
+
+
 def _configure(connection) -> None:
+    _require_single_schema(connection)
     context.configure(
         connection=connection,
         target_metadata=target_metadata(),

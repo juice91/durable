@@ -16,6 +16,12 @@ run timeout 1800 uv run pytest -q
 run env EAP_TEST_DATABASE_URL="${EAP_TEST_DATABASE_URL:-postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app}" uv run pytest apps/api -q
 run pnpm -C apps/studio test
 run timeout 300 bash tests/scripts/dev-lifecycle-test.sh
+# pgvector upgrade path on throwaway containers and volumes (never eap_postgres); needs Docker.
+if docker info >/dev/null 2>&1; then
+    run timeout 180 bash tests/scripts/pgvector-upgrade-test.sh
+else
+    echo "== SKIP tests/scripts/pgvector-upgrade-test.sh (Docker is not running)"
+fi
 
 if [ "$status" -ne 0 ]; then echo "SOME SUITES FAILED"; else echo "ALL SUITES PASSED"; fi
 exit "$status"

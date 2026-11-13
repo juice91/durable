@@ -1,6 +1,11 @@
 services:
   postgres:
-    image: postgres:17
+    # The official Postgres 17 image plus the pgvector extension (0.8 or later for iterative index
+    # scans). Same major version as the former postgres:17 image, so an existing postgres_data volume
+    # opens unchanged; see "pgvector" in packages/db/README.md for the in-place upgrade. Keep the
+    # -trixie suffix: postgres:17 is Debian 13 (glibc 2.41), and the plain -pg17 tag is Debian 12
+    # (glibc 2.36), whose different collation version would invalidate text indexes on the volume.
+    image: pgvector/pgvector:0.8.2-pg17-trixie
     container_name: eap_postgres
     ports:
       - "127.0.0.1:54329:5432"
@@ -12,7 +17,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5

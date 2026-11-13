@@ -98,6 +98,9 @@ start_docker_service() {
         return 0
     fi
 
+    if [[ "$service" == "postgres" ]] && ! postgres_volume_guard "${compose_dir}/compose.yaml"; then
+        return 1
+    fi
     echo "[$service] Starting Docker service..."
     docker compose -f "${compose_dir}/compose.yaml" up -d "$service"
 
@@ -132,6 +135,154 @@ wait_for_docker_health() {
 
     echo "[$service] Docker service did not become healthy within ${max_wait}s (status: $status)" >&2
     return 1
+}
+
+# psql as the Postgres container's admin role, in database eap_app. TCP on the container's loopback
+# (trusted by the image's pg_hba.conf): while the init scripts run, the image's temporary server
+# listens only on the socket, so this cannot see a half-initialised volume.
+_pg_admin_psql() {
+    local container="$1"
+    shift
+    # The single-quoted program is expanded by the container's shell, where POSTGRES_USER is set.
+    # shellcheck disable=SC2016
+    docker exec "$container" sh -c \
+        'exec psql -X -q -t -A -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "${POSTGRES_USER:-postgres}" -d eap_app "$@"' \
+        psql "$@"
+}
+
+# The compose project and the data volume of an existing Postgres container. Project names differ
+# between machines (the compose directory name, or an explicit -p), so recreating the container
+# must reuse ITS project: under another project, compose mounts <other>_postgres_data, a different
+# (often empty) volume.
+postgres_compose_project() {
+    docker inspect "$1" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true
+}
+
+postgres_data_volume() {
+    docker inspect "$1" \
+        --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' \
+        2>/dev/null || true
+}
+
+# Before `compose up` creates a NEW Postgres container: refuse when the volume compose would mount
+# (<default project>_postgres_data) is not the only *_postgres_data volume on this machine. The
+# default project differs between machines, so another such volume may hold the real dev data, and
+# compose would silently start on an empty one. EAP_POSTGRES_ALLOW_DEFAULT_VOLUME=1 accepts the
+# default (e.g. when the others belong to unrelated projects). Usage: postgres_volume_guard compose_file
+postgres_volume_guard() {
+    local compose_file="$1" project expected volumes others
+    [[ "${EAP_POSTGRES_ALLOW_DEFAULT_VOLUME:-}" == 1 ]] && return 0
+    project=$(docker compose -f "$compose_file" config 2>/dev/null | sed -n 's/^name: //p' | head -1)
+    if [[ -z "$project" ]]; then
+        echo "[postgres] cannot read the compose project of ${compose_file}; refusing to create a container" >&2
+        return 1
+    fi
+    expected="${project}_postgres_data"
+    volumes=$(docker volume ls -q | grep -E '_postgres_data$' || true)
+    others=$(grep -vx -- "$expected" <<<"$volumes" || true)
+    [[ -z "$others" ]] && return 0
+    {
+        echo "[postgres] REFUSED: no eap_postgres container exists, and compose project '${project}' would start a"
+        echo "[postgres] new one on volume ${expected}$(grep -qx -- "$expected" <<<"$volumes" && echo "" || echo " (new and empty)"), but these Postgres data volumes also exist:"
+        local v
+        while IFS= read -r v; do
+            echo "[postgres]   ${v}: docker compose -p ${v%_postgres_data} -f ${compose_file} up -d postgres"
+        done <<<"$others"
+        echo "[postgres] Start the one that holds your data with its command above (then rerun), or set"
+        echo "[postgres] EAP_POSTGRES_ALLOW_DEFAULT_VOLUME=1 to use ${expected} deliberately. See packages/db/README.md."
+    } >&2
+    return 1
+}
+
+# Print the exact steps that move an existing Postgres container onto the image pinned in
+# compose.yaml, keeping its data volume. Usage: postgres_swap_steps container image backup_hint
+postgres_swap_steps() {
+    local container="$1" image="$2" backup_hint="$3"
+    local compose="infrastructure/docker/compose.yaml"
+    local project volume rm_step=""
+    project=$(postgres_compose_project "$container")
+    volume=$(postgres_data_volume "$container")
+    if [[ -z "$project" && "$volume" == *_postgres_data ]]; then
+        # Not created by compose: derive the project from the volume, and remove the container
+        # first (compose would refuse its name). The named volume survives `docker rm`.
+        project="${volume%_postgres_data}"
+        rm_step="docker rm -f ${container}   (removes the container only; volume ${volume} is kept)"
+    fi
+    echo "[postgres] container ${container} runs image ${image}, which has no pgvector extension."
+    echo "[postgres] The stack now needs the image pinned in ${compose}. To switch in place"
+    echo "[postgres] (same Postgres 17; volume ${volume:-unknown} and all its data are kept):"
+    echo "[postgres]   1. scripts/dev-down.sh   (the app processes; Postgres keeps running for the backup)"
+    echo "[postgres]   2. optional backup: ${backup_hint}"
+    if [[ -z "$project" || "$volume" != "${project}_postgres_data" ]]; then
+        echo "[postgres]   3. STOP: cannot tell which compose project owns volume '${volume:-unknown}' (project label"
+        echo "[postgres]      '${project}'). Recreating under the wrong project mounts another, empty volume."
+        echo "[postgres]      Compose mounts only <project>_postgres_data, so if '${volume:-unknown}' is not named"
+        echo "[postgres]      that way, do not recreate with compose: dump and restore instead (packages/db/README.md)."
+    else
+        if [[ -n "$rm_step" ]]; then
+            echo "[postgres]   2b. not created by compose, so remove it first: ${rm_step}"
+        fi
+        echo "[postgres]   3. docker compose -p ${project} -f ${compose} pull postgres && \\"
+        echo "[postgres]        docker compose -p ${project} -f ${compose} up -d postgres"
+        echo "[postgres]      Always pass -p ${project}: without it compose may use another project and mount"
+        echo "[postgres]      another project's <project>_postgres_data volume instead of ${volume}."
+        echo "[postgres]   4. check the volume; this must print ${volume}:"
+        echo "[postgres]        docker inspect ${container} --format '{{range .Mounts}}{{if eq .Destination \"/var/lib/postgresql/data\"}}{{.Name}}{{end}}{{end}}'"
+    fi
+    echo "[postgres]   5. scripts/dev-up.sh   (creates the extension, then migrates)"
+}
+
+# Create the pgvector extension in eap_app if it is missing (RAG and memory need the `vector` type).
+# CREATE EXTENSION needs a superuser and the eap_app role is not one, so this runs as the admin role.
+# New volumes already have it from init-scripts/01-setup-databases.sh; this covers volumes created
+# under the former postgres:17 image. Idempotent. Fails, naming the fix, when the container runs an
+# image without pgvector. Usage: ensure_vector_extension [container] (default eap_postgres).
+ensure_vector_extension() {
+    local container="${1:-eap_postgres}"
+    local waited=0 present="" available=""
+
+    until present=$(_pg_admin_psql "$container" -c "SELECT extversion FROM pg_extension WHERE extname = 'vector'" 2>/dev/null); do
+        if [[ $waited -ge 60 ]]; then
+            echo "[postgres] cannot query database eap_app in container ${container} as the admin role" >&2
+            _pg_admin_psql "$container" -c "SELECT 1" >&2 || true
+            return 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    # An image on another glibc than the one that created the volume mis-sorts text indexes; Postgres
+    # only logs a warning, so surface it here (see "pgvector" in packages/db/README.md).
+    local drifted
+    drifted=$(_pg_admin_psql "$container" -c "SELECT string_agg(datname || ' ' || datcollversion || ' -> ' || pg_database_collation_actual_version(oid), ', ') FROM pg_database WHERE datname IN ('eap_app', 'eap_dbos') AND datcollversion IS DISTINCT FROM pg_database_collation_actual_version(oid)" 2>/dev/null || true)
+    if [[ -n "$drifted" ]]; then
+        echo "[postgres] WARNING: collation version mismatch (${drifted}): the container's image has another glibc than the one that created this volume. Use the image pinned in infrastructure/docker/compose.yaml." >&2
+    fi
+    if [[ -n "$present" ]]; then
+        echo "[postgres] vector extension ${present} present in eap_app"
+        return 0
+    fi
+
+    local backup_hint
+    backup_hint="mkdir -p ~/.eap-backups && docker exec ${container} sh -c 'pg_dumpall -U \"\$POSTGRES_USER\"' > ~/.eap-backups/eap-\$(date +%Y%m%d-%H%M%S).sql"
+    if ! available=$(_pg_admin_psql "$container" -c "SELECT default_version FROM pg_available_extensions WHERE name = 'vector'"); then
+        echo "[postgres] query failed: cannot read pg_available_extensions in eap_app (container ${container})" >&2
+        return 1
+    fi
+    if [[ -z "$available" ]]; then
+        local image
+        image=$(docker inspect --format='{{.Config.Image}}' "$container" 2>/dev/null || echo "unknown")
+        postgres_swap_steps "$container" "$image" "$backup_hint" >&2
+        return 1
+    fi
+
+    echo "[postgres] This volume predates pgvector: creating the vector extension ${available} in eap_app."
+    echo "[postgres] This changes no rows. Before the upcoming RAG migrations, a backup of this volume is cheap insurance:"
+    echo "[postgres]   ${backup_hint}"
+    if ! _pg_admin_psql "$container" -c "CREATE EXTENSION IF NOT EXISTS vector"; then
+        echo "[postgres] CREATE EXTENSION vector failed in eap_app" >&2
+        return 1
+    fi
+    echo "[postgres] vector extension created in eap_app"
 }
 
 # Get process group pid.

@@ -82,6 +82,90 @@ uv run alembic -c packages/db/alembic.ini check          # "No new upgrade opera
 
 `stamp` only writes the `alembic_version` table; no table or row is touched.
 
+## pgvector (the `vector` extension)
+
+Knowledge bases and semantic recall store embeddings in `eap_app` with pgvector. The dev Postgres
+runs `pgvector/pgvector:0.8.2-pg17-trixie` (`infrastructure/docker/compose.yaml`): the official
+Postgres 17 image plus the extension, so it opens a volume written by the former `postgres:17` image
+unchanged, with no dump and restore. The `-trixie` suffix matters: `postgres:17` is Debian 13 with
+glibc 2.41, and the plain `-pg17` tag is Debian 12 with glibc 2.36, whose different collation
+version would leave text indexes on an existing volume silently mis-sorted (Postgres warns
+`collation version mismatch`). The extension lives in `eap_app`'s `public` schema.
+
+`CREATE EXTENSION` needs a superuser and the `eap_app` role is not one, so the admin role creates it:
+`init-scripts/01-setup-databases.sh` for a new volume, and `scripts/dev-up.sh` (through
+`ensure_vector_extension` in `scripts/dev-lib.sh`) for an existing one, on every start and as a
+no-op once it exists. Migrations only check for it (`IF NOT EXISTS`). A downgrade never drops the
+extension: it is shared by every schema in the database, including the test schemas. Production
+provisioning needs the same one-time admin step:
+`CREATE EXTENSION IF NOT EXISTS vector;` in the app database, as a superuser.
+
+### Writing migrations and models that use pgvector
+
+Migrations run with the search path set to the target schema alone (`env.py` refuses a path of more
+than one schema; see Tests), so nothing from the extension resolves unqualified there. Migration 0011
+and later ones therefore write:
+
+- `CREATE EXTENSION IF NOT EXISTS vector SCHEMA public` (a no-op where the admin step already ran;
+  it fails for the non-superuser app role when the extension is missing, so name that fix in the
+  error), and never drop the extension on downgrade;
+- the column type as `public.vector`: pgvector's `Vector()` renders an unqualified `VECTOR`, so add
+  vector columns with `op.execute("ALTER TABLE ... ADD COLUMN embedding public.vector")` (or a
+  column type whose DDL is `public.vector`), not `sa.Column(..., Vector())`;
+- casts as `::public.vector(N)`, e.g. the partial index expression
+  `((embedding::public.vector(1536)) public.vector_cosine_ops) WHERE dimensions = 1536`;
+- operator classes as `public.vector_cosine_ops`;
+- operators in migration SQL as `OPERATOR(public.<=>)`.
+
+Models import the type from `pgvector.sqlalchemy` (`Vector`); the app's connections have `public` on
+their search path (the default `"$user", public`, and `<schema>,public` in test sessions), so runtime
+queries use the plain `vector` type and `<=>`.
+
+### Upgrading an existing dev volume
+
+What must survive is everything in `eap_app` (agents, versions, runs, events, conversations, MCP
+servers with their encrypted secrets) and `eap_dbos` (in-flight workflow checkpoints). Both stay on
+the Postgres data volume; only the container is replaced.
+
+**Pass the container's own compose project.** The project name differs between machines (by
+default it is the compose file's directory, `docker`, but an older checkout or an explicit `-p` may
+have made it `eap`), and the data volume is `<project>_postgres_data`. A plain `docker compose -f ...
+up -d postgres` uses the default project: it fails on the `eap_postgres` name when the container
+belongs to another project, and once that container is removed it starts on
+`docker_postgres_data`, a different, possibly empty, volume. Read the project and the volume first:
+
+```
+scripts/dev-down.sh                       # the app processes; Postgres keeps running
+project=$(docker inspect eap_postgres --format '{{index .Config.Labels "com.docker.compose.project"}}')
+volume=$(docker inspect eap_postgres \
+  --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')
+echo "project=$project volume=$volume"    # continue only if volume is "${project}_postgres_data"
+# optional backup:
+mkdir -p ~/.eap-backups
+docker exec eap_postgres sh -c 'pg_dumpall -U "$POSTGRES_USER"' > ~/.eap-backups/eap-$(date +%Y%m%d-%H%M%S).sql
+docker compose -p "$project" -f infrastructure/docker/compose.yaml pull postgres
+docker compose -p "$project" -f infrastructure/docker/compose.yaml up -d postgres   # recreates the container
+docker inspect eap_postgres \
+  --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}'
+                                          # must print the same $volume
+scripts/dev-up.sh                         # creates the extension, then migrates
+```
+
+If the project label is empty (a container not created by compose), take the project from the
+volume name (`eap_postgres_data` → `-p eap`) and `docker rm -f eap_postgres` before `up`; a named
+volume survives `docker rm`. A volume not named `<project>_postgres_data` cannot be mounted by
+compose as it is: take the backup above and restore it into the new container instead. Never add a top-level `name:` to `compose.yaml` to settle this: it
+would move the volumes of fresh clones.
+
+`dev-up.sh` alone does not swap the image: it restarts the existing container as it is. When that
+container has no pgvector, it stops and prints these steps with the project and volume filled in.
+If no `eap_postgres` container exists at all, `dev-up.sh` and `dev-db.sh up` refuse to let compose
+create one while a `*_postgres_data` volume other than the default project's exists, and print the
+`-p <project>` command for each; `EAP_POSTGRES_ALLOW_DEFAULT_VOLUME=1` accepts the default.
+The compose healthcheck escapes its variable (`$${POSTGRES_USER}`) so the container's own
+environment supplies the user; compose run without `dev-lib.sh`'s environment still gets a healthy
+container.
+
 ## Create a new migration
 
 1. Change the SQLAlchemy model where the table lives (`apps/api/src/eap_api/models.py`,
@@ -115,7 +199,18 @@ Hand-written migrations (`revision -m ...` without `--autogenerate`) follow the 
 The `eap_db` pytest plugin (entry point `pytest11`, loaded automatically in the workspace venv)
 creates a uniquely named schema `eap_test_<hex>` in the database of `EAP_TEST_DATABASE_URL` (default:
 the dev database above), runs `alembic upgrade head` in it, and sets `EAP_TEST_DATABASE_URL` and
-`EAP_DATABASE_URL` to a URL whose `search_path` is that schema, before any test module is imported.
-Every suite, and every worker or API subprocess a test starts, therefore runs against a migrated
-throwaway schema and never against the shared `public` schema. The schema is dropped when the
-session ends. If Postgres is unreachable the plugin only warns. Disable it with `-p no:eap_db`.
+`EAP_DATABASE_URL` to a URL whose `search_path` is `<schema>,public`, before any test module is
+imported. Every suite, and every worker or API subprocess a test starts, therefore runs against a
+migrated throwaway schema and never against the shared `public` schema's tables. The schema is
+dropped when the session ends.
+
+`public` is on that path only so that pgvector's `vector` type and operators resolve; the session
+schema is at head, so its tables shadow those in `public`. The migrations themselves run with the
+path set to the schema alone (an unqualified `alembic_version` would otherwise resolve to the dev
+database's own) and write extension types as `public.vector`. For a schema of your own, use
+`schema_url(base, schema)` while it is empty or partly migrated, and
+`schema_url(base, schema, public=True)` once it is at head and only for app queries, never to
+migrate again. `create_migrated_schema(base, schema)` returns the schema-only URL (safe for an
+`upgrade`/`downgrade` round trip); `public=True` opts in for runtime use. The migration environment
+enforces this: it refuses to run when `current_schemas(false)` has more than one schema, so a
+downgrade's `DROP ... IF EXISTS` or `DELETE` can never fall through to `public`. If Postgres is unreachable the plugin only warns. Disable it with `-p no:eap_db`.

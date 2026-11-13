@@ -33,4 +33,10 @@ GRANT CONNECT ON DATABASE eap_app TO $POSTGRES_USER;
 GRANT CONNECT ON DATABASE eap_dbos TO $POSTGRES_USER;
 EOF
 
+# pgvector: CREATE EXTENSION needs a superuser and the eap_app role is not one, so the admin role
+# creates it here for new volumes (scripts/dev-up.sh does the same for existing volumes). It lives in
+# eap_app's public schema; migrations qualify the type as public.vector.
+echo "Creating the vector extension in eap_app..."
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "eap_app" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
 echo "Database setup complete!"

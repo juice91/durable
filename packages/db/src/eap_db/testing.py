@@ -2,10 +2,19 @@
 
 At configure time, before any test module is imported, the session creates a uniquely named schema
 (`eap_test_<hex>`) in the eap_app database, runs `alembic upgrade head` in it, and points
-EAP_TEST_DATABASE_URL and EAP_DATABASE_URL at it through `options=-csearch_path=<schema>`. Every
-suite, and every worker/API subprocess a test starts with the inherited environment, therefore uses
-a schema built by the migrations, never the shared public schema. The schema is dropped when the
-session ends.
+EAP_TEST_DATABASE_URL and EAP_DATABASE_URL at it through `options=-csearch_path=<schema>,public`.
+Every suite, and every worker/API subprocess a test starts with the inherited environment, therefore
+uses a schema built by the migrations, never the shared public schema. The schema is dropped when
+the session ends.
+
+`public` stays on the session's search path only so that extension objects resolve: pgvector's
+`vector` type, its operators (`<=>`) and operator classes live in `public` (the extension is per
+database). The session schema is at head, so each of its tables shadows the same-named table in
+`public`. Migrations never run with `public` on the path (the migration environment refuses a
+search path of more than one schema): the unqualified `alembic_version` lookup would find the dev
+database's own version table in an empty schema and skip every migration, and a downgrade's
+`DROP ... IF EXISTS` or `DELETE` would fall through to the dev database's own objects. Migrations
+qualify extension types as `public.vector` instead. Only the plugin's session URL carries `public`.
 
 The base database is EAP_TEST_DATABASE_URL, else the dev default below. When Postgres is unreachable
 the plugin warns and leaves the environment alone, so the Postgres-backed suites skip or fail as they
@@ -29,14 +38,25 @@ SCHEMA_ENV = "EAP_TEST_SCHEMA"
 _state: dict[str, str] = {}
 
 
-def schema_url(base_url: str, schema: str) -> str:
-    """`base_url` with every connection's search_path set to `schema` (rendered with the password)."""
-    url = make_url(base_url).update_query_dict({"options": f"-csearch_path={schema}"})
+def schema_url(base_url: str, schema: str, *, public: bool = False) -> str:
+    """`base_url` with every connection's search_path set to `schema` (rendered with the password).
+
+    With `public=True` the path is `<schema>,public`, so pgvector's `vector` type and operators
+    resolve. Use that only for a schema that is at head: in an empty or partly migrated schema,
+    unqualified names (`alembic_version`, `to_regclass('runs')`) fall through to `public`.
+    """
+    search_path = f"{schema},public" if public else schema
+    url = make_url(base_url).update_query_dict({"options": f"-csearch_path={search_path}"})
     return url.render_as_string(hide_password=False)
 
 
-def create_migrated_schema(base_url: str, schema: str) -> str:
-    """Create `schema`, migrate it to head, and return a URL whose connections use it."""
+def create_migrated_schema(base_url: str, schema: str, *, public: bool = False) -> str:
+    """Create `schema`, migrate it to head, and return a URL whose connections use it.
+
+    The migrations run with the search path set to `schema` alone, and so does the returned URL
+    unless `public=True`. Pass `public=True` only for a URL that runs app queries needing pgvector,
+    never for one that will run migrations (upgrade or downgrade) again.
+    """
     from alembic import command
 
     from eap_db import alembic_config
@@ -47,8 +67,7 @@ def create_migrated_schema(base_url: str, schema: str) -> str:
             conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     finally:
         admin.dispose()
-    url = schema_url(base_url, schema)
-    engine = create_engine(url)
+    engine = create_engine(schema_url(base_url, schema))
     try:
         with engine.begin() as conn:
             command.upgrade(alembic_config(conn), "head")
@@ -57,7 +76,7 @@ def create_migrated_schema(base_url: str, schema: str) -> str:
         raise
     finally:
         engine.dispose()
-    return url
+    return schema_url(base_url, schema, public=public)
 
 
 def drop_schema(base_url: str, schema: str) -> None:
@@ -92,7 +111,7 @@ def _setup(config: pytest.Config) -> None:
         return
     schema = f"eap_test_{uuid.uuid4().hex[:12]}"
     try:
-        url = create_migrated_schema(base_url, schema)
+        url = create_migrated_schema(base_url, schema, public=True)
     except OperationalError as exc:
         warnings.warn(f"eap_db: no migrated test schema, Postgres unreachable at {make_url(base_url)!r}: {exc}")
         return
