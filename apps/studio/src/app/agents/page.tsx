@@ -5,6 +5,9 @@ import { api } from "@/lib/api";
 import type { Agent } from "@/lib/api";
 import { AgentsListUI } from "@/components/agents/AgentsList";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
+import { Button } from "@/components/ui/Button";
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -36,34 +39,45 @@ export default function AgentsPage() {
     router.push(routes.agentEditor(id));
   };
 
+  const header = (
+    <PageHeader
+      crumbs={[navCrumb("agents", { current: true })]}
+      actions={
+        <Button variant="primary" size="sm" onClick={handleNewAgent}>
+          New agent
+        </Button>
+      }
+    />
+  );
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-card-foreground/60">Loading agents...</p>
-      </div>
+      <>
+        {header}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-card-foreground/60">Loading agents...</p>
+        </div>
+      </>
     );
   }
 
   if (error) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-destructive-text">{error}</p>
-      </div>
+      <>
+        {header}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-destructive-text">{error}</p>
+        </div>
+      </>
     );
   }
 
   return (
     <>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-card-foreground">Agents</h1>
-        <button
-          onClick={handleNewAgent}
-          className="inline-flex items-center px-4 py-2 bg-accent text-accent-foreground rounded-md hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent-foreground focus:ring-offset-2"
-        >
-          New agent
-        </button>
+      {header}
+      <div className="px-4 py-6 md:px-6">
+        <AgentsListUI agents={agents} onSelect={handleAgentSelect} />
       </div>
-      <AgentsListUI agents={agents} onSelect={handleAgentSelect} />
     </>
   );
 }

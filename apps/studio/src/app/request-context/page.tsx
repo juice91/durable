@@ -20,6 +20,8 @@ import {
   type SavedRequestContext,
 } from "@/lib/requestContext";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 type VersionChoice = number | "draft";
 
@@ -171,9 +173,10 @@ export default function RequestContextPage() {
   };
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("request-context", { current: true })]} />
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">Request Context</h1>
         <p className="mt-1 text-muted-foreground">
           Typed values an agent receives per run. Fill them for a version, check them against the API, and save them for the playground.
         </p>
@@ -240,7 +243,7 @@ export default function RequestContextPage() {
             </section>
           </aside>
 
-          <main className="min-w-0 space-y-6">
+          <div className="min-w-0 space-y-6">
             {infoError ? <p role="alert" data-testid="context-load-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{infoError}</p> : null}
             {infoLoading ? <p className="text-muted-foreground">Loading context fields…</p> : null}
 
@@ -332,9 +335,10 @@ export default function RequestContextPage() {
                   ) : null}
                 </section>
             ) : null}
-          </main>
+          </div>
         </div>
       ) : null}
     </div>
+    </>
   );
 }

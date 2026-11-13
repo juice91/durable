@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError } from "@/lib/api";
 import { getWorkflow, listWorkflowVersions, type Workflow, type WorkflowVersion } from "@/lib/workflows";
@@ -10,6 +9,8 @@ import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -46,18 +47,11 @@ export default function WorkflowDetailPage() {
   const graphSpec = spec ?? workflow?.draft_spec ?? null;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 px-4 py-8">
-      <nav aria-label="Breadcrumb" className="text-sm"><Link href={routes.workflows()} className="text-primary underline-offset-4 hover:underline">Workflows</Link></nav>
-      {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Workflow not found.</p> : null}
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
-      {!workflow && !notFound && !error ? <p className="text-muted-foreground">Loading workflow…</p> : null}
-      {workflow ? (
-        <>
-          <header className="flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-bold text-foreground">{workflow.name}</h1>
-              {graphSpec?.description ? <p className="mt-1 max-w-3xl text-muted-foreground">{graphSpec.description}</p> : null}
-            </div>
+    <>
+      <PageHeader
+        crumbs={[navCrumb("workflows"), { label: workflow?.name ?? "Workflow" }]}
+        actions={
+          workflow ? (
             <div className="flex items-center gap-2">
               <label htmlFor="workflow-version" className="text-sm text-muted-foreground">Version</label>
               <select
@@ -74,7 +68,16 @@ export default function WorkflowDetailPage() {
                 ))}
               </select>
             </div>
-          </header>
+          ) : null
+        }
+      />
+    <div className="mx-auto max-w-7xl space-y-6 px-4 py-8">
+      {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Workflow not found.</p> : null}
+      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
+      {!workflow && !notFound && !error ? <p className="text-muted-foreground">Loading workflow…</p> : null}
+      {workflow ? (
+        <>
+          {graphSpec?.description ? <p className="max-w-3xl text-muted-foreground">{graphSpec.description}</p> : null}
           {current ? (
             <p className="text-xs text-muted-foreground">Published {formatDateTime(current.created_at)} by <span className="font-mono">{current.created_by}</span></p>
           ) : (
@@ -97,5 +100,6 @@ export default function WorkflowDetailPage() {
         </>
       ) : null}
     </div>
+    </>
   );
 }

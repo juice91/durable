@@ -300,6 +300,20 @@ describe("useUrlSheet history and URL source", () => {
     expect(navigation.replace).toHaveBeenCalledTimes(1);
   });
 
+  it("push mode: closing after a link changed the value replaces instead of going Back", () => {
+    navigation.pathname = "/tools";
+    const { rerender } = render(<PushSheetHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Open tool" }));
+    navigation.search = "tool=search";
+    rerender(<PushSheetHarness />);
+    // A link elsewhere moves the URL to a value this hook never wrote.
+    navigation.search = "tool=other";
+    rerender(<PushSheetHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Close tool" }));
+    expect(navigation.back).not.toHaveBeenCalled();
+    expect(navigation.replace).toHaveBeenCalledWith("/tools", { scroll: false });
+  });
+
   it("push mode: closing a deep-linked Sheet replaces (there is nothing of ours to go Back to)", () => {
     navigation.pathname = "/tools";
     navigation.search = "tool=search";

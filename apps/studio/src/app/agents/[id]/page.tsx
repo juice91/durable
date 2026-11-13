@@ -8,6 +8,8 @@ import { AgentVersionsPanel } from "@/components/agents/AgentVersionsPanel";
 import { VersionCompare } from "@/components/agents/VersionCompare";
 import { errorTarget } from "@/components/agents/specSections";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -107,24 +109,34 @@ export default function AgentDetailPage() {
 
   const latestVersion = versions.reduce((max, v) => Math.max(max, v.version), 0);
 
+  const header = <PageHeader crumbs={[navCrumb("agents"), { label: "Edit Agent" }]} />;
+
   if (loadError && !agent) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-destructive-text">{loadError}</p>
-      </div>
+      <>
+        {header}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-destructive-text">{loadError}</p>
+        </div>
+      </>
     );
   }
 
   if (!agent) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-card-foreground/60">Loading...</p>
-      </div>
+      <>
+        {header}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-card-foreground/60">Loading...</p>
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <>
+    {header}
+    <div className="max-w-3xl mx-auto px-4 py-6">
         <div className="mb-6">
           <button
             onClick={() => router.push(routes.agents())}
@@ -132,7 +144,6 @@ export default function AgentDetailPage() {
           >
             ← Back to agents
           </button>
-          <h1 className="text-2xl font-bold text-card-foreground">Edit Agent</h1>
           <p className="text-sm text-muted-foreground mt-1">ID: {agent.id}</p>
         </div>
 
@@ -199,5 +210,6 @@ export default function AgentDetailPage() {
 
         <AgentVersionsPanel versions={versions} agentId={agent.id} hasUnsavedEdits={isDirty} onRestored={handleRestored} />
     </div>
+    </>
   );
 }

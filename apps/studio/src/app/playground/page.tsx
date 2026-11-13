@@ -84,6 +84,8 @@ import {
   type SubscribeHandlers,
 } from "@/lib/runs";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 /** One turn of the conversation: a run plus what the thread and its badge need to draw it. */
 type Turn = ThreadTurn & {
@@ -868,7 +870,29 @@ export default function PlaygroundPage() {
   const optionsRefused = Boolean(optionErrors.context || optionErrors.model || optionErrors.version || optionErrors.general);
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-8rem)] max-w-6xl flex-col gap-4 md:flex-row">
+    // Fills the main card (a stretched flex item, so h-full resolves): the header stays put and the
+    // conversation scrolls inside, so the card itself never scrolls.
+    <div data-testid="playground-page" className="flex h-full min-h-0 flex-col">
+      <PageHeader
+        crumbs={[navCrumb("playground", { current: true })]}
+        actions={
+          latest && status ? (
+            <div className="flex items-center gap-3">
+              <StatusPill
+                status={status}
+                showRecoveringNotice={status === "recovering"}
+              />
+              <a
+                href={routes.run(latest.runId)}
+                className="text-sm text-info-text hover:underline"
+              >
+                View run
+              </a>
+            </div>
+          ) : null
+        }
+      />
+    <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col gap-4 p-4 md:flex-row">
       <div className="flex max-h-56 min-h-0 md:max-h-none">
         <ConversationRail
           agentId={selectedAgent ? selectedAgentId : ""}
@@ -880,24 +904,6 @@ export default function PlaygroundPage() {
       </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="mb-6">
-          <div className="mb-3 flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-bold">Playground</h1>
-            {latest && status && (
-              <div className="flex items-center gap-3">
-                <StatusPill
-                  status={status}
-                  showRecoveringNotice={status === "recovering"}
-                />
-                <a
-                  href={routes.run(latest.runId)}
-                  className="text-sm text-info-text hover:underline"
-                >
-                  View run
-                </a>
-              </div>
-            )}
-          </div>
-
           <RunOptionsBar
             agents={agents}
             selectedAgentId={selectedAgentId}
@@ -973,6 +979,7 @@ export default function PlaygroundPage() {
           />
         </TurnViewsContext.Provider>
       </div>
+    </div>
     </div>
   );
 }

@@ -28,6 +28,8 @@ import {
   type RunTimes,
 } from "@/components/logs/logsQuery";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
@@ -256,9 +258,10 @@ function LogsSearch() {
         : `${items.length} log record${items.length === 1 ? "" : "s"}${search.hasOlder ? ", older records available" : ""}`;
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("logs", { current: true })]} />
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-card-foreground">Logs</h1>
         <p className="mt-1 text-muted-foreground">Search your API and worker logs, and jump from a record to its run&apos;s trace</p>
       </div>
 
@@ -449,12 +452,13 @@ function LogsSearch() {
         <p role="alert" className="mt-2 text-center text-sm text-muted-foreground">{search.olderError}</p>
       ) : null}
     </div>
+    </>
   );
 }
 
 export default function LogsPage() {
   return (
-    <Suspense fallback={<p className="py-8 text-center text-sm text-muted-foreground">Loading...</p>}>
+    <Suspense fallback={<><PageHeader crumbs={[navCrumb("logs", { current: true })]} /><p className="py-8 text-center text-sm text-muted-foreground">Loading...</p></>}>
       <LogsSearch />
     </Suspense>
   );

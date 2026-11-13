@@ -10,6 +10,8 @@ import { ApiError } from "@/lib/api";
 import { startToolRun, ToolRunError } from "@/lib/toolRuns";
 import { canonicalInputKey, toolRunLedger, type PendingRun, type StartedRunNote } from "@/lib/toolRunLedger";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
 
@@ -150,9 +152,10 @@ export default function ToolsPage() {
   };
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("tools", { current: true })]} />
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">Tools</h1>
         <p className="mt-1 text-muted-foreground">Explore platform tools, fill their inputs and run them.</p>
       </div>
       {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
@@ -189,7 +192,7 @@ export default function ToolsPage() {
             </div>
           </aside>
           {selected ? (
-            <main className="min-w-0 space-y-6">
+            <div className="min-w-0 space-y-6">
               <section className="rounded-lg border border-border bg-card p-5">
                 <h2 className="text-xl font-semibold text-card-foreground">{selected.title}</h2>
                 <p className="font-mono text-xs text-muted-foreground">{selected.id}</p>
@@ -229,10 +232,11 @@ export default function ToolsPage() {
                 <h3 className="mb-3 font-semibold text-card-foreground">Input schema</h3>
                 <pre className="overflow-x-auto rounded-md bg-muted p-4 text-xs text-foreground">{JSON.stringify(selected.input_schema, null, 2)}</pre>
               </section>
-            </main>
+            </div>
           ) : null}
         </div>
       ) : null}
     </div>
+    </>
   );
 }

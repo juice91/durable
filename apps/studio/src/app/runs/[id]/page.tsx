@@ -9,6 +9,7 @@ import { RunSubject } from "@/components/runs/RunSubject";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 import { TraceView } from "@/components/traces/TraceView";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
 
 const RUN_TABS = ["events", "trace"] as const;
 
@@ -116,24 +117,35 @@ export default function RunDetailPage() {
 
   const status = getStatus();
 
+  // Until the run loads the title is just "Run": the id appears once its details can be shown.
+  const pendingHeader = <PageHeader crumbs={[{ label: "Runs" }, { label: "Run" }]} />;
+
   if (loadError && !run) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-destructive-text">{loadError}</p>
-      </div>
+      <>
+        {pendingHeader}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-destructive-text">{loadError}</p>
+        </div>
+      </>
     );
   }
 
   if (!run) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-card-foreground/60">Loading run...</p>
-      </div>
+      <>
+        {pendingHeader}
+        <div className="flex items-center justify-center py-12">
+          <p className="text-card-foreground/60">Loading run...</p>
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <>
+      <PageHeader crumbs={[{ label: "Runs" }, { label: `Run ${run.run_id}` }]} />
+    <div className="max-w-4xl mx-auto px-4 py-6">
         <div className="mb-6">
           <button
             onClick={() => router.push(routes.agents())}
@@ -143,8 +155,7 @@ export default function RunDetailPage() {
           </button>
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold text-card-foreground">Run {run.run_id}</h1>
-              <p className="text-sm text-muted-foreground mt-1">
+              <p className="text-sm text-muted-foreground">
                 <RunSubject run={run} showVersion />
               </p>
             </div>
@@ -236,5 +247,6 @@ export default function RunDetailPage() {
           </div>
         )}
     </div>
+    </>
   );
 }

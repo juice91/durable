@@ -1,6 +1,6 @@
 import "./globals.css";
 import { inter, jetbrainsMono } from "./fonts";
-import { Layout } from "@/components/layout/Layout";
+import { AppShell } from "@/components/frame/AppShell";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import { ThemeScript } from "@/components/theme/ThemeScript";
 
@@ -23,7 +23,7 @@ export default function RootLayout({
       </head>
       <body>
         <ThemeProvider>
-          <Layout>{children}</Layout>
+          <AppShell>{children}</AppShell>
         </ThemeProvider>
       </body>
     </html>

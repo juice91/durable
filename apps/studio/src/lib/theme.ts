@@ -1,3 +1,5 @@
+import { SIDEBAR_ATTRIBUTE, SIDEBAR_COLLAPSED, SIDEBAR_STORAGE_KEY } from "./sidebarPref";
+
 /**
  * Studio theme: System / Light / Dark, default System.
  *
@@ -83,10 +85,14 @@ export function setTheme(pref: ThemePreference, storage: Storage | null = defaul
 /**
  * The blocking inline script for <head>. It must stay self-contained (no imports, ES5) because it
  * runs before any bundle: same key, same fallback to System, same class and color-scheme as above.
+ * It also mirrors the stored sidebar state to `<html data-sidebar>` (lib/sidebarPref.ts).
  */
 export function themeScript(): string {
   const key = JSON.stringify(THEME_STORAGE_KEY);
   const query = JSON.stringify(DARK_MEDIA_QUERY);
+  const sidebarKey = JSON.stringify(SIDEBAR_STORAGE_KEY);
+  const sidebarAttr = JSON.stringify(SIDEBAR_ATTRIBUTE);
+  const collapsed = JSON.stringify(SIDEBAR_COLLAPSED);
   return (
     "(function(){try{" +
     "var p=null;try{p=window.localStorage.getItem(" + key + ")}catch(e){}" +
@@ -95,6 +101,11 @@ export function themeScript(): string {
     "var r=document.documentElement;" +
     'if(d)r.classList.add("dark");else r.classList.remove("dark");' +
     'r.style.colorScheme=d?"dark":"light";' +
+    "}catch(e){}" +
+    // The sidebar rail (lib/sidebarPref.ts), on its own so a theme failure never blocks it.
+    "try{var s=null;try{s=window.localStorage.getItem(" + sidebarKey + ")}catch(e){}" +
+    "var h=document.documentElement;" +
+    "if(s===" + collapsed + ")h.setAttribute(" + sidebarAttr + "," + collapsed + ");else h.removeAttribute(" + sidebarAttr + ");" +
     "}catch(e){}})();"
   );
 }

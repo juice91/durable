@@ -13,6 +13,8 @@ import {
   type ProcessorType,
   type ProcessorUsage,
 } from "@/lib/processors";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 function messageOf(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
@@ -52,9 +54,10 @@ export default function ProcessorsPage() {
   };
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("processors", { current: true })]} />
     <div className="mx-auto max-w-7xl space-y-10 px-4 py-8">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Processors</h1>
         <p className="mt-1 text-muted-foreground">
           Guardrails that run on an agent&apos;s input and output: the built-in types, which agents use them,
           what they did on recent runs, and a console to try them on a sample.
@@ -91,5 +94,6 @@ export default function ProcessorsPage() {
         )}
       </section>
     </div>
+    </>
   );
 }

@@ -48,12 +48,14 @@ export function useUrlSheet(param: string, { clear = [], history = "replace" }: 
   const searchParams = useSearchParams();
   const value = searchParams?.get(param) || null;
   const clearKey = clear.join(",");
-  // True while the open Sheet was opened by this hook with a push: closing it then goes Back.
-  const pushedOpen = useRef(false);
+  // The values this hook wrote since its push (the pushed one plus switches that replaced it); empty
+  // when the open Sheet was not opened by this hook. Closing goes Back only while the URL shows one
+  // of them: if a link or Back changed it, the history entry on top is not ours to pop.
+  const written = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    // Closed from elsewhere (Back, a link): nothing of ours left to pop.
-    if (value === null) pushedOpen.current = false;
+    // Closed or changed from elsewhere (Back, a link): nothing of ours left to pop.
+    if (value === null || !written.current.has(value)) written.current.clear();
   }, [value]);
 
   // Built from the live URL at call time: two calls in one tick (open then switch) must not both
@@ -69,11 +71,9 @@ export function useUrlSheet(param: string, { clear = [], history = "replace" }: 
       const href = withSearchParams(pathname, currentParams(), { ...extra, [param]: next });
       if (history === "push") {
         // Only the first open pushes; switching value while open replaces, so one Back closes.
-        if (pushedOpen.current) router.replace(href, { scroll: false });
-        else {
-          router.push(href, { scroll: false });
-          pushedOpen.current = true;
-        }
+        if (written.current.size > 0) router.replace(href, { scroll: false });
+        else router.push(href, { scroll: false });
+        written.current.add(next);
       } else {
         router.replace(href, { scroll: false });
       }
@@ -82,15 +82,16 @@ export function useUrlSheet(param: string, { clear = [], history = "replace" }: 
   );
 
   const close = useCallback(() => {
-    if (history === "push" && pushedOpen.current) {
-      pushedOpen.current = false;
+    const ours = value !== null && written.current.has(value);
+    written.current.clear();
+    if (history === "push" && ours) {
       router.back();
       return;
     }
     const changes: Record<string, string | null> = { [param]: null };
     for (const key of clearKey ? clearKey.split(",") : []) changes[key] = null;
     router.replace(withSearchParams(pathname, currentParams(), changes), { scroll: false });
-  }, [clearKey, currentParams, history, param, pathname, router]);
+  }, [clearKey, currentParams, history, param, pathname, router, value]);
 
   const onOpenChange = useCallback(
     (next: boolean) => {

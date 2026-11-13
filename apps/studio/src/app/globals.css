@@ -248,3 +248,27 @@
     font-variant-numeric: tabular-nums;
   }
 }
+
+/*
+ * The collapsed sidebar before hydration (SL.4). The head script sets <html data-sidebar="collapsed">
+ * from localStorage["studio.sidebar"] before paint; the server always renders the expanded sidebar,
+ * so these rules give that markup the 56 px rail's shape until React renders the rail itself (the
+ * frame reads the same attribute and re-renders as the rail right after hydration's first pass).
+ */
+html[data-sidebar="collapsed"] [data-sidebar-root] {
+  width: 3.5rem;
+}
+html[data-sidebar="collapsed"] [data-sidebar-root] [data-rail-hidden],
+html[data-sidebar="collapsed"] [data-sidebar-head] > :not([data-testid="sidebar-toggle"]) {
+  display: none;
+}
+html[data-sidebar="collapsed"] [data-sidebar-root] [data-sidebar-head] {
+  justify-content: center;
+  padding-inline: 0;
+}
+html[data-sidebar="collapsed"] [data-sidebar-root] [data-rail-item] {
+  width: var(--spacing-sidebar-item);
+  justify-content: center;
+  padding-inline: 0;
+  margin-inline: auto;
+}

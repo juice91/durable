@@ -20,6 +20,8 @@ import {
   type TraceRun,
 } from "@/lib/traces";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "completed", label: "Completed" },
@@ -146,9 +148,10 @@ function TracesList() {
   const agentOptions = Object.entries(agentNames).sort((a, b) => a[1].localeCompare(b[1]));
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("traces", { current: true })]} />
     <div className="max-w-7xl mx-auto px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-card-foreground">Traces</h1>
         <p className="text-muted-foreground mt-1">Runs with their span tree, tokens and cost</p>
       </div>
 
@@ -376,13 +379,14 @@ function TracesList() {
         </>
       )}
     </div>
+    </>
   );
 }
 
 export default function TracesPage() {
   // useSearchParams needs a Suspense boundary for the static prerender.
   return (
-    <Suspense fallback={<p className="py-12 text-center text-muted-foreground">Loading runs...</p>}>
+    <Suspense fallback={<><PageHeader crumbs={[navCrumb("traces", { current: true })]} /><p className="py-12 text-center text-muted-foreground">Loading runs...</p></>}>
       <TracesList />
     </Suspense>
   );

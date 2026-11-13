@@ -75,7 +75,7 @@ export function AgentsListUI({ agents, onSelect }: AgentsListUIProps) {
             >
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="font-medium text-card-foreground">{agent.name}</h3>
+                  <h2 className="font-medium text-card-foreground">{agent.name}</h2>
                   <p className="text-sm text-muted-foreground">
                     {agent.latest_version !== null ? `Version ${agent.latest_version}` : "Draft"}
                   </p>

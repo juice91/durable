@@ -6,6 +6,8 @@ import { EmptyState } from "@/components/shared/EmptyState";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
 import { getWorkflowVersion, listWorkflows, type Workflow } from "@/lib/workflows";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 interface Row extends Workflow {
   /** When the latest version was published (the API has no updated_at for a workflow). */
@@ -41,9 +43,10 @@ export default function WorkflowsPage() {
   }, []);
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("workflows", { current: true })]} />
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">Workflows</h1>
         <p className="mt-1 text-muted-foreground">Published workflow definitions: open one to see its execution graph, run it and follow its runs.</p>
       </div>
       {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
@@ -81,5 +84,6 @@ export default function WorkflowsPage() {
         </div>
       ) : null}
     </div>
+    </>
   );
 }

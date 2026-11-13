@@ -6,6 +6,8 @@ import { McpTestResult } from "@/components/mcp/McpTestResult";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
 import { describeMcpApiMessage, describeMcpError, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -161,13 +163,24 @@ export default function McpServersPage() {
   };
 
   return (
+    <>
+      <PageHeader
+        crumbs={[navCrumb("mcp", { current: true })]}
+        titleRef={headingRef}
+        titleProps={{ tabIndex: -1, className: "focus:outline-none" }}
+        actions={
+          form === null ? (
+            <button type="button" onClick={() => setForm({ mode: "create" })} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground">
+              Register server
+            </button>
+          ) : null
+        }
+      />
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-bold text-foreground focus:outline-none">MCP Servers</h1>
           <p className="mt-1 text-muted-foreground">Register remote MCP servers, test them and see the tools they offer to agents.</p>
         </div>
-        {form === null ? <button type="button" onClick={() => setForm({ mode: "create" })} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">Register server</button> : null}
       </div>
 
       {form ? (
@@ -234,5 +247,6 @@ export default function McpServersPage() {
         />
       ) : null}
     </div>
+    </>
   );
 }

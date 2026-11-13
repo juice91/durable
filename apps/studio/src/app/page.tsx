@@ -34,13 +34,15 @@ import {
   recentFailuresHref,
 } from "@/lib/dashboard";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 /** Preset ranges move forward this often (and re-fetch) while the page is open (as on Metrics). */
 const AUTO_REFRESH_MS = 5 * 60_000;
 
 export default function DashboardPage() {
   return (
-    <Suspense fallback={<div className="max-w-7xl mx-auto px-4 py-8 text-muted-foreground">Loading dashboard…</div>}>
+    <Suspense fallback={<><PageHeader crumbs={[navCrumb("dashboard", { current: true })]} /><div className="max-w-7xl mx-auto px-4 py-8 text-muted-foreground">Loading dashboard…</div></>}>
       <DashboardView />
     </Suspense>
   );
@@ -114,19 +116,24 @@ function DashboardView() {
     summary.data !== null && summary.data.current.runs === 0 && summary.data.current.requests === 0;
 
   return (
+    <>
+      <PageHeader
+        crumbs={[navCrumb("dashboard", { current: true })]}
+        actions={
+          <Link href={metricsHref} className={linkCls} data-testid="dashboard-open-metrics">
+            Open in Metrics
+          </Link>
+        }
+      />
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-card-foreground">Dashboard</h1>
           <p className="text-muted-foreground mt-1">
             Overview for{" "}
             <span className="text-foreground" data-testid="dashboard-range">{formatRange(filters.from, filters.to)}</span>.
             Select a card, bar, agent or run for the details.
           </p>
         </div>
-        <Link href={metricsHref} className={linkCls} data-testid="dashboard-open-metrics">
-          Open in Metrics
-        </Link>
       </div>
 
       <MetricsFilterBar
@@ -210,5 +217,6 @@ function DashboardView() {
         </>
       )}
     </div>
+    </>
   );
 }

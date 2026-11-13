@@ -28,13 +28,15 @@ import {
   type ModelOption,
 } from "@/lib/metrics";
 import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 /** Preset ranges move forward this often (and re-fetch) while the page is open. */
 const AUTO_REFRESH_MS = 5 * 60_000;
 
 export default function MetricsPage() {
   return (
-    <Suspense fallback={<div className="max-w-7xl mx-auto px-4 py-8 text-muted-foreground">Loading metrics…</div>}>
+    <Suspense fallback={<><PageHeader crumbs={[navCrumb("metrics", { current: true })]} /><div className="max-w-7xl mx-auto px-4 py-8 text-muted-foreground">Loading metrics…</div></>}>
       <MetricsView />
     </Suspense>
   );
@@ -118,9 +120,10 @@ function MetricsView() {
     summary.data !== null && summary.data.current.runs === 0 && summary.data.current.requests === 0;
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("metrics", { current: true })]} />
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-card-foreground">Metrics</h1>
         <p className="text-muted-foreground mt-1">
           Runs, errors, latency, tokens and cost for{" "}
           <span className="text-foreground" data-testid="metrics-range">{formatRange(filters.from, filters.to)}</span>.
@@ -194,5 +197,6 @@ function MetricsView() {
         </>
       )}
     </div>
+    </>
   );
 }
