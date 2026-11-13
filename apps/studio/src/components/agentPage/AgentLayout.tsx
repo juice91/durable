@@ -20,7 +20,7 @@ import type { VersionRef } from "@/components/playground/runOptions";
 import { AgentPageContext, type AgentPageValue } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
 import { THREADS_TITLE } from "./AgentChatPanes";
-import { CHAT_PANES_MIN_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
+import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 
 export const CONFIG_TITLE = "Config";
@@ -83,6 +83,11 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const autoCollapsed =
     tab === "chat" && threadsAutoCollapsed({ isWide, configOpen: sidePanel.open, frame: frameSize, panelWidth: chatPanelWidth(sidePanel.width, frameSize) });
   const threadsVisible = isWide ? threadsShown(threadsExpanded, autoCollapsed) : threadsSheetOpen;
+  // The wide pane's real state, reported by the panes (null while they are not mounted).
+  const [threadsPaneExpanded, setThreadsPaneExpanded] = useState<boolean | null>(null);
+  const reportThreadsPane = useCallback((expanded: boolean | null) => setThreadsPaneExpanded(expanded), []);
+  // What the Conversations button and `{` act on: the real pane where it exists, else the state.
+  const threadsPressed = isWide && tab === "chat" && threadsPaneExpanded !== null ? threadsPaneExpanded : threadsVisible;
   // Marks a Config open or close made for the user rather than by them, so it is not saved as their
   // per-agent choice (the tab-change default, or closing Config to make room for threads).
   const autoToggleRef = useRef(false);
@@ -163,8 +168,18 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
   // Remember a user's open or close on the Chat tab (the toggle, `]`, or the panel's Close button).
-  const seenConfigOpenRef = useRef(configOpen);
+  // Tracking starts once the panel is registered: the open state it registers with is the default
+  // (configOpenByDefault), not a user's choice, so it is never saved.
+  const seenConfigOpenRef = useRef<boolean | null>(null);
   useEffect(() => {
+    if (!configAvailable) {
+      seenConfigOpenRef.current = null;
+      return;
+    }
+    if (seenConfigOpenRef.current === null) {
+      seenConfigOpenRef.current = configOpen;
+      return;
+    }
     if (seenConfigOpenRef.current === configOpen) return;
     seenConfigOpenRef.current = configOpen;
     if (autoToggleRef.current) {
@@ -174,21 +189,26 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
     if (tab === "chat" && isWide && configAvailable) writeConfigOpen(agentId, configOpen);
   }, [agentId, configAvailable, configOpen, isWide, tab]);
 
-  // A user's open or close of the threads pane. Opening it while it is auto-collapsed closes Config
-  // (for them, not saved) so threads and chat get their room back.
+  // A user's open or close of the threads pane. Opening it while Config keeps it collapsed closes
+  // Config (for them, not saved) so threads and chat get their room back. That covers the
+  // auto-collapse, and a pane the layout refused to expand although the state already says open
+  // (the fit is computed, the real width can be a few pixels short): without it the click would
+  // change nothing.
+  const configOpenNow = sidePanel.open;
   const setThreadsOpen = useCallback(
     (open: boolean) => {
       if (!isWide) {
         setThreadsSheetOpen(open);
         return;
       }
-      if (open && autoCollapsed) {
+      const refused = threadsExpanded && threadsPaneExpanded === false;
+      if (open && configOpenNow && (autoCollapsed || refused)) {
         autoToggleRef.current = true;
         setConfigOpen(false);
       }
       setThreadsExpanded(open);
     },
-    [autoCollapsed, isWide, setConfigOpen],
+    [autoCollapsed, configOpenNow, isWide, setConfigOpen, threadsExpanded, threadsPaneExpanded],
   );
 
   // `]` toggles Config; `{` the conversations pane (Chat tab). Ignored while typing or under a modal.
@@ -200,12 +220,12 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
         toggleConfig();
       } else if (event.key === "{" && tab === "chat") {
         event.preventDefault();
-        setThreadsOpen(!threadsVisible);
+        setThreadsOpen(!threadsPressed);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsVisible]);
+  }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsPressed]);
 
   const copyLink = async () => {
     try {
@@ -229,11 +249,13 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       threadsOpen,
       setThreadsOpen,
       threadsAutoCollapsed: isWide && autoCollapsed,
+      threadsPaneExpanded,
+      reportThreadsPane,
       requestContextSlot,
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, requestContextSlot, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, requestContextSlot, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -263,8 +285,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
           label={THREADS_TITLE}
           shortcut="{"
           size="sm"
-          aria-pressed={threadsVisible}
-          onClick={() => setThreadsOpen(!threadsVisible)}
+          aria-pressed={threadsPressed}
+          onClick={() => setThreadsOpen(!threadsPressed)}
           icon={icon(MessagesSquare)}
           data-testid="agent-threads-toggle"
         />
@@ -310,7 +332,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
               tab === "chat" &&
               configOpenByDefault(readConfigOpen(agentId), currentFrameSize(sidebarCollapsed || sidebarAttributeCollapsed()))
             }
-            mainMinWidth={tab === "chat" ? CHAT_PANES_MIN_PX : undefined}
+            mainMinWidth={tab === "chat" ? CHAT_PANES_FIT_PX : undefined}
           >
             {agent ? (
               <ConfigPanel

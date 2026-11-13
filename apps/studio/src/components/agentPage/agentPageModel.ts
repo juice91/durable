@@ -31,6 +31,27 @@ export function agentLayoutKey(agentId: string): string {
   return `${AGENT_LAYOUT_KEY_PREFIX}${agentId}`;
 }
 
+/**
+ * The threads pane width the user last dragged to, in px (`studio.agent-layout.v1.{id}:threads-px`,
+ * under the layout prefix so Settings lists and clears it with the layout). The kit's saved layout
+ * is in percent of the group, which depends on the window and the side panel; this is what an
+ * expand restores.
+ */
+export function agentThreadsWidthKey(agentId: string): string {
+  return `${AGENT_LAYOUT_KEY_PREFIX}${agentId}:threads-px`;
+}
+
+/** The saved threads width in px, or null when none (or not a sane number). */
+export function readThreadsWidth(agentId: string): number | null {
+  const raw = readStorage(agentThreadsWidthKey(agentId));
+  const width = raw === null ? Number.NaN : Number(raw);
+  return Number.isFinite(width) && width > 0 && width < 10000 ? Math.round(width) : null;
+}
+
+export function writeThreadsWidth(agentId: string, width: number): void {
+  if (Number.isFinite(width) && width > 0) writeStorage(agentThreadsWidthKey(agentId), String(Math.round(width)));
+}
+
 const read = readStorage;
 // Not remembered on failure (private mode, a full quota): nothing depends on it.
 const write = (key: string, value: string): void => void writeStorage(key, value);

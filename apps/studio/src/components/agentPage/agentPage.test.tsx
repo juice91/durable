@@ -580,12 +580,12 @@ describe("Chat beside Config at narrow desktop widths (review I3; widths injecte
     expect(readConfigOpen("a1")).toBe(true);
   });
 
-  it("at 1440 px the panel's maximum leaves threads + chat (574 px with the expanded sidebar)", async () => {
+  it("at 1440 px the panel's maximum leaves threads + chat and the margin (558 px with the expanded sidebar)", async () => {
     renderChat();
     const handle = await screen.findByRole("separator", { name: "Resize side panel" });
-    expect(handle).toHaveAttribute("aria-valuemax", "574");
+    expect(handle).toHaveAttribute("aria-valuemax", "558");
     fireEvent.keyDown(handle, { key: "End" });
-    expect(handle).toHaveAttribute("aria-valuenow", "574");
+    expect(handle).toHaveAttribute("aria-valuenow", "558");
     expect(threadsToggle()).toHaveAttribute("aria-pressed", "true");
   });
 });

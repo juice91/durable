@@ -5,10 +5,10 @@
  * unit-tested with injected widths (jsdom does no layout).
  *
  * Policy:
- * - fits: the main card's width with the panel open >= THREADS_MIN_PX + CHAT_MIN_PX.
+ * - fits: the main card's width with the panel open >= THREADS_MIN_PX + CHAT_MIN_PX + CHAT_FIT_MARGIN_PX.
  * - Config opens by default on Chat only when it fits with the panel at its default width; a saved
  *   per-agent choice wins either way.
- * - The panel's maximum width leaves CHAT_PANES_MIN_PX in the main card (floored at the panel's
+ * - The panel's maximum width leaves CHAT_PANES_FIT_PX in the main card (floored at the panel's
  *   own minimum): `chatPanelClamp` for `clampSidePanelWidth`.
  * - With Config open where it does not fit, the threads pane collapses automatically so the chat
  *   keeps CHAT_MIN_PX. That collapse is not the user's layout: it is never saved, and the threads
@@ -24,10 +24,18 @@ export const THREADS_MIN_PX = 240;
 export const CHAT_MIN_PX = 360;
 /** What the main card needs for threads and chat side by side. */
 export const CHAT_PANES_MIN_PX = THREADS_MIN_PX + CHAT_MIN_PX;
+/**
+ * Slack on top of the panes' minimums before "fits": the geometry is computed, not measured, so a
+ * classic (non-overlay) scrollbar or a rounding pixel must not leave the kit refusing an expand
+ * that the numbers allowed.
+ */
+export const CHAT_FIT_MARGIN_PX = 16;
+/** What the main card must have for the panes to count as fitting (minimums + margin). */
+export const CHAT_PANES_FIT_PX = CHAT_PANES_MIN_PX + CHAT_FIT_MARGIN_PX;
 
 /** The side-panel clamp options for the Chat tab (the panel leaves room for both panes). */
 export function chatPanelClamp(sidebarCollapsed: boolean): SidePanelClampOptions {
-  return { sidebarCollapsed, mainMinWidth: CHAT_PANES_MIN_PX };
+  return { sidebarCollapsed, mainMinWidth: CHAT_PANES_FIT_PX };
 }
 
 /** The panel's rendered width on the Chat tab for a saved width `savedWidth`. */
@@ -35,9 +43,9 @@ export function chatPanelWidth(savedWidth: number, frame: FrameSize): number {
   return clampSidePanelWidth(savedWidth, frame.viewport, chatPanelClamp(frame.sidebarCollapsed));
 }
 
-/** Threads and chat both fit at their minimums beside a panel `panelWidth` px wide (null: closed). */
+/** Threads and chat both fit (minimums + margin) beside a panel `panelWidth` px wide (null: closed). */
 export function chatPanesFit(frame: FrameSize, panelWidth: number | null): boolean {
-  return mainCardWidth(frame, panelWidth) >= CHAT_PANES_MIN_PX;
+  return mainCardWidth(frame, panelWidth) >= CHAT_PANES_FIT_PX;
 }
 
 /**
@@ -67,4 +75,16 @@ export function threadsAutoCollapsed({ isWide, configOpen, frame, panelWidth }: 
 /** What the threads pane shows: the user's choice, unless it is auto-collapsed. */
 export function threadsShown(userOpen: boolean, autoCollapsed: boolean): boolean {
   return userOpen && !autoCollapsed;
+}
+
+/**
+ * A pane's width in px from a layout's percentage. The kit's percentages are of the panels' total
+ * width, which is the group's width minus its separators. Computed from the layout the kit reports
+ * (not measured from the DOM, which still shows the previous layout while `onLayoutChanged` runs).
+ * Null when the group has no size.
+ */
+export function paneWidthFromLayout(percent: number, groupWidth: number, separatorsWidth = 0): number | null {
+  const available = groupWidth - separatorsWidth;
+  if (!Number.isFinite(percent) || !(available > 0)) return null;
+  return Math.round((percent / 100) * available);
 }

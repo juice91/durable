@@ -33,6 +33,14 @@ export interface AgentPageValue {
    * fit beside it (chatFit.ts). Not the user's layout: never saved.
    */
   threadsAutoCollapsed: boolean;
+  /**
+   * Whether the wide threads pane really is expanded, as the panes last measured it; null while the
+   * wide panes are not mounted. The header's pressed state follows it, so a pane that has not
+   * expanded yet (an expand the layout refused) never reads as shown.
+   */
+  threadsPaneExpanded: boolean | null;
+  /** The panes report their real state here (null when they unmount). */
+  reportThreadsPane: (expanded: boolean | null) => void;
   /** Where the chat portals its temporary "Request context" section (inside the Config panel); null
    * while the Config panel is closed. */
   requestContextSlot: HTMLElement | null;

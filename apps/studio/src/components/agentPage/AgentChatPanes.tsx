@@ -1,13 +1,13 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useGroupRef, usePanelRef } from "react-resizable-panels";
+import { useGroupRef, usePanelRef, type Layout, type LayoutChangedMeta } from "react-resizable-panels";
 import { ResizableGroup, ResizableHandle, ResizablePanel, readStoredLayout, writeStoredLayout } from "@/components/ui/Resizable";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
 import { useIsWide } from "@/components/frame/useMediaQuery";
-import { agentLayoutKey } from "./agentPageModel";
+import { agentLayoutKey, readThreadsWidth, writeThreadsWidth } from "./agentPageModel";
 import { useAgentPage } from "./AgentPageContext";
-import { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX, threadsShown } from "./chatFit";
+import { CHAT_MIN_PX, paneWidthFromLayout, THREADS_DEFAULT_PX, THREADS_MIN_PX, threadsShown } from "./chatFit";
 
 // The pane minimums live in chatFit.ts (one source for the panes and the fit decisions).
 export { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX };
@@ -58,11 +58,112 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
   const shown = threadsShown(threadsOpen, autoCollapsed);
   const panelRef = usePanelRef();
   const groupRef = useGroupRef();
+  const [groupElement, setGroupElement] = useState<HTMLDivElement | null>(null);
   const storageKey = agentLayoutKey(agentId);
+  const reportPane = page?.reportThreadsPane;
+  // Read through refs: the kit and the ResizeObserver call back outside React's render cycle.
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
+  const reportRef = useRef(reportPane);
+  reportRef.current = reportPane;
 
   // The first time the panes exist, the saved layout decides whether threads start collapsed; after
   // that, the toggle (and the auto-collapse) drives the pane.
   const adopted = useRef(false);
+  // A user's toggle waiting to be saved: saved only once the pane really shows it, so a refused
+  // expand is never stored as a collapse.
+  const pendingSave = useRef<boolean | null>(null);
+
+  /**
+   * Saves the user's open or closed choice, and only that: a toggle never writes widths (the layout
+   * right after an expand is transient: the kit's leftover percent, a group still resizing). Widths
+   * are saved by real drags only (the kit saves the layout, `onLayoutChanged` the px width).
+   */
+  const saveUserLayout = useCallback(
+    (open: boolean) => {
+      if (!open) writeStoredLayout(storageKey, { threads: 0, chat: 100 });
+      // Open: forget a saved collapse; a saved dragged layout stays as it is.
+      else if (readStoredLayout(storageKey)?.threads === 0) clearStoredLayout(storageKey);
+    },
+    [storageKey],
+  );
+
+  // The width an expanded pane keeps, in px: the user's last dragged width, else the default.
+  const threadsWidth = useRef<number>(THREADS_DEFAULT_PX);
+  useEffect(() => {
+    threadsWidth.current = readThreadsWidth(agentId) ?? THREADS_DEFAULT_PX;
+  }, [agentId]);
+  const groupElementRef = useRef<HTMLDivElement | null>(null);
+  groupElementRef.current = groupElement;
+
+  /**
+   * Keeps an expanded pane at the user's width in px. The kit sizes panes in percent of the group,
+   * and an expand restores the percent it remembered from before the collapse, measured while the
+   * group may have been much narrower or wider (Config open, the sidebar moving): that is how a
+   * reopened pane came back at the separator's maximum. Skipped while the group has no size (jsdom,
+   * before layout).
+   */
+  const pinWidth = useCallback(() => {
+    const panel = panelRef.current;
+    const groupWidth = groupElementRef.current?.getBoundingClientRect().width ?? 0;
+    if (!panel || panel.isCollapsed() || groupWidth <= 0) return;
+    const target = threadsWidth.current;
+    if (Math.abs(panel.getSize().inPixels - target) > 1) panel.resize(target);
+  }, [panelRef]);
+
+  /**
+   * Makes the pane match `shown`, and reports the pane's real state to the header. An expand can be
+   * refused: while the group is narrower than threads + chat minimums (mid-way through the sidebar's
+   * width transition, say) the kit snaps the pane back to collapsed. So this runs again whenever the
+   * group's size changes, until the pane really matches. A pending user toggle is saved here, once
+   * the pane shows it.
+   */
+  const syncPane = useCallback(() => {
+    const panel = panelRef.current;
+    if (!panel || !adopted.current) return;
+    const collapsed = panel.isCollapsed();
+    if (shownRef.current && collapsed) panel.expand();
+    else if (!shownRef.current && !collapsed) panel.collapse();
+    if (shownRef.current) pinWidth();
+    const expanded = !panel.isCollapsed();
+    reportRef.current?.(expanded);
+    if (pendingSave.current !== null && pendingSave.current === expanded) {
+      saveUserLayout(expanded);
+      pendingSave.current = null;
+    }
+  }, [panelRef, pinWidth, saveUserLayout]);
+
+  // Retry after the group resizes (the window, the sidebar, the side panel), a frame later so the
+  // kit has applied the group's new size first.
+  useEffect(() => {
+    if (!groupElement || typeof ResizeObserver === "undefined") return;
+    let frame: number | null = null;
+    const schedule =
+      typeof window.requestAnimationFrame === "function"
+        ? (run: () => void) => window.requestAnimationFrame(run)
+        : (run: () => void) => window.setTimeout(run, 0);
+    const cancel = (id: number) =>
+      typeof window.cancelAnimationFrame === "function" ? window.cancelAnimationFrame(id) : window.clearTimeout(id);
+    const observer = new ResizeObserver(() => {
+      if (frame !== null) cancel(frame);
+      frame = schedule(() => {
+        frame = null;
+        syncPane();
+      });
+    });
+    observer.observe(groupElement);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) cancel(frame);
+    };
+  }, [groupElement, syncPane]);
+
+  // The header shows the pane's real state only while the wide panes exist.
+  useEffect(() => {
+    if (!isWide || !mounted) return;
+    return () => reportRef.current?.(null);
+  }, [isWide, mounted]);
+
   const lastUserOpen = useRef(threadsOpen);
   useEffect(() => {
     if (!isWide || !mounted) {
@@ -74,41 +175,55 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     if (!adopted.current) {
       adopted.current = true;
       const savedOpen = !panel.isCollapsed();
+      // A layout saved before px widths were kept: its measured width becomes the user's width.
+      const measured = savedOpen && !autoCollapsed && readThreadsWidth(agentId) === null ? panel.getSize().inPixels : 0;
+      if (measured > 0 && (groupElementRef.current?.getBoundingClientRect().width ?? 0) > 0) threadsWidth.current = measured;
       lastUserOpen.current = savedOpen;
       if (savedOpen !== threadsOpen) {
         setThreadsOpen(savedOpen);
         return;
       }
     }
-    const userChanged = lastUserOpen.current !== threadsOpen;
+    // Only the user's choice is saved (by syncPane, once the pane shows it); an auto-collapse, or
+    // its undoing, is not.
+    if (lastUserOpen.current !== threadsOpen) pendingSave.current = threadsOpen;
     lastUserOpen.current = threadsOpen;
-    if (shown !== !panel.isCollapsed()) {
-      if (shown) panel.expand();
-      else panel.collapse();
-    }
-    // Only the user's choice is saved; an auto-collapse (or its undoing) is not.
-    if (!userChanged) return;
-    // The kit saves user drags; a toggle (`{`, the header button) changes the pane in code, so it is
-    // saved here, and a reload keeps it.
-    const layout = autoCollapsed ? undefined : groupRef.current?.getLayout();
-    if (layout && Object.keys(layout).length > 0) writeStoredLayout(storageKey, layout);
-    // No measured layout (the group has no size yet, or the pane is auto-collapsed): save the
-    // collapse itself, or forget a saved one.
-    else if (!threadsOpen) writeStoredLayout(storageKey, { threads: 0, chat: 100 });
-    else if (readStoredLayout(storageKey)?.threads === 0) clearStoredLayout(storageKey);
-  }, [autoCollapsed, groupRef, isWide, mounted, panelRef, setThreadsOpen, shown, storageKey, threadsOpen]);
+    syncPane();
+    // autoCollapsed and agentId are read at adoption only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isWide, mounted, panelRef, setThreadsOpen, shown, syncPane, threadsOpen]);
 
-  // Dragging the pane closed (or open) updates the toggle. A collapse or expand made in code (the
-  // toggle, the auto-collapse) already matches `shown` and changes nothing here.
-  // Read through a ref: the kit may report a resize with the callback from the render before.
-  const shownRef = useRef(shown);
-  shownRef.current = shown;
+  // The pane's size changed (a drag, a toggle, a refused or retried expand): report what it shows.
   const onThreadsResize = useCallback(() => {
     const panel = panelRef.current;
     if (!panel || !adopted.current) return;
-    const open = !panel.isCollapsed();
-    if (open !== shownRef.current) setThreadsOpen(open);
-  }, [panelRef, setThreadsOpen]);
+    reportRef.current?.(!panel.isCollapsed());
+  }, [panelRef]);
+
+  // Only a user's drag (or the separator's keys) collapsing or opening the pane changes their
+  // choice. Layout changes made in code (a toggle, the auto-collapse, a refused expand) do not.
+  const onLayoutChanged = useCallback(
+    (layout: Layout, meta: LayoutChangedMeta) => {
+      const panel = panelRef.current;
+      if (!meta.isUserInteraction || !panel || !adopted.current) return;
+      const open = !panel.isCollapsed();
+      // A drag or a separator key sets the width an expand restores (the kit saves the layout
+      // itself). From the reported layout: the DOM still has the previous one at this point.
+      const percent = layout.threads;
+      const element = groupElementRef.current;
+      if (open && element && typeof percent === "number") {
+        const separators = Array.from(element.querySelectorAll<HTMLElement>(":scope > [data-separator]"));
+        const separatorsWidth = separators.reduce((sum, separator) => sum + separator.getBoundingClientRect().width, 0);
+        const width = paneWidthFromLayout(percent, element.getBoundingClientRect().width, separatorsWidth);
+        if (width !== null && width > 0) {
+          threadsWidth.current = width;
+          writeThreadsWidth(agentId, width);
+        }
+      }
+      if (open !== shownRef.current) setThreadsOpen(open);
+    },
+    [agentId, panelRef, setThreadsOpen],
+  );
 
   if (!mounted) return <div data-testid="agent-chat-panes" className="flex min-h-0 min-w-0 flex-1" />;
 
@@ -130,6 +245,8 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     <ResizableGroup
       storageKey={storageKey}
       groupRef={groupRef}
+      elementRef={setGroupElement}
+      onLayoutChanged={onLayoutChanged}
       orientation="horizontal"
       data-testid="agent-chat-panes"
       data-layout="wide"
