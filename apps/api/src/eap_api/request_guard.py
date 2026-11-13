@@ -35,12 +35,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.params import Depends as DependsParam
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import Principal, current_principal
 
 DEFAULT_MAX_BODY_BYTES = 256 * 1024  # the run payload limit (EAP_MAX_RUN_PAYLOAD_BYTES default)
 DEFAULT_MAX_BODY_DEPTH = 32
 MAX_REPORTED_ERRORS = 20
+# Bodies larger than this are decoded and scanned in the threadpool instead of on the event loop.
+INLINE_SCAN_MAX_BYTES = 256 * 1024
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -206,14 +209,17 @@ def schema_checks_storable(endpoint: Callable[..., Any]) -> Callable[..., Any]:
 
 def guarded_json_route(
     *,
-    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    max_body_bytes: int | Callable[[], int] = DEFAULT_MAX_BODY_BYTES,
     max_depth: int = DEFAULT_MAX_BODY_DEPTH,
     depth_detail: str | None = None,
     check_storable: bool = True,
 ) -> type[APIRoute]:
-    """An APIRoute class with the guards described in this module's docstring."""
+    """An APIRoute class with the guards described in this module's docstring.
+
+    `max_body_bytes` may be a callable, read on every write request (a cap set by an environment
+    variable, e.g. EAP_KB_MAX_DOCUMENT_BYTES for the knowledge base document upload)."""
     nested_detail = depth_detail or f"request body is nested more than {max_depth} levels deep"
-    too_large = too_large_detail(max_body_bytes)
+    body_limit: Callable[[], int] = max_body_bytes if callable(max_body_bytes) else (lambda: max_body_bytes)
 
     class GuardedJsonRoute(APIRoute):
         def __init__(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
@@ -227,6 +233,21 @@ def guarded_json_route(
             self.checks_storable = check_storable
             self.checks_body_strings = check_storable and not getattr(endpoint, _SCHEMA_CHECKS_STORABLE, False)
 
+        def _inspect_body(self, body: bytes) -> tuple[Response | None, list[dict[str, Any]]]:
+            """UTF-8 and NUL (415), depth (422), then the unstorable strings of the parsed body."""
+            text = decode_utf8_json_body(body)
+            if text is None:
+                return JSONResponse(status_code=415, content={"detail": NOT_UTF8_DETAIL}), []
+            if json_depth_exceeds(text, max_depth):
+                return JSONResponse(status_code=422, content={"detail": nested_detail}), []
+            if not (self.checks_body_strings and text.strip()):
+                return None, []
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                return None, []  # FastAPI reports the malformed JSON itself
+            return None, unstorable_strings(parsed)
+
         def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
             handler = super().get_route_handler()
 
@@ -235,21 +256,19 @@ def guarded_json_route(
                 if self.checks_storable:
                     errors = unstorable_params(request)
                 if request.method in WRITE_METHODS:
-                    body = await read_capped_body(request, max_body_bytes)
+                    limit = body_limit()
+                    body = await read_capped_body(request, limit)
                     if body is None:
-                        return JSONResponse(status_code=413, content={"detail": too_large})
+                        return JSONResponse(status_code=413, content={"detail": too_large_detail(limit)})
                     request._body = body  # FastAPI's request.body() returns these bytes; no second read
-                    text = decode_utf8_json_body(body)
-                    if text is None:
-                        return JSONResponse(status_code=415, content={"detail": NOT_UTF8_DETAIL})
-                    if json_depth_exceeds(text, max_depth):
-                        return JSONResponse(status_code=422, content={"detail": nested_detail})
-                    if self.checks_body_strings and text.strip():
-                        try:
-                            parsed = json.loads(text)
-                        except ValueError:
-                            parsed = None  # FastAPI reports the malformed JSON itself
-                        errors += unstorable_strings(parsed)
+                    if len(body) > INLINE_SCAN_MAX_BYTES:
+                        # Large bodies (the knowledge base upload): scan in the threadpool, not on the loop.
+                        rejection, body_errors = await run_in_threadpool(self._inspect_body, body)
+                    else:
+                        rejection, body_errors = self._inspect_body(body)
+                    if rejection is not None:
+                        return rejection
+                    errors += body_errors
                 if errors:
                     setattr(request.state, _STATE_KEY, errors[:MAX_REPORTED_ERRORS])
                 try:

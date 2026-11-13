@@ -312,6 +312,19 @@ class DocumentNotFound(LookupError):
         return f"document {self.document} no longer exists"
 
 
+class IngestRunConflict(RuntimeError):
+    """Another request started an ingest run of the document first (compare-and-set lost; API: 409)."""
+
+    code = "ingest_run_conflict"
+
+    def __init__(self, document: str) -> None:
+        self.document = str(document)
+        super().__init__(self.document)
+
+    def __str__(self) -> str:
+        return f"another ingest run of document {self.document} was started concurrently"
+
+
 class ReindexInProgress(RuntimeError):
     """The knowledge base already has a pending generation (API: 409)."""
 
@@ -758,12 +771,17 @@ class KnowledgeStore:
         mime_type: str,
         source_url: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> PutDocumentResult:
         """Upload a document. Unchanged (same content hash, metadata, title, source URL and MIME
         type) is a no-op with `unchanged=True`. Otherwise the content is stored, `latest_version`
         increases (1 for a new key), status becomes 'pending' and the error clears: start an ingest
         run of `document["latest_version"]`. Raises KnowledgeBaseNotFound, and
-        KnowledgeBaseLimitExceeded at the 2,000 document cap."""
+        KnowledgeBaseLimitExceeded at the 2,000 document cap.
+
+        `run_id` (the API generates it before the write): recorded as `last_run_id` in the same
+        transaction as a changing upload, so a concurrent unchanged upload always finds the run that
+        owns the new version. Not written when the upload is unchanged."""
         _require_tenant(tenant_id)
         kid = _canonical_uuid(kb_id)
         if kid is None:
@@ -800,6 +818,7 @@ class KnowledgeStore:
                 "mime": mime_type,
                 "url": source_url,
                 "meta": json.dumps(meta),
+                "run": None if run_id is None else str(run_id),
             }
             if existing is not None:
                 if (
@@ -815,7 +834,8 @@ class KnowledgeStore:
                     text(
                         "UPDATE kb_documents SET title = :title, content = :content, content_hash = :hash,"
                         " mime_type = :mime, source_url = :url, metadata = CAST(:meta AS jsonb),"
-                        " latest_version = latest_version + 1, status = 'pending', error = NULL, updated_at = now()"
+                        " latest_version = latest_version + 1, status = 'pending', error = NULL, updated_at = now(),"
+                        " last_run_id = coalesce(CAST(:run AS varchar), last_run_id)"
                         f" WHERE tenant_id = :t AND id = :id RETURNING {_DOC_COLUMNS}"
                     ),
                     {**values, "id": existing["id"]},
@@ -832,8 +852,8 @@ class KnowledgeStore:
                 row = session.execute(
                     text(
                         "INSERT INTO kb_documents (id, tenant_id, kb_id, document_key, title, source_url, mime_type,"
-                        " metadata, content, content_hash) VALUES (:id, :t, :kb, :key, :title, :url, :mime,"
-                        f" CAST(:meta AS jsonb), :content, :hash) RETURNING {_DOC_COLUMNS}"
+                        " metadata, content, content_hash, last_run_id) VALUES (:id, :t, :kb, :key, :title, :url, :mime,"
+                        f" CAST(:meta AS jsonb), :content, :hash, CAST(:run AS varchar)) RETURNING {_DOC_COLUMNS}"
                     ),
                     {**values, "id": str(uuid.uuid4())},
                 ).mappings().one()
@@ -898,35 +918,91 @@ class KnowledgeStore:
                 > 0
             )
 
-    def request_reingest(self, tenant_id: str, kb_id: str, document_key: str) -> dict[str, Any]:
+    def request_reingest(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        document_key: str,
+        *,
+        run_id: str | None = None,
+        expected_last_run_id: Any = _UNSET,
+        doc_version: int | None = None,
+    ) -> dict[str, Any]:
         """Retry: status 'pending' with the error cleared, same `latest_version` (cached embeddings
-        are reused). Start an ingest run of `latest_version`. Raises DocumentNotFound."""
+        are reused). Start an ingest run of `latest_version`. Raises DocumentNotFound.
+
+        `run_id` is recorded as `last_run_id` in the same statement. With `expected_last_run_id`
+        (None included) and/or `doc_version`, the update applies only while the document still has
+        that `last_run_id` / `latest_version`, so of two concurrent reingests one wins; the loser
+        gets IngestRunConflict and must not start a run."""
         kid = _canonical_uuid(kb_id)
+        conditions, params = "", {"t": tenant_id, "kb": kid, "key": document_key, "run": run_id and str(run_id)}
+        if expected_last_run_id is not _UNSET:
+            conditions += " AND last_run_id IS NOT DISTINCT FROM CAST(:prev AS varchar)"
+            params["prev"] = None if expected_last_run_id is None else str(expected_last_run_id)
+        if doc_version is not None:
+            conditions += " AND latest_version = :v"
+            params["v"] = int(doc_version)
         with self.engine.begin() as conn:
             row = None
             if kid is not None:
                 row = conn.execute(
                     text(
-                        "UPDATE kb_documents SET status = 'pending', error = NULL, updated_at = now()"
-                        " WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key"
+                        "UPDATE kb_documents SET status = 'pending', error = NULL, updated_at = now(),"
+                        " last_run_id = coalesce(CAST(:run AS varchar), last_run_id)"
+                        f" WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key{conditions}"
                         f" RETURNING {_DOC_COLUMNS}"
                     ),
-                    {"t": tenant_id, "kb": kid, "key": document_key},
+                    params,
                 ).mappings().first()
+                if row is None and conditions:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key"),
+                        params,
+                    ).first()
+                    if exists is not None:
+                        raise IngestRunConflict(document_key)
         if row is None:
             raise DocumentNotFound(document_key)
         return _doc_dict(row)
 
-    def attach_ingest_run(self, tenant_id: str, document_id: str, run_id: str) -> bool:
-        """Record the ingest run started for the document (`last_run_id`)."""
+    def attach_ingest_run(
+        self,
+        tenant_id: str,
+        document_id: str,
+        run_id: str,
+        *,
+        doc_version: int | None = None,
+        expected_last_run_id: Any = _UNSET,
+        expected_updated_at: datetime | None = None,
+    ) -> bool:
+        """Record the ingest run started for the document (`last_run_id`). With `doc_version` it
+        applies only while that is the latest version; with `expected_last_run_id` (None included)
+        only while `last_run_id` is still that value; with `expected_updated_at` only while
+        `updated_at` is still the value the caller read (any write since, a lease renewal included,
+        makes it lose). Compare-and-set: of concurrent callers one wins. False when it did not
+        apply: the caller must not start the run."""
         did = _canonical_uuid(document_id)
         if did is None:
             return False
+        conditions, params = "", {"t": tenant_id, "id": did, "run": str(run_id)}
+        if doc_version is not None:
+            conditions += " AND latest_version = :v"
+            params["v"] = int(doc_version)
+        if expected_last_run_id is not _UNSET:
+            conditions += " AND last_run_id IS NOT DISTINCT FROM CAST(:prev AS varchar)"
+            params["prev"] = None if expected_last_run_id is None else str(expected_last_run_id)
+        if expected_updated_at is not None:
+            conditions += " AND updated_at = :seen"
+            params["seen"] = expected_updated_at
         with self.engine.begin() as conn:
             return (
                 conn.execute(
-                    text("UPDATE kb_documents SET last_run_id = :run, updated_at = now() WHERE tenant_id = :t AND id = :id"),
-                    {"t": tenant_id, "id": did, "run": str(run_id)},
+                    text(
+                        "UPDATE kb_documents SET last_run_id = :run, updated_at = now()"
+                        f" WHERE tenant_id = :t AND id = :id{conditions}"
+                    ),
+                    params,
                 ).rowcount
                 > 0
             )
@@ -1574,6 +1650,25 @@ class KnowledgeStore:
                         " WHERE tenant_id = :t AND id = :id AND pending_generation = :g"
                     ),
                     {"t": tenant_id, "id": kid, "g": int(generation), "error": error},
+                ).rowcount
+                > 0
+            )
+
+    def claim_reindex_retry(self, tenant_id: str, kb_id: str, generation: int) -> bool:
+        """Compare-and-set 'reindex_failed' -> 'reindexing' for pending `generation` (error cleared):
+        of concurrent retries exactly one gets True and starts the retry run. False when the
+        generation is not pending in the failed state (another retry won, or it was cancelled)."""
+        kid = _canonical_uuid(kb_id)
+        if kid is None:
+            return False
+        with self.engine.begin() as conn:
+            return (
+                conn.execute(
+                    text(
+                        "UPDATE knowledge_bases SET status = 'reindexing', error = NULL, updated_at = now()"
+                        " WHERE tenant_id = :t AND id = :id AND pending_generation = :g AND status = 'reindex_failed'"
+                    ),
+                    {"t": tenant_id, "id": kid, "g": int(generation)},
                 ).rowcount
                 > 0
             )

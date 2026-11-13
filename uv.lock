@@ -553,6 +553,7 @@ source = { editable = "apps/api" }
 dependencies = [
     { name = "dbos" },
     { name = "eap-db" },
+    { name = "eap-knowledge" },
     { name = "eap-observability" },
     { name = "eap-processors" },
     { name = "eap-run-store" },
@@ -579,6 +580,7 @@ dev = [
 requires-dist = [
     { name = "dbos", specifier = ">=3.5.0" },
     { name = "eap-db", editable = "packages/db" },
+    { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-observability", editable = "packages/observability" },
     { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-run-store", editable = "packages/run-store" },

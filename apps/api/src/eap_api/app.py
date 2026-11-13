@@ -112,6 +112,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.traces import router as traces_router
 
     app.include_router(traces_router, prefix="/api/v1")
+    # Knowledge bases (RM.7): CRUD, document upload, ingest and reindex runs, GET /embedding-models.
+    # A malformed embedding allowlist or knowledge base limit fails startup here.
+    from eap_api.routes.knowledge import check_knowledge_configuration, router as knowledge_router
+
+    check_knowledge_configuration()
+    app.include_router(knowledge_router, prefix="/api/v1")
     
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
@@ -141,6 +147,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.state.run_launcher = DBOSRunLauncher(LauncherSettings.from_env())
     app.state.run_stores = (RunStore(engine), EventLog(engine))
+    from eap_run_store.knowledge import KnowledgeStore
+
+    app.state.knowledge_store = KnowledgeStore(engine)
     conninfo = engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
     app.state.delta_source = PostgresDeltaSource(conninfo)
 

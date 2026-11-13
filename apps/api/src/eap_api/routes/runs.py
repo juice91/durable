@@ -73,7 +73,8 @@ router = APIRouter(
 def _run_json(run: dict[str, Any]) -> dict[str, Any]:
     """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings.
 
-    `kind` is 'agent', 'tool' or 'workflow'. An agent run has `agent_id`/`version` and `tool_id`
+    `kind` is 'agent', 'tool', 'workflow' or 'kb_ingest' (a knowledge base ingest or reindex run:
+    `knowledge_base_id` set, `input` its JSON mode, see eap_api.launcher). An agent run has `agent_id`/`version` and `tool_id`
     null; a tool run has `tool_id`, `agent_id`/`version` null, and `input`/`output` as JSON text; a
     workflow run has `workflow_id`/`workflow_version`, input/output as JSON text. A workflow's agent
     step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise)."""
@@ -86,6 +87,8 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "tool_id": run.get("tool_id"),
         "workflow_id": run.get("workflow_id"),
         "workflow_version": run.get("workflow_version"),
+        # The knowledge base of a kb_ingest run, or of a tool run of the knowledge base search tester.
+        "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") is not None else None,
         "parent_run_id": run.get("parent_run_id"),
         "parent_step_id": run.get("parent_step_id"),
         "status": run["status"],
@@ -315,7 +318,7 @@ def list_runs(
     ] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
-    kind: Annotated[Literal["agent", "tool", "workflow"] | None, Query()] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     parent_run_id: uuid.UUID | None = None,
@@ -327,7 +330,7 @@ def list_runs(
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow'), `tool_id` and
+    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest'), `tool_id` and
     `workflow_id` filter. A workflow's child agent runs are listed only with `parent_run_id`.
 
     Metrics drill-down (P0.6), same meaning as in GET /metrics/*: `status` may be repeated or
