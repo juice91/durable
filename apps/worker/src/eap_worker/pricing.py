@@ -322,8 +322,64 @@ def usage_record(request_key: str, usage_input: dict[str, Any], at: datetime | N
     return row, event_fields
 
 
+# ----------------------------------------------------------------------------- embeddings (RM.6)
+
+OPERATION_CHAT = "chat"
+OPERATION_EMBEDDING = "embedding"
+
+
+def embedding_usage_record(
+    request_key: str,
+    *,
+    model_id: str,
+    provider_model_name: str | None,
+    input_tokens: int,
+    usage_measured: bool,
+    inputs: int,
+    dimensions: int,
+    input_type: str,
+    at: datetime | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Price one embedding call with the same `price()` as chat (output tokens 0). Returns (the
+    run_model_requests row for EventLog.append / KnowledgeStore.write_embeddings `usage=`, with
+    `operation='embedding'`, the `embedding` event's data).
+
+    The event data never holds text: `{model_id, inputs (count), input_tokens, cost_usd,
+    usage_measured, price_source, provider_model_name, dimensions, input_type}`. An unmeasured call
+    (the provider omitted usage) records 0 tokens and no cost, as for chat."""
+    row, fields = usage_record(
+        request_key,
+        {
+            "model_id": model_id,
+            "provider_model_name": provider_model_name,
+            "input_tokens": input_tokens if usage_measured else 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "usage_measured": usage_measured,
+        },
+        at,
+    )
+    row["operation"] = OPERATION_EMBEDDING
+    event_data = {
+        "model_id": model_id,
+        "inputs": inputs,
+        "input_tokens": row["input_tokens"],
+        "cost_usd": fields["cost_usd"],
+        "usage_measured": usage_measured,
+        "price_source": row["price_source"],
+        "provider_model_name": provider_model_name,
+        "dimensions": dimensions,
+        "input_type": input_type,
+    }
+    return row, event_data
+
+
 __all__ = [
     "DEFAULT_PRICES_FILE",
+    "OPERATION_CHAT",
+    "OPERATION_EMBEDDING",
+    "embedding_usage_record",
     "InvalidPriceFile",
     "PRICES_FILE_ENV",
     "Usage",

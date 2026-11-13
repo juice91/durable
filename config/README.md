@@ -13,4 +13,7 @@ and never recomputed, so editing this file changes the cost of future requests o
 prices nothing (and the worker logs an error) until it is fixed.
 
 `model-prices.test.json` prices `test:*` at fixed non-zero values so that tests can check the
-cost arithmetic (the worker tests point `EAP_MODEL_PRICES_FILE` at it).
+cost arithmetic (the worker tests point `EAP_MODEL_PRICES_FILE` at it). The embedders
+`test:hash` and `test:hash768` have their own price (USD 0.13 per million input tokens) for the
+embedding cost checks. Embedding calls are priced by the same lookup, with output tokens 0, and
+recorded with `operation = embedding`; `litellm:*` embedding models are 0 in the repo default.

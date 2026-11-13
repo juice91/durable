@@ -35,6 +35,15 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  with SDK (transport) retries off; DBOS's model step retry policy owns retrying.
 - anything else is left to Pydantic AI's `infer_model`.
 
+Scripted embedding models (RM.6), resolved by `eap_worker.embeddings`, not by the chat resolver:
+
+- `test:hash`    hashed bag of words into 1536 dimensions, L2-normalised and deterministic, so texts
+                 that share words have a higher cosine similarity. Reports `ceil(len / 4)` input
+                 tokens per text. Ignores a `dimensions` setting (always its native size), so a
+                 policy declaring other dimensions gives an EmbeddingDimensionMismatch.
+- `test:hash768` the same at 768 dimensions.
+- `test:hash-nousage` the same at 1536 dimensions, but reports no usage (an unmeasured call).
+
 Every id must also pass the platform model allowlist (EAP_ALLOWED_MODELS, default `test:*`). The
 workflow checks it before the agent starts; the resolver checks it again so no code path can build
 a model that the policy forbids.
@@ -42,8 +51,11 @@ a model that the policy forbids.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import AsyncIterator
+import math
+import re
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from pydantic_ai.messages import (
@@ -56,7 +68,12 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.embeddings import EmbeddingModel as PaiEmbeddingModel, EmbeddingResult, EmbeddingSettings
+from pydantic_ai.embeddings.result import EmbedInputType
 from pydantic_ai.models import Model, ModelResolutionContext
+from pydantic_ai.usage import RequestUsage
+
+from eap_schemas.knowledge import approx_tokens
 from pydantic_ai.messages import ThinkingPart
 from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, DeltaToolCall, DeltaToolCalls, FunctionModel
 
@@ -329,6 +346,72 @@ def litellm_model(name: str, settings: WorkerSettings) -> Model:
         max_retries=0,  # transport retries off: the DBOS model step owns retrying
     )
     return OpenAIChatModel(name, provider=OpenAIProvider(openai_client=client))
+
+
+# ----------------------------------------------------------------------------- scripted embedders
+
+# name -> (native dimensions, reports usage)
+HASH_EMBEDDING_MODELS: dict[str, tuple[int, bool]] = {
+    "hash": (1536, True),
+    "hash768": (768, True),
+    "hash-nousage": (1536, False),
+}
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def hash_embedding(text: str, dimensions: int) -> list[float]:
+    """Deterministic hashed bag of words, L2-normalised. Each lower-cased word adds its count at a
+    blake2b-chosen index with a blake2b-chosen sign, so shared words always raise the dot product.
+    Text without words gives the unit vector e0 (never a zero vector, which has no cosine)."""
+    vec = [0.0] * dimensions
+    for word in _WORD_RE.findall(text.lower()):
+        digest = hashlib.blake2b(word.encode("utf-8"), digest_size=8).digest()
+        index = int.from_bytes(digest[:4], "big") % dimensions
+        vec[index] += 1.0 if digest[4] & 1 else -1.0
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm == 0.0:
+        vec[0] = 1.0
+        return vec
+    return [v / norm for v in vec]
+
+
+class HashEmbeddingModel(PaiEmbeddingModel):
+    """The `test:hash*` scripted embedders as a Pydantic AI embedding model (so they go through
+    `Embedder`, its settings and its instrumentation exactly like a provider model)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self._name = name
+        self._dimensions, self._reports_usage = HASH_EMBEDDING_MODELS[name]
+
+    @property
+    def model_name(self) -> str:
+        return self._name
+
+    @property
+    def system(self) -> str:
+        return "test"
+
+    async def embed(
+        self, inputs: str | Sequence[str], *, input_type: EmbedInputType, settings: EmbeddingSettings | None = None
+    ) -> EmbeddingResult:
+        texts, _settings = self.prepare_embed(inputs, settings)
+        usage = (
+            RequestUsage(input_tokens=sum(approx_tokens(t) for t in texts)) if self._reports_usage else RequestUsage()
+        )
+        return EmbeddingResult(
+            embeddings=[hash_embedding(t, self._dimensions) for t in texts],
+            inputs=texts,
+            input_type=input_type,
+            usage=usage,
+            model_name=self._name,
+            provider_name="test",
+        )
+
+
+def scripted_embedding_model(name: str) -> HashEmbeddingModel | None:
+    """The scripted embedder for `test:<name>`, or None if there is none of that name."""
+    return HashEmbeddingModel(name) if name in HASH_EMBEDDING_MODELS else None
 
 
 def make_resolver(settings_getter: Any):

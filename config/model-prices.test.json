@@ -9,6 +9,12 @@
         "cache_write_per_mtok": "2.5"
       }
     ],
+    "test:hash": [
+      {"effective_from": "2026-01-01", "input_per_mtok": "0.13", "output_per_mtok": "0"}
+    ],
+    "test:hash768": [
+      {"effective_from": "2026-01-01", "input_per_mtok": "0.13", "output_per_mtok": "0"}
+    ],
     "litellm:*": [
       {"effective_from": "2026-01-01", "input_per_mtok": "0", "output_per_mtok": "0"}
     ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from eap_schemas.embedding_policy import EmbeddingModelPolicy
 from eap_schemas.models_policy import ModelPolicy
 
 QUEUE_NAME = "eap-agent-runs"
@@ -20,6 +21,31 @@ DELTA_CHANNEL = "eap_run_deltas"
 _DEFAULT_APP_DB = "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"
 _DEFAULT_DBOS_DB = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
 
+# Embedding requests (RM.6): caps on one provider request; a larger call is split into several.
+DEFAULT_EMBEDDING_MAX_BATCH_INPUTS = 32
+DEFAULT_EMBEDDING_MAX_BATCH_TOKENS = 16_384  # approximate tokens, ceil(len / 4)
+DEFAULT_EMBEDDING_TIMEOUT_S = 120.0
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def _positive_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = float(raw)
+    if not value > 0:
+        raise ValueError(f"{name} must be positive, got {raw!r}")
+    return value
+
 
 @dataclass(frozen=True)
 class WorkerSettings:
@@ -33,6 +59,16 @@ class WorkerSettings:
     litellm_api_key: str | None = field(repr=False)  # secret: never in repr/logs
     # Platform model allowlist (EAP_ALLOWED_MODELS); default `test:*` only.
     allowed_models: ModelPolicy = field(default_factory=lambda: ModelPolicy.parse(None))
+    # Embedding model allowlist (EAP_ALLOWED_EMBEDDING_MODELS + EAP_EMBEDDING_QUERY_INSTRUCTIONS);
+    # default `test:*` only. Checked before every embedding call.
+    allowed_embedding_models: EmbeddingModelPolicy = field(default_factory=lambda: EmbeddingModelPolicy.parse(None))
+    # `litellm:*` embedding models may sit behind another gateway URL or virtual key than chat;
+    # each falls back to the chat value (litellm_base_url / litellm_api_key) when unset.
+    litellm_embedding_base_url: str | None = None
+    litellm_embedding_api_key: str | None = field(default=None, repr=False)  # secret
+    embedding_max_batch_inputs: int = DEFAULT_EMBEDDING_MAX_BATCH_INPUTS
+    embedding_max_batch_tokens: int = DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
+    embedding_timeout_s: float = DEFAULT_EMBEDDING_TIMEOUT_S
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -53,4 +89,14 @@ class WorkerSettings:
             # Never logged or printed; see apps/worker/.env.example for how to load it.
             litellm_api_key=os.environ.get("EAP_LITELLM_API_KEY") or os.environ.get("LITELLM_API_KEY"),
             allowed_models=ModelPolicy.from_env(),
+            allowed_embedding_models=EmbeddingModelPolicy.from_env(),
+            litellm_embedding_base_url=os.environ.get("EAP_LITELLM_EMBEDDING_BASE_URL") or None,
+            litellm_embedding_api_key=os.environ.get("EAP_LITELLM_EMBEDDING_API_KEY") or None,
+            embedding_max_batch_inputs=_positive_int(
+                "EAP_EMBEDDING_MAX_BATCH_INPUTS", DEFAULT_EMBEDDING_MAX_BATCH_INPUTS
+            ),
+            embedding_max_batch_tokens=_positive_int(
+                "EAP_EMBEDDING_MAX_BATCH_TOKENS", DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
+            ),
+            embedding_timeout_s=_positive_float("EAP_EMBEDDING_TIMEOUT_S", DEFAULT_EMBEDDING_TIMEOUT_S),
         )
