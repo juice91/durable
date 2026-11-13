@@ -1,18 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RequestContextValidationError,
+  MIGRATED_PRESET_NAME,
+  PRESETS_PREFIX,
   clearSavedContext,
+  deletePreset,
   getRequestContext,
+  latestPreset,
+  listPresets,
   loadSavedContext,
   mapContextErrors,
   normalizeContext,
   parseContextJson,
-  playgroundHref,
+  presetNameError,
+  presetsKey,
   saveContext,
+  savePreset,
   savedContextKey,
   validateRequestContext,
 } from "@/lib/requestContext";
-import { routes } from "@/lib/routes";
+import { legacyTarget, routes } from "@/lib/routes";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -157,12 +164,129 @@ describe("saved context storage", () => {
     vi.unstubAllEnvs();
   });
 
-  it("builds the playground link", () => {
-    // One literal URL per helper, so a builder bug cannot hide behind builder-vs-builder equality.
-    expect(playgroundHref("a 1")).toBe("/playground?agent=a+1");
-    expect(playgroundHref("a1", 3, true)).toBe(routes.playground({ agent: "a1", version: 3, context: "preset" }));
-    expect(playgroundHref("a1", "draft")).toBe(routes.playground({ agent: "a1", version: "draft" }));
-    // An empty agent id gives the plain route, without a version or preset flag.
-    expect(playgroundHref("", 3, true)).toBe("/playground");
+  it("the old \"Use in playground\" link lands in the agent's chat with the preset flag", () => {
+    // SL.10 removed playgroundHref with the Request Context page; its links (`/playground?…&context=preset`)
+    // still land in the chat, where `context=preset` applies the newest preset. One literal URL per case.
+    const land = (href: string) => {
+      const url = new URL(href, "http://studio.test");
+      return legacyTarget(url.pathname, url.searchParams);
+    };
+    expect(land(routes.playground({ agent: "a 1" }))).toBe("/agents/a%201/chat");
+    expect(land(routes.playground({ agent: "a1", version: 3, context: "preset" }))).toBe("/agents/a1/chat?version=3&context=preset");
+    expect(land(routes.playground({ agent: "a1", version: "draft" }))).toBe("/agents/a1/chat?version=draft");
+    // Without an agent there is no server target (the client redirect picks one).
+    expect(land(routes.playground({ version: 3, context: "preset" }))).toBeNull();
+  });
+});
+
+describe("named presets (SL.10)", () => {
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("saves, lists by name, replaces by name and deletes per agent", () => {
+    expect(listPresets("a1")).toEqual([]);
+    expect(savePreset("a1", " gold ", { tier: "gold" }, 2)).toMatchObject({ name: "gold", value: { tier: "gold" }, version: 2 });
+    savePreset("a1", "Bronze", { tier: "bronze" }, "draft");
+    savePreset("a2", "other", { tier: "x" }, null);
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["Bronze", "gold"]);
+    savePreset("a1", "gold", { tier: "gold", seats: 3 }, null);
+    expect(listPresets("a1")).toHaveLength(2);
+    expect(listPresets("a1").find((preset) => preset.name === "gold")).toMatchObject({ value: { tier: "gold", seats: 3 }, version: null });
+    expect(deletePreset("a1", "Bronze")).toBe(true);
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["gold"]);
+    expect(listPresets("a2").map((preset) => preset.name)).toEqual(["other"]);
+  });
+
+  it("stores one credential-scoped studio.* key per agent, never the credential", () => {
+    vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "Bearer tenant-a");
+    savePreset("a1", "p", { a: 1 }, null);
+    expect(Object.keys(window.localStorage)).toEqual([presetsKey("a1")]);
+    expect(presetsKey("a1")).toMatch(/^studio\.requestContextPresets\.v1\.c[0-9a-f]{16}:a1$/);
+    expect(presetsKey("a1").startsWith(PRESETS_PREFIX)).toBe(true);
+    expect(window.localStorage.getItem(presetsKey("a1"))).not.toContain("tenant-a");
+    vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "Bearer tenant-b");
+    expect(listPresets("a1")).toEqual([]);
+  });
+
+  it("latestPreset is the most recently saved one", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-14T10:00:00Z"));
+      savePreset("a1", "b", { v: 1 }, null);
+      vi.setSystemTime(new Date("2026-11-14T11:00:00Z"));
+      savePreset("a1", "a", { v: 2 }, null);
+      expect(latestPreset("a1")?.name).toBe("a");
+      vi.setSystemTime(new Date("2026-11-14T12:00:00Z"));
+      savePreset("a1", "b", { v: 3 }, null);
+      expect(latestPreset("a1")).toMatchObject({ name: "b", value: { v: 3 } });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(latestPreset("none")).toBeNull();
+  });
+
+  it("migrates the old saved value into a preset named Saved, once, keeping the old key", () => {
+    saveContext("a1", { tier: "silver" }, 1);
+    const presets = listPresets("a1");
+    expect(presets).toEqual([expect.objectContaining({ name: MIGRATED_PRESET_NAME, value: { tier: "silver" }, version: 1 })]);
+    expect(JSON.parse(window.localStorage.getItem(presetsKey("a1")) ?? "{}")).toMatchObject({ migrated: true });
+    // Idempotent: reading again imports nothing more.
+    expect(listPresets("a1")).toHaveLength(1);
+    // Deleting "Saved" sticks: the old key is still there but is never imported again.
+    expect(deletePreset("a1", MIGRATED_PRESET_NAME)).toBe(true);
+    expect(loadSavedContext("a1")).not.toBeNull();
+    expect(listPresets("a1")).toEqual([]);
+    expect(latestPreset("a1")).toBeNull();
+  });
+
+  it("migration merges into presets saved before it and writes nothing for an agent without the old key", () => {
+    expect(listPresets("fresh")).toEqual([]);
+    expect(window.localStorage.getItem(presetsKey("fresh"))).toBeNull();
+    window.localStorage.setItem(presetsKey("a1"), JSON.stringify({ presets: [{ name: "mine", value: { a: 1 }, version: null, saved_at: "x" }] }));
+    saveContext("a1", { tier: "gold" }, null);
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["mine", "Saved"]);
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["mine", "Saved"]);
+  });
+
+  it("a failed migration write is retried on the next read, without duplicates", () => {
+    saveContext("a1", { tier: "gold" }, null);
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("QuotaExceededError");
+    });
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["Saved"]);
+    expect(window.localStorage.getItem(presetsKey("a1"))).toBeNull();
+    setItem.mockRestore();
+    expect(listPresets("a1").map((preset) => preset.name)).toEqual(["Saved"]);
+    expect(JSON.parse(window.localStorage.getItem(presetsKey("a1")) ?? "{}").presets).toHaveLength(1);
+  });
+
+  it("ignores corrupt records and entries, and reports storage that throws", () => {
+    window.localStorage.setItem(presetsKey("a1"), "{nope");
+    expect(listPresets("a1")).toEqual([]);
+    window.localStorage.setItem(
+      presetsKey("a1"),
+      JSON.stringify({ migrated: true, presets: [{ name: "", value: {} }, { name: "ok", value: { a: 1 }, version: -1 }, { name: "ok", value: { b: 2 } }, { name: "bad", value: [1] }] }),
+    );
+    expect(listPresets("a1")).toEqual([{ name: "ok", value: { a: 1 }, version: null, saved_at: "" }]);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    expect(savePreset("a1", "new", { a: 1 }, null)).toBeNull();
+    expect(deletePreset("a1", "ok")).toBe(false);
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("SecurityError");
+    });
+    expect(listPresets("a1")).toEqual([]);
+  });
+
+  it("validates preset names", () => {
+    expect(presetNameError("  ")).toBe("Enter a name");
+    expect(presetNameError("x".repeat(61))).toMatch(/at most 60/);
+    expect(presetNameError(" ok ")).toBeNull();
+    expect(savePreset("a1", " ", { a: 1 }, null)).toBeNull();
+    expect(listPresets("a1")).toEqual([]);
   });
 });

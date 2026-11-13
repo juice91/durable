@@ -9,6 +9,7 @@ import { collectQueries, collectRenderedIds, findDeadQueries, type SourceFile } 
 
 const nav = vi.hoisted(() => ({ search: "", push: vi.fn(), replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ push: nav.push, replace: nav.replace }),
   useSearchParams: () => new URLSearchParams(nav.search),
 }));
@@ -57,9 +58,21 @@ const decodeSegs = (p: string) => p.split("?")[0].split("/").slice(1).map(decode
 describe("route builders: ids round-trip", () => {
   it("agent, trace, run and workflow builders keep the id in one segment that decodes back", () => {
     for (const id of PATH_IDS) {
+      // SL.12: a trace is the Sheet over the list, `/traces?trace=<id>` (a run: `&tab=events`); the id
+      // round-trips through its one query parameter. The retired page paths keep one path segment.
+      for (const [href, tab] of [
+        [routes.trace(id), null],
+        [routes.run(id), "events"],
+      ] as const) {
+        const url = new URL(href, "http://studio.test");
+        expect(url.pathname).toBe("/traces");
+        expect(url.searchParams.getAll("trace")).toEqual([id]);
+        expect(url.searchParams.get("tab")).toBe(tab);
+        expect(url.hash).toBe("");
+      }
       for (const [path, head] of [
-        [routes.trace(id), "traces"],
-        [routes.run(id), "runs"],
+        [routes.legacyTracePath(id), "traces"],
+        [routes.legacyRunPath(id), "runs"],
         [routes.workflow(id), "workflows"],
       ] as const) {
         expect(path.startsWith(`/${head}/`)).toBe(true);
@@ -87,16 +100,21 @@ describe("route builders: ids round-trip", () => {
 
   it("an id never leaks a query or fragment delimiter into the path", () => {
     for (const id of PATH_IDS) {
-      const url = new URL(routes.trace(id), "http://studio.test");
+      // SL.12: the trace id lives in the query, so the check is on the retired page path, plus no
+      // fragment and no extra parameter from the trace builder.
+      const url = new URL(routes.legacyTracePath(id), "http://studio.test");
       expect(url.search).toBe("");
       expect(url.hash).toBe("");
+      const sheet = new URL(routes.trace(id), "http://studio.test");
+      expect(sheet.hash).toBe("");
+      expect([...sheet.searchParams.keys()]).toEqual(["trace"]);
     }
   });
 
   it("resolved by a browser URL parser, the id stays one segment (dot segments must not collapse)", () => {
     // "." and "..": RouteIdError instead of a URL that resolves elsewhere (decided requirement above).
     for (const id of DOT_IDS) {
-      for (const build of [routes.agentEditor, routes.trace, routes.run, routes.workflow]) {
+      for (const build of [routes.agentEditor, routes.trace, routes.run, routes.legacyTracePath, routes.legacyRunPath, routes.workflow]) {
         expect(() => build(id)).toThrow(RouteIdError);
         expect(() => build(id)).toThrow("route id cannot be '.' or '..'");
       }
@@ -383,7 +401,7 @@ describe("rendered links are unchanged for ordinary ids", () => {
     runs = [failed];
     nav.search = "range=30d";
     render(React.createElement(MetricsPage));
-    await waitFor(() => expect(screen.getByTestId("recent-failure")).toHaveAttribute("href", "/traces/run-failed-1"));
+    await waitFor(() => expect(screen.getByTestId("recent-failure")).toHaveAttribute("href", "/traces?trace=run-failed-1"));
     expect(screen.getByTestId("recent-failures-all")).toHaveAttribute("href", expect.stringMatching(/^\/traces\?status=failed%2Cneeds_attention/));
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "24h" } });
     expect(nav.replace).toHaveBeenCalledWith("/metrics?range=24h", { scroll: false });
@@ -398,7 +416,7 @@ describe("rendered links are unchanged for ordinary ids", () => {
     vi.mocked(listTraceRuns).mockResolvedValue({ items: [baseRun, wf], next_before: null } as never);
     render(React.createElement(TracesPage));
     const rows = await screen.findAllByTestId("trace-row");
-    expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", "/traces/run-1");
+    expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", "/traces?trace=run-1");
     expect(await screen.findByRole("link", { name: "Workflow: Triage v3" })).toHaveAttribute("href", "/workflows/wf-1/runs/wfrun-1");
     fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "failed" } });
     expect(nav.replace).toHaveBeenLastCalledWith("/traces?status=failed");
@@ -410,11 +428,11 @@ describe("rendered links are unchanged for ordinary ids", () => {
     const item = { ts: "2026-11-13T10:00:00.123456+00:00", level: "error", message: "model call failed", service: "eap-worker", trace_id: "t1", span_id: "s1", run_id: RUN };
     vi.mocked(searchLogs).mockResolvedValue({ items: [item], from: "2026-11-13T09:00:00+00:00", to: "2026-11-13T10:00:00+00:00", limit: 100 } as never);
     render(React.createElement(LogsPage));
-    expect(await screen.findByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", `/traces/${RUN}`);
+    expect(await screen.findByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", `/traces?trace=${RUN}`);
   });
 
   it("playground: the turn footer links to the run's trace", async () => {
-    const { TurnFooter } = await import("@/components/playground/TurnFooter");
+    const { TurnFooter } = await import("@/components/chat/TurnFooter");
     render(React.createElement(TurnFooter, {
       turn: {
         runId: "run-9", status: "completed", modelId: "m", modelOverridden: false, draft: false, version: 1,
@@ -422,7 +440,7 @@ describe("rendered links are unchanged for ordinary ids", () => {
         checking: false, block: null, liveText: true, announce: false,
       } as never,
     }));
-    expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute("href", "/traces/run-9");
+    expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute("href", "/traces?trace=run-9");
     expect(routes.playground({ agent: "a1", conversation: "c1" })).toBe("/playground?agent=a1&conversation=c1");
   });
 });

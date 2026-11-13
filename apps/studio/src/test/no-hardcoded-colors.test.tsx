@@ -5,13 +5,6 @@ import path from "path";
 const componentsDir = path.join(__dirname, "..", "components");
 const appDir = path.join(__dirname, "..", "app");
 
-// Files that are allowed to use hardcoded colors (playground components)
-const playgroundFiles = new Set([
-  "playground",
-  "components/playground",
-  "src/components/playground",
-]);
-
 // Common hardcoded colors to check for - focus on patterns that need theme tokens
 const problematicPatterns = [
   "bg-white",
@@ -27,17 +20,13 @@ const problematicPatterns = [
   "focus:ring-blue",
 ];
 
-function isPlaygroundFile(filePath: string): boolean {
-  const relPath = path.relative(process.cwd(), filePath);
-  return relPath.includes("playground") || relPath.includes("components/playground");
-}
-
-function findNonPlaygroundFiles(dir: string, files: string[] = []): string[] {
+// No file is exempt: the playground's exemption went when chat moved to `components/chat` (SL.10).
+function findFiles(dir: string, files: string[] = []): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      findNonPlaygroundFiles(fullPath, files);
+      findFiles(fullPath, files);
     } else if (entry.isFile() && entry.name.endsWith(".tsx")) {
       files.push(fullPath);
     }
@@ -45,15 +34,16 @@ function findNonPlaygroundFiles(dir: string, files: string[] = []): string[] {
   return files;
 }
 
-describe("Non-playground components", () => {
+describe("Components and pages", () => {
   it("should not use hardcoded color classes", () => {
-    const allFiles = [...findNonPlaygroundFiles(componentsDir), ...findNonPlaygroundFiles(appDir)];
+    const allFiles = [...findFiles(componentsDir), ...findFiles(appDir)];
+    // The chat (formerly the exempt playground) is scanned like everything else.
+    expect(allFiles.some((file) => file.includes(path.join("components", "chat")))).toBe(true);
+    expect(allFiles.some((file) => file.includes(path.join("components", "agentPage", "ChatPane.tsx")))).toBe(true);
 
     const violations: Array<{ file: string; lines: Array<{ line: number; content: string }> }> = [];
 
     for (const file of allFiles) {
-      if (isPlaygroundFile(file)) continue;
-
       const content = fs.readFileSync(file, "utf-8");
       const lines = content.split("\n");
       const fileViolations: Array<{ line: number; content: string }> = [];

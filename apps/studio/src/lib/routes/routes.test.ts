@@ -18,8 +18,12 @@ describe("routes: today's URLs", () => {
     [routes.mcp(), "/mcp"],
     [routes.processors(), "/processors"],
     [routes.traces(), "/traces"],
-    [routes.trace("r1"), "/traces/r1"],
-    [routes.run("r1"), "/runs/r1"],
+    [routes.trace("r1"), "/traces?trace=r1"],
+    [routes.trace("r1", { tab: "logs" }), "/traces?trace=r1&tab=logs"],
+    [routes.trace("r1", { tab: "spans" }), "/traces?trace=r1"],
+    [routes.run("r1"), "/traces?trace=r1&tab=events"],
+    [routes.legacyTracePath("r1"), "/traces/r1"],
+    [routes.legacyRunPath("r1"), "/runs/r1"],
     [routes.logs(), "/logs"],
     [routes.metrics(), "/metrics"],
     [routes.settings(), "/settings"],
@@ -40,8 +44,10 @@ describe("routes: areas", () => {
 describe("routes: encoding", () => {
   it("encodes id segments, including ':' '/' '?' '#' and spaces", () => {
     expect(routes.agentEditor("ns:agent/1")).toBe("/agents/ns%3Aagent%2F1/editor");
-    expect(routes.trace("run:1?x#y")).toBe("/traces/run%3A1%3Fx%23y");
-    expect(routes.run("a b")).toBe("/runs/a%20b");
+    expect(routes.trace("run:1?x#y")).toBe("/traces?trace=run%3A1%3Fx%23y");
+    expect(routes.run("a b")).toBe("/traces?trace=a+b&tab=events");
+    expect(routes.legacyTracePath("run:1?x#y")).toBe("/traces/run%3A1%3Fx%23y");
+    expect(routes.legacyRunPath("a b")).toBe("/runs/a%20b");
     expect(routes.workflow("wf:1")).toBe("/workflows/wf%3A1");
     expect(routes.workflowRun("wf/1", "run:2")).toBe("/workflows/wf%2F1/runs/run%3A2");
   });

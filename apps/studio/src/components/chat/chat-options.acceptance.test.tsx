@@ -550,7 +550,7 @@ describe("reload keeps the options", () => {
     const first = await renderReady();
     await screen.findByRole("button", { name: /1 of 1 set/ });
     fireEvent.click(screen.getByRole("button", { name: /1 of 1 set/ }));
-    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    expect(screen.getByText("Using preset “Saved”.")).toBeInTheDocument();
     await send("p");
     expect(lastBody()?.request_context).toEqual({ tier: "preset" });
     first.unmount();
@@ -854,25 +854,28 @@ describe("accessibility", () => {
     expect(alert).toHaveTextContent("Enter a model name for anthropic");
   });
 
-  it("exposes the context toggle as an expandable button controlling a labelled region", async () => {
+  it("exposes the context toggle as an expandable button controlling a labelled dialog", async () => {
     await renderReady();
     const toggle = await screen.findByRole("button", { name: /No context fields/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveAttribute("aria-controls", "playground-context-panel");
+    expect(toggle).toHaveAttribute("aria-haspopup", "dialog");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const region = screen.getByRole("region", { name: "Request context" });
-    expect(region.id).toBe("playground-context-panel");
+    // SL.10: the panel is the composer's popover, a labelled dialog (a region of the page before).
+    const panel = await screen.findByRole("dialog", { name: "Request context" });
+    expect(panel.id).toBe("playground-context-panel");
   });
 
   it("keeps all controls reachable by keyboard, in order", async () => {
     await renderReady();
     await screen.findByRole("button", { name: /No context fields/ });
+    // SL.10: the chips sit in the composer, under the message box: message, Version, Model, context.
     const controls = [
+      composer(),
       screen.getByRole("combobox", { name: "Version" }),
       screen.getByRole("combobox", { name: "Model" }),
       screen.getByRole("button", { name: /No context fields/ }),
-      composer(),
     ];
     for (const el of controls) {
       expect(el).not.toBeDisabled();
@@ -881,8 +884,8 @@ describe("accessibility", () => {
     for (let i = 1; i < controls.length; i += 1) {
       expect(controls[i - 1].compareDocumentPosition(controls[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
-    controls[3].focus();
-    expect(document.activeElement).toBe(controls[3]);
+    controls[0].focus();
+    expect(document.activeElement).toBe(controls[0]);
   });
 
   it("marks the model picker invalid and linked to its refusal after a 422", async () => {

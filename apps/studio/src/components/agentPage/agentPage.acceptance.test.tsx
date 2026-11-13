@@ -29,8 +29,8 @@ vi.mock("@/lib/conversations", () => ({
   listConversations: vi.fn(),
   renameConversation: vi.fn(),
 }));
-vi.mock("@/components/playground/turnApi", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/components/playground/turnApi")>();
+vi.mock("@/components/chat/turnApi", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/components/chat/turnApi")>();
   return { ...original, startTurnWithOptions: vi.fn() };
 });
 vi.mock("@/lib/runs", async (importOriginal) => {
@@ -155,7 +155,8 @@ const config = () => screen.findByRole("complementary", { name: "Config" });
 const tab = (name: string) => within(within(main()).getByRole("navigation", { name: "Agent sections" })).getByRole("link", { name: new RegExp(`^${name}$`, "i") });
 const section = (name: string | RegExp) => screen.getByRole("region", { name });
 const badge = (label: string) => within(screen.getByTestId("memory-card")).getByText(label).closest("[data-state]")!;
-const traceRows = () => within(screen.getByTestId("agent-traces-list")).getAllByRole("link", { name: /^Run started/ });
+// SL.12: a row opens the trace Sheet in place, so its primary control is a button (the Trace column keeps a link).
+const traceRows = () => within(screen.getByTestId("agent-traces-list")).getAllByRole("button", { name: /^Run started/ });
 
 /** What a server page redirects to (Next's redirect() throws). */
 async function redirectOf(run: () => Promise<unknown>): Promise<string | null> {

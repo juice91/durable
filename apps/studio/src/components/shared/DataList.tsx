@@ -55,6 +55,11 @@ export interface DataListProps<Row> {
   getRowTestId?: (row: Row) => string | undefined;
   /** The row whose Sheet is open, highlighted. */
   selectedRowId?: string | null;
+  /**
+   * Called with the ids of the rows as shown (searched and sorted), whenever that order changes:
+   * a Sheet's prev / next follows the list the user sees.
+   */
+  onVisibleRowIdsChange?: (ids: string[]) => void;
 
   /** Show the search box with this placeholder. */
   searchPlaceholder?: string;
@@ -246,6 +251,7 @@ export function DataList<Row>({
   getRowLabel,
   getRowTestId,
   selectedRowId = null,
+  onVisibleRowIdsChange,
   searchPlaceholder,
   searchLabel,
   filterRow,
@@ -305,6 +311,13 @@ export function DataList<Row>({
     }
     return result;
   }, [columns, filterRow, manualSort, rows, sort, trimmedQuery]);
+
+  const visibleKey = useMemo(() => visibleRows.map((row) => getRowId(row)).join("\u0000"), [visibleRows, getRowId]);
+  const onVisibleRef = useRef(onVisibleRowIdsChange);
+  onVisibleRef.current = onVisibleRowIdsChange;
+  useEffect(() => {
+    onVisibleRef.current?.(visibleKey ? visibleKey.split("\u0000") : []);
+  }, [visibleKey]);
 
   const toggleSort = (columnId: string) => {
     const next = nextSort(sort, columnId);

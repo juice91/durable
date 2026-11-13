@@ -65,10 +65,10 @@ describe("Navigation", () => {
       expect(navSections.find((section) => section.group.id === "settings")!.group.placement).toBe("footer");
     });
 
-    test("the transitional item is exactly Request Context, with no g-key (SL.6 removed Playground, SL.7 Dashboard)", () => {
+    test("no transitional item is left (SL.6 removed Playground, SL.7 Dashboard, SL.10 Request Context)", () => {
       const transitional = navItems.filter((item) => item.transitional);
-      expect(transitional.map((item) => item.id).sort()).toEqual(["request-context"]);
-      for (const item of transitional) expect(item.gKey).toBeUndefined();
+      expect(transitional.map((item) => item.id)).toEqual([]);
+      expect(navItems.some((item) => item.id === "request-context" || item.href.startsWith("/request-context"))).toBe(false);
     });
 
     test("g-keys follow the plan", () => {

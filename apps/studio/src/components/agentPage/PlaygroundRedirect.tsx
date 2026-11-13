@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { getConversation } from "@/lib/conversations";
 import { routes, type AgentChatRouteOptions } from "@/lib/routes";
-import { parseVersionParam } from "@/components/playground/runOptions";
+import { parseVersionParam } from "@/components/chat/runOptions";
 import { playgroundFallbackTarget, readLastAgent } from "./agentPageModel";
 
 /**

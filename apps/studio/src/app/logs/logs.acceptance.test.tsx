@@ -5,8 +5,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ApiError } from "@/lib/api";
 import { getTrace, listTraceRuns, type Trace, type TraceSpan } from "@/lib/traces";
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
-import { TraceView } from "@/components/traces/TraceView";
 import LogsPage from "./page";
+import TracesPage from "@/app/traces/page";
 import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
@@ -31,6 +31,7 @@ const replaceSpy = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", async () => {
   const React = await import("react");
   return {
+    usePathname: () => "/logs",
     useRouter: () => ({ replace: (url: string) => { replaceSpy(url); nav.replace(url); }, push: vi.fn() }),
     useSearchParams: () => {
       const s = React.useSyncExternalStore(
@@ -443,20 +444,40 @@ function fakeServer() {
     return reply(hit.reverse().slice(0, p.limit ?? 100), p.limit ?? 100);
   });
 }
+/**
+ * SL.12: the span's logs live in the trace Sheet's Logs tab. Open the Traces page at
+ * routes.trace(RUN) (the Sheet open on Spans), as a user following a trace link does.
+ */
+async function openTraceSheet(): Promise<HTMLElement[]> {
+  vi.mocked(listTraceRuns).mockResolvedValue({ items: [], next_before: null } as never);
+  nav.search = new URL(routes.trace(RUN), "http://studio.test").search.slice(1);
+  render(<TracesPage />);
+  const sheet = await screen.findByTestId("trace-sheet");
+  return within(sheet).findAllByTestId("trace-span-row");
+}
+const sheetTab = (name: "Spans" | "Logs") => within(screen.getByTestId("trace-sheet")).getByRole("tab", { name });
+/** Select span `index` on the Spans tab, then show the Logs tab (the selection carries over). */
+async function spanLogs(index: number): Promise<void> {
+  fireEvent.mouseDown(sheetTab("Spans"));
+  fireEvent.click((await within(screen.getByTestId("trace-sheet")).findAllByTestId("trace-span-row"))[index]);
+  fireEvent.mouseDown(sheetTab("Logs"));
+  await screen.findByTestId("trace-logs-panel");
+}
 const panelMessages = () => within(screen.getByTestId("trace-logs-panel")).queryAllByTestId("log-row").map((r) => r.querySelector("pre")?.textContent);
 
 describe("span window", () => {
   it("selecting a span queries from = its start and to = its end + 1 ms, and shows that span's records", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan, toolSpan]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    const rows = await screen.findAllByTestId("trace-span-row");
+    await openTraceSheet();
+    // The root span (selected first) covers the whole run.
+    await spanLogs(0);
     await waitFor(() => expect(panelMessages()).toHaveLength(4));
-    fireEvent.click(rows[1]);
+    await spanLogs(1);
     await waitFor(() => expect(panelMessages()).toEqual(["inside the model"]));
     expect(calls().at(-1)).toEqual({ run_id: RUN, limit: 500, from: "2026-11-13T10:00:02.000000Z", to: "2026-11-13T10:00:05.001000Z" });
     expect(screen.getByTestId("trace-logs-scope")).toHaveTextContent("Model request #0: test:model");
-    fireEvent.click(rows[2]);
+    await spanLogs(2);
     await waitFor(() => expect(panelMessages()).toEqual(["inside the tool"]));
     expect(calls().at(-1)).toEqual({ run_id: RUN, limit: 500, from: "2026-11-13T10:00:06.000000Z", to: "2026-11-13T10:00:08.001000Z" });
   });
@@ -466,8 +487,8 @@ describe("span window", () => {
     try {
       vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan]));
       fakeServer();
-      render(<TraceView runId={RUN} />);
-      fireEvent.click((await screen.findAllByTestId("trace-span-row"))[1]);
+      await openTraceSheet();
+      await spanLogs(1);
       await waitFor(() => expect(panelMessages()).toEqual(["inside the model", "at the end"]));
     } finally {
       RECORDS.pop();
@@ -478,8 +499,8 @@ describe("span window", () => {
     const open = span("t0", "run", "tool_call", "lookup", 6, null, { tool_id: "lookup" });
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, open]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    fireEvent.click((await screen.findAllByTestId("trace-span-row"))[1]);
+    await openTraceSheet();
+    await spanLogs(1);
     await waitFor(() => expect(panelMessages()).toEqual(["inside the tool", "after everything"]));
     expect(calls().at(-1)).toEqual({ run_id: RUN, limit: 500, from: "2026-11-13T10:00:06.000000Z" });
   });
@@ -490,8 +511,8 @@ describe("span window", () => {
     vi.setSystemTime(new Date("2026-11-13T12:00:00Z"));
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    fireEvent.click((await screen.findAllByTestId("trace-span-row"))[1]);
+    await openTraceSheet();
+    await spanLogs(1);
     await waitFor(() => expect(panelMessages()).toEqual(["inside the model"]));
     fireEvent.click(screen.getByRole("button", { name: "Show all run logs" }));
     await waitFor(() => expect(panelMessages()).toHaveLength(4));
@@ -506,8 +527,8 @@ describe("span window", () => {
     const quiet = span("q", "run", "tool_call", "quiet", 4, 5, { tool_id: "quiet" });
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, quiet]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    fireEvent.click((await screen.findAllByTestId("trace-span-row"))[1]);
+    await openTraceSheet();
+    await spanLogs(1);
     expect(await screen.findByTestId("trace-logs-empty")).toHaveTextContent("No logs during this span.");
     fireEvent.click(within(screen.getByTestId("trace-logs-empty")).getByRole("button", { name: "Show all run logs" }));
     await waitFor(() => expect(panelMessages()).toHaveLength(4));
@@ -516,9 +537,11 @@ describe("span window", () => {
   it("Loki unavailable inside the trace view leaves the trace usable", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan]));
     vi.mocked(searchLogs).mockRejectedValue(new ApiError(503, "Log search is not configured"));
-    render(<TraceView runId={RUN} />);
+    await openTraceSheet();
+    await spanLogs(0);
     expect(await screen.findByTestId("logs-unavailable")).toHaveTextContent("Log search is not configured");
-    expect(screen.getAllByTestId("trace-span-row").length).toBe(2);
+    fireEvent.mouseDown(sheetTab("Spans"));
+    expect(within(screen.getByTestId("trace-sheet")).getAllByTestId("trace-span-row").length).toBe(2);
   });
 
   it("a stale window response is dropped after selecting another span", async () => {
@@ -526,9 +549,11 @@ describe("span window", () => {
     const slow = deferred<ReturnType<typeof reply>>();
     vi.mocked(searchLogs).mockReturnValueOnce(slow.promise);
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    const rows = await screen.findAllByTestId("trace-span-row");
-    fireEvent.click(rows[2]);
+    await openTraceSheet();
+    // The Logs tab opens on the root span (the slow response), then the tool span is selected.
+    fireEvent.mouseDown(sheetTab("Logs"));
+    await screen.findByTestId("trace-logs-panel");
+    await spanLogs(2);
     await waitFor(() => expect(panelMessages()).toEqual(["inside the tool"]));
     await act(async () => { slow.resolve(reply([logAt("stale root result", 4)])); });
     expect(panelMessages()).toEqual(["inside the tool"]);
@@ -549,8 +574,8 @@ describe("acceptance: log line to trace and span to logs", () => {
   it("from a span, the panel offers a link to the same run's Logs page", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    await screen.findAllByTestId("trace-span-row");
+    await openTraceSheet();
+    await spanLogs(1);
     expect(screen.getByRole("link", { name: "Search in Logs" })).toHaveAttribute("href", `${routes.logs()}?run_id=${RUN}`);
   });
 
@@ -620,8 +645,8 @@ describe("accessibility", () => {
   it("the trace panel's live region announces the scope and count, and its toggle exposes its state", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixtureTrace([rootSpan, modelSpan]));
     fakeServer();
-    render(<TraceView runId={RUN} />);
-    fireEvent.click((await screen.findAllByTestId("trace-span-row"))[1]);
+    await openTraceSheet();
+    await spanLogs(1);
     const panel = screen.getByTestId("trace-logs-panel");
     await waitFor(() => expect(panel.querySelector("[aria-live=polite]")).toHaveTextContent("1 log record during Model request #0: test:model"));
     const toggle = within(panel).getByRole("button", { name: "Show all run logs" });

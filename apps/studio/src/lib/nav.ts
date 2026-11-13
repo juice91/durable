@@ -4,7 +4,6 @@ import {
   McpIcon,
   MetricsIcon,
   ProcessorsIcon,
-  RequestContextIcon,
   SettingsIcon,
   ToolsIcon,
   TracesIcon,
@@ -56,7 +55,7 @@ export interface NavItem {
   match?: readonly string[];
   /** Active only on exactly its href, not on its sub-paths. */
   exact?: boolean;
-  /** A page that a later task replaces and removes from the registry (SL.10). */
+  /** A page that a later task replaces and removes from the registry (none is left since SL.10). */
   transitional?: boolean;
   /** Extra palette search words. */
   keywords?: readonly string[];
@@ -69,8 +68,6 @@ export const navItems: readonly NavItem[] = [
   { id: "tools", label: "Tools", href: routes.tools(), icon: ToolsIcon, group: "primitives", gKey: "o" },
   { id: "mcp", label: "MCP Servers", href: routes.mcp(), icon: McpIcon, group: "primitives", gKey: "m", keywords: ["mcp"] },
   { id: "processors", label: "Processors", href: routes.processors(), icon: ProcessorsIcon, group: "primitives", gKey: "p", keywords: ["guardrails"] },
-  // Transitional: SL.10 turns request context into a composer popover and removes this item.
-  { id: "request-context", label: "Request Context", href: routes.requestContext(), icon: RequestContextIcon, group: "primitives", transitional: true },
   // Observability
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },

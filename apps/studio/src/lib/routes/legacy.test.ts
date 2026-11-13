@@ -53,7 +53,20 @@ const CASES: Array<[string, Record<string, string | string[] | undefined>, strin
   ["/", { range: ["24h", "30d"] }, "/metrics?range=24h&range=30d"],
   ["/", { range: "" }, "/metrics?range="],
   ["/", { range: "//evil.com" }, "/metrics?range=%2F%2Fevil.com"],
-  // SL.10, SL.12 add their rows here (see the plan's route map).
+  // SL.10: the Request Context page is the chat composer's popover; `context=open` opens it.
+  ["/request-context", {}, "/agents"],
+  ["/request-context", { agent: "a1" }, "/agents/a1/chat?context=open"],
+  ["/request-context", { agent: "a1", version: "3" }, "/agents/a1/chat?version=3&context=open"],
+  ["/request-context", { agent: "a1", version: "draft" }, "/agents/a1/chat?version=draft&context=open"],
+  ["/request-context", { agent: "a 1/b", version: "0" }, "/agents/a%201%2Fb/chat?context=open"],
+  ["/request-context", { agent: "..", version: "2" }, "/agents"],
+  ["/request-context/", { agent: "a1", unrelated: "x" }, "/agents/a1/chat?context=open"],
+  // SL.12: the run and trace pages are the trace Sheet on Traces.
+  ["/traces/r1", {}, "/traces?trace=r1"],
+  ["/traces/r1", { x: "1" }, "/traces?trace=r1"],
+  ["/runs/r1", {}, "/traces?trace=r1&tab=events"],
+  ["/runs/a%20b", {}, "/traces?trace=a+b&tab=events"],
+  ["/traces/..", {}, null],
 ];
 
 describe("legacyTarget: the table", () => {
@@ -61,15 +74,15 @@ describe("legacyTarget: the table", () => {
     expect(legacyTarget(pathname, search)).toBe(expected);
   });
 
-  it("rows are grouped per task in plan order (SL.6, SL.7); URLs no task has retired yet are current", () => {
+  it("rows are grouped per task in plan order (SL.6, SL.7, SL.10, SL.12)", () => {
     expect(LEGACY_RULES.map((rule) => [rule.task, rule.pattern])).toEqual([
       ["SL.6", "/agents/:id"],
       ["SL.6", "/playground"],
       ["SL.7", "/"],
+      ["SL.10", "/request-context"],
+      ["SL.12", "/traces/:runId"],
+      ["SL.12", "/runs/:id"],
     ]);
-    for (const url of ["/request-context", "/traces/r1", "/runs/r1"]) {
-      expect(legacyTarget(url, {})).toBeNull();
-    }
   });
 });
 

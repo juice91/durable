@@ -10,6 +10,7 @@ import { routes } from "@/lib/routes";
 const nav = vi.hoisted(() => ({ query: "", replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/traces",
   useRouter: () => ({ push: vi.fn(), replace: nav.replace }),
   useSearchParams: () => new URLSearchParams(nav.query),
 }));

@@ -8,14 +8,18 @@ import { EMPTY_FILTERS, formatDuration, listTraceRuns, runDurationMs, traceFilte
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { Button } from "@/components/ui/Button";
+import { TraceLink } from "@/components/traces/TraceLink";
+import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 
 const PAGE_SIZE = 50;
+/** The row's test id, as a `testId` key so the test-id inventory sees it rendered. */
+const AGENT_TRACE_ROW = { testId: "agent-trace-row" } as const;
 const dim = "text-muted-foreground";
 
 /**
- * The agent page's Traces tab (SL.6): the agent's runs, newest first, each row opening its trace as
- * the Traces list does. "All filters" opens the full Traces list narrowed to this agent. SL.12 turns
- * the rows into the trace drawer.
+ * The agent page's Traces tab (SL.6, SL.12): the agent's runs, newest first; a row opens its trace
+ * in the trace Sheet in place (`?trace=` on this page, so it survives a reload), with prev / next
+ * through the rows. "Open in Traces" opens the full Traces list narrowed to this agent.
  */
 export function TracesTab({ agentId }: { agentId: string }) {
   const filters = useMemo(() => ({ ...EMPTY_FILTERS, agent_id: agentId }), [agentId]);
@@ -24,6 +28,8 @@ export function TracesTab({ agentId }: { agentId: string }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The rows' ids as the list shows them (the user's sort), for the Sheet's prev / next.
+  const [visibleIds, setVisibleIds] = useState<string[] | null>(null);
   // A response applies only while its request is the latest (a retry or an agent switch wins).
   const requestRef = useRef(0);
 
@@ -132,37 +138,53 @@ export function TracesTab({ agentId }: { agentId: string }) {
           <span className={dim}>-</span>
         ),
     },
+    {
+      id: "trace",
+      header: "Trace",
+      // The same Sheet as the row, as a real link (new tab, copy link address).
+      cell: (run) => (
+        <TraceLink runId={run.run_id} className="text-caption text-info-text hover:underline" data-testid="agent-trace-open">
+          Open
+        </TraceLink>
+      ),
+    },
   ];
 
   return (
-    <div data-testid="agent-traces-tab" className="flex min-w-0 flex-col gap-3 p-4">
-      <DataList<TraceRun>
-        label="Agent runs"
-        rows={runs}
-        columns={columns}
-        getRowId={(run) => run.run_id}
-        getRowHref={(run) => routes.trace(run.run_id)}
-        getRowLabel={(run) => `Run started ${new Date(run.created_at).toLocaleString()}`}
-        getRowTestId={() => "agent-trace-row"}
-        defaultSort={{ columnId: "started", direction: "desc" }}
-        loading={loading}
-        error={error}
-        onRetry={() => void load()}
-        empty={{ title: "No runs yet", description: "Runs appear here once the agent is used in chat or by a workflow." }}
-        toolbar={
-          <Link href={routes.traces(traceFiltersToParams(filters))} className="text-label text-info-text hover:underline" data-testid="agent-traces-all">
-            Open in Traces
-          </Link>
-        }
-        testId="agent-traces-list"
-      />
-      {nextBefore && !loading ? (
-        <div className="flex justify-center">
-          <Button variant="secondary" size="sm" onClick={() => void load(nextBefore)} disabled={loadingMore}>
-            {loadingMore ? "Loading…" : "Load more"}
-          </Button>
+    <TraceSheetHost runIds={visibleIds ?? runs.map((run) => run.run_id)}>
+      {(sheet) => (
+        <div data-testid="agent-traces-tab" className="flex min-w-0 flex-col gap-3 p-4">
+          <DataList<TraceRun>
+            label="Agent runs"
+            rows={runs}
+            columns={columns}
+            getRowId={(run) => run.run_id}
+            onRowOpen={(run) => sheet.open(run.run_id)}
+            getRowLabel={(run) => `Run started ${new Date(run.created_at).toLocaleString()}`}
+            getRowTestId={() => AGENT_TRACE_ROW.testId}
+            selectedRowId={sheet.runId}
+            onVisibleRowIdsChange={setVisibleIds}
+            defaultSort={{ columnId: "started", direction: "desc" }}
+            loading={loading}
+            error={error}
+            onRetry={() => void load()}
+            empty={{ title: "No runs yet", description: "Runs appear here once the agent is used in chat or by a workflow." }}
+            toolbar={
+              <Link href={routes.traces(traceFiltersToParams(filters))} className="text-label text-info-text hover:underline" data-testid="agent-traces-all">
+                Open in Traces
+              </Link>
+            }
+            testId="agent-traces-list"
+          />
+          {nextBefore && !loading ? (
+            <div className="flex justify-center">
+              <Button variant="secondary" size="sm" onClick={() => void load(nextBefore)} disabled={loadingMore}>
+                {loadingMore ? "Loading…" : "Load more"}
+              </Button>
+            </div>
+          ) : null}
         </div>
-      ) : null}
-    </div>
+      )}
+    </TraceSheetHost>
   );
 }

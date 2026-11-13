@@ -1,6 +1,6 @@
 import React from "react";
 import "@testing-library/jest-dom";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTab } from "@/components/agentPage/ChatTab";
 import { AgentLayout } from "@/components/agentPage/AgentLayout";
@@ -27,7 +27,7 @@ import {
 import {
   startTurnWithOptions as startTurn,
   TurnStartError,
-} from "@/components/playground/turnApi";
+} from "@/components/chat/turnApi";
 import { fetchModels, type ModelOption } from "@/lib/metrics";
 import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
@@ -47,8 +47,8 @@ vi.mock("@/lib/api", () => ({
   api: { agents: { list: vi.fn(), get: vi.fn() }, versions: { list: vi.fn() } },
 }));
 
-vi.mock("@/components/playground/turnApi", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/components/playground/turnApi")>();
+vi.mock("@/components/chat/turnApi", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/components/chat/turnApi")>();
   return { ...original, startTurnWithOptions: vi.fn() };
 });
 
@@ -579,6 +579,11 @@ describe("PlaygroundPage", () => {
     await renderReady();
 
     expect(await screen.findByText("tickets__create")).toBeInTheDocument();
+    // SL.10: the tool call is a collapsible card (status and duration in its header); the result shows
+    // once it is expanded.
+    const card = screen.getByTestId("tool-call-card");
+    expect(within(card).getByTestId("tool-call-status")).toHaveTextContent("Done");
+    fireEvent.click(within(card).getByRole("button", { name: /tickets__create/ }));
     expect(screen.getByText(/"ticket_id": "T-42"/)).toBeInTheDocument();
   });
 
@@ -880,7 +885,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     await modelsReady();
     const model = screen.getByRole("combobox", { name: "Model" });
     expect(model).toHaveValue("");
-    expect(screen.getByRole("option", { name: "Version default (openai:gpt-4.1-mini)" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Use version's model (openai:gpt-4.1-mini)" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "openai:gpt-4.1-mini" })).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "anthropic: other model…" })).toBeInTheDocument();
     await sendMessage("Hi");
@@ -959,7 +964,8 @@ describe("PlaygroundPage run options (P0.19)", () => {
     const errors = await screen.findByTestId("context-turn-errors");
     expect(errors).toHaveTextContent("tier");
     expect(errors).toHaveTextContent("String should have at most 20 characters");
-    expect(screen.getByRole("region", { name: "Request context" })).toBeInTheDocument();
+    // The 422 opened the request context popover (SL.10; it was a region of the page before).
+    expect(screen.getByRole("dialog", { name: "Request context" })).toBeInTheDocument();
     expect(lastOptions()?.request_context).toEqual({ tier: "platinum-plus-extra-long" });
   });
 
@@ -1188,14 +1194,14 @@ describe("PlaygroundPage run options (P0.19)", () => {
     );
   });
 
-  it("preselects the context preset saved on the Request Context page", async () => {
+  it("preselects the context preset saved on the Request Context page (migrated to the preset \"Saved\")", async () => {
     vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
     const { saveContext } = await import("@/lib/requestContext");
     saveContext("agent-1", { tier: "gold" }, null);
     window.history.replaceState({}, "", routes.agentChat("agent-1"));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
-    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    expect(screen.getByText("Using preset “Saved”.")).toBeInTheDocument();
     await sendMessage("Hi");
     expect(lastOptions()?.request_context).toEqual({ tier: "gold" });
   });
@@ -1209,7 +1215,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     window.history.replaceState({}, "", routes.agentChat("agent-1", { version: "draft", context: "preset" }));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
-    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    expect(screen.getByText("Using preset “Saved”.")).toBeInTheDocument();
     expect(window.sessionStorage.getItem(key)).toBeNull();
     const params = new URLSearchParams(window.location.search);
     expect(params.get("context")).toBeNull();

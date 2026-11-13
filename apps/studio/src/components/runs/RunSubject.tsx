@@ -1,6 +1,7 @@
 import React from "react";
 import type { Run } from "@/lib/runs";
 import { routes } from "@/lib/routes";
+import { TraceLink } from "@/components/traces/TraceLink";
 
 export type RunKind = "agent" | "tool" | "workflow";
 
@@ -55,13 +56,14 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
       {run.parent_run_id ? (
         <span className="block text-xs font-normal text-muted-foreground">
           Part of workflow run{" "}
-          <a
+          <TraceLink
             data-testid="run-parent-link"
-            href={routes.run(run.parent_run_id)}
+            runId={run.parent_run_id}
+            tab="events"
             className="font-mono text-primary underline-offset-4 hover:underline"
           >
             {short(run.parent_run_id)}
-          </a>
+          </TraceLink>
           {run.parent_step_id ? <> (step <span className="font-mono">{run.parent_step_id}</span>)</> : null}
         </span>
       ) : null}

@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import React from "react";
+import React, { useState } from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { TRACE_POLL_MS, TraceView, traceSignature } from "./TraceView";
+import { TraceSheet } from "./TraceSheet";
+import { TRACE_POLL_MS, traceSignature } from "./useTrace";
+import type { TraceTab } from "@/lib/routes/observability";
 import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { ApiError } from "@/lib/api";
 import { searchLogs } from "@/components/logs/logsQuery";
@@ -81,7 +83,14 @@ function fixture(): Trace {
   };
 }
 
-describe("TraceView", () => {
+
+/** The trace Sheet of `runId` on the Spans tab, tabs switchable (it replaced the old trace view). */
+function View({ runId }: { runId: string }) {
+  const [tab, setTab] = useState<TraceTab>("spans");
+  return <TraceSheet runId={runId} open tab={tab} onTabChange={setTab} onOpenChange={() => undefined} />;
+}
+
+describe("trace Sheet: spans", () => {
   beforeEach(() => {
     vi.mocked(getTrace).mockReset();
     vi.mocked(searchLogs).mockReset();
@@ -91,13 +100,13 @@ describe("TraceView", () => {
 
   it("renders the nested span tree with names, totals, Grafana link and truncation notice", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
-    render(<TraceView runId="wfrun-1" />);
+    render(<View runId="wfrun-1" />);
 
     const rows = await screen.findAllByTestId("trace-span-row");
     expect(rows.map((r) => [r.getAttribute("data-span-id"), r.getAttribute("data-depth")])).toEqual([
       ["run:wfrun-1", "0"], ["wfrun-1:step:classify", "1"], ["run:child-1", "2"], ["child-1:model:0", "3"], ["child-1:tool:c1", "3"],
     ]);
-    expect(await screen.findByRole("heading", { level: 1, name: "Workflow: Triage v3" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 2, name: "Workflow: Triage v3" })).toBeInTheDocument();
     expect(await screen.findByText("Agent: Support assistant v2")).toBeInTheDocument();
     expect(screen.getByTestId("totals-cost")).toHaveTextContent("$0.00045");
     expect(screen.getByTestId("totals-input-tokens")).toHaveTextContent("120");
@@ -110,7 +119,7 @@ describe("TraceView", () => {
 
   it("shows a model request's tokens, cost, collapsed input and server truncation", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
-    render(<TraceView runId="wfrun-1" />);
+    render(<View runId="wfrun-1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     fireEvent.click(rows[3]);
 
@@ -128,7 +137,7 @@ describe("TraceView", () => {
 
   it("links a child run to its own trace and shows a span error", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
-    render(<TraceView runId="wfrun-1" />);
+    render(<View runId="wfrun-1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     fireEvent.click(rows[2]);
     expect(screen.getByTestId("span-link-child-trace")).toHaveAttribute("href", routes.trace("child-1"));
@@ -138,7 +147,7 @@ describe("TraceView", () => {
 
   it("supports keyboard navigation and collapsing", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
-    render(<TraceView runId="wfrun-1" />);
+    render(<View runId="wfrun-1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(rows[0], { key: "ArrowDown" });
@@ -161,7 +170,7 @@ describe("TraceView", () => {
     t.totals = { ...t.totals, runs: 1, tool_calls: 0, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, cost_usd: null, unrecorded_requests: 1 };
     t.truncated.payload_fields = 0;
     vi.mocked(getTrace).mockResolvedValue(t);
-    render(<TraceView runId="old" />);
+    render(<View runId="old" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     expect(screen.getByTestId("totals-cost")).toHaveTextContent("not recorded");
     expect(screen.getByTestId("totals-input-tokens")).toHaveTextContent("not recorded");
@@ -170,18 +179,19 @@ describe("TraceView", () => {
     expect(screen.getByTestId("span-cost")).toHaveTextContent("not recorded");
   });
 
-  it("renders the logs slot with the selected span's window when given", async () => {
+  it("the Logs tab gets the selected span's window", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
-    const renderLogs = vi.fn(({ window }: { window: { start: string | null } }) => <p>logs from {window.start}</p>);
-    render(<TraceView runId="wfrun-1" renderLogsPanel={renderLogs} />);
+    render(<View runId="wfrun-1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     fireEvent.click(rows[3]);
-    expect(screen.getByTestId("trace-logs-slot")).toHaveTextContent(`logs from ${T(2)}`);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Logs" }));
+    expect(await screen.findByTestId("trace-logs-scope")).toHaveTextContent("Model request #0");
+    expect(vi.mocked(searchLogs).mock.calls.at(-1)?.[0]).toMatchObject({ run_id: "wfrun-1", from: "2026-11-13T10:00:02.000000Z" });
   });
 
   it("shows 'Run not found' for a 404", async () => {
     vi.mocked(getTrace).mockRejectedValue(new ApiError(404, "Run not found"));
-    render(<TraceView runId="nope" />);
+    render(<View runId="nope" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Run not found");
   });
 
@@ -208,7 +218,7 @@ describe("TraceView", () => {
           .mockRejectedValueOnce(new ApiError(500, "boom"))
           .mockResolvedValueOnce(runningFixture())
           .mockResolvedValue(done);
-        render(<TraceView runId="wfrun-1" />);
+        render(<View runId="wfrun-1" />);
         await flush();
         expect(getTrace).toHaveBeenCalledTimes(1);
         await act(async () => { vi.advanceTimersByTime(TRACE_POLL_MS); });
@@ -235,7 +245,7 @@ describe("TraceView", () => {
       vi.useFakeTimers();
       try {
         vi.mocked(getTrace).mockImplementation(async () => runningFixture());
-        render(<TraceView runId="wfrun-1" />);
+        render(<View runId="wfrun-1" />);
         await flush();
         const before = screen.getAllByTestId("trace-span-row");
         fireEvent.click(before[1]);
@@ -276,8 +286,8 @@ describe("TraceView", () => {
         ? new Promise<Trace>((r) => { resolveOld = r; })
         : Promise.resolve({ ...fixture(), run: { ...run, run_id: "run-b" } }),
     );
-    const view = render(<TraceView runId="run-a" />);
-    view.rerender(<TraceView runId="run-b" />);
+    const view = render(<View runId="run-a" />);
+    view.rerender(<View runId="run-b" />);
     expect(await screen.findByText("Run run-b")).toBeInTheDocument();
     const stale = fixture();
     stale.run = { ...run, run_id: "run-a" };

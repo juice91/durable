@@ -6,7 +6,10 @@ import { api } from "@/lib/api";
 import { getRun } from "@/lib/runs";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { EMPTY_FILTERS, listTraceRuns, type TraceRun } from "@/lib/traces";
-import { LogsTable } from "@/components/logs/LogsTable";
+import { LogsList } from "@/components/logs/LogsList";
+import { LogSheet } from "@/components/logs/LogSheet";
+import { TraceSheetHost, withSheetParams } from "@/components/traces/TraceSheetHost";
+import { TRACE_PARAM } from "@/lib/routes/observability";
 import { LogsUnavailable } from "@/components/logs/LogsUnavailable";
 import { useLogSearch } from "@/components/logs/useLogSearch";
 import {
@@ -23,6 +26,7 @@ import {
   logsRequestParams,
   parseLogFilters,
   type LogFilters,
+  type LogItem,
   type LogLevel,
   type RangePreset,
   type RunTimes,
@@ -137,11 +141,14 @@ function LogsSearch() {
   // URL update has not rendered yet.
   const pendingRef = useRef<{ urlKey: string; filters: LogFilters }>({ urlKey, filters });
   if (pendingRef.current.urlKey !== urlKey) pendingRef.current = { urlKey, filters };
+  // The latest URL: filter writes keep an open trace Sheet's `trace` and `tab`.
+  const latestParams = useRef(searchParams);
+  latestParams.current = searchParams;
   const setFilters = useCallback(
     (patch: Partial<LogFilters>) => {
       const next = { ...pendingRef.current.filters, ...patch };
       pendingRef.current = { ...pendingRef.current, filters: next };
-      router.replace(routes.logs(logFiltersToParams(next)), { scroll: false });
+      router.replace(routes.logs(withSheetParams(logFiltersToParams(next), latestParams.current)), { scroll: false });
     },
     [router],
   );
@@ -214,6 +221,25 @@ function LogsSearch() {
     };
   }, []);
   const [nonce, setNonce] = useState(0);
+  // The record whose log Sheet is open (no URL state: records have no stable id).
+  const [openLog, setOpenLog] = useState<{ item: LogItem; key: string } | null>(null);
+  // Opening a Sheet (a record, or a trace: `?trace=`) cancels a pending search debounce: its late
+  // URL write must not land under the Sheet. The typed text stays in the box; Enter applies it.
+  const cancelSearchDebounce = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = null;
+  }, []);
+  const traceOpen = searchParams?.get(TRACE_PARAM) ?? null;
+  useEffect(() => {
+    if (traceOpen) cancelSearchDebounce();
+  }, [traceOpen, cancelSearchDebounce]);
+  const onOpenLog = useCallback(
+    (item: LogItem, key: string) => {
+      cancelSearchDebounce();
+      setOpenLog({ item, key });
+    },
+    [cancelSearchDebounce],
+  );
   const runOptions = useRunOptions(filters.agent_id, nonce);
 
   // --- the query --------------------------------------------------------------------------------
@@ -260,6 +286,7 @@ function LogsSearch() {
   return (
     <>
       <PageHeader crumbs={[navCrumb("logs", { current: true })]} />
+    <TraceSheetHost>
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
         <p className="mt-1 text-muted-foreground">Search your API and worker logs, and jump from a record to its run&apos;s trace</p>
@@ -390,7 +417,7 @@ function LogsSearch() {
               committedRef.current = null;
               pendingRef.current = { ...pendingRef.current, filters: EMPTY_LOG_FILTERS };
               setText("");
-              router.replace(routes.logs(), { scroll: false });
+              router.replace(routes.logs(withSheetParams(new URLSearchParams(), latestParams.current)), { scroll: false });
             }}
           >
             Clear filters
@@ -438,7 +465,7 @@ function LogsSearch() {
           </p>
         </div>
       ) : (
-        <LogsTable items={items} caption="Log records, newest first" busy={busy} />
+        <LogsList items={items} caption="Log records, newest first" busy={busy} selectedKey={openLog?.key ?? null} onOpen={onOpenLog} />
       )}
 
       {!problem && !search.error && search.hasOlder ? (
@@ -451,7 +478,9 @@ function LogsSearch() {
       {search.olderError ? (
         <p role="alert" className="mt-2 text-center text-sm text-muted-foreground">{search.olderError}</p>
       ) : null}
+      <LogSheet item={openLog?.item ?? null} onClose={() => setOpenLog(null)} />
     </div>
+    </TraceSheetHost>
     </>
   );
 }

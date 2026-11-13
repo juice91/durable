@@ -27,8 +27,8 @@ vi.mock("@/lib/conversations", () => ({
   listConversations: vi.fn(),
   renameConversation: vi.fn(),
 }));
-vi.mock("@/components/playground/turnApi", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/components/playground/turnApi")>();
+vi.mock("@/components/chat/turnApi", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/components/chat/turnApi")>();
   return { ...original, startTurnWithOptions: vi.fn() };
 });
 vi.mock("@/lib/runs", async (importOriginal) => {
@@ -50,7 +50,7 @@ vi.mock("@/lib/traces", async (importOriginal) => {
 
 import { api, ApiError, type Agent, type AgentSpec } from "@/lib/api";
 import { createConversation, getConversation, listConversations } from "@/lib/conversations";
-import { startTurnWithOptions } from "@/components/playground/turnApi";
+import { startTurnWithOptions } from "@/components/chat/turnApi";
 import { getRequestContext } from "@/lib/requestContext";
 import { listTraceRuns } from "@/lib/traces";
 import { routes } from "@/lib/routes";
@@ -206,13 +206,16 @@ describe("agent page shell (wide)", () => {
     expect(screen.queryByRole("navigation", { name: "Conversations" })).toBeNull();
   });
 
-  it("the request context panel shows inside Config, never in the chat column", async () => {
+  it("the request context opens as the composer's popover, never in Config or a column of the chat", async () => {
     renderChat();
     const toggle = await screen.findByRole("button", { name: /Request context/ });
     await waitFor(() => expect(toggle).toBeEnabled());
+    // The button lives in the composer (SL.10; SL.6 put the panel in Config).
+    expect(screen.getByTestId("chat-composer")).toContainElement(toggle);
     fireEvent.click(toggle);
     const panel = await screen.findByTestId("playground-context-panel");
-    expect(screen.getByRole("complementary", { name: "Config" })).toContainElement(panel);
+    expect(screen.getByRole("dialog", { name: "Request context" })).toContainElement(panel);
+    expect(screen.getByRole("complementary", { name: "Config" })).not.toContainElement(panel);
     expect(screen.getByTestId("agent-chat")).not.toContainElement(panel);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
   });
@@ -491,6 +494,17 @@ describe("redirect pages", () => {
     render(element as React.ReactElement);
     expect(screen.getByTestId("playground-redirect")).toBeInTheDocument();
     await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(routes.agentChat("a1")));
+  });
+
+  it("/request-context redirects to the agent's chat with the popover open, or to Agents (SL.10)", async () => {
+    const { default: Page } = await import("@/app/request-context/page");
+    await Page({ searchParams: Promise.resolve({ agent: "a1", version: "2" }) });
+    expect(redirectMock).toHaveBeenLastCalledWith(routes.agentChat("a1", { version: 2, context: "open" }));
+    await Page({ searchParams: Promise.resolve({ version: ["draft"] }) });
+    expect(redirectMock).toHaveBeenLastCalledWith(routes.agents());
+    await Page({ searchParams: Promise.resolve({ agent: "..", version: "2" }) });
+    expect(redirectMock).toHaveBeenLastCalledWith(routes.agents());
+    expect(redirectMock).toHaveBeenCalledTimes(3);
   });
 });
 

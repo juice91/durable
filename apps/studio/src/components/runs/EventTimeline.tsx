@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
+import { TraceLink } from "@/components/traces/TraceLink";
 
 interface EventItemProps {
   event: RunEvent;
@@ -225,6 +226,16 @@ function EventItem({ event }: EventItemProps) {
           {event.type}
         </div>
         {renderContent()}
+        {/* A workflow step's child run: its trace stacks over this one where the trace Sheet is hosted. */}
+        {typeof event.data.child_run_id === "string" && event.data.child_run_id ? (
+          <TraceLink
+            runId={event.data.child_run_id}
+            data-testid="event-child-run-link"
+            className="mt-1 inline-block text-xs text-primary underline-offset-4 hover:underline"
+          >
+            Open child run trace
+          </TraceLink>
+        ) : null}
       </div>
     </div>
   );

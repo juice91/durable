@@ -103,8 +103,6 @@ interface PageCase {
   active: string;
 }
 
-const RUN = "11111111-2222-3333-4444-555555555555";
-
 /** An agent tab page inside `app/agents/[id]/layout.tsx`, as Next renders it. */
 async function inAgentLayout(tab: Promise<{ default: React.ComponentType }>): Promise<{ default: React.ComponentType }> {
   const [{ default: Layout }, { default: Tab }] = await Promise.all([import("@/app/agents/[id]/layout"), tab]);
@@ -132,11 +130,22 @@ const PAGES: PageCase[] = [
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", active: "tools" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", active: "mcp" },
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", active: "processors" },
-  { name: "request-context", path: "/request-context", load: () => import("@/app/request-context/page"), h1: "Request Context", active: "request-context" },
+  // SL.10: `/request-context` redirects to the chat with its request context popover open (`context=open`).
+  {
+    name: "request-context",
+    path: "/agents/a1/chat",
+    params: { id: "a1" },
+    load: () => {
+      window.history.replaceState(null, "", routes.agentChat("a1", { context: "open" }));
+      return inAgentLayout(import("@/app/agents/[id]/chat/page"));
+    },
+    h1: "Support bot",
+    active: "agents",
+  },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", active: "metrics" },
   { name: "traces", path: "/traces", load: () => import("@/app/traces/page"), h1: "Traces", active: "traces" },
-  { name: "trace run", path: `/traces/${RUN}`, params: { runId: RUN }, load: () => import("@/app/traces/[runId]/page"), h1: null, active: "traces" },
-  { name: "runs/[id]", path: `/runs/${RUN}`, params: { id: RUN }, load: () => import("@/app/runs/[id]/page"), h1: null, active: "traces" },
+  // SL.12: `/traces/:runId` and `/runs/:id` are redirects; a run's trace and events are the trace Sheet
+  // over the list, checked inside this frame (light and dark, axe) in components/traces/TraceSheet.frame.test.tsx.
   { name: "logs", path: "/logs", load: () => import("@/app/logs/page"), h1: "Logs", active: "logs" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", active: "settings" },
 ];

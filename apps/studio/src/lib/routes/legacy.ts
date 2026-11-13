@@ -11,7 +11,7 @@
 
 import { agentRoutes, type RouteVersion } from "./agents";
 import { RouteIdError } from "./query";
-import { observabilityRoutes } from "./observability";
+import { observabilityRoutes, TRACE_LEGACY_RULES } from "./observability";
 
 export type LegacySearchParams =
   | URLSearchParams
@@ -78,6 +78,19 @@ export const LEGACY_RULES: readonly LegacyRule[] = [
       return carried.toString() ? observabilityRoutes.metrics(carried) : agentRoutes.agents();
     },
   },
+  // SL.10: the Request Context page became the chat composer's popover (with named presets). With an
+  // agent it opens that agent's chat on the same version with the popover open; without one, Agents.
+  {
+    task: "SL.10",
+    pattern: "/request-context",
+    to: (_params, search) => {
+      const agent = search.get("agent");
+      if (!agent) return agentRoutes.agents();
+      return chatOrAgents(agent, { version: legacyVersion(search.get("version")), context: "open" });
+    },
+  },
+  // SL.12: the run and trace pages became the trace Sheet on Traces (rules defined with the routes).
+  ...TRACE_LEGACY_RULES,
 ];
 
 /** Next 15 `searchParams` (a record, values possibly arrays) or URLSearchParams, as URLSearchParams. */

@@ -13,6 +13,9 @@ import {
 } from "@/lib/traces";
 import { KIND_BADGE, STATUS_BAR, STATUS_LABELS } from "./spanStyles";
 
+/** "timeline": each span's bar on the trace's time axis (the waterfall). "tree": the span tree alone. */
+export type SpanTreeMode = "timeline" | "tree";
+
 interface TraceWaterfallProps {
   rows: SpanRow[];
   window: TraceWindow | null;
@@ -23,6 +26,8 @@ interface TraceWaterfallProps {
   names?: NameMaps;
   /** Fixed "now" for open spans (tests); defaults to the render time. */
   now?: number;
+  /** Timeline (default) or Tree: the same rows, without the time axis and bars. */
+  mode?: SpanTreeMode;
 }
 
 interface RowItemProps {
@@ -39,6 +44,7 @@ interface RowItemProps {
   widthPct: number;
   zeroLength: boolean;
   duration: string;
+  mode: SpanTreeMode;
   onSelect: (spanId: string) => void;
   onToggle: (spanId: string) => void;
   onKey: (event: React.KeyboardEvent, spanId: string) => void;
@@ -49,8 +55,9 @@ interface RowItemProps {
  * re-renders only the rows whose selection, focus, collapse state or geometry changed. */
 const RowItem = memo(function RowItem({
   spanId, kind, status, label, depth, expandable, isCollapsed, selected, focusable,
-  offsetPct, widthPct, zeroLength, duration, onSelect, onToggle, onKey, registerRef,
+  offsetPct, widthPct, zeroLength, duration, mode, onSelect, onToggle, onKey, registerRef,
 }: RowItemProps) {
+  const timeline = mode === "timeline";
   return (
     <div
       ref={(el) => registerRef(spanId, el)}
@@ -71,7 +78,7 @@ const RowItem = memo(function RowItem({
         selected ? "bg-accent text-accent-foreground" : "hover:bg-muted/60"
       }`}
     >
-      <div className="flex w-2/5 shrink-0 items-center gap-1 overflow-hidden pr-2" style={{ paddingLeft: `${depth * 16}px` }}>
+      <div className={`flex ${timeline ? "w-2/5 shrink-0" : "min-w-0 flex-1"} items-center gap-1 overflow-hidden pr-2`} style={{ paddingLeft: `${depth * 16}px` }}>
         {expandable ? (
           <button
             type="button"
@@ -92,7 +99,11 @@ const RowItem = memo(function RowItem({
           {KIND_BADGE[kind]}
         </span>
         <span className="truncate" title={label}>{label}</span>
+        {timeline ? null : (
+          <span data-testid="trace-span-dot" className={`ml-1 inline-block size-2 shrink-0 rounded-full ${STATUS_BAR[status]}`} aria-hidden="true" />
+        )}
       </div>
+      {timeline ? (
       <div className="relative h-5 flex-1" aria-hidden="true">
         <div className="absolute inset-y-2 left-0 right-0 rounded bg-muted/40" />
         {zeroLength ? (
@@ -109,6 +120,7 @@ const RowItem = memo(function RowItem({
           />
         )}
       </div>
+      ) : null}
       <div className="w-20 shrink-0 pl-2 text-right font-mono text-xs text-muted-foreground">{duration}</div>
     </div>
   );
@@ -118,7 +130,7 @@ const RowItem = memo(function RowItem({
  * on the trace's time axis and coloured by status. A WAI-ARIA tree: Up/Down move, Right expands or
  * enters the first child, Left collapses or goes to the parent, Home/End jump. */
 export function TraceWaterfall({
-  rows, window, selectedId, onSelect, collapsed, onToggle, names, now,
+  rows, window, selectedId, onSelect, collapsed, onToggle, names, now, mode = "timeline",
 }: TraceWaterfallProps) {
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const focusPending = useRef(false);
@@ -187,13 +199,22 @@ export function TraceWaterfall({
   const focusId = selectedId && indexById.has(selectedId) ? selectedId : rows[0]?.span.id;
 
   return (
-    <div className="rounded-md border border-border bg-card">
+    <div className="rounded-md border border-border bg-card" data-span-mode={mode}>
       <div className="flex border-b border-border bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
-        <div className="w-2/5 shrink-0">Span</div>
-        <div className="flex flex-1 justify-between">
-          <span>0 ms</span>
-          <span>{formatDuration(window?.durationMs ?? null)}</span>
-        </div>
+        {mode === "timeline" ? (
+          <>
+            <div className="w-2/5 shrink-0">Span</div>
+            <div className="flex flex-1 justify-between">
+              <span>0 ms</span>
+              <span>{formatDuration(window?.durationMs ?? null)}</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="min-w-0 flex-1">Span</div>
+            <div className="w-20 shrink-0 text-right">{formatDuration(window?.durationMs ?? null)}</div>
+          </>
+        )}
       </div>
       <div role="tree" aria-label="Trace spans" className="max-h-[32rem] overflow-auto">
         {rows.map((row) => {
@@ -215,6 +236,7 @@ export function TraceWaterfall({
               widthPct={geom.widthPct}
               zeroLength={geom.zeroLength}
               duration={geom.open ? "running" : formatDuration(geom.durationMs)}
+              mode={mode}
               onSelect={onSelect}
               onToggle={onToggle}
               onKey={onKey}

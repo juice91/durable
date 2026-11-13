@@ -16,7 +16,8 @@ import { useIsWide, useViewportWidth } from "@/components/frame/useMediaQuery";
 import { IconButton } from "@/components/ui/IconButton";
 import { toast } from "@/components/ui/Toaster";
 import { TooltipProvider } from "@/components/ui/Tooltip";
-import type { VersionRef } from "@/components/playground/runOptions";
+import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
+import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
 import { THREADS_TITLE } from "./AgentChatPanes";
@@ -62,7 +63,6 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [configVersion, setConfigVersion] = useState<VersionRef>(null);
-  const [requestContextSlot, setRequestContextSlot] = useState<HTMLElement | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   // The chat's address while on this agent, so Chat → Traces → Chat returns to the same conversation.
   const [chatHref, setChatHref] = useState<string | null>(null);
@@ -251,11 +251,10 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       threadsAutoCollapsed: isWide && autoCollapsed,
       threadsPaneExpanded,
       reportThreadsPane,
-      requestContextSlot,
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, requestContextSlot, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -311,6 +310,9 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   return (
     <TooltipProvider>
       <AgentPageContext.Provider value={value}>
+        {/* The page's one trace Sheet host (SL.12): Open trace in chat and the Traces tab's rows open
+            it in place; the Traces tab's own host hands its run ids up for prev / next. */}
+        <TraceSheetHost>
         <div data-testid="agent-page" className="flex h-full min-h-0 min-w-0 flex-col">
           <PageHeader
             crumbs={crumbs}
@@ -339,7 +341,6 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
                 agent={agent}
                 versions={versions}
                 versionRef={tab === "chat" ? configVersion : null}
-                requestContextSlotRef={tab === "chat" ? setRequestContextSlot : undefined}
               />
             ) : (
               <p className="px-3 py-3 text-label text-muted-foreground">{loadError ?? "Loading configuration…"}</p>
@@ -355,6 +356,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">{children}</div>
           )}
         </div>
+        </TraceSheetHost>
       </AgentPageContext.Provider>
     </TooltipProvider>
   );

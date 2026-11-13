@@ -1,6 +1,10 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
+import { cn } from "@/lib/cn";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { Button, focusRing } from "@/components/ui/Button";
 import {
   listConversations,
   renameConversation,
@@ -191,39 +195,36 @@ export function ConversationRail({
       aria-label="Conversations"
       className="flex min-h-0 w-full min-w-0 flex-1 flex-col"
     >
-      <button
-        type="button"
-        onClick={onNew}
-        disabled={!agentId}
-        className="mb-3 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-      >
+      <Button onClick={onNew} disabled={!agentId} className="mb-2 w-full justify-start">
+        <Plus aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} />
         New conversation
-      </button>
+      </Button>
+      <h2 className="mb-1 px-2 text-caption font-semibold uppercase tracking-wide text-muted-foreground">Recent</h2>
 
       {error && (
-        <p role="alert" className="mb-2 text-sm text-destructive-text">
+        <p role="alert" className="mb-2 px-2 text-label text-destructive-text">
           {error}
         </p>
       )}
 
       {loading && items.length === 0 ? (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="px-2 text-label text-muted-foreground">
           Loading conversations…
         </p>
       ) : !agentId ? (
-        <p className="text-sm text-muted-foreground">Choose an agent to see its conversations.</p>
+        <p className="px-2 text-label text-muted-foreground">Choose an agent to see its conversations.</p>
       ) : items.length === 0 && !error ? (
-        <p className="text-sm text-muted-foreground">
+        <p className="px-2 text-label text-muted-foreground">
           No conversations yet. Send a message to start one.
         </p>
       ) : (
-        <ul ref={listRef} className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+        <ul ref={listRef} className="min-h-0 flex-1 space-y-0.5 overflow-y-auto">
           {items.map((conversation) => {
             const selected = conversation.id === selectedId;
             const label = conversationLabel(conversation);
             if (editingId === conversation.id) {
               return (
-                <li key={conversation.id} className="rounded-md bg-muted p-2">
+                <li key={conversation.id} className="rounded-md bg-fill-selected p-1.5">
                   <input
                     aria-label="Conversation title"
                     autoFocus
@@ -240,10 +241,10 @@ export function ConversationRail({
                       }
                     }}
                     onBlur={() => void saveRename(conversation)}
-                    className="w-full rounded border border-border bg-card px-2 py-1 text-sm text-card-foreground"
+                    className={cn("w-full rounded-sm border border-border bg-surface px-2 py-1 text-label text-foreground", focusRing)}
                   />
                   {renameError && (
-                    <p role="alert" className="mt-1 text-xs text-destructive-text">
+                    <p role="alert" className="mt-1 text-caption text-destructive-text">
                       {renameError}
                     </p>
                   )}
@@ -253,7 +254,7 @@ export function ConversationRail({
             return (
               <li
                 key={conversation.id}
-                className={`group flex items-start gap-1 rounded-md ${selected ? "bg-muted" : "hover:bg-muted"}`}
+                className={cn("group flex min-w-0 items-start gap-1 rounded-md", selected ? "bg-fill-selected" : "hover:bg-fill-hover")}
               >
                 <button
                   type="button"
@@ -261,16 +262,16 @@ export function ConversationRail({
                   aria-current={selected ? "true" : undefined}
                   onClick={() => onSelect(conversation)}
                   onKeyDown={moveFocus}
-                  className="min-w-0 flex-1 px-2 py-2 text-left"
+                  className={cn("min-w-0 flex-1 rounded-md px-2 py-1.5 text-left", focusRing)}
                 >
-                  <span className={`block truncate text-sm ${selected ? "font-semibold" : ""}`}>{label}</span>
-                  <span className="block text-xs text-muted-foreground">{summary(conversation)}</span>
+                  <span className={cn("block truncate text-label text-foreground", selected && "font-semibold")}>{label}</span>
+                  <span className="block truncate text-caption text-muted-foreground">{summary(conversation)}</span>
                 </button>
                 <button
                   type="button"
                   aria-label={`Rename ${label}`}
                   onClick={() => startRename(conversation)}
-                  className="rounded px-2 py-2 text-xs text-muted-foreground opacity-70 hover:text-foreground focus:opacity-100 group-hover:opacity-100"
+                  className={cn("shrink-0 rounded-md px-2 py-1.5 text-caption text-muted-foreground opacity-70 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100", focusRing)}
                 >
                   Rename
                 </button>
@@ -285,7 +286,7 @@ export function ConversationRail({
           type="button"
           onClick={loadMore}
           disabled={loadingMore}
-          className="mt-2 rounded-md px-3 py-1 text-sm text-muted-foreground hover:bg-muted disabled:opacity-50"
+          className={cn("mt-2 rounded-md px-2 py-1 text-label text-muted-foreground hover:bg-fill-hover disabled:opacity-50", focusRing)}
         >
           {loadingMore ? "Loading…" : "Load more"}
         </button>

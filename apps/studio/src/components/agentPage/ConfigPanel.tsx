@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
 import { Button, focusRing } from "@/components/ui/Button";
 import { sectionsOf } from "@/components/agents/specSections";
-import type { VersionRef } from "@/components/playground/runOptions";
+import type { VersionRef } from "@/components/chat/runOptions";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 
 /** Editor steps the "Edit" links open (SL.11's stepper reads `?step=`). */
@@ -19,9 +19,6 @@ export interface ConfigPanelProps {
   versions: AgentVersion[] | null;
   /** The version the chat targets; null: the latest published (the draft when none is). */
   versionRef?: VersionRef;
-  /** Receives the element the chat's temporary "Request context" section renders into (SL.6 only;
-   * SL.10 moves request context into the composer). */
-  requestContextSlotRef?: (element: HTMLElement | null) => void;
 }
 
 function Section({
@@ -63,7 +60,7 @@ const muted = "text-muted-foreground";
  * is made of, from the effective spec (latest published, or the draft with `?version=draft`). Each
  * section links to its editor step.
  */
-export function ConfigPanel({ agent, versions, versionRef = null, requestContextSlotRef }: ConfigPanelProps) {
+export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelProps) {
   const config = effectiveConfig(agent, versions, versionRef);
   const spec = config.spec;
   const counts = configCounts(spec);
@@ -90,9 +87,6 @@ export function ConfigPanel({ agent, versions, versionRef = null, requestContext
           {config.restoredFrom ? <span className={muted}>restored from v{config.restoredFrom}</span> : null}
         </p>
       </Section>
-
-      {/* Temporary until SL.10: the chat's request context values. */}
-      {requestContextSlotRef ? <div ref={requestContextSlotRef} data-testid="config-request-context-slot" className="min-w-0 px-3 empty:hidden" /> : null}
 
       {spec === null ? (
         <p className={cn("px-3 py-3 text-label", muted)} role="status">

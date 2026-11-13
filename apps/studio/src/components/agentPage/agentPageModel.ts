@@ -5,7 +5,7 @@
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes, type AgentChatRouteOptions } from "@/lib/routes";
 import { sectionsOf } from "@/components/agents/specSections";
-import { effectiveVersionRef, targetSpec, type VersionRef } from "@/components/playground/runOptions";
+import { effectiveVersionRef, targetSpec, type VersionRef } from "@/components/chat/runOptions";
 import { readStorage, writeStorage } from "@/lib/safeStorage";
 
 /** The agent whose chat was opened last (`/playground` without an agent goes there). */

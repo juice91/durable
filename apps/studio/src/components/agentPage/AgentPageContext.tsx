@@ -2,7 +2,7 @@
 
 import { createContext, useContext } from "react";
 import type { Agent, AgentVersion } from "@/lib/api";
-import type { VersionRef } from "@/components/playground/runOptions";
+import type { VersionRef } from "@/components/chat/runOptions";
 
 /**
  * What `app/agents/[id]/layout.tsx` (through `AgentLayout`) shares with its tabs: the agent, loaded
@@ -41,9 +41,6 @@ export interface AgentPageValue {
   threadsPaneExpanded: boolean | null;
   /** The panes report their real state here (null when they unmount). */
   reportThreadsPane: (expanded: boolean | null) => void;
-  /** Where the chat portals its temporary "Request context" section (inside the Config panel); null
-   * while the Config panel is closed. */
-  requestContextSlot: HTMLElement | null;
   /** The chat's current address (conversation and options), so the Chat tab returns to it. */
   chatHref: string | null;
   setChatHref: (href: string | null) => void;

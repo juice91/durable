@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import React from "react";
+import React, { useState } from "react";
 import "@testing-library/jest-dom";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { TraceView } from "./TraceView";
+import { TraceSheet } from "./TraceSheet";
+import type { TraceTab } from "@/lib/routes/observability";
 import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { ApiError } from "@/lib/api";
 import { searchLogs } from "@/components/logs/logsQuery";
@@ -50,7 +51,14 @@ function base(): Trace {
   };
 }
 
-describe("TraceView acceptance", () => {
+
+/** The trace Sheet of `runId` on the Spans tab, tabs switchable (it replaced the old trace view). */
+function View({ runId }: { runId: string }) {
+  const [tab, setTab] = useState<TraceTab>("spans");
+  return <TraceSheet runId={runId} open tab={tab} onTabChange={setTab} onOpenChange={() => undefined} />;
+}
+
+describe("trace Sheet: spans acceptance", () => {
   beforeEach(() => {
     vi.mocked(getTrace).mockReset();
     vi.mocked(searchLogs).mockReset();
@@ -60,7 +68,7 @@ describe("TraceView acceptance", () => {
 
   it("an unpriced request says 'no price', an unmeasured one 'not recorded'; totals say 'no price'", async () => {
     vi.mocked(getTrace).mockResolvedValue(base());
-    render(<TraceView runId="r1" />);
+    render(<View runId="r1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     expect(screen.getByTestId("totals-cost")).toHaveTextContent("no price");
     fireEvent.click(rows[1]);
@@ -74,7 +82,7 @@ describe("TraceView acceptance", () => {
     const t = base();
     t.truncated = { spans: true, events: true, child_runs: true, payload_fields: 3 };
     vi.mocked(getTrace).mockResolvedValue(t);
-    render(<TraceView runId="r1" />);
+    render(<View runId="r1" />);
     const note = await screen.findByTestId("trace-truncation");
     expect(note).toHaveTextContent("Only the first 2,000 spans are shown.");
     expect(note).toHaveTextContent("more than 10,000 events");
@@ -84,7 +92,7 @@ describe("TraceView acceptance", () => {
 
   it("waterfall: Up, Home, End and Enter move and select; the detail follows", async () => {
     vi.mocked(getTrace).mockResolvedValue(base());
-    render(<TraceView runId="r1" />);
+    render(<View runId="r1" />);
     const rows = () => screen.getAllByTestId("trace-span-row");
     await screen.findAllByTestId("trace-span-row");
     expect(screen.getByRole("tree", { name: "Trace spans" })).toBeInTheDocument();
@@ -102,7 +110,7 @@ describe("TraceView acceptance", () => {
 
   it("a 404 says the run was not found", async () => {
     vi.mocked(getTrace).mockRejectedValue(new ApiError(404, "Run not found"));
-    render(<TraceView runId="nope" />);
+    render(<View runId="nope" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Run not found");
   });
 
@@ -110,7 +118,7 @@ describe("TraceView acceptance", () => {
     vi.mocked(getTrace).mockImplementation(async () => {
       throw new ApiError(500, "boom");
     });
-    render(<TraceView runId="r2" />);
+    render(<View runId="r2" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Failed to load the trace");
   });
 });

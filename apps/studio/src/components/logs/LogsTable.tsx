@@ -1,8 +1,7 @@
-import Link from "next/link";
 import React, { useMemo, useState } from "react";
 import { LogLevelBadge } from "./LogLevelBadge";
 import { formatLogTime, logRowKeys, type LogItem } from "./logsQuery";
-import { routes } from "@/lib/routes";
+import { TraceLink } from "@/components/traces/TraceLink";
 
 interface LogsTableProps {
   items: LogItem[];
@@ -15,7 +14,7 @@ interface LogsTableProps {
 /** Messages longer than this many characters are shown cut, with a control to expand them. */
 export const MESSAGE_PREVIEW_CHARS = 2000;
 
-function LogMessage({ message }: { message: string }) {
+export function LogMessage({ message }: { message: string }) {
   const [expanded, setExpanded] = useState(false);
   const long = message.length > MESSAGE_PREVIEW_CHARS;
   const shown = long && !expanded ? `${message.slice(0, MESSAGE_PREVIEW_CHARS)}...` : message;
@@ -36,7 +35,7 @@ function LogMessage({ message }: { message: string }) {
   );
 }
 
-function shortId(id: string): string {
+export function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}...` : id;
 }
 
@@ -74,13 +73,13 @@ export const LogsTable = React.memo(function LogsTable({ items, caption, showTra
                 {showTraceLink ? (
                   <td className="whitespace-nowrap px-3 py-2 text-xs">
                     {item.run_id ? (
-                      <Link
-                        href={routes.trace(item.run_id)}
+                      <TraceLink
+                        runId={item.run_id}
                         aria-label={`Open trace of run ${item.run_id}`}
                         className="font-mono text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         {shortId(item.run_id)}
-                      </Link>
+                      </TraceLink>
                     ) : (
                       <span className="text-muted-foreground" title="Not logged inside a run">-</span>
                     )}

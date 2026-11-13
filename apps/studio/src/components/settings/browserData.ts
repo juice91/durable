@@ -1,5 +1,5 @@
 import { SIDE_PANEL_STORAGE_KEY } from "@/components/frame/frameStorage";
-import { SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
+import { PRESETS_PREFIX, SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
 import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 import { safeLocalStorage } from "@/lib/safeStorage";
@@ -86,9 +86,9 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
   {
     id: "request-context",
     label: "Request-context presets",
-    description: "Saved request-context values for each agent.",
+    description: "Named request-context presets for each agent (and the single saved value they were migrated from).",
     keys: [],
-    prefixes: [SAVED_CONTEXT_PREFIX],
+    prefixes: [PRESETS_PREFIX, SAVED_CONTEXT_PREFIX],
     clearGroup: "presets",
   },
 ];

@@ -61,10 +61,12 @@ describe("turnBody", () => {
 describe("URL state", () => {
   it("parses valid values and ignores invalid ones", () => {
     expect(parseUrlState("?agent=a&conversation=c&version=3&model=test:echo")).toEqual({
-      agent: "a", conversation: "c", version: 3, model: "test:echo", preferPreset: false,
+      agent: "a", conversation: "c", version: 3, model: "test:echo", preferPreset: false, openContext: false,
     });
     expect(parseUrlState("?agent=a&context=preset").preferPreset).toBe(true);
     expect(parseUrlState("?agent=a&context=other").preferPreset).toBe(false);
+    expect(parseUrlState("?agent=a&context=open")).toMatchObject({ preferPreset: false, openContext: true });
+    expect(parseUrlState("?agent=a&context=other").openContext).toBe(false);
     expect(parseUrlState("?version=draft").version).toBe("draft");
     for (const bad of ["0", "-1", "1.5", "abc", ""]) expect(parseUrlState(`?version=${bad}`).version).toBeNull();
     for (const bad of ["noprovider", "openai:*", ":x", "a b:c"]) expect(parseUrlState(`?model=${encodeURIComponent(bad)}`).model).toBeNull();

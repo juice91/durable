@@ -9,6 +9,7 @@
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import type { ModelOption } from "@/lib/metrics";
 import {
+  OPEN_CONTEXT_VALUE,
   PRESET_CONTEXT_PARAM,
   PRESET_CONTEXT_VALUE,
   credentialScope,
@@ -53,8 +54,10 @@ export interface PlaygroundUrlState {
   version: VersionRef;
   /** The model override as `provider:name`, or null for the version's model. */
   model: string | null;
-  /** `context=preset` (from the Request Context page): the saved preset wins over the tab's context. */
+  /** `context=preset`: the newest saved preset wins over the tab's remembered context. */
   preferPreset: boolean;
+  /** `context=open` (the old Request Context page's links): the request context popover opens. */
+  openContext: boolean;
 }
 
 const MODEL_ID_RE = /^[A-Za-z0-9_.-]+:\S.{0,199}$/;
@@ -79,10 +82,11 @@ export function parseUrlState(search: string): PlaygroundUrlState {
     version: parseVersionParam(params.get("version")),
     model: parseModelParam(params.get("model")),
     preferPreset: params.get(PRESET_CONTEXT_PARAM) === PRESET_CONTEXT_VALUE,
+    openContext: params.get(PRESET_CONTEXT_PARAM) === OPEN_CONTEXT_VALUE,
   };
 }
 
-/** Removes the one-shot `context=preset` flag from the URL so a reload or later edits are not overridden. */
+/** Removes the one-shot `context=preset` / `context=open` flag from the URL so a reload or later edits are not overridden. */
 export function stripPreferPresetParam(): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
@@ -483,4 +487,34 @@ export function optionsFromRun(run: RunUsageRow): TurnOptions {
 export function versionLabel(draft: boolean, version: number | null | undefined): string | null {
   if (draft) return "Draft";
   return typeof version === "number" ? `v${version}` : null;
+}
+
+// ------------------------------------------------------------------------- draft vs latest
+
+/** JSON with object keys sorted, so two equal specs compare equal whatever their key order. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Whether the draft holds changes the latest published version lacks (the version chip then lists
+ * Draft first). True for an agent with no published version; false while the versions load.
+ */
+export function draftDiffersFromLatest(
+  draftSpec: AgentSpec | null | undefined,
+  latestVersion: number | null,
+  versions: readonly AgentVersion[] | null,
+): boolean {
+  if (latestVersion === null) return true;
+  if (!draftSpec || versions === null) return false;
+  const latest = versions.find((item) => item.version === latestVersion);
+  return latest ? canonical(draftSpec) !== canonical(latest.spec) : false;
 }

@@ -152,13 +152,14 @@ describe("Agent MCP tool picker acceptance", () => {
       { server: "ghost", tool: "lookup" },
     ]));
     await screen.findByDisplayValue("Test Agent");
-    const chips = await screen.findAllByTestId("mcp-selected-tool");
-    const docsChip = chips.find((chip) => chip.textContent?.includes("docs/search"));
-    const ghostChip = chips.find((chip) => chip.textContent?.includes("ghost/lookup"));
-    expect(docsChip).toHaveTextContent("server disabled");
-    expect(ghostChip).toHaveTextContent("server not registered");
+    // The servers list loads separately from the agent; the warnings appear once it has settled.
+    expect(await screen.findByText(/No enabled MCP servers/)).toBeInTheDocument();
+    await waitFor(() => {
+      const chips = screen.getAllByTestId("mcp-selected-tool");
+      expect(chips.find((chip) => chip.textContent?.includes("docs/search"))).toHaveTextContent("server disabled");
+      expect(chips.find((chip) => chip.textContent?.includes("ghost/lookup"))).toHaveTextContent("server not registered");
+    });
     expect(screen.queryByLabelText("Tool name on docs")).not.toBeInTheDocument();
-    expect(screen.getByText(/No enabled MCP servers/)).toBeInTheDocument();
   });
 
   it("shows a publish 422 when an MCP server is disabled", async () => {
