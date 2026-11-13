@@ -6,6 +6,7 @@
 - GET  /conversations/{id}                one conversation with its runs in turn order
 - PATCH /conversations/{id}               rename (title 1–200 characters)
 - POST /conversations/{id}/runs           start the next turn
+- DELETE /conversations/{id}              delete the conversation and its derived memory (RM.9)
 
 A turn is an ordinary run (same enqueue, same events, same SSE) whose row also carries
 conversation_id and turn; the worker builds the turn's message history from the earlier completed
@@ -14,6 +15,20 @@ untitled conversation from its input (first 60 characters, one line), under the 
 idempotent on the client run_id exactly like POST /agents/{id}/runs: the row is inserted under the
 conversation's lock, then the workflow is enqueued on every attempt, so a crash between the two
 heals when the client retries. Another tenant's or an unknown conversation is a 404.
+
+Resource identity (RAG and memory milestone, RM.9): `resource_id` is set once at creation and never
+changed. It defaults to the principal's user id (left NULL when that id does not fit the resource
+pattern, which turns resource-scoped memory off for the conversation); an integration acting for
+its own end users passes `resource_id` explicitly. Reusing a client conversation_id with another
+resource_id is a 409 ("... different resource_id"), distinct from the other-tenant or other-agent
+409s.
+
+DELETE keeps the turns' runs (the audit and cost record) with their text nulled and events
+scrubbed, and deletes the conversation's observations, conversation-scoped working memory and
+message embeddings in one transaction (eap_run_store.memory.MemoryStore.delete_conversation).
+Resource-scoped working memory stays (DELETE /memory/resources/{rid} forgets it). 204; 404 for an
+unknown, another tenant's, malformed or already deleted id (a repeated delete changes nothing);
+409 with Retry-After while the latest turn is queued or running.
 """
 
 from __future__ import annotations
@@ -21,7 +36,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from eap_observability import current_trace_context
@@ -44,12 +59,18 @@ from eap_run_store import (
     ConversationCursor,
     ConversationIdConflict,
     ConversationNotFound,
+    ConversationResourceConflict,
     InvalidRunCursor,
+    MemoryStore,
     RunIdConflict,
     RunStore,
     TurnInProgress,
+    validate_resource_id,
 )
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
+
+# How long a client should wait before retrying a delete refused because a turn is still running.
+BUSY_RETRY_AFTER_SECONDS = 2
 
 router = APIRouter(
     tags=["conversations"],
@@ -62,6 +83,7 @@ def _conversation_json(conv: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": conv["id"],
         "agent_id": conv["agent_id"],
+        "resource_id": conv.get("resource_id"),
         "title": conv["title"],
         "turn_count": conv["turn_count"],
         "last_turn_run_id": conv["last_turn_run_id"],
@@ -70,6 +92,45 @@ def _conversation_json(conv: dict[str, Any]) -> dict[str, Any]:
         "created_at": conv["created_at"].isoformat(),
         "updated_at": conv["updated_at"].isoformat(),
     }
+
+
+def default_resource_id(user_id: str) -> str | None:
+    """The principal's user id as the default resource id, or None when it does not fit
+    RESOURCE_ID_PATTERN (resource-scoped memory is then off for the conversation)."""
+    try:
+        return validate_resource_id(user_id)
+    except ValueError:
+        return None
+
+
+def get_memory_store(request: Request) -> MemoryStore:
+    store = getattr(request.app.state, "memory_store", None)
+    if store is None:  # built lazily on the API's engine (create_app does not wire it)
+        store = request.app.state.memory_store = MemoryStore(request.app.state.database_engine)
+    return store
+
+
+MemoryDep = Annotated[MemoryStore, Depends(get_memory_store)]
+
+
+def canonical_uuid_or_404(value: str, detail: str) -> str:
+    """A path id as a canonical UUID string; a malformed one answers 404 like an unknown one."""
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
+def turn_busy_409(detail: str, busy: list[str] | None = None) -> JSONResponse:
+    """409 for a delete refused while a turn is queued or running (nothing was deleted)."""
+    content: dict[str, Any] = {"detail": detail}
+    if busy is not None:
+        content["busy_conversations"] = busy
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content=content,
+        headers={"Retry-After": str(BUSY_RETRY_AFTER_SECONDS)},
+    )
 
 
 def _conversation_or_404(run_store: RunStore, tenant_id: str, conversation_id: uuid.UUID) -> dict[str, Any]:
@@ -85,14 +146,24 @@ def _conversation_or_404(run_store: RunStore, tenant_id: str, conversation_id: u
 def create_conversation(
     agent_id: uuid.UUID, body: ConversationCreate, principal: PrincipalDep, db: SessionDep, stores: StoresDep
 ) -> JSONResponse:
-    """201 when created, 200 when the tenant already has this client-supplied conversation_id."""
+    """201 when created, 200 when the tenant already has this client-supplied conversation_id (with
+    the same resource_id; 409 for a different one). `resource_id` defaults to the caller's user id
+    and is immutable."""
     run_store, _ = stores
     tenant_id = principal.tenant_id
     agent = db.query(AgentModel).filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id).first()
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    resource_id = body.resource_id if body.resource_id is not None else default_resource_id(principal.user_id)
     try:
-        conv, created = run_store.create_conversation(tenant_id, agent_id, body.title, body.conversation_id)
+        conv, created = run_store.create_conversation(
+            tenant_id, agent_id, body.title, body.conversation_id, resource_id=resource_id
+        )
+    except ConversationResourceConflict:  # a subclass of ConversationIdConflict: caught first
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="conversation_id already exists with a different resource_id; resource_id cannot change",
+        )
     except ConversationIdConflict:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="conversation_id is already in use")
     if conv["agent_id"] != str(agent_id):
@@ -225,3 +296,27 @@ def start_turn(
 
     run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
     return started_response(run, created, {"conversation_id": run["conversation_id"], "turn": run["turn"]})
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={409: {"model": ErrorDetail, "description": "A turn is still queued or running; retry after it ends"}},
+)
+def delete_conversation(conversation_id: str, principal: PrincipalDep, memory: MemoryDep) -> Response:
+    """Delete the conversation: its runs stay with input, output, messages, request context and
+    error nulled and every event scrubbed (usage and cost stay); its observations,
+    conversation-scoped working memory and message embeddings are deleted; resource-scoped working
+    memory stays. 204; 404 unknown, another tenant's, malformed or already deleted; 409 (with
+    Retry-After) while its latest turn is queued or running, nothing deleted."""
+    conv_id = canonical_uuid_or_404(conversation_id, "Conversation not found")
+    try:
+        deleted = memory.delete_conversation(principal.tenant_id, conv_id)
+    except TurnInProgress as busy:
+        return turn_busy_409(
+            f"The latest turn (run {busy.run_id}) is still {busy.status}; nothing was deleted. "
+            "Retry when it finishes"
+        )
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

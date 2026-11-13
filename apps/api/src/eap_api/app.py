@@ -118,7 +118,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     check_knowledge_configuration()
     app.include_router(knowledge_router, prefix="/api/v1")
-    
+    # Agent memory (RM.9): working memory, observations, forget-resource.
+    from eap_api.routes.memory import router as memory_router
+
+    app.include_router(memory_router, prefix="/api/v1")
+
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict:

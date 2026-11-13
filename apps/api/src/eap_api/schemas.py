@@ -132,6 +132,14 @@ class ConversationCreate(BaseModel):
 
     title: str | None = Field(default=None, max_length=1000)
     conversation_id: UUID | None = None
+    # The owner the conversation acts for (RM.9): set once, never changed. Omitted means the
+    # principal's user id. An integration acting for its own end users passes their key.
+    resource_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.:@-]{1,128}$",
+        description="1-128 characters of A-Z, a-z, 0-9, '_', '.', ':', '@' or '-'; default: the caller's user id",
+    )
 
     @field_validator("title")
     @classmethod
@@ -434,3 +442,98 @@ class KnowledgeBaseInUse(BaseModel):
 
     detail: str
     agents: list[KnowledgeBaseReference]
+
+
+# ------------------------------------------------------------------------------ memory (RM.9)
+
+
+class WorkingMemoryPut(BaseModel):
+    """Body of PUT .../memory/working: the whole note, replacing it. A string in template mode
+    (Markdown, at most 16 KiB), an object in schema mode (validated against the agent's latest
+    published `memory.working.json_schema`). Send `If-Match: <version>` (0: the note must not exist
+    yet) to fail with 409 instead of overwriting a newer edit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | dict[str, Any]
+
+
+class WorkingMemoryResponse(BaseModel):
+    """One working memory note. `scope_key` is the conversation id (scope `conversation`) or the
+    resource id (scope `resource`). `content` is a string (format `markdown`) or an object (`json`).
+    The response's ETag header is the quoted version."""
+
+    agent_id: str
+    scope: Literal["conversation", "resource"]
+    scope_key: str
+    format: Literal["markdown", "json"]
+    content: str | dict[str, Any]
+    version: int
+    updated_by_run_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkingMemoryListResponse(BaseModel):
+    items: list[WorkingMemoryResponse]
+
+
+class ObservationResponse(BaseModel):
+    id: str
+    agent_id: str
+    conversation_id: str
+    kind: Literal["observation", "reflection"]
+    covers_from_turn: int
+    covers_to_turn: int
+    content: str
+    approx_tokens: int
+    run_id: str | None
+    superseded_by: str | None
+    created_at: datetime
+
+
+class ObservationListResponse(BaseModel):
+    """`covered_to_turn`: the highest turn the active observations cover (0: none); history after
+    it is what the model sees verbatim."""
+
+    items: list[ObservationResponse]
+    covered_to_turn: int
+
+
+class ObservationsDeleted(BaseModel):
+    deleted: int
+
+
+class ForgetResourceResponse(BaseModel):
+    """What a forget removed. `agent_id` null: every agent of the tenant. `conversations_deleted`
+    (include_conversations) lists the conversations deleted; `busy_conversations` the ones skipped
+    because a turn started between the memory delete and the conversation delete (retry them)."""
+
+    resource_id: str
+    agent_id: str | None
+    working_memories_deleted: int
+    message_embeddings_deleted: int
+    conversations_deleted: list[str]
+    busy_conversations: list[str]
+
+
+class BusyDetail(BaseModel):
+    """409 while a turn is queued or running; nothing was deleted. Retry after it finishes."""
+
+    detail: str
+    busy_conversations: list[str] = []
+
+
+class ValidationIssue(BaseModel):
+    """One request validation problem: where and what, never the rejected value."""
+
+    loc: list[int | str]
+    msg: str
+    type: str
+
+
+class UnprocessableDetail(BaseModel):
+    """422: a message (a rule the request broke, e.g. invalid working memory content, which names a
+    path, never a value) or the request validation problems."""
+
+    detail: str | list[ValidationIssue]

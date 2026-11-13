@@ -119,7 +119,7 @@ import json
 import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -425,6 +425,22 @@ class MemoryLedgerConflict(RuntimeError):
         return f"ledger key {self.key!r} is in state {self.state!r}, not a completed working memory write"
 
 
+class ObservationNotLatest(RuntimeError):
+    """delete_observation(only_latest=True) refused: the row is superseded, or a newer active row
+    covers later turns. Coverage is the highest active `covers_to_turn`, so deleting an older row
+    would hide its turns from both the history and the observations (API: 409). Nothing deleted."""
+
+    code = "observation_not_latest"
+
+    def __init__(self, conversation_id: str, observation_id: str) -> None:
+        self.conversation_id = conversation_id
+        self.observation_id = observation_id
+        super().__init__(conversation_id, observation_id)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"observation {self.observation_id} is not the conversation's newest active observation"
+
+
 class ResourceBusy(TurnInProgress):
     """forget_resource refused: a conversation of the resource has a queued or running turn (its
     write could recreate the note after the delete). Nothing was deleted; retry when the turns end
@@ -489,6 +505,9 @@ class WorkingMemoryWrite:
     replayed: bool = False  # True: the ledger key existed, nothing was written
     agent_id: str = ""
     scope_key: str = ""
+    # The row as this write stored it (RETURNING, same transaction); None on a replay. Never in the
+    # ledger or event data.
+    note: "WorkingMemory | None" = field(default=None, compare=False, repr=False)
 
     def event_data(self) -> dict[str, Any]:
         """The default `memory_updated` data: no content, no resource id."""
@@ -987,7 +1006,7 @@ class MemoryStore:
                             "INSERT INTO working_memories (tenant_id, agent_id, scope, scope_key, conversation_id,"
                             " format, content, version, updated_by_run_id)"
                             " VALUES (:t, :a, :s, :k, :conv, :f, CAST(:content AS jsonb), 1, :run)"
-                            " ON CONFLICT ON CONSTRAINT working_memories_pkey DO NOTHING RETURNING version"
+                            f" ON CONFLICT ON CONSTRAINT working_memories_pkey DO NOTHING RETURNING {_WM_COLUMNS}"
                         ),
                         {
                             **params,
@@ -996,14 +1015,16 @@ class MemoryStore:
                             "content": json.dumps(new, ensure_ascii=False),
                             "run": run_id,
                         },
-                    ).first()
+                    ).mappings().first()
                 except IntegrityError as exc:
                     session.rollback()
                     if "fk_working_memories_tenant_conversation" in str(exc.orig):
                         raise ConversationNotFound(tenant_id, scope_key) from None
                     raise
                 if inserted is not None:
-                    result = WorkingMemoryWrite(scope, fmt, 1, _changed_keys(None, new, patch), False, agent, scope_key)
+                    result = WorkingMemoryWrite(
+                        scope, fmt, 1, _changed_keys(None, new, patch), False, agent, scope_key, _wm(inserted)
+                    )
                     return self._finish_write(session, tenant_id, row_key, event, result)
                 # A concurrent first write won the insert: wait for it, then apply on top of it.
                 row = session.execute(select_locked, params).mappings().one()
@@ -1012,15 +1033,18 @@ class MemoryStore:
                 raise WorkingMemoryVersionConflict(scope, scope_key, int(expected_version), row["version"])
             old = row["content"] if row["format"] == fmt else None
             new = self._new_content(fmt, old, content, patch, json_schema)
-            version = session.execute(
+            stored = session.execute(
                 text(
                     "UPDATE working_memories SET format = :f, content = CAST(:content AS jsonb),"
                     " version = version + 1, updated_by_run_id = :run, updated_at = now()"
-                    " WHERE tenant_id = :t AND agent_id = :a AND scope = :s AND scope_key = :k RETURNING version"
+                    " WHERE tenant_id = :t AND agent_id = :a AND scope = :s AND scope_key = :k"
+                    f" RETURNING {_WM_COLUMNS}"
                 ),
                 {**params, "f": fmt, "content": json.dumps(new, ensure_ascii=False), "run": run_id},
-            ).scalar_one()
-            result = WorkingMemoryWrite(scope, fmt, version, _changed_keys(old, new, patch), False, agent, scope_key)
+            ).mappings().one()
+            result = WorkingMemoryWrite(
+                scope, fmt, stored["version"], _changed_keys(old, new, patch), False, agent, scope_key, _wm(stored)
+            )
             return self._finish_write(session, tenant_id, row_key, event, result)
 
     @staticmethod
@@ -1354,9 +1378,15 @@ class MemoryStore:
         with self.engine.connect() as conn:
             return [_obs(r) for r in conn.execute(text(sql), params).mappings().all()]
 
-    def delete_observation(self, tenant_id: str, conversation_id: str, observation_id: str) -> int:
+    def delete_observation(
+        self, tenant_id: str, conversation_id: str, observation_id: str, *, only_latest: bool = False
+    ) -> int:
         """Delete one row and every row it superseded (recursively). Returns the number deleted
-        (0: unknown id, another tenant's or conversation's; idempotent)."""
+        (0: unknown id, another tenant's or conversation's; idempotent).
+
+        `only_latest` (the API, RM.9): raise ObservationNotLatest, deleting nothing, unless the row
+        is active and has the conversation's highest `covers_to_turn`; checked under the
+        conversation lock that insert_observation and reflect take, so it cannot race them."""
         _require_tenant(tenant_id)
         oid = _canonical_uuid(observation_id)
         if oid is None:
@@ -1370,6 +1400,20 @@ class MemoryStore:
             if locked is None:
                 session.rollback()
                 return 0
+            if only_latest:
+                target = session.execute(
+                    text(
+                        "SELECT covers_to_turn, superseded_by FROM memory_observations"
+                        " WHERE tenant_id = :t AND conversation_id = :c AND id = :id"
+                    ),
+                    {"t": tenant_id, "c": conv, "id": oid},
+                ).first()
+                if target is None:
+                    session.rollback()
+                    return 0
+                if target.superseded_by is not None or target.covers_to_turn < self._covered_to(session, tenant_id, conv):
+                    session.rollback()
+                    raise ObservationNotLatest(conv, oid)
             deleted = session.execute(
                 text(
                     "WITH RECURSIVE doomed AS ("
@@ -2065,6 +2109,7 @@ __all__ = [
     "MemorySnapshot",
     "MemoryStore",
     "Observation",
+    "ObservationNotLatest",
     "ResourceBusy",
     "ObservationWrite",
     "RecallHit",
