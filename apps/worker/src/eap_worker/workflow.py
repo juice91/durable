@@ -85,6 +85,26 @@ its `embedding` event and usage row under `embed:retrieve:{tool_call_id}`, then 
 runs inside the existing call_tool step, whose result is checkpointed. Its `tool_result` event also
 carries the structured `sources`. A spec without knowledge bases keeps its exact toolset and steps.
 
+Working memory and history limits (RM.12; eap_worker.memory): only for a spec with `memory` AND a
+conversation turn. `eap.start_run` also records the conversation's `resource_id` (None for a
+standalone run; a checkpoint recorded before RM.12 has no such key). Such a turn does NOT run
+`eap.load_history`; `eap.load_memory` takes its place in the sequence, after the model and tool
+checks (so a failure there ends the run with a durable run_failed) and never for a blocked input:
+
+    eap.start_run
+    ... input processors, `start`, processor events ...
+    eap.load_memory                     snapshot: resource_id, working memory note, history after
+                                        memory.history (last_turns, max_tokens), then the byte cap
+    eap-agent__dynamic_toolset__eap-spec-tools.get_tools   (+ update_working_memory when writable)
+    ...
+    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   update_working_memory: its write, the
+                                        `memory_updated` event (`memory:wm:{tool_call_id}`) and the
+                                        ledger row in one transaction
+
+The recorded note is rendered into the instructions as a delimited "Working memory" block, fixed
+for the turn. A spec without `memory`, a standalone run and a workflow child run keep their exact
+step layout, toolset and full history (up to EAP_MAX_HISTORY_BYTES).
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -123,7 +143,7 @@ from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore
+from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
 from eap_schemas import AgentSpec
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import render_instructions
@@ -131,6 +151,7 @@ from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import InputBlocked, OutputBlocked, classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
+from eap_worker.memory import instructions_with_memory, load_memory_step, memory_context, memory_of, with_memory
 from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
@@ -155,11 +176,15 @@ HEARTBEAT_SECONDS = 5.0
 
 
 def _instructions(ctx: RunContext[WorkerDeps]) -> str:
-    # Rendered workflow-side from the recorded context, so every (re)execution sends the same text.
+    # Rendered workflow-side from the recorded context (and, for a memory turn, the recorded
+    # eap.load_memory output), so every (re)execution sends the same text.
     spec = ctx.deps.spec
     if not spec.context_fields:
-        return spec.instructions
-    return render_instructions(spec.instructions, ctx.deps.request_context, spec.context_fields)
+        base = spec.instructions
+    else:
+        base = render_instructions(spec.instructions, ctx.deps.request_context, spec.context_fields)
+    memory = memory_of(ctx.deps)
+    return base if memory is None else instructions_with_memory(base, memory)
 
 
 def _knowledge_store() -> KnowledgeStore:
@@ -167,10 +192,16 @@ def _knowledge_store() -> KnowledgeStore:
     return KnowledgeStore(get_runtime().engine)
 
 
+def _memory_store() -> MemoryStore:
+    """The worker's MemoryStore (cheap: a sessionmaker on the runtime's engine)."""
+    return MemoryStore(get_runtime().engine)
+
+
 async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     """Only the published spec's tools: built-ins checked against registry + allowlist, plus its MCP
     tools (eap_worker.mcp), plus the platform tools it uses (eap_worker.platform_tools: `retrieve`
-    when it attaches knowledge bases). No I/O here: MCP server rows and secrets, and knowledge base
+    when it attaches knowledge bases, `update_working_memory` for a memory turn with writable
+    working memory). No I/O here: MCP server rows and secrets, and knowledge base
     names, are read later, inside the get_tools step (and MCP secrets inside a newly reserved call),
     so a replayed step needs neither the database nor the platform key. A spec without MCP tools and
     platform tools gets exactly the FunctionToolset it always did."""
@@ -179,7 +210,7 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     check_no_hidden_tools(spec)
     builtin: FunctionToolset[RunDeps] = toolset_for_spec(spec, rt.registry, ctx.deps.allowed_tools)
     mcp = mcp_toolset_for_run(rt.engine, ctx.deps.tenant_id, spec.mcp_tools) if spec.mcp_tools else None
-    platform = platform_toolset_for_run(ctx.deps, knowledge=_knowledge_store)
+    platform = platform_toolset_for_run(ctx.deps, knowledge=_knowledge_store, memory=_memory_store)
     if mcp is None and platform is None:
         return builtin
     return RunToolset(builtin, mcp, platform)
@@ -255,8 +286,11 @@ async def start_run_step(
     input_text: str,
     spec_json: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Returns {"conversation_id", "turn", "traceparent", "superseded", "model_id",
-    "request_context", "is_draft"}; conversation_id/turn are None for a standalone run, traceparent
+    """Returns {"conversation_id", "turn", "resource_id", "traceparent", "superseded", "model_id",
+    "request_context", "is_draft"}; conversation_id/turn/resource_id are None for a standalone run
+    (RM.12: the conversation row's resource_id, read only for a spec with `memory`; else None; it is
+    recorded for RM.14's pre-turn recall, while eap.load_memory's snapshot stays authoritative for
+    the working memory key), traceparent
     is None when the API had telemetry off. `superseded` is True when this turn must not run (see
     mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
     the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
@@ -284,9 +318,16 @@ async def start_run_step(
         if started:
             rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
+        resource_id = None
+        # Only a memory spec needs it (RM.12): no extra read for any other turn.
+        memory_spec = _spec_or_none(spec_json) if spec_json is not None else None
+        if run.get("conversation_id") is not None and memory_spec is not None and memory_spec.memory is not None:
+            conversation = rt.run_store.get_conversation(tenant_id, run["conversation_id"]) or {}
+            resource_id = conversation.get("resource_id")
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
+            "resource_id": resource_id,
             "traceparent": run.get("traceparent"),
             "superseded": not started,
             "model_id": run.get("model_id"),
@@ -682,7 +723,9 @@ async def _run_body(
             if pre.text is not None:
                 input_text = pre.text
         history: list[ModelMessage] | None = None
-        if link.get("conversation_id") is not None and (pre is None or pre.text is not None):
+        # A memory turn loads its history in eap.load_memory instead (below, after the checks).
+        memory_turn = pre_spec is not None and pre_spec.memory is not None and link.get("conversation_id") is not None
+        if link.get("conversation_id") is not None and (pre is None or pre.text is not None) and not memory_turn:
             history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
             history = ModelMessagesTypeAdapter.validate_python(history_json)
     except BaseException:
@@ -702,6 +745,14 @@ async def _run_body(
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
         deps = rt.deps_for(run_id, tenant_id, spec, link.get("request_context") or None)
+        if spec.memory is not None and link.get("conversation_id") is not None:
+            # RM.12: the turn's memory snapshot (recorded), then its instructions block and tools.
+            loaded = await load_memory_step(
+                run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]),
+                spec.memory.model_dump(mode="json"),
+            )
+            history = ModelMessagesTypeAdapter.validate_python(loaded["history"])
+            deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded))
         output, new_messages = await _drive_agent(run_id, deps, input_text, history, model_id)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)

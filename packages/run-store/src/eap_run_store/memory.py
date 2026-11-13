@@ -1047,6 +1047,18 @@ class MemoryStore:
             )
             return self._finish_write(session, tenant_id, row_key, event, result)
 
+    def ledger_result(
+        self, tenant_id: str, agent_id: str, ledger_key: str, *, scope: str, scope_key: str
+    ) -> WorkingMemoryWrite | None:
+        """The stored result of an earlier write with this ledger key (`replayed=True`), or None.
+        Read-only; lets a re-executed tool call answer from the ledger before it redacts or
+        validates anything. Raises MemoryLedgerConflict like update_working_memory."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        _check_scope(scope, scope_key)
+        with self.Session() as session:
+            return self._ledger_result(session, tenant_id, ledger_row_key(ledger_key, agent), agent, scope, scope_key)
+
     @staticmethod
     def _new_content(
         fmt: str,

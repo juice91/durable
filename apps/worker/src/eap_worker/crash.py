@@ -60,6 +60,11 @@
   the atomic version (or generation) switch transaction. Recovery re-runs the switch, which answers
   'already_active' when it had committed.
 
+- `load_memory` (RM.12): inside `eap.load_memory`, right after the memory snapshot was read and
+  before the step checkpoint. Recovery reads the snapshot again. (A memory turn's
+  `update_working_memory` uses `after_tool_call`: right after its write, event and ledger row
+  committed; recovery is answered from the ledger.)
+
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
 then recovers instead of crash-looping.
@@ -89,6 +94,7 @@ CRASH_POINTS = frozenset(
         "kb_batch_after_commit",
         "kb_before_finalize",
         "kb_finalize",
+        "load_memory",
     }
 )
 

@@ -35,6 +35,18 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  `According to [1] <title>: <url>` from the first numbered source of the result,
                  `No sources found.` for an empty result, and `Retrieve error: <message>` after a tool
                  error or a retry prompt (it never calls again). Without the tool: `Echo: <input>`.
+- `test:memory` (RM.12) parses `remember <key>=<value>` (any number, values without spaces; a value
+                 that parses as JSON is used as such, e.g. `age=42`) and `forget <key>` from the input
+                 and, when `update_working_memory` is offered and there is something to change,
+                 calls it once: schema mode `{"patch": {key: value, forgotten key: null}}`; template
+                 mode `{"content": <the note from the instructions' working memory block with a
+                 `- <key>: <value>` line replaced (matched case-insensitively) or appended, and
+                 forgotten keys' lines removed>}`. An input that is a JSON object holding `patch` or
+                 `content` is passed as the arguments as-is. Then answers
+                 `<tool result>\nWorking memory:\n<the block's note>` (`Memory error: <message>` after a
+                 tool error or retry prompt; no tool call: just `Working memory:\n<note>`, `(none)`
+                 without a block). The note echoed is the one rendered into the instructions, i.e.
+                 as of the turn's start.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -58,6 +70,7 @@ a model that the policy forbids.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import math
 import re
@@ -386,6 +399,106 @@ def scripted_retrieve_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-retrieve")
 
 
+WORKING_MEMORY_TOOL = "update_working_memory"
+_REMEMBER = re.compile(r"\bremember\s+([A-Za-z_][\w.-]*)=(\S+)", re.IGNORECASE)
+_FORGET = re.compile(r"\bforget\s+([A-Za-z_][\w.-]*)", re.IGNORECASE)
+_WM_BLOCK = re.compile(r"<working_memory[^>]*>\n(.*?)\n</working_memory>", re.DOTALL)
+
+
+def _wm_note(info: AgentInfo) -> str | None:
+    """The note in the instructions' working memory block, unescaped (eap_worker.memory.escape_note)."""
+    found = _WM_BLOCK.search(info.instructions or "")
+    return None if found is None else html.unescape(found.group(1))
+
+
+def _wm_value(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _wm_template_content(note: str, pairs: list[tuple[str, str]], forget: list[str]) -> str:
+    lines = note.split("\n") if note else []
+    for key, value in pairs:
+        pattern = re.compile(rf"^(\s*[-*]\s*){re.escape(key)}\s*:.*$", re.IGNORECASE)
+        for i, line in enumerate(lines):
+            found = pattern.match(line)
+            if found:
+                label = line[found.end(1):].split(":", 1)[0]
+                lines[i] = f"{found.group(1)}{label}: {value}"
+                break
+        else:
+            lines.append(f"- {key}: {value}")
+    for key in forget:
+        pattern = re.compile(rf"^\s*[-*]\s*{re.escape(key)}\s*:", re.IGNORECASE)
+        lines = [line for line in lines if not pattern.match(line)]
+    return "\n".join(lines)
+
+
+def _memory_args(prompt: str, info: AgentInfo, tool_def: Any) -> dict[str, Any] | None:
+    try:
+        request = json.loads(prompt)
+    except ValueError:
+        request = None
+    if isinstance(request, dict) and ("patch" in request or "content" in request):
+        return request
+    pairs = _REMEMBER.findall(prompt)
+    forget = _FORGET.findall(prompt)
+    if not pairs and not forget:
+        return None
+    properties = (tool_def.parameters_json_schema or {}).get("properties", {})
+    if "patch" in properties:
+        patch: dict[str, Any] = {key: _wm_value(value) for key, value in pairs}
+        patch.update({key: None for key in forget})
+        return {"patch": patch}
+    return {"content": _wm_template_content(_wm_note(info) or "", pairs, forget)}
+
+
+def _this_turn(messages: list[ModelMessage]) -> list[Any]:
+    """The request parts from the current turn's user prompt on (a conversation's history holds
+    earlier turns' tool returns, which must not count as this turn's)."""
+    parts = [p for m in messages if isinstance(m, ModelRequest) for p in m.parts]
+    starts = [i for i, p in enumerate(parts) if isinstance(p, UserPromptPart)]
+    return parts[starts[-1]:] if starts else parts
+
+
+def _memory_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    offered = {t.name: t for t in info.function_tools}
+    parts = _this_turn(messages)
+    retries = [p for p in parts if isinstance(p, RetryPromptPart) and p.tool_name == WORKING_MEMORY_TOOL]
+    returns = [p for p in parts if isinstance(p, ToolReturnPart) and p.tool_name == WORKING_MEMORY_TOOL]
+    note = _wm_note(info)
+    shown = f"Working memory:\n{note if note is not None else '(none)'}"
+    if retries:
+        return "text", f"Memory error: {retries[-1].model_response()}\n{shown}"
+    if returns:
+        last = returns[-1]
+        if last.outcome != "success":
+            return "text", f"Memory error: {last.content}\n{shown}"
+        return "text", f"{last.content}\n{shown}"
+    if WORKING_MEMORY_TOOL in offered:
+        args = _memory_args(_last_prompt(messages), info, offered[WORKING_MEMORY_TOOL])
+        if args is not None:
+            return "tool", args
+    return "text", shown
+
+
+def scripted_memory_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        kind, value = _memory_plan(messages, info)
+        return ModelResponse(parts=[ToolCallPart(WORKING_MEMORY_TOOL, value) if kind == "tool" else TextPart(value)])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        kind, value = _memory_plan(messages, info)
+        if kind == "tool":
+            yield {0: DeltaToolCall(name=WORKING_MEMORY_TOOL, json_args=json.dumps(value))}
+        else:
+            yield value
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-memory")
+
+
 def litellm_model(name: str, settings: WorkerSettings) -> Model:
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -500,6 +613,8 @@ def make_resolver(settings_getter: Any):
                 return scripted_think_tool_model()
             if name == "retrieve":
                 return scripted_retrieve_model()
+            if name == "memory":
+                return scripted_memory_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

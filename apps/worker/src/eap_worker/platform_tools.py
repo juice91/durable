@@ -1,8 +1,9 @@
-"""Platform tools (RAG and memory milestone, RM.11; RM.12 adds working memory).
+"""Platform tools (RAG and memory milestone, RM.11; RM.12 adds `update_working_memory`, built in
+eap_worker.memory).
 
 Platform tools are added to a run by the platform, never listed in `AgentSpec.tools`. They live in
 `PlatformToolset`, the third member of the run's `RunToolset` (eap_worker.mcp), and only for a spec
-that uses them: a spec without `knowledge_bases` (and, from RM.12, without working memory) gets
+that uses them: a spec without `knowledge_bases` and without a memory turn's writable working memory gets
 `platform_toolset_for_run(...) is None`, so its toolset and its DBOS step sequence are exactly what
 they were before platform tools existed.
 
@@ -63,7 +64,7 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_core import SchemaValidator, core_schema
 
 from eap_observability import log_failure
-from eap_run_store import KnowledgeStore, SearchHit
+from eap_run_store import KnowledgeStore, MemoryStore, SearchHit
 from eap_runtime import RunDeps, ToolRegistry, UnknownToolError
 from eap_schemas import AgentSpec, EmbeddingDimensionMismatch, EmbeddingModelNotAllowed, KnowledgeBaseNotFound
 from eap_schemas.knowledge import MAX_RETRIEVE_RESULT_BYTES
@@ -168,15 +169,30 @@ class PlatformToolset(AbstractToolset[Any]):
         return await self.tools[name].call(tool_args, ctx, tool.tool_def)
 
 
-def platform_toolset_for_run(deps: Any, *, knowledge: Callable[[], KnowledgeStore]) -> PlatformToolset | None:
+def platform_toolset_for_run(
+    deps: Any,
+    *,
+    knowledge: Callable[[], KnowledgeStore],
+    memory: Callable[[], MemoryStore] | None = None,
+) -> PlatformToolset | None:
     """The run's platform toolset, or None when the spec uses no platform tool (then the run's
     toolset is exactly what it was before platform tools existed). No I/O here: it is built inside
-    every step that evaluates the toolset factory. `knowledge` returns the KnowledgeStore (called
-    only inside a step). RM.12 appends its working memory tool here."""
+    every step that evaluates the toolset factory. `knowledge` / `memory` return the stores (called
+    only inside a step).
+
+    `update_working_memory` (RM.12, eap_worker.memory) is added only when the deps carry a memory
+    turn's context (`MemoryWorkerDeps.memory`, from the recorded `eap.load_memory` output) with
+    writable working memory and a scope key: never for a spec without memory, a standalone run, a
+    `read_only` config, or a resource-scoped note of a conversation without a resource id."""
+    from eap_worker.memory import working_memory_tool  # eap_worker.memory imports this module
+
     spec: AgentSpec = deps.spec
     tools: list[PlatformTool] = []
     if spec.knowledge_bases:
         tools.append(RetrieveTool(spec.knowledge_bases, knowledge))
+    wm_tool = working_memory_tool(deps, memory)
+    if wm_tool is not None:
+        tools.append(wm_tool)
     return PlatformToolset(tools) if tools else None
 
 
