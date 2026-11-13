@@ -1,4 +1,5 @@
-"""Agent memory in Postgres (RAG and memory milestone, RM.5; migration 0012_memory).
+"""Agent memory in Postgres (RAG and memory milestone, RM.5 and RM.8; migrations 0012_memory and
+0013_semantic_recall).
 
 Tables (Alembic owns them; the models here are what `alembic check` compares):
 
@@ -14,6 +15,18 @@ Tables (Alembic owns them; the models here are what `alembic check` compares):
   of a conversation cover a gap-free prefix of its turns, `1..covered_to_turn`: `insert_observation`
   accepts only `covers_from_turn = covered_to_turn + 1`, and `reflect` replaces exactly the active
   rows up to its end.
+- `message_embeddings` (RM.8): semantic recall. One row per `(tenant_id, run_id, role)` (role
+  `user` = the turn's processed input, `assistant` = its final answer), with the agent, the
+  conversation's resource_id (NULL when it has none), conversation and turn, the processed text, the
+  embedding model and an untyped `public.vector` with `dimensions`; one partial expression HNSW index
+  per dimension (768, 1024, 1536). Cascades from the conversation and from the run.
+- `memory_forget_watermarks` (RM.8): per conversation whose resource was forgotten,
+  `forgotten_through_turn` = its highest turn at the forget (upserted to the max). `index_turn`
+  skips a turn at or below it, so a post-turn index step that runs late (or is recovered) after a
+  forget cannot bring the forgotten memory back. Turn numbers, not clocks: forget and `create_turn`
+  hold the same conversation lock, so the comparison is exact. No agent_id: a conversation belongs
+  to one agent, and a per-agent forget only marks that agent's conversations. Cascades from the
+  conversation; retention keeps them.
 
 Every method takes the tenant id (and the agent id where memory is per agent) from trusted input
 (the principal, the run's deps) and filters by both in SQL. Memory text never goes to logs or event
@@ -21,7 +34,8 @@ data: events carry versions, keys and counts. The store does not redact: callers
 `memory.redact` already processed (RM.12, RM.13). It imports no pydantic_ai or dbos.
 
 Concurrency rules. **Lock order: the conversation row, then the working memory row, then
-observation rows, then the run row (event append), then the side_effects ledger row.** Every method
+observation rows, then message embedding rows, then the run row (event append), then the
+side_effects ledger row.** Every method
 that locks more than one of these takes them in that order, and none waits for an earlier one while
 holding a later one:
 
@@ -34,12 +48,23 @@ holding a later one:
 - `insert_observation`, `reflect` and `delete_observation(s)` take the conversation
   `FOR NO KEY UPDATE` (serialising the conversation's observation writers without blocking
   `update_working_memory`'s KEY SHARE), then observation rows.
+- `index_turn` takes the conversation `FOR KEY SHARE` (like a conversation-scoped working memory
+  write: `delete_conversation` and `forget_resource` wait for it, and it waits for them), then reads
+  the conversation's forget watermark (written only by forget while it holds the conversation
+  `FOR UPDATE`, so this check cannot race a forget), then inserts its embedding rows (a concurrent insert of the same `(run_id, role)` waits for the first
+  and then skips), then the run row through `append_event_in_session` when an event is given.
+- `search_recall` and `recall_neighbours` take no lock (one read transaction each).
+- `delete_message_embeddings_before` (retention) locks a batch of embedding rows
+  `FOR UPDATE SKIP LOCKED` and deletes them: it never waits for, nor deadlocks with, a
+  `delete_conversation` or `forget_resource` holding some of those rows (they are left to it).
 - `delete_conversation` takes the conversation `FOR UPDATE` (waits for every writer above, and
-  `create_turn`'s lock), deletes its working memory and observations, then updates its runs, then
+  `create_turn`'s lock), deletes its working memory, observations and message embeddings, then
+  updates its runs, then
   scrubs those runs' events (event rows come under their run row), then deletes their ledger rows.
 - `forget_resource` locks the resource's conversations `FOR UPDATE` in id order (no new turn can
   start in them), refuses with ResourceBusy while any of them has a queued or running turn, else
-  deletes the resource notes, then scrubs the `memory_updated` events of those conversations' runs,
+  deletes the resource notes, then the resource's message embeddings, upserts the conversations'
+  forget watermarks, then scrubs the `memory_updated` events of those conversations' runs,
   then deletes those runs' ledger rows, in one transaction; then deletes each conversation as
   above when asked.
 
@@ -55,8 +80,10 @@ rows and run totals are untouched.
 What each deletion removes:
 - `delete_conversation`: the runs' `input`, `output`, `messages`, `request_context` and `error`
   (NULL; error codes survive in the scrubbed `run_failed` data); every event scrubbed; every
-  `side_effects` row of those runs (`{run_id}:...` tool results and `wm:{run_id}:...` ledger rows).
-- `forget_resource` without conversations: the notes, the `memory_updated` events' key names and
+  `side_effects` row of those runs (`{run_id}:...` tool results and `wm:{run_id}:...` ledger rows);
+  the conversation's working memory, observations and message embeddings.
+- `forget_resource` without conversations: the notes, the message embeddings whose `resource_id`
+  is the resource (of that agent, or every agent), the `memory_updated` events' key names and
   the ledger rows of the resource's runs. Those runs' own turn text stays (it is the conversation,
   not memory), so the model's `update_working_memory` tool-call events and `runs.messages` still
   hold the patch it sent; `include_conversations=True` removes those too.
@@ -79,6 +106,9 @@ Idempotency for DBOS steps (a re-executed step writes once):
   for another scope or scope key (or a stored result naming another agent) is MemoryLedgerConflict.
 - observations: unique `(tenant_id, conversation_id, kind, covers_to_turn)`; a repeated insert or
   reflection returns the existing row (`status='existing'`).
+- message embeddings: unique `(tenant_id, run_id, role)`; `index_turn` inserts with
+  `ON CONFLICT DO NOTHING` and reports which roles already existed. An existing row is never
+  replaced (not even under another embedding model: re-indexing after a model change is P1).
 - an optional `MemoryEvent` (an event plus an optional usage row) is appended in the same
   transaction as the write, with EventLog's rules (a repeated event key is not written again).
 """
@@ -93,21 +123,25 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    literal_column,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
+from eap_schemas.embedding_policy import parse_embedding_model_id
 from eap_schemas.knowledge import approx_tokens as _approx_tokens
 from eap_schemas.memory import (
     HistoryConfig,
@@ -119,6 +153,14 @@ from eap_schemas.memory import (
     validate_working_memory_text,
 )
 
+from eap_run_store.knowledge import (
+    HNSW_DIMENSIONS,
+    HNSW_EF_CONSTRUCTION,
+    HNSW_M,
+    HNSW_MAX_EF_SEARCH,
+    MIN_EF_SEARCH,
+    vector_literal,
+)
 from eap_run_store.store import (
     TERMINAL_RUN_STATUSES,
     Base,
@@ -143,10 +185,23 @@ OBS_KIND_CHECK = "kind IN ('observation', 'reflection')"
 OBS_TURNS_CHECK = "covers_from_turn >= 1 AND covers_to_turn >= covers_from_turn"
 OBS_TOKENS_CHECK = "approx_tokens >= 0"
 OBS_SUPERSEDED_CHECK = "superseded_by IS NULL OR superseded_by <> id"
+# Same texts as migration 0013_semantic_recall.
+FW_TURN_CHECK = "forgotten_through_turn >= 0"
+ME_ROLE_CHECK = "role IN ('user', 'assistant')"
+ME_TURN_CHECK = "turn >= 1"
+ME_EMBEDDING_CHECK = (
+    "embedding IS NOT NULL AND dimensions IS NOT NULL AND dimensions IN (768, 1024, 1536)"
+    " AND public.vector_dims(embedding) = dimensions"
+)
 
 WORKING_MEMORY_SCOPES = ("conversation", "resource")
 WORKING_MEMORY_FORMATS = ("markdown", "json")
 OBSERVATION_KINDS = ("observation", "reflection")
+MESSAGE_ROLES = ("user", "assistant")
+RECALL_SCOPES = ("resource", "conversation")
+MAX_RECALL_TOP_K = 50
+MAX_MESSAGE_RANGE = 10
+MAX_RETENTION_BATCH = 10_000
 LEDGER_PREFIX = "wm:"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 # Top-level string fields kept when an event is scrubbed (if they look like identifiers).
@@ -254,6 +309,86 @@ class MemoryObservationModel(Base):
             postgresql_where=text("superseded_by IS NOT NULL"),
         ),
         Index("ix_memory_observations_created", "created_at"),
+    )
+
+
+class MessageEmbeddingModel(Base):
+    __tablename__ = "message_embeddings"
+
+    id: Mapped[str] = mapped_column(
+        "id", PG_UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[str] = mapped_column("tenant_id", String, nullable=False)
+    agent_id: Mapped[str] = mapped_column("agent_id", String, nullable=False)
+    # The conversation's resource_id at index time (immutable), NULL when it has none.
+    resource_id: Mapped[str | None] = mapped_column("resource_id", String, nullable=True)
+    conversation_id: Mapped[str] = mapped_column("conversation_id", String, nullable=False)
+    turn: Mapped[int] = mapped_column("turn", Integer, nullable=False)
+    run_id: Mapped[str] = mapped_column("run_id", String, nullable=False)
+    role: Mapped[str] = mapped_column("role", String, nullable=False)
+    text_: Mapped[str] = mapped_column("text", Text, nullable=False)
+    embedding_model: Mapped[str] = mapped_column("embedding_model", String, nullable=False)
+    dimensions: Mapped[int] = mapped_column("dimensions", SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        "created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    # Untyped vector (`public.vector` in the migration), as kb_chunks.embedding.
+    embedding: Mapped[Any] = mapped_column("embedding", Vector(), nullable=False, deferred=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "run_id", "role", name="uq_message_embeddings_run_role"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_message_embeddings_tenant_conversation",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["runs.tenant_id", "runs.id"],
+            name="fk_message_embeddings_tenant_run",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(ME_ROLE_CHECK, name="ck_message_embeddings_role"),
+        CheckConstraint(ME_TURN_CHECK, name="ck_message_embeddings_turn"),
+        CheckConstraint(ME_EMBEDDING_CHECK, name="ck_message_embeddings_embedding"),
+        Index("ix_message_embeddings_tenant_agent_resource", "tenant_id", "agent_id", "resource_id"),
+        Index("ix_message_embeddings_tenant_conversation_turn", "tenant_id", "conversation_id", "turn"),
+        Index("ix_message_embeddings_tenant_created", "tenant_id", "created_at"),
+        *(
+            Index(
+                f"ix_message_embeddings_embedding_{dims}",
+                literal_column(f"(embedding::public.vector({dims}))").label(f"embedding_{dims}"),
+                postgresql_ops={f"embedding_{dims}": "public.vector_cosine_ops"},
+                postgresql_using="hnsw",
+                postgresql_with={"m": HNSW_M, "ef_construction": HNSW_EF_CONSTRUCTION},
+                postgresql_where=text(f"dimensions = {dims}"),
+            )
+            for dims in HNSW_DIMENSIONS
+        ),
+    )
+
+
+class MemoryForgetWatermarkModel(Base):
+    """forget_resource's mark on a conversation: index_turn skips turns <= forgotten_through_turn."""
+
+    __tablename__ = "memory_forget_watermarks"
+
+    tenant_id: Mapped[str] = mapped_column("tenant_id", String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column("conversation_id", String, primary_key=True)
+    forgotten_through_turn: Mapped[int] = mapped_column("forgotten_through_turn", Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        "updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            name="fk_memory_forget_watermarks_tenant_conversation",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(FW_TURN_CHECK, name="ck_memory_forget_watermarks_turn"),
     )
 
 
@@ -435,6 +570,60 @@ class ForgetResult:
     working_memories: int  # resource notes deleted
     conversations: tuple[str, ...]  # conversations deleted (include_conversations)
     busy_conversations: tuple[str, ...]  # skipped: a turn was still queued or running
+    message_embeddings: int = 0  # recall rows of the resource deleted (RM.8)
+
+
+@dataclass(frozen=True)
+class TurnText:
+    """One text of a turn to index: role `user` (the processed input) or `assistant` (the final
+    answer), already redacted, and its embedding."""
+
+    role: Literal["user", "assistant"]
+    text: str
+    embedding: Sequence[float]
+
+
+@dataclass(frozen=True)
+class IndexTurnResult:
+    """`inserted`: roles written by this call; `existing`: roles already indexed (a re-executed
+    step), left as they were. `skipped`: the turn is at or below the conversation's forget
+    watermark (its resource was forgotten after it); nothing was written (no rows, no event)."""
+
+    conversation_id: str
+    turn: int
+    run_id: str
+    resource_id: str | None
+    inserted: tuple[str, ...]
+    existing: tuple[str, ...]
+    skipped: bool = False
+
+
+@dataclass(frozen=True)
+class RecallHit:
+    """One message_embeddings row found by search_recall."""
+
+    id: str
+    conversation_id: str
+    turn: int
+    run_id: str
+    role: str
+    text: str
+    created_at: datetime
+    distance: float
+    score: float  # 1 - cosine distance
+
+
+@dataclass(frozen=True)
+class RecallMessage:
+    """One message_embeddings row returned by recall_neighbours (no distance)."""
+
+    id: str
+    conversation_id: str
+    turn: int
+    run_id: str
+    role: str
+    text: str
+    created_at: datetime
 
 
 # --------------------------------------------------------------------------------------- helpers
@@ -1322,12 +1511,399 @@ class MemoryStore:
             trimmed_turns=trimmed,
         )
 
+    # ------------------------------------------------------------------ semantic recall (RM.8)
+
+    def index_turn(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        conversation_id: str,
+        run_id: str,
+        items: Sequence[TurnText],
+        *,
+        embedding_model: str,
+        event: MemoryEvent | None = None,
+    ) -> IndexTurnResult:
+        """Store the embeddings of one completed turn's texts, once per `(run_id, role)`, in one
+        transaction.
+
+        `items`: one or two TurnText with distinct roles, processed and redacted text only (the
+        store does not redact), embeddings all of one dimension in (768, 1024, 1536). The turn
+        number is the run's, and the resource id the conversation's (never caller input).
+        A role already indexed for this run is left as it was and reported in `existing` (a
+        re-executed step writes nothing new); `event` (e.g. the `embed:index:{turn}` usage) is
+        appended in the same transaction, with default data
+        `{model_id, dimensions, turn, inserted, existing}` (counts) unless already appended.
+
+        Forget watermark: when the run's turn is <= the conversation's `forgotten_through_turn`
+        (its resource was forgotten after that turn existed), nothing is written, not even `event`,
+        and the result has `skipped=True` (a late or recovered step after forget_resource). A turn
+        created after the forget has a higher number and indexes normally. Turn numbers, no clocks:
+        forget and `create_turn` take the same conversation lock.
+
+        Raises ConversationNotFound (unknown, another tenant's or another agent's conversation, or
+        deleted), RunNotFound (the run, or the event's run, is not a turn of this tenant, agent and
+        conversation), ValueError for bad items."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        conv = str(conversation_id)
+        run = str(run_id)
+        parse_embedding_model_id(embedding_model)
+        items = list(items)
+        if not 1 <= len(items) <= len(MESSAGE_ROLES):
+            raise ValueError("pass one or two items (roles user and assistant)")
+        roles = [i.role for i in items]
+        if len(set(roles)) != len(roles) or any(r not in MESSAGE_ROLES for r in roles):
+            raise ValueError(f"item roles must be distinct, each one of {', '.join(MESSAGE_ROLES)}")
+        if any(not isinstance(i.text, str) or not i.text.strip() for i in items):
+            raise ValueError("item text is required")
+        dims = {len(i.embedding) for i in items}
+        if len(dims) != 1 or not dims <= set(HNSW_DIMENSIONS):
+            raise ValueError(f"embeddings must all have one of {HNSW_DIMENSIONS} dimensions")
+        (dim,) = dims
+        literals = [vector_literal(i.embedding) for i in items]
+
+        with self.Session() as session:
+            conv_row = self._lock_conversation(session, tenant_id, agent, conv, "KEY SHARE")
+            run_row = session.execute(
+                text("SELECT agent_id, conversation_id, turn FROM runs WHERE tenant_id = :t AND id = :r"),
+                {"t": tenant_id, "r": run},
+            ).first()
+            if run_row is None or run_row.agent_id != agent or run_row.conversation_id != conv or run_row.turn is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run)
+            _check_run(session, tenant_id, (None if event is None else event.run_id,), agent, conv)
+            turn = int(run_row.turn)
+            resource_id = conv_row["resource_id"]
+            forgotten_through = session.execute(
+                text(
+                    "SELECT forgotten_through_turn FROM memory_forget_watermarks"
+                    " WHERE tenant_id = :t AND conversation_id = :c"
+                ),
+                {"t": tenant_id, "c": conv},
+            ).scalar_one_or_none()
+            if forgotten_through is not None and turn <= forgotten_through:
+                session.rollback()
+                return IndexTurnResult(conv, turn, run, resource_id, (), (), skipped=True)
+            inserted: list[str] = []
+            existing: list[str] = []
+            for item, literal in zip(items, literals):
+                row = session.execute(
+                    text(
+                        "INSERT INTO message_embeddings (tenant_id, agent_id, resource_id, conversation_id, turn,"
+                        " run_id, role, text, embedding_model, dimensions, embedding)"
+                        " VALUES (:t, :a, :res, :c, :turn, :r, :role, :text, :model, :dims, CAST(:e AS public.vector))"
+                        " ON CONFLICT ON CONSTRAINT uq_message_embeddings_run_role DO NOTHING RETURNING role"
+                    ),
+                    {
+                        "t": tenant_id,
+                        "a": agent,
+                        "res": conv_row["resource_id"],
+                        "c": conv,
+                        "turn": turn,
+                        "r": run,
+                        "role": item.role,
+                        "text": item.text,
+                        "model": embedding_model,
+                        "dims": dim,
+                        "e": literal,
+                    },
+                ).first()
+                (inserted if row is not None else existing).append(item.role)
+            try:
+                _append_event(
+                    session,
+                    tenant_id,
+                    event,
+                    {
+                        "model_id": embedding_model,
+                        "dimensions": dim,
+                        "turn": turn,
+                        "inserted": len(inserted),
+                        "existing": len(existing),
+                    },
+                )
+            except Exception:
+                session.rollback()
+                raise
+            session.commit()
+        return IndexTurnResult(conv, turn, run, conv_row["resource_id"], tuple(inserted), tuple(existing))
+
+    @staticmethod
+    def _recall_sql(dims: int, scope_clause: str, exclude: bool, with_min_score: bool) -> str:
+        # `dims` is one of HNSW_DIMENSIONS (checked), inlined so that the partial index predicate
+        # and the cast match the index definition exactly.
+        distance = f"(m.embedding::public.vector({dims})) OPERATOR(public.<=>) CAST(:q AS public.vector({dims}))"
+        excl = " AND NOT (m.conversation_id = :c AND m.turn = ANY(CAST(:ex AS integer[])))" if exclude else ""
+        cut = " WHERE hits.distance <= :max_distance" if with_min_score else ""
+        return (
+            "SELECT * FROM ("
+            f" SELECT m.id, m.conversation_id, m.turn, m.run_id, m.role, m.text, m.created_at, {distance} AS distance"
+            " FROM message_embeddings m"
+            f" WHERE m.tenant_id = :t AND m.agent_id = :a AND {scope_clause}"
+            f" AND m.embedding_model = :model AND m.dimensions = {dims}{excl}"
+            f" ORDER BY {distance} LIMIT :k"
+            f") hits{cut} ORDER BY hits.distance, hits.id"
+        )
+
+    def _prepare_recall(
+        self,
+        session,
+        tenant_id: str,
+        agent_id: str,
+        conversation_id: str,
+        query_embedding: Sequence[float],
+        embedding_model: str,
+        scope: str,
+        top_k: int,
+        min_score: float | None,
+        exclude_turns: Iterable[int],
+    ) -> tuple[str, dict[str, Any]]:
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        conv = str(conversation_id)
+        parse_embedding_model_id(embedding_model)
+        if scope not in RECALL_SCOPES:
+            raise ValueError(f"scope must be one of {', '.join(RECALL_SCOPES)}")
+        dims = len(query_embedding)
+        if dims not in HNSW_DIMENSIONS:
+            raise ValueError(f"query embedding has {dims} dimensions; expected one of {HNSW_DIMENSIONS}")
+        if not 1 <= int(top_k) <= MAX_RECALL_TOP_K:
+            raise ValueError(f"top_k must be between 1 and {MAX_RECALL_TOP_K}")
+        if min_score is not None and not 0.0 <= float(min_score) <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+        excluded = sorted({int(t) for t in exclude_turns})
+        row = session.execute(
+            text("SELECT agent_id, resource_id FROM conversations WHERE tenant_id = :t AND id = :c"),
+            {"t": tenant_id, "c": conv},
+        ).mappings().first()
+        if row is None or row["agent_id"] != agent:
+            session.rollback()
+            raise ConversationNotFound(tenant_id, conv)
+        params: dict[str, Any] = {
+            "t": tenant_id,
+            "a": agent,
+            "c": conv,
+            "model": embedding_model,
+            "q": vector_literal(query_embedding),
+            "k": int(top_k),
+        }
+        if scope == "resource" and row["resource_id"] is not None:
+            scope_clause = "m.resource_id = :res"
+            params["res"] = row["resource_id"]
+        else:  # conversation scope, or a conversation without a resource id
+            scope_clause = "m.conversation_id = :c"
+        if excluded:
+            params["ex"] = excluded
+        if min_score is not None:
+            params["max_distance"] = 1.0 - float(min_score)
+        ef_search = min(HNSW_MAX_EF_SEARCH, max(MIN_EF_SEARCH, 4 * int(top_k)))
+        # SET LOCAL equivalents (bindable): reset when this transaction ends.
+        session.execute(text("SELECT set_config('hnsw.ef_search', :v, true)"), {"v": str(ef_search)})
+        session.execute(text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)"))
+        return self._recall_sql(dims, scope_clause, bool(excluded), min_score is not None), params
+
+    def search_recall(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        conversation_id: str,
+        query_embedding: Sequence[float],
+        *,
+        embedding_model: str,
+        scope: str = "resource",
+        top_k: int = 4,
+        min_score: float | None = None,
+        exclude_turns: Iterable[int] = (),
+    ) -> list[RecallHit]:
+        """The `top_k` indexed messages nearest to `query_embedding` by cosine distance, for the turn
+        running in `conversation_id`, in one SQL query.
+
+        Rows must have this tenant and agent, `embedding_model` (rows under another model are
+        ignored) and the query's dimensions, and lie in the scope: `resource` = the
+        conversation's resource_id (read from the conversation row, never caller input; a
+        conversation without one falls back to its own rows), `conversation` = this conversation.
+        `exclude_turns` are turns of THIS conversation already in the assembled context: they never
+        return. Ranking: the partial HNSW index of the query's dimension, `ORDER BY distance LIMIT
+        top_k`, then the `min_score` cut (score = 1 - distance), re-sorted by exact distance (ties
+        by id). Hits are messages (a turn's user and assistant rows count separately).
+        `hnsw.ef_search = max(40, 4 × top_k)` and `hnsw.iterative_scan = relaxed_order` hold for
+        this transaction only. The iterative scan stops after `hnsw.max_scan_tuples` index tuples
+        (pgvector default 20,000): when the filters are very selective (a small resource in a large
+        index of the same dimension, or most turns excluded), recall can come back with fewer than
+        `top_k` hits even though more matching rows exist.
+
+        Raises ConversationNotFound (unknown, another tenant's or another agent's conversation),
+        ValueError for unsupported dimensions, scope, top_k (1..50) or min_score."""
+        with self.Session() as session:
+            sql, params = self._prepare_recall(
+                session, tenant_id, agent_id, conversation_id, query_embedding, embedding_model, scope, top_k,
+                min_score, exclude_turns,
+            )
+            rows = session.execute(text(sql), params).mappings().all()
+            session.commit()
+        return [
+            RecallHit(
+                id=str(r["id"]),
+                conversation_id=r["conversation_id"],
+                turn=r["turn"],
+                run_id=r["run_id"],
+                role=r["role"],
+                text=r["text"],
+                created_at=r["created_at"],
+                distance=float(r["distance"]),
+                score=1.0 - float(r["distance"]),
+            )
+            for r in rows
+        ]
+
+    def explain_search_recall(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        conversation_id: str,
+        query_embedding: Sequence[float],
+        *,
+        embedding_model: str,
+        scope: str = "resource",
+        top_k: int = 4,
+        min_score: float | None = None,
+        exclude_turns: Iterable[int] = (),
+        disable_seqscan: bool = True,
+    ) -> str:
+        """EXPLAIN of exactly the SQL `search_recall` runs, with the same settings (diagnostics and
+        tests: a small table makes the planner prefer a sequential scan, hence `disable_seqscan`)."""
+        with self.Session() as session:
+            sql, params = self._prepare_recall(
+                session, tenant_id, agent_id, conversation_id, query_embedding, embedding_model, scope, top_k,
+                min_score, exclude_turns,
+            )
+            if disable_seqscan:
+                session.execute(text("SET LOCAL enable_seqscan = off"))
+            plan = "\n".join(r[0] for r in session.execute(text("EXPLAIN " + sql), params))
+            session.rollback()
+        return plan
+
+    def recall_neighbours(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        conversation_id: str,
+        turn: int,
+        message_range: int,
+        *,
+        current_conversation_id: str,
+        exclude_turns: Iterable[int] = (),
+    ) -> list[RecallMessage]:
+        """The indexed messages of turns `turn - message_range .. turn + message_range` of the hit's
+        `conversation_id` (the hit's turn included), for the turn running in
+        `current_conversation_id`. Oldest turn first, user before assistant, under any embedding
+        model (the text is the same). Only stored (processed, redacted) text, never raw input.
+
+        Scoping, all in SQL: this tenant's and agent's rows, and the current conversation's resource
+        (`resource_id` read from its row; a current conversation without one only sees its own
+        rows). `exclude_turns` are turns of the CURRENT conversation already in context: they are
+        dropped only from rows of that conversation. [] when the current conversation is not this
+        tenant's and agent's (unknown or deleted)."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        if not 0 <= int(message_range) <= MAX_MESSAGE_RANGE:
+            raise ValueError(f"message_range must be between 0 and {MAX_MESSAGE_RANGE}")
+        current = str(current_conversation_id)
+        params: dict[str, Any] = {
+            "t": tenant_id,
+            "a": agent,
+            "c": str(conversation_id),
+            "cur": current,
+            "lo": int(turn) - int(message_range),
+            "hi": int(turn) + int(message_range),
+        }
+        excluded = sorted({int(t) for t in exclude_turns})
+        with self.engine.connect() as conn:
+            with conn.begin():
+                row = conn.execute(
+                    text("SELECT agent_id, resource_id FROM conversations WHERE tenant_id = :t AND id = :cur"),
+                    params,
+                ).mappings().first()
+                if row is None or row["agent_id"] != agent:
+                    return []
+                sql = (
+                    "SELECT id, conversation_id, turn, run_id, role, text, created_at FROM message_embeddings"
+                    " WHERE tenant_id = :t AND conversation_id = :c AND agent_id = :a AND turn BETWEEN :lo AND :hi"
+                )
+                if row["resource_id"] is not None:
+                    sql += " AND resource_id = :res"
+                    params["res"] = row["resource_id"]
+                else:
+                    sql += " AND conversation_id = :cur"
+                if excluded:
+                    sql += " AND NOT (conversation_id = :cur AND turn = ANY(CAST(:ex AS integer[])))"
+                    params["ex"] = excluded
+                sql += " ORDER BY turn, CASE role WHEN 'user' THEN 0 ELSE 1 END, id"
+                rows = conn.execute(text(sql), params).mappings().all()
+        return [
+            RecallMessage(
+                id=str(r["id"]),
+                conversation_id=r["conversation_id"],
+                turn=r["turn"],
+                run_id=r["run_id"],
+                role=r["role"],
+                text=r["text"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def message_embedding_tenants_before(self, cutoff: datetime, *, limit: int = 1000) -> list[str]:
+        """Tenants that have message embeddings created before `cutoff` (timezone-aware), in id
+        order, at most `limit` (the retention sweep's tenant batches; an operator-only call)."""
+        if cutoff.tzinfo is None:
+            raise ValueError("cutoff must be timezone-aware")
+        with self.engine.connect() as conn:
+            return list(
+                conn.execute(
+                    text(
+                        "SELECT DISTINCT tenant_id FROM message_embeddings WHERE created_at < :cut"
+                        " ORDER BY tenant_id LIMIT :n"
+                    ),
+                    {"cut": cutoff, "n": max(1, min(int(limit), MAX_RETENTION_BATCH))},
+                ).scalars()
+            )
+
+    def delete_message_embeddings_before(self, tenant_id: str, cutoff: datetime, *, limit: int = 1000) -> int:
+        """Retention: delete up to `limit` of the tenant's message embeddings created before
+        `cutoff` (timezone-aware), oldest first, in one transaction. Returns the number deleted;
+        call again until it returns less than `limit`. Idempotent (a re-run deletes what is left).
+        Embeddings are immutable, so their age is `created_at`. Every agent of the tenant.
+        Rows locked by a concurrent delete_conversation or forget_resource are skipped
+        (`FOR UPDATE SKIP LOCKED`): that delete removes them. Forget watermarks are kept."""
+        _require_tenant(tenant_id)
+        if cutoff.tzinfo is None:
+            raise ValueError("cutoff must be timezone-aware")
+        with self.Session() as session:
+            ids = session.execute(
+                text(
+                    "SELECT id FROM message_embeddings WHERE tenant_id = :t AND created_at < :cut"
+                    " ORDER BY created_at, id LIMIT :n FOR UPDATE SKIP LOCKED"
+                ),
+                {"t": tenant_id, "cut": cutoff, "n": max(1, min(int(limit), MAX_RETENTION_BATCH))},
+            ).scalars().all()
+            deleted = 0
+            if ids:
+                deleted = session.execute(
+                    text("DELETE FROM message_embeddings WHERE tenant_id = :t AND id = ANY(CAST(:ids AS uuid[]))"),
+                    {"t": tenant_id, "ids": [str(i) for i in ids]},
+                ).rowcount
+            session.commit()
+        return deleted
+
     # ------------------------------------------------------------------ deletions
 
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> bool:
         """Delete a conversation and its derived memory in one transaction.
 
-        Deletes its conversation-scoped working memory and observations (and, by cascade, any
+        Deletes its conversation-scoped working memory, observations and message embeddings (and,
+        by cascade, any
         other row that references the conversation), keeps its runs as the audit and cost record
         with `input`, `output`, `messages`, `request_context` and `error` set to NULL and detached
         from the conversation (`conversation_id` and `turn` NULL), scrubs every event of those runs
@@ -1361,6 +1937,11 @@ class MemoryStore:
             session.execute(
                 text("DELETE FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"), params
             )
+            # The FK cascade would remove these with the conversation row; deleting them here keeps
+            # the lock order (embedding rows before the run rows) explicit.
+            session.execute(
+                text("DELETE FROM message_embeddings WHERE tenant_id = :t AND conversation_id = :c"), params
+            )
             run_ids = session.execute(
                 text(
                     "UPDATE runs SET input = NULL, output = NULL, messages = NULL, request_context = NULL, error = NULL,"
@@ -1386,12 +1967,17 @@ class MemoryStore:
         First, in one transaction: lock the resource's conversations (of that agent, or all)
         `FOR UPDATE` in id order, so no turn can start in them; if any has a queued or running
         latest turn, raise ResourceBusy and change nothing (its write could recreate the note, and
-        its ledger would be gone). Otherwise delete the resource-scoped notes, scrub the
+        its ledger would be gone). Otherwise delete the resource-scoped notes and the message
+        embeddings indexed under the resource (that agent's, or every agent's), scrub the
         `memory_updated` events of those conversations' runs (they carry key names) and delete
         their working memory ledger rows. The turns' own text stays (see the module docstring).
         Then, with `include_conversations`, delete each of those conversations through
         delete_conversation, one transaction each; one whose turn started in between is skipped and
-        reported in `busy_conversations`. Idempotent. (RM.8 adds the resource's message embeddings.)"""
+        reported in `busy_conversations`. Idempotent.
+
+        In that transaction it also sets each locked conversation's forget watermark to its highest
+        existing turn (upsert to the max), so a post-turn index step of a turn that existed before
+        the forget, running late or recovered, skips (see index_turn)."""
         _require_tenant(tenant_id)
         validate_resource_id(resource_id)
         if not resource_id:
@@ -1431,6 +2017,25 @@ class MemoryStore:
                 ),
                 params,
             ).rowcount
+            embeddings = session.execute(
+                text("DELETE FROM message_embeddings WHERE tenant_id = :t AND resource_id = :k" + agent_clause),
+                params,
+            ).rowcount
+            # The watermarks: every turn that exists now is forgotten; later turns (higher numbers,
+            # created under the same conversation lock after this commits) index normally.
+            if ids:
+                session.execute(
+                    text(
+                        "INSERT INTO memory_forget_watermarks (tenant_id, conversation_id, forgotten_through_turn)"
+                        " SELECT CAST(:t AS varchar), c.id, coalesce((SELECT max(r.turn) FROM runs r"
+                        " WHERE r.tenant_id = CAST(:t AS varchar) AND r.conversation_id = c.id), 0)"
+                        " FROM unnest(CAST(:ids AS text[])) AS c(id)"
+                        " ON CONFLICT ON CONSTRAINT memory_forget_watermarks_pkey DO UPDATE SET forgotten_through_turn"
+                        " = greatest(memory_forget_watermarks.forgotten_through_turn,"
+                        " excluded.forgotten_through_turn), updated_at = now()"
+                    ),
+                    {"t": tenant_id, "ids": list(ids)},
+                )
             writer_runs = session.execute(
                 text("SELECT id FROM runs WHERE tenant_id = :t AND conversation_id = ANY(:ids) ORDER BY id"),
                 {"t": tenant_id, "ids": list(ids)},
@@ -1446,19 +2051,25 @@ class MemoryStore:
                         deleted.append(conv)
                 except TurnInProgress:
                     busy.append(conv)
-        return ForgetResult(notes, tuple(deleted), tuple(busy))
+        return ForgetResult(notes, tuple(deleted), tuple(busy), embeddings)
 
 
 __all__ = [
     "ForgetResult",
+    "IndexTurnResult",
     "MemoryEvent",
+    "MemoryForgetWatermarkModel",
     "MemoryLedgerConflict",
+    "MessageEmbeddingModel",
     "MemoryObservationModel",
     "MemorySnapshot",
     "MemoryStore",
     "Observation",
     "ResourceBusy",
     "ObservationWrite",
+    "RecallHit",
+    "RecallMessage",
+    "TurnText",
     "WorkingMemory",
     "WorkingMemoryModel",
     "WorkingMemoryVersionConflict",
