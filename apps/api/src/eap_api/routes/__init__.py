@@ -1,5 +1,6 @@
 """Route definitions for the control-plane API."""
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -17,15 +18,19 @@ from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, VersionRestore
 from eap_api.version_diff import compare_specs
+from eap_observability import log_failure
 from eap_processors import processor_errors
 from eap_run_store import KnowledgeStore
 from eap_schemas import AgentSpec, canonical_spec_hash, reserved_tool_name_conflicts
+from eap_schemas.embedding_policy import EmbeddingModelNotAllowed, EmbeddingModelPolicy
 from eap_schemas.tools import HIDDEN_TOOL_DECLARATIONS
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.processors import processor_models
 from eap_schemas.request_context import placeholder_errors
 
 # Body cap, UTF-8, depth, unstorable strings and compact 422s: eap_api.request_guard.
+log = logging.getLogger("eap_api")
+
 router = APIRouter(route_class=GuardedJsonRoute)
 
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -283,26 +288,30 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
     _check_knowledge_bases(db, tenant_id, spec)
 
 
-# Memory features the spec can describe (RM.2) but the worker does not run yet. Until RM.14
-# (semantic recall) lands, a spec that sets one would publish and then silently do nothing, so
-# publish, restore and draft runs refuse it. RM.14 removes its entry here (the plan's task sections
-# say so); RM.13 removed observational memory's.
-UNAVAILABLE_MEMORY_FEATURES: tuple[tuple[str, str], ...] = (
-    ("semantic_recall", "semantic recall is not available yet"),
-)
-
-
 def _check_memory_features(spec: AgentSpec) -> None:
-    """422 when the spec sets a memory feature that is not implemented yet (memory.semantic_recall);
-    remove it from the agent's memory settings to publish."""
+    """Memory's embedding models (semantic recall, RM.14) must pass the embedding allowlist
+    (EAP_ALLOWED_EMBEDDING_MODELS) with known dimensions: 422 naming the first that does not, 503
+    when the allowlist itself is misconfigured. The worker re-checks before every embedding call
+    and records a failed `embedding` event instead of failing the turn."""
     memory = spec.memory
     if memory is None:
         return
-    for field, message in UNAVAILABLE_MEMORY_FEATURES:
-        if getattr(memory, field) is not None:
-            raise HTTPException(
-                status_code=422, detail=f"{message}: remove memory.{field} from the agent's memory settings"
-            )
+    models = memory.embedding_models()
+    if not models:
+        return
+    try:
+        policy = EmbeddingModelPolicy.from_env()
+    except ValueError as exc:  # checked at startup; the environment changed under the process
+        log_failure(log, "embedding model allowlist invalid", exc, code="embedding_policy_invalid", level=logging.ERROR)
+        raise HTTPException(
+            status_code=503,
+            detail="the embedding model allowlist (EAP_ALLOWED_EMBEDDING_MODELS) is misconfigured",
+        ) from None
+    for model_id in models:
+        try:
+            policy.resolve(model_id)
+        except EmbeddingModelNotAllowed as exc:
+            raise HTTPException(status_code=422, detail=f"memory.semantic_recall: {exc}") from None
 
 
 def _check_platform_tools(spec: AgentSpec) -> None:

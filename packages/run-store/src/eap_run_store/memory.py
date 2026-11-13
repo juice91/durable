@@ -1997,6 +1997,114 @@ class MemoryStore:
             for r in rows
         ]
 
+    def recall_rows_exist(
+        self, tenant_id: str, agent_id: str, conversation_id: str, *, embedding_model: str, scope: str = "resource"
+    ) -> bool:
+        """Whether search_recall could find anything for the turn running in `conversation_id`: any
+        message_embeddings row of this tenant, agent and `embedding_model` in the scope (resolved
+        exactly like search_recall: the conversation's resource_id, or this conversation). One
+        indexed EXISTS, so the caller can skip a priced query embedding for a brand-new user (RM.14).
+        Raises ConversationNotFound (unknown, another tenant's or another agent's conversation)."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        conv = str(conversation_id)
+        parse_embedding_model_id(embedding_model)
+        if scope not in RECALL_SCOPES:
+            raise ValueError(f"scope must be one of {', '.join(RECALL_SCOPES)}")
+        with self.engine.connect() as conn:
+            with conn.begin():
+                row = conn.execute(
+                    text("SELECT agent_id, resource_id FROM conversations WHERE tenant_id = :t AND id = :c"),
+                    {"t": tenant_id, "c": conv},
+                ).mappings().first()
+                if row is None or row["agent_id"] != agent:
+                    raise ConversationNotFound(tenant_id, conv)
+                params: dict[str, Any] = {"t": tenant_id, "a": agent, "c": conv, "model": embedding_model}
+                if scope == "resource" and row["resource_id"] is not None:
+                    clause = "resource_id = :res"
+                    params["res"] = row["resource_id"]
+                else:
+                    clause = "conversation_id = :c"
+                return bool(
+                    conn.execute(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM message_embeddings WHERE tenant_id = :t AND agent_id = :a"
+                            f" AND {clause} AND embedding_model = :model)"
+                        ),
+                        params,
+                    ).scalar_one()
+                )
+
+    def recall_neighbours_many(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        hits: Sequence[tuple[str, int]],
+        message_range: int,
+        *,
+        current_conversation_id: str,
+        exclude_turns: Iterable[int] = (),
+    ) -> dict[tuple[str, int], list[RecallMessage]]:
+        """recall_neighbours for several hit turns `(conversation_id, turn)` in ONE query, with the
+        same scoping and ordering; keyed by the hit (a message near two hits appears under both).
+        {} when `hits` is empty or the current conversation is not this tenant's and agent's."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        if not 0 <= int(message_range) <= MAX_MESSAGE_RANGE:
+            raise ValueError(f"message_range must be between 0 and {MAX_MESSAGE_RANGE}")
+        keys = list(dict.fromkeys((str(c), int(t)) for c, t in hits))
+        if not keys:
+            return {}
+        current = str(current_conversation_id)
+        params: dict[str, Any] = {
+            "t": tenant_id,
+            "a": agent,
+            "cur": current,
+            "r": int(message_range),
+            "hc": [c for c, _ in keys],
+            "ht": [t for _, t in keys],
+        }
+        excluded = sorted({int(t) for t in exclude_turns})
+        with self.engine.connect() as conn:
+            with conn.begin():
+                row = conn.execute(
+                    text("SELECT agent_id, resource_id FROM conversations WHERE tenant_id = :t AND id = :cur"),
+                    params,
+                ).mappings().first()
+                if row is None or row["agent_id"] != agent:
+                    return {}
+                sql = (
+                    "SELECT h.c AS hit_conversation_id, h.t AS hit_turn, m.id, m.conversation_id, m.turn, m.run_id,"
+                    " m.role, m.text, m.created_at"
+                    " FROM unnest(CAST(:hc AS varchar[]), CAST(:ht AS integer[])) AS h(c, t)"
+                    " JOIN message_embeddings m ON m.tenant_id = :t AND m.agent_id = :a AND m.conversation_id = h.c"
+                    " AND m.turn BETWEEN h.t - :r AND h.t + :r"
+                )
+                if row["resource_id"] is not None:
+                    sql += " AND m.resource_id = :res"
+                    params["res"] = row["resource_id"]
+                else:
+                    sql += " AND m.conversation_id = :cur"
+                if excluded:
+                    sql += " AND NOT (m.conversation_id = :cur AND m.turn = ANY(CAST(:ex AS integer[])))"
+                    params["ex"] = excluded
+                sql += " ORDER BY h.c, h.t, m.turn, CASE m.role WHEN 'user' THEN 0 ELSE 1 END, m.id"
+                rows = conn.execute(text(sql), params).mappings().all()
+        out: dict[tuple[str, int], list[RecallMessage]] = {k: [] for k in keys}
+        for r in rows:
+            out[(r["hit_conversation_id"], int(r["hit_turn"]))].append(
+                RecallMessage(
+                    id=str(r["id"]),
+                    conversation_id=r["conversation_id"],
+                    turn=r["turn"],
+                    run_id=r["run_id"],
+                    role=r["role"],
+                    text=r["text"],
+                    created_at=r["created_at"],
+                )
+            )
+        return out
+
     def message_embedding_tenants_before(self, cutoff: datetime, *, limit: int = 1000) -> list[str]:
         """Tenants that have message embeddings created before `cutoff` (timezone-aware), in id
         order, at most `limit` (the retention sweep's tenant batches; an operator-only call)."""

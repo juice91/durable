@@ -32,6 +32,8 @@ _DEFAULT_DBOS_DB = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_
 DEFAULT_EMBEDDING_MAX_BATCH_INPUTS = 32
 DEFAULT_EMBEDDING_MAX_BATCH_TOKENS = 16_384  # approximate tokens, ceil(len / 4)
 DEFAULT_EMBEDDING_TIMEOUT_S = 120.0
+# The pre-turn recall query (RM.14) runs before the model: its own short per-attempt deadline.
+DEFAULT_RECALL_TIMEOUT_S = 8.0
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -76,6 +78,7 @@ class WorkerSettings:
     embedding_max_batch_inputs: int = DEFAULT_EMBEDDING_MAX_BATCH_INPUTS
     embedding_max_batch_tokens: int = DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
     embedding_timeout_s: float = DEFAULT_EMBEDDING_TIMEOUT_S
+    recall_timeout_s: float = DEFAULT_RECALL_TIMEOUT_S
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -106,6 +109,7 @@ class WorkerSettings:
                 "EAP_EMBEDDING_MAX_BATCH_TOKENS", DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
             ),
             embedding_timeout_s=_positive_float("EAP_EMBEDDING_TIMEOUT_S", DEFAULT_EMBEDDING_TIMEOUT_S),
+            recall_timeout_s=_positive_float("EAP_RECALL_TIMEOUT_S", DEFAULT_RECALL_TIMEOUT_S),
         )
 
 

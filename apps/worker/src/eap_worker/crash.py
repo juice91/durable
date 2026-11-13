@@ -73,6 +73,13 @@
   right after the observation (or reflection, or failure event) transaction committed and before
   the step checkpoint. Recovery re-runs the step: the slot answers `existing`, one row, one event,
   one usage row.
+- `recall_embedding` (RM.14): inside `eap.memory_recall`, right after the query embedding returned
+  and before the search and the `embed:recall:{turn}` event and usage transaction. Recovery
+  re-runs the step (one bounded duplicate provider call): one event, one usage row, the same block.
+- `after_memory_index` (RM.14): inside `eap.memory_index`, right after the index_turn transaction
+  (rows, `embed:index:{turn}` event, usage row) committed and before the step checkpoint (the run
+  is already completed). Recovery re-runs the step: index_turn answers `existing`, the event key
+  exists, so one row per role, one event, one usage row.
 
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
@@ -106,6 +113,8 @@ CRASH_POINTS = frozenset(
         "load_memory",
         "observer_request",
         "after_observation_write",
+        "recall_embedding",
+        "after_memory_index",
     }
 )
 

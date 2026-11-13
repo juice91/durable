@@ -1,11 +1,9 @@
 """RAG milestone checkpoint review fixes (2026-11-14), API side: dot-only document keys and no
-trailing-slash redirects, the `eap-kb-ingest` queue, unavailable memory features refused at publish,
-restore and draft runs, paged document lists, the `knowledge_base_id` run filter and a knowledge
-base's ingest spend."""
+trailing-slash redirects, the `eap-kb-ingest` queue, paged document lists, the `knowledge_base_id`
+run filter and a knowledge base's ingest spend."""
 
 from __future__ import annotations
 
-import json
 import uuid
 
 import pytest
@@ -78,7 +76,9 @@ def test_kb_ingest_is_enqueued_on_its_own_queue(pg, tenant_of, fake_dbos, kb_cle
     assert options["workflow_name"] == "eap.kb_ingest"
 
 
-# ------------------------------------------------------------------- unavailable memory features
+# ------------------------------------------------------------------------ memory specs (helpers)
+# The interim "not available yet" refusals are gone (RM.13, RM.14): test_observational_publish.py
+# and test_semantic_recall_publish.py cover the publish checks that replaced them.
 
 
 def _agent_with_draft(client, h, memory=None):
@@ -86,48 +86,6 @@ def _agent_with_draft(client, h, memory=None):
     r = client.post(f"{API}/agents", json={"spec": spec}, headers=h)
     assert r.status_code == 201, r.text
     return r.json()["id"]
-
-
-@requires_pg
-@pytest.mark.parametrize(
-    ("memory", "message"),
-    [
-        (SEMANTIC_RECALL, "semantic recall is not available yet"),
-    ],
-)
-def test_unavailable_memory_features_are_refused(pg, tenant_of, fake_dbos, memory, message):
-    client, app = pg
-    tenant, h = tenant_of()
-
-    # Publish.
-    agent_id = _agent_with_draft(client, h, memory)
-    r = client.post(f"{API}/agents/{agent_id}/versions", headers=h)
-    assert r.status_code == 422 and r.json()["detail"].startswith(message), r.text
-
-    # Draft run (the shared validate path).
-    r = client.post(
-        f"{API}/agents/{agent_id}/runs",
-        json={"run_id": str(uuid.uuid4()), "input": "hi", "version": "draft"},
-        headers=h,
-    )
-    assert r.status_code == 422 and r.json()["detail"].startswith(message), r.text
-    assert fake_dbos.calls == []
-
-    # Restore of a version stored before the check existed.
-    plain = _agent_with_draft(client, h)
-    assert client.post(f"{API}/agents/{plain}/versions", headers=h).status_code == 201
-    stored = {**SPEC, "instructions": "v1 with memory", "memory": memory}
-    with app.state.database_engine.begin() as conn:
-        conn.execute(
-            text("UPDATE agent_versions SET spec = CAST(:s AS jsonb) WHERE agent_id = :a AND version = 1"),
-            {"s": json.dumps(stored), "a": plain},
-        )
-    r = client.patch(f"{API}/agents/{plain}", json={"spec": {**SPEC, "instructions": "v2"}}, headers=h)
-    assert r.status_code == 200, r.text
-    assert client.post(f"{API}/agents/{plain}/versions", headers=h).status_code == 201
-    r = client.post(f"{API}/agents/{plain}/versions/1/restore", json={"discard_draft": True}, headers=h)
-    assert r.status_code == 422 and r.json()["detail"].startswith(message), r.text
-    del tenant
 
 
 # ------------------------------------------------------------------------ document pagination

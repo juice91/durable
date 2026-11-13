@@ -126,6 +126,26 @@ run's status is already `completed`:
 A failure there never changes the run's status. Without `memory.observational` the layout is the
 RM.12 one exactly (no post-turn step).
 
+Semantic recall (RM.14; eap_worker.recall): only for a spec with `memory.semantic_recall` AND a
+conversation turn. Pre-turn, right after eap.load_memory (so never for a blocked input), one step
+embeds the processed input, searches, widens the hits and checkpoints the groups, which the
+instructions show as a "Related earlier conversations" block (never stored); post-turn, for a
+completed turn, one step indexes the processed input and the final answer:
+
+    eap.load_memory
+    eap.memory_recall                   query embedding (`embed:recall:{turn}`), search excluding the
+                                        turns in context, neighbours, the 8 KiB fit; its `embedding`
+                                        event and usage row
+    ... the turn ...
+    eap.finish_run
+    eap.memory_index                    redact, embed (`embed:index:{turn}`), MemoryStore.index_turn
+                                        with its `embedding` event and usage row in one transaction
+    eap.memory_observe ...              (RM.13, when configured)
+
+A recall or index failure (embedding model no longer allowed, provider error, redaction) is one
+text-free `embedding` event `embed:{recall|index}:{turn}:failed` and never fails the turn. Without
+`memory.semantic_recall` the layout is the RM.12 / RM.13 one exactly.
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -183,6 +203,7 @@ from eap_worker.memory import (
     with_memory,
 )
 from eap_worker.observational import observe_after_turn
+from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
@@ -320,8 +341,8 @@ async def start_run_step(
     """Returns {"conversation_id", "turn", "resource_id", "traceparent", "superseded", "model_id",
     "request_context", "is_draft"}; conversation_id/turn/resource_id are None for a standalone run
     (RM.12: the conversation row's resource_id, read only for a spec with `memory`; else None; it is
-    recorded for RM.14's pre-turn recall, while eap.load_memory's snapshot stays authoritative for
-    the working memory key), traceparent
+    informational: eap.load_memory's snapshot is authoritative for the working memory key, and RM.14's
+    recall store calls read the resource from the conversation row themselves), traceparent
     is None when the API had telemetry off. `superseded` is True when this turn must not run (see
     mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
     the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
@@ -807,7 +828,14 @@ async def _run_body(
                 spec.memory.model_dump(mode="json"),
             )
             history = ModelMessagesTypeAdapter.validate_python(loaded["history"])
-            deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded))
+            recall = None
+            if spec.memory.semantic_recall is not None:
+                # RM.14: pre-turn recall on the processed input (recorded; never fails the turn).
+                recall = await recall_before_turn(
+                    run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec,
+                    input_text, loaded,
+                )
+            deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded, recall))
         output, new_messages = await _drive_agent(run_id, deps, input_text, history, model_id)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
@@ -829,6 +857,11 @@ async def _run_body(
     # complete event log.
     await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
     await finish_run_step(run_id, tenant_id, "completed", output, None, new_messages)
+    if spec.memory is not None and spec.memory.semantic_recall is not None and link.get("conversation_id") is not None:
+        # RM.14: post-turn index of the processed input and final answer (never fails the turn).
+        await index_after_turn(
+            run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec, input_text, output
+        )
     if spec.memory is not None and spec.memory.observational is not None and link.get("conversation_id") is not None:
         # RM.13: post-turn observational memory, after the run is completed (never delays the answer,
         # never fails the turn).
