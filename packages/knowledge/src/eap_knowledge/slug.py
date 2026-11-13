@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from urllib.parse import quote
+
+
+_ASCII_DROP = re.compile(r"[^a-z0-9 _-]")
 
 
 def slugify(heading: str) -> str:
@@ -13,6 +17,8 @@ def slugify(heading: str) -> str:
     does: ``"What's new?"`` -> ``"whats-new"``, ``"A -- B"`` -> ``"a----b"``, ``"日本語 見出し"`` ->
     ``"日本語-見出し"``.
     """
+    if heading.isascii():  # fast path, same result: ASCII letters and digits are L and N
+        return _ASCII_DROP.sub("", heading.strip().lower()).replace(" ", "-")
     out: list[str] = []
     for ch in heading.strip().lower():
         if ch == " ":

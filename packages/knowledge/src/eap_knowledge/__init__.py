@@ -13,7 +13,7 @@ from eap_knowledge.config import (
     ChunkingConfigLike,
 )
 from eap_knowledge.errors import ExtractionFailed, InvalidChunkingConfig, UnsupportedMimeType
-from eap_knowledge.extract import MAX_HTML_ATTRIBUTES, document_format, extract
+from eap_knowledge.extract import MAX_HTML_ATTRIBUTES, MAX_SECTIONS, document_format, extract
 from eap_knowledge.model import Chunk, Document, Section, approx_tokens, sha256_hex
 from eap_knowledge.slug import anchor_fragment, slugify
 
@@ -24,6 +24,7 @@ __all__ = [
     "DEFAULT_CHUNKING",
     "MAX_HEADING_CHARS",
     "MAX_HTML_ATTRIBUTES",
+    "MAX_SECTIONS",
     "PREFIX_SHARE",
     "SUPPORTED_CHUNKER_VERSIONS",
     "Chunk",

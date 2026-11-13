@@ -21,6 +21,7 @@ from eap_knowledge import (
     DEFAULT_CHUNKING,
     MAX_HEADING_CHARS,
     MAX_HTML_ATTRIBUTES,
+    MAX_SECTIONS,
     ExtractionFailed,
     Chunk,
     ChunkingConfig,
@@ -574,6 +575,102 @@ def test_comments_inside_code_are_kept_as_code() -> None:
     assert "<!-- fenced comment -->" in a.text
     assert "`<!-- span -->`" in a.text
     assert "<!-- indented code -->" in a.text
+
+
+_MIB = 1024 * 1024
+
+
+def _rep(unit: str, size: int = _MIB) -> str:
+    return (unit * (size // len(unit) + 1))[:size]
+
+
+def _assert_linear(make, *, limit: float = 2.0) -> None:
+    """Time extract+chunk at 256 KiB and 1 MiB: 4x the input may take at most ~8x the time (a
+    quadratic path would take 16x), and the larger run stays under a generous absolute limit."""
+
+    def run(size: int) -> float:
+        text = make(size)
+        started = time.perf_counter()
+        chunk(extract(text, "text/markdown"))
+        return time.perf_counter() - started
+
+    run(_MIB // 64)  # warm up
+    small, large = run(_MIB // 4), run(_MIB)
+    assert large < limit, (small, large)
+    assert large <= 8 * small + 0.1, (small, large)
+
+
+INLINE_UNITS = ["[", "*a", "_a ", "`a", "<a", "!["]
+
+
+@pytest.mark.parametrize("unit", INLINE_UNITS)
+@pytest.mark.parametrize("shape", ["paragraph", "headings", "with_comment"])
+def test_markdown_inline_pathologies_are_linear(unit: str, shape: str) -> None:
+    # markdown-it's inline pass took 9-33 s on 5 MiB of these.
+    makers = {
+        "paragraph": lambda n: _rep(unit, n),
+        "headings": lambda n: _rep("# " + unit * 2000 + "\n", n),
+        "with_comment": lambda n: "<!-- c --> " + _rep(unit, n) + " <!-- d -->",
+    }
+    _assert_linear(makers[shape])
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(lambda n: "# a" + " " * n + "#b", id="atx-1mb-spaces"),
+        pytest.param(lambda n: "# a" + " \t" * (n // 2) + "#b", id="atx-tab-space-mix"),
+        pytest.param(lambda n: _rep("# a" + " " * 2000 + "#b\n", n), id="atx-lines-of-2000-spaces"),
+        pytest.param(lambda n: _rep("# a" + " " * 2000 + "##\n", n), id="atx-closing-after-spaces"),
+        pytest.param(lambda n: _rep("> a\n" + "lazy line\n" * 4, n), id="lazy-quote"),
+        pytest.param(lambda n: _rep("[a]: /u\n", n), id="refdefs"),
+        pytest.param(lambda n: _rep("[" + "a" * 2000 + "\n", n), id="unclosed-refdef-lines"),
+        pytest.param(lambda n: _rep("- \n\n  x\n", n), id="empty-items"),
+        pytest.param(lambda n: _rep("- a\n  - b\n\n  c\n", n), id="nested-reentry"),
+    ]
+    + [pytest.param(lambda n, u=u: _rep(u, n), id=repr(u)) for u in
+       ["a\n", "a\n\n", "# a\n", "# *a\n", "a\n=\n", "- a\n", "1. a\n", "> a\n", "```\nx\n```\n", "<div>\n"]],
+)
+def test_markdown_block_pathologies_are_linear(make) -> None:
+    _assert_linear(make)
+
+
+def test_atx_closing_sequence_rules() -> None:
+    from eap_knowledge.markdown import atx_content
+
+    cases = {"foo ##": "foo", "foo#": "foo#", "#": "", "foo \\#": "foo \\#", "  foo  #  ": "foo", "a" + " " * 9 + "#b": "a" + " " * 9 + "#b"}
+    for raw, want in cases.items():
+        assert atx_content(raw) == want, raw
+
+
+def test_heading_text_does_not_depend_on_position() -> None:
+    heading = "# *x* " + "`a` " * 6 + "\n\nbody\n\n"
+    doc = extract(heading * 6000, "text/markdown")
+    texts = {s.heading for s in doc.sections if s.level}
+    assert texts == {"x " + "a " * 5 + "a"}
+
+
+def test_headings_past_the_section_cap_stay_as_body_text() -> None:
+    md = "".join(f"# H{i}\n\nbody {i}\n\n" for i in range(MAX_SECTIONS + 50))
+    doc = extract(md, "text/markdown")
+    assert len(doc.sections) == MAX_SECTIONS
+    last = doc.sections[-1]
+    assert last.heading == f"H{MAX_SECTIONS - 2}"
+    assert f"# H{MAX_SECTIONS + 49}" in last.text and f"body {MAX_SECTIONS + 49}" in last.text
+    html = "".join(f"<h2>H{i}</h2><p>body {i}</p>" for i in range(MAX_SECTIONS + 5))
+    hdoc = extract(html, "text/html")
+    assert len(hdoc.sections) == MAX_SECTIONS and f"## H{MAX_SECTIONS + 4}" in hdoc.sections[-1].text
+
+
+def test_headings_inside_lists_and_quotes_are_not_top_level() -> None:
+    md = "# Top\n\n- item\n\n  # in list\n\n> # in quote\n> more\nlazy line\n\n1. x\n   ## in ordered\n\n## Real\n\nend"
+    assert [s.heading for s in extract(md, "text/markdown").sections] == ["", "Top", "Real"]
+
+
+def test_heading_inline_syntax_matches_markdown_it() -> None:
+    md = "# *Emph* and `code` [link](x) ![alt](i) \\# &amp; <b>x</b> ##\n\nSetext *two*\nlines\n---\n\nbody"
+    doc = extract(md, "text/markdown")
+    assert [s.heading for s in doc.sections] == ["", "Emph and code link alt # & x", "Setext two lines"]
 
 
 def _bounded(fn, seconds: float, peak_bytes: int):

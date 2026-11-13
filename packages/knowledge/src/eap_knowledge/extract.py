@@ -7,9 +7,8 @@ import unicodedata
 import html.parser as _stdlib_html_parser
 from html.parser import HTMLParser
 
-from markdown_it import MarkdownIt
-
 from eap_knowledge.errors import ExtractionFailed, UnsupportedMimeType
+from eap_knowledge.markdown import apply_html_rules, atx_content, heading_text, reference_env, scan
 from eap_knowledge.model import Document, Section
 from eap_knowledge.slug import SlugRegistry, slugify
 
@@ -25,7 +24,6 @@ _FORMATS = {
 # A line of YAML front matter: a comment, a list item, an indented continuation, a blank line or a
 # `key:` (plain or quoted key, no spaces in a plain key).
 _YAML_LINE = re.compile(r"""(?:|#.*|-(?:[ \t].*)?|[ \t]+.*|(?:[A-Za-z0-9_][\w.-]*|"[^"]*"|'[^']*')[ \t]*:(?:[ \t].*)?)""")
-_MD_DROPPED_BLOCK = re.compile(r"[ \t]*<(?:script|style|noscript|template)\b", re.I)
 
 # html.parser builds a list entry per attribute, so the memory a start tag costs grows with its
 # attribute count (not with value length): a tag with more attributes than this is rejected.
@@ -60,14 +58,14 @@ def extract(content: str, mime_type: str, *, title: str = "", source_url: str | 
     else:
         raw = [(0, "", content, None)]
     sections = _build(raw)
-    extracted = sum(_non_ws_len(s.heading) + _non_ws_len(s.text) for s in sections)
+    extracted = _non_ws_len("".join([s.heading + s.text for s in sections]))
     return Document(
         title=title, source_url=source_url or None, format=fmt, sections=sections, extracted_chars=extracted
     )
 
 
 def _non_ws_len(text: str) -> int:
-    return len(text) - sum(1 for ch in text if ch.isspace())
+    return len("".join(text.split()))
 
 
 def _normalize(text: str) -> str:
@@ -84,6 +82,8 @@ def _clean_block(text: str) -> str:
 
     Leading indentation is kept (code blocks).
     """
+    if "\n" not in text:  # fast path, same result
+        return text.rstrip()
     text = "\n".join(line.rstrip() for line in text.split("\n"))
     return _BLANK_RUNS.sub("\n\n", text).strip("\n")
 
@@ -92,7 +92,24 @@ def _clean_block(text: str) -> str:
 _Raw = tuple[int, str, str, str | None]
 
 
+# Sections per document. Past this, further headings stay in the last section's body as heading
+# lines, so a document of millions of headings costs linear time and loses no text.
+MAX_SECTIONS = 10_000
+
+
+def _cap_sections(raw: list[_Raw]) -> list[_Raw]:
+    if len(raw) <= MAX_SECTIONS:
+        return raw
+    level, heading, body, explicit_id = raw[MAX_SECTIONS - 1]
+    parts = [body]
+    for lv, h, b, _ in raw[MAX_SECTIONS:]:
+        parts.append(f"{'#' * lv} {h}" if lv else "")
+        parts.append(b)
+    return [*raw[: MAX_SECTIONS - 1], (level, heading, "\n\n".join(p for p in parts if p), explicit_id)]
+
+
 def _build(raw: list[_Raw]) -> tuple[Section, ...]:
+    raw = _cap_sections(raw)
     stack: list[tuple[int, str]] = []
     slugs = SlugRegistry()
     # Explicit HTML ids are used as-is and claimed first, so a generated slug never takes one.
@@ -113,7 +130,7 @@ def _build(raw: list[_Raw]) -> tuple[Section, ...]:
                 anchor = slugs.claim(base) if base else None
         sections.append(
             Section(
-                heading_path=tuple(h for _, h in stack),
+                heading_path=tuple([h for _, h in stack]),
                 heading=heading,
                 level=level,
                 text=_clean_block(body),
@@ -150,86 +167,25 @@ def _strip_front_matter(content: str) -> str:
 
 
 def _markdown_sections(content: str) -> list[_Raw]:
+    """Sections at top-level headings, from a linear block scan (see ``eap_knowledge.markdown``).
+
+    Bodies are the source lines between headings, with script/style/noscript/template HTML blocks
+    and HTML comments removed; code (fenced or indented) is kept verbatim.
+    """
     content = _strip_front_matter(content)
     lines = content.split("\n")
-    tokens = MarkdownIt("commonmark").parse(content)
-    # Raw HTML script/style/noscript/template blocks and HTML comments (block and inline) are
-    # dropped, as in HTML uploads. Edits keep the line count, so token line maps stay valid; code
-    # fences and code spans are never touched.
-    for i, tok in enumerate(tokens):
-        if tok.map is None:
-            continue
-        start, stop = tok.map[0], min(tok.map[1], len(lines))
-        if tok.type == "html_block" and _MD_DROPPED_BLOCK.match(tok.content):
-            for k in range(start, stop):
-                lines[k] = ""
-        elif tok.type == "html_block" and "<!--" in tok.content:
-            lines[start:stop] = _COMMENT.sub(_newlines_only, "\n".join(lines[start:stop])).split("\n")
-        elif tok.type == "inline" and tok.children and not (i and tokens[i - 1].type == "heading_open"):
-            if any(_is_inline_comment(child) for child in tok.children):
-                lines[start:stop] = _drop_inline_comments("\n".join(lines[start:stop]), tok.children).split("\n")
-    # Top-level headings only (a heading inside a list item or blockquote stays body text), with
-    # their source line span [start, end).
-    heads: list[tuple[int, int, int, str]] = []
-    for i, tok in enumerate(tokens):
-        if tok.type == "heading_open" and tok.level == 0 and tok.map is not None:
-            heads.append((tok.map[0], tok.map[1], int(tok.tag[1]), _inline_text(tokens[i + 1])))
+    result = scan(lines)
+    apply_html_rules(lines, result.kinds)
+    # Headings past the section cap stay in the last section's body as their own source lines.
+    kept = [(s, e, lv, raw if s + 1 < e else atx_content(raw)) for s, e, lv, raw in result.headings[: MAX_SECTIONS - 1]]
+    env = reference_env(result.ref_labels) if result.ref_labels and any("[" in r for *_, r in kept) else None
+    heads = [(start, end, level, heading_text(raw, env)) for start, end, level, raw in kept]
     first = heads[0][0] if heads else len(lines)
     raw: list[_Raw] = [(0, "", "\n".join(lines[:first]), None)]
     for idx, (_, end, level, text) in enumerate(heads):
         stop = heads[idx + 1][0] if idx + 1 < len(heads) else len(lines)
         raw.append((level, text, "\n".join(lines[end:stop]), None))
     return raw
-
-
-_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
-
-
-def _newlines_only(match: re.Match[str]) -> str:
-    return "\n" * match.group(0).count("\n")
-
-
-def _is_inline_comment(child) -> bool:  # type: ignore[no-untyped-def]  # markdown_it Token
-    return child.type == "html_inline" and child.content.startswith("<!--")
-
-
-def _drop_inline_comments(block: str, children) -> str:  # type: ignore[no-untyped-def]
-    """Remove the inline comment tokens from the block's source, matched in source order.
-
-    A cursor walks the children: text, code spans and other inline HTML move it forward when found,
-    so a ``<!--`` inside a code span is never taken for a comment. A child that cannot be located
-    (escapes, entities, blockquote markers) is skipped, which at worst keeps a comment.
-    """
-    out: list[str] = []
-    cursor = 0
-    for child in children:
-        content = child.content
-        if not content:
-            continue
-        pos = block.find(content, cursor)
-        if pos < 0:
-            continue
-        if _is_inline_comment(child):
-            out.append(block[cursor:pos])
-            out.append("\n" * content.count("\n"))
-            cursor = pos + len(content)
-        elif child.type in ("text", "code_inline", "html_inline"):
-            out.append(block[cursor : pos + len(content)])
-            cursor = pos + len(content)
-    out.append(block[cursor:])
-    return "".join(out)
-
-
-def _inline_text(inline) -> str:  # type: ignore[no-untyped-def]  # markdown_it Token
-    parts: list[str] = []
-    for child in inline.children or ():
-        if child.type in ("text", "code_inline"):
-            parts.append(child.content)
-        elif child.type in ("softbreak", "hardbreak"):
-            parts.append(" ")
-        elif child.type == "image":
-            parts.append(child.content)
-    return _collapse("".join(parts))
 
 
 # --- HTML ----------------------------------------------------------------------------------------
