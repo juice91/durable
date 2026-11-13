@@ -6,3 +6,4 @@ export { MetricsCharts, chartSpecs, ALL_CHARTS, USAGE_DRILL_LABEL, type ChartId,
 export { BreakdownTable, breakdownHref, breakdownLabel, SORT_OPTIONS, type BreakdownTableProps } from "./BreakdownTable";
 export { MetricsFilterBar, type MetricsFilterBarProps } from "./MetricsFilterBar";
 export { useMetricsQuery, type MetricsQueryState } from "./useMetricsQuery";
+export { useAutoRefresh } from "./useAutoRefresh";

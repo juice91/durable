@@ -341,12 +341,12 @@ export function hasActiveFilters(filters: TraceFilters): boolean {
 
 export async function listTraceRuns(
   filters: TraceFilters,
-  { limit = 50, before }: { limit?: number; before?: string } = {},
+  { limit = 50, before, signal }: { limit?: number; before?: string; signal?: AbortSignal } = {},
 ): Promise<{ items: TraceRun[]; next_before: string | null }> {
   const params = traceFiltersToParams(filters);
   params.set("limit", String(limit));
   if (before) params.set("before", before);
-  const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders() });
+  const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders(), signal });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
 }

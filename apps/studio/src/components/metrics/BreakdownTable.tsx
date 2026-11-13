@@ -28,6 +28,9 @@ export interface BreakdownTableProps {
   error?: string | null;
   emptyMessage?: string;
   note?: string;
+  /** Where a row's name (and a click on the row) leads, with the link's accessible name; default:
+   * the Traces list filtered to the row (`breakdownHref`). The Overview Dashboard opens Metrics. */
+  rowLink?: (item: BreakdownItem, name: string) => { href: string; label: string };
 }
 
 export const SORT_OPTIONS: { value: BreakdownSort; label: string }[] = [
@@ -76,6 +79,7 @@ export function BreakdownTable({
   error = null,
   emptyMessage = "No data in this period",
   note,
+  rowLink,
 }: BreakdownTableProps) {
   const sortId = `breakdown-sort-${by}`;
   const th = "px-3 py-2 font-medium text-muted-foreground whitespace-nowrap";
@@ -122,8 +126,9 @@ export function BreakdownTable({
             </thead>
             <tbody className="divide-y divide-border">
               {items.map((item) => {
-                const href = breakdownHref(item, by, filters);
                 const name = breakdownLabel(item, by);
+                const link = rowLink ? rowLink(item, name) : { href: breakdownHref(item, by, filters), label: `${name}: open matching runs` };
+                const href = link.href;
                 return (
                   <tr
                     key={item.key}
@@ -135,7 +140,7 @@ export function BreakdownTable({
                     }}
                   >
                     <th scope="row" className="px-3 py-2 text-left font-medium max-w-[16rem]">
-                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "model" ? item.key : `${name} (${item.key})`} aria-label={`${name}: open matching runs`}>
+                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "model" ? item.key : `${name} (${item.key})`} aria-label={link.label}>
                         {name}
                       </Link>
                     </th>
