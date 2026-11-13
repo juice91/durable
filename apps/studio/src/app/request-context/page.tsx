@@ -19,6 +19,7 @@ import {
   type RequestContextValue,
   type SavedRequestContext,
 } from "@/lib/requestContext";
+import { routes } from "@/lib/routes";
 
 type VersionChoice = number | "draft";
 
@@ -184,7 +185,7 @@ export default function RequestContextPage() {
         <div className="rounded-lg border border-dashed border-border p-8 text-center">
           <p className="font-medium text-foreground">No agents yet</p>
           <p className="mt-1 text-sm text-muted-foreground">Request context is declared on an agent.</p>
-          <Link href="/agents/new" className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline">Create an agent</Link>
+          <Link href={routes.agentNew()} className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline">Create an agent</Link>
         </div>
       ) : null}
 
@@ -218,7 +219,7 @@ export default function RequestContextPage() {
                 </select>
                 {agent.latest_version === null ? <p className="text-xs text-muted-foreground">Not published yet: only the draft is available.</p> : null}
               </div>
-              <Link href={`/agents/${agent.id}`} className="inline-block text-sm text-primary underline-offset-4 hover:underline">Edit fields in the agent editor</Link>
+              <Link href={routes.agentEditor(agent.id)} className="inline-block text-sm text-primary underline-offset-4 hover:underline">Edit fields in the agent editor</Link>
             </section>
 
             <section className="space-y-2 rounded-lg border border-border bg-card p-4" data-testid="saved-context">
@@ -249,7 +250,7 @@ export default function RequestContextPage() {
                 <p className="mt-1 text-sm text-muted-foreground">
                   Add typed fields to the agent, then use them in the instructions as <code className="font-mono">{"{{context.<name>}}"}</code> or read them from tools.
                 </p>
-                <Link href={`/agents/${agent.id}`} className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline">Open the agent editor</Link>
+                <Link href={routes.agentEditor(agent.id)} className="mt-3 inline-block text-sm text-primary underline-offset-4 hover:underline">Open the agent editor</Link>
               </section>
             ) : null}
 

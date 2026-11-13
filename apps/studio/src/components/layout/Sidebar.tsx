@@ -80,7 +80,7 @@ export function MobileSidebar({ isOpen, onClose }: { isOpen: boolean; onClose: (
 
   return (
     <div className="fixed inset-0 z-50 md:hidden">
-      <div className="fixed inset-0 bg-black bg-opacity-50" onClick={onClose} />
+      <div className="fixed inset-0 bg-canvas/80" onClick={onClose} />
       <div className="fixed inset-y-0 left-0 w-64 bg-background shadow-xl transform transition-transform duration-200 ease-in-out">
         <div className="flex items-center justify-between p-4 border-b border-border">
           <h1 className="text-lg font-semibold text-foreground">AI Platform Studio</h1>

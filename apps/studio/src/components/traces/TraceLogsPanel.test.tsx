@@ -7,6 +7,7 @@ import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceView } from "./TraceView";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/logs/logsQuery")>()),
@@ -48,7 +49,7 @@ describe("TraceLogsPanel", () => {
       run_id: RUN, limit: 500, from: "2026-11-13T10:00:02.000000Z", to: "2026-11-13T10:00:05.001000Z",
     });
     expect(screen.getByTestId("trace-logs-scope")).toHaveTextContent("Model request #0: test:model");
-    expect(screen.getByRole("link", { name: "Search in Logs" })).toHaveAttribute("href", `/logs?run_id=${RUN}`);
+    expect(screen.getByRole("link", { name: "Search in Logs" })).toHaveAttribute("href", `${routes.logs()}?run_id=${RUN}`);
   });
 
   it("shows all run logs on request, and back", async () => {

@@ -16,10 +16,10 @@ import {
   parseTraceFilters,
   runDurationMs,
   traceFiltersToParams,
-  tracePath,
   type TraceFilters,
   type TraceRun,
 } from "@/lib/traces";
+import { routes } from "@/lib/routes";
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "completed", label: "Completed" },
@@ -96,8 +96,7 @@ function TracesList() {
   }, []);
 
   const setFilters = useCallback((patch: Partial<TraceFilters>) => {
-    const query = traceFiltersToParams({ ...filters, ...patch }).toString();
-    router.replace(query ? `/traces?${query}` : "/traces");
+    router.replace(routes.traces(traceFiltersToParams({ ...filters, ...patch })));
   }, [filters, router]);
 
   // Every request (first page or "Load more") takes a new generation; a response is applied only
@@ -227,7 +226,7 @@ function TracesList() {
         {hasActiveFilters(filters) ? (
           <button
             type="button"
-            onClick={() => router.replace("/traces")}
+            onClick={() => router.replace(routes.traces())}
             className="rounded-md px-3 py-2 text-sm text-primary underline-offset-4 hover:underline"
           >
             Clear filters
@@ -320,7 +319,7 @@ function TracesList() {
                       </td>
                       <td className="px-4 py-3">
                         <a
-                          href={tracePath(run.run_id)}
+                          href={routes.trace(run.run_id)}
                           data-testid="trace-row-open"
                           className="inline-flex items-center text-primary hover:underline"
                         >

@@ -6,6 +6,7 @@ import { kpiCards } from "@/components/metrics";
 import { RANGE, summaryFixture } from "@/components/metrics/metricsFixtures";
 import { parseDashboardState } from "@/lib/dashboard";
 import type { TraceRun } from "@/lib/traces";
+import { routes } from "@/lib/routes";
 
 const filters = { ...RANGE };
 const state = parseDashboardState(new URLSearchParams("range=30d"));
@@ -38,9 +39,9 @@ describe("dashboardKpiCards", () => {
     const hrefs = Object.fromEntries(dashboardKpiCards(summary, filters, state).map((c) => [c.id, c.href]));
     expect(hrefs.runs).toMatch(/^\/traces\?/);
     expect(hrefs.error_rate).toMatch(/^\/traces\?status=failed&/);
-    expect(hrefs.latency_p95).toBe("/metrics?range=30d");
-    expect(hrefs.tokens).toBe("/metrics?range=30d");
-    expect(hrefs.cost).toBe("/metrics?range=30d");
+    expect(hrefs.latency_p95).toBe(routes.metrics({ range: "30d" }));
+    expect(hrefs.tokens).toBe(routes.metrics({ range: "30d" }));
+    expect(hrefs.cost).toBe(routes.metrics({ range: "30d" }));
   });
 
   it("renders five linked cards, or loading placeholders without a summary", () => {
@@ -68,27 +69,27 @@ describe("RecentFailures", () => {
       <RecentFailures
         runs={[run(), run({ run_id: "r-2", display_status: "needs_attention", status: "needs_attention", error: null })]}
         total={7}
-        viewAllHref="/traces?status=failed%2Cneeds_attention"
+        viewAllHref={routes.traces({ status: "failed,needs_attention" })}
         agentNames={{ "a-1": "Support bot" }}
       />,
     );
     const rows = screen.getAllByTestId("recent-failure");
-    expect(rows.map((r) => r.getAttribute("href"))).toEqual(["/traces/r-1", "/traces/r-2"]);
+    expect(rows.map((r) => r.getAttribute("href"))).toEqual([routes.trace("r-1"), routes.trace("r-2")]);
     expect(within(rows[0]).getByText("boom")).toBeInTheDocument();
     expect(within(rows[0]).queryAllByRole("link")).toHaveLength(0);
     expect(within(rows[1]).getByText("No error message")).toBeInTheDocument();
     expect(within(rows[1]).getByText("Needs Attention")).toBeInTheDocument();
     expect(screen.getByTestId("recent-failures-all")).toHaveTextContent("View all 7 in Traces");
-    expect(screen.getByTestId("recent-failures-all")).toHaveAttribute("href", "/traces?status=failed%2Cneeds_attention");
+    expect(screen.getByTestId("recent-failures-all")).toHaveAttribute("href", routes.traces({ status: "failed,needs_attention" }));
   });
 
   it("shows empty, loading and error states", () => {
-    const { rerender } = render(<RecentFailures runs={[]} total={0} viewAllHref="/traces" />);
+    const { rerender } = render(<RecentFailures runs={[]} total={0} viewAllHref={routes.traces()} />);
     expect(screen.getByTestId("recent-failures-empty")).toHaveTextContent("No failed or needs-attention runs in this period.");
-    rerender(<RecentFailures runs={null} total={null} viewAllHref="/traces" loading />);
+    rerender(<RecentFailures runs={null} total={null} viewAllHref={routes.traces()} loading />);
     expect(screen.getByLabelText("Loading recent failures")).toBeInTheDocument();
     expect(screen.getByTestId("recent-failures-all")).toHaveTextContent("View all in Traces");
-    rerender(<RecentFailures runs={null} total={null} viewAllHref="/traces" error="HTTP 500" />);
+    rerender(<RecentFailures runs={null} total={null} viewAllHref={routes.traces()} error="HTTP 500" />);
     expect(screen.getByRole("alert")).toHaveTextContent("HTTP 500");
   });
 });

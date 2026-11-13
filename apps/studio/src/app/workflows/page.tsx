@@ -5,6 +5,7 @@ import Link from "next/link";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
 import { getWorkflowVersion, listWorkflows, type Workflow } from "@/lib/workflows";
+import { routes } from "@/lib/routes";
 
 interface Row extends Workflow {
   /** When the latest version was published (the API has no updated_at for a workflow). */
@@ -65,13 +66,13 @@ export default function WorkflowsPage() {
               {rows.map((w) => (
                 <tr key={w.id} data-testid={`workflow-row-${w.id}`} className="border-t border-border hover:bg-accent/40">
                   <td className="px-4 py-3">
-                    <Link href={`/workflows/${encodeURIComponent(w.id)}`} className="font-medium text-foreground underline-offset-4 hover:underline">{w.name}</Link>
+                    <Link href={routes.workflow(w.id)} className="font-medium text-foreground underline-offset-4 hover:underline">{w.name}</Link>
                     {w.draft_spec?.description ? <p className="line-clamp-1 text-xs text-muted-foreground">{w.draft_spec.description}</p> : null}
                   </td>
                   <td className="px-4 py-3">{w.latest_version != null ? `v${w.latest_version}` : <span className="text-muted-foreground">Draft only</span>}</td>
                   <td className="px-4 py-3 text-muted-foreground" title="When the latest version was published">{w.updatedAt ? formatDateTime(w.updatedAt) : "—"}</td>
                   <td className="px-4 py-3 text-right">
-                    <Link href={`/workflows/${encodeURIComponent(w.id)}`} aria-label={`Open ${w.name}`} className="text-primary underline-offset-4 hover:underline">Open</Link>
+                    <Link href={routes.workflow(w.id)} aria-label={`Open ${w.name}`} className="text-primary underline-offset-4 hover:underline">Open</Link>
                   </td>
                 </tr>
               ))}

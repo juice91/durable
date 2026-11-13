@@ -104,7 +104,33 @@ describe("Status and level styles", () => {
     expect(violations).toEqual([]);
   });
 
+  it("every source file under src/ uses theme tokens only (no palette hues, white/black or hex)", () => {
+    const srcDir = path.join(componentsDir, "..");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(tsx?|jsx?)$/.test(entry.name) && !/\.test\./.test(entry.name)) files.push(full);
+      }
+    };
+    walk(srcDir);
+    const violations = files.flatMap((file) =>
+      fs
+        .readFileSync(file, "utf-8")
+        .split("\n")
+        .map((content, index) => `${path.relative(srcDir, file)}:${index + 1}: ${content.trim()}`)
+        .filter((line) => PALETTE_COLOR.test(line.slice(line.indexOf(": ") + 2))),
+    );
+    expect(files.length).toBeGreaterThan(50);
+    expect(violations).toEqual([]);
+  });
+
   it("the token check catches palette colours", () => {
+    expect(PALETTE_COLOR.test('className="mb-3 bg-green-50 border-green-200"')).toBe(true);
+    expect(PALETTE_COLOR.test('className="hover:bg-green-700"')).toBe(true);
+    expect(PALETTE_COLOR.test('"bg-amber-950 text-sky-300"')).toBe(true);
+    expect(PALETTE_COLOR.test('"fixed inset-0 bg-black/50"')).toBe(true);
     expect(PALETTE_COLOR.test('ok: "bg-green-600 dark:bg-green-500"')).toBe(true);
     expect(PALETTE_COLOR.test('"dark:text-red-400"')).toBe(true);
     expect(PALETTE_COLOR.test('ok: "bg-success", error: "text-destructive-text", w: "bg-warning/15"')).toBe(false);

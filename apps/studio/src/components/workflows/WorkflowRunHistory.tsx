@@ -5,8 +5,9 @@ import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { formatDateTime } from "./ApprovalCard";
 import type { Run } from "@/lib/runs";
-import { listWorkflowRuns, workflowRunPath } from "@/lib/workflows";
+import { listWorkflowRuns } from "@/lib/workflows";
 import { isTerminal } from "@/lib/workflowRunState";
+import { routes } from "@/lib/routes";
 
 /** "1.2s", "3m 04s", "2h 05m"; null when either end is missing. */
 export function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
@@ -82,7 +83,7 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0 }: { workflowId:
               {runs.map((run) => (
                 <tr key={run.run_id} data-testid={`workflow-run-row-${run.run_id}`} data-status={run.display_status} className="border-t border-border">
                   <td className="py-2 pr-3">
-                    <Link href={workflowRunPath(workflowId, run.run_id)} className="font-mono text-primary underline-offset-4 hover:underline">{run.run_id.slice(0, 8)}</Link>
+                    <Link href={routes.workflowRun(workflowId, run.run_id)} className="font-mono text-primary underline-offset-4 hover:underline">{run.run_id.slice(0, 8)}</Link>
                   </td>
                   <td className="py-2 pr-3"><StatusPill status={run.display_status} /></td>
                   <td className="py-2 pr-3">{run.workflow_version != null ? `v${run.workflow_version}` : "—"}</td>

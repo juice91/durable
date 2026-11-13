@@ -11,6 +11,7 @@ import {
 } from "./dashboard";
 import { metricsQueryParams, pageStateToFilters, parsePageState } from "./metrics";
 import { parseTraceFilters } from "./traces";
+import { routes } from "@/lib/routes";
 
 const NOW = new Date("2026-11-13T12:00:00Z");
 
@@ -40,8 +41,10 @@ describe("parseDashboardState", () => {
       const state = parseDashboardState(new URLSearchParams(qs));
       expect(parseDashboardState(dashboardParams(state))).toEqual(state);
     }
-    expect(dashboardPath(parseDashboardState(new URLSearchParams("")))).toBe("/");
-    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=30d")))).toBe("/?range=30d");
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("")))).toBe(routes.dashboard());
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=30d")))).toBe(routes.dashboard({ range: "30d" }));
+    // One literal URL per helper, so a builder bug is caught.
+    expect(dashboardPath(parseDashboardState(new URLSearchParams("range=24h")))).toBe("/?range=24h");
   });
 });
 
@@ -50,7 +53,7 @@ describe("metricsPageHref", () => {
     for (const qs of ["", "range=24h", "range=30d", "range=90d", "from=2026-11-01T00:00:00Z&to=2026-11-05T00:00:00Z"]) {
       const dashboard = parseDashboardState(new URLSearchParams(qs));
       const href = metricsPageHref(dashboard);
-      expect(href.startsWith("/metrics")).toBe(true);
+      expect(href.startsWith(routes.metrics())).toBe(true);
       const metrics = parsePageState(query(href));
       const a = metricsQueryParams(pageStateToFilters(dashboard, NOW)).toString();
       const b = metricsQueryParams(pageStateToFilters(metrics, NOW)).toString();
@@ -59,8 +62,9 @@ describe("metricsPageHref", () => {
   });
 
   it("keeps a preset a preset (no frozen from/to)", () => {
-    expect(metricsPageHref(parseDashboardState(new URLSearchParams("range=30d")))).toBe("/metrics?range=30d");
-    expect(metricsPageHref(parseDashboardState(new URLSearchParams("")))).toBe("/metrics");
+    expect(metricsPageHref(parseDashboardState(new URLSearchParams("range=30d")))).toBe(routes.metrics({ range: "30d" }));
+    expect(metricsPageHref(parseDashboardState(new URLSearchParams("")))).toBe(routes.metrics());
+    expect(metricsPageHref(parseDashboardState(new URLSearchParams("range=24h")))).toBe("/metrics?range=24h");
   });
 
   it("narrows to an agent for the top agents drill-down", () => {
@@ -90,7 +94,7 @@ describe("recent failures", () => {
 
   it("'View all' opens the Traces list with exactly the panel's filters", () => {
     const href = recentFailuresHref(filters);
-    expect(href.startsWith("/traces?")).toBe(true);
+    expect(href.startsWith(`${routes.traces()}?`)).toBe(true);
     expect(parseTraceFilters(query(href))).toEqual(recentFailuresFilters(filters));
   });
 

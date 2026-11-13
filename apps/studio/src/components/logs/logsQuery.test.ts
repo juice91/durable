@@ -19,6 +19,7 @@ import {
   traceLogsParams,
   type LogItem,
 } from "./logsQuery";
+import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -50,8 +51,10 @@ describe("URL filters", () => {
   });
 
   it("builds Logs page links", () => {
-    expect(logsPath({})).toBe("/logs");
-    expect(logsPath({ run_id: RUN })).toBe(`/logs?run_id=${RUN}`);
+    expect(logsPath({})).toBe(routes.logs());
+    expect(logsPath({ run_id: RUN })).toBe(`${routes.logs()}?run_id=${RUN}`);
+    // One literal URL per helper, so a builder bug is caught.
+    expect(logsPath({ q: "a b", level: "error" })).toBe("/logs?q=a+b&level=error");
   });
 });
 

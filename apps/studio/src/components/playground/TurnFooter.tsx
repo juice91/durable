@@ -3,9 +3,9 @@
 import React from "react";
 import { formatTokens, formatUsd } from "@/lib/format";
 import {  } from "@/lib/metrics";
-import { tracePath } from "@/lib/traces";
 import type { RunStatus } from "@/lib/runs";
 import { versionLabel, type BlockCode, type TurnUsage } from "./runOptions";
+import { routes } from "@/lib/routes";
 
 /** What the thread shows under one turn's last message. */
 export interface TurnView {
@@ -98,7 +98,7 @@ export function TurnFooter({ turn }: { turn: TurnView }) {
         )}
         <span data-testid="turn-badge-tokens">{tokensText(turn.usage, running)}</span>
         {turn.usage.recorded && <span data-testid="turn-badge-cost">{costText(turn.usage)}</span>}
-        <a href={tracePath(turn.runId)} className="text-primary hover:underline">
+        <a href={routes.trace(turn.runId)} className="text-primary hover:underline">
           Open trace
         </a>
       </div>

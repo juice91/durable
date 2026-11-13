@@ -7,13 +7,13 @@ import {
   KIND_LABELS,
   formatDuration,
   spanLabel,
-  tracePath,
   type NameMaps,
   type SpanUsage,
   type TraceSpan,
 } from "@/lib/traces";
 import { PayloadBlock, payloadText } from "./PayloadBlock";
 import { STATUS_LABELS, STATUS_TEXT } from "./spanStyles";
+import { routes } from "@/lib/routes";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -90,12 +90,12 @@ function Links({ span }: { span: TraceSpan }) {
   const links: Array<{ href: string; label: string; external?: boolean; testId: string }> = [];
   const runId = str(a.run_id);
   if ((span.kind === "run" || span.kind === "child_run") && runId) {
-    if (span.kind === "child_run") links.push({ href: tracePath(runId), label: "Open child run trace", testId: "span-link-child-trace" });
-    links.push({ href: `/runs/${encodeURIComponent(runId)}`, label: "Run details", testId: "span-link-run" });
+    if (span.kind === "child_run") links.push({ href: routes.trace(runId), label: "Open child run trace", testId: "span-link-child-trace" });
+    links.push({ href: routes.run(runId), label: "Run details", testId: "span-link-run" });
   }
   const childRun = str(a.child_run_id);
   if (span.kind === "workflow_step" && childRun) {
-    links.push({ href: tracePath(childRun), label: "Open child run trace", testId: "span-link-child-trace" });
+    links.push({ href: routes.trace(childRun), label: "Open child run trace", testId: "span-link-child-trace" });
   }
   const traceId = str(a.trace_id);
   if (traceId) links.push({ href: buildTraceLink(traceId), label: "Open in Grafana", external: true, testId: "span-link-grafana" });

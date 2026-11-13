@@ -2,6 +2,7 @@
 // error classification, and the "load older" cursor. The API builds the LogQL; Studio only sends
 // structured parameters (run_id, q, level, from, to, limit).
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
+import { routes } from "@/lib/routes";
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 export const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error", "fatal"];
@@ -162,8 +163,7 @@ export function logFiltersToParams(filters: LogFilters): URLSearchParams {
 }
 
 export function logsPath(filters: Partial<LogFilters>): string {
-  const query = logFiltersToParams({ ...EMPTY_LOG_FILTERS, ...filters }).toString();
-  return query ? `/logs?${query}` : "/logs";
+  return routes.logs(logFiltersToParams({ ...EMPTY_LOG_FILTERS, ...filters }));
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -12,6 +12,7 @@ import { WorkflowGraph } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
 import { ApprovalCard, formatDateTime } from "./ApprovalCard";
 import { formatDuration } from "./WorkflowRunHistory";
+import { routes } from "@/lib/routes";
 
 type StreamState = "connecting" | "live" | "reconnecting" | "ended";
 
@@ -171,9 +172,9 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
           <span data-testid="workflow-run-stream" data-state={stream} aria-live="polite" className="text-xs text-muted-foreground">{STREAM_LABELS[stream]}</span>
           <span data-testid="workflow-run-status" data-status={view.status}><StatusPill status={view.status} showRecoveringNotice /></span>
           {effectiveWorkflowId ? (
-            <Link href={`/workflows/${encodeURIComponent(effectiveWorkflowId)}`} className="text-sm text-primary underline-offset-4 hover:underline">Back to workflow</Link>
+            <Link href={routes.workflow(effectiveWorkflowId)} className="text-sm text-primary underline-offset-4 hover:underline">Back to workflow</Link>
           ) : null}
-          <Link href={`/runs/${runId}`} className="text-sm text-primary underline-offset-4 hover:underline">Run details</Link>
+          <Link href={routes.run(runId)} className="text-sm text-primary underline-offset-4 hover:underline">Run details</Link>
         </div>
       </header>
 
@@ -184,7 +185,7 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
       {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Graph unavailable: {specError}</p> : null}
 
       {view.status === "needs_attention" ? (
-        <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-orange-500 bg-orange-100/50 p-3 text-sm text-foreground dark:bg-orange-900/20">
+        <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-warning bg-warning/10 p-3 text-sm text-foreground">
           <p className="font-semibold">Needs attention: a step may have had side effects whose outcome is unknown.</p>
           <p className="mt-1 text-xs">It was not retried automatically. Check the target system before running the workflow again.</p>
           {view.runError?.error ? <p className="mt-1 whitespace-pre-wrap text-xs">{view.runError.error}</p> : null}

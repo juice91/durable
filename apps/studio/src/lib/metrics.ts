@@ -3,6 +3,7 @@
 // formatting, chart summaries and the drill-down links to the Traces list.
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
 import { formatCost } from "./format";
+import { routes } from "@/lib/routes";
 
 // ------------------------------------------------------------------------------------- types
 
@@ -325,7 +326,7 @@ export function tracesHref(
     const v = merged[key];
     if (v) params.set(key, v);
   }
-  return `/traces?${params.toString()}`;
+  return routes.traces(params);
 }
 
 /** Statuses a "failed" drill-down shows (the error rate counts `failed`). */

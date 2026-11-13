@@ -5,8 +5,9 @@ import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { runKind } from "@/components/runs/RunSubject";
 import { formatCount } from "@/lib/metrics";
-import { tracePath, type TraceRun } from "@/lib/traces";
+import type { TraceRun } from "@/lib/traces";
 import type { Run } from "@/lib/runs";
+import { routes } from "@/lib/routes";
 
 function short(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}...` : id;
@@ -90,7 +91,7 @@ export function RecentFailures({
             return (
               <li key={run.run_id}>
                 <Link
-                  href={tracePath(run.run_id)}
+                  href={routes.trace(run.run_id)}
                   className="flex flex-col gap-1 px-4 py-2.5 hover:bg-muted/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   data-testid="recent-failure"
                 >

@@ -30,11 +30,11 @@ export const NODE_STATE_LABELS: Record<NodeState, string> = {
 export const NODE_STATE_CLASSES: Record<NodeState, string> = {
   pending: "border-border bg-card text-card-foreground",
   running: "border-primary bg-accent text-accent-foreground ring-2 ring-primary/40 animate-pulse",
-  waiting: "border-yellow-500 bg-yellow-100 text-yellow-900 dark:bg-yellow-900/30 dark:text-yellow-200",
-  completed: "border-green-600 bg-green-100 text-green-900 dark:bg-green-900/30 dark:text-green-200",
-  failed: "border-destructive bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-200",
+  waiting: "border-warning bg-warning/10 text-warning-text",
+  completed: "border-success bg-success/10 text-success-text",
+  failed: "border-destructive bg-destructive/10 text-destructive-text",
   skipped: "border-dashed border-border bg-muted text-muted-foreground opacity-60",
-  needs_attention: "border-orange-500 bg-orange-100 text-orange-900 dark:bg-orange-900/30 dark:text-orange-200",
+  needs_attention: "border-2 border-warning bg-warning/15 text-warning-text",
 };
 
 const TYPE_LABELS: Record<WorkflowStep["type"], string> = {

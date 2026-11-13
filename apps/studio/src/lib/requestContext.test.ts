@@ -12,6 +12,7 @@ import {
   savedContextKey,
   validateRequestContext,
 } from "@/lib/requestContext";
+import { routes } from "@/lib/routes";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -157,8 +158,11 @@ describe("saved context storage", () => {
   });
 
   it("builds the playground link", () => {
+    // One literal URL per helper, so a builder bug cannot hide behind builder-vs-builder equality.
     expect(playgroundHref("a 1")).toBe("/playground?agent=a+1");
-    expect(playgroundHref("a1", 3, true)).toBe("/playground?agent=a1&version=3&context=preset");
-    expect(playgroundHref("a1", "draft")).toBe("/playground?agent=a1&version=draft");
+    expect(playgroundHref("a1", 3, true)).toBe(routes.playground({ agent: "a1", version: 3, context: "preset" }));
+    expect(playgroundHref("a1", "draft")).toBe(routes.playground({ agent: "a1", version: "draft" }));
+    // An empty agent id gives the plain route, without a version or preset flag.
+    expect(playgroundHref("", 3, true)).toBe("/playground");
   });
 });

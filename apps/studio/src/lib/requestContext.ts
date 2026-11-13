@@ -6,6 +6,7 @@
 //   200 {valid: true, request_context} or 422 {detail: [{loc: ["body", "request_context", field], msg, type}]}
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
 import type { JsonSchema } from "@/lib/tools";
+import { routes } from "@/lib/routes";
 
 export type ContextFieldType = "string" | "integer" | "number" | "boolean" | "enum";
 
@@ -253,10 +254,10 @@ export const PRESET_CONTEXT_VALUE = "preset";
  * saved context). `version` (a number or "draft"; null: latest) is the version the preset was
  * checked against; `preferPreset` adds `context=preset` so the saved preset replaces the context
  * the playground remembered for this agent in the tab.
+ * An empty `agentId` gives the plain `/playground` (no version or preset flag, which would apply to no
+ * agent), so the link opens the playground's normal agent choice rather than a half-filled URL.
  */
 export function playgroundHref(agentId: string, version: ContextVersionRef = null, preferPreset = false): string {
-  const params = new URLSearchParams({ agent: agentId });
-  if (version !== null) params.set("version", String(version));
-  if (preferPreset) params.set(PRESET_CONTEXT_PARAM, PRESET_CONTEXT_VALUE);
-  return `/playground?${params.toString()}`;
+  if (!agentId) return routes.playground();
+  return routes.playground({ agent: agentId, version, context: preferPreset ? PRESET_CONTEXT_VALUE : null });
 }

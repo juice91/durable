@@ -1,8 +1,8 @@
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
-import { tracePath } from "@/lib/traces";
 import { LogLevelBadge } from "./LogLevelBadge";
 import { formatLogTime, logRowKeys, type LogItem } from "./logsQuery";
+import { routes } from "@/lib/routes";
 
 interface LogsTableProps {
   items: LogItem[];
@@ -75,7 +75,7 @@ export const LogsTable = React.memo(function LogsTable({ items, caption, showTra
                   <td className="whitespace-nowrap px-3 py-2 text-xs">
                     {item.run_id ? (
                       <Link
-                        href={tracePath(item.run_id)}
+                        href={routes.trace(item.run_id)}
                         aria-label={`Open trace of run ${item.run_id}`}
                         className="font-mono text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >

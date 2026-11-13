@@ -4,6 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { RunEvent, SubscribeHandlers } from "@/lib/runs";
 import { ApiError } from "@/lib/api";
 import { demoSpec, parallelApprovalSpec } from "@/test/workflowFixtures";
+import { routes } from "@/lib/routes";
 
 const runsMock = vi.hoisted(() => ({
   getRun: vi.fn(),
@@ -80,7 +81,7 @@ describe("WorkflowRunView", () => {
     const panel = screen.getByTestId("step-io-panel");
     expect(within(panel).getByTestId("step-io-input")).toHaveTextContent('"text": "hi"');
     expect(within(panel).getByTestId("step-io-output")).toHaveTextContent("billing");
-    expect(within(panel).getByTestId("step-child-run-link")).toHaveAttribute("href", "/runs/child-9");
+    expect(within(panel).getByTestId("step-child-run-link")).toHaveAttribute("href", routes.run("child-9"));
   });
 
   it("approves a waiting step with a comment, then refreshes", async () => {

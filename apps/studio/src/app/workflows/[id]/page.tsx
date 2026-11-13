@@ -4,11 +4,12 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError } from "@/lib/api";
-import { getWorkflow, listWorkflowVersions, workflowRunPath, type Workflow, type WorkflowVersion } from "@/lib/workflows";
+import { getWorkflow, listWorkflowVersions, type Workflow, type WorkflowVersion } from "@/lib/workflows";
 import { WorkflowGraph } from "@/components/workflows/WorkflowGraph";
 import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
+import { routes } from "@/lib/routes";
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -46,7 +47,7 @@ export default function WorkflowDetailPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-8">
-      <nav aria-label="Breadcrumb" className="text-sm"><Link href="/workflows" className="text-primary underline-offset-4 hover:underline">Workflows</Link></nav>
+      <nav aria-label="Breadcrumb" className="text-sm"><Link href={routes.workflows()} className="text-primary underline-offset-4 hover:underline">Workflows</Link></nav>
       {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Workflow not found.</p> : null}
       {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {!workflow && !notFound && !error ? <p className="text-muted-foreground">Loading workflow…</p> : null}
@@ -89,7 +90,7 @@ export default function WorkflowDetailPage() {
               workflowName={workflow.name}
               version={current?.version ?? null}
               spec={spec}
-              onStarted={(runId) => router.push(workflowRunPath(workflow.id, runId))}
+              onStarted={(runId) => router.push(routes.workflowRun(workflow.id, runId))}
             />
             <WorkflowRunHistory workflowId={workflow.id} />
           </div>

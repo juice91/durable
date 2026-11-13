@@ -6,6 +6,10 @@
  * and series 1 + series 2 (p50/p95, input/output); series 2 and critical never share a chart.
  * Each pair passes the dataviz palette validator (lightness band, chroma, CVD and normal-vision
  * separation >= 15, contrast >= 3:1) against the light surface (white) and the dark one (#09090b).
+ * Re-validated in SL.1 against the neutral surfaces in globals.css that charts sit on (background,
+ * surface/card and surface-raised: white in light; 0 0% 8% and 0 0% 11% in dark): the hues and
+ * lightness are unchanged, every series still reads at >= 3:1 (lowest: light series 2 on white,
+ * 3.2:1; dark series 2 on 0 0% 11%, 4.0:1), enforced by src/test/contrast.test.ts.
  * Gridlines, axis text and the surface follow the app's border, muted-foreground and card tokens. */
 .eap-viz {
   --viz-series-1: 213 68% 50%;   /* blue   #2a78d6 */

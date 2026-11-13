@@ -12,6 +12,7 @@ import {
   RequestContextValidationError,
   type RequestContextInfo,
 } from "@/lib/requestContext";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/api", () => ({ api: { agents: { list: vi.fn() } } }));
 vi.mock("@/lib/requestContext", async (importOriginal) => {
@@ -59,7 +60,7 @@ describe("RequestContextPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
-    window.history.replaceState(null, "", "/request-context");
+    window.history.replaceState(null, "", routes.requestContext());
     vi.mocked(api.agents.list).mockResolvedValue(agents);
     vi.mocked(getRequestContext).mockImplementation(async (agentId) => (agentId === "agent-1" ? withFields : noFields));
     vi.mocked(validateRequestContext).mockImplementation(async (_agent, value) => {
@@ -109,7 +110,7 @@ describe("RequestContextPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save for playground" }));
     expect(screen.getByTestId("context-save-notice")).toHaveTextContent("Saved");
     expect(loadSavedContext("agent-1")).toMatchObject({ value: { tier: "silver", seats: 4 }, version: 2 });
-    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", "/playground?agent=agent-1&version=2&context=preset");
+    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", routes.playground({ agent: "agent-1", version: 2, context: "preset" }));
   });
 
   it("preselects a saved context and its version", async () => {
@@ -119,7 +120,7 @@ describe("RequestContextPage", () => {
     expect(screen.getByLabelText("Version")).toHaveValue("1");
     expect(getRequestContext).toHaveBeenCalledWith("agent-1", 1);
     // The link carries the preset's version and the flag that makes the preset win in the playground.
-    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", "/playground?agent=agent-1&version=1&context=preset");
+    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", routes.playground({ agent: "agent-1", version: 1, context: "preset" }));
     expect(screen.getByTestId("saved-context")).toHaveTextContent('"silver"');
   });
 
@@ -134,7 +135,7 @@ describe("RequestContextPage", () => {
   });
 
   it("shows an empty state for an agent without fields and offers only the draft when unpublished", async () => {
-    window.history.replaceState(null, "", "/request-context?agent=agent-2");
+    window.history.replaceState(null, "", routes.requestContext({ agent: "agent-2" }));
     render(<RequestContextPage />);
     expect(await screen.findByTestId("context-no-fields")).toHaveTextContent("declares no context fields");
     expect(getRequestContext).toHaveBeenCalledWith("agent-2", "draft");

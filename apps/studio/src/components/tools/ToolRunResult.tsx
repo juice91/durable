@@ -5,6 +5,7 @@ import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { getRun, subscribeRun, type Run, type RunEvent, type RunStatus } from "@/lib/runs";
 import { describeToolRun } from "@/lib/toolRuns";
+import { routes } from "@/lib/routes";
 
 interface ToolRunResultProps {
   runId: string;
@@ -79,7 +80,7 @@ export function ToolRunResult({ runId, initialStatus }: ToolRunResultProps) {
           <h3 className="font-semibold text-card-foreground">Result</h3>
           <StatusPill status={view.status} showRecoveringNotice />
         </div>
-        <Link href={`/runs/${runId}`} data-testid="tool-run-link" className="text-sm text-primary underline-offset-4 hover:underline">
+        <Link href={routes.run(runId)} data-testid="tool-run-link" className="text-sm text-primary underline-offset-4 hover:underline">
           Open run {runId.slice(0, 8)}
         </Link>
       </div>

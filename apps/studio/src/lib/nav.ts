@@ -1,4 +1,5 @@
 import { DashboardIcon, UsersIcon, PlayIcon, GitGraphIcon, WrenchIcon, CpuIcon, BoxIcon, ActivityIcon, FileTextIcon, SettingsIcon, BarChartIcon } from "./icons";
+import { routes } from "./routes";
 
 export type NavItem = {
   label: string;
@@ -15,28 +16,28 @@ export const navSections: NavSection[] = [
   {
     title: "Build",
     items: [
-      { label: "Dashboard", href: "/", icon: DashboardIcon },
-      { label: "Agents", href: "/agents", icon: UsersIcon },
-      { label: "Playground", href: "/playground", icon: PlayIcon },
-      { label: "Workflows", href: "/workflows", icon: GitGraphIcon },
-      { label: "Tools", href: "/tools", icon: WrenchIcon },
-      { label: "MCP Servers", href: "/mcp", icon: CpuIcon },
-      { label: "Processors", href: "/processors", icon: BoxIcon },
-      { label: "Request Context", href: "/request-context", icon: FileTextIcon },
+      { label: "Dashboard", href: routes.dashboard(), icon: DashboardIcon },
+      { label: "Agents", href: routes.agents(), icon: UsersIcon },
+      { label: "Playground", href: routes.playground(), icon: PlayIcon },
+      { label: "Workflows", href: routes.workflows(), icon: GitGraphIcon },
+      { label: "Tools", href: routes.tools(), icon: WrenchIcon },
+      { label: "MCP Servers", href: routes.mcp(), icon: CpuIcon },
+      { label: "Processors", href: routes.processors(), icon: BoxIcon },
+      { label: "Request Context", href: routes.requestContext(), icon: FileTextIcon },
     ],
   },
   {
     title: "Observe",
     items: [
-      { label: "Traces", href: "/traces", icon: ActivityIcon },
-      { label: "Logs", href: "/logs", icon: FileTextIcon },
-      { label: "Metrics", href: "/metrics", icon: BarChartIcon },
+      { label: "Traces", href: routes.traces(), icon: ActivityIcon },
+      { label: "Logs", href: routes.logs(), icon: FileTextIcon },
+      { label: "Metrics", href: routes.metrics(), icon: BarChartIcon },
     ],
   },
   {
     title: "Settings",
     items: [
-      { label: "Settings", href: "/settings", icon: SettingsIcon },
+      { label: "Settings", href: routes.settings(), icon: SettingsIcon },
     ],
   },
 ];

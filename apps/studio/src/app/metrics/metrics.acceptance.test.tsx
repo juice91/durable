@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MetricsPage from "./page";
 import { breakdownFixture, metricValues, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -91,11 +92,11 @@ describe("MetricsPage acceptance", () => {
       render(<MetricsPage />);
       await screen.findByTestId("kpi-runs-value");
       fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "workflow" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?kind=workflow", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ kind: "workflow" }), { scroll: false });
       fireEvent.change(screen.getByLabelText("Interval"), { target: { value: "day" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?interval=day", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ interval: "day" }), { scroll: false });
       fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "24h" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?range=24h", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ range: "24h" }), { scroll: false });
     });
 
     it("a custom range in the URL is queried as given", async () => {
@@ -121,7 +122,7 @@ describe("MetricsPage acceptance", () => {
       expect(runs.from).toBeTruthy();
       expect(runs.to).toBeTruthy();
       expect(q(screen.getByTestId("kpi-error_rate").getAttribute("href")!)).toMatchObject({ status: "failed", agent_id: "a-1" });
-      expect(new URL(screen.getByTestId("kpi-runs").getAttribute("href")!, "http://x").pathname).toBe("/traces");
+      expect(new URL(screen.getByTestId("kpi-runs").getAttribute("href")!, "http://x").pathname).toBe(routes.traces());
     });
 
     it("breakdown rows link to the agent or model, and failed counts to failed runs", async () => {
@@ -156,7 +157,7 @@ describe("MetricsPage acceptance", () => {
       expect(screen.getAllByTestId("active-bucket")[0]).toHaveAttribute("data-bucket", "2");
       fireEvent.keyDown(plot, { key: "Enter" });
       expect(push).toHaveBeenCalledTimes(1);
-      expect(new URL(push.mock.calls[0][0], "http://x").pathname).toBe("/traces");
+      expect(new URL(push.mock.calls[0][0], "http://x").pathname).toBe(routes.traces());
     });
   });
 

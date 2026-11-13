@@ -33,6 +33,7 @@ import {
   recentFailuresFilters,
   recentFailuresHref,
 } from "@/lib/dashboard";
+import { routes } from "@/lib/routes";
 
 /** Preset ranges move forward this often (and re-fetch) while the page is open (as on Metrics). */
 const AUTO_REFRESH_MS = 5 * 60_000;
@@ -155,9 +156,9 @@ function DashboardView() {
             <div className="rounded-md border border-border bg-muted/50 p-3 text-sm text-muted-foreground" data-testid="dashboard-empty">
               <p>No runs or model requests in this period. Widen the date range, or start a run:</p>
               <p className="mt-2 flex flex-wrap gap-4">
-                <Link href="/agents" className={linkCls}>Agents</Link>
-                <Link href="/playground" className={linkCls}>Playground</Link>
-                <Link href="/workflows" className={linkCls}>Workflows</Link>
+                <Link href={routes.agents()} className={linkCls}>Agents</Link>
+                <Link href={routes.playground()} className={linkCls}>Playground</Link>
+                <Link href={routes.workflows()} className={linkCls}>Workflows</Link>
               </p>
             </div>
           )}

@@ -8,7 +8,7 @@ import { EventTimeline } from "@/components/runs/EventTimeline";
 import { RunSubject } from "@/components/runs/RunSubject";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 import { TraceView } from "@/components/traces/TraceView";
-import { tracePath } from "@/lib/traces";
+import { routes } from "@/lib/routes";
 
 const RUN_TABS = ["events", "trace"] as const;
 
@@ -136,7 +136,7 @@ export default function RunDetailPage() {
     <div className="max-w-4xl mx-auto">
         <div className="mb-6">
           <button
-            onClick={() => router.push("/agents")}
+            onClick={() => router.push(routes.agents())}
             className="text-sm text-card-foreground/80 hover:text-card-foreground mb-4 inline-flex items-center"
           >
             ← Back to agents
@@ -179,7 +179,7 @@ export default function RunDetailPage() {
             </div>
           )}
           {(status === "failed" || status === "needs_attention") && (
-            <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <div role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">
               {run.error ||
                 (status === "needs_attention"
                   ? "This run needs attention before it can continue."
@@ -229,7 +229,7 @@ export default function RunDetailPage() {
           </div>
         ) : (
           <div id="run-panel-trace" role="tabpanel" aria-labelledby="run-tab-trace" className="space-y-2">
-            <a href={tracePath(run.run_id)} className="text-xs text-primary underline-offset-4 hover:underline">
+            <a href={routes.trace(run.run_id)} className="text-xs text-primary underline-offset-4 hover:underline">
               Open full trace view
             </a>
             <TraceView runId={run.run_id} embedded />

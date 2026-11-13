@@ -261,10 +261,6 @@ export function runDurationMs(run: TraceRun): number | null {
   return Math.max(0, end - start);
 }
 
-export function tracePath(runId: string): string {
-  return `/traces/${encodeURIComponent(runId)}`;
-}
-
 // ---------------------------------------------------------------------------- list filters
 
 /** Traces list URL filters: the Metrics drill-down contract (`agent_id`, `model`, `status`,

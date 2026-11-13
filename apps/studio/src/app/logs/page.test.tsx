@@ -7,6 +7,7 @@ import { listTraceRuns } from "@/lib/traces";
 import { getRun } from "@/lib/runs";
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import LogsPage from "./page";
+import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const OTHER_RUN = "99999999-2222-3333-4444-555555555555";
@@ -69,7 +70,7 @@ describe("Logs page", () => {
     expect(rows[0]).toHaveTextContent("error");
     expect(rows[0]).toHaveTextContent("eap-worker");
     expect(rows[0].querySelector("time")).toHaveAttribute("dateTime", "2026-11-13T10:00:00.123456+00:00");
-    expect(screen.getByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", `/traces/${RUN}`);
+    expect(screen.getByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", routes.trace(RUN));
     expect(screen.getAllByRole("link", { name: /Open trace/ })).toHaveLength(1);
   });
 
@@ -95,17 +96,17 @@ describe("Logs page", () => {
     expect(replace).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(60));
     expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace).toHaveBeenCalledWith("/logs?q=time", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.logs({ q: "time" }), { scroll: false });
   });
 
   it("writes the level and time range to the URL", async () => {
     vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
     fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error" }), { scroll: false });
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "24h" } });
     // The level chosen first is kept although the URL has not re-rendered yet.
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error&range=24h", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error", range: "24h" }), { scroll: false });
   });
 
   it("shows the Loki-unavailable state with a retry", async () => {
@@ -160,9 +161,9 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "timeout" } });
     act(() => vi.advanceTimersByTime(100));
     fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error" }), { scroll: false });
     act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS));
-    expect(replace).toHaveBeenLastCalledWith("/logs?q=timeout&level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ q: "timeout", level: "error" }), { scroll: false });
   });
 
   it("keeps the agent and range when the debounced text lands", async () => {
@@ -174,7 +175,7 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: AGENT } });
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "6h" } });
     act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS + 10));
-    expect(replace).toHaveBeenLastCalledWith(`/logs?q=x&agent_id=${AGENT}&range=6h`, { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(`${routes.logs()}?q=x&agent_id=${AGENT}&range=6h`, { scroll: false });
   });
 
   it("Enter with search text and a partial run id writes both in one URL change", async () => {
@@ -184,7 +185,7 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Run"), { target: { value: "1111" } });
     fireEvent.submit(screen.getByRole("search", { name: "Log filters" }));
     expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace).toHaveBeenCalledWith("/logs?q=boom&run_id=1111", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.logs({ q: "boom", run_id: "1111" }), { scroll: false });
   });
 
   it("searches a selected run over its lifetime, not up to now", async () => {

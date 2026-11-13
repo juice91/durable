@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import ProcessorsPage from "./page";
 import { api, ApiError, type Agent } from "@/lib/api";
 import { loadAgentProcessorSpecs, processors, type ProcessorCatalog, type ProcessorResultItem } from "@/lib/processors";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/processors", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/processors")>();
@@ -76,7 +77,7 @@ describe("ProcessorsPage", () => {
     expect(within(pii).getByText("PII redaction")).toBeInTheDocument();
     expect(within(pii).getByTestId("processor-config-fields")).toHaveTextContent("kinds");
     const usage = await within(pii).findByTestId("processor-usage");
-    expect(within(usage).getByRole("link", { name: "Support bot" })).toHaveAttribute("href", "/agents/agent-1");
+    expect(within(usage).getByRole("link", { name: "Support bot" })).toHaveAttribute("href", routes.agentEditor("agent-1"));
     expect(usage).toHaveTextContent("v2");
     const moderation = cards.find((card) => card.dataset.processorType === "moderation")!;
     expect(within(moderation).getByText(/test in the playground/)).toBeInTheDocument();
@@ -86,7 +87,7 @@ describe("ProcessorsPage", () => {
   it("lists recent outcomes with counts only and a link to the run", async () => {
     render(<ProcessorsPage />);
     const row = await screen.findByTestId("result-row");
-    expect(within(row).getByRole("link", { name: `Open trace of run ${RUN_ID}` })).toHaveAttribute("href", `/traces/${RUN_ID}`);
+    expect(within(row).getByRole("link", { name: `Open trace of run ${RUN_ID}` })).toHaveAttribute("href", routes.trace(RUN_ID));
     expect(row).toHaveTextContent("email ×2");
     expect(row).toHaveTextContent("block");
     expect(row).toHaveTextContent("input");

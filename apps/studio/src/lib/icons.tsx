@@ -1,117 +1,66 @@
 import React from "react";
+import {
+  BookOpen,
+  Bot,
+  ChartLine,
+  FileText,
+  Inbox,
+  KeyRound,
+  LayoutDashboard,
+  ListTree,
+  Play,
+  Plug,
+  ScrollText,
+  Settings,
+  ShieldCheck,
+  Workflow,
+  Wrench,
+  type LucideIcon,
+  type LucideProps,
+} from "lucide-react";
 
-type IconProps = {
-  title: string;
-  path: React.ReactNode;
-  type?: "line" | "fill";
-  className?: string;
-};
+/** Studio draws every icon with this stroke width. */
+export const ICON_STROKE_WIDTH = 1.75;
 
-export function createSvgIcon(title: string, path: React.ReactNode, type: "line" | "fill" = "line") {
-  return function Icon({ className }: { className?: string }) {
-    return (
-      <svg
-        className={className}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-label={title}
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        {path}
-      </svg>
-    );
-  };
+export type IconProps = LucideProps;
+export type IconComponent = React.ForwardRefExoticComponent<IconProps & React.RefAttributes<SVGSVGElement>>;
+
+/**
+ * Wraps a lucide icon so it defaults to Studio's stroke width. Icons are decorative
+ * (`aria-hidden`) unless given an `aria-label` or `title`, which is lucide's own rule.
+ */
+export function studioIcon(Icon: LucideIcon, displayName: string): IconComponent {
+  const Wrapped = React.forwardRef<SVGSVGElement, IconProps>(function StudioIcon({ strokeWidth = ICON_STROKE_WIDTH, ...props }, ref) {
+    return <Icon ref={ref} strokeWidth={strokeWidth} {...props} />;
+  });
+  Wrapped.displayName = displayName;
+  return Wrapped;
 }
 
-export const DashboardIcon = createSvgIcon(
-  "Dashboard",
-  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
-  "line"
-);
+// Section icons, by the plan's names.
+export const AgentsIcon = studioIcon(Bot, "AgentsIcon");
+export const WorkflowsIcon = studioIcon(Workflow, "WorkflowsIcon");
+export const ToolsIcon = studioIcon(Wrench, "ToolsIcon");
+export const McpIcon = studioIcon(Plug, "McpIcon");
+export const ProcessorsIcon = studioIcon(ShieldCheck, "ProcessorsIcon");
+export const KnowledgeIcon = studioIcon(BookOpen, "KnowledgeIcon");
+export const MetricsIcon = studioIcon(ChartLine, "MetricsIcon");
+export const TracesIcon = studioIcon(ListTree, "TracesIcon");
+export const LogsIcon = studioIcon(ScrollText, "LogsIcon");
+export const SettingsIcon = studioIcon(Settings, "SettingsIcon");
+export const ApprovalsIcon = studioIcon(Inbox, "ApprovalsIcon");
+// Transitional pages (removed with their nav items in SL.6, SL.7 and SL.10).
+export const DashboardIcon = studioIcon(LayoutDashboard, "DashboardIcon");
+export const PlaygroundIcon = studioIcon(Play, "PlaygroundIcon");
+export const RequestContextIcon = studioIcon(KeyRound, "RequestContextIcon");
 
-export const UsersIcon = createSvgIcon(
-  "Users",
-  <>
-    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-    <circle cx="9" cy="7" r="4" />
-    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-  </>,
-  "line"
-);
-
-export const PlayIcon = createSvgIcon(
-  "Play",
-  <polygon points="5 3 19 12 5 21 5 3" />,
-  "line"
-);
-
-export const GitGraphIcon = createSvgIcon(
-  "GitGraph",
-  <>
-    <path d="M6 3v12" />
-    <circle cx="6" cy="3" r="2" />
-    <circle cx="6" cy="9" r="2" />
-    <circle cx="6" cy="15" r="2" />
-    <path d="M12 3v12" />
-    <circle cx="12" cy="9" r="2" />
-    <circle cx="12" cy="15" r="2" />
-    <path d="M6 9h6" />
-    <path d="M6 15h6" />
-  </>,
-  "line"
-);
-
-export const WrenchIcon = createSvgIcon(
-  "Wrench",
-  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />,
-  "line"
-);
-
-export const CpuIcon = createSvgIcon(
-  "Cpu",
-  <rect x="4" y="4" width="16" height="16" rx="2" ry="2" />,
-  "line"
-);
-
-export const BoxIcon = createSvgIcon(
-  "Box",
-  <>
-    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-    <path d="M3.27 6.96 12 12.01l8.73-5.05" />
-    <path d="M12 22.08V12" />
-  </>,
-  "line"
-);
-
-export const ActivityIcon = createSvgIcon(
-  "Activity",
-  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />,
-  "line"
-);
-
-export const FileTextIcon = createSvgIcon(
-  "FileText",
-  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />,
-  "line"
-);
-
-export const BarChartIcon = createSvgIcon(
-  "BarChart",
-  <>
-    <line x1="12" y1="20" x2="12" y2="10" />
-    <line x1="18" y1="20" x2="18" y2="4" />
-    <line x1="6" y1="20" x2="6" y2="16" />
-  </>,
-  "line"
-);
-
-export const SettingsIcon = createSvgIcon(
-  "Settings",
-  <circle cx="12" cy="12" r="3" />,
-  "line"
-);
+// Earlier names, kept so existing imports compile. Each maps to its section's lucide icon.
+export const UsersIcon = AgentsIcon;
+export const PlayIcon = PlaygroundIcon;
+export const GitGraphIcon = WorkflowsIcon;
+export const WrenchIcon = ToolsIcon;
+export const CpuIcon = McpIcon;
+export const BoxIcon = ProcessorsIcon;
+export const ActivityIcon = TracesIcon;
+export const FileTextIcon = studioIcon(FileText, "FileTextIcon");
+export const BarChartIcon = MetricsIcon;

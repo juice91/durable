@@ -15,6 +15,7 @@ import {
   type ProcessorResultItem,
   type ProcessorType,
 } from "@/lib/processors";
+import { routes } from "@/lib/routes";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -217,11 +218,11 @@ export function ProcessorResultsTable({ agents, types }: {
                     <time dateTime={item.ts}>{new Date(item.ts).toLocaleString()}</time>
                   </td>
                   <td className="px-3 py-2">
-                    <Link href={`/agents/${item.agent_id}`} className="text-primary hover:underline">{agentName(item.agent_id)}</Link>
+                    <Link href={routes.agentEditor(item.agent_id)} className="text-primary hover:underline">{agentName(item.agent_id)}</Link>
                     {item.agent_version !== null ? <span className="ml-1 font-mono text-xs text-muted-foreground">v{item.agent_version}</span> : null}
                   </td>
                   <td className="px-3 py-2">
-                    <Link href={`/traces/${item.run_id}`} className="font-mono text-xs text-primary hover:underline" aria-label={`Open trace of run ${item.run_id}`}>
+                    <Link href={routes.trace(item.run_id)} className="font-mono text-xs text-primary hover:underline" aria-label={`Open trace of run ${item.run_id}`}>
                       {item.run_id.slice(0, 8)}
                     </Link>
                     {item.parent_run_id ? <span className="ml-1 text-xs text-muted-foreground">child run</span> : null}

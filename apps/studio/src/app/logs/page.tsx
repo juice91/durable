@@ -27,6 +27,7 @@ import {
   type RangePreset,
   type RunTimes,
 } from "@/components/logs/logsQuery";
+import { routes } from "@/lib/routes";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
@@ -138,8 +139,7 @@ function LogsSearch() {
     (patch: Partial<LogFilters>) => {
       const next = { ...pendingRef.current.filters, ...patch };
       pendingRef.current = { ...pendingRef.current, filters: next };
-      const query = logFiltersToParams(next).toString();
-      router.replace(query ? `/logs?${query}` : "/logs", { scroll: false });
+      router.replace(routes.logs(logFiltersToParams(next)), { scroll: false });
     },
     [router],
   );
@@ -387,7 +387,7 @@ function LogsSearch() {
               committedRef.current = null;
               pendingRef.current = { ...pendingRef.current, filters: EMPTY_LOG_FILTERS };
               setText("");
-              router.replace("/logs", { scroll: false });
+              router.replace(routes.logs(), { scroll: false });
             }}
           >
             Clear filters

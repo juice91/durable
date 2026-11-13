@@ -6,7 +6,8 @@ import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import { ApiError } from "@/lib/api";
 import { canonicalInputKey, type PendingRun } from "@/lib/toolRunLedger";
 import { ToolRunError } from "@/lib/toolRuns";
-import { startWorkflowRun, workflowRunLedger, workflowRunPath, type WorkflowSpec } from "@/lib/workflows";
+import { startWorkflowRun, workflowRunLedger, type WorkflowSpec } from "@/lib/workflows";
+import { routes } from "@/lib/routes";
 
 export const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
 
@@ -148,7 +149,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
           {notes.map((item) => (
             <li key={item.runId} role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">
               <span>A run of {item.toolTitle} was started:</span>
-              <Link href={workflowRunPath(workflowId, item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
+              <Link href={routes.workflowRun(workflowId, item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
               <button type="button" aria-label={`Dismiss note for run ${item.runId}`} onClick={() => workflowRunLedger.dismissNote(item.runId)} className="ml-auto text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
             </li>
           ))}

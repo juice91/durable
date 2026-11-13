@@ -20,6 +20,7 @@ import { SpanDetail } from "./SpanDetail";
 import { renderTraceLogsPanel } from "./TraceLogsPanel";
 import { TraceTotals } from "./TraceTotals";
 import { TraceWaterfall } from "./TraceWaterfall";
+import { routes } from "@/lib/routes";
 
 const TERMINAL = new Set(["completed", "failed", "needs_attention"]);
 export const TRACE_POLL_MS = 3000;
@@ -172,13 +173,13 @@ export function TraceView({ runId, embedded = false, renderLogsPanel = renderTra
       {!embedded ? (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <Link href="/traces" className="text-sm text-muted-foreground hover:text-card-foreground">← Traces</Link>
+            <Link href={routes.traces()} className="text-sm text-muted-foreground hover:text-card-foreground">← Traces</Link>
             <h1 className="mt-1 text-2xl font-bold text-card-foreground">{root ? spanLabel(root, names) : `Run ${run.run_id}`}</h1>
             <p className="mt-1 font-mono text-xs text-muted-foreground">Run {run.run_id}</p>
           </div>
           <div className="flex items-center gap-2">
             <a
-              href={`/runs/${encodeURIComponent(run.run_id)}`}
+              href={routes.run(run.run_id)}
               className="inline-flex items-center rounded-md bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted/80"
             >
               Run details

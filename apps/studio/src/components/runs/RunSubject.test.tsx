@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Run } from "@/lib/runs";
 import { RunSubject, runKind } from "./RunSubject";
+import { routes } from "@/lib/routes";
 
 const base: Run = {
   run_id: "run-12345678-aaaa", agent_id: "agent-1", version: 2, status: "completed", display_status: "completed",
@@ -20,7 +21,7 @@ describe("RunSubject", () => {
   it("labels a workflow run with its workflow and version and links to its execution view", () => {
     render(<RunSubject run={workflowRun} workflowNames={{ "wf-abcdef123456": "Triage" }} />);
     const link = screen.getByRole("link", { name: "Workflow: Triage v3" });
-    expect(link).toHaveAttribute("href", "/workflows/wf-abcdef123456/runs/wfrun-1");
+    expect(link).toHaveAttribute("href", routes.workflowRun("wf-abcdef123456", "wfrun-1"));
     expect(screen.queryByText(/Tool: unknown|Agent: null/)).toBeNull();
   });
 
@@ -42,7 +43,7 @@ describe("RunSubject", () => {
   it("links a workflow's child agent run to its parent run", () => {
     render(<RunSubject run={{ ...base, kind: "agent", parent_run_id: "parent-run-0001", parent_step_id: "classify" }} />);
     expect(screen.getByTestId("run-subject")).toHaveTextContent("Part of workflow run parent-r... (step classify)");
-    expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
+    expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", routes.run("parent-run-0001"));
   });
 
   it("classifies rows without kind", () => {

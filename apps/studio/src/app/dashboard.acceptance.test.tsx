@@ -10,6 +10,7 @@ import { DASHBOARD_KPIS } from "@/components/dashboard";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
 import { parsePageState, pageStateToFilters } from "@/lib/metrics";
 import { parseTraceFilters } from "@/lib/traces";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -89,11 +90,11 @@ function setup() {
 const enc = (iso: string) => iso.replace(/:/g, "%3A");
 const hrefOf = (id: string) => screen.getByTestId(id).getAttribute("href");
 const RANGES = {
-  "7d": { qs: "", metrics: "/metrics", from: "2026-11-06T12:01:00.000Z", to: "2026-11-13T12:01:00.000Z" },
-  "30d": { qs: "range=30d", metrics: "/metrics?range=30d", from: "2026-10-14T12:01:00.000Z", to: "2026-11-13T12:01:00.000Z" },
+  "7d": { qs: "", metrics: routes.metrics(), from: "2026-11-06T12:01:00.000Z", to: "2026-11-13T12:01:00.000Z" },
+  "30d": { qs: "range=30d", metrics: routes.metrics({ range: "30d" }), from: "2026-10-14T12:01:00.000Z", to: "2026-11-13T12:01:00.000Z" },
   custom: {
     qs: CUSTOM, from: "2026-11-01T00:00:00Z", to: "2026-11-05T00:00:00Z",
-    metrics: `/metrics?range=custom&from=${enc("2026-11-01T00:00:00Z")}&to=${enc("2026-11-05T00:00:00Z")}`,
+    metrics: `${routes.metrics()}?range=custom&from=${enc("2026-11-01T00:00:00Z")}&to=${enc("2026-11-05T00:00:00Z")}`,
   },
 } as const;
 
@@ -107,8 +108,8 @@ describe("Dashboard links (exact hrefs) and round trips", () => {
       await screen.findAllByTestId("recent-failure");
       await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toBeInTheDocument());
       const range = `from=${enc(r.from)}&to=${enc(r.to)}`;
-      expect(hrefOf("kpi-runs")).toBe(`/traces?${range}`);
-      expect(hrefOf("kpi-error_rate")).toBe(`/traces?status=failed&${range}`);
+      expect(hrefOf("kpi-runs")).toBe(`${routes.traces()}?${range}`);
+      expect(hrefOf("kpi-error_rate")).toBe(`${routes.traces()}?status=failed&${range}`);
       for (const id of ["latency_p95", "tokens", "cost"]) expect(hrefOf(`kpi-${id}`)).toBe(r.metrics);
       expect(hrefOf("dashboard-open-metrics")).toBe(r.metrics);
       expect(hrefOf("dashboard-trends-metrics")).toBe(r.metrics);
@@ -116,8 +117,8 @@ describe("Dashboard links (exact hrefs) and round trips", () => {
       expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-1`);
       expect(screen.getByRole("link", { name: "Intake: open in Metrics" })).toHaveAttribute("href", `${r.metrics}${sep}agent_id=a-2`);
       const rows = screen.getAllByTestId("recent-failure");
-      expect(rows.map((a) => a.getAttribute("href"))).toEqual(["/traces/run-f1", "/traces/run-n1"]);
-      expect(hrefOf("recent-failures-all")).toBe(`/traces?status=failed%2Cneeds_attention&${range}`);
+      expect(rows.map((a) => a.getAttribute("href"))).toEqual([routes.trace("run-f1"), routes.trace("run-n1")]);
+      expect(hrefOf("recent-failures-all")).toBe(`${routes.traces()}?status=failed%2Cneeds_attention&${range}`);
     });
 
     it(`${name}: every target page parses the params back to the same filters`, async () => {
@@ -158,14 +159,14 @@ describe("Dashboard chart bar links", () => {
     await waitFor(() => expect(bars("Runs and failures")).toHaveLength(6));
     const runs = bars("Runs and failures");
     const byKey = (key: string) => runs.filter((a) => a.getAttribute("data-series") === key).map((a) => a.getAttribute("href"));
-    expect(byKey("runs")).toEqual([0, 1, 2].map((i) => `/traces?from=${day(i)}&to=${day(i + 1)}`));
-    expect(byKey("failed")).toEqual([0, 1, 2].map((i) => `/traces?status=failed&from=${day(i)}&to=${day(i + 1)}`));
+    expect(byKey("runs")).toEqual([0, 1, 2].map((i) => `${routes.traces()}?from=${day(i)}&to=${day(i + 1)}`));
+    expect(byKey("failed")).toEqual([0, 1, 2].map((i) => `${routes.traces()}?status=failed&from=${day(i)}&to=${day(i + 1)}`));
     await waitFor(() => expect(bars("Cost (USD)")).toHaveLength(3));
-    expect(bars("Cost (USD)").map((a) => a.getAttribute("href"))).toEqual([0, 1, 2].map((i) => `/traces?from=${day(i)}&to=${day(i + 1)}`));
+    expect(bars("Cost (USD)").map((a) => a.getAttribute("href"))).toEqual([0, 1, 2].map((i) => `${routes.traces()}?from=${day(i)}&to=${day(i + 1)}`));
     expect(screen.queryByTestId("chart-Latency")).toBeNull();
     expect(screen.queryByTestId("chart-Tokens")).toBeNull();
     fireEvent.click(runs.find((a) => a.getAttribute("data-series") === "failed" && a.getAttribute("data-bucket") === "2")!);
-    expect(push).toHaveBeenCalledWith(`/traces?status=failed&from=${day(2)}&to=${day(3)}`);
+    expect(push).toHaveBeenCalledWith(`${routes.traces()}?status=failed&from=${day(2)}&to=${day(3)}`);
   });
 
   it("bar targets parse back with the Traces page's parser", async () => {
@@ -289,7 +290,7 @@ describe("Dashboard behaviour", () => {
     await act(async () => { releaseOld(); await new Promise((r) => setTimeout(r, 20)); });
     expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("222");
     expect(screen.queryByText("111")).toBeNull();
-    expect(hrefOf("dashboard-open-metrics")).toBe("/metrics?range=30d");
+    expect(hrefOf("dashboard-open-metrics")).toBe(routes.metrics({ range: "30d" }));
   });
 
   it("a stale error from the old range does not replace the new data", async () => {
@@ -396,7 +397,7 @@ describe("Dashboard accessibility", () => {
       within(intakeRow).getByRole("link", { name: "Intake: open 2 failed runs" }),
     ]);
     const failedHref = new URL(intakeStops[1].getAttribute("href")!, "http://x");
-    expect(failedHref.pathname).toBe("/traces");
+    expect(failedHref.pathname).toBe(routes.traces());
     expect(failedHref.searchParams.get("agent_id")).toBe("a-2");
     expect(failedHref.searchParams.get("status")).toBe("failed");
     // Nothing inside a KPI card or failure row is a second stop (no nested links or buttons).
@@ -504,7 +505,7 @@ describe("BreakdownTable without rowLink (unchanged default)", () => {
     render(<BreakdownTable title="By agent" by="agent" items={items} filters={filters} sort="runs" onSortChange={() => undefined} onNavigate={onNavigate} />);
     const link = screen.getByRole("link", { name: "Support bot: open matching runs" });
     const url = new URL(link.getAttribute("href")!, "http://x");
-    expect(url.pathname).toBe("/traces");
+    expect(url.pathname).toBe(routes.traces());
     expect(url.searchParams.get("agent_id")).toBe("a-1");
     expect(url.searchParams.get("from")).toBe(filters.from);
     fireEvent.click(within(screen.getByTestId("breakdown-row-agent-a-1")).getByText("4"));

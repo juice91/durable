@@ -202,7 +202,3 @@ export async function decideApproval(
  * `toolId` is the workflow id and `inputKey` covers the input AND the version.
  */
 export const workflowRunLedger = createRunLedger("eap.studio.workflowRuns.v1");
-
-export function workflowRunPath(workflowId: string, runId: string): string {
-  return `/workflows/${enc(workflowId)}/runs/${enc(runId)}`;
-}

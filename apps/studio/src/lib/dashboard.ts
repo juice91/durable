@@ -12,6 +12,7 @@ import {
   type MetricsPageState,
 } from "./metrics";
 import type { TraceFilters } from "./traces";
+import { routes } from "@/lib/routes";
 
 type ParamReader = { get(name: string): string | null };
 
@@ -28,8 +29,7 @@ export function dashboardParams(state: MetricsPageState): URLSearchParams {
 }
 
 export function dashboardPath(state: MetricsPageState): string {
-  const qs = dashboardParams(state).toString();
-  return qs ? `/?${qs}` : "/";
+  return routes.dashboard(dashboardParams(state));
 }
 
 /** The Metrics page for the dashboard's range, optionally narrowed (e.g. to one agent). Presets stay
@@ -38,14 +38,14 @@ export function metricsPageHref(
   state: MetricsPageState,
   narrow: Partial<Pick<MetricsPageState, "agent_id" | "model" | "provider" | "kind">> = {},
 ): string {
-  const qs = pageStateToParams({
+  const params = pageStateToParams({
     ...DEFAULT_PAGE_STATE,
     range: state.range,
     from: state.from,
     to: state.to,
     ...narrow,
-  }).toString();
-  return qs ? `/metrics?${qs}` : "/metrics";
+  });
+  return routes.metrics(params);
 }
 
 /** Run statuses the "Recent failures" panel lists: failed runs and runs that need attention. */

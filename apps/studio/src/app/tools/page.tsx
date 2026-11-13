@@ -9,6 +9,7 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import { ApiError } from "@/lib/api";
 import { startToolRun, ToolRunError } from "@/lib/toolRuns";
 import { canonicalInputKey, toolRunLedger, type PendingRun, type StartedRunNote } from "@/lib/toolRunLedger";
+import { routes } from "@/lib/routes";
 
 const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
 
@@ -160,7 +161,7 @@ export default function ToolsPage() {
           {notes.map((item) => (
             <li key={item.runId} role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">
               <span>Run started for {item.toolTitle} <span className="font-mono text-xs text-muted-foreground">({item.toolId})</span>:</span>
-              <Link href={`/runs/${item.runId}`} className="text-primary underline-offset-4 hover:underline">Open run</Link>
+              <Link href={routes.run(item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
               <button type="button" aria-label={`Dismiss note for run ${item.runId}`} onClick={() => toolRunLedger.dismissNote(item.runId)} className="ml-auto text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
             </li>
           ))}

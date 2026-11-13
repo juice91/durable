@@ -5,6 +5,7 @@ import DashboardPage from "./page";
 import MetricsPage from "./metrics/page";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
 import { DASHBOARD_KPIS } from "@/components/dashboard";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -99,7 +100,7 @@ describe("DashboardPage", () => {
     expect(screen.getByText("Runs and failures")).toBeInTheDocument();
     expect(screen.getAllByText("Cost (USD)").length).toBeGreaterThan(0);
     expect(screen.queryByText("Latency")).toBeNull();
-    await waitFor(() => expect(screen.getByTestId("recent-failure")).toHaveAttribute("href", "/traces/run-failed-1"));
+    await waitFor(() => expect(screen.getByTestId("recent-failure")).toHaveAttribute("href", routes.trace("run-failed-1")));
     expect(screen.getByTestId("recent-failure")).toHaveTextContent("Support bot");
     expect(screen.getByTestId("recent-failure")).toHaveTextContent("model_error: upstream 500");
     expect(screen.getByTestId("recent-failures-all")).toHaveTextContent("View all 4 in Traces");
@@ -135,21 +136,21 @@ describe("DashboardPage", () => {
     mockFetch(okResponder);
     render(<DashboardPage />);
     await waitFor(() => expect(screen.getByTestId("kpi-runs")).toHaveAttribute("href"));
-    expect(screen.getByTestId("dashboard-open-metrics")).toHaveAttribute("href", "/metrics?range=30d");
-    expect(screen.getByTestId("dashboard-trends-metrics")).toHaveAttribute("href", "/metrics?range=30d");
+    expect(screen.getByTestId("dashboard-open-metrics")).toHaveAttribute("href", routes.metrics({ range: "30d" }));
+    expect(screen.getByTestId("dashboard-trends-metrics")).toHaveAttribute("href", routes.metrics({ range: "30d" }));
     const traces = new URL(screen.getByTestId("kpi-runs").getAttribute("href")!, "http://x");
-    expect(traces.pathname).toBe("/traces");
+    expect(traces.pathname).toBe(routes.traces());
     expect(traces.searchParams.get("from")).toBe("2026-10-14T12:01:00.000Z");
     expect(traces.searchParams.get("to")).toBe("2026-11-13T12:01:00.000Z");
     expect(screen.getByTestId("kpi-error_rate").getAttribute("href")).toContain("status=failed");
     for (const id of ["latency_p95", "tokens", "cost"]) {
-      expect(screen.getByTestId(`kpi-${id}`)).toHaveAttribute("href", "/metrics?range=30d");
+      expect(screen.getByTestId(`kpi-${id}`)).toHaveAttribute("href", routes.metrics({ range: "30d" }));
     }
-    await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toHaveAttribute("href", "/metrics?range=30d&agent_id=a-1"));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Support bot: open in Metrics" })).toHaveAttribute("href", routes.metrics({ range: "30d", agent_id: "a-1" })));
     fireEvent.click(within(screen.getByTestId("breakdown-row-agent-a-1")).getByText("12"));
-    expect(push).toHaveBeenCalledWith("/metrics?range=30d&agent_id=a-1");
+    expect(push).toHaveBeenCalledWith(routes.metrics({ range: "30d", agent_id: "a-1" }));
     const all = new URL(screen.getByTestId("recent-failures-all").getAttribute("href")!, "http://x");
-    expect(all.pathname).toBe("/traces");
+    expect(all.pathname).toBe(routes.traces());
     expect(all.searchParams.get("status")).toBe("failed,needs_attention");
     expect(all.searchParams.get("from")).toBe("2026-10-14T12:01:00.000Z");
   });
@@ -158,9 +159,9 @@ describe("DashboardPage", () => {
     mockFetch(okResponder);
     render(<DashboardPage />);
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "30d" } });
-    expect(replace).toHaveBeenCalledWith("/?range=30d", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.dashboard({ range: "30d" }), { scroll: false });
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "7d" } });
-    expect(replace).toHaveBeenLastCalledWith("/", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.dashboard(), { scroll: false });
     expect(screen.queryByLabelText("Agent")).toBeNull();
     expect(screen.queryByLabelText("Interval")).toBeNull();
   });
@@ -172,8 +173,8 @@ describe("DashboardPage", () => {
     expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("0");
     expect(screen.getByTestId("kpi-error_rate-value")).toHaveTextContent("—");
     const empty = screen.getByTestId("dashboard-empty");
-    expect(within(empty).getByRole("link", { name: "Agents" })).toHaveAttribute("href", "/agents");
-    expect(within(empty).getByRole("link", { name: "Playground" })).toHaveAttribute("href", "/playground");
+    expect(within(empty).getByRole("link", { name: "Agents" })).toHaveAttribute("href", routes.agents());
+    expect(within(empty).getByRole("link", { name: "Playground" })).toHaveAttribute("href", routes.playground());
     await waitFor(() => expect(screen.getByTestId("recent-failures-empty")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText("No agent runs in this period")).toBeInTheDocument());
   });

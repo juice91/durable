@@ -7,6 +7,7 @@ import { AgentEditor } from "@/components/agents/AgentEditor";
 import { AgentVersionsPanel } from "@/components/agents/AgentVersionsPanel";
 import { VersionCompare } from "@/components/agents/VersionCompare";
 import { errorTarget } from "@/components/agents/specSections";
+import { routes } from "@/lib/routes";
 
 export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -109,7 +110,7 @@ export default function AgentDetailPage() {
   if (loadError && !agent) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-red-500">{loadError}</p>
+        <p className="text-destructive-text">{loadError}</p>
       </div>
     );
   }
@@ -126,7 +127,7 @@ export default function AgentDetailPage() {
     <div className="max-w-3xl mx-auto">
         <div className="mb-6">
           <button
-            onClick={() => router.push("/agents")}
+            onClick={() => router.push(routes.agents())}
             className="text-sm text-card-foreground/80 hover:text-card-foreground mb-4 inline-flex items-center"
           >
             ← Back to agents
@@ -137,7 +138,7 @@ export default function AgentDetailPage() {
 
         {/* Errors that name a part of the form (a processor, the instructions) show inline there instead. */}
         {saveError && !errorTarget(saveError) && (
-          <div role="alert" data-testid="agent-save-error" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">
+          <div role="alert" data-testid="agent-save-error" className="mb-4 p-3 border rounded-md text-sm border-destructive/40 bg-destructive/10 text-destructive-text">
             {saveError}
           </div>
         )}
@@ -145,12 +146,12 @@ export default function AgentDetailPage() {
         <div className="mb-8">
           <h2 className="text-lg font-semibold mb-3 text-card-foreground">Edit Agent</h2>
           {lastPublishResult?.type === "success" && (
-            <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-md text-green-700 text-sm">
+            <div className="mb-3 p-3 border rounded-md text-sm border-success/40 bg-success/10 text-success-text">
               Version {lastPublishResult.version} published
             </div>
           )}
           {lastPublishResult?.type === "conflict" && (
-            <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-yellow-700 text-sm">
+            <div className="mb-3 p-3 border rounded-md text-sm border-warning/40 bg-warning/10 text-warning-text">
               {lastPublishResult.message}
             </div>
           )}
@@ -164,7 +165,7 @@ export default function AgentDetailPage() {
           />
           <div className="mt-4">
             {isDirty ? (
-              <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-yellow-700 text-sm">
+              <div className="mb-3 p-3 border rounded-md text-sm border-warning/40 bg-warning/10 text-warning-text">
                 Save the draft before publishing
               </div>
             ) : null}
@@ -189,7 +190,7 @@ export default function AgentDetailPage() {
             <button
               onClick={handlePublish}
               disabled={publishing || submitting || isDirty}
-              className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {publishing || submitting ? "Processing..." : "Publish"}
             </button>

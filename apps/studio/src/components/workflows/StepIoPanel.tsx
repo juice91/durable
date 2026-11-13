@@ -7,6 +7,7 @@ import { NODE_STATE_CLASSES, NODE_STATE_LABELS } from "./WorkflowGraph";
 import { formatDateTime } from "./ApprovalCard";
 import type { StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
+import { routes } from "@/lib/routes";
 
 function Block({ label, value, testId }: { label: string; value: unknown; testId: string }) {
   return (
@@ -37,7 +38,7 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
       </p>
       {detail.childRunId ? (
         <p className="text-sm">
-          <Link data-testid="step-child-run-link" href={`/runs/${detail.childRunId}`} className="text-primary underline-offset-4 hover:underline">
+          <Link data-testid="step-child-run-link" href={routes.run(detail.childRunId)} className="text-primary underline-offset-4 hover:underline">
             Open agent run {detail.childRunId.slice(0, 8)}
           </Link>
         </p>

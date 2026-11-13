@@ -2,6 +2,7 @@ import { test, expect, describe, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
 import { usePathname } from "next/navigation";
+import { routes } from "@/lib/routes";
 
 vi.mock("next/navigation", () => ({
   usePathname: vi.fn(),
@@ -13,7 +14,7 @@ describe("Sidebar", () => {
   test("should render all nav labels as links with correct hrefs", () => {
     const labels = ["Dashboard", "Agents", "Playground", "Workflows", "Tools", "MCP Servers", "Processors", "Request Context", "Traces", "Logs", "Metrics", "Settings"];
 
-    vi.mocked(usePathname).mockReturnValue("/");
+    vi.mocked(usePathname).mockReturnValue(routes.dashboard());
 
     render(<Sidebar />);
 
@@ -24,20 +25,20 @@ describe("Sidebar", () => {
   });
 
   test("should mark active route with aria-current=page for /agents", () => {
-    vi.mocked(usePathname).mockReturnValue("/agents");
+    vi.mocked(usePathname).mockReturnValue(routes.agents());
 
     render(<Sidebar />);
 
-    const agentsLink = document.querySelector('a[href="/agents"]');
+    const agentsLink = document.querySelector(`a[href="${routes.agents()}"]`);
     expect(agentsLink?.getAttribute("aria-current")).toBe("page");
   });
 
   test("should mark active route with aria-current=page for /", () => {
-    vi.mocked(usePathname).mockReturnValue("/");
+    vi.mocked(usePathname).mockReturnValue(routes.dashboard());
 
     render(<Sidebar />);
 
-    const dashboardLink = document.querySelector('a[href="/"]');
+    const dashboardLink = document.querySelector(`a[href="${routes.dashboard()}"]`);
     expect(dashboardLink?.getAttribute("aria-current")).toBe("page");
   });
 });

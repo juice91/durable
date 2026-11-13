@@ -30,6 +30,7 @@ import {
 import { fetchModels, type ModelOption } from "@/lib/metrics";
 import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/api", () => ({
   api: { agents: { list: vi.fn() }, versions: { list: vi.fn() } },
@@ -221,7 +222,7 @@ const answered = (input: string, answer: string): RunEvent[] => [
 ];
 
 beforeEach(() => {
-  window.history.replaceState({}, "", "/playground");
+  window.history.replaceState({}, "", routes.playground());
   vi.clearAllMocks();
   window.localStorage.clear();
   window.sessionStorage.clear();
@@ -322,7 +323,7 @@ describe("PlaygroundPage", () => {
     expect(screen.getByText("What is my name?")).toBeInTheDocument();
     expect(await screen.findByRole("link", { name: "View run" })).toHaveAttribute(
       "href",
-      `/runs/${secondRun}`,
+      routes.run(secondRun),
     );
   });
 
@@ -407,7 +408,7 @@ describe("PlaygroundPage", () => {
         "run-2": [event(0, "run_started", { input: "What is my name?" })],
       },
     );
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
     await renderReady();
 
     expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
@@ -423,7 +424,7 @@ describe("PlaygroundPage", () => {
     expect(createConversation).not.toHaveBeenCalled();
     expect(composer()).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
-    expect(screen.getByRole("link", { name: "View run" })).toHaveAttribute("href", "/runs/run-2");
+    expect(screen.getByRole("link", { name: "View run" })).toHaveAttribute("href", routes.run("run-2"));
 
     act(() => {
       handlers.onEvent?.(event(1, "model_message", { model_request: 0, text: "You are Ada" }));
@@ -437,7 +438,7 @@ describe("PlaygroundPage", () => {
 
   it("re-posts a turn that was recorded but never started, with the same run_id", async () => {
     mockConversation([turnRun("run-1", 1, "Hello", "queued")], {});
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
     await renderReady();
 
     await waitFor(() =>
@@ -461,7 +462,7 @@ describe("PlaygroundPage", () => {
       [{ ...turnRun("run-1", 1, "Hi", "completed"), output: "Hey" }],
       { "run-1": answered("Hi", "Hey") },
     );
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
     await renderReady();
 
     expect(await screen.findByText("Hey")).toBeInTheDocument();
@@ -526,7 +527,7 @@ describe("PlaygroundPage", () => {
         }),
       ],
     });
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
 
     await renderReady();
 
@@ -544,7 +545,7 @@ describe("PlaygroundPage", () => {
         }),
       ],
     });
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
 
     await renderReady();
 
@@ -863,8 +864,8 @@ describe("PlaygroundPage run options (P0.19)", () => {
     expect(screen.getAllByTestId("turn-badge-cost").map((el) => el.textContent)).toEqual(["$0.0012", "no price"]);
     expect(screen.getAllByText("override")).toHaveLength(1);
     expect(screen.getAllByRole("link", { name: "Open trace" }).map((el) => el.getAttribute("href"))).toEqual([
-      `/traces/${firstRun}`,
-      `/traces/${secondRun}`,
+      routes.trace(firstRun),
+      routes.trace(secondRun),
     ]);
   });
 
@@ -945,7 +946,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
   });
 
   it("restores agent, version and model from the URL on reload", async () => {
-    window.history.replaceState({}, "", "/playground?agent=agent-3&version=1&model=test:echo");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-3", version: 1, model: "test:echo" }));
     await renderReady();
     expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("v1"));
@@ -957,14 +958,14 @@ describe("PlaygroundPage run options (P0.19)", () => {
   });
 
   it("restores a wildcard model's typed name from the URL", async () => {
-    window.history.replaceState({}, "", "/playground?agent=agent-1&model=anthropic:claude-x");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", model: "anthropic:claude-x" }));
     await renderReady();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("anthropic:*"));
     expect(screen.getByRole("textbox", { name: "Model name" })).toHaveValue("claude-x");
   });
 
   it("drops a URL model the platform does not offer", async () => {
-    window.history.replaceState({}, "", "/playground?agent=agent-1&model=openai:gpt-5");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", model: "openai:gpt-5" }));
     await renderReady();
     expect(await screen.findByText(/openai:gpt-5 is not offered here/)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("");
@@ -1096,7 +1097,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
         ],
       },
     );
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
     await renderReady();
     await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
     const [first] = screen.getAllByTestId("turn-badge");
@@ -1124,7 +1125,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
       ],
       {},
     );
-    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    window.history.replaceState({}, "", routes.playground({ conversation: "conv-1" }));
     await renderReady();
     await waitFor(() =>
       expect(startTurn).toHaveBeenCalledWith("conv-1", "run-1", "Hello", {
@@ -1139,7 +1140,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
     const { saveContext } = await import("@/lib/requestContext");
     saveContext("agent-1", { tier: "gold" }, null);
-    window.history.replaceState({}, "", "/playground?agent=agent-1");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
     expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
@@ -1153,7 +1154,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     saveContext("agent-1", { tier: "gold" }, "draft");
     const key = "eap.playground.context.v1:anon:agent-1";
     window.sessionStorage.setItem(key, JSON.stringify({ value: { tier: "silver" } }));
-    window.history.replaceState({}, "", "/playground?agent=agent-1&version=draft&context=preset");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-1", version: "draft", context: "preset" }));
     await renderReady();
     fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
     expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
@@ -1171,7 +1172,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
     const { saveContext } = await import("@/lib/requestContext");
     saveContext("agent-1", { tier: "gold" }, null);
     window.sessionStorage.setItem("eap.playground.context.v1:anon:agent-1", JSON.stringify({ value: { tier: "silver" } }));
-    window.history.replaceState({}, "", "/playground?agent=agent-1");
+    window.history.replaceState({}, "", routes.playground({ agent: "agent-1" }));
     await renderReady();
     await screen.findByRole("button", { name: /1 of 1 set/ });
     await sendMessage("Hi");

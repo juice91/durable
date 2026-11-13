@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import TracesPage from "./page";
 import { listTraceRuns } from "@/lib/traces";
 import { api } from "@/lib/api";
+import { routes } from "@/lib/routes";
 
 const nav = vi.hoisted(() => ({ query: "", replace: vi.fn() }));
 
@@ -51,7 +52,7 @@ describe("TracesPage acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await waitFor(() => expect(screen.getAllByTestId("trace-row")).toHaveLength(3));
     expect(list.mock.calls[1][1]).toEqual({ limit: 50, before: "cur-1" });
-    expect(hrefs()).toEqual(["/traces/run-c", "/traces/run-b", "/traces/run-a"]);
+    expect(hrefs()).toEqual([routes.trace("run-c"), routes.trace("run-b"), routes.trace("run-a")]);
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
@@ -68,7 +69,7 @@ describe("TracesPage acceptance", () => {
     const model = await screen.findByLabelText(/model/i);
     fireEvent.change(model, { target: { value: "openai:gpt-4.1" } });
     fireEvent.blur(model);
-    expect(nav.replace).toHaveBeenLastCalledWith("/traces?model=openai%3Agpt-4.1");
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ model: "openai:gpt-4.1" }));
     fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-11-01T00:00" } });
     const url = nav.replace.mock.calls.at(-1)![0] as string;
     expect(new URLSearchParams(url.split("?")[1]).get("from")).toBeTruthy();
@@ -84,6 +85,6 @@ describe("TracesPage acceptance", () => {
     expect(params.get("status")).toBe("failed");
     expect(params.get("kind")).toBe("tool");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(nav.replace).toHaveBeenLastCalledWith("/traces");
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces());
   });
 });

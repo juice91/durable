@@ -5,6 +5,7 @@ import { buildWorkflowGraph } from "@/lib/workflowGraph";
 import { canonicalInputKey } from "@/lib/toolRunLedger";
 import { workflowRunLedger, type WorkflowSpec } from "@/lib/workflows";
 import { demoSpec, parallelSpec } from "@/test/workflowFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ useParams: () => ({ id: "wf-1" }), useRouter: () => ({ push }) }));
@@ -178,13 +179,13 @@ describe("Workflows list acceptance", () => {
     const published = await screen.findByTestId("workflow-row-wf-1");
     const draft = screen.getByTestId("workflow-row-wf-2");
 
-    expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", "/workflows/wf-1");
-    expect(within(published).getByRole("link", { name: "Open Triage" })).toHaveAttribute("href", "/workflows/wf-1");
+    expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
+    expect(within(published).getByRole("link", { name: "Open Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
     expect(published).toHaveTextContent("v2");
     expect(published).not.toHaveTextContent("Draft only");
 
-    expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", "/workflows/wf-2");
-    expect(within(draft).getByRole("link", { name: "Open Draft" })).toHaveAttribute("href", "/workflows/wf-2");
+    expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
+    expect(within(draft).getByRole("link", { name: "Open Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
     expect(draft).toHaveTextContent("Draft only");
     expect(draft).not.toHaveTextContent("vnull");
     expect(within(table).getAllByRole("row")).toHaveLength(3);
@@ -317,7 +318,7 @@ describe("Workflow run panel acceptance", () => {
     expect(sent.input).toEqual({ text: "from-json", urgent: true });
     expect(sent.version).toBe(2);
     expect(sent.run_id).toEqual(expect.any(String));
-    await waitFor(() => expect(push).toHaveBeenCalledWith(`/workflows/wf-1/runs/${sent.run_id}`));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.workflowRun("wf-1", String(sent.run_id))));
   });
 
   it("maps a 422 list onto fields and leaves string request errors in the banner", async () => {
@@ -439,6 +440,6 @@ describe("Workflow run panel acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run workflow" }));
     await waitFor(() => expect(postBodies()).toHaveLength(2));
     expect(postBodies()[1]).toEqual({ input: { text: "hello" }, version: 2, run_id: first.run_id });
-    await waitFor(() => expect(push).toHaveBeenCalledWith(`/workflows/wf-1/runs/${first.run_id}`));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.workflowRun("wf-1", String(first.run_id))));
   });
 });

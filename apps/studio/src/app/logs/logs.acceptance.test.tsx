@@ -7,6 +7,7 @@ import { getTrace, listTraceRuns, type Trace, type TraceSpan } from "@/lib/trace
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import { TraceView } from "@/components/traces/TraceView";
 import LogsPage from "./page";
+import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const RUN2 = "99999999-2222-3333-4444-555555555555";
@@ -198,7 +199,7 @@ describe("query building and the URL", () => {
     startAt(new URLSearchParams({ q: "boom", level: "warn", run_id: RUN, range: "1h" }).toString());
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(replaceSpy).toHaveBeenLastCalledWith("/logs");
+    expect(replaceSpy).toHaveBeenLastCalledWith(routes.logs());
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(2));
     expect(calls()[1]).toEqual({ limit: 100 });
     expect(screen.getByLabelText("Search messages")).toHaveValue("");
@@ -281,7 +282,7 @@ describe("stale responses and paging", () => {
     vi.mocked(searchLogs).mockReturnValueOnce(slow.promise).mockResolvedValueOnce(reply([log("from newer")]));
     startAt("q=old");
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(1));
-    act(() => nav.replace("/logs?q=new"));
+    act(() => nav.replace(routes.logs({ q: "new" })));
     expect(await screen.findByText("from newer")).toBeInTheDocument();
     await act(async () => { slow.resolve(reply([log("from older")])); });
     expect(screen.queryByText("from older")).toBeNull();
@@ -294,7 +295,7 @@ describe("stale responses and paging", () => {
     vi.mocked(searchLogs).mockReturnValueOnce(slow.promise).mockResolvedValueOnce(reply([log("fresh")]));
     startAt("q=old");
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(1));
-    act(() => nav.replace("/logs?q=new"));
+    act(() => nav.replace(routes.logs({ q: "new" })));
     await screen.findByText("fresh");
     await act(async () => { slow.reject(new ApiError(503, "late")); });
     expect(screen.queryByTestId("logs-unavailable")).toBeNull();
@@ -346,7 +347,7 @@ describe("stale responses and paging", () => {
     startAt();
     fireEvent.click(await screen.findByRole("button", { name: "Load older" }));
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(2));
-    act(() => nav.replace("/logs?level=fatal"));
+    act(() => nav.replace(routes.logs({ level: "fatal" })));
     await screen.findByText("new filter result");
     await act(async () => { olderResponse.resolve(reply([log("stale older")])); });
     expect(screen.queryByText("stale older")).toBeNull();
@@ -540,7 +541,7 @@ describe("acceptance: log line to trace and span to logs", () => {
     startAt();
     await screen.findByText("one");
     const links = screen.getAllByRole("link", { name: /Open trace of run/ });
-    expect(links.map((l) => l.getAttribute("href"))).toEqual([`/traces/${RUN}`, `/traces/${RUN2}`]);
+    expect(links.map((l) => l.getAttribute("href"))).toEqual([routes.trace(RUN), routes.trace(RUN2)]);
     const orphanRow = screen.getAllByTestId("log-row")[2];
     expect(within(orphanRow).queryByRole("link")).toBeNull();
   });
@@ -550,7 +551,7 @@ describe("acceptance: log line to trace and span to logs", () => {
     fakeServer();
     render(<TraceView runId={RUN} />);
     await screen.findAllByTestId("trace-span-row");
-    expect(screen.getByRole("link", { name: "Search in Logs" })).toHaveAttribute("href", `/logs?run_id=${RUN}`);
+    expect(screen.getByRole("link", { name: "Search in Logs" })).toHaveAttribute("href", `${routes.logs()}?run_id=${RUN}`);
   });
 
   it("the Logs page link from a trace loads that run's logs with the run filter set", async () => {

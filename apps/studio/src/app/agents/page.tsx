@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import type { Agent } from "@/lib/api";
 import { AgentsListUI } from "@/components/agents/AgentsList";
+import { routes } from "@/lib/routes";
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -28,11 +29,11 @@ export default function AgentsPage() {
   }, []);
 
   const handleNewAgent = () => {
-    router.push("/agents/new");
+    router.push(routes.agentNew());
   };
 
   const handleAgentSelect = (id: string) => {
-    router.push(`/agents/${id}`);
+    router.push(routes.agentEditor(id));
   };
 
   if (loading) {
@@ -46,7 +47,7 @@ export default function AgentsPage() {
   if (error) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-red-500">{error}</p>
+        <p className="text-destructive-text">{error}</p>
       </div>
     );
   }

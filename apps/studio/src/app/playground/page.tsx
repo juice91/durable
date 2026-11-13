@@ -83,6 +83,7 @@ import {
   type RunStatus,
   type SubscribeHandlers,
 } from "@/lib/runs";
+import { routes } from "@/lib/routes";
 
 /** One turn of the conversation: a run plus what the thread and its badge need to draw it. */
 type Turn = ThreadTurn & {
@@ -148,7 +149,7 @@ function ToolCall({ toolName, args, result }: ToolCallMessagePartProps) {
 
 function MarkdownText({ text }: TextMessagePartProps) {
   return (
-    <div className="space-y-2 break-words [&_a]:text-blue-600 [&_a]:underline [&_code]:rounded [&_code]:bg-background/60 [&_code]:px-1 [&_pre]:overflow-x-auto [&_ul]:list-disc [&_ul]:pl-5">
+    <div className="space-y-2 break-words [&_a]:text-info-text [&_a]:underline [&_code]:rounded [&_code]:bg-background/60 [&_code]:px-1 [&_pre]:overflow-x-auto [&_ul]:list-disc [&_ul]:pl-5">
       <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
         {text}
       </ReactMarkdown>
@@ -162,7 +163,7 @@ function ThreadMessage() {
   return (
     <MessagePrimitive.Root className="flex w-full flex-col">
       <MessagePrimitive.If user>
-        <div className="ml-auto max-w-[80%] rounded-lg bg-blue-600 px-4 py-3 text-white">
+        <div className="ml-auto max-w-[80%] rounded-lg bg-primary px-4 py-3 text-primary-foreground">
           <MessagePrimitive.Parts components={{ tools: { Fallback: ToolCall } }} />
         </div>
       </MessagePrimitive.If>
@@ -217,7 +218,7 @@ function PlaygroundThread({
             rows={2}
             className="min-h-12 flex-1 resize-none rounded-lg border border-border bg-card px-4 py-3 text-sm text-card-foreground disabled:cursor-not-allowed disabled:bg-muted"
           />
-          <ComposerPrimitive.Send className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+          <ComposerPrimitive.Send className="rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
             Send message
           </ComposerPrimitive.Send>
         </ComposerPrimitive.Root>
@@ -888,8 +889,8 @@ export default function PlaygroundPage() {
                   showRecoveringNotice={status === "recovering"}
                 />
                 <a
-                  href={`/runs/${latest.runId}`}
-                  className="text-sm text-blue-600 hover:underline"
+                  href={routes.run(latest.runId)}
+                  className="text-sm text-info-text hover:underline"
                 >
                   View run
                 </a>
@@ -952,12 +953,12 @@ export default function PlaygroundPage() {
           )}
 
           {status === "recovering" && (
-            <div className="mt-4 rounded-md border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-700">
+            <div className="mt-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning-text">
               The worker is restarting. Events may be delayed while the run recovers.
             </div>
           )}
           {(error || statusError) && (
-            <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <div role="alert" className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">
               {error || statusError}
             </div>
           )}

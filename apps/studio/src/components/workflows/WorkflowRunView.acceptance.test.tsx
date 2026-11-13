@@ -4,6 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { ApiError } from "@/lib/api";
 import type { Run, RunEvent, SubscribeHandlers } from "@/lib/runs";
 import { demoSpec, parallelSpec } from "@/test/workflowFixtures";
+import { routes } from "@/lib/routes";
 
 const runsMock = vi.hoisted(() => ({
   getRun: vi.fn(),
@@ -114,7 +115,7 @@ describe("WorkflowRunView acceptance", () => {
     expect(panel).toHaveAttribute("data-step-id", "classify");
     expect(within(panel).getByTestId("step-io-input")).toHaveTextContent('"text": "hi"');
     expect(within(panel).getByTestId("step-io-output")).toHaveTextContent("billing");
-    expect(within(panel).getByTestId("step-child-run-link")).toHaveAttribute("href", "/runs/child-9-abcdefgh");
+    expect(within(panel).getByTestId("step-child-run-link")).toHaveAttribute("href", routes.run("child-9-abcdefgh"));
     expect(within(panel).getByTestId("step-io-state")).toHaveTextContent("Completed");
 
     emit(ev("step_started", { step_id: "lookup", step_type: "tool", tool_id: "http.get", input: { url: "https://example.test" } }));
@@ -170,7 +171,7 @@ describe("WorkflowRunView acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Step classify, Agent, Completed" }));
     expect(screen.getByTestId("step-io-input")).toHaveTextContent('"text": "hi"');
     expect(screen.getByTestId("step-io-output")).toHaveTextContent("billing");
-    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", "/runs/child-9");
+    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", routes.run("child-9"));
 
     cleanup();
     await renderView();
@@ -179,7 +180,7 @@ describe("WorkflowRunView acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Step classify, Agent, Completed" }));
     expect(screen.getByTestId("step-io-input")).toHaveTextContent('"text": "hi"');
     expect(screen.getByTestId("step-io-output")).toHaveTextContent("billing");
-    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", "/runs/child-9");
+    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", routes.run("child-9"));
   });
 
   it("keeps the graph across a reconnect and does not open a second subscription", async () => {
@@ -286,7 +287,7 @@ describe("WorkflowRunView acceptance", () => {
     expect(screen.getByTestId("workflow-run-output")).toHaveTextContent("joined");
 
     fireEvent.click(screen.getByRole("button", { name: "Step merge, Agent, Completed" }));
-    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", "/runs/child-merge");
+    expect(screen.getByTestId("step-child-run-link")).toHaveAttribute("href", routes.run("child-merge"));
     expect(screen.getByTestId("step-io-output")).toHaveTextContent("joined");
   });
 

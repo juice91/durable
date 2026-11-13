@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RequestContextPage from "./page";
 import { credentialScope, loadSavedContext, saveContext, savedContextKey } from "@/lib/requestContext";
+import { routes } from "@/lib/routes";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, onClick, ...rest }: { href: string; children: React.ReactNode; onClick?: () => void }) => (
@@ -33,7 +34,7 @@ let validateBodies: Record<string, unknown>[] = [];
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "Bearer test");
   window.localStorage.clear();
-  window.history.replaceState(null, "", "/request-context");
+  window.history.replaceState(null, "", routes.requestContext());
   validateBodies = [];
   validate = (body) => ({ status: 200, body: { valid: true, request_context: body.request_context } });
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {

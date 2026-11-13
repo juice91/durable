@@ -1,6 +1,6 @@
 import React from "react";
 import type { Run } from "@/lib/runs";
-import { workflowRunPath } from "@/lib/workflows";
+import { routes } from "@/lib/routes";
 
 export type RunKind = "agent" | "tool" | "workflow";
 
@@ -37,7 +37,7 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
     return (
       <span data-testid="run-subject" data-kind="workflow">
         {workflowId ? (
-          <a href={workflowRunPath(workflowId, run.run_id)} className="text-primary underline-offset-4 hover:underline">
+          <a href={routes.workflowRun(workflowId, run.run_id)} className="text-primary underline-offset-4 hover:underline">
             {label}
           </a>
         ) : label}
@@ -57,7 +57,7 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
           Part of workflow run{" "}
           <a
             data-testid="run-parent-link"
-            href={`/runs/${encodeURIComponent(run.parent_run_id)}`}
+            href={routes.run(run.parent_run_id)}
             className="font-mono text-primary underline-offset-4 hover:underline"
           >
             {short(run.parent_run_id)}

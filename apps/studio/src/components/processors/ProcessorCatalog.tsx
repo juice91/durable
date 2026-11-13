@@ -3,6 +3,7 @@
 import Link from "next/link";
 import React from "react";
 import { describeSchemaType, type ProcessorDeclaration, type ProcessorType, type ProcessorUsage } from "@/lib/processors";
+import { routes } from "@/lib/routes";
 
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -14,7 +15,7 @@ function UsageList({ usage, loading, error }: { usage: ProcessorUsage[] | undefi
     <ul data-testid="processor-usage" className="space-y-1">
       {usage.map((item) => (
         <li key={item.agent_id} className="flex flex-wrap items-center gap-2 text-sm">
-          <Link href={`/agents/${item.agent_id}`} className="font-medium text-primary hover:underline">{item.agent_name}</Link>
+          <Link href={routes.agentEditor(item.agent_id)} className="font-medium text-primary hover:underline">{item.agent_name}</Link>
           {item.unknown ? (
             <span data-testid="processor-usage-unknown" className="text-xs text-muted-foreground">
               unknown: v{item.version} could not be read

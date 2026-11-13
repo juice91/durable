@@ -74,7 +74,7 @@ export function ApprovalCard({ runId, stepId, prompt, deadline, onRefresh, onDec
   };
 
   return (
-    <div data-testid={`approval-${stepId}`} role="region" aria-label={`Approval for step ${stepId}`} className="space-y-3 rounded-lg border-2 border-yellow-500 bg-card p-4">
+    <div data-testid={`approval-${stepId}`} role="region" aria-label={`Approval for step ${stepId}`} className="space-y-3 rounded-lg border-2 border-warning bg-card p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold text-foreground">Waiting for approval: <span className="font-mono">{stepId}</span></h3>
         <p className="text-xs text-muted-foreground">Deadline: <time data-testid={`approval-deadline-${stepId}`} dateTime={deadline ?? undefined}>{formatDateTime(deadline)}</time></p>

@@ -7,6 +7,7 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import { startToolRun, ToolRunError, mapToolRunError } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -120,7 +121,7 @@ describe("ToolsPage", () => {
     // ...but announced, with a link, and it stays after switching tools again.
     const notes = screen.getByTestId("tool-runs-started-elsewhere");
     expect(notes).toHaveTextContent("Run started for Create ticket");
-    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/stale-run");
+    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("stale-run"));
     fireEvent.click(within(screen.getByLabelText("Tool catalog")).getByText("Create ticket"));
     expect(screen.getByTestId("tool-runs-started-elsewhere")).toHaveTextContent("Run started for Create ticket");
   });
@@ -149,7 +150,7 @@ describe("ToolsPage", () => {
     expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     expect(screen.getByLabelText(/Subject \*/)).toHaveValue("keep me");
     await act(async () => resolve({ run_id: "run-same", kind: "tool", tool_id: "tickets.create", status: "queued", display_status: "queued", trace_id: null }));
-    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", "/runs/run-same");
+    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", routes.run("run-same"));
     expect(screen.queryByTestId("tool-runs-started-elsewhere")).not.toBeInTheDocument();
   });
 
@@ -253,7 +254,7 @@ describe("ToolsPage", () => {
       render(<ToolsPage />);
       const notes = await screen.findByTestId("tool-runs-started-elsewhere");
       expect(notes).toHaveTextContent("Run started for Create ticket");
-      expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/r-late");
+      expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("r-late"));
       await fillSubject("x");
       expect(screen.queryByTestId("tool-run-reuse-hint")).not.toBeInTheDocument();
     });
@@ -307,7 +308,7 @@ describe("ToolsPage", () => {
 
     await act(async () => resolve({ run_id: "11111111-2222-3333-4444-555555555555", kind: "tool", tool_id: "tickets.create", status: "queued", display_status: "queued", trace_id: null }));
     expect(run).not.toBeDisabled();
-    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", "/runs/11111111-2222-3333-4444-555555555555");
+    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", routes.run("11111111-2222-3333-4444-555555555555"));
   });
 
   it("maps 422 validation errors onto the form fields", async () => {

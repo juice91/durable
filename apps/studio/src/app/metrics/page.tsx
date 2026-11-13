@@ -27,6 +27,7 @@ import {
   type MetricsPageState,
   type ModelOption,
 } from "@/lib/metrics";
+import { routes } from "@/lib/routes";
 
 /** Preset ranges move forward this often (and re-fetch) while the page is open. */
 const AUTO_REFRESH_MS = 5 * 60_000;
@@ -107,8 +108,7 @@ function MetricsView() {
 
   const update = useCallback(
     (next: MetricsPageState) => {
-      const qs = pageStateToParams(next).toString();
-      router.replace(qs ? `/metrics?${qs}` : "/metrics", { scroll: false });
+      router.replace(routes.metrics(pageStateToParams(next)), { scroll: false });
     },
     [router],
   );

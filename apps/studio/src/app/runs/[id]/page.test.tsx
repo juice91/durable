@@ -13,6 +13,7 @@ import {
   type SubscribeHandlers,
 } from "@/lib/runs";
 import * as grafanaLib from "@/lib/grafana";
+import { routes } from "@/lib/routes";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -127,7 +128,7 @@ describe("RunDetailPage", () => {
     (listEvents as any).mockResolvedValueOnce([]);
     render(<RunDetailPage />);
     const link = await screen.findByRole("link", { name: "Workflow: wf-abcde... v3" });
-    expect(link).toHaveAttribute("href", `/workflows/wf-abcdef123456/runs/${ticketRun.run_id}`);
+    expect(link).toHaveAttribute("href", routes.workflowRun("wf-abcdef123456", ticketRun.run_id));
     expect(screen.queryByText(/Agent: null|Version: latest/)).toBeNull();
   });
 
@@ -135,7 +136,7 @@ describe("RunDetailPage", () => {
     (getRun as any).mockResolvedValueOnce({ ...ticketRun, kind: "agent", parent_run_id: "parent-run-0001", parent_step_id: "classify" });
     (listEvents as any).mockResolvedValueOnce([]);
     render(<RunDetailPage />);
-    expect(await screen.findByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
+    expect(await screen.findByTestId("run-parent-link")).toHaveAttribute("href", routes.run("parent-run-0001"));
     expect(screen.getByText(/version: 1/i)).toBeInTheDocument();
   });
 
@@ -350,7 +351,7 @@ describe("RunDetailPage", () => {
     fireEvent.click(tab);
     expect(tab).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("trace-view-stub")).toHaveTextContent(`trace ${ticketRun.run_id} embedded`);
-    expect(screen.getByRole("link", { name: "Open full trace view" })).toHaveAttribute("href", `/traces/${ticketRun.run_id}`);
+    expect(screen.getByRole("link", { name: "Open full trace view" })).toHaveAttribute("href", routes.trace(ticketRun.run_id));
   });
 
   it("follows the ARIA tabs pattern: roving tabIndex and arrow, Home and End keys", async () => {

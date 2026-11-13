@@ -3,6 +3,7 @@ import React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import MetricsPage from "./page";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -168,7 +169,7 @@ describe("MetricsPage", () => {
     render(<MetricsPage />);
     await screen.findByRole("option", { name: "Support bot" });
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "a-1" } });
-    expect(replace).toHaveBeenCalledWith("/metrics?agent_id=a-1", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.metrics({ agent_id: "a-1" }), { scroll: false });
   });
 
   it("Enter on the focused runs chart opens the selected bucket's failed runs", async () => {
@@ -194,7 +195,7 @@ describe("MetricsPage", () => {
     fireEvent.click(bar);
     expect(push).toHaveBeenCalledTimes(1);
     const target = new URL(push.mock.calls[0][0], "http://x");
-    expect(target.pathname).toBe("/traces");
+    expect(target.pathname).toBe(routes.traces());
     expect(Object.fromEntries(target.searchParams)).toEqual({
       status: "failed", from: "2026-11-12T00:00:00.000Z", to: "2026-11-13T00:00:00.000Z", agent_id: "a-1",
     });

@@ -2,6 +2,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { demoSpec } from "@/test/workflowFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ useParams: () => ({ id: "wf-1" }), useRouter: () => ({ push }) }));
@@ -56,7 +57,7 @@ describe("/workflows", () => {
   it("lists workflows with latest version, updated and a link", async () => {
     render(<WorkflowsPage />);
     const row = await screen.findByTestId("workflow-row-wf-1");
-    expect(within(row).getByRole("link", { name: "Triage" })).toHaveAttribute("href", "/workflows/wf-1");
+    expect(within(row).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
     expect(row).toHaveTextContent("v2");
     await waitFor(() => expect(row).toHaveTextContent("2026"));
     expect(screen.getByTestId("workflow-row-wf-2")).toHaveTextContent("Draft only");
@@ -76,7 +77,7 @@ describe("/workflows/[id]", () => {
     fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
     await waitFor(() => expect(screen.queryByTestId("workflow-step-route")).toBeNull());
     const row = await screen.findByTestId("workflow-run-row-aaaaaaaa-1");
-    expect(within(row).getByRole("link")).toHaveAttribute("href", "/workflows/wf-1/runs/aaaaaaaa-1");
+    expect(within(row).getByRole("link")).toHaveAttribute("href", routes.workflowRun("wf-1", "aaaaaaaa-1"));
     expect(row).toHaveTextContent("2.5s");
   });
 
@@ -101,7 +102,7 @@ describe("/workflows/[id]", () => {
 
     runResponses.push(() => json(202, { run_id: firstId, kind: "workflow", workflow_id: "wf-1", version: 2, status: "queued", display_status: "queued", trace_id: null }));
     fireEvent.click(screen.getByRole("button", { name: "Run workflow" }));
-    await waitFor(() => expect(push).toHaveBeenCalledWith(`/workflows/wf-1/runs/${firstId}`));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.workflowRun("wf-1", firstId)));
     const body = JSON.parse(posts()[1][1].body);
     expect(body).toEqual({ input: { text: "hello" }, version: 2, run_id: firstId });
   });

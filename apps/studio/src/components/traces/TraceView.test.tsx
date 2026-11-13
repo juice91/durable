@@ -6,6 +6,7 @@ import { TRACE_POLL_MS, TraceView, traceSignature } from "./TraceView";
 import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { ApiError } from "@/lib/api";
 import { searchLogs } from "@/components/logs/logsQuery";
+import { routes } from "@/lib/routes";
 
 // The default logs panel fetches; keep these tests off the network.
 vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
@@ -130,7 +131,7 @@ describe("TraceView", () => {
     render(<TraceView runId="wfrun-1" />);
     const rows = await screen.findAllByTestId("trace-span-row");
     fireEvent.click(rows[2]);
-    expect(screen.getByTestId("span-link-child-trace")).toHaveAttribute("href", "/traces/child-1");
+    expect(screen.getByTestId("span-link-child-trace")).toHaveAttribute("href", routes.trace("child-1"));
     fireEvent.click(rows[4]);
     expect(screen.getByTestId("span-error")).toHaveTextContent("tool_failed");
   });

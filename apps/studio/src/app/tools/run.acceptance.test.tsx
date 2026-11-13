@@ -7,6 +7,7 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import { mapToolRunError, startToolRun } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type Run, type RunEvent, type RunStatus, type SubscribeHandlers } from "@/lib/runs";
 import { canonicalInputKey, MAX_NOTES, toolRunLedger } from "@/lib/toolRunLedger";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -125,7 +126,7 @@ describe("Tools run acceptance", () => {
     vi.mocked(getRun).mockResolvedValue(runRow("run-ok", "completed", { output: '{"ticket":"T-9"}' }));
     await renderTools();
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
-    expect(await screen.findByTestId("tool-run-link")).toHaveAttribute("href", "/runs/run-ok");
+    expect(await screen.findByTestId("tool-run-link")).toHaveAttribute("href", routes.run("run-ok"));
 
     act(() => handlers.onEnd?.("run_completed"));
     expect(await screen.findByTestId("tool-run-output")).toHaveTextContent('"ticket": "T-9"');
@@ -248,7 +249,7 @@ describe("Tools run acceptance", () => {
     await act(async () => resolve(accepted("stale-run")));
     const notes = screen.getByTestId("tool-runs-started-elsewhere");
     expect(notes).toHaveTextContent("Run started for Create ticket");
-    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/stale-run");
+    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("stale-run"));
     expect(screen.queryByTestId("tool-run-result")).not.toBeInTheDocument();
     expect(subscribeRun).not.toHaveBeenCalled();
 
