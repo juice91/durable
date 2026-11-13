@@ -7,7 +7,33 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
+from eap_schemas.embedding_policy import (
+    EmbeddingDimensionMismatch,
+    EmbeddingModel,
+    EmbeddingModelNotAllowed,
+    EmbeddingModelPolicy,
+)
+from eap_schemas.knowledge import (
+    MAX_KNOWLEDGE_BASES_PER_AGENT,
+    ChunkingConfig,
+    IngestBudgetExceeded,
+    KnowledgeBaseNotFound,
+    KnowledgeBaseRef,
+    approx_tokens,
+    check_knowledge_base_refs,
+)
 from eap_schemas.mcp import McpToolRef, mcp_tool_name
+from eap_schemas.memory import (
+    HistoryConfig,
+    MemoryConfig,
+    ObservationalMemoryConfig,
+    SemanticRecallConfig,
+    WorkingMemoryConfig,
+    WorkingMemoryInvalid,
+    merge_working_memory,
+    validate_working_memory_content,
+    validate_working_memory_schema,
+)
 from eap_schemas.model_ref import ModelRef
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
@@ -17,12 +43,32 @@ from eap_schemas.processors import (
     ProcessorSpec,
 )
 from eap_schemas.request_context import MAX_CONTEXT_FIELDS, ContextField
-from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
+from eap_schemas.tools import RESERVED_TOOL_NAMES, TOOL_DECLARATIONS, ToolDeclaration, builtin_tool_name
 
 __all__ = (
     "AgentSpec",
     "AgentVersion",
+    "ChunkingConfig",
     "ContextField",
+    "EmbeddingDimensionMismatch",
+    "EmbeddingModel",
+    "EmbeddingModelNotAllowed",
+    "EmbeddingModelPolicy",
+    "HistoryConfig",
+    "IngestBudgetExceeded",
+    "KnowledgeBaseNotFound",
+    "KnowledgeBaseRef",
+    "MemoryConfig",
+    "ObservationalMemoryConfig",
+    "RESERVED_TOOL_NAMES",
+    "SemanticRecallConfig",
+    "WorkingMemoryConfig",
+    "WorkingMemoryInvalid",
+    "approx_tokens",
+    "merge_working_memory",
+    "reserved_tool_name_conflicts",
+    "validate_working_memory_content",
+    "validate_working_memory_schema",
     "McpToolRef",
     "ModelRef",
     "ModelSettings",
@@ -68,6 +114,12 @@ class AgentSpec(BaseModel):
     input_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     output_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     context_fields: Tuple[ContextField, ...] = Field(default=(), max_length=MAX_CONTEXT_FIELDS)
+    # Knowledge and memory (RAG and memory milestone, RM.2). Same rule: left out of every dump while
+    # empty (no knowledge bases; memory None), so every stored spec keeps its JSON and hash. Inside
+    # KnowledgeBaseRef and MemoryConfig every None field is dropped too. `memory: {}` is NOT empty:
+    # it turns memory on with the default history limits.
+    knowledge_bases: Tuple[KnowledgeBaseRef, ...] = Field(default=(), max_length=MAX_KNOWLEDGE_BASES_PER_AGENT)
+    memory: MemoryConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_empty_optional_fields(self, handler):
@@ -86,6 +138,20 @@ class AgentSpec(BaseModel):
             if field.name in seen:
                 raise ValueError(f"duplicate context field: {field.name}")
             seen.add(field.name)
+        return self
+
+    @model_validator(mode="after")
+    def check_knowledge_and_memory(self):
+        """Unique knowledge bases; with knowledge or memory on, no tool takes a reserved platform name.
+
+        Only checked when the new fields are set, so no stored spec can stop validating. Publish
+        (RM.11) checks `reserved_tool_name_conflicts` for every spec.
+        """
+        check_knowledge_base_refs(self.knowledge_bases)
+        if self.knowledge_bases or self.memory is not None:
+            conflicts = reserved_tool_name_conflicts(self)
+            if conflicts:
+                raise ValueError(f"tool name {conflicts[0]!r} is reserved for a platform tool")
         return self
 
     @model_validator(mode="after")
@@ -158,7 +224,22 @@ class AgentSpec(BaseModel):
 
 # AgentSpec fields added after specs were first stored: omitted from dumps (and so from the hash)
 # while empty.
-_OMIT_WHEN_EMPTY = ("mcp_tools", "input_processors", "output_processors", "context_fields")
+_OMIT_WHEN_EMPTY = (
+    "mcp_tools",
+    "input_processors",
+    "output_processors",
+    "context_fields",
+    "knowledge_bases",
+    "memory",
+)
+
+
+def reserved_tool_name_conflicts(spec: AgentSpec) -> tuple[str, ...]:
+    """Model-facing names of the spec's built-in and MCP tools that are reserved platform tool
+    names (`retrieve`, `update_working_memory`), in spec order."""
+    names = [builtin_tool_name(tool_id) for tool_id in spec.tools]
+    names += [mcp_tool_name(ref.server, ref.tool) for ref in spec.mcp_tools]
+    return tuple(name for name in names if name in RESERVED_TOOL_NAMES)
 
 
 def canonical_spec_hash(spec: AgentSpec) -> str:
@@ -251,6 +332,11 @@ RunEventType = Literal[
     "step_timed_out",  # written by the worker when the approval wait timed out, same key
     "step_completed",
     "step_failed",
+    # RAG and memory milestone. Data carries counts, ids, models and costs, never text.
+    "ingest_progress",  # kb_ingest runs: {embedded, total} after each embedded batch
+    "embedding",  # one per embedding call, key = request key: {model_id, inputs, input_tokens, cost_usd}
+    "memory_observe_failed",  # the post-turn observer failed; the run status is unchanged
+    "memory_updated",  # working memory or observations changed (Studio "memory updating")
 ]
 
 
