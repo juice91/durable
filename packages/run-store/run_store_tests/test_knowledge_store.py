@@ -57,6 +57,30 @@ def chunk(ordinal: int, body: str, title: str = "Section") -> ChunkInput:
 
 
 @pytest.fixture
+def isolated_store():
+    """A KnowledgeStore on a throwaway schema migrated to head, dropped afterwards. For EXPLAIN
+    assertions: the planner's choice depends on the table's statistics, and the session schema's
+    kb_chunks also holds every other test's rows (the worker tests share it via
+    EAP_TEST_DATABASE_URL), so a plan asserted there would depend on test order."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    from eap_db.testing import create_migrated_schema, drop_schema
+
+    from .conftest import DATABASE_URL
+
+    url = make_url(DATABASE_URL)
+    base = url.set(query={k: v for k, v in url.query.items() if k != "options"}).render_as_string(hide_password=False)
+    schema = f"eap_test_kbplan_{uuid.uuid4().hex[:8]}"
+    eng = create_engine(create_migrated_schema(base, schema, public=True))
+    try:
+        yield KnowledgeStore(eng)
+    finally:
+        eng.dispose()
+        drop_schema(base, schema)
+
+
+@pytest.fixture
 def store(engine):
     return KnowledgeStore(engine)
 
@@ -410,7 +434,8 @@ def test_cancel_and_failed_reindex(store, tenant):
 
 
 @pytest.mark.parametrize("dims,model", [(768, MODEL_768), (1024, "test:hash1024"), (1536, MODEL)])
-def test_search_uses_the_hnsw_index_of_its_dimension(store, tenant, dims, model):
+def test_search_uses_the_hnsw_index_of_its_dimension(isolated_store, tenant, dims, model):
+    store = isolated_store
     kb = make_kb(store, tenant, name=f"kb{dims}", model=model, dims=dims)
     ingest(store, tenant, kb, "a", ["one", "two"], hot=[1, 2], dims=dims)
     plan = store.explain_search(tenant, [kb["id"]], vec(dims, 1), embedding_model=model, top_k=4)

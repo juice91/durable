@@ -1226,19 +1226,56 @@ class KnowledgeStore:
         doc_version: int | None = None,
     ) -> EmbeddingProgress:
         """Chunk counts of the generation (or one document version in it). `pending_tokens` is the
-        cost cap's estimate after `apply_cached_embeddings`."""
+        cost cap's estimate after `apply_cached_embeddings`: the approximate tokens of the chunks still
+        without an embedding, **counted once per distinct embed text** (max(approx_tokens) per
+        `embed_text_hash`), because the worker embeds each distinct text once and fills duplicates
+        from the cache. Same rule as `estimate_reindex`, so the dry run and the worker's cap agree."""
         kid = _require_uuid(kb_id, "kb_id")
         scope, scope_params = _scope_clause(document_id, doc_version)
+        params = {"t": tenant_id, "kb": kid, "g": int(generation), **scope_params}
+        where = f"tenant_id = :t AND kb_id = :kb AND generation = :g{scope}"
         with self.engine.connect() as conn:
             row = conn.execute(
-                text(
-                    "SELECT count(*) AS total, count(embedding) AS embedded,"
-                    " coalesce(sum(approx_tokens) FILTER (WHERE embedding IS NULL), 0) AS pending_tokens"
-                    f" FROM kb_chunks WHERE tenant_id = :t AND kb_id = :kb AND generation = :g{scope}"
-                ),
-                {"t": tenant_id, "kb": kid, "g": int(generation), **scope_params},
+                text(f"SELECT count(*) AS total, count(embedding) AS embedded FROM kb_chunks WHERE {where}"),
+                params,
             ).mappings().one()
-        return EmbeddingProgress(int(row["total"]), int(row["embedded"]), int(row["pending_tokens"]))
+            pending_tokens = conn.execute(
+                text(
+                    "SELECT coalesce(sum(t), 0) FROM (SELECT max(approx_tokens) AS t FROM kb_chunks"
+                    f" WHERE {where} AND embedding IS NULL GROUP BY embed_text_hash) h"
+                ),
+                params,
+            ).scalar_one()
+        return EmbeddingProgress(int(row["total"]), int(row["embedded"]), int(pending_tokens))
+
+    def fill_cached_embeddings(
+        self, tenant_id: str, kb_id: str, generation: int, chunk_ids: Sequence[str]
+    ) -> set[str]:
+        """`apply_cached_embeddings` for the given chunk ids only (a batch the worker selected): copy
+        an existing embedding of the same knowledge base, generation and `embed_text_hash` onto each
+        of them still without one. Returns the ids filled."""
+        kid = _require_uuid(kb_id, "kb_id")
+        ids = [_require_uuid(c, "chunk id") for c in chunk_ids]
+        if not ids:
+            return set()
+        with self.Session() as session:
+            _, dims = self._writable_generation(session, tenant_id, kid, int(generation))
+            filled = session.execute(
+                text(
+                    "UPDATE kb_chunks c SET embedding = hit.embedding, dimensions = hit.dimensions"
+                    " FROM (SELECT p.id, src.embedding, src.dimensions FROM kb_chunks p"
+                    " CROSS JOIN LATERAL (SELECT x.embedding, x.dimensions FROM kb_chunks x"
+                    " WHERE x.tenant_id = p.tenant_id AND x.kb_id = p.kb_id AND x.generation = p.generation"
+                    " AND x.embed_text_hash = p.embed_text_hash AND x.embedding IS NOT NULL"
+                    " AND x.dimensions = :dims LIMIT 1) src"
+                    " WHERE p.tenant_id = :t AND p.kb_id = :kb AND p.generation = :g AND p.embedding IS NULL"
+                    " AND p.id = ANY(CAST(:ids AS uuid[]))) hit WHERE c.id = hit.id AND c.embedding IS NULL"
+                    " RETURNING c.id"
+                ),
+                {"t": tenant_id, "kb": kid, "g": int(generation), "dims": dims, "ids": ids},
+            ).scalars().all()
+            session.commit()
+        return {str(i) for i in filled}
 
     def next_unembedded_batch(
         self,

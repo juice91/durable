@@ -46,6 +46,20 @@
   events whose `event_key` matches the glob `EAP_CRASH_EVENT_KEY` (default `*`, i.e. the first
   event written, `start`).
 
+- `kb_chunk` (RM.10): inside `eap.kb_chunk` (ingest) right after the chunk rows were upserted, and
+  inside `eap.kb_copy` (reindex) right after the active chunks were copied, before the step
+  checkpoint. Recovery re-runs the step; the upsert / copy is idempotent (no duplicate rows).
+- `kb_batch_before_commit` (RM.10): inside `eap.kb_embed_batch`, after the embedding call returned
+  and before the transaction that writes the vectors, the usage row and the `ingest_progress` event.
+  Recovery embeds that batch again (one bounded duplicate provider call) and writes ONE usage row.
+  Filtered by `EAP_CRASH_EVENT_KEY` against the batch key `embed:batch:{i}`.
+- `kb_batch_after_commit` (RM.10): inside `eap.kb_embed_batch`, right after that transaction
+  committed and before the step checkpoint. Recovery finds the batch's event and returns its counts
+  without a provider call. Filtered like `kb_batch_before_commit`.
+- `kb_before_finalize` / `kb_finalize` (RM.10): inside `eap.kb_finalize`, right before / right after
+  the atomic version (or generation) switch transaction. Recovery re-runs the switch, which answers
+  'already_active' when it had committed.
+
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
 then recovers instead of crash-looping.
@@ -70,6 +84,11 @@ CRASH_POINTS = frozenset(
         "input_processors",
         "output_processors",
         "moderation_request",
+        "kb_chunk",
+        "kb_batch_before_commit",
+        "kb_batch_after_commit",
+        "kb_before_finalize",
+        "kb_finalize",
     }
 )
 

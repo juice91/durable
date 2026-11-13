@@ -15,6 +15,7 @@ from eap_worker import workflow as _workflow  # noqa: F401
 from eap_worker import processors as _processors  # noqa: F401  (eap-moderator, eap.input/output_processors)
 from eap_worker import tool_run as _tool_run  # noqa: F401  (eap.tool_run and its steps)
 from eap_worker import workflow_run as _workflow_run  # noqa: F401  (eap.workflow_run, eap.workflow_branch)
+from eap_worker import kb_ingest as _kb_ingest  # noqa: F401  (eap.kb_ingest and its steps, RM.10)
 
 APP_NAME = "eap-worker"
 

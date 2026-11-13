@@ -24,7 +24,7 @@ from eap_run_store import (
     RunStore,
 )
 
-from .test_knowledge_store import MODEL, MODEL_768, chunk, ingest, make_kb, search, vec
+from .test_knowledge_store import MODEL, MODEL_768, chunk, ingest, isolated_store, make_kb, search, vec  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get(SCHEMA_ENV), reason="needs the eap_db pytest plugin's migrated schema (dev Postgres)"
@@ -448,7 +448,8 @@ def test_top_k_is_ordered_by_exact_distance_and_scores_match(store, tenant):
     assert search(store, tenant, [], q) == []
 
 
-def test_index_is_used_with_filters_and_several_knowledge_bases(store, tenant):
+def test_index_is_used_with_filters_and_several_knowledge_bases(isolated_store, tenant):
+    store = isolated_store  # a throwaway schema: the plan must not depend on other tests' rows
     for dims, model in ((768, MODEL_768), (1024, "test:hash1024"), (1536, MODEL)):
         a = make_kb(store, tenant, name=f"a{dims}", model=model, dims=dims)
         b = make_kb(store, tenant, name=f"b{dims}", model=model, dims=dims)

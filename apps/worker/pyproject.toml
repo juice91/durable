@@ -17,6 +17,8 @@ dependencies = [
     "eap-secrets",
     # Input and output processors (P0.17): the deterministic chains run in the worker's steps.
     "eap-processors",
+    # Knowledge base extraction and chunking (RM.10, eap.kb_ingest).
+    "eap-knowledge",
     "pydantic-ai-slim[anthropic,dbos,openai]>=2.67.0",
     "dbos[otel]>=3.5.0",
     # MCP tools in agents (task 3.5): the MCP client Pydantic AI's [mcp] extra builds on.
@@ -46,3 +48,4 @@ eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
 eap-processors = { workspace = true }
+eap-knowledge = { workspace = true }
