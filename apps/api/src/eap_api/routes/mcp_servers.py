@@ -33,13 +33,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from eap_observability import log_failure
-from eap_secrets import KEY_ENV, DecryptionFailed, Keyring, SecretsError, SecretsKeyMissing, load_keyring
+from eap_secrets import (
+    KEY_ENV,
+    DecryptionFailed,
+    Keyring,
+    SecretsError,
+    SecretsKeyMissing,
+    load_keyring,
+    mcp_header_context,
+)
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.mcp_servers.connection import connection_timeout_s, list_server_tools
 from eap_api.mcp_servers.models import TRANSPORT_STREAMABLE_HTTP, McpServerModel, McpServerSecretModel
+from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
 
 log = logging.getLogger("eap_api.mcp_servers")
@@ -62,6 +71,7 @@ _RESERVED_HEADERS = frozenset({
 router = APIRouter(
     tags=["mcp-servers"],
     responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}, 503: {"model": ErrorDetail}},
+    route_class=GuardedJsonRoute,
 )
 
 
@@ -164,7 +174,7 @@ def _check_url_sync(policy: OutboundPolicy, url: str) -> None:
 
 
 def _secret_context(tenant_id: str, server_id: str, header_name: str) -> bytes:
-    return f"{tenant_id}/{server_id}/{header_name}".encode()
+    return mcp_header_context(tenant_id, server_id, header_name)  # shared with the worker
 
 
 def _seal(ring: Keyring, tenant_id: str, server_id: str, headers: dict[str, str]) -> list[McpServerSecretModel]:

@@ -64,3 +64,65 @@ the request ends normally instead of dying. Inserting directly skips the route's
 the process inside `launch` leaves exactly the state a real crash leaves: the route's own insert
 committed and nothing else happened. The retry then goes through the real
 `created=False → compare → launch` path.
+
+# Milestone 3 (task 3.10): workflow crashes and MCP safety, whole-system
+
+`test_workflow_crash.py` and `test_mcp_safety.py` start the **real API in its own process**
+(`api_server.py`: uvicorn on a free 127.0.0.1 port, INFO logs to a file) and talk to it over real
+HTTP (`Harness.start_api()` swaps `harness.client` for an HTTP client). Agents, workflows and MCP
+servers are created and published over HTTP; runs are started, approved and streamed over HTTP.
+The worker-level tests in `apps/worker/worker_tests/test_workflow_run_crash*.py` and
+`test_mcp_*.py` enqueue directly or use an in-process app; these do not. Knobs:
+`EAP_APPROVAL_POLL_SECONDS=1` (recorded once per run, so every process gets it; W4d and W4e record a
+20 s hour and a 0.25 s poll instead, and W4e waits until that hour has passed). The suite takes
+about 3.5 minutes; every API, worker, MCP
+server and collector is stopped in teardown, and the
+test's DBOS schema and tenant rows (including workflows and MCP servers) are deleted.
+
+## Workflow invariants (`assert_exactly_once`)
+
+1. The run ends once: the expected terminal status (`completed`, or `needs_attention` where a side
+   effect's outcome is unknown), one `end` event, exactly one DBOS workflow with the run id, in
+   SUCCESS, and no DBOS workflow prefixed by the run id other than its parallel branches
+   (`{run_id}:{parallel}:{branch}`), each once, in SUCCESS.
+2. Gap-free seq from 0 and no duplicate event_key across the parent and its branches; the
+   expected story (exact order, or the exact key set plus ordering rules for parallel branches).
+3. Side effects once: the expected number of `fake_external_tickets` rows and service calls, and
+   exactly one child agent run per agent step that ran (the step_started event's child_run_id),
+   each in the expected status (completed, or needs_attention when that child is the unknown side
+   effect) and finished by one DBOS workflow with its own gap-free events; `GET /runs?parent_run_id=`
+   lists exactly those. Nothing changes during a further 1 s settle.
+4. SSE resume (`?after_seq=` and `Last-Event-ID`) from -1, 0, the last seq stored before the
+   crash, the midpoint, last-1 and last returns exactly the database's events after that seq.
+
+| # | Kill | Proves |
+|---|------|--------|
+| W1 | `workflow_mid_step` at `step:ask:started` (agent) / `step:t:started` (tool) | the step re-runs after recovery: completed once, 1 ticket, 2 child runs |
+| W2 | `after_workflow_tool_call` at `step:t:call` | needs_attention once, the ticket service is not called again (1 call, 1 ticket) |
+| W3 | inside branch a while its sibling ticket is held behind an approval; inside branch b before its tool; at the join; after branch b's tool call | branch a completes once after that approval (the ticket is not in flight at the kill); the others complete once, or needs_attention after the tool call; each branch workflow once, 1 ticket |
+| W4 | `workflow_waiting`; approve over HTTP after the restart, or while no worker runs | the decision is never lost; completed once; a second approve or reject is 409 |
+| W4c | SIGKILL of a healthy worker while a parallel branch's approval is in DBOS recv; approve while down | the branch workflow (the wake-up target) resumes; completed once |
+| W4d | kill while waiting under a 20 s hour; restart; approve within a second of the recorded deadline | exactly one `step:hold:decision`; completed if that event is `step_approved`, failed `approval_timeout` if it is `step_timed_out`; the HTTP result matches; a second decide is 409. This is the race: the approve is sent while the run is still waiting |
+| W4e | same 20 s hour and crash as W4d; the approve is sent only after the recorded deadline, once `step_timed_out` is stored | 409; exactly one `step:hold:decision`, type `step_timed_out`, timestamp inside the deadline window (deadline−0.1 s to deadline+1.0 s); failed `approval_timeout`; the later step never starts; a second decide is 409 |
+| W7 | `after_tool_call` on an MCP tool reached through a workflow agent step (agent with `mcp_tools`) | the workflow and its child run each end needs_attention once; the server is called once and not contacted again |
+| W5 | `after_child_run_insert`, then v2 of the agent is published over HTTP | the recovered child runs v1 (the version its row names) |
+| W6a | the API process dies inside `launch_workflow` (`crashing_workflow_api.py run`) | the orphan stays queued; the same-run_id retry is 202 and completes once; a further retry is a no-op; other input is 409 |
+| W6b | the API process dies inside `notify_approval` (`crashing_workflow_api.py approve`) | the committed decision is found by the poll; completed once |
+
+## MCP safety
+
+Names that should resolve to a private address are not left to real DNS or `/etc/hosts`.
+`api_server.py` installs a test-only `socket.getaddrinfo` stub when `EAP_TEST_DNS_STUB` is set
+(`name=addr[|addr],...`, several names comma-separated) and logs `EAP_TEST_DNS_STUB active`.
+M7a uses it for an intranet name (10.0.0.5), a metadata name (169.254.169.254), a ULA name
+(`fd00::5`), and a name with one public and one private record. Every other name still resolves
+for real. The literal list also covers ULA (`fd00::`, `fc00::`) and 6to4 (`2002:`).
+
+| # | What | Proves |
+|---|------|--------|
+| M7a | literal URLs (loopback, private, link-local/metadata, ULA `fd00`/`fc00`, 6to4 `2002:`, CGNAT, 0.0.0.0, IPv4-mapped and NAT64 IPv6, `127.1`, decimal and hex hosts, http, credentials) plus the stubbed DNS names above, without a dev allow host | 422 with the policy code (`address_blocked` for the private literals, ULA, 6to4, and stubbed names), the URL and the resolved address are not echoed, nothing is stored |
+| M7b | API allows 127.0.0.1, the worker does not | the worker's own check refuses: 0 requests reach the server, run fails `mcp_tool_unavailable` |
+| M8 | two header-secret sentinels, a server that echoes the headers back (as a result and as a tool error), OTLP exported to a local collector | the sentinels appear in no API response (create, get, list, test, a 422, PATCH-URL 422s, runs, events, SSE), neither process log, no OTLP trace or log export, no runs / execution_events / side_effects row and no row of the DBOS system schema, in plain, URL, hex or any-alignment base64 form |
+| M9 | gzip result, 8 MB result, remote `$ref` in a listed schema | needs_attention after exactly one tools/call for the first two (identity encoding only); the `$ref` is never fetched |
+| M10 | `after_tool_call` on a side-effecting MCP call | needs_attention once, the server is not contacted again, no secret in either worker log |
+| M11 | an allowlisted server answers 302 and 307 to a counting listener on another 127.0.0.1 port | 0 connections reach that listener, through the API connection test (`redirect_refused`) and through a real agent run (`mcp_tool_unavailable`, worker inner code ends with `connect_failed`); the location and port are not in the error |

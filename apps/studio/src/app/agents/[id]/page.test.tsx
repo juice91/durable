@@ -63,6 +63,29 @@ describe("AgentDetailPage", () => {
     });
   });
 
+  it("Publish 422 for an MCP server shows the server message", async () => {
+    (api.agents.get as any).mockResolvedValueOnce({
+      id: "a1",
+      name: "Test Agent",
+      draft_spec: {
+        spec_version: 1,
+        name: "Test Agent",
+        instructions: "Test",
+        model: { provider: "openai", name: "gpt-4" },
+        tools: [],
+        mcp_tools: [{ server: "x", tool: "search" }],
+      },
+      latest_version: 1,
+    });
+    (api.versions.list as any).mockResolvedValueOnce([]);
+    (api.versions.create as any).mockRejectedValueOnce(new ApiError(422, "MCP server 'x' is disabled"));
+
+    render(<AgentDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+
+    expect(await screen.findByTestId("agent-save-error")).toHaveTextContent("MCP server 'x' is disabled");
+  });
+
   it("shows error screen only on initial load failure", async () => {
     (api.agents.get as any).mockRejectedValueOnce(new ApiError(404, "Not found"));
 

@@ -12,6 +12,21 @@ interface EventTimelineProps {
   currentPartialText: PartialTextMap;
 }
 
+/** Event payload values are JSON: text stays as is, anything else is shown as pretty JSON (a tool
+ * run's input and result are objects, which React cannot render as children). */
+export function formatValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+function JsonBlock({ value, label }: { value: unknown; label?: string }) {
+  return (
+    <pre aria-label={label} className="mt-1 text-xs text-muted-foreground bg-muted p-2 rounded whitespace-pre-wrap break-words">
+      {formatValue(value)}
+    </pre>
+  );
+}
+
 function MarkdownContent({ text }: { text: string }) {
   return (
     <div className="prose dark:prose-invert max-w-none text-sm text-card-foreground/80">
@@ -64,11 +79,24 @@ function EventItem({ event }: EventItemProps) {
         return (
           <div className="text-sm text-card-foreground/70">
             Run started
-            {event.data.input && (
+            {typeof event.data.tool_id === "string" && (
               <span className="block mt-1 text-xs font-mono text-muted-foreground">
-                Input: {event.data.input}
+                Tool: {event.data.tool_id}
               </span>
             )}
+            {typeof event.data.input === "string"
+              ? event.data.input && (
+                  <span className="block mt-1 text-xs font-mono text-muted-foreground">
+                    Input: {event.data.input}
+                  </span>
+                )
+              : event.data.input !== undefined &&
+                event.data.input !== null && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Input:
+                    <JsonBlock value={event.data.input} label="Run input" />
+                  </div>
+                )}
           </div>
         );
       case "model_message":
@@ -85,26 +113,39 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm">
             <span className="font-semibold text-purple-700 dark:text-purple-400">Tool call:</span>
             <span className="text-purple-600 dark:text-purple-300 ml-1">
-              {event.data.tool_name}
+              {formatValue(event.data.tool_id ?? event.data.tool_name)}
             </span>
-            <pre className="mt-1 text-xs text-muted-foreground bg-muted p-2 rounded">
-              {JSON.stringify(event.data.args, null, 2)}
-            </pre>
+            <JsonBlock value={event.data.args ?? {}} label="Tool arguments" />
           </div>
         );
       case "tool_result":
         return (
           <div className="text-sm">
-            <span className="font-semibold text-green-700 dark:text-green-400">Tool result:</span>
-            <pre className="mt-1 text-xs text-muted-foreground bg-muted p-2 rounded">
-              {JSON.stringify(event.data.content, null, 2)}
-            </pre>
+            {event.data.status === "error" ? (
+              <>
+                <span className="font-semibold text-red-700 dark:text-red-400">Tool error:</span>
+                {event.data.content !== undefined ? (
+                  <JsonBlock value={event.data.content} label="Tool result" />
+                ) : (
+                  <span className="block mt-1 text-red-600 dark:text-red-300">
+                    {formatValue(event.data.error ?? "Unknown error")}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                <span className="font-semibold text-green-700 dark:text-green-400">Tool result:</span>
+                <JsonBlock value={event.data.content ?? null} label="Tool result" />
+              </>
+            )}
           </div>
         );
       case "run_completed":
         return (
-          <div className="text-sm text-green-700 dark:text-green-400 font-semibold">
-            Run completed successfully
+          <div className="text-sm">
+            <span className="text-green-700 dark:text-green-400 font-semibold">Run completed successfully</span>
+            {/* A tool run's end event carries the tool result (any JSON value) */}
+            {event.data.result !== undefined && <JsonBlock value={event.data.result} label="Run result" />}
           </div>
         );
       case "run_failed":
@@ -112,12 +153,12 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm text-red-700 dark:text-red-400 font-semibold">
             Run failed
             <span className="block mt-1 text-red-600 dark:text-red-300">
-              {event.data.error || "Unknown error"}
+              {formatValue(event.data.error || "Unknown error")}
             </span>
           </div>
         );
       default:
-        return <div className="text-sm text-muted-foreground">{JSON.stringify(event.data)}</div>;
+        return <JsonBlock value={event.data} />;
     }
   };
 

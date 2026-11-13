@@ -82,6 +82,16 @@ class WorkerRuntime:
             allowed_tools=self.allowed_tools,
         )
 
+    def tool_deps_for(self, run_id: str, tenant_id: str) -> RunDeps:
+        """Deps for a tool test run's single tool call: the same side-effect store and (crash-hooked)
+        ticket service an agent run's tools get, without an agent spec."""
+        return RunDeps(
+            tenant_id=tenant_id,
+            run_id=UUID(run_id),
+            side_effects=PostgresSideEffectStore(self.engine, tenant_id),
+            ticket_service=_CrashAfterCallTicketService(self.tickets.for_tenant(tenant_id)),
+        )
+
     def publish_delta(self, run_id: str, model_request: int, attempt: str, delta: str) -> None:
         with self.engine.begin() as conn:
             for i in range(0, len(delta), _MAX_DELTA_CHARS):

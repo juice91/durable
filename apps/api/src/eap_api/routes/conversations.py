@@ -25,6 +25,7 @@ from eap_observability import current_trace_context
 
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
+from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import (
     PrincipalDep,
     SessionDep,
@@ -39,7 +40,11 @@ from eap_api.routes.runs import (
 from eap_api.schemas import ConversationCreate, ErrorDetail, TurnCreate
 from eap_run_store import ConversationIdConflict, ConversationNotFound, RunIdConflict, RunStore, TurnInProgress
 
-router = APIRouter(tags=["conversations"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}})
+router = APIRouter(
+    tags=["conversations"],
+    responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}},
+    route_class=GuardedJsonRoute,
+)
 
 
 def _conversation_json(conv: dict[str, Any]) -> dict[str, Any]:
@@ -156,5 +161,5 @@ def start_turn(
             status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
         )
 
-    launch_recorded_run(db, launcher, tenant_id, run)
+    run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
     return started_response(run, created, {"conversation_id": run["conversation_id"], "turn": run["turn"]})

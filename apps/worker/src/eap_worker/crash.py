@@ -9,7 +9,30 @@
   is model request 1 (request 0 is a tool call).
 - `after_tool_call`: inside the `tickets.create` tool step, right after the external ticket
   service returned and before `side_effects.complete` and the DBOS step checkpoint (the side
-  effect row stays `reserved`).
+  effect row stays `reserved`). Also inside an MCP tool step (eap_worker.mcp), right after the MCP
+  server answered `tools/call`, at the same point relative to `side_effects.complete`.
+- `after_tool_run_call`: inside the `eap.tool_call` step of a tool test run (eap_worker.tool_run),
+  right after the tool function returned and before its result is recorded (for a side-effecting
+  tool: before `side_effects.complete` of the run's `{run_id}:tool` reservation; for any tool:
+  before the step checkpoint). Recovery then ends a side-effecting tool run in `needs_attention`
+  without calling the tool again, and simply re-runs a read-only one.
+- `workflow_mid_step`: in a workflow run (eap_worker.workflow_run), right after a step's
+  `step_started` event is recorded and before the step does its work (resolves an agent, calls a
+  tool, waits, ...). Filtered like `after_event_write`: `EAP_CRASH_EVENT_KEY` is matched against
+  `step:{step_id}:started`, so `step:approve*` targets one step.
+- `after_workflow_tool_call`: inside a workflow tool step's `eap.workflow_tool_call` step, right
+  after the tool returned and before its result is recorded (for a side-effecting tool: before
+  `side_effects.complete` of the `{run_id}:{step_id}` reservation). Recovery then ends the run in
+  `needs_attention` without calling the tool again; a read-only tool is simply called again.
+  Filtered by `EAP_CRASH_EVENT_KEY` against `step:{step_id}:call`.
+- `after_child_run_insert`: inside a workflow agent step's `eap.workflow_resolve_agent` step,
+  right after the child agent run row is inserted (naming the resolved agent version) and before
+  the step's result is checkpointed. Recovery re-runs the step, finds the row and reuses ITS
+  version (never re-resolving 'latest'). Filtered by `EAP_CRASH_EVENT_KEY` against
+  `step:{step_id}:child`.
+- `workflow_waiting`: in a workflow approval step, right after its `step_waiting` event is
+  recorded and before the workflow starts waiting for the decision. Filtered by
+  `EAP_CRASH_EVENT_KEY` against `step:{step_id}:waiting`.
 - `after_event_write`: inside the `eap.append_event` DBOS step, right after the durable event
   committed to `eap_app` and before the step's checkpoint reaches `eap_dbos`. Only fires for
   events whose `event_key` matches the glob `EAP_CRASH_EVENT_KEY` (default `*`, i.e. the first
@@ -26,7 +49,18 @@ import fnmatch
 import os
 import sys
 
-CRASH_POINTS = frozenset({"model_request", "after_tool_call", "after_event_write"})
+CRASH_POINTS = frozenset(
+    {
+        "model_request",
+        "after_tool_call",
+        "after_tool_run_call",
+        "after_event_write",
+        "workflow_mid_step",
+        "after_workflow_tool_call",
+        "workflow_waiting",
+        "after_child_run_insert",
+    }
+)
 
 
 def crash_point(name: str, *, event_key: str | None = None) -> None:

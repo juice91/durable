@@ -12,7 +12,11 @@ class UnknownToolError(Exception):
 
     def __init__(self, tool_id: str):
         self.tool_id = tool_id
-        super().__init__(f"Unknown tool: {tool_id}")
+        # args are the constructor arguments, so pickle (DBOS step errors) rebuilds it exactly.
+        super().__init__(tool_id)
+
+    def __str__(self) -> str:
+        return f"Unknown tool: {self.tool_id}"
 
 
 class ToolNotAllowedError(Exception):
@@ -20,7 +24,10 @@ class ToolNotAllowedError(Exception):
 
     def __init__(self, tool_id: str):
         self.tool_id = tool_id
-        super().__init__(f"Tool not allowed: {tool_id}")
+        super().__init__(tool_id)  # pickle-safe, as UnknownToolError
+
+    def __str__(self) -> str:
+        return f"Tool not allowed: {self.tool_id}"
 
 
 class ToolRegistry:

@@ -63,4 +63,86 @@ describe("EventTimeline", () => {
     expect(screen.getByText("Request #1")).toBeInTheDocument();
     expect(screen.getByText("Partial text")).toBeInTheDocument();
   });
+
+  it("renders a tool run's start, call, result and end events (object payloads)", () => {
+    const toolEvents: RunEvent[] = [
+      {
+        seq: 0,
+        type: "run_started",
+        data: { kind: "tool", tool_id: "tickets.create", input: { title: "Printer", body: "on fire" } },
+        ts: "2026-11-13T00:00:00Z",
+      },
+      {
+        seq: 1,
+        type: "tool_call",
+        data: {
+          tool_call_id: "tool_run",
+          tool_name: "tickets__create",
+          tool_id: "tickets.create",
+          args: { title: "Printer", body: "on fire" },
+        },
+        ts: "2026-11-13T00:00:01Z",
+      },
+      {
+        seq: 2,
+        type: "tool_result",
+        data: {
+          tool_call_id: "tool_run",
+          tool_name: "tickets__create",
+          tool_id: "tickets.create",
+          status: "ok",
+          content: { ticket_id: "TCK-1", created: true },
+        },
+        ts: "2026-11-13T00:00:02Z",
+      },
+      {
+        seq: 3,
+        type: "run_completed",
+        data: { output: '{"created":true,"ticket_id":"TCK-1"}', result: { ticket_id: "TCK-1", created: true } },
+        ts: "2026-11-13T00:00:03Z",
+      },
+    ];
+    render(<EventTimeline events={toolEvents} currentPartialText={{}} />);
+
+    expect(screen.getByText("Tool: tickets.create")).toBeInTheDocument();
+    expect(screen.getByLabelText("Run input")).toHaveTextContent('"title": "Printer"');
+    expect(screen.getByLabelText("Tool arguments")).toHaveTextContent('"body": "on fire"');
+    expect(screen.getByLabelText("Tool result")).toHaveTextContent('"ticket_id": "TCK-1"');
+    expect(screen.getByText("Run completed successfully")).toBeInTheDocument();
+    expect(screen.getByLabelText("Run result")).toHaveTextContent('"created": true');
+  });
+
+  it("renders a failed tool call's error and a string result", () => {
+    const toolEvents: RunEvent[] = [
+      {
+        seq: 0,
+        type: "run_started",
+        data: { kind: "tool", tool_id: "clock.now", input: {} },
+        ts: "2026-11-13T00:00:00Z",
+      },
+      {
+        seq: 1,
+        type: "tool_result",
+        data: {
+          tool_call_id: "tool_run",
+          tool_id: "tickets.create",
+          status: "error",
+          error: "SideEffectOutcomeUnknown: check the external system",
+          error_code: "side_effect_outcome_unknown",
+        },
+        ts: "2026-11-13T00:00:01Z",
+      },
+      {
+        seq: 2,
+        type: "run_completed",
+        data: { output: '"2026-11-13T00:00:00+00:00"', result: "2026-11-13T00:00:00+00:00" },
+        ts: "2026-11-13T00:00:02Z",
+      },
+    ];
+    render(<EventTimeline events={toolEvents} currentPartialText={{}} />);
+    expect(screen.getByLabelText("Run input")).toHaveTextContent("{}");
+    expect(screen.getByText("Tool error:")).toBeInTheDocument();
+    expect(screen.getByText("SideEffectOutcomeUnknown: check the external system")).toBeInTheDocument();
+    expect(screen.getByLabelText("Run result")).toHaveTextContent("2026-11-13T00:00:00+00:00");
+  });
 });

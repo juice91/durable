@@ -20,6 +20,7 @@ from sqlalchemy import (
     select,
     text,
     func,
+    case,
     tuple_,
     update,
 )
@@ -51,6 +52,31 @@ class Base(DeclarativeBase):
 
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
+RUN_KINDS = ("agent", "tool", "workflow")
+
+# runs.error of a run whose hand-off to the orchestrator failed (the API could not enqueue it).
+# Stable text: RunStore.requeue_after_enqueue_failure recognises the state by it.
+ENQUEUE_FAILED_ERROR = (
+    "EnqueueFailed: the run could not be started (enqueue_failed); retry the same request with the same run_id"
+)
+
+# An agent run names its agent version and no tool or workflow; a tool run names its tool only and
+# is never a conversation turn; a workflow run names its published workflow version only. Same text
+# as migration 0007_workflow_runs.
+RUN_KIND_TARGET_CHECK = (
+    "(kind = 'agent' AND agent_id IS NOT NULL AND agent_version IS NOT NULL AND tool_id IS NULL"
+    " AND workflow_id IS NULL AND workflow_version IS NULL)"
+    " OR (kind = 'tool' AND tool_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
+    " AND conversation_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
+    " OR (kind = 'workflow' AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL"
+    " AND agent_id IS NULL AND agent_version IS NULL AND tool_id IS NULL AND conversation_id IS NULL)"
+)
+# A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
+# conversation turn). Same text as migration 0007_workflow_runs.
+RUN_PARENT_LINK_CHECK = (
+    "(parent_run_id IS NULL AND parent_step_id IS NULL)"
+    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
+)
 
 
 class ConversationModel(Base):
@@ -88,8 +114,19 @@ class RunModel(Base):
         primary_key=True,
     )
     tenant_id: Mapped[StrAnnotated] = mapped_column("tenant_id", String, nullable=False)
-    agent_id: Mapped[UUIDAnnotated] = mapped_column("agent_id", String, nullable=False)
-    agent_version: Mapped[int] = mapped_column("agent_version", Integer, nullable=False)
+    # What the run executes: 'agent' (a published agent version: agent_id + agent_version) or
+    # 'tool' (one platform tool call from the tool test console: tool_id). ck_runs_kind_target
+    # keeps the target columns consistent with the kind.
+    kind: Mapped[StrAnnotated] = mapped_column("kind", String, nullable=False, server_default=text("'agent'"))
+    agent_id: Mapped[UUIDAnnotated | None] = mapped_column("agent_id", String, nullable=True)
+    agent_version: Mapped[int | None] = mapped_column("agent_version", Integer, nullable=True)
+    tool_id: Mapped[StrAnnotated | None] = mapped_column("tool_id", String, nullable=True)
+    # 'workflow' runs: the published workflow version executed (workflows.id, workflow_versions.version).
+    workflow_id: Mapped[StrAnnotated | None] = mapped_column("workflow_id", String, nullable=True)
+    workflow_version: Mapped[int | None] = mapped_column("workflow_version", Integer, nullable=True)
+    # An agent step's child run: the workflow run and step it executes for (both NULL otherwise).
+    parent_run_id: Mapped[StrAnnotated | None] = mapped_column("parent_run_id", String, nullable=True)
+    parent_step_id: Mapped[StrAnnotated | None] = mapped_column("parent_step_id", String, nullable=True)
     status: Mapped[StrAnnotated] = mapped_column("status", String, nullable=False)
     input: Mapped[StrAnnotated | None] = mapped_column("input", Text, nullable=True)
     output: Mapped[StrAnnotated | None] = mapped_column("output", Text, nullable=True)
@@ -124,8 +161,17 @@ class RunModel(Base):
         ),
         UniqueConstraint("conversation_id", "turn", name="uq_runs_conversation_turn"),
         CheckConstraint("(conversation_id IS NULL) = (turn IS NULL)", name="ck_runs_conversation_turn"),
-        # The tenant's runs, newest first (GET /runs).
+        CheckConstraint(RUN_KIND_TARGET_CHECK, name="ck_runs_kind_target"),
+        CheckConstraint(RUN_PARENT_LINK_CHECK, name="ck_runs_parent_link"),
+        ForeignKeyConstraint(
+            ["tenant_id", "parent_run_id"], ["runs.tenant_id", "runs.id"], name="fk_runs_tenant_parent_run"
+        ),
+        # The tenant's runs, newest first (GET /runs), also filtered by kind or by tool.
         Index("ix_runs_tenant_created", "tenant_id", "created_at"),
+        Index("ix_runs_tenant_kind_created", "tenant_id", "kind", "created_at"),
+        Index("ix_runs_tenant_tool_created", "tenant_id", "tool_id", "created_at"),
+        Index("ix_runs_tenant_workflow_created", "tenant_id", "workflow_id", "created_at"),
+        Index("ix_runs_parent_run", "parent_run_id"),
     )
 
 
@@ -183,7 +229,12 @@ class RunNotFound(ValueError):
     def __init__(self, tenant_id: str, run_id: UUID | str):
         self.tenant_id = tenant_id
         self.run_id = run_id
-        super().__init__(f"Run not found for tenant {tenant_id!r}: {run_id}")
+        # args are the constructor arguments: raised inside DBOS steps, whose errors are pickled
+        # (a message-only args made unpickling fail with TypeError).
+        super().__init__(tenant_id, run_id)
+
+    def __str__(self) -> str:
+        return f"Run not found for tenant {self.tenant_id!r}: {self.run_id}"
 
 
 def _run_event_from_model(model: ExecutionEventModel) -> RunEvent:
@@ -202,7 +253,10 @@ class RunIdConflict(Exception):
 
     def __init__(self, run_id: UUID):
         self.run_id = run_id
-        super().__init__(f"Run ID {run_id} already exists under a different tenant")
+        super().__init__(run_id)  # pickle-safe, as RunNotFound
+
+    def __str__(self) -> str:
+        return f"Run ID {self.run_id} already exists under a different tenant"
 
 
 class ConversationNotFound(ValueError):
@@ -211,7 +265,10 @@ class ConversationNotFound(ValueError):
     def __init__(self, tenant_id: str, conversation_id: UUID | str):
         self.tenant_id = tenant_id
         self.conversation_id = str(conversation_id)
-        super().__init__(f"Conversation not found for tenant {tenant_id!r}: {conversation_id}")
+        super().__init__(tenant_id, conversation_id)  # pickle-safe, as RunNotFound
+
+    def __str__(self) -> str:
+        return f"Conversation not found for tenant {self.tenant_id!r}: {self.conversation_id}"
 
 
 class ConversationIdConflict(Exception):
@@ -219,7 +276,10 @@ class ConversationIdConflict(Exception):
 
     def __init__(self, conversation_id: UUID | str):
         self.conversation_id = str(conversation_id)
-        super().__init__(f"Conversation ID {conversation_id} already exists under a different tenant")
+        super().__init__(conversation_id)  # pickle-safe, as RunNotFound
+
+    def __str__(self) -> str:
+        return f"Conversation ID {self.conversation_id} already exists under a different tenant"
 
 
 class TurnInProgress(Exception):
@@ -229,7 +289,10 @@ class TurnInProgress(Exception):
         self.conversation_id = conversation_id
         self.run_id = run_id
         self.status = status
-        super().__init__(f"Conversation {conversation_id} is busy: turn run {run_id} is {status}")
+        super().__init__(conversation_id, run_id, status)  # pickle-safe, as RunNotFound
+
+    def __str__(self) -> str:
+        return f"Conversation {self.conversation_id} is busy: turn run {self.run_id} is {self.status}"
 
 
 def _iso_conversation(conv: ConversationModel, turn_count: int) -> dict[str, Any]:
@@ -255,8 +318,14 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
     return {
         "id": run.id,
         "tenant_id": run.tenant_id,
+        "kind": run.kind,
         "agent_id": run.agent_id,
         "agent_version": run.agent_version,
+        "tool_id": run.tool_id,
+        "workflow_id": run.workflow_id,
+        "workflow_version": run.workflow_version,
+        "parent_run_id": run.parent_run_id,
+        "parent_step_id": run.parent_step_id,
         "status": run.status,
         "display_status": _display_status(run),
         "input": run.input,
@@ -289,58 +358,126 @@ class RunStore:
         trace_id: str | None = None,
         traceparent: str | None = None,
     ) -> tuple[UUID, bool]:
-        """Create a new run. Idempotent: same run_id returns existing without creating second row.
+        """Create a new agent run. Idempotent: same run_id returns existing without creating second row.
 
         `trace_id`/`traceparent` are the creating API request's trace context (None when telemetry
         is off); an existing row keeps the values it was created with.
 
-        Returns (UUID, created: bool) where created=False if the run already exists for this tenant.
+        Returns (UUID, created: bool) where created=False if the run already exists for this tenant
+        (whatever its kind: the caller checks that it is the same request).
         Raises RunIdConflict if the run_id exists under a different tenant.
         """
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="agent",
+            agent_id=str(agent_id),
+            agent_version=agent_version,
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_tool_run(
+        self,
+        tenant_id: str,
+        tool_id: str,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create a tool run (kind 'tool': one call of `tool_id`, `input` = its JSON arguments as text).
+
+        Same idempotency and tenant rules as create_run: (run_id, created), RunIdConflict for
+        another tenant's run_id, and an existing row of this tenant is returned as is.
+        """
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="tool",
+            tool_id=tool_id,
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_workflow_run(
+        self,
+        tenant_id: str,
+        workflow_id: UUID | str,
+        workflow_version: int,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create a workflow run (kind 'workflow': published version `workflow_version` of
+        `workflow_id`, `input` = the workflow input as canonical JSON text).
+
+        Same idempotency and tenant rules as create_run."""
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="workflow",
+            workflow_id=str(workflow_id),
+            workflow_version=workflow_version,
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_child_agent_run(
+        self,
+        tenant_id: str,
+        agent_id: UUID | str,
+        agent_version: int,
+        input: str,
+        run_id: UUID,
+        parent_run_id: UUID | str,
+        parent_step_id: str,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create the agent run that executes agent step `parent_step_id` of workflow run
+        `parent_run_id` (same tenant: enforced by fk_runs_tenant_parent_run). Same idempotency
+        rules as create_run; `eap.agent_run` then drives it like any agent run."""
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="agent",
+            agent_id=str(agent_id),
+            agent_version=agent_version,
+            input=input,
+            parent_run_id=str(parent_run_id),
+            parent_step_id=parent_step_id,
+            traceparent=traceparent,
+        )
+
+    def _insert_run(self, tenant_id: str, run_id: UUID, **values: Any) -> tuple[UUID, bool]:
         from sqlalchemy.dialects.postgresql import insert
 
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
         with self.Session() as session:
-            # Use PostgreSQL INSERT ... ON CONFLICT ... RETURNING for atomic operation
-            stmt = insert(RunModel).values(
-                id=str(run_id),
-                tenant_id=tenant_id,
-                agent_id=str(agent_id),
-                agent_version=agent_version,
-                status="queued",
-                input=input,
-                trace_id=trace_id,
-                traceparent=traceparent,
-            ).on_conflict_do_nothing(
-                constraint="runs_pkey"
-            ).returning(
-                RunModel.id,
-                RunModel.tenant_id
+            # INSERT ... ON CONFLICT DO NOTHING ... RETURNING: atomic against a concurrent retry.
+            stmt = (
+                insert(RunModel)
+                .values(id=str(run_id), tenant_id=tenant_id, status="queued", **values)
+                .on_conflict_do_nothing(constraint="runs_pkey")
+                .returning(RunModel.id, RunModel.tenant_id)
             )
-            
             result = session.execute(stmt).fetchone()
-            
             if result is not None:
-                # We inserted a new row
                 session.commit()
                 return UUID(result.id), True
-            
-            # Check if the run exists under this tenant or another tenant
-            existing = session.execute(
-                select(RunModel).where(RunModel.id == str(run_id))
-            ).scalar_one_or_none()
-            
-            if existing is None:
-                # This shouldn't happen but handle gracefully
-                session.commit()
-                return UUID(run_id), False
-            
-            if existing.tenant_id != tenant_id:
-                # Different tenant - raise conflict
-                session.commit()
-                raise RunIdConflict(run_id)
-            
-            # Same tenant, run already exists
+
+            existing = session.execute(select(RunModel).where(RunModel.id == str(run_id))).scalar_one_or_none()
             session.commit()
+            if existing is None:
+                # Deleted between the conflict and this read; report it as existing, like before.
+                return UUID(str(run_id)), False
+            if existing.tenant_id != tenant_id:
+                raise RunIdConflict(run_id)
             return UUID(existing.id), False
 
     def set_status(
@@ -366,6 +503,109 @@ class RunStore:
         if messages is not None:
             values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
         self._update_owned(tenant_id, run_id, values)
+
+    def mark_enqueue_failed(self, tenant_id: str, run_id: UUID) -> bool:
+        """The run could not be handed to the orchestrator: queued -> failed (ENQUEUE_FAILED_ERROR).
+
+        Only a run still `queued` changes, so a workflow that did start (an enqueue that raised
+        after DBOS accepted it) is never overwritten. Returns whether the row changed."""
+        return self._conditional_update(
+            tenant_id, run_id, RunModel.status == "queued",
+            {"status": "failed", "error": ENQUEUE_FAILED_ERROR},
+        )
+
+    def mark_running(self, tenant_id: str, run_id: UUID) -> bool:
+        """A workflow has started the run: status -> running, and an ENQUEUE_FAILED_ERROR left by a
+        hand-off that raised although DBOS accepted it is cleared in the same statement (any other
+        error is kept). RunNotFound for another tenant's or an unknown run. Returns True.
+
+        A conversation turn is checked under the conversation's row lock (the lock create_turn
+        takes). If a later turn exists, this turn was marked failed by its hand-off and the
+        conversation has moved on: it is left unchanged (still failed) and False is returned, so
+        the workflow must stop without running it. A run without a conversation (agent, tool or
+        workflow run) never takes the lock and always returns True."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        values = {
+            "status": "running",
+            "updated_at": datetime.now(timezone.utc),
+            "error": case((RunModel.error == ENQUEUE_FAILED_ERROR, None), else_=RunModel.error),
+        }
+        with self.Session() as session:
+            run = session.execute(
+                select(RunModel.conversation_id, RunModel.turn)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+            ).first()
+            if run is None:
+                raise RunNotFound(tenant_id, run_id)
+            if run.conversation_id is not None:
+                session.execute(
+                    select(ConversationModel.id).where(ConversationModel.id == run.conversation_id).with_for_update()
+                )
+                later = session.execute(
+                    select(RunModel.id)
+                    .where(RunModel.conversation_id == run.conversation_id, RunModel.turn > run.turn)
+                    .limit(1)
+                ).first()
+                if later is not None:
+                    session.rollback()
+                    return False
+            session.execute(
+                update(RunModel).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id).values(**values)
+            )
+            session.commit()
+            return True
+
+    def requeue_after_enqueue_failure(self, tenant_id: str, run_id: UUID) -> bool:
+        """A retry of a run left failed by mark_enqueue_failed: failed -> queued, error cleared.
+
+        Any other run is left alone. A conversation turn is re-queued only while it is still the
+        conversation's latest turn, checked under the conversation's row lock (the lock create_turn
+        takes): a failed turn is terminal, so a later turn may have started since. Returns whether
+        the row changed."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        failed_handoff = (RunModel.status == "failed") & (RunModel.error == ENQUEUE_FAILED_ERROR)
+        with self.Session() as session:
+            run = session.execute(
+                select(RunModel.conversation_id, RunModel.turn)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, failed_handoff)
+            ).first()
+            if run is None:
+                return False
+            if run.conversation_id is not None:
+                session.execute(
+                    select(ConversationModel.id).where(ConversationModel.id == run.conversation_id).with_for_update()
+                )
+                later = session.execute(
+                    select(RunModel.id)
+                    .where(RunModel.conversation_id == run.conversation_id, RunModel.turn > run.turn)
+                    .limit(1)
+                ).first()
+                if later is not None:
+                    session.rollback()
+                    return False
+            updated = session.execute(
+                update(RunModel)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, failed_handoff)
+                .values(status="queued", error=None, updated_at=datetime.now(timezone.utc))
+                .returning(RunModel.id)
+            ).fetchone()
+            session.commit()
+            return updated is not None
+
+    def _conditional_update(self, tenant_id: str, run_id: UUID, condition: Any, values: dict[str, Any]) -> bool:
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        with self.Session() as session:
+            updated = session.execute(
+                update(RunModel)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, condition)
+                .values(**values, updated_at=datetime.now(timezone.utc))
+                .returning(RunModel.id)
+            ).fetchone()
+            session.commit()
+            return updated is not None
 
     def heartbeat(self, tenant_id: str, run_id: UUID) -> None:
         """Update the heartbeat timestamp for a run owned by `tenant_id` (RunNotFound otherwise)."""
@@ -405,20 +645,37 @@ class RunStore:
         before: RunCursor | None = None,
         agent_id: UUID | str | None = None,
         status: str | None = None,
+        kind: str | None = None,
+        tool_id: str | None = None,
+        workflow_id: UUID | str | None = None,
+        parent_run_id: UUID | str | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
         `before` position in that order (RunCursor.after(last row of the previous page)),
-        optionally only one agent's and/or one status's.
+        optionally only one agent's, one status's, one kind's ('agent' | 'tool') and/or one tool's.
 
         The cursor is the pair, not the timestamp alone, so rows sharing a created_at are never
-        skipped or repeated across pages."""
+        skipped or repeated across pages.
+
+        Child runs (a workflow's agent steps) are listed only when `parent_run_id` names their
+        workflow run; otherwise only top-level runs are returned. `workflow_id` filters workflow runs."""
         query = select(RunModel).where(RunModel.tenant_id == tenant_id)
+        if parent_run_id is not None:
+            query = query.where(RunModel.parent_run_id == str(parent_run_id))
+        else:
+            query = query.where(RunModel.parent_run_id.is_(None))
+        if workflow_id is not None:
+            query = query.where(RunModel.workflow_id == str(workflow_id))
         if before is not None:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if agent_id is not None:
             query = query.where(RunModel.agent_id == str(agent_id))
         if status is not None:
             query = query.where(RunModel.status == status)
+        if kind is not None:
+            query = query.where(RunModel.kind == kind)
+        if tool_id is not None:
+            query = query.where(RunModel.tool_id == tool_id)
         query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
         with self.Session() as session:
             return [_run_dict(r) for r in session.execute(query).scalars()]
@@ -672,6 +929,81 @@ class EventLog:
             session.commit()
 
             return _run_event_from_model(event_model), True
+
+    def get_event(self, tenant_id: str, run_id: UUID | str, event_key: str) -> RunEvent | None:
+        """The run's event with this key, or None (no such event, or another tenant's run)."""
+        with self.Session() as session:
+            event = session.execute(
+                select(ExecutionEventModel).where(
+                    ExecutionEventModel.tenant_id == tenant_id,
+                    ExecutionEventModel.run_id == str(run_id),
+                    ExecutionEventModel.event_key == event_key,
+                )
+            ).scalar_one_or_none()
+            return None if event is None else _run_event_from_model(event)
+
+    def append_step_decision(
+        self, tenant_id: str, run_id: UUID | str, step_id: str, type: RunEventType, data: dict | None = None
+    ) -> tuple[str, RunEvent | None]:
+        """Record the one decision of a workflow approval step, atomically under the run-row lock.
+
+        The decision is the event `step:{step_id}:decision` (type step_approved | step_rejected |
+        step_timed_out). It is written only while the step is waiting: the run is not terminal, its
+        `step:{step_id}:waiting` event exists and no decision exists yet. Returns
+        ("created", event), ("exists", the earlier decision) or ("not_waiting", None); exactly one
+        caller ever gets "created" (the API's approve/reject and the worker's timeout race on it).
+        Raises RunNotFound for an unknown run or another tenant's run. Same seq rules as append.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        decision_key = f"step:{step_id}:decision"
+        with self.Session() as session:
+            owned = session.execute(
+                text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+                {"run_id": str(run_id), "tenant_id": tenant_id},
+            ).fetchone()
+            if owned is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
+            keys = set(
+                session.execute(
+                    select(ExecutionEventModel.event_key).where(
+                        ExecutionEventModel.run_id == str(run_id),
+                        ExecutionEventModel.event_key.in_([f"step:{step_id}:waiting", decision_key, "end"]),
+                    )
+                ).scalars()
+            )
+            if decision_key in keys:
+                existing = session.execute(
+                    select(ExecutionEventModel).where(
+                        ExecutionEventModel.run_id == str(run_id), ExecutionEventModel.event_key == decision_key
+                    )
+                ).scalar_one()
+                session.commit()
+                return "exists", _run_event_from_model(existing)
+            if (
+                owned.status in TERMINAL_RUN_STATUSES
+                or "end" in keys
+                or f"step:{step_id}:waiting" not in keys
+            ):
+                session.rollback()
+                return "not_waiting", None
+            new_seq = session.execute(
+                text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
+                {"run_id": str(run_id)},
+            ).scalar_one() + 1
+            event_model = ExecutionEventModel(
+                tenant_id=tenant_id,
+                run_id=str(run_id),
+                seq=new_seq,
+                event_key=decision_key,
+                type=type,
+                data=data or {},
+                ts=datetime.now(timezone.utc),
+            )
+            session.add(event_model)
+            session.commit()
+            return "created", _run_event_from_model(event_model)
 
     def list_events(self, tenant_id: str, run_id: UUID, after_seq: int = -1) -> list[RunEvent]:
         """List events for a run after a given seq. Returns empty for another tenant's run."""

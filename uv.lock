@@ -557,8 +557,10 @@ dependencies = [
     { name = "eap-secrets" },
     { name = "fastapi" },
     { name = "fastmcp-slim", extra = ["client"] },
+    { name = "jsonschema" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
+    { name = "referencing" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
 ]
@@ -580,8 +582,10 @@ requires-dist = [
     { name = "eap-secrets", editable = "packages/secrets" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3.0,<5" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "referencing", specifier = ">=0.30" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
@@ -695,7 +699,18 @@ dependencies = [
     { name = "eap-observability" },
     { name = "eap-run-store" },
     { name = "eap-schemas" },
+    { name = "eap-secrets" },
+    { name = "fastmcp-slim", extra = ["client"] },
+    { name = "httpx2" },
+    { name = "jsonschema" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "dbos", "openai"] },
+    { name = "referencing" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "fastmcp-slim", extra = ["server"] },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -706,7 +721,18 @@ requires-dist = [
     { name = "eap-observability", editable = "packages/observability" },
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
+    { name = "eap-secrets", editable = "packages/secrets" },
+    { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3.0,<5" },
+    { name = "httpx2", specifier = ">=2.16" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "dbos", "openai"], specifier = ">=2.67.0" },
+    { name = "referencing", specifier = ">=0.30" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "fastmcp-slim", extras = ["server"], specifier = ">=3.3.0,<5" },
+    { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
 [[package]]

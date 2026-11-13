@@ -1,3 +1,9 @@
+/** An MCP tool an agent may call: `server` is the tenant MCP server's NAME, `tool` the tool's name on it. */
+export interface McpToolRef {
+  server: string;
+  tool: string;
+}
+
 export interface AgentSpec {
   spec_version: 1;
   name: string;
@@ -7,6 +13,8 @@ export interface AgentSpec {
     name: string;
   };
   tools: string[];
+  /** Left out entirely when empty, so the spec hash does not change for agents without MCP tools. */
+  mcp_tools?: McpToolRef[];
   model_settings?: {
     temperature?: number | null;
     max_tokens?: number | null;

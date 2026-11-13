@@ -116,8 +116,10 @@ export default function TracesPage() {
                         {new Date(run.created_at).toLocaleString()}
                       </td>
                       <td className="px-4 py-3 font-medium">
-                        {agentNames[run.agent_id] ??
-                          `${run.agent_id.slice(0, 8)}${run.agent_id.length > 8 ? "..." : ""}`}
+                        {run.agent_id === null
+                          ? `Tool: ${run.tool_id ?? "unknown"}`
+                          : (agentNames[run.agent_id] ??
+                            `${run.agent_id.slice(0, 8)}${run.agent_id.length > 8 ? "..." : ""}`)}
                       </td>
                       <td className="px-4 py-3">
                         <StatusPill status={run.display_status as any} />

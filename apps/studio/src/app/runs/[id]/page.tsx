@@ -139,7 +139,9 @@ export default function RunDetailPage() {
             <div>
               <h1 className="text-2xl font-bold text-card-foreground">Run {run.run_id}</h1>
               <p className="text-sm text-muted-foreground mt-1">
-                Agent: {run.agent_id} | Version: {run.version ?? "latest"}
+                {run.kind === "tool"
+                  ? `Tool: ${run.tool_id ?? "unknown"}`
+                  : `Agent: ${run.agent_id} | Version: ${run.version ?? "latest"}`}
               </p>
             </div>
             <div className="flex items-center gap-2">

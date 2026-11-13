@@ -109,6 +109,32 @@ def cleanup_tenant(engine, tenant_id: str) -> None:
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM mcp_server_secrets WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM mcp_servers WHERE tenant_id = :t"), {"t": tenant_id})
+
+
+@pytest.fixture
+def mcp_env(monkeypatch) -> str:
+    """MCP tool runs against a local server: a fresh platform secrets key and 127.0.0.1 on the dev
+    allowlist (the in-process worker reads both from the environment inside each tool step).
+    Returns the key, for a worker subprocess's environment."""
+    from eap_secrets import KEY_ENV, OLD_KEYS_ENV, generate_key
+    from eap_secrets.outbound import DEV_ALLOW_HOSTS_ENV
+
+    key = generate_key()
+    monkeypatch.setenv(KEY_ENV, key)
+    monkeypatch.delenv(OLD_KEYS_ENV, raising=False)
+    monkeypatch.setenv(DEV_ALLOW_HOSTS_ENV, "127.0.0.1")
+    return key
+
+
+@pytest.fixture
+def local_mcp_server():
+    """A running LocalMcpServer (worker_tests.mcp_helpers); `.url`, `.call_count(tool)`, `.seen_headers`."""
+    from worker_tests.mcp_helpers import LocalMcpServer
+
+    with LocalMcpServer() as server:
+        yield server
 
 
 def ticket_spec(tools: tuple[str, ...] = ("tickets.create",), model: str = "ticket") -> dict[str, Any]:

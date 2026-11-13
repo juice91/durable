@@ -108,11 +108,14 @@ def wait_for(predicate: Callable[[], Any], *, timeout: float, what: str, interva
 class WorkerProcess:
     """`python -m eap_worker` with stdout+stderr in a log file."""
 
-    def __init__(self, env: dict[str, str], log_path: Path) -> None:
+    READY = "EAP_WORKER_READY"
+
+    def __init__(self, env: dict[str, str], log_path: Path, argv: list[str] | None = None) -> None:
         self.log_path = log_path
         self._log = log_path.open("w")
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "eap_worker"], cwd=REPO_ROOT, env=env, stdout=self._log, stderr=subprocess.STDOUT
+            argv or [sys.executable, "-m", "eap_worker"],
+            cwd=REPO_ROOT, env=env, stdout=self._log, stderr=subprocess.STDOUT,
         )
 
     def log(self) -> str:
@@ -121,10 +124,10 @@ class WorkerProcess:
     def wait_ready(self, timeout: float = 60) -> None:
         def ready() -> bool:
             if self.proc.poll() is not None:
-                raise AssertionError(f"worker exited early ({self.proc.returncode}):\n{self.log()[-4000:]}")
-            return "EAP_WORKER_READY" in self.log()
+                raise AssertionError(f"process exited early ({self.proc.returncode}):\n{self.log()[-4000:]}")
+            return self.READY in self.log()
 
-        wait_for(ready, timeout=timeout, what=f"worker ready ({self.log_path.name})")
+        wait_for(ready, timeout=timeout, what=f"process ready ({self.log_path.name})")
 
     def wait_exit(self, timeout: float = 90) -> int:
         try:
@@ -138,7 +141,8 @@ class WorkerProcess:
             self.proc.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self.proc.wait(timeout=10)
-        self._log.close()
+        if not self._log.closed:
+            self._log.close()
 
     def stop(self) -> None:
         if self.proc.poll() is None:
@@ -148,6 +152,25 @@ class WorkerProcess:
             except subprocess.TimeoutExpired:
                 pass
         self.kill()
+
+
+class ApiProcess(WorkerProcess):
+    """The real API (`eap_api.app:create_app` under uvicorn) in its own process: `api_server.py`
+    binds 127.0.0.1 on a free port, logs at INFO to stdout (captured in a log file) and prints
+    `EAP_API_READY port=<n>` once /healthz answers."""
+
+    READY = "EAP_API_READY"
+
+    def __init__(self, env: dict[str, str], log_path: Path) -> None:
+        super().__init__(env, log_path, [sys.executable, str(Path(__file__).with_name("api_server.py"))])
+
+    @property
+    def base_url(self) -> str:
+        import re
+
+        match = re.search(r"EAP_API_READY port=(\d+)", self.log())
+        assert match, self.log()[-4000:]
+        return f"http://127.0.0.1:{match.group(1)}"
 
 
 # --------------------------------------------------------------------------- deltas (LISTEN)
@@ -243,6 +266,7 @@ class EventRow:
     event_key: str
     type: str
     data: dict[str, Any]
+    ts: Any = None
 
 
 class Harness:
@@ -264,6 +288,8 @@ class Harness:
         self.headers = {"Authorization": f"Bearer dev:{self.tenant}:alice"}
         self.run_ids: list[str] = []
         self.workers: list[WorkerProcess] = []
+        self.apis: list[ApiProcess] = []
+        self._http_clients: list[Any] = []
         self.listeners: list[DeltaListener] = []
         self.env = {
             "EAP_AUTH_MODE": "dev",
@@ -291,9 +317,27 @@ class Harness:
 
     # ---- processes
 
-    def start_worker(self, name: str, *, crash_at: str | None = None, event_key: str | None = None) -> WorkerProcess:
+    def process_env(self, extra_env: dict[str, str | None] | None = None) -> dict[str, str]:
+        """The environment of a worker or API process: ours, the test's EAP_* settings, then
+        `extra_env` (a None value removes that variable). Never any EAP_CRASH* setting."""
         env = {k: v for k, v in os.environ.items() if not k.startswith("EAP_CRASH")}
         env.update(self.env)
+        for key, value in (extra_env or {}).items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        return env
+
+    def start_worker(
+        self,
+        name: str,
+        *,
+        crash_at: str | None = None,
+        event_key: str | None = None,
+        extra_env: dict[str, str | None] | None = None,
+    ) -> WorkerProcess:
+        env = self.process_env(extra_env)
         if crash_at:
             env["EAP_CRASH_AT"] = crash_at
             # Belt and braces: even an inherited env cannot crash twice.
@@ -304,6 +348,18 @@ class Harness:
         self.workers.append(worker)
         worker.wait_ready()
         return worker
+
+    def start_api(self, name: str = "api", *, extra_env: dict[str, str | None] | None = None) -> ApiProcess:
+        """Start the real API in its own process and point `self.client` (POST, GET, SSE) at it over
+        real HTTP. The in-process app built in __init__ stays unused from then on."""
+        import httpx2
+
+        api = ApiProcess(self.process_env(extra_env), self.tmp_path / f"{name}.log")
+        self.apis.append(api)
+        api.wait_ready()
+        self.client = httpx2.Client(base_url=api.base_url, timeout=60.0)
+        self._http_clients.append(self.client)
+        return api
 
     @property
     def crash_marker(self) -> Path:
@@ -347,6 +403,38 @@ class Harness:
             headers=headers or self.headers,
         )
 
+    def publish_agent_version(self, agent_id: str, spec: dict[str, Any]) -> int:
+        """Replace an agent's draft and publish it; returns the new version number."""
+        r = self.client.patch(f"/api/v1/agents/{agent_id}", json={"spec": spec}, headers=self.headers)
+        assert r.status_code == 200, r.text
+        r = self.client.post(f"/api/v1/agents/{agent_id}/versions", headers=self.headers)
+        assert r.status_code == 201, r.text
+        return r.json()["version"]
+
+    def create_published_workflow(self, spec: dict[str, Any]) -> str:
+        r = self.client.post("/api/v1/workflows", json={"spec": spec}, headers=self.headers)
+        assert r.status_code == 201, r.text
+        workflow_id = r.json()["id"]
+        r = self.client.post(f"/api/v1/workflows/{workflow_id}/versions", headers=self.headers)
+        assert r.status_code == 201, r.text
+        return workflow_id
+
+    def post_workflow_run(self, workflow_id: str, run_id: str, input_value: dict[str, Any]) -> Any:
+        if run_id not in self.run_ids:
+            self.run_ids.append(run_id)
+        return self.client.post(
+            f"/api/v1/workflows/{workflow_id}/runs",
+            json={"run_id": run_id, "input": input_value},
+            headers=self.headers,
+        )
+
+    def decide(self, run_id: str, step_id: str, decision: str = "approve", comment: str | None = None) -> Any:
+        return self.client.post(
+            f"/api/v1/workflows/runs/{run_id}/steps/{step_id}/{decision}",
+            json={"comment": comment} if comment is not None else {},
+            headers=self.headers,
+        )
+
     def sse(self, run_id: str, *, after_seq: int | None = None, last_event_id: int | None = None) -> list[Frame]:
         url = f"/api/v1/runs/{run_id}/stream"
         if after_seq is not None:
@@ -366,9 +454,9 @@ class Harness:
 
     def events(self, run_id: str) -> list[EventRow]:
         return [
-            EventRow(r.seq, r.event_key, r.type, r.data)
+            EventRow(r.seq, r.event_key, r.type, r.data, r.ts)
             for r in self.sql(
-                "SELECT seq, event_key, type, data FROM execution_events WHERE run_id = :r ORDER BY seq", r=run_id
+                "SELECT seq, event_key, type, data, ts FROM execution_events WHERE run_id = :r ORDER BY seq", r=run_id
             )
         ]
 
@@ -405,6 +493,74 @@ class Harness:
                 )
             ]
 
+    def child_runs(self, run_id: str) -> list[tuple[str, str, str, int]]:
+        """(id, parent_step_id, status, agent_version) of the agent runs a workflow run spawned."""
+        return [
+            (str(r.id), r.parent_step_id, r.status, r.agent_version)
+            for r in self.sql(
+                "SELECT id, parent_step_id, status, agent_version FROM runs WHERE parent_run_id = :r "
+                "ORDER BY parent_step_id, id",
+                r=run_id,
+            )
+        ]
+
+    def workflows_with_prefix(self, prefix: str) -> list[tuple[str, str, str]]:
+        """(workflow_uuid, name, status) of every DBOS workflow whose id starts with `prefix`
+        (a workflow run and its parallel branches `{run_id}:{parallel}:{branch}`)."""
+        import psycopg
+
+        with psycopg.connect(_libpq(DBOS_DB_URL), connect_timeout=5) as conn:
+            exists = conn.execute("SELECT to_regclass(%s)", (f'"{self.schema}".workflow_status',)).fetchone()[0]
+            if exists is None:
+                return []
+            return [
+                tuple(r)
+                for r in conn.execute(
+                    f'SELECT workflow_uuid, name, status FROM "{self.schema}".workflow_status '
+                    "WHERE workflow_uuid LIKE %s ORDER BY workflow_uuid",
+                    (prefix + "%",),
+                )
+            ]
+
+    def dbos_steps(self, workflow_id: str) -> list[tuple[int, str]]:
+        """(function_id, function_name) of every step DBOS has checkpointed for one workflow."""
+        import psycopg
+
+        with psycopg.connect(_libpq(DBOS_DB_URL), connect_timeout=5) as conn:
+            exists = conn.execute("SELECT to_regclass(%s)", (f'"{self.schema}".operation_outputs',)).fetchone()[0]
+            if exists is None:
+                return []
+            return [
+                tuple(r)
+                for r in conn.execute(
+                    f'SELECT function_id, function_name FROM "{self.schema}".operation_outputs '
+                    "WHERE workflow_uuid = %s ORDER BY function_id",
+                    (workflow_id,),
+                )
+            ]
+
+    def wait_terminal(self, run_id: str, timeout: float = 90) -> dict[str, Any]:
+        """The runs row once it is completed, failed or needs_attention (any of them)."""
+        terminal = {"completed", "failed", "needs_attention"}
+
+        def done() -> dict[str, Any] | None:
+            run = self.run_row(run_id)
+            return run if run["status"] in terminal else None
+
+        try:
+            return wait_for(done, timeout=timeout, what=f"run {run_id} to reach a terminal status")
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}\n{self.worker_logs()}") from None
+
+    def wait_event(self, run_id: str, event_key: str, timeout: float = 60) -> EventRow:
+        def found() -> EventRow | None:
+            return next((e for e in self.events(run_id) if e.event_key == event_key), None)
+
+        try:
+            return wait_for(found, timeout=timeout, what=f"event {event_key} of run {run_id}")
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}\n{self.worker_logs()}") from None
+
     def wait_completed(self, run_id: str, timeout: float = 90) -> dict[str, Any]:
         terminal = {"completed", "failed", "needs_attention"}
 
@@ -420,7 +576,7 @@ class Harness:
         return run
 
     def worker_logs(self) -> str:
-        return "\n".join(f"--- {w.log_path.name}\n{w.log()[-3000:]}" for w in self.workers)
+        return "\n".join(f"--- {w.log_path.name}\n{w.log()[-3000:]}" for w in [*self.workers, *self.apis])
 
     # ---- teardown
 
@@ -434,6 +590,12 @@ class Harness:
         for worker in self.workers:
             with contextlib.suppress(Exception):
                 worker.stop()
+        for client in self._http_clients:
+            with contextlib.suppress(Exception):
+                client.close()
+        for api in self.apis:
+            with contextlib.suppress(Exception):
+                api.stop()
         with contextlib.suppress(Exception):
             self._client_cm.__exit__(None, None, None)
         try:
@@ -452,6 +614,10 @@ class Harness:
                     {"t": self.tenant},
                 )
                 conn.execute(text("DELETE FROM agents WHERE tenant_id = :t"), {"t": self.tenant})
+                conn.execute(text("DELETE FROM workflow_versions WHERE tenant_id = :t"), {"t": self.tenant})
+                conn.execute(text("DELETE FROM workflows WHERE tenant_id = :t"), {"t": self.tenant})
+                conn.execute(text("DELETE FROM mcp_server_secrets WHERE tenant_id = :t"), {"t": self.tenant})
+                conn.execute(text("DELETE FROM mcp_servers WHERE tenant_id = :t"), {"t": self.tenant})
         finally:
             self.engine.dispose()
             with psycopg.connect(_libpq(DBOS_DB_URL), autocommit=True, connect_timeout=5) as conn:

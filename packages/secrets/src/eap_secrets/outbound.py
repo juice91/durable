@@ -54,7 +54,12 @@ class OutboundBlocked(Exception):
     def __init__(self, code: str, address_class: str | None = None) -> None:
         self.code = code
         self.address_class = address_class
-        super().__init__(f"outbound connection refused: {code}" + (f" ({address_class})" if address_class else ""))
+        # args are the constructor arguments, so the error survives pickling (DBOS step errors).
+        super().__init__(code, address_class)
+
+    def __str__(self) -> str:
+        suffix = f" ({self.address_class})" if self.address_class else ""
+        return f"outbound connection refused: {self.code}{suffix}"
 
 
 @dataclass(frozen=True)

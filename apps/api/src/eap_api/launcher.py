@@ -20,6 +20,17 @@ from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
 WORKFLOW_NAME = "eap.agent_run"
+# Tool test runs (POST /tools/{tool_id}/runs): their own workflow name, because their arguments are
+# not the agent run's, on the same queue, so one worker pool and one app_version serve both.
+TOOL_WORKFLOW_NAME = "eap.tool_run"
+# Workflow runs (POST /workflows/{workflow_id}/runs): `eap.workflow_run(run_id, tenant_id,
+# workflow_version_id, input_json)` on the same queue.
+WORKFLOW_RUN_NAME = "eap.workflow_run"
+
+
+def approval_topic(step_id: str) -> str:
+    """The DBOS message topic an approval step waits on (eap_worker.workflow_run.approval_topic)."""
+    return f"approval:{step_id}"
 
 _DEFAULT_DBOS_URL = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
 
@@ -55,11 +66,33 @@ class RunLauncher(Protocol):
         traceparent: str | None = None,
     ) -> None: ...
 
+    def launch_tool(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        tool_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None: ...
+
+    def launch_workflow(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        workflow_version_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None: ...
+
+    def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None: ...
+
     def close(self) -> None: ...
 
 
 class DBOSRunLauncher:
-    """Enqueues `eap.agent_run` on `eap-agent-runs`. The DBOSClient is created on first use."""
+    """Enqueues `eap.agent_run` / `eap.tool_run` on `eap-agent-runs`. The DBOSClient is created on first use."""
 
     def __init__(self, settings: LauncherSettings, client: Any | None = None) -> None:
         self.settings = settings
@@ -91,9 +124,44 @@ class DBOSRunLauncher:
         input_text: str,
         traceparent: str | None = None,
     ) -> None:
+        options = self._options(WORKFLOW_NAME, run_id, traceparent)
+        self._get_client().enqueue(options, str(run_id), tenant_id, str(agent_id), version, spec_json, input_text)
+
+    def launch_tool(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        tool_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None:
+        """Enqueue `eap.tool_run(run_id, tenant_id, tool_id, input_json)`, workflow_id = run_id."""
+        options = self._options(TOOL_WORKFLOW_NAME, run_id, traceparent)
+        self._get_client().enqueue(options, str(run_id), tenant_id, tool_id, input_json)
+
+    def launch_workflow(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        workflow_version_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None:
+        """Enqueue `eap.workflow_run(run_id, tenant_id, workflow_version_id, input_json)`, workflow_id = run_id."""
+        options = self._options(WORKFLOW_RUN_NAME, run_id, traceparent)
+        self._get_client().enqueue(options, str(run_id), tenant_id, workflow_version_id, input_json)
+
+    def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None:
+        """Wake the DBOS workflow waiting on approval step `step_id` (DBOS send on its topic). Only a
+        wake-up: the decision itself is the run's `step:{step_id}:decision` event."""
+        self._get_client().send(workflow_id, {"decision": decision}, approval_topic(step_id))
+
+    def _options(self, workflow_name: str, run_id: UUID, traceparent: str | None) -> dict[str, Any]:
         options: dict[str, Any] = {
             "queue_name": QUEUE_NAME,
-            "workflow_name": WORKFLOW_NAME,
+            "workflow_name": workflow_name,
             "workflow_id": str(run_id),
             "app_version": self.settings.app_version,
         }
@@ -102,7 +170,7 @@ class DBOSRunLauncher:
         attributes = dbos_trace_attributes(traceparent)
         if attributes is not None:
             options["attributes"] = attributes
-        self._get_client().enqueue(options, str(run_id), tenant_id, str(agent_id), version, spec_json, input_text)
+        return options
 
     def close(self) -> None:
         with self._lock:

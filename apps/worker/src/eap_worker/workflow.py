@@ -23,7 +23,7 @@ Step layout of a run (each line is a DBOS step, so recovery replays recorded res
     eap-agent__model.request_stream     model request n (deltas NOTIFY'd live inside)
     eap.append_event   model:{n}:final  model_message (from the checkpointed response)
     eap.append_event   tool:{id}:call   tool_call (before the tool runs)
-    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create etc.
+    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create, MCP tools (mcp__<server>__<tool>)
     eap.append_event   tool:{id}:result tool_result
     ... (next model request) ...
     eap.append_event   end              run_completed | run_failed
@@ -72,15 +72,17 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.toolsets import DynamicToolset, FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
 from eap_observability import log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
+from eap_run_store import ENQUEUE_FAILED_ERROR
 from eap_schemas import AgentSpec
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import classify
+from eap_worker.mcp import RunToolset, mcp_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.runtime import WorkerDeps, get_runtime
 
@@ -98,9 +100,16 @@ def _instructions(ctx: RunContext[WorkerDeps]) -> str:
     return ctx.deps.spec.instructions
 
 
-def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> FunctionToolset[RunDeps]:
-    """Deterministic: only the published spec's tools, each checked against registry + allowlist."""
-    return toolset_for_spec(ctx.deps.spec, get_runtime().registry, ctx.deps.allowed_tools)
+async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
+    """Only the published spec's tools: built-ins checked against registry + allowlist, plus its MCP
+    tools (eap_worker.mcp). No I/O here: MCP server rows and secrets are read later, inside the
+    discovery step and inside a newly reserved call, so a replayed step needs neither the database
+    nor the platform key. A spec without MCP tools gets exactly the FunctionToolset it always did."""
+    rt = get_runtime()
+    builtin: FunctionToolset[RunDeps] = toolset_for_spec(ctx.deps.spec, rt.registry, ctx.deps.allowed_tools)
+    if not ctx.deps.spec.mcp_tools:
+        return builtin
+    return RunToolset(builtin, mcp_toolset_for_run(rt.engine, ctx.deps.tenant_id, ctx.deps.spec.mcp_tools))
 
 
 def _text_of(event: Any) -> str | None:
@@ -159,21 +168,28 @@ agent: Agent[WorkerDeps, str] = Agent(
 async def start_run_step(
     run_id: str, tenant_id: str, agent_id: str, version: int, input_text: str
 ) -> dict[str, Any]:
-    """Returns {"conversation_id", "turn", "traceparent"}; conversation_id/turn are None for a
-    standalone run, traceparent is None when the API had telemetry off."""
+    """Returns {"conversation_id", "turn", "traceparent", "superseded"}; conversation_id/turn are
+    None for a standalone run, traceparent is None when the API had telemetry off. `superseded` is
+    True when this turn must not run (see mark_running); the decision is part of this step's
+    recorded output, so a replayed workflow takes the same branch."""
     rt = get_runtime()
 
     def work() -> dict[str, Any]:
         # The API inserts the row first (client-supplied run_id); this is an idempotent safety net.
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         rt.run_store.create_run(tenant_id, UUID(agent_id), version, input_text, UUID(run_id))
-        rt.run_store.set_status(tenant_id, UUID(run_id), "running")
-        rt.run_store.heartbeat(tenant_id, UUID(run_id))
+        # running, clearing an ENQUEUE_FAILED_ERROR in the same statement: the API marks a run failed
+        # when its enqueue raised, yet DBOS may have accepted it, and then this workflow runs it.
+        # A turn that a later turn has overtaken meanwhile stays failed and is not run (False).
+        started = rt.run_store.mark_running(tenant_id, UUID(run_id))
+        if started:
+            rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
             "traceparent": run.get("traceparent"),
+            "superseded": not started,
         }
 
     return await asyncio.to_thread(work)
@@ -278,15 +294,16 @@ def _all_parts(messages: list[ModelMessage]) -> list[Any]:
     return [p for m in messages if isinstance(m, ModelRequest) for p in m.parts]
 
 
-def _is_side_effect_unknown(exc: BaseException) -> bool:
-    seen: set[int] = set()
+def _is_side_effect_unknown(exc: BaseException, seen: set[int] | None = None) -> bool:
+    # One `seen` for the whole walk: a group member's __context__ can point back at the group.
+    seen = set() if seen is None else seen
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         if isinstance(cur, SideEffectOutcomeUnknown) or type(cur).__name__ == "SideEffectOutcomeUnknown":
             return True
         if isinstance(cur, BaseExceptionGroup):
-            if any(_is_side_effect_unknown(e) for e in cur.exceptions):
+            if any(_is_side_effect_unknown(e, seen) for e in cur.exceptions):
                 return True
         cur = cur.__cause__ or cur.__context__
     return False
@@ -300,7 +317,9 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
             data = {
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
-                "status": "ok",
+                # pydantic-ai 2.x returns a tool's ModelRetry / ToolFailed as a return with outcome
+                # 'retried' / 'failed'; other outcomes (denied, interrupted) stay "ok" as before.
+                "status": "error" if part.outcome in ("failed", "retried") else "ok",
                 "content": to_jsonable_python(part.content, fallback=str),
             }
         elif isinstance(part, RetryPromptPart):
@@ -386,6 +405,11 @@ async def agent_run(
     input_text: str,
 ) -> dict[str, Any]:
     link = await start_run_step(run_id, tenant_id, agent_id, version, input_text) or {}
+    if link.get("superseded"):
+        # Its hand-off failed (the run is failed with ENQUEUE_FAILED_ERROR) and a later turn has
+        # started since: running it now would run two turns at once. No event, no model call, no tool.
+        log.warning("run %s not started: a later turn of its conversation has started", run_id)
+        return {"status": "failed", "error": ENQUEUE_FAILED_ERROR, "error_code": "superseded"}
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
         result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)

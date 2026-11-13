@@ -20,6 +20,10 @@ dependencies = [
     "dbos>=3.5.0",
     "uvicorn>=0.34.0",
     "eap-secrets",
+    # Workflow run input is checked against the version's input_schema, with an empty
+    # referencing.Registry (no remote $ref is ever retrieved).
+    "jsonschema>=4.20",
+    "referencing>=0.30",
     # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
     "fastmcp-slim[client]>=3.3.0,<5",
 ]

@@ -14,8 +14,24 @@ dependencies = [
     "eap-run-store",
     "eap-db",
     "eap-observability",
+    "eap-secrets",
     "pydantic-ai-slim[anthropic,dbos,openai]>=2.67.0",
     "dbos[otel]>=3.5.0",
+    # MCP tools in agents (task 3.5): the MCP client Pydantic AI's [mcp] extra builds on.
+    "fastmcp-slim[client]>=3.3.0,<5",
+    # Checks a model's MCP tool arguments against the tool's JSON schema before any call.
+    "jsonschema>=4.20",
+    # An empty registry for those schemas: no remote $ref is ever retrieved.
+    "referencing>=0.30",
+    # The policy-checked HTTP client's response hook caps MCP response bodies.
+    "httpx2>=2.16",
+]
+
+[dependency-groups]
+dev = [
+    # A local MCP server (FastMCP over Streamable HTTP) for the MCP tool tests.
+    "fastmcp-slim[server]>=3.3.0,<5",
+    "uvicorn>=0.34.0",
 ]
 
 [tool.uv.sources]
@@ -24,3 +40,4 @@ eap-agent-runtime = { workspace = true }
 eap-run-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
+eap-secrets = { workspace = true }

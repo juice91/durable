@@ -111,7 +111,7 @@ export default function LogsPage() {
                       <td className="px-4 py-3 font-mono text-xs">
                         {new Date(run.created_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 font-medium">{run.agent_id}</td>
+                      <td className="px-4 py-3 font-medium">{run.agent_id ?? `Tool: ${run.tool_id ?? "unknown"}`}</td>
                       <td className="px-4 py-3">
                         <StatusPill status={run.display_status as any} />
                       </td>

@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_mcp_servers_revision():
-    assert head_revisions() == {"0004_mcp_servers"}
+def test_single_head_is_the_workflow_runs_revision():
+    assert head_revisions() == {"0007_workflow_runs"}
 
 
 @requires_schema

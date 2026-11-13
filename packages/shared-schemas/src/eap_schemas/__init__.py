@@ -4,14 +4,16 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Tuple
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
+from eap_schemas.mcp import McpToolRef, mcp_tool_name
 from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
 
 __all__ = (
     "AgentSpec",
     "AgentVersion",
+    "McpToolRef",
     "ModelRef",
     "ModelSettings",
     "RunEvent",
@@ -19,6 +21,7 @@ __all__ = (
     "TOOL_DECLARATIONS",
     "ToolDeclaration",
     "canonical_spec_hash",
+    "mcp_tool_name",
 )
 
 
@@ -71,6 +74,33 @@ class AgentSpec(BaseModel):
     model: ModelRef
     tools: Tuple[str, ...] = ()
     model_settings: ModelSettings = Field(default_factory=ModelSettings)
+    # MCP tools of the tenant's registered servers. Left out of every dump while empty, so specs
+    # stored before this field existed keep their exact JSON and canonical_spec_hash.
+    mcp_tools: Tuple[McpToolRef, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_mcp_tools(self, handler):
+        data = handler(self)
+        if not self.mcp_tools and isinstance(data, dict):
+            data.pop("mcp_tools", None)
+        return data
+
+    @model_validator(mode="after")
+    def check_tool_names(self):
+        """MCP tool pairs are unique and no two tools share a model-facing name."""
+        if not self.mcp_tools:
+            return self
+        names = {tool_id.replace(".", "__"): tool_id for tool_id in self.tools}
+        seen: set[tuple[str, str]] = set()
+        for ref in self.mcp_tools:
+            if (ref.server, ref.tool) in seen:
+                raise ValueError(f"duplicate MCP tool: {ref.server}/{ref.tool}")
+            seen.add((ref.server, ref.tool))
+            name = mcp_tool_name(ref.server, ref.tool)
+            if name in names:
+                raise ValueError(f"MCP tool {ref.server}/{ref.tool} has the same tool name as {names[name]}: {name}")
+            names[name] = f"{ref.server}/{ref.tool}"
+        return self
 
     @field_validator("name", mode="before")
     @classmethod
@@ -202,6 +232,14 @@ RunEventType = Literal[
     "tool_result",
     "run_completed",
     "run_failed",
+    # Workflow runs (eap.workflow_run): one node's lifecycle, keyed `step:{step_id}:<phase>`.
+    "step_started",
+    "step_waiting",  # an approval step is waiting for a decision
+    "step_approved",  # written by the API (POST .../approve), key `step:{step_id}:decision`
+    "step_rejected",  # written by the API (POST .../reject), key `step:{step_id}:decision`
+    "step_timed_out",  # written by the worker when the approval wait timed out, same key
+    "step_completed",
+    "step_failed",
 ]
 
 

@@ -43,9 +43,16 @@ class SecretsError(RuntimeError):
     """Base class; messages never contain key material or plaintext."""
 
 
+# Each subclass passes its constructor arguments as args and builds its message in __str__, so it
+# survives pickling (DBOS pickles step errors; unpickling calls the class with args).
+
+
 class SecretsKeyMissing(SecretsError):
     def __init__(self) -> None:
-        super().__init__(
+        super().__init__()
+
+    def __str__(self) -> str:
+        return (
             f"{KEY_ENV} is not set; it is required to store or use encrypted secrets (MCP server "
             f"headers). Set it to base64 of 32 random bytes, generated with: {GENERATE_COMMAND}"
         )
@@ -53,15 +60,22 @@ class SecretsKeyMissing(SecretsError):
 
 class SecretsKeyInvalid(SecretsError):
     def __init__(self, variable: str) -> None:
-        super().__init__(
-            f"{variable} is not a valid key: expected base64 of exactly {KEY_BYTES} bytes; "
+        self.variable = variable
+        super().__init__(variable)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.variable} is not a valid key: expected base64 of exactly {KEY_BYTES} bytes; "
             f"generate one with: {GENERATE_COMMAND}"
         )
 
 
 class DecryptionFailed(SecretsError):
     def __init__(self) -> None:
-        super().__init__("secret could not be decrypted (unknown key id, wrong context or corrupted ciphertext)")
+        super().__init__()
+
+    def __str__(self) -> str:
+        return "secret could not be decrypted (unknown key id, wrong context or corrupted ciphertext)"
 
 
 @dataclass(frozen=True)
@@ -139,6 +153,14 @@ class Keyring:
     __str__ = __repr__
 
 
+def mcp_header_context(tenant_id: str, server_id: str, header_name: str) -> bytes:
+    """The associated data binding an MCP server header secret to its row (tenant, server, header).
+
+    Shared by the API (which seals and test-connects) and the worker (which opens the secrets for a
+    run's MCP tools): both must use exactly this value or decryption fails."""
+    return f"{tenant_id}/{server_id}/{header_name}".encode()
+
+
 def load_keyring(env: Mapping[str, str] | None = None) -> Keyring:
     """The platform keyring from the environment; raises a clear SecretsKeyMissing when unset."""
     return Keyring.from_env(env)
@@ -157,4 +179,5 @@ __all__ = [
     "generate_key",
     "key_id_for",
     "load_keyring",
+    "mcp_header_context",
 ]

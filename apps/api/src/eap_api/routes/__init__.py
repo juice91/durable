@@ -11,12 +11,15 @@ import uuid
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
+from eap_api.mcp_servers.models import McpServerModel
 from eap_api.models import AgentModel, AgentVersionModel
+from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail
 from eap_schemas import AgentSpec, canonical_spec_hash
 from eap_schemas.models_policy import ModelPolicy
 
-router = APIRouter()
+# Body cap, UTF-8, depth, unstorable strings and compact 422s: eap_api.request_guard.
+router = APIRouter(route_class=GuardedJsonRoute)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
@@ -184,6 +187,25 @@ def patch_agent(
     return JSONResponse(content=_agent_to_response(agent, latest))
 
 
+def _check_mcp_servers(db: Session, tenant_id: str, spec: AgentSpec) -> None:
+    """Every MCP tool must name an enabled MCP server of this tenant (422 naming the first that
+    does not). Another tenant's server is reported exactly like an unknown one. Whether the tool
+    exists on the server is checked by the worker at run time, since the server can change."""
+    names = list(dict.fromkeys(ref.server for ref in spec.mcp_tools))
+    if not names:
+        return
+    enabled = dict(
+        db.query(McpServerModel.name, McpServerModel.enabled)
+        .filter(McpServerModel.tenant_id == tenant_id, McpServerModel.name.in_(names))
+        .all()
+    )
+    for name in names:
+        if name not in enabled:
+            raise HTTPException(status_code=422, detail=f"MCP server '{name}' is not registered in this tenant")
+        if not enabled[name]:
+            raise HTTPException(status_code=422, detail=f"MCP server '{name}' is disabled")
+
+
 @router.post(
     "/agents/{agent_id}/versions",
     status_code=status.HTTP_201_CREATED,
@@ -246,6 +268,8 @@ def publish_version(
                 "setting; remove temperature from the agent's model settings"
             ),
         )
+
+    _check_mcp_servers(db, principal.tenant_id, spec)
 
     draft_hash = canonical_spec_hash(spec)
 

@@ -34,8 +34,12 @@ class ModelNotAllowed(ValueError):
     def __init__(self, provider: str, name: str) -> None:
         self.provider = provider
         self.name = name
-        super().__init__(
-            f"model '{provider}:{name}' is not allowed on this platform "
+        # args are the constructor arguments, so the error survives pickling (DBOS step errors).
+        super().__init__(provider, name)
+
+    def __str__(self) -> str:
+        return (
+            f"model '{self.provider}:{self.name}' is not allowed on this platform "
             f"(not in the {ALLOWED_MODELS_ENV} allowlist)"
         )
 

@@ -113,7 +113,7 @@ export default function AgentDetailPage() {
         </div>
 
         {saveError && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">
+          <div role="alert" data-testid="agent-save-error" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">
             {saveError}
           </div>
         )}

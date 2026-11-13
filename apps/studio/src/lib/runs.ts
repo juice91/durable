@@ -35,8 +35,17 @@ export type RunStatus = "queued" | "running" | "recovering" | "completed" | "fai
 
 export interface Run {
   run_id: string;
-  agent_id: string;
+  /** "tool" for a tool test run (POST /tools/{id}/runs): agent_id and version are null, tool_id is set. */
+  kind?: "agent" | "tool" | "workflow";
+  /** Workflow runs: the workflow and its version. A workflow's agent step runs as an agent run
+   * with parent_run_id / parent_step_id set. */
+  workflow_id?: string | null;
+  workflow_version?: number | null;
+  parent_run_id?: string | null;
+  parent_step_id?: string | null;
+  agent_id: string | null;
   version: number | null;
+  tool_id?: string | null;
   status: string;
   display_status: RunStatus;
   input: string;
@@ -51,7 +60,11 @@ export interface Run {
 }
 
 export interface RunEventData {
-  input?: string;
+  /** Text for an agent run; the tool's JSON arguments (an object) for a tool run. */
+  input?: string | Record<string, unknown>;
+  /** Tool runs: the tool id (run_started, tool_call, tool_result) and the result (run_completed). */
+  tool_id?: string;
+  result?: unknown;
   version?: number;
   agent_id?: string;
   text?: string;
@@ -69,7 +82,11 @@ export interface RunEventData {
 
 export interface RunEvent {
   seq: number;
-  type: "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed";
+  type:
+    | "run_started" | "model_message" | "tool_call" | "tool_result" | "run_completed" | "run_failed"
+    // Workflow runs (task 3.8): one key per step and phase.
+    | "step_started" | "step_waiting" | "step_approved" | "step_rejected" | "step_timed_out"
+    | "step_completed" | "step_failed";
   data: RunEventData;
   ts: string;
 }

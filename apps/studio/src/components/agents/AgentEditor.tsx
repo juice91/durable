@@ -1,19 +1,12 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { listTools, type ToolDefinition } from "@/lib/tools";
+import type { AgentSpec, McpToolRef } from "@/lib/api";
+import { mcpToolKey, withMcpTools } from "@/lib/mcpServers";
+import { McpToolPicker } from "./McpToolPicker";
 
-interface AgentSpec {
-  spec_version: 1;
-  name: string;
-  instructions: string;
-  model: {
-    provider: string;
-    name: string;
-  };
-  tools: string[];
-  model_settings?: {
-    temperature?: number | null;
-    max_tokens?: number | null;
-  };
+function sameMcpTools(a: McpToolRef[], b: McpToolRef[] | undefined): boolean {
+  const other = b ?? [];
+  return a.length === other.length && a.every((ref) => other.some((item) => mcpToolKey(item) === mcpToolKey(ref)));
 }
 
 interface AgentEditorProps {
@@ -29,6 +22,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
   const [provider, setProvider] = useState(initialData?.model.provider || "");
   const [modelName, setModelName] = useState(initialData?.model.name || "");
   const [selectedTools, setSelectedTools] = useState<string[]>(initialData?.tools || []);
+  const [mcpTools, setMcpTools] = useState<McpToolRef[]>(initialData?.mcp_tools || []);
   const [temperature, setTemperature] = useState<string>(initialData?.model_settings?.temperature?.toString() || "");
   const [maxTokens, setMaxTokens] = useState<string>(initialData?.model_settings?.max_tokens?.toString() || "");
   const [submitting, setSubmitting] = useState(false);
@@ -56,11 +50,12 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
       modelName !== initialData?.model.name ||
       selectedTools.length !== initialData?.tools.length ||
       selectedTools.some((t) => !initialData?.tools.includes(t)) ||
+      !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
       temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
       maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "");
     setIsDirty(isDirty);
     onDirtyChange?.(isDirty);
-  }, [name, instructions, provider, modelName, selectedTools, temperature, maxTokens, initialData, onDirtyChange]);
+  }, [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, initialData, onDirtyChange]);
 
   // Track initial data changes
   const prevDataRef = { current: initialData };
@@ -70,6 +65,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
     setProvider(initialData?.model.provider || "");
     setModelName(initialData?.model.name || "");
     setSelectedTools(initialData?.tools || []);
+    setMcpTools(initialData?.mcp_tools || []);
     setTemperature(initialData?.model_settings?.temperature?.toString() || "");
     setMaxTokens(initialData?.model_settings?.max_tokens?.toString() || "");
     prevDataRef.current = initialData;
@@ -84,17 +80,19 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
       modelName !== initialData?.model.name ||
       selectedTools.length !== initialData?.tools.length ||
       selectedTools.some((t) => !initialData?.tools.includes(t)) ||
+      !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
       temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
       maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "");
     setIsDirty(isDirty);
     onDirtyChange?.(isDirty);
-  }, [name, instructions, provider, modelName, selectedTools, temperature, maxTokens, initialData, onDirtyChange]);
+  }, [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, initialData, onDirtyChange]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
 
-    const spec: AgentSpec = {
+    // mcp_tools is left out entirely when empty, so the spec hash stays stable.
+    const spec: AgentSpec = withMcpTools({
       spec_version: 1,
       name,
       instructions,
@@ -107,7 +105,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
         temperature: temperature ? parseFloat(temperature) : null,
         max_tokens: maxTokens ? parseInt(maxTokens, 10) : null,
       },
-    };
+    }, mcpTools);
 
     setSubmitting(true);
     try {
@@ -213,6 +211,8 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
         </div>
         {toolsError ? <p role="alert" className="mt-2 text-xs text-destructive">{toolsError}</p> : null}
       </div>
+
+      <McpToolPicker value={mcpTools} onChange={setMcpTools} />
 
       <div className="grid grid-cols-2 gap-4">
         <div>

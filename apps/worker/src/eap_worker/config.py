@@ -9,6 +9,12 @@ from eap_schemas.models_policy import ModelPolicy
 
 QUEUE_NAME = "eap-agent-runs"
 WORKFLOW_NAME = "eap.agent_run"
+# Tool test runs (POST /tools/{tool_id}/runs), on the same queue: eap_worker.tool_run.
+TOOL_WORKFLOW_NAME = "eap.tool_run"
+# Workflow runs (POST /workflows/{id}/runs), on the same queue: eap_worker.workflow_run. Parallel
+# branches run as child workflows of WORKFLOW_BRANCH_NAME (never enqueued by the API).
+WORKFLOW_RUN_NAME = "eap.workflow_run"
+WORKFLOW_BRANCH_NAME = "eap.workflow_branch"
 DELTA_CHANNEL = "eap_run_deltas"
 
 _DEFAULT_APP_DB = "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"

@@ -232,7 +232,9 @@ def test_4_api_crash_after_insert_before_enqueue_then_client_retries(
     assert crashed_api.returncode == 137, crashed_api.stdout + crashed_api.stderr
     assert "EAP_API_CRASH launcher reached" in crashed_api.stdout
 
-    # The orphan: a committed runs row that no workflow will ever pick up on its own.
+    # The orphan: a committed runs row that no workflow will ever pick up on its own. Still `queued`
+    # (not failed with ENQUEUE_FAILED_ERROR): only an enqueue that raises marks the run failed and
+    # answers 503; a process that dies inside the launcher runs no handler, so nothing can mark it.
     assert h.run_row(run_id)["status"] == "queued"
     time.sleep(2.0)  # 10 queue polls of a live worker
     assert h.workflows(run_id) == []

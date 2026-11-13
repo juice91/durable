@@ -1,0 +1,266 @@
+"""Input hardening shared by every JSON write route of the API.
+
+`guarded_json_route(...)` returns an APIRoute class; a router that sets it as `route_class` gets,
+for each POST/PUT/PATCH request, before FastAPI parses the body:
+
+- more than ``max_body_bytes`` -> 413 {"detail": "request body too large (max N bytes)"}; the
+  declared Content-Length is checked first, then the stream, so an oversized body is never buffered;
+- not strict UTF-8 (an optional BOM), or any NUL byte -> 415
+  {"detail": "request body must be UTF-8 encoded JSON (no NUL bytes)"};
+- objects/arrays nested deeper than ``max_depth`` -> 422 {"detail": "<depth_detail>"} (a string);
+
+and then, on every method, after authentication (so a 401 still wins over a 422):
+
+- any path parameter, query parameter (name or value) or string in the body (object keys
+  included) that PostgreSQL cannot store in or compare with a text or JSONB column (U+0000, or an
+  unpaired UTF-16 surrogate written as a \\uD800-\\uDFFF escape) -> 422 with the compact list below,
+  one item per offending string (at most MAX_REPORTED_ERRORS), naming its location: ["path", name],
+  ["query", name] or ["body", ...field path]. An endpoint marked @schema_checks_storable skips only
+  the body scan (its model reports those itself); its path and query are still checked.
+
+Every RequestValidationError the route raises (FastAPI's own body/query/path validation included)
+answers 422 {"detail": [{"loc", "msg", "type"}, ...]}: never the rejected input or ctx, each part
+bounded in size. HTTPExceptions a route raises itself (422 strings included) are unchanged.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Annotated, Any
+
+from fastapi import Depends, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.params import Depends as DependsParam
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
+
+from eap_api.auth import Principal, current_principal
+
+DEFAULT_MAX_BODY_BYTES = 256 * 1024  # the run payload limit (EAP_MAX_RUN_PAYLOAD_BYTES default)
+DEFAULT_MAX_BODY_DEPTH = 32
+MAX_REPORTED_ERRORS = 20
+WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+UTF8_BOM = b"\xef\xbb\xbf"
+NOT_UTF8_DETAIL = "request body must be UTF-8 encoded JSON (no NUL bytes)"
+UNSTORABLE_ERROR_TYPE = "string_unstorable"
+
+_STATE_KEY = "eap_unstorable_errors"
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
+_LOC_PART_MAX = 100
+
+
+def too_large_detail(limit: int) -> str:
+    return f"request body too large (max {limit} bytes)"
+
+
+def decode_utf8_json_body(body: bytes) -> str | None:
+    """The body as text, or None unless it is strict UTF-8 (an optional BOM) with no NUL byte.
+
+    FastAPI parses with json.loads(bytes), which guesses UTF-16/32 from BOMs and NUL bytes. A body
+    that passes here has neither (UTF-16 BOMs are not valid UTF-8, UTF-32's contain NUL), so
+    json.loads decodes it as UTF-8 too: the text scanned below is exactly the text parsed next."""
+    if b"\x00" in body:
+        return None
+    try:
+        return body.removeprefix(UTF8_BOM).decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+
+def json_depth_exceeds(text: str, limit: int) -> bool:
+    """Whether JSON text nests objects/arrays deeper than ``limit``, by scanning its characters
+    (no parsing, no recursion); brackets inside strings are ignored."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "]}":
+            depth -= 1
+    return False
+
+
+async def read_capped_body(request: Request, limit: int) -> bytes | None:
+    """The request body, or None as soon as it is known to exceed ``limit`` bytes (declared
+    Content-Length first, then while streaming): an oversized body is never buffered whole."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        return None
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _loc_part(part: Any) -> int | str:
+    return part if isinstance(part, int) else str(part)[:_LOC_PART_MAX]
+
+
+def compact_errors(errors: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """loc, msg and type only (never the rejected input or ctx), each bounded in size."""
+    return [
+        {
+            "loc": [_loc_part(part) for part in err.get("loc", ())],
+            "msg": str(err.get("msg", ""))[:500],
+            "type": str(err.get("type", ""))[:100],
+        }
+        for err in list(errors)[:MAX_REPORTED_ERRORS]
+    ]
+
+
+def compact_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    return compact_errors(exc.errors())
+
+
+def unstorable_reason(text: str) -> str | None:
+    """Why PostgreSQL cannot store ``text`` in a text or JSONB column, or None if it can."""
+    match = _UNSTORABLE.search(text)
+    if match is None:
+        return None
+    if match.group() == "\x00":
+        return "a NUL character (\\u0000)"
+    return f"an unpaired surrogate (\\u{ord(match.group()):04x})"
+
+
+def _key_label(key: str) -> str:
+    return _UNSTORABLE.sub("?", key[:_LOC_PART_MAX])
+
+
+def unstorable_strings(data: Any, prefix: Sequence[int | str] = ("body",)) -> list[dict[str, Any]]:
+    """Compact 422 items for every unstorable string in parsed JSON, keys included, in document
+    order (at most MAX_REPORTED_ERRORS). Iterative: the caller bounds the depth first. A key's
+    location shows it with its unstorable characters replaced by '?'."""
+    found: list[dict[str, Any]] = []
+    # (value, loc, None) to visit, or (None, loc, message) for a key error found on the way down.
+    stack: list[tuple[Any, tuple[int | str, ...], str | None]] = [(data, tuple(prefix), None)]
+    while stack and len(found) < MAX_REPORTED_ERRORS:
+        item, loc, key_error = stack.pop()
+        if key_error is not None:
+            found.append({"loc": list(loc), "msg": key_error, "type": UNSTORABLE_ERROR_TYPE})
+        elif isinstance(item, str):
+            if reason := unstorable_reason(item):
+                found.append({"loc": list(loc), "msg": f"string contains {reason}, which cannot be stored",
+                              "type": UNSTORABLE_ERROR_TYPE})
+        elif isinstance(item, dict):
+            children: list[tuple[Any, tuple[int | str, ...], str | None]] = []
+            for key, value in item.items():
+                key_loc = (*loc, _key_label(key))
+                if reason := unstorable_reason(key):
+                    children.append((None, key_loc, f"key contains {reason}, which cannot be stored"))
+                children.append((value, key_loc, None))
+            stack.extend(reversed(children))
+        elif isinstance(item, list):
+            stack.extend(reversed([(value, (*loc, i), None) for i, value in enumerate(item)]))
+    return found[:MAX_REPORTED_ERRORS]
+
+
+def unstorable_params(request: Request) -> list[dict[str, Any]]:
+    """Compact 422 items for unstorable path parameters and query parameters (names included).
+    Starlette decodes percent-escapes with errors='replace', so in practice this is %00; a lone
+    surrogate cannot arrive through a URL, but is checked the same way."""
+    errors = unstorable_strings(dict(request.path_params), ("path",))
+    for key, value in request.query_params.multi_items():
+        if len(errors) >= MAX_REPORTED_ERRORS:
+            break
+        errors += unstorable_strings({key: value}, ("query",))
+    return errors
+
+
+def _reject_unstorable_strings(
+    request: Request, _principal: Annotated[Principal, Depends(current_principal)]
+) -> None:
+    """Route dependency: raise the unstorable-string errors found before parsing. It depends on
+    the principal so authentication (cached for the route) answers first."""
+    errors = getattr(request.state, _STATE_KEY, None)
+    if errors:
+        raise RequestValidationError(errors)
+
+
+_SCHEMA_CHECKS_STORABLE = "_eap_schema_checks_storable"
+
+
+def schema_checks_storable(endpoint: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark an endpoint whose body model already rejects unstorable strings itself (with its own
+    messages), so the route-level check is skipped for it. Apply below the router decorator."""
+    setattr(endpoint, _SCHEMA_CHECKS_STORABLE, True)
+    return endpoint
+
+
+def guarded_json_route(
+    *,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    max_depth: int = DEFAULT_MAX_BODY_DEPTH,
+    depth_detail: str | None = None,
+    check_storable: bool = True,
+) -> type[APIRoute]:
+    """An APIRoute class with the guards described in this module's docstring."""
+    nested_detail = depth_detail or f"request body is nested more than {max_depth} levels deep"
+    too_large = too_large_detail(max_body_bytes)
+
+    class GuardedJsonRoute(APIRoute):
+        def __init__(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
+            if check_storable:
+                dependencies: list[DependsParam] = list(kwargs.get("dependencies") or [])
+                # include_router re-creates the route with its dependencies: add this one once.
+                if not any(d.dependency is _reject_unstorable_strings for d in dependencies):
+                    dependencies.append(Depends(_reject_unstorable_strings))
+                kwargs["dependencies"] = dependencies
+            super().__init__(path, endpoint, **kwargs)
+            self.checks_storable = check_storable
+            self.checks_body_strings = check_storable and not getattr(endpoint, _SCHEMA_CHECKS_STORABLE, False)
+
+        def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+            handler = super().get_route_handler()
+
+            async def guarded(request: Request) -> Response:
+                errors: list[dict[str, Any]] = []
+                if self.checks_storable:
+                    errors = unstorable_params(request)
+                if request.method in WRITE_METHODS:
+                    body = await read_capped_body(request, max_body_bytes)
+                    if body is None:
+                        return JSONResponse(status_code=413, content={"detail": too_large})
+                    request._body = body  # FastAPI's request.body() returns these bytes; no second read
+                    text = decode_utf8_json_body(body)
+                    if text is None:
+                        return JSONResponse(status_code=415, content={"detail": NOT_UTF8_DETAIL})
+                    if json_depth_exceeds(text, max_depth):
+                        return JSONResponse(status_code=422, content={"detail": nested_detail})
+                    if self.checks_body_strings and text.strip():
+                        try:
+                            parsed = json.loads(text)
+                        except ValueError:
+                            parsed = None  # FastAPI reports the malformed JSON itself
+                        errors += unstorable_strings(parsed)
+                if errors:
+                    setattr(request.state, _STATE_KEY, errors[:MAX_REPORTED_ERRORS])
+                try:
+                    return await handler(request)
+                except RequestValidationError as exc:
+                    return JSONResponse(status_code=422, content={"detail": compact_validation_errors(exc)})
+
+            return guarded
+
+    return GuardedJsonRoute
+
+
+# The default for the API's JSON write routes (agents, runs, conversations, MCP servers, tools).
+GuardedJsonRoute = guarded_json_route()

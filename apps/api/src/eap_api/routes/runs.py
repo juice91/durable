@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -23,6 +23,7 @@ from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel, AgentVersionModel
+from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail, RunCreate
 from eap_api.sse import (
     DeltaSource,
@@ -35,7 +36,7 @@ from eap_api.sse import (
     release_stream_slot,
     run_event_stream,
 )
-from eap_run_store import EventLog, InvalidRunCursor, RunCursor, RunIdConflict, RunStore
+from eap_run_store import ENQUEUE_FAILED_ERROR, EventLog, InvalidRunCursor, RunCursor, RunIdConflict, RunStore
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
 
 log = logging.getLogger("eap_api")
@@ -50,16 +51,29 @@ def require_run_storage(request: Request) -> tuple[RunStore, EventLog]:
 
 StoresDep = Annotated[tuple[RunStore, EventLog], Depends(require_run_storage)]
 
-router = APIRouter(tags=["runs"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}})
+router = APIRouter(
+    tags=["runs"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}}, route_class=GuardedJsonRoute
+)
 
 
 def _run_json(run: dict[str, Any]) -> dict[str, Any]:
-    """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings."""
+    """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings.
+
+    `kind` is 'agent', 'tool' or 'workflow'. An agent run has `agent_id`/`version` and `tool_id`
+    null; a tool run has `tool_id`, `agent_id`/`version` null, and `input`/`output` as JSON text; a
+    workflow run has `workflow_id`/`workflow_version`, input/output as JSON text. A workflow's agent
+    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise)."""
     iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
     return {
         "run_id": str(run["id"]),
-        "agent_id": str(run["agent_id"]),
+        "kind": run.get("kind") or "agent",
+        "agent_id": str(run["agent_id"]) if run["agent_id"] is not None else None,
         "version": run["agent_version"],
+        "tool_id": run.get("tool_id"),
+        "workflow_id": run.get("workflow_id"),
+        "workflow_version": run.get("workflow_version"),
+        "parent_run_id": run.get("parent_run_id"),
+        "parent_step_id": run.get("parent_step_id"),
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],
@@ -113,17 +127,37 @@ def check_payload_size(db: Session, agent_id: uuid.UUID | str, version: int, inp
         )
 
 
-def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run: dict[str, Any]) -> None:
-    """Enqueue exactly what the stored row says (hand-off contract), so a retry starts the recorded run.
+def launch_recorded_run(
+    db: Session, launcher: RunLauncher, run_store: RunStore, tenant_id: str, run: dict[str, Any], created: bool
+) -> dict[str, Any]:
+    """Hand the stored run to the orchestrator; returns the run as it stands afterwards.
 
-    Called whether or not this request created the row: DBOS attaches a repeated workflow_id to the
+    Enqueues exactly what the stored row says (hand-off contract), so a retry starts the recorded
+    run, whether or not this request created the row: DBOS attaches a repeated workflow_id to the
     existing workflow, so a crash between insert and enqueue heals when the client retries.
+
+    Same semantics as tool runs (POST /tools/{id}/runs). This request owns the hand-off of a row it
+    created, or of one an earlier failed hand-off left failed and it re-queues now. A failed
+    enqueue answers 503, and an owned run still `queued` is marked failed with ENQUEUE_FAILED_ERROR
+    so it is not left queued with no workflow; a retry with the same run_id and input re-queues it
+    and enqueues again. If DBOS did accept the enqueue that raised, the workflow runs anyway and
+    its start step (mark_running) clears that error. A conversation turn is only re-queued while it
+    is the latest turn: once a later turn has started, the retry answers 409.
     """
+    run_id = uuid.UUID(str(run["id"]))
+    owns_handoff = created or run_store.requeue_after_enqueue_failure(tenant_id, run_id)
+    if not owns_handoff and run["conversation_id"] is not None:
+        current = run_store.get_run(tenant_id, run_id) or run
+        if current["status"] == "failed" and current["error"] == ENQUEUE_FAILED_ERROR:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This turn could not be started and a later turn has started since; start a new turn",
+            )
     version_row = _version_row(db, run["agent_id"], run["agent_version"])
     assert version_row is not None  # versions are immutable and never deleted
     try:
         launcher.launch(
-            run_id=uuid.UUID(str(run["id"])),
+            run_id=run_id,
             tenant_id=tenant_id,
             agent_id=uuid.UUID(str(run["agent_id"])),
             version=run["agent_version"],
@@ -137,11 +171,25 @@ def launch_recorded_run(db: Session, launcher: RunLauncher, tenant_id: str, run:
             log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
             run_id=run["id"], tenant_id=tenant_id,
         )
+        if owns_handoff:
+            try:
+                run_store.mark_enqueue_failed(tenant_id, run_id)
+            except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
+                log_failure(
+                    log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
+                    level=logging.ERROR, run_id=run["id"], tenant_id=tenant_id,
+                )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Run recorded but could not be started; retry the same request (same run_id)",
         )
+    run = run_store.get_run(tenant_id, run_id) or run
+    if run["error"] == ENQUEUE_FAILED_ERROR:
+        # A concurrent request that owned the hand-off failed and marked the run failed, but this
+        # enqueue succeeded: the workflow exists, and its start step clears that error.
+        run = {**run, "status": "queued", "display_status": "queued", "error": None}
     log.info("run %s queued: tenant=%s agent=%s version=%s", run["id"], tenant_id, run["agent_id"], run["agent_version"])
+    return run
 
 
 def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] | None = None) -> JSONResponse:
@@ -210,7 +258,7 @@ def start_run(
             status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
         )
 
-    launch_recorded_run(db, launcher, tenant_id, run)
+    run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
     return started_response(run, created)
 
 
@@ -225,11 +273,16 @@ def list_runs(
     ] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[str | None, Query(alias="status")] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow"] | None, Query()] = None,
+    tool_id: Annotated[str | None, Query(max_length=64)] = None,
+    workflow_id: uuid.UUID | None = None,
+    parent_run_id: uuid.UUID | None = None,
 ) -> JSONResponse:
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422."""
+    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow'), `tool_id` and
+    `workflow_id` filter. A workflow's child agent runs are listed only with `parent_run_id`."""
     run_store, _ = stores
     cursor = None
     if before is not None:
@@ -240,7 +293,10 @@ def list_runs(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="before is not a valid cursor; pass the previous page's next_before verbatim",
             )
-    runs = run_store.list_runs(principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=run_status)
+    runs = run_store.list_runs(
+        principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=run_status, kind=kind, tool_id=tool_id,
+        workflow_id=workflow_id, parent_run_id=parent_run_id,
+    )
     next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
     return JSONResponse(content={"items": [_run_json(r) for r in runs], "next_before": next_before})
 

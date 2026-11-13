@@ -11,7 +11,11 @@ class SideEffectOutcomeUnknown(Exception):
 
     def __init__(self, key: str):
         self.key = key
-        super().__init__(f"Side effect outcome unknown for key: {key}")
+        # args are the constructor arguments, so pickle (DBOS step errors) rebuilds it exactly.
+        super().__init__(key)
+
+    def __str__(self) -> str:
+        return f"Side effect outcome unknown for key: {self.key}"
 
 
 def run_side_effect(

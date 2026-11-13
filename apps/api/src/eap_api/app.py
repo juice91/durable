@@ -52,10 +52,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
         ),
     )
     
-    # CORS middleware - allow http://localhost:3000
+    # CORS: the local Studio dev server, by either loopback name (no other origin is allowed).
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -82,6 +82,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.tools import router as tools_router
 
     app.include_router(tools_router, prefix="/api/v1")
+
+    from eap_api.routes.workflows import router as workflows_router
+
+    app.include_router(workflows_router, prefix="/api/v1")
+    # Workflow runs and approval decisions (task 3.8): POST /workflows/{id}/runs, .../approve|reject.
+    from eap_api.routes.workflow_runs import router as workflow_runs_router
+
+    app.include_router(workflow_runs_router, prefix="/api/v1")
     
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
