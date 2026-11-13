@@ -1,14 +1,13 @@
 "use client";
 
 import React from "react";
+import { formatTokens, formatUsd, parseCost } from "@/lib/format";
 import { TimeSeriesChart, type ChartSeries } from "./TimeSeriesChart";
 import {
   FAILED_STATUSES,
   bucketRange,
-  formatCost,
   formatCount,
   formatLatency,
-  parseCost,
   summarizeSeries,
   tracesHref,
   type MetricsFilters,
@@ -93,10 +92,10 @@ export function chartSpecs(ts: MetricsTimeseries, filters: MetricsFilters, ids: 
         { key: "input", label: "Input", color: "var(--viz-series-1-color)", values: input },
         { key: "output", label: "Output", color: "var(--viz-series-2-color)", values: output },
       ],
-      formatValue: formatCount,
+      formatValue: formatTokens,
       integer: true,
       bucketHref,
-      summary: `${summarize("Input tokens", input, formatCount)} ${summarize("Output tokens", output, formatCount)}`,
+      summary: `${summarize("Input tokens", input, formatTokens)} ${summarize("Output tokens", output, formatTokens)}`,
       drillLabel: USAGE_DRILL_LABEL,
       extraTooltip: (i) => [
         ...(b[i].unmeasured_requests ? [`${b[i].unmeasured_requests} requests not measured`] : []),
@@ -109,9 +108,9 @@ export function chartSpecs(ts: MetricsTimeseries, filters: MetricsFilters, ids: 
       description: "Priced model requests; requests without a price are counted separately",
       type: "bar",
       series: [{ key: "cost", label: "Cost", color: "var(--viz-series-1-color)", values: cost }],
-      formatValue: formatCost,
+      formatValue: formatUsd,
       bucketHref,
-      summary: summarize("Cost", cost, formatCost),
+      summary: summarize("Cost", cost, formatUsd),
       drillLabel: USAGE_DRILL_LABEL,
       extraTooltip: (i) => [
         ...(b[i].unpriced_requests ? [`${b[i].unpriced_requests} requests have no price`] : []),

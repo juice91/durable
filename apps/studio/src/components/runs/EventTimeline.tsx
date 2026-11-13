@@ -1,6 +1,7 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
 
 interface EventItemProps {
@@ -84,15 +85,6 @@ export function EventTimeline({ events, currentPartialText, status }: EventTimel
   );
 }
 
-/** "3 email, 1 phone" from a processor's match_counts (types with a zero count left out). */
-export function formatMatchCounts(counts: unknown): string {
-  if (counts === null || typeof counts !== "object" || Array.isArray(counts)) return "";
-  return Object.entries(counts as Record<string, unknown>)
-    .filter(([, n]) => typeof n === "number" && n > 0)
-    .map(([kind, n]) => `${n} ${kind}`)
-    .join(", ");
-}
-
 /** One processor outcome as a compact line: phase, processor type, action, then the match counts,
  * flagged categories or reason. Only these fields are read; the event never carries text, and none
  * is shown even if it did. */
@@ -100,7 +92,7 @@ function ProcessorLine({ data }: { data: RunEvent["data"] }) {
   const phase = data.phase === "input" ? "Input" : data.phase === "output" ? "Output" : "";
   const type = typeof data.processor_type === "string" ? data.processor_type : "processor";
   const action = typeof data.action === "string" ? data.action : "";
-  const counts = formatMatchCounts(data.match_counts);
+  const counts = formatMatchCounts(data.match_counts, "");
   const categories = Array.isArray(data.categories)
     ? data.categories.filter((c): c is string => typeof c === "string").join(", ")
     : "";
@@ -114,7 +106,7 @@ function ProcessorLine({ data }: { data: RunEvent["data"] }) {
       <span className="font-semibold">{`${phase} processor`.trim()}</span>
       <span className="ml-1 font-mono">{type}</span>
       {action && (
-        <span className={blocked ? "ml-1 font-semibold text-red-700 dark:text-red-400" : "ml-1 text-muted-foreground"}>
+        <span className={blocked ? "ml-1 font-semibold text-destructive-text" : "ml-1 text-muted-foreground"}>
           {action}
         </span>
       )}
@@ -165,8 +157,8 @@ function EventItem({ event }: EventItemProps) {
       case "tool_call":
         return (
           <div className="text-sm">
-            <span className="font-semibold text-purple-700 dark:text-purple-400">Tool call:</span>
-            <span className="text-purple-600 dark:text-purple-300 ml-1">
+            <span className="font-semibold text-primary">Tool call:</span>
+            <span className="ml-1 font-mono text-muted-foreground">
               {formatValue(event.data.tool_id ?? event.data.tool_name)}
             </span>
             <JsonBlock value={event.data.args ?? {}} label="Tool arguments" />
@@ -177,18 +169,18 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm">
             {event.data.status === "error" ? (
               <>
-                <span className="font-semibold text-red-700 dark:text-red-400">Tool error:</span>
+                <span className="font-semibold text-destructive-text">Tool error:</span>
                 {event.data.content !== undefined ? (
                   <JsonBlock value={event.data.content} label="Tool result" />
                 ) : (
-                  <span className="block mt-1 text-red-600 dark:text-red-300">
+                  <span className="block mt-1 text-destructive-text">
                     {formatValue(event.data.error ?? "Unknown error")}
                   </span>
                 )}
               </>
             ) : (
               <>
-                <span className="font-semibold text-green-700 dark:text-green-400">Tool result:</span>
+                <span className="font-semibold text-success">Tool result:</span>
                 <JsonBlock value={event.data.content ?? null} label="Tool result" />
               </>
             )}
@@ -197,16 +189,16 @@ function EventItem({ event }: EventItemProps) {
       case "run_completed":
         return (
           <div className="text-sm">
-            <span className="text-green-700 dark:text-green-400 font-semibold">Run completed successfully</span>
+            <span className="text-success font-semibold">Run completed successfully</span>
             {/* A tool run's end event carries the tool result (any JSON value) */}
             {event.data.result !== undefined && <JsonBlock value={event.data.result} label="Run result" />}
           </div>
         );
       case "run_failed":
         return (
-          <div className="text-sm text-red-700 dark:text-red-400 font-semibold">
+          <div className="text-sm text-destructive-text font-semibold">
             {event.data.status === "needs_attention" ? "Needs attention" : "Run failed"}
-            <span className="block mt-1 text-red-600 dark:text-red-300">
+            <span className="block mt-1 text-destructive-text">
               {formatValue(event.data.error || "Unknown error")}
             </span>
           </div>

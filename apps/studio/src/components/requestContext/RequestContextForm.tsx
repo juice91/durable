@@ -176,10 +176,10 @@ export function RequestContextForm({
           )}
           {undeclared.length > 0 ? (
             <div data-testid="context-undeclared-keys" className="space-y-2 rounded-md border border-destructive/30 bg-destructive/10 p-3">
-              <p className="text-sm text-destructive">Not declared by this version:</p>
+              <p className="text-sm text-destructive-text">Not declared by this version:</p>
               <ul className="space-y-1">
                 {undeclared.map((key) => (
-                  <li key={key} className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+                  <li key={key} className="flex flex-wrap items-center gap-2 text-xs text-destructive-text">
                     <span className="font-mono">{key}</span>
                     {validation.fieldErrors[key] ? <span role="alert">{validation.fieldErrors[key]}</span> : null}
                     {key in value ? (
@@ -205,9 +205,9 @@ export function RequestContextForm({
             onChange={(event) => setJson(event.target.value)}
             className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
-          {jsonError ? <p role="alert" data-testid="context-json-error" className="text-xs text-destructive">{jsonError}</p> : null}
+          {jsonError ? <p role="alert" data-testid="context-json-error" className="text-xs text-destructive-text">{jsonError}</p> : null}
           {fieldErrorEntries.length > 0 ? (
-            <ul role="alert" data-testid="context-json-field-errors" className="space-y-1 text-xs text-destructive">
+            <ul role="alert" data-testid="context-json-field-errors" className="space-y-1 text-xs text-destructive-text">
               {fieldErrorEntries.map(([key, message]) => <li key={key}><span className="font-mono">{key}</span>: {message}</li>)}
             </ul>
           ) : null}
@@ -215,7 +215,7 @@ export function RequestContextForm({
       )}
 
       {validation.message && !jsonError ? (
-        <p role="alert" data-testid="context-validation-message" className={`rounded-md border p-3 text-sm ${validation.status === "error" ? "border-border bg-muted/40 text-foreground" : "border-destructive/30 bg-destructive/10 text-destructive"}`}>
+        <p role="alert" data-testid="context-validation-message" className={`rounded-md border p-3 text-sm ${validation.status === "error" ? "border-border bg-muted/40 text-foreground" : "border-destructive/30 bg-destructive/10 text-destructive-text"}`}>
           {validation.status === "error" ? `Could not validate: ${validation.message}` : validation.message}
         </p>
       ) : null}
@@ -235,7 +235,7 @@ function ValidationBadge({ state }: { state: ContextValidationState }) {
   const tone = state.status === "valid"
     ? "bg-primary/10 text-primary"
     : state.status === "invalid"
-      ? "bg-destructive/10 text-destructive"
+      ? "bg-destructive/10 text-destructive-text"
       : "bg-muted text-muted-foreground";
   return (
     <span role="status" aria-live="polite" data-testid="context-validation-status" data-state={state.status} className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`}>

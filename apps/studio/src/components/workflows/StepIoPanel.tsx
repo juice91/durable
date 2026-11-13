@@ -65,7 +65,7 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
         ) : <Block label="Output" value={detail.output} testId="step-io-output" />
       ) : null}
       {detail.error || detail.errorCode ? (
-        <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">
+        <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">
           {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
           {detail.errorCode ? <p className="mt-1 text-xs">Error code: <code className="font-mono">{detail.errorCode}</code></p> : null}
         </div>

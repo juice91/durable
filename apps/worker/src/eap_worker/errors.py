@@ -38,6 +38,20 @@ class ToolInputInvalid(Exception):
         return f"input does not match tool {self.tool_id!r}"
 
 
+REQUEST_CONTEXT_INVALID_MESSAGE = "the request context does not match the agent's context fields"
+
+
+class RequestContextInvalid(Exception):
+    """The run's request context does not satisfy the spec's `context_fields` (e.g. a required field
+    is missing, as in a workflow agent step, which runs with an empty context). Carries no values."""
+
+    def __init__(self) -> None:
+        super().__init__()  # pickle-safe: no constructor arguments
+
+    def __str__(self) -> str:
+        return REQUEST_CONTEXT_INVALID_MESSAGE
+
+
 class InputBlocked(Exception):
     """An input processor (P0.17) blocked the turn's input: the main model is never called. Carries
     no text, only the processor's position and type (from the published spec)."""
@@ -140,6 +154,7 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
         "model_not_allowed",
         lambda e: f"model '{_field(e, 'provider')}:{_field(e, 'name')}' is not allowed on this platform",
     ),
+    (RequestContextInvalid, "failed", "request_context_invalid", lambda e: REQUEST_CONTEXT_INVALID_MESSAGE),
     (InputBlocked, "failed", "input_blocked", lambda e: INPUT_BLOCKED_MESSAGE),
     (OutputBlocked, "failed", "output_blocked", lambda e: OUTPUT_BLOCKED_MESSAGE),
     (UnknownToolError, "failed", "unknown_tool", lambda e: f"tool '{_field(e, 'tool_id')}' is not registered"),
@@ -204,9 +219,11 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
 __all__ = [
     "INPUT_BLOCKED_MESSAGE",
     "OUTPUT_BLOCKED_MESSAGE",
+    "REQUEST_CONTEXT_INVALID_MESSAGE",
     "WORKFLOW_FAILURES",
     "InputBlocked",
     "OutputBlocked",
+    "RequestContextInvalid",
     "RunFailure",
     "ToolInputInvalid",
     "WorkflowStepError",

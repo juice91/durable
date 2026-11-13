@@ -45,7 +45,7 @@ export default function WorkflowsPage() {
         <h1 className="text-2xl font-bold text-foreground">Workflows</h1>
         <p className="mt-1 text-muted-foreground">Published workflow definitions: open one to see its execution graph, run it and follow its runs.</p>
       </div>
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {!rows && !error ? <p className="text-muted-foreground">Loading workflows…</p> : null}
       {rows && rows.length === 0 ? (
         <EmptyState title="No workflows yet" description="Create a workflow definition through the API (POST /api/v1/workflows) and publish a version to run it here." />

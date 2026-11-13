@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { localInputToIso } from "@/lib/datetimeLocal";
 import {
   formatMatchCounts,
-  localInputToIso,
   PROCESSOR_ACTIONS,
   PROCESSOR_PHASES,
   processors as processorsApi,
@@ -34,7 +34,7 @@ interface FilterForm {
 const EMPTY_FILTERS: FilterForm = { agent_id: "", type: "", action: "", phase: "", run_id: "", from: "", to: "" };
 
 function actionClass(action: string | null): string {
-  if (action === "block") return "bg-destructive/10 text-destructive";
+  if (action === "block") return "bg-destructive/10 text-destructive-text";
   if (action === "allow" || action === null) return "bg-muted text-muted-foreground";
   return "bg-primary/10 text-primary";
 }
@@ -43,8 +43,8 @@ function actionClass(action: string | null): string {
 function toFilters(form: FilterForm): ProcessorResultFilters | string {
   const runId = form.run_id.trim();
   if (runId && !UUID_PATTERN.test(runId)) return "Run ID must be a full run UUID.";
-  const from = localInputToIso(form.from);
-  const to = localInputToIso(form.to);
+  const from = localInputToIso(form.from) ?? undefined;
+  const to = localInputToIso(form.to) ?? undefined;
   if (from && to && from >= to) return "From must be before To.";
   return { agent_id: form.agent_id, type: form.type, action: form.action, phase: form.phase, run_id: runId, from, to };
 }
@@ -179,12 +179,12 @@ export function ProcessorResultsTable({ agents, types }: {
           <button type="submit" className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground">Apply</button>
           <button type="button" className={secondaryButton} onClick={reset}>Reset</button>
         </div>
-        {formError ? <p role="alert" data-testid="results-filter-error" className="text-sm text-destructive sm:col-span-2 lg:col-span-4">{formError}</p> : null}
+        {formError ? <p role="alert" data-testid="results-filter-error" className="text-sm text-destructive-text sm:col-span-2 lg:col-span-4">{formError}</p> : null}
       </form>
 
       <p className="text-xs text-muted-foreground">Outcomes record match counts only. Matched text is never stored, so it cannot be shown here.</p>
 
-      {error ? <p role="alert" data-testid="results-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" data-testid="results-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {loading ? <p className="text-sm text-muted-foreground">Loading outcomes…</p> : null}
 
       {!loading && !error && items.length === 0 ? (

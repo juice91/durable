@@ -5,6 +5,13 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { TRACE_POLL_MS, TraceView, traceSignature } from "./TraceView";
 import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { ApiError } from "@/lib/api";
+import { searchLogs } from "@/components/logs/logsQuery";
+
+// The default logs panel fetches; keep these tests off the network.
+vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/logs/logsQuery")>()),
+  searchLogs: vi.fn(),
+}));
 
 vi.mock("@/lib/traces", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -76,6 +83,9 @@ function fixture(): Trace {
 describe("TraceView", () => {
   beforeEach(() => {
     vi.mocked(getTrace).mockReset();
+    vi.mocked(searchLogs).mockReset();
+    // Never settles: these tests are not about logs, and a late response would update state outside act.
+    vi.mocked(searchLogs).mockReturnValue(new Promise(() => undefined));
   });
 
   it("renders the nested span tree with names, totals, Grafana link and truncation notice", async () => {

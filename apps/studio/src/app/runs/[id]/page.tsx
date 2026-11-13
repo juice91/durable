@@ -119,7 +119,7 @@ export default function RunDetailPage() {
   if (loadError && !run) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-destructive-foreground">{loadError}</p>
+        <p className="text-destructive-text">{loadError}</p>
       </div>
     );
   }

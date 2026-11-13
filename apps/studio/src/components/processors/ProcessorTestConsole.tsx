@@ -24,7 +24,7 @@ interface Step {
 }
 
 function actionClass(action: string): string {
-  if (action === "block") return "bg-destructive/10 text-destructive";
+  if (action === "block") return "bg-destructive/10 text-destructive-text";
   if (action === "allow") return "bg-muted text-muted-foreground";
   return "bg-primary/10 text-primary";
 }
@@ -158,7 +158,7 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
       <div className="space-y-1">
         <label htmlFor="console-sample" className="block text-sm font-medium text-foreground">Sample text</label>
         <textarea id="console-sample" rows={5} className={inputClass} value={text} onChange={(event) => { changed(); setText(event.target.value); }} placeholder="Text to run the processors on" />
-        <p className={`text-xs ${sampleBytes > maxBytes ? "text-destructive" : "text-muted-foreground"}`}>
+        <p className={`text-xs ${sampleBytes > maxBytes ? "text-destructive-text" : "text-muted-foreground"}`}>
           {sampleBytes.toLocaleString()} of {maxBytes.toLocaleString()} bytes. The sample is processed for this request only and is not stored.
         </p>
       </div>
@@ -167,11 +167,11 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
         {busy ? "Running…" : "Run test"}
       </button>
 
-      {error ? <p role="alert" data-testid="console-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" data-testid="console-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
 
       {result ? (
         <section data-testid="console-result" aria-label="Test result" className="space-y-3 rounded-md border border-border p-3">
-          <p className={`text-sm font-medium ${result.blocked ? "text-destructive" : "text-foreground"}`}>
+          <p className={`text-sm font-medium ${result.blocked ? "text-destructive-text" : "text-foreground"}`}>
             {result.blocked ? "Blocked: the text would not be passed on." : "Passed."}
           </p>
           <ol className="space-y-1 text-sm">

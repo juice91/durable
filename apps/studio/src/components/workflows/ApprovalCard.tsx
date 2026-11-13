@@ -91,16 +91,16 @@ export function ApprovalCard({ runId, stepId, prompt, deadline, onRefresh, onDec
           onChange={(event) => setComment(event.target.value)}
           className="w-full rounded-md border border-input bg-background p-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
-        <p id={`${commentId}-count`} className={`text-xs ${tooLong ? "text-destructive" : "text-muted-foreground"}`}>
+        <p id={`${commentId}-count`} className={`text-xs ${tooLong ? "text-destructive-text" : "text-muted-foreground"}`}>
           {comment.length}/{MAX_APPROVAL_COMMENT}{tooLong ? " — too long" : ""}
         </p>
       </div>
-      {error ? <p role="alert" data-testid={`approval-error-${stepId}`} className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" data-testid={`approval-error-${stepId}`} className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">{error}</p> : null}
       <div className="flex gap-2">
         <button type="button" onClick={() => decide("approve")} disabled={Boolean(busy) || tooLong} aria-busy={busy === "approve"} className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
           Approve
         </button>
-        <button type="button" onClick={() => { setDialogError(null); setConfirmReject(true); }} disabled={Boolean(busy) || tooLong} className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive disabled:cursor-not-allowed disabled:opacity-50">
+        <button type="button" onClick={() => { setDialogError(null); setConfirmReject(true); }} disabled={Boolean(busy) || tooLong} className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive-text disabled:cursor-not-allowed disabled:opacity-50">
           Reject
         </button>
       </div>

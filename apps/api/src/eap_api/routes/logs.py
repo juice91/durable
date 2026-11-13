@@ -288,8 +288,22 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _before_epoch(value: datetime | None) -> bool:
+    """Whether `value` (naive = UTC) is before 1970-01-01; a value so early that converting it
+    overflows counts as before."""
+    if value is None:
+        return False
+    try:
+        return _utc(value) < EPOCH
+    except OverflowError:
+        return True
+
+
 def _ns(value: datetime) -> int:
-    delta = value - datetime(1970, 1, 1, tzinfo=UTC)
+    delta = value - EPOCH
     return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
 
@@ -343,7 +357,9 @@ def search_logs(
     `run_id` narrows to one run of the tenant (404 if it is not theirs). `q` is a case-sensitive
     substring of the message. `level` is a minimum level. `from`/`to` (ISO 8601; naive = UTC) default
     to the last hour, or, with `run_id`, to a window starting a minute before the run was created;
-    the window may span at most 7 days. `limit` 1–500, default 100.
+    the window may span at most 7 days: a longer window is 422 when both `from` and `to` are given,
+    and is clamped to the last 7 days when `to` is omitted. The response's `from`/`to` are the
+    window actually searched (after defaults and clamping). Dates before 1970-01-01 are 422. `limit` 1–500, default 100.
     """
     tenant_id = principal.tenant_id
     run_store, _ = stores
@@ -353,9 +369,15 @@ def search_logs(
         if run is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
+    if _before_epoch(from_) or _before_epoch(to):
+        raise _unprocessable("from and to must not be before 1970-01-01")
     end = _utc(to) if to is not None else datetime.now(UTC)
     if from_ is not None:
         start = _utc(from_)
+        if to is None and start < end and end - start > MAX_RANGE:
+            # `to` defaults to the server's now, which is later than the client's: clamp rather than
+            # 422 a client that asked for exactly the maximum window ending now.
+            start = end - MAX_RANGE
     elif run is not None and run.get("created_at") is not None:
         start = max(_utc(run["created_at"]) - RUN_LOOKBACK, end - MAX_RANGE)
     else:

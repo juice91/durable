@@ -63,7 +63,7 @@ export default function ProcessorsPage() {
 
       <section aria-labelledby="processors-catalog" className="space-y-3">
         <h2 id="processors-catalog" className="text-lg font-semibold text-foreground">Catalog</h2>
-        {catalogError ? <p role="alert" data-testid="catalog-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{catalogError}</p> : null}
+        {catalogError ? <p role="alert" data-testid="catalog-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{catalogError}</p> : null}
         {!catalog && !catalogError ? <p className="text-sm text-muted-foreground">Loading processor types…</p> : null}
         {catalog && catalog.items.length === 0 ? <p data-testid="catalog-empty" className="text-sm text-muted-foreground">No processor types are available.</p> : null}
         {catalog && catalog.items.length > 0 ? (

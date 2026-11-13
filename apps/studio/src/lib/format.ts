@@ -1,0 +1,48 @@
+// The one cost and token formatting rule used by the playground footer, traces, metrics and the
+// dashboard, so the same run reads the same everywhere.
+
+/** Parse the API's decimal cost string (or a number); null for missing or non-numeric values. */
+export function parseCost(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The DB scale of costs (NUMERIC(.., 10)): never show more decimals than that. */
+const MAX_COST_DECIMALS = 10;
+
+/**
+ * USD amount: "$0" for zero; below $1 two significant digits ("$0.015", "$0.0015", "$0.50");
+ * at $1 and above two decimals with grouping ("$1.50", "$1,234.50").
+ */
+export function formatUsd(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  if (value === 0) return "$0";
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs < 1) {
+    const decimals = Math.min(MAX_COST_DECIMALS, 1 - Math.floor(Math.log10(abs)));
+    const text = abs.toFixed(decimals);
+    // 0.996 rounds up to "1.0": fall through to the dollars-and-cents form.
+    if (Number(text) < 1) return `${sign}$${text}`;
+  }
+  return `${sign}$${abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A cost from the API (decimal string or number) via `formatUsd`; null when missing or unparsable,
+ * so each caller can say why ("no price", "not recorded", "—"). */
+export function formatCost(value: string | number | null | undefined): string | null {
+  const n = parseCost(value);
+  return n === null ? null : formatUsd(n);
+}
+
+/** Token count: exact with grouping below a million ("999,999"), compact above ("1.2M", "3.4B");
+ * "-" when missing. */
+export function formatTokens(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+  const abs = Math.abs(value);
+  const compact = (n: number) => n.toFixed(1).replace(/\.0$/, "");
+  if (abs >= 1e9) return `${compact(value / 1e9)}B`;
+  if (abs >= 1e6) return `${compact(value / 1e6)}M`;
+  return Math.round(value).toLocaleString("en-US");
+}

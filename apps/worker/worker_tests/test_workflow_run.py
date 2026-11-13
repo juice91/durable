@@ -228,6 +228,33 @@ def test_agent_not_found_and_output_schema_mismatch(worker, client, tenant, defs
     assert events[-1][3]["error_code"] == "output_invalid" and events[-1][3]["step_id"] is None
 
 
+def test_agent_step_with_a_required_context_field_fails_request_context_invalid(worker, client, tenant, defs):
+    """Workflow agent steps run with an empty request context: an agent with a required context
+    field fails the step (and the run) with request_context_invalid before any model request."""
+    spec = {**agent_spec(), "context_fields": [{"name": "customer", "type": "string", "required": True}]}
+    agent_id = publish_agent(worker.engine, tenant, spec)
+    wf = {
+        "name": "Needs context",
+        "input_schema": {"type": "object"},
+        "start": "a",
+        "steps": [{"id": "a", "type": "agent", "agent_id": agent_id, "input": {"q": "hi"}}],
+    }
+    _, run_id = _start(worker, client, tenant, wf, {})
+    run = wait_terminal(worker.run_store, tenant, run_id)
+    assert run["status"] == "failed"
+    events = event_rows(worker.engine, run_id)
+    failed = [e for e in events if e[1] == "step:a:failed"][0][3]
+    assert failed["error_code"] == "request_context_invalid"
+    assert events[-1][3]["error_code"] == "request_context_invalid"
+    child_id = [e for e in events if e[1] == "step:a:started"][0][3]["child_run_id"]
+    child = worker.run_store.get_run(tenant, uuid.UUID(child_id))
+    assert child["status"] == "failed"
+    assert child["error"] == "RequestContextInvalid: the request context does not match the agent's context fields"
+    child_events = event_rows(worker.engine, child_id)
+    assert [e[1] for e in child_events] == ["start", "end"]
+    assert child_events[-1][3]["error_code"] == "request_context_invalid"
+
+
 def test_archived_agent_is_agent_not_found_when_the_child_would_be_created(worker, client, tenant, defs):
     """The archived check still guards the create path: a fresh step never creates a child run for
     an archived agent (recovery of an already-created child is the W5b crash test)."""

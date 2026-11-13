@@ -227,6 +227,23 @@ describe("TracesPage", () => {
     expect(nav.replace).toHaveBeenLastCalledWith("/traces");
   });
 
+  it("sends the Recovering status filter as status=recovering, as-is", async () => {
+    (listRuns as any).mockResolvedValue(mockResponse);
+    const first = render(<TracesPage />);
+    await waitFor(() => expect(listRuns).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "recovering" } });
+    const url = nav.replace.mock.calls.at(-1)![0] as string;
+    expect(new URLSearchParams(url.split("?")[1]).get("status")).toBe("recovering");
+
+    // The URL drives the API call: the page asks for exactly status=recovering.
+    first.unmount();
+    (listRuns as any).mockClear();
+    nav.query = "status=recovering";
+    render(<TracesPage />);
+    await waitFor(() => expect(listRuns).toHaveBeenCalled());
+    expect((listRuns as any).mock.calls[0][0]).toMatchObject({ status: ["recovering"] });
+  });
+
   it("commits a text filter on Enter", async () => {
     (listRuns as any).mockResolvedValue(mockResponse);
     render(<TracesPage />);

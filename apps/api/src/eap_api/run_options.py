@@ -35,7 +35,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel, AgentVersionModel
-from eap_api.routes import _check_publishable
+from eap_api.routes import _check_publishable, validate_stored_draft
 from eap_schemas import AgentSpec, ModelRef
 from eap_schemas.models_policy import ModelNotAllowed, ModelPolicy
 from eap_schemas.request_context import RequestContextError, validate_request_context
@@ -93,15 +93,7 @@ def _draft_target(db: Session, tenant_id: str, agent: AgentModel) -> RunTarget:
     """The agent's current draft, validated exactly as a publish would, as a snapshot."""
     if agent.draft_spec is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent has no draft")
-    try:
-        spec = AgentSpec.model_validate(agent.draft_spec)
-    except ValidationError as exc:
-        first = exc.errors()[0] if exc.errors() else {"loc": (), "msg": "invalid"}
-        where = ".".join(str(p) for p in first.get("loc", ())) or "spec"
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"The draft is not a valid agent spec ({where}: {first.get('msg', 'invalid')}); fix it in the editor",
-        ) from None
+    spec = validate_stored_draft(agent.draft_spec)
     _check_publishable(db, tenant_id, spec)
     snapshot = spec.model_dump(mode="json")
     return RunTarget(version=None, spec=spec, spec_dict=snapshot, draft_spec=snapshot)

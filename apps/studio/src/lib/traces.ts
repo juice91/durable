@@ -252,24 +252,6 @@ export function formatDuration(durationMs: number | null | undefined): string {
   return `${minutes}m ${seconds}s`;
 }
 
-export function formatTokens(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "-";
-  return value.toLocaleString("en-US");
-}
-
-/** A decimal USD string as dollars: small amounts keep significant digits ("$0.000123"). */
-export function formatCost(value: string | null | undefined): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  if (n === 0) return "$0.00";
-  const abs = Math.abs(n);
-  // At least two decimals; below a cent, three significant digits (costs are stored to 1e-10).
-  const decimals = abs >= 0.01 ? 4 : Math.min(10, Math.ceil(-Math.log10(abs)) + 2);
-  const text = n.toFixed(decimals).replace(/(\.\d\d\d*?)0+$/, "$1");
-  return `$${text}`;
-}
-
 /** Run duration: started_at → finished_at when recorded, else created_at → updated_at for a finished run. */
 export function runDurationMs(run: TraceRun): number | null {
   const terminal = ["completed", "failed", "needs_attention"].includes(run.display_status);
@@ -341,30 +323,12 @@ export function hasActiveFilters(filters: TraceFilters): boolean {
 
 export async function listTraceRuns(
   filters: TraceFilters,
-  { limit = 50, before }: { limit?: number; before?: string } = {},
+  { limit = 50, before, signal }: { limit?: number; before?: string; signal?: AbortSignal } = {},
 ): Promise<{ items: TraceRun[]; next_before: string | null }> {
   const params = traceFiltersToParams(filters);
   params.set("limit", String(limit));
   if (before) params.set("before", before);
-  const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders() });
+  const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders(), signal });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
-}
-
-/** `datetime-local` value (local time) -> UTC ISO; '' -> null. */
-export function localInputToIso(value: string): string | null {
-  if (!value) return null;
-  const t = Date.parse(value);
-  return Number.isNaN(t) ? null : new Date(t).toISOString();
-}
-
-/** ISO (or anything Date parses; a value without an offset is UTC, as the API reads it) -> `datetime-local` value. */
-export function isoToLocalInput(value: string | null): string {
-  if (!value) return "";
-  const hasOffset = /([zZ]|[+-]\d\d:?\d\d)$/.test(value);
-  const t = Date.parse(hasOffset || !value.includes("T") ? value : `${value}Z`);
-  if (Number.isNaN(t)) return "";
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

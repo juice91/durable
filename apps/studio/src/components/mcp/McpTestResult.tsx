@@ -7,7 +7,7 @@ import { describeMcpError, isOutboundPolicyCode, type McpTestResult as Result } 
 export function McpTestResult({ result }: { result: Result }) {
   if (result.status === "error") {
     return (
-      <div role="alert" data-testid="mcp-test-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+      <div role="alert" data-testid="mcp-test-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">
         <p className="font-semibold">{isOutboundPolicyCode(result.error_code) ? "Blocked by the outbound policy" : "Connection failed"}</p>
         <p>{describeMcpError(result.error_code)}</p>
         <p className="mt-1 text-xs">Error code: <code className="font-mono">{result.error_code}</code></p>

@@ -23,7 +23,7 @@ function LastTest({ server }: { server: McpServer }) {
     <span className="flex flex-col">
       {server.last_status === "ok"
         ? <span className="text-primary">Connected</span>
-        : <span className="text-destructive" title={server.last_error_code ?? undefined}>{describeMcpError(server.last_error_code)}</span>}
+        : <span className="text-destructive-text" title={server.last_error_code ?? undefined}>{describeMcpError(server.last_error_code)}</span>}
       {when ? <span className="text-xs text-muted-foreground">{when}</span> : null}
     </span>
   );
@@ -181,9 +181,9 @@ export default function McpServersPage() {
         </div>
       ) : null}
 
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {notice ? <p role="status" data-testid="mcp-notice" className="mb-4 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">{notice}</p> : null}
-      {actionError ? <p role="alert" data-testid="mcp-action-error" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{actionError}</p> : null}
+      {actionError ? <p role="alert" data-testid="mcp-action-error" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{actionError}</p> : null}
       {loading ? <p className="text-muted-foreground">Loading MCP servers…</p> : null}
 
       {!loading && !error && servers.length === 0 ? (
@@ -211,7 +211,7 @@ export default function McpServersPage() {
                   <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => void testServer(server)}>Test connection</button>
                   <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => void toggleEnabled(server)}>{server.enabled ? "Disable" : "Enable"}</button>
                   <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => setForm({ mode: "edit", server })}>Edit</button>
-                  <button type="button" className={`${secondaryButton} text-destructive`} disabled={busy[server.id]} onClick={() => openDeleteDialog(server)}>Delete</button>
+                  <button type="button" className={`${secondaryButton} text-destructive-text`} disabled={busy[server.id]} onClick={() => openDeleteDialog(server)}>Delete</button>
                 </div>
               </div>
               {busy[server.id] ? <p className="mt-2 text-xs text-muted-foreground" aria-live="polite">Working…</p> : null}

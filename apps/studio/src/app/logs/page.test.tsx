@@ -1,157 +1,255 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { ApiError } from "@/lib/api";
+import { listTraceRuns } from "@/lib/traces";
+import { getRun } from "@/lib/runs";
+import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import LogsPage from "./page";
-import { listRuns } from "@/lib/runs";
+
+const RUN = "11111111-2222-3333-4444-555555555555";
+const OTHER_RUN = "99999999-2222-3333-4444-555555555555";
+const AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+let currentParams = new URLSearchParams();
+const replace = vi.fn();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ replace, push: vi.fn() }),
+  useSearchParams: () => currentParams,
 }));
 
-vi.mock("@/lib/runs", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/lib/runs")>();
-  return {
-    ...original,
-    listRuns: vi.fn(),
-  };
+vi.mock("@/lib/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/api")>();
+  return { ...original, api: { ...original.api, agents: { ...original.api.agents, list: vi.fn(async () => [{ id: AGENT, name: "Support bot" }]) } } };
 });
 
-describe("LogsPage", () => {
-  const mockRuns = [
-    {
-      run_id: "run-1",
-      agent_id: "agent-1",
-      version: 1,
-      status: "completed",
-      display_status: "completed",
-      input: "test input",
-      output: "test output",
-      error: null,
-      heartbeat_at: null,
-      created_at: "2026-11-12T10:00:00Z",
-      updated_at: "2026-11-12T10:00:05Z",
-      trace_id: "trace-abc123",
-      conversation_id: "conv-123",
-      turn: 1,
-    },
-  ];
+vi.mock("@/lib/traces", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/traces")>()),
+  listTraceRuns: vi.fn(async () => ({ items: [], next_before: null })),
+}));
 
-  const mockResponse = {
-    items: mockRuns,
-    next_before: null,
-  };
+vi.mock("@/lib/runs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/runs")>()),
+  getRun: vi.fn(async () => {
+    throw new Error("not mocked");
+  }),
+}));
 
+vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/logs/logsQuery")>()),
+  searchLogs: vi.fn(),
+}));
+
+function log(message: string, run_id: string | null = RUN, ts = "2026-11-13T10:00:00.123456+00:00"): LogItem {
+  return { ts, level: "error", message, service: "eap-worker", trace_id: "t1", span_id: "s1", run_id };
+}
+
+const response = (items: LogItem[]) => ({ items, from: "2026-11-13T09:00:00+00:00", to: "2026-11-13T10:00:00+00:00", limit: 100 });
+
+describe("Logs page", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    currentParams = new URLSearchParams();
+    replace.mockReset();
+    vi.mocked(searchLogs).mockReset();
+    vi.mocked(listTraceRuns).mockReset();
+    vi.mocked(listTraceRuns).mockResolvedValue({ items: [], next_before: null });
+    vi.mocked(getRun).mockReset();
+    vi.mocked(getRun).mockRejectedValue(new Error("not mocked"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("shows records with time, level, service, message and a link to the run's trace", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([log("model call failed"), log("outside a run", null)]));
+    render(<LogsPage />);
+    expect(await screen.findByText("model call failed")).toBeInTheDocument();
+    const rows = screen.getAllByTestId("log-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("error");
+    expect(rows[0]).toHaveTextContent("eap-worker");
+    expect(rows[0].querySelector("time")).toHaveAttribute("dateTime", "2026-11-13T10:00:00.123456+00:00");
+    expect(screen.getByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", `/traces/${RUN}`);
+    expect(screen.getAllByRole("link", { name: /Open trace/ })).toHaveLength(1);
   });
 
-  it("labels a workflow run with its workflow, not 'Tool: unknown'", async () => {
-    (listRuns as any).mockResolvedValue({ items: [...mockRuns, {
-      run_id: "wfrun-1", kind: "workflow" as const, agent_id: null, version: null, tool_id: null,
-      workflow_id: "wf-abcdef123456", workflow_version: 3, status: "running", display_status: "running",
-      input: "{}", output: null, error: null, heartbeat_at: null, created_at: "2026-11-12T11:00:00Z",
-      updated_at: "2026-11-12T11:00:05Z", trace_id: null, conversation_id: null, turn: null,
-    }], next_before: null });
+  it("sends the URL filters to GET /logs and never the agent", async () => {
+    currentParams = new URLSearchParams({ q: "boom", level: "warn", run_id: RUN, from: "2026-11-13T09:00:00.000Z", to: "2026-11-13T10:00:00.000Z" });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
-    const link = await screen.findByRole("link", { name: "Workflow: wf-abcde... v3" });
-    expect(link).toHaveAttribute("href", "/workflows/wf-abcdef123456/runs/wfrun-1");
-    expect(screen.queryByText(/Tool: unknown/)).toBeNull();
-  });
-
-  it("renders the logs page title and header", async () => {
-    (listRuns as any).mockResolvedValue(mockResponse);
-
-    render(<LogsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Logs")).toBeInTheDocument();
+    await waitFor(() => expect(searchLogs).toHaveBeenCalled());
+    expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({
+      limit: 100, run_id: RUN, q: "boom", level: "warn", from: "2026-11-13T09:00:00.000Z", to: "2026-11-13T10:00:00.000Z",
     });
+    expect(screen.getByLabelText("Search messages")).toHaveValue("boom");
   });
 
-  it("renders status filter dropdown", async () => {
-    (listRuns as any).mockResolvedValue(mockResponse);
-
+  it("debounces the search box into the URL", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByLabelText(/filter by status/i)).toBeInTheDocument();
-    });
+    const box = screen.getByLabelText("Search messages");
+    fireEvent.change(box, { target: { value: "ti" } });
+    fireEvent.change(box, { target: { value: "time" } });
+    act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS - 50));
+    expect(replace).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(60));
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith("/logs?q=time", { scroll: false });
   });
 
-  it("renders View all platform logs link", async () => {
-    (listRuns as any).mockResolvedValue(mockResponse);
-
+  it("writes the level and time range to the URL", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: /view all platform logs/i })).toBeInTheDocument();
-    });
+    fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
+    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "24h" } });
+    // The level chosen first is kept although the URL has not re-rendered yet.
+    expect(replace).toHaveBeenLastCalledWith("/logs?level=error&range=24h", { scroll: false });
   });
 
-  it("calls listRuns with correct parameters", async () => {
-    (listRuns as any).mockResolvedValue(mockResponse);
-
+  it("shows the Loki-unavailable state with a retry", async () => {
+    vi.mocked(searchLogs).mockRejectedValueOnce(new ApiError(503, "Log search is unavailable")).mockResolvedValueOnce(response([log("back")]));
     render(<LogsPage />);
-
-    await waitFor(() => {
-      expect(listRuns).toHaveBeenCalledWith({
-        limit: 50,
-        before: undefined,
-        status: undefined,
-      });
-    });
+    const state = await screen.findByTestId("logs-unavailable");
+    expect(state).toHaveTextContent("Loki unavailable");
+    expect(state).toHaveTextContent("Log search is unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("back")).toBeInTheDocument();
   });
 
-  it("labels agent, tool, workflow and child rows and links workflow and parent runs", async () => {
-    (listRuns as any).mockResolvedValue({
-      items: [
-        {
-          run_id: "agent-run-1", kind: "agent", agent_id: "agent-abcdef12", version: 1, tool_id: null,
-          status: "completed", display_status: "completed", input: "hi", output: "ok", error: null,
-          heartbeat_at: null, created_at: "2026-11-13T10:00:00Z", updated_at: "2026-11-13T10:00:05Z",
-          trace_id: "trace-agent", conversation_id: null, turn: null,
-        },
-        {
-          run_id: "tool-run-1", kind: "tool", agent_id: null, version: null, tool_id: "clock.now",
-          status: "completed", display_status: "completed", input: "{}", output: "12:00", error: null,
-          heartbeat_at: null, created_at: "2026-11-13T10:01:00Z", updated_at: "2026-11-13T10:01:01Z",
-          trace_id: null, conversation_id: null, turn: null,
-        },
-        {
-          run_id: "wfrun-rows", kind: "workflow", agent_id: null, version: null, tool_id: null,
-          workflow_id: "wf-abcdef123456", workflow_version: 3, status: "running", display_status: "running",
-          input: "{}", output: null, error: null, heartbeat_at: null, created_at: "2026-11-13T10:02:00Z",
-          updated_at: "2026-11-13T10:02:05Z", trace_id: null, conversation_id: null, turn: null,
-        },
-        {
-          run_id: "child-run-1", kind: "agent", agent_id: "agent-abcdef12", version: 2,
-          parent_run_id: "parent-run-0001", parent_step_id: "classify",
-          status: "completed", display_status: "completed", input: "step", output: "done", error: null,
-          heartbeat_at: null, created_at: "2026-11-13T10:03:00Z", updated_at: "2026-11-13T10:03:04Z",
-          trace_id: null, conversation_id: null, turn: null,
-        },
-      ],
-      next_before: null,
-    });
+  it("shows an empty state", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    currentParams = new URLSearchParams({ q: "nothing" });
     render(<LogsPage />);
+    expect(await screen.findByTestId("logs-empty")).toHaveTextContent("No logs match these filters");
+  });
 
-    expect(await screen.findByRole("columnheader", { name: "Agent / Tool / Workflow" })).toBeInTheDocument();
+  it("does not query with an invalid run id", async () => {
+    currentParams = new URLSearchParams({ run_id: "not-a-uuid" });
+    render(<LogsPage />);
+    expect(await screen.findByTestId("logs-filter-problem")).toHaveTextContent("Run id must be a UUID");
+    expect(searchLogs).not.toHaveBeenCalled();
+  });
 
-    const subjects = await screen.findAllByTestId("run-subject");
-    const plainAgent = subjects.find((node) => node.getAttribute("data-kind") === "agent" && !node.textContent?.includes("Part of"));
-    expect(plainAgent).toHaveTextContent("agent-ab...");
-    expect(subjects.find((node) => node.getAttribute("data-kind") === "tool")).toHaveTextContent("Tool: clock.now");
+  it("filters by agent in the browser through the agent's runs", async () => {
+    currentParams = new URLSearchParams({ agent_id: AGENT });
+    vi.mocked(listTraceRuns).mockResolvedValue({ items: [{ run_id: RUN, created_at: "2026-11-13T09:59:00Z", display_status: "completed" } as never], next_before: null });
+    vi.mocked(searchLogs).mockResolvedValue(response([log("mine"), log("theirs", OTHER_RUN)]));
+    render(<LogsPage />);
+    expect(await screen.findByText("mine")).toBeInTheDocument();
+    expect(screen.queryByText("theirs")).toBeNull();
+    expect(vi.mocked(listTraceRuns).mock.calls.at(-1)?.[0]).toMatchObject({ agent_id: AGENT });
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("1 most recent run");
+  });
 
-    const workflow = await screen.findByRole("link", { name: "Workflow: wf-abcde... v3" });
-    expect(workflow).toHaveAttribute("href", "/workflows/wf-abcdef123456/runs/wfrun-rows");
-    expect(workflow.closest("[data-testid='run-subject']")).toHaveAttribute("data-kind", "workflow");
+  it("loads older records", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => log(`m${i}`, RUN, `2026-11-13T09:${String(59 - (i % 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}+00:00`));
+    vi.mocked(searchLogs).mockResolvedValueOnce(response(full)).mockResolvedValueOnce(response([log("older", RUN, "2026-11-13T09:00:00+00:00")]));
+    render(<LogsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older" }));
+    expect(await screen.findByText("older")).toBeInTheDocument();
+    expect(vi.mocked(searchLogs).mock.calls[1][0]).toMatchObject({ from: "2026-11-13T09:00:00+00:00" });
+    expect(screen.queryByRole("button", { name: "Load older" })).toBeNull();
+  });
 
-    const child = subjects.find((node) => node.textContent?.includes("Part of workflow run"));
-    expect(child).toHaveAttribute("data-kind", "agent");
-    expect(child).toHaveTextContent("agent-ab...");
-    expect(child).toHaveTextContent("Part of workflow run parent-r... (step classify)");
-    expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
-    expect(screen.queryByText(/Tool: unknown/)).toBeNull();
+  it("keeps a level chosen while the search debounce is pending", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    render(<LogsPage />);
+    fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "timeout" } });
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
+    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS));
+    expect(replace).toHaveBeenLastCalledWith("/logs?q=timeout&level=error", { scroll: false });
+  });
+
+  it("keeps the agent and range when the debounced text lands", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    render(<LogsPage />);
+    await screen.findByRole("option", { name: "Support bot" });
+    fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: AGENT } });
+    fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "6h" } });
+    act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS + 10));
+    expect(replace).toHaveBeenLastCalledWith(`/logs?q=x&agent_id=${AGENT}&range=6h`, { scroll: false });
+  });
+
+  it("Enter with search text and a partial run id writes both in one URL change", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    render(<LogsPage />);
+    fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "boom" } });
+    fireEvent.change(screen.getByLabelText("Run"), { target: { value: "1111" } });
+    fireEvent.submit(screen.getByRole("search", { name: "Log filters" }));
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith("/logs?q=boom&run_id=1111", { scroll: false });
+  });
+
+  it("searches a selected run over its lifetime, not up to now", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-13T12:00:00Z"));
+    currentParams = new URLSearchParams({ run_id: RUN });
+    vi.mocked(getRun).mockResolvedValue({
+      run_id: RUN, created_at: "2026-11-05T10:00:00Z", updated_at: "2026-11-05T10:00:03Z", display_status: "completed",
+      finished_at: "2026-11-05T10:00:02Z",
+    } as never);
+    vi.mocked(searchLogs).mockResolvedValue(response([log("old run")]));
+    render(<LogsPage />);
+    expect(await screen.findByText("old run")).toBeInTheDocument();
+    expect(searchLogs).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({
+      limit: 100, run_id: RUN, from: "2026-11-05T09:59:00.000000Z", to: "2026-11-05T10:00:07.000000Z",
+    });
+    expect(screen.getByRole("option", { name: "Run lifetime" })).toBeInTheDocument();
+  });
+
+  it("leaves the window to the API when the run cannot be loaded, and says so", async () => {
+    currentParams = new URLSearchParams({ run_id: RUN });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    render(<LogsPage />);
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({ limit: 100, run_id: RUN });
+    expect(await screen.findByRole("option", { name: "Since the run started" })).toBeInTheDocument();
+  });
+
+  it("says when the agent's runs cannot be loaded, and re-fetches them on Refresh", async () => {
+    currentParams = new URLSearchParams({ agent_id: AGENT });
+    vi.mocked(listTraceRuns).mockRejectedValueOnce(new Error("down"));
+    vi.mocked(searchLogs).mockResolvedValue(response([log("mine")]));
+    render(<LogsPage />);
+    expect(await screen.findByTestId("logs-agent-note")).toHaveTextContent("Could not load this agent's runs");
+    vi.mocked(listTraceRuns).mockResolvedValue({ items: [{ run_id: RUN, created_at: "2026-11-13T09:59:00Z", display_status: "completed" } as never], next_before: null });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("mine")).toBeInTheDocument();
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("1 most recent run");
+  });
+
+  it("cuts a very long message with an expand control", async () => {
+    const long = `start ${"y".repeat(3000)} end`;
+    vi.mocked(searchLogs).mockResolvedValue(response([log(long)]));
+    render(<LogsPage />);
+    const more = await screen.findByRole("button", { name: /Show full message/ });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/end$/)).toBeNull();
+    fireEvent.click(more);
+    expect(screen.getByText(/ end$/)).toBeInTheDocument();
+  });
+
+  it("drops a pending search debounce when the search text changes from outside (Back/forward)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(searchLogs).mockResolvedValue(response([]));
+    currentParams = new URLSearchParams({ q: "first" });
+    const { rerender } = render(<LogsPage />);
+    const box = screen.getByLabelText("Search messages");
+    fireEvent.change(box, { target: { value: "first and more" } });
+    // Back: the URL's q changes before the debounce fires.
+    currentParams = new URLSearchParams({ q: "earlier" });
+    rerender(<LogsPage />);
+    expect(screen.getByLabelText("Search messages")).toHaveValue("earlier");
+    act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS * 2));
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Search messages")).toHaveValue("earlier");
   });
 });

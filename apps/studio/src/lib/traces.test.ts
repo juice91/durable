@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   flattenSpans,
-  formatCost,
   formatDuration,
-  isoToLocalInput,
-  localInputToIso,
   parseTraceFilters,
   spanGeometry,
   spanLabel,
@@ -89,15 +86,6 @@ describe("spanLabel", () => {
 });
 
 describe("formatting", () => {
-  it("formats costs from decimal strings", () => {
-    expect(formatCost(null)).toBeNull();
-    expect(formatCost("0")).toBe("$0.00");
-    expect(formatCost("0.0000000000")).toBe("$0.00");
-    expect(formatCost("1.5000000000")).toBe("$1.50");
-    expect(formatCost("0.0123400000")).toBe("$0.0123");
-    expect(formatCost("0.0001234567")).toBe("$0.000123");
-    expect(formatCost("0.0000000020")).toBe("$0.000000002");
-  });
   it("formats durations", () => {
     expect(formatDuration(null)).toBe("-");
     expect(formatDuration(0)).toBe("0 ms");
@@ -122,12 +110,6 @@ describe("URL filters", () => {
     expect(f.kind).toBeNull();
     expect(f.model).toBeNull();
     expect(traceFiltersToParams(f).toString()).toBe("status=failed%2Crunning");
-  });
-  it("converts datetime-local values to UTC and back", () => {
-    const iso = localInputToIso("2026-11-13T10:30")!;
-    expect(iso).toMatch(/Z$/);
-    expect(isoToLocalInput(iso)).toBe("2026-11-13T10:30");
-    expect(localInputToIso("")).toBeNull();
-    expect(isoToLocalInput(null)).toBe("");
+    expect(traceFiltersToParams({ ...f, status: ["recovering"] }).toString()).toBe("status=recovering");
   });
 });

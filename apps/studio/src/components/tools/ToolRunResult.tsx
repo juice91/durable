@@ -86,13 +86,13 @@ export function ToolRunResult({ runId, initialStatus }: ToolRunResultProps) {
       <div className={`rounded-md border p-3 text-sm ${toneClass}`}>
         {view.tone === "pending" ? <p className="text-muted-foreground" aria-live="polite">{view.title}…</p> : null}
         {view.tone === "attention" ? (
-          <div role="alert" data-testid="tool-run-needs-attention" className="space-y-1 text-destructive">
+          <div role="alert" data-testid="tool-run-needs-attention" className="space-y-1 text-destructive-text">
             <p className="font-semibold">{view.title}</p>
             <p className="text-xs">It was not retried automatically. Open the run and check the target system before running it again.</p>
           </div>
         ) : null}
-        {view.tone === "error" ? <p role="alert" className="font-semibold text-destructive">{view.title}</p> : null}
-        {view.error ? <p data-testid="tool-run-error" className="mt-1 whitespace-pre-wrap text-destructive">{view.error}</p> : null}
+        {view.tone === "error" ? <p role="alert" className="font-semibold text-destructive-text">{view.title}</p> : null}
+        {view.error ? <p data-testid="tool-run-error" className="mt-1 whitespace-pre-wrap text-destructive-text">{view.error}</p> : null}
         {view.errorCode ? <p className="mt-1 text-xs text-muted-foreground">Error code: <code data-testid="tool-run-error-code" className="font-mono">{view.errorCode}</code></p> : null}
         {view.tone === "success" ? (
           view.result !== null
@@ -100,7 +100,7 @@ export function ToolRunResult({ runId, initialStatus }: ToolRunResultProps) {
             : <p className="text-muted-foreground">Completed with no output.</p>
         ) : null}
       </div>
-      {loadError ? <p role="alert" className="mt-2 text-xs text-destructive">{loadError}</p> : null}
+      {loadError ? <p role="alert" className="mt-2 text-xs text-destructive-text">{loadError}</p> : null}
     </section>
   );
 }

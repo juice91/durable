@@ -2,6 +2,7 @@
 // Overview Dashboard share: filters <-> query strings, date-range presets, period deltas, number
 // formatting, chart summaries and the drill-down links to the Traces list.
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
+import { formatCost } from "./format";
 
 // ------------------------------------------------------------------------------------- types
 
@@ -377,30 +378,10 @@ export function computeDelta(
 
 // ----------------------------------------------------------------------- formatting
 
-/** Parse the API's decimal cost string; null for missing or non-numeric values. */
-export function parseCost(value: string | null | undefined): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** "$1.23", "$0.0042", "$0.00" — enough significant digits for sub-cent model costs. */
-export function formatCost(value: string | number | null | undefined): string {
-  const n = typeof value === "number" ? value : parseCost(value);
-  if (n === null) return "—";
-  if (n === 0) return "$0.00";
-  const abs = Math.abs(n);
-  if (abs >= 1) return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  if (abs >= 0.01) return `$${n.toFixed(2)}`;
-  // Two significant digits: 0.0042 -> "$0.0042", 0.000123 -> "$0.00012" (at most 10 decimals, the DB scale).
-  const decimals = Math.min(10, -Math.floor(Math.log10(abs)) + 1);
-  return `$${n.toFixed(decimals)}`;
-}
-
 /** The cost cell text: "no price" when every request in it was unpriced. */
 export function formatCostWithPricing(values: Pick<MetricValues, "cost_usd" | "requests" | "unpriced_requests">): string {
   if (values.requests > 0 && values.unpriced_requests >= values.requests) return "no price";
-  return formatCost(values.cost_usd);
+  return formatCost(values.cost_usd) ?? "—";
 }
 
 /** "1,234", "12.3K", "4.5M". */
@@ -493,22 +474,6 @@ export function providersOf(models: readonly string[]): string[] {
 }
 
 // ------------------------------------------------------------------- custom range inputs
-
-/** `datetime-local` value (local time) -> UTC ISO; '' or invalid -> null. */
-export function localInputToIso(value: string): string | null {
-  if (!value) return null;
-  const t = Date.parse(value);
-  return Number.isNaN(t) ? null : new Date(t).toISOString();
-}
-
-/** ISO -> `datetime-local` value in local time ("YYYY-MM-DDTHH:mm"). */
-export function isoToLocalInput(value: string | null): string {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 // ------------------------------------------------------------------------- filter options
 

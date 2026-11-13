@@ -8,7 +8,7 @@ const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm tex
 
 function UsageList({ usage, loading, error }: { usage: ProcessorUsage[] | undefined; loading: boolean; error: string | null }) {
   if (loading) return <p className="text-xs text-muted-foreground">Loading agents…</p>;
-  if (error) return <p className="text-xs text-destructive">{error}</p>;
+  if (error) return <p className="text-xs text-destructive-text">{error}</p>;
   if (!usage || usage.length === 0) return <p data-testid="processor-usage-empty" className="text-xs text-muted-foreground">No agent uses this processor yet.</p>;
   return (
     <ul data-testid="processor-usage" className="space-y-1">
@@ -73,7 +73,7 @@ export function ProcessorCatalog({ items, usage, usageLoading, usageError, onTry
                   {properties.map(([name, schema]) => (
                     <li key={name}>
                       <span className="font-mono text-foreground">{name}</span>
-                      {required.includes(name) ? <span className="text-destructive"> *</span> : null}
+                      {required.includes(name) ? <span className="text-destructive-text"> *</span> : null}
                       <span className="text-muted-foreground"> · {describeSchemaType(schema)}</span>
                       {schema.default !== undefined ? <span className="text-muted-foreground"> · default {JSON.stringify(schema.default)}</span> : null}
                       {schema.description ? <span className="block text-muted-foreground">{schema.description}</span> : null}

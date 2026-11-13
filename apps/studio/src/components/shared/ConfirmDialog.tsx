@@ -149,7 +149,7 @@ export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = 
       >
         <h2 id={titleId} className="text-lg font-semibold text-card-foreground">{title}</h2>
         {description ? <div id={descriptionId} className="text-sm text-muted-foreground">{description}</div> : null}
-        {error ? <p role="alert" data-testid="confirm-dialog-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+        {error ? <p role="alert" data-testid="confirm-dialog-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
         <div className="flex justify-end gap-2">
           <button ref={cancelRef} type="button" disabled={busy} onClick={onCancel} className="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50">{cancelLabel}</button>
           <button

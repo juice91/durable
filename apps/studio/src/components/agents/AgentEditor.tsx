@@ -244,11 +244,11 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
         {/* Polite and persistent: announced when the problems change, not on every keystroke. */}
         <div id="instructions-problems" aria-live="polite">
           {instructionProblems.map((problem) => (
-            <p key={problem} data-testid="placeholder-error" className="mt-1 text-xs text-destructive">{problem}</p>
+            <p key={problem} data-testid="placeholder-error" className="mt-1 text-xs text-destructive-text">{problem}</p>
           ))}
         </div>
         {target?.kind === "instructions" && serverError && !instructionProblems.some((p) => serverError.endsWith(p)) ? (
-          <p role="alert" data-testid="instructions-server-error" className="mt-1 text-xs text-destructive">{serverError}</p>
+          <p role="alert" data-testid="instructions-server-error" className="mt-1 text-xs text-destructive-text">{serverError}</p>
         ) : null}
       </div>
 
@@ -310,7 +310,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
             </label>
           ))}
         </div>
-        {toolsError ? <p role="alert" className="mt-2 text-xs text-destructive">{toolsError}</p> : null}
+        {toolsError ? <p role="alert" className="mt-2 text-xs text-destructive-text">{toolsError}</p> : null}
       </div>
 
       <McpToolPicker value={mcpTools} onChange={setMcpTools} />

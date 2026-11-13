@@ -178,7 +178,7 @@ export default function RequestContextPage() {
         </p>
       </div>
 
-      {agentsError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{agentsError}</p> : null}
+      {agentsError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{agentsError}</p> : null}
       {agentsLoading ? <p className="text-muted-foreground">Loading agents…</p> : null}
       {!agentsLoading && !agentsError && agents.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border p-8 text-center">
@@ -240,7 +240,7 @@ export default function RequestContextPage() {
           </aside>
 
           <main className="min-w-0 space-y-6">
-            {infoError ? <p role="alert" data-testid="context-load-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{infoError}</p> : null}
+            {infoError ? <p role="alert" data-testid="context-load-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{infoError}</p> : null}
             {infoLoading ? <p className="text-muted-foreground">Loading context fields…</p> : null}
 
             {info && info.fields.length === 0 ? (
@@ -316,7 +316,7 @@ export default function RequestContextPage() {
                       Save for playground
                     </button>
                     <Link
-                      href={playgroundHref(agentId)}
+                      href={playgroundHref(agentId, canSave ? versionRef : (saved?.version ?? versionRef), true)}
                       onClick={() => {
                         if (canSave) save();
                       }}
@@ -327,7 +327,7 @@ export default function RequestContextPage() {
                     {!canSave && validation.status !== "checking" ? <span className="text-xs text-muted-foreground">Only a valid context can be saved.</span> : null}
                   </div>
                   {notice ? (
-                    <p role="status" data-testid="context-save-notice" className={`mt-3 text-sm ${notice.tone === "warn" ? "text-destructive" : "text-muted-foreground"}`}>{notice.text}</p>
+                    <p role="status" data-testid="context-save-notice" className={`mt-3 text-sm ${notice.tone === "warn" ? "text-destructive-text" : "text-muted-foreground"}`}>{notice.text}</p>
                   ) : null}
                 </section>
             ) : null}

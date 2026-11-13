@@ -154,7 +154,7 @@ export default function ToolsPage() {
         <h1 className="text-2xl font-bold text-foreground">Tools</h1>
         <p className="mt-1 text-muted-foreground">Explore platform tools, fill their inputs and run them.</p>
       </div>
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {notes.length > 0 ? (
         <ul data-testid="tool-runs-started-elsewhere" aria-label="Runs started for other tools" className="mb-4 space-y-2">
           {notes.map((item) => (
@@ -179,8 +179,8 @@ export default function ToolsPage() {
                   <span className="block font-mono text-xs text-muted-foreground">{tool.id}</span>
                   <span className="mt-2 line-clamp-2 block text-sm text-muted-foreground">{tool.description}</span>
                   <span className="mt-2 flex flex-wrap gap-1">
-                    {tool.side_effect ? <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive">Side effect</span> : <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">Read only</span>}
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${tool.allowed ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive"}`}>{tool.allowed ? "Allowed" : "Disallowed"}</span>
+                    {tool.side_effect ? <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive-text">Side effect</span> : <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">Read only</span>}
+                    <span className={`rounded-full px-2 py-0.5 text-xs ${tool.allowed ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive-text"}`}>{tool.allowed ? "Allowed" : "Disallowed"}</span>
                   </span>
                 </button>
               ))}
@@ -205,11 +205,11 @@ export default function ToolsPage() {
                   <div className="space-y-1">
                     <label htmlFor="tool-input-json" className="sr-only">Tool input JSON</label>
                     <textarea id="tool-input-json" rows={12} value={rawInput} onChange={(event) => setJsonInput(event.target.value)} className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-                    {jsonError ? <p role="alert" className="text-xs text-destructive">{jsonError}</p> : null}
+                    {jsonError ? <p role="alert" className="text-xs text-destructive-text">{jsonError}</p> : null}
                   </div>
                 )}
                 <div className="mt-5 space-y-3 border-t border-border pt-4">
-                  {runBanner ? <p role="alert" data-testid="tool-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{runBanner}</p> : null}
+                  {runBanner ? <p role="alert" data-testid="tool-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{runBanner}</p> : null}
                   <div className="flex flex-wrap items-center gap-3">
                     <button type="button" onClick={runTool} disabled={submitting || (mode === "json" && Boolean(jsonError))} aria-busy={submitting} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">Run</button>
                     {submitting ? <span className="text-xs text-muted-foreground" aria-live="polite">Starting…</span> : null}

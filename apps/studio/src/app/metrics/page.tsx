@@ -8,6 +8,7 @@ import {
   MetricsCharts,
   MetricsFilterBar,
   MetricsKpis,
+  useAutoRefresh,
   useMetricsQuery,
 } from "@/components/metrics";
 import {
@@ -45,14 +46,10 @@ function MetricsView() {
   const state = useMemo(() => parsePageState(new URLSearchParams(search)), [search]);
 
   // Presets end "now": recomputed when the URL state changes (range, filters), on Refresh, and every
-  // AUTO_REFRESH_MS while a preset range is shown (a custom range is fixed and is not re-fetched).
+  // AUTO_REFRESH_MS while a preset range is shown and the tab is visible, once more when it becomes
+  // visible again (useAutoRefresh); a custom range is fixed and is not re-fetched.
   const [refreshes, setRefreshes] = useState(0);
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (state.range === "custom") return;
-    const timer = setInterval(() => setTick((t) => t + 1), AUTO_REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [state.range]);
+  const tick = useAutoRefresh(state.range !== "custom", AUTO_REFRESH_MS);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const now = useMemo(() => new Date(), [search, refreshes, tick]);
   const filters = useMemo(() => pageStateToFilters(state, now), [state, now]);

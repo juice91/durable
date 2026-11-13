@@ -158,5 +158,7 @@ describe("saved context storage", () => {
 
   it("builds the playground link", () => {
     expect(playgroundHref("a 1")).toBe("/playground?agent=a+1");
+    expect(playgroundHref("a1", 3, true)).toBe("/playground?agent=a1&version=3&context=preset");
+    expect(playgroundHref("a1", "draft")).toBe("/playground?agent=a1&version=draft");
   });
 });

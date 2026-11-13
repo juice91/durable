@@ -148,7 +148,7 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
 
   if (notFound) {
     return (
-      <div role="alert" data-testid="workflow-run-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+      <div role="alert" data-testid="workflow-run-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive-text">
         Run not found.
       </div>
     );
@@ -180,8 +180,8 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
       {workflowId && run?.workflow_id && run.workflow_id !== workflowId ? (
         <p role="status" className="rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">This run belongs to another workflow; showing that workflow&apos;s graph.</p>
       ) : null}
-      {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{loadError}</p> : null}
-      {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">Graph unavailable: {specError}</p> : null}
+      {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{loadError}</p> : null}
+      {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Graph unavailable: {specError}</p> : null}
 
       {view.status === "needs_attention" ? (
         <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-orange-500 bg-orange-100/50 p-3 text-sm text-foreground dark:bg-orange-900/20">
@@ -191,7 +191,7 @@ export function WorkflowRunView({ runId, workflowId }: WorkflowRunViewProps) {
         </div>
       ) : null}
       {view.status === "failed" ? (
-        <div role="alert" data-testid="workflow-run-failed" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+        <div role="alert" data-testid="workflow-run-failed" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">
           <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
           {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
           {view.runError?.errorCode ? <p className="mt-1 text-xs">Error code: <code data-testid="workflow-run-error-code" className="font-mono">{view.runError.errorCode}</code></p> : null}

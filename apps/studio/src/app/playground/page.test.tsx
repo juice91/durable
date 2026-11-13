@@ -9,7 +9,6 @@ import {
   getConversation,
   listConversations,
   renameConversation,
-  startTurn,
   type Conversation,
   type ConversationRun,
 } from "@/lib/conversations";
@@ -24,16 +23,38 @@ import {
   type SubscribeHandlers,
 } from "@/lib/runs";
 
+import {
+  startTurnWithOptions as startTurn,
+  TurnStartError,
+} from "@/components/playground/turnApi";
+import { fetchModels, type ModelOption } from "@/lib/metrics";
+import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
+import type { AgentSpec, AgentVersion } from "@/lib/api";
+
 vi.mock("@/lib/api", () => ({
-  api: { agents: { list: vi.fn() } },
+  api: { agents: { list: vi.fn() }, versions: { list: vi.fn() } },
 }));
+
+vi.mock("@/components/playground/turnApi", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/components/playground/turnApi")>();
+  return { ...original, startTurnWithOptions: vi.fn() };
+});
+
+vi.mock("@/lib/metrics", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/metrics")>();
+  return { ...original, fetchModels: vi.fn() };
+});
+
+vi.mock("@/lib/requestContext", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/requestContext")>();
+  return { ...original, getRequestContext: vi.fn(), validateRequestContext: vi.fn() };
+});
 
 vi.mock("@/lib/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   listConversations: vi.fn(),
   renameConversation: vi.fn(),
-  startTurn: vi.fn(),
 }));
 
 vi.mock("@/lib/runs", async (importOriginal) => {
@@ -84,6 +105,33 @@ const agents = [
     },
     latest_version: 2,
   },
+];
+
+const specOf = (name: string, model = { provider: "openai", name: "gpt-4.1-mini" }, extra: object = {}): AgentSpec =>
+  ({ spec_version: 1, name, instructions: "Help", model, tools: [], ...extra }) as AgentSpec;
+
+const versionOf = (agentId: string, version: number, spec: AgentSpec): AgentVersion => ({
+  agent_id: agentId,
+  version,
+  spec,
+  spec_hash: `hash-${version}`,
+  created_at: "2026-11-12T00:00:00Z",
+  created_by: "dev",
+});
+
+const versionsByAgent: Record<string, AgentVersion[]> = {
+  "agent-1": [versionOf("agent-1", 1, specOf("Support assistant"))],
+  "agent-3": [
+    versionOf("agent-3", 1, specOf("Published helper")),
+    versionOf("agent-3", 2, specOf("Published helper")),
+  ],
+};
+
+const modelList: ModelOption[] = [
+  { id: "openai:gpt-4.1-mini", provider: "openai", name: "gpt-4.1-mini", wildcard: false, source: "allowlist", description: null },
+  { id: "openai:gpt-4.1", provider: "openai", name: "gpt-4.1", wildcard: false, source: "allowlist", description: null },
+  { id: "anthropic:*", provider: "anthropic", name: "*", wildcard: true, source: "allowlist", description: null },
+  { id: "test:echo", provider: "test", name: "echo", wildcard: false, source: "scripted", description: "Echoes" },
 ];
 
 const run = (id: string, display_status: Run["display_status"] = "running"): Run => ({
@@ -175,7 +223,19 @@ const answered = (input: string, answer: string): RunEvent[] => [
 beforeEach(() => {
   window.history.replaceState({}, "", "/playground");
   vi.clearAllMocks();
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   vi.mocked(api.agents.list).mockResolvedValue(agents);
+  vi.mocked(api.versions.list).mockImplementation(async (agentId) => versionsByAgent[agentId] ?? []);
+  vi.mocked(fetchModels).mockResolvedValue(modelList);
+  vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => ({
+    agent_id: agentId,
+    version: typeof version === "number" ? version : null,
+    draft: version === "draft",
+    fields: [],
+    schema: { type: "object" as const, properties: {} },
+  }));
+  vi.mocked(validateRequestContext).mockImplementation(async (_agentId, value) => value);
   vi.mocked(startRun).mockImplementation(async (_agentId, runId) => run(runId));
   vi.mocked(createConversation).mockImplementation(async (agentId, title, id) => ({
     id: id ?? "conv-new",
@@ -380,14 +440,20 @@ describe("PlaygroundPage", () => {
     window.history.replaceState({}, "", "/playground?conversation=conv-1");
     await renderReady();
 
-    await waitFor(() => expect(startTurn).toHaveBeenCalledWith("conv-1", "run-1", "Hello"));
+    await waitFor(() =>
+      expect(startTurn).toHaveBeenCalledWith("conv-1", "run-1", "Hello", {
+        version: 1,
+        model: null,
+        request_context: null,
+      }),
+    );
     await waitFor(() =>
       expect(subscribeRun).toHaveBeenCalledWith("run-1", expect.any(Object), { initialLastSeq: -1 }),
     );
     expect(vi.mocked(startTurn).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(subscribeRun).mock.invocationCallOrder[0],
     );
-    expect(screen.getByText("Hello")).toBeInTheDocument();
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
   });
 
   it("does not subscribe when every turn of the loaded conversation is finished", async () => {
@@ -677,5 +743,447 @@ describe("PlaygroundPage", () => {
       expect(subscribeRun).not.toHaveBeenCalled();
       await waitFor(() => expect(composer()).toBeEnabled());
     });
+  });
+});
+
+describe("PlaygroundPage run options (P0.19)", () => {
+  const tierInfo = (agentId: string, version: unknown) => ({
+    agent_id: agentId,
+    version: typeof version === "number" ? version : null,
+    draft: version === "draft",
+    fields: [
+      { name: "tier", type: "string" as const, required: false, description: "Customer tier", max_length: 20, values: [] },
+    ],
+    schema: { type: "object" as const, properties: { tier: { type: "string" as const, title: "tier" } } },
+  });
+
+  const lastOptions = () => vi.mocked(startTurn).mock.calls.at(-1)?.[3];
+
+  async function modelsReady() {
+    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+  }
+
+  function choose(name: string, value: string) {
+    fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
+  }
+
+  function answer(runId: string, modelId: string, cost: string | null, tokens: [number, number]) {
+    act(() => {
+      handlers.onEvent?.(event(0, "run_started", { input: "x" }));
+      handlers.onEvent?.(
+        event(1, "model_message", {
+          model_request: 0,
+          is_final: true,
+          text: `answer from ${modelId}`,
+          model_id: modelId,
+          usage: { input_tokens: tokens[0], output_tokens: tokens[1] },
+          cost_usd: cost,
+        }),
+      );
+      handlers.onEvent?.(event(2, "run_completed", { output: `answer from ${modelId}` }));
+    });
+    return runId;
+  }
+
+  beforeEach(() => {
+    vi.mocked(startTurn).mockImplementation(async (conversationId, runId, _input, options) => ({
+      run_id: runId,
+      status: "queued",
+      display_status: "queued",
+      agent_id: "agent-1",
+      version: options.version === "draft" ? null : (options.version ?? 1),
+      draft: options.version === "draft",
+      model_id: options.model ? `${options.model.provider}:${options.model.name}` : "openai:gpt-4.1-mini",
+      model_overridden: options.model !== null,
+      conversation_id: conversationId,
+      turn: 1,
+    }));
+  });
+
+  it("sends the version, the model override and the request context with the turn, and keeps them in the URL", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    window.sessionStorage.setItem(
+      `eap.playground.context.v1:anon:agent-1`,
+      JSON.stringify({ value: { tier: "gold" } }),
+    );
+    await renderReady();
+    await modelsReady();
+    choose("Version", "v1");
+    choose("Model", "openai:gpt-4.1");
+    await sendMessage("Hi");
+
+    expect(lastOptions()).toEqual({
+      version: 1,
+      model: { provider: "openai", name: "gpt-4.1" },
+      request_context: { tier: "gold" },
+    });
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("agent")).toBe("agent-1");
+    expect(params.get("version")).toBe("1");
+    expect(params.get("model")).toBe("openai:gpt-4.1");
+  });
+
+  it("does not send the version's own model as an override and offers no wildcard as a plain model", async () => {
+    await renderReady();
+    await modelsReady();
+    const model = screen.getByRole("combobox", { name: "Model" });
+    expect(model).toHaveValue("");
+    expect(screen.getByRole("option", { name: "Version default (openai:gpt-4.1-mini)" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "openai:gpt-4.1-mini" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "anthropic: other model…" })).toBeInTheDocument();
+    await sendMessage("Hi");
+    expect(lastOptions()).toEqual({ version: null, model: null, request_context: null });
+  });
+
+  it("switches model mid-conversation; each turn's badge shows its own model, tokens and cost", async () => {
+    await renderReady();
+    await modelsReady();
+    await sendMessage("First");
+    const firstRun = vi.mocked(startTurn).mock.calls[0][1];
+    answer(firstRun, "openai:gpt-4.1-mini", "0.0012", [1200, 300]);
+    await waitFor(() => expect(composer()).toBeEnabled());
+
+    choose("Model", "test:echo");
+    await sendMessage("Second");
+    const [, secondRun, , secondOptions] = vi.mocked(startTurn).mock.calls[1];
+    expect(vi.mocked(startTurn).mock.calls[0][3].model).toBeNull();
+    expect(secondOptions.model).toEqual({ provider: "test", name: "echo" });
+    expect(vi.mocked(startTurn).mock.calls[1][0]).toBe(vi.mocked(startTurn).mock.calls[0][0]);
+    answer(secondRun, "test:echo", null, [10, 5]);
+
+    await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
+    expect(screen.getAllByTestId("turn-badge-model").map((el) => el.textContent)).toEqual([
+      "openai:gpt-4.1-mini",
+      "test:echo",
+    ]);
+    expect(screen.getAllByTestId("turn-badge-tokens").map((el) => el.textContent)).toEqual([
+      "1,200 in · 300 out tokens",
+      "10 in · 5 out tokens",
+    ]);
+    expect(screen.getAllByTestId("turn-badge-cost").map((el) => el.textContent)).toEqual(["$0.0012", "no price"]);
+    expect(screen.getAllByText("override")).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "Open trace" }).map((el) => el.getAttribute("href"))).toEqual([
+      `/traces/${firstRun}`,
+      `/traces/${secondRun}`,
+    ]);
+  });
+
+  it("shows a refused model inline under the picker, not as a generic failure", async () => {
+    vi.mocked(startTurn).mockRejectedValueOnce(
+      new TurnStartError(422, "model 'openai:gpt-4.1' is not allowed on this platform (not in the EAP_ALLOWED_MODELS allowlist)"),
+    );
+    await renderReady();
+    await modelsReady();
+    choose("Model", "openai:gpt-4.1");
+    await sendMessage("Hi");
+
+    const alert = await screen.findByText(/is not allowed on this platform/);
+    expect(alert).toHaveAttribute("id", "playground-model-error");
+    expect(screen.getByRole("combobox", { name: "Model" })).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByText("Failed to send the message.")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("turn-footer")).toHaveLength(0);
+    expect(screen.getByTestId("unsent-message")).toHaveTextContent("Hi");
+    await waitFor(() => expect(composer()).toBeEnabled());
+
+    choose("Model", "test:echo");
+    expect(screen.queryByText(/is not allowed on this platform/)).not.toBeInTheDocument();
+  });
+
+  it("shows refused context fields inline in the context panel", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    window.sessionStorage.setItem(
+      `eap.playground.context.v1:anon:agent-1`,
+      JSON.stringify({ value: { tier: "platinum-plus-extra-long" } }),
+    );
+    vi.mocked(startTurn).mockRejectedValueOnce(
+      new TurnStartError(422, [
+        { loc: ["body", "request_context", "tier"], msg: "String should have at most 20 characters", type: "string_too_long" },
+      ]),
+    );
+    await renderReady();
+    await waitFor(() => expect(getRequestContext).toHaveBeenCalled());
+    await sendMessage("Hi");
+
+    const errors = await screen.findByTestId("context-turn-errors");
+    expect(errors).toHaveTextContent("tier");
+    expect(errors).toHaveTextContent("String should have at most 20 characters");
+    expect(screen.getByRole("region", { name: "Request context" })).toBeInTheDocument();
+    expect(lastOptions()?.request_context).toEqual({ tier: "platinum-plus-extra-long" });
+  });
+
+  it("shows a refused draft inline under the version selector", async () => {
+    vi.mocked(startTurn).mockRejectedValueOnce(new TurnStartError(422, "instructions: unknown placeholder {{context.plan}}"));
+    await renderReady();
+    choose("Version", "draft");
+    await sendMessage("Hi");
+    expect(lastOptions()?.version).toBe("draft");
+    expect(await screen.findByText("The draft cannot run: instructions: unknown placeholder {{context.plan}}")).toHaveAttribute(
+      "id",
+      "playground-version-error",
+    );
+  });
+
+  it("shows the draft's own model refusal as a draft problem, not under the picker", async () => {
+    vi.mocked(startTurn).mockRejectedValueOnce(
+      new TurnStartError(422, "model 'openai:gpt-9' is not allowed on this platform (not in the EAP_ALLOWED_MODELS allowlist)"),
+    );
+    await renderReady();
+    choose("Version", "draft");
+    await sendMessage("Hi");
+    expect(lastOptions()?.model).toBeNull();
+    expect(await screen.findByText(/^The draft cannot run: model 'openai:gpt-9'/)).toHaveAttribute("id", "playground-version-error");
+    expect(document.getElementById("playground-model-error")).toBeNull();
+  });
+
+  it("shows other refusals inline above the thread", async () => {
+    vi.mocked(startTurn).mockRejectedValueOnce(
+      new TurnStartError(422, [{ loc: ["body", "input"], msg: "input must be at most 32 KiB in UTF-8", type: "value_error" }]),
+    );
+    await renderReady();
+    await sendMessage("Hi");
+    expect(await screen.findByTestId("turn-options-error")).toHaveTextContent("input: input must be at most 32 KiB in UTF-8");
+  });
+
+  it("restores agent, version and model from the URL on reload", async () => {
+    window.history.replaceState({}, "", "/playground?agent=agent-3&version=1&model=test:echo");
+    await renderReady();
+    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("agent-3");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("v1"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("test:echo"));
+    expect(new URLSearchParams(window.location.search).get("model")).toBe("test:echo");
+    await sendMessage("Hi");
+    expect(vi.mocked(createConversation).mock.calls[0][0]).toBe("agent-3");
+    expect(lastOptions()).toEqual({ version: 1, model: { provider: "test", name: "echo" }, request_context: null });
+  });
+
+  it("restores a wildcard model's typed name from the URL", async () => {
+    window.history.replaceState({}, "", "/playground?agent=agent-1&model=anthropic:claude-x");
+    await renderReady();
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("anthropic:*"));
+    expect(screen.getByRole("textbox", { name: "Model name" })).toHaveValue("claude-x");
+  });
+
+  it("drops a URL model the platform does not offer", async () => {
+    window.history.replaceState({}, "", "/playground?agent=agent-1&model=openai:gpt-5");
+    await renderReady();
+    expect(await screen.findByText(/openai:gpt-5 is not offered here/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("");
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("model")).toBeNull());
+  });
+
+  it("takes a free-text model name for a wildcard provider", async () => {
+    await renderReady();
+    await modelsReady();
+    choose("Model", "anthropic:*");
+    expect(screen.getByText("Enter a model name for anthropic")).toBeInTheDocument();
+    expect(composer()).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Model name" }), { target: { value: "claude-sonnet-x" } });
+    await waitFor(() => expect(composer()).toBeEnabled());
+    await sendMessage("Hi");
+    expect(lastOptions()?.model).toEqual({ provider: "anthropic", name: "claude-sonnet-x" });
+    expect(new URLSearchParams(window.location.search).get("model")).toBe("anthropic:claude-sonnet-x");
+  });
+
+  it("runs the draft of an agent that has no published version", async () => {
+    await renderReady();
+    choose("Agent", "agent-2");
+    expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("draft");
+    expect(screen.queryByRole("option", { name: /Latest/ })).not.toBeInTheDocument();
+    await sendMessage("Hi");
+    expect(vi.mocked(createConversation).mock.calls[0][0]).toBe("agent-2");
+    expect(lastOptions()?.version).toBe("draft");
+    expect(await screen.findByTestId("turn-badge-version")).toHaveTextContent("Draft");
+    expect(new URLSearchParams(window.location.search).get("version")).toBe("draft");
+  });
+
+  it("shows the output-check state while an agent with output processors runs, then the checked answer", async () => {
+    vi.mocked(api.versions.list).mockResolvedValue([
+      versionOf("agent-1", 1, specOf("Support assistant", undefined, { output_processors: [{ type: "pii_redact" }] })),
+    ]);
+    await renderReady();
+    await waitFor(() => expect(api.versions.list).toHaveBeenCalled());
+    await sendMessage("Hi");
+    expect(await screen.findByTestId("turn-output-checking")).toHaveTextContent(
+      "The output is being checked before display.",
+    );
+    const runId = vi.mocked(startTurn).mock.calls[0][1];
+    // A delta that arrives anyway (defence in depth) is never shown.
+    act(() => {
+      handlers.onEvent?.(event(0, "run_started", { input: "Hi" }));
+      handlers.onDelta?.({ run_id: runId, model_request: 0, attempt: "a", delta: "UNCHECKED secret@example.com" });
+    });
+    expect(screen.queryByText(/UNCHECKED/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("turn-output-checking")).toBeInTheDocument();
+    expect(screen.getByTestId("turn-footer")).toHaveAttribute("data-live-text", "false");
+    answer(runId, "openai:gpt-4.1-mini", "0.001", [5, 5]);
+    expect(await screen.findByText("answer from openai:gpt-4.1-mini")).toBeInTheDocument();
+    expect(screen.queryByTestId("turn-output-checking")).not.toBeInTheDocument();
+  });
+
+  it("withholds live text while the target spec is unknown, then streams once it is known", async () => {
+    let resolveVersions: (items: AgentVersion[]) => void = () => undefined;
+    vi.mocked(api.versions.list).mockImplementation(
+      () => new Promise<AgentVersion[]>((resolve) => { resolveVersions = resolve; }),
+    );
+    await renderReady();
+    await sendMessage("Hi");
+    const runId = vi.mocked(startTurn).mock.calls[0][1];
+    act(() => {
+      handlers.onEvent?.(event(0, "run_started", { input: "Hi" }));
+      handlers.onDelta?.({ run_id: runId, model_request: 0, attempt: "a", delta: "early text" });
+    });
+    expect(await screen.findByTestId("turn-output-checking")).toBeInTheDocument();
+    expect(screen.getByTestId("turn-footer")).toHaveAttribute("data-live-text", "false");
+    expect(screen.queryByText(/early text/)).not.toBeInTheDocument();
+    await act(async () => resolveVersions(versionsByAgent["agent-1"]));
+    await waitFor(() => expect(screen.queryByTestId("turn-output-checking")).not.toBeInTheDocument());
+    expect(screen.getByTestId("turn-footer")).toHaveAttribute("data-live-text", "true");
+  });
+
+  it("does not show the output-check state for an agent without output processors", async () => {
+    await renderReady();
+    await waitFor(() => expect(api.versions.list).toHaveBeenCalled());
+    await sendMessage("Hi");
+    await screen.findByTestId("turn-badge");
+    expect(screen.queryByTestId("turn-output-checking")).not.toBeInTheDocument();
+  });
+
+  it("shows a blocked answer under its message with the fixed message, once", async () => {
+    await renderReady();
+    await sendMessage("Hi");
+    act(() => {
+      handlers.onEvent?.(event(0, "run_started", { input: "Hi" }));
+      handlers.onEvent?.(event(1, "model_message", { model_request: 0, is_final: true, blocked: true }));
+      handlers.onEvent?.(
+        event(2, "run_failed", {
+          status: "failed",
+          error: "the answer was blocked by this agent's output processors",
+          error_code: "output_blocked",
+        }),
+      );
+    });
+    const blocked = await screen.findByTestId("turn-blocked");
+    expect(blocked).toHaveAttribute("data-code", "output_blocked");
+    expect(blocked).toHaveTextContent("Answer blocked");
+    expect(blocked).toHaveTextContent("The answer was blocked by this agent's output processors.");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    await waitFor(() => expect(composer()).toBeEnabled());
+  });
+
+  it("shows a loaded turn's recorded model, tokens, cost and block", async () => {
+    mockConversation(
+      [
+        {
+          ...turnRun("run-1", 1, "Hi", "completed"),
+          output: "Hey",
+          model_id: "test:echo",
+          model_overridden: true,
+          input_tokens: 120,
+          output_tokens: 30,
+          cost_usd: "0.0012000000",
+        } as ConversationRun,
+        { ...turnRun("run-2", 2, "my card", "failed"), error: "the message was blocked by this agent's input processors" },
+      ],
+      {
+        "run-1": answered("Hi", "Hey"),
+        "run-2": [
+          event(0, "run_started", { input: "[withheld: blocked by the agent's input processors]" }),
+          event(1, "run_failed", {
+            status: "failed",
+            error: "the message was blocked by this agent's input processors",
+            error_code: "input_blocked",
+          }),
+        ],
+      },
+    );
+    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    await renderReady();
+    await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
+    const [first] = screen.getAllByTestId("turn-badge");
+    expect(first).toHaveTextContent("test:echo");
+    expect(first).toHaveTextContent("override");
+    expect(first).toHaveTextContent("120 in · 30 out tokens");
+    expect(first).toHaveTextContent("$0.0012");
+    expect(screen.getByTestId("turn-blocked")).toHaveTextContent("Message blocked");
+    // A block found on reload is shown, not announced.
+    expect(screen.getByTestId("turn-blocked")).not.toHaveAttribute("role");
+    expect(screen.getByTestId("turn-blocked")).toHaveTextContent("The message was blocked by this agent's input processors.");
+  });
+
+  it("re-posts a recorded draft turn with the options it was recorded with", async () => {
+    mockConversation(
+      [
+        {
+          ...turnRun("run-1", 1, "Hello", "queued"),
+          version: null,
+          draft: true,
+          model_id: "test:echo",
+          model_overridden: true,
+          request_context: { tier: "gold" },
+        } as unknown as ConversationRun,
+      ],
+      {},
+    );
+    window.history.replaceState({}, "", "/playground?conversation=conv-1");
+    await renderReady();
+    await waitFor(() =>
+      expect(startTurn).toHaveBeenCalledWith("conv-1", "run-1", "Hello", {
+        version: "draft",
+        model: { provider: "test", name: "echo" },
+        request_context: { tier: "gold" },
+      }),
+    );
+  });
+
+  it("preselects the context preset saved on the Request Context page", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    const { saveContext } = await import("@/lib/requestContext");
+    saveContext("agent-1", { tier: "gold" }, null);
+    window.history.replaceState({}, "", "/playground?agent=agent-1");
+    await renderReady();
+    fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
+    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toEqual({ tier: "gold" });
+  });
+
+  it("lets the saved preset win over the tab's remembered context with context=preset, then drops the flag", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    const { saveContext } = await import("@/lib/requestContext");
+    saveContext("agent-1", { tier: "gold" }, "draft");
+    const key = "eap.playground.context.v1:anon:agent-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ value: { tier: "silver" } }));
+    window.history.replaceState({}, "", "/playground?agent=agent-1&version=draft&context=preset");
+    await renderReady();
+    fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
+    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("context")).toBeNull();
+    expect(params.get("version")).toBe("draft");
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toEqual({ tier: "gold" });
+    expect(lastOptions()?.version).toBe("draft");
+  });
+
+  it("keeps the tab's remembered context over the preset without the flag", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    const { saveContext } = await import("@/lib/requestContext");
+    saveContext("agent-1", { tier: "gold" }, null);
+    window.sessionStorage.setItem("eap.playground.context.v1:anon:agent-1", JSON.stringify({ value: { tier: "silver" } }));
+    window.history.replaceState({}, "", "/playground?agent=agent-1");
+    await renderReady();
+    await screen.findByRole("button", { name: /1 of 1 set/ });
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toEqual({ tier: "silver" });
+  });
+
+  it("sends no context to a version without context fields, even when a value is remembered", async () => {
+    window.sessionStorage.setItem(`eap.playground.context.v1:anon:agent-1`, JSON.stringify({ value: { stale: 1 } }));
+    await renderReady();
+    await waitFor(() => expect(getRequestContext).toHaveBeenCalled());
+    await screen.findByRole("button", { name: /No context fields/ });
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toBeNull();
   });
 });

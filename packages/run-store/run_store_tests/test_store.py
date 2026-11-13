@@ -667,3 +667,35 @@ def test_run_cursor_round_trips_and_rejects_garbage():
     for bad in ("", "!!!", "2026-01-01T00:00:00+00:00", token[:-4], token + "x" * 600, "e30"):
         with pytest.raises(InvalidRunCursor):
             RunCursor.decode(bad)
+
+
+def test_list_runs_recovering_filter_matches_stale_running_runs(run_store, test_tenant):
+    """`recovering` is a display status: the list filter maps it to running + heartbeat > 20 s old."""
+    from datetime import datetime, timedelta, timezone
+
+    from eap_run_store import RunModel
+
+    agent_id = uuid4()
+    stale, fresh, done = uuid4(), uuid4(), uuid4()
+    for rid in (stale, fresh, done):
+        run_store.create_run(tenant_id=test_tenant, agent_id=agent_id, agent_version=1, input="x", run_id=rid)
+    run_store.set_status(test_tenant, stale, "running")
+    run_store.set_status(test_tenant, fresh, "running")
+    run_store.set_status(test_tenant, done, "completed")
+    run_store.heartbeat(test_tenant, fresh)
+    with run_store.engine.begin() as conn:
+        conn.execute(
+            RunModel.__table__.update()
+            .where(RunModel.id == str(stale))
+            .values(heartbeat_at=datetime.now(timezone.utc) - timedelta(seconds=30))
+        )
+
+    def ids(status):
+        return {r["id"] for r in run_store.list_runs(test_tenant, status=status)}
+
+    assert ids("recovering") == {str(stale)}
+    assert all(r["display_status"] == "recovering" for r in run_store.list_runs(test_tenant, status="recovering"))
+    assert ids(["recovering", "completed"]) == {str(stale), str(done)}
+    assert ids("running") == {str(stale), str(fresh)}
+    assert ids("recovering") <= ids(None)
+    assert run_store.list_runs("other_" + test_tenant, status="recovering") == []

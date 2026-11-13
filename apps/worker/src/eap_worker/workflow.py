@@ -148,10 +148,10 @@ from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, too
 from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
 from eap_schemas import AgentSpec
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
-from eap_schemas.request_context import render_instructions
+from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
-from eap_worker.errors import InputBlocked, OutputBlocked, classify
+from eap_worker.errors import InputBlocked, OutputBlocked, RequestContextInvalid, classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
 from eap_worker.memory import (
     instructions_with_memory,
@@ -174,7 +174,7 @@ from eap_worker.processors import (
     run_chain,
     strip_thinking,
 )
-from eap_worker.runtime import WorkerDeps, get_runtime
+from eap_worker.runtime import WorkerDeps, declared_context, get_runtime
 
 log = logging.getLogger("eap_worker")
 
@@ -714,6 +714,19 @@ async def agent_run(
         return result
 
 
+def _check_request_context(spec: AgentSpec, request_context: dict[str, Any] | None) -> None:
+    """The run's declared context must satisfy the spec's context fields before the model is called
+    (no step: pure and deterministic). The API validates a caller's context, but a workflow agent
+    step runs with an empty one, so an agent with a required field fails here. Undeclared keys are
+    ignored as in RunDeps. RequestContextInvalid carries no values."""
+    if not spec.context_fields:
+        return
+    try:
+        validate_request_context(spec.context_fields, declared_context(spec, request_context))
+    except RequestContextError:
+        raise RequestContextInvalid() from None
+
+
 async def _run_body(
     run_id: str,
     tenant_id: str,
@@ -764,7 +777,9 @@ async def _run_body(
         rt.settings.allowed_models.check(provider, model_name)
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
-        deps = rt.deps_for(run_id, tenant_id, spec, link.get("request_context") or None)
+        request_context = link.get("request_context") or None
+        _check_request_context(spec, request_context)
+        deps = rt.deps_for(run_id, tenant_id, spec, request_context)
         if spec.memory is not None and link.get("conversation_id") is not None:
             # RM.12: the turn's memory snapshot (recorded), then its instructions block and tools.
             loaded = await load_memory_step(

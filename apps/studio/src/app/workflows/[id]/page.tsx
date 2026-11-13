@@ -47,8 +47,8 @@ export default function WorkflowDetailPage() {
   return (
     <div className="mx-auto max-w-7xl space-y-6 px-4 py-8">
       <nav aria-label="Breadcrumb" className="text-sm"><Link href="/workflows" className="text-primary underline-offset-4 hover:underline">Workflows</Link></nav>
-      {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">Workflow not found.</p> : null}
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+      {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">Workflow not found.</p> : null}
+      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {!workflow && !notFound && !error ? <p className="text-muted-foreground">Loading workflow…</p> : null}
       {workflow ? (
         <>

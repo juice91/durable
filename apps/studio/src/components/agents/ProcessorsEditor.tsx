@@ -49,7 +49,7 @@ function EnumChecklist({ id, label, description, options, value, onChange }: {
       </div>
       {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
       <div id={`${id}-problem`} aria-live="polite">
-        {value.length === 0 ? <p className="text-xs text-destructive">Pick at least one</p> : null}
+        {value.length === 0 ? <p className="text-xs text-destructive-text">Pick at least one</p> : null}
       </div>
     </fieldset>
   );
@@ -85,7 +85,7 @@ function LinesInput({ id, label, description, value, maxItems, maxLength, onChan
       />
       {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
       <div id={`${id}-problems`} aria-live="polite">
-        {problems.map((p) => <p key={p} className="text-xs text-destructive">{p}</p>)}
+        {problems.map((p) => <p key={p} className="text-xs text-destructive-text">{p}</p>)}
       </div>
     </div>
   );
@@ -135,9 +135,9 @@ export function ModerationModelPicker({ id, value, models, modelsError, onChange
           onChange={(e) => onChange({ provider: wildcard.provider, name: e.target.value })}
         />
       ) : null}
-      {modelsError ? <p role="alert" className="text-xs text-destructive">Could not load models: {modelsError}</p> : null}
+      {modelsError ? <p role="alert" className="text-xs text-destructive-text">Could not load models: {modelsError}</p> : null}
       <div id={`${id}-name-problem`} aria-live="polite">
-        {wildcard && !name ? <p className="text-xs text-destructive">Type a model name</p> : null}
+        {wildcard && !name ? <p className="text-xs text-destructive-text">Type a model name</p> : null}
       </div>
       <p className="text-xs text-muted-foreground">Must be in the platform allowlist; checked at publish and at run time.</p>
     </div>
@@ -293,7 +293,7 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
               ) : (
                 <pre className="overflow-x-auto rounded bg-muted p-2 text-xs text-muted-foreground">{JSON.stringify(processor.config, null, 2)}</pre>
               )}
-              {errors[processor.clientId] ? <p role="alert" data-testid={`${idPrefix}-error`} className="text-xs text-destructive">{errors[processor.clientId]}</p> : null}
+              {errors[processor.clientId] ? <p role="alert" data-testid={`${idPrefix}-error`} className="text-xs text-destructive-text">{errors[processor.clientId]}</p> : null}
             </li>
           );
         })}
@@ -332,9 +332,10 @@ export function ProcessorsEditor(props: ProcessorsEditorProps) {
       <legend className="px-1 text-sm font-medium text-card-foreground">Processors</legend>
       <p className="text-xs text-muted-foreground">
         Guardrails on the user&apos;s input and on the model&apos;s output. Blocked input or output fails the turn with a fixed message.
+        Tool results and request context values are not processed; moderation checks only the final answer.
       </p>
-      {props.catalogError ? <p role="alert" className="text-xs text-destructive">Could not load the processor catalog: {props.catalogError}</p> : null}
-      {props.sectionError ? <p role="alert" data-testid="processors-error" className="text-xs text-destructive">{props.sectionError}</p> : null}
+      {props.catalogError ? <p role="alert" className="text-xs text-destructive-text">Could not load the processor catalog: {props.catalogError}</p> : null}
+      {props.sectionError ? <p role="alert" data-testid="processors-error" className="text-xs text-destructive-text">{props.sectionError}</p> : null}
       <PhaseList phase="input" value={props.inputProcessors} onChange={props.onInputChange} catalog={props.catalog} models={props.models} modelsError={props.modelsError} errors={props.inputErrors ?? {}} />
       <PhaseList phase="output" value={props.outputProcessors} onChange={props.onOutputChange} catalog={props.catalog} models={props.models} modelsError={props.modelsError} errors={props.outputErrors ?? {}} />
     </fieldset>

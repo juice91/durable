@@ -1,12 +1,11 @@
 "use client";
 
 import React from "react";
+import { formatCost, formatTokens } from "@/lib/format";
 import { buildTraceLink } from "@/lib/grafana";
 import {
   KIND_LABELS,
-  formatCost,
   formatDuration,
-  formatTokens,
   spanLabel,
   tracePath,
   type NameMaps,

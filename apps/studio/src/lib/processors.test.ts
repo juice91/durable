@@ -7,7 +7,6 @@ import {
   formatMatchCounts,
   isModerationRefusal,
   loadAgentProcessorSpecs,
-  localInputToIso,
   mapWithConcurrency,
   processors,
   processorUsage,
@@ -33,6 +32,9 @@ describe("helpers", () => {
     expect(formatMatchCounts({ email: 2, phone: 1 })).toBe("email ×2, phone ×1");
     expect(formatMatchCounts({ email: 0 })).toBe("No matches");
     expect(formatMatchCounts(undefined)).toBe("No matches");
+    expect(formatMatchCounts({ email: "2", phone: 1 })).toBe("phone ×1");
+    expect(formatMatchCounts(["x"])).toBe("No matches");
+    expect(formatMatchCounts({}, "")).toBe("");
   });
 
   it("builds a default config from the schema defaults (copied, not shared)", () => {
@@ -54,11 +56,6 @@ describe("helpers", () => {
     expect(isModerationRefusal("text is larger than 32768 bytes (32 KiB)")).toBe(false);
   });
 
-  it("turns a datetime-local value into an ISO timestamp", () => {
-    expect(localInputToIso("")).toBeUndefined();
-    expect(localInputToIso("not a date")).toBeUndefined();
-    expect(localInputToIso("2026-11-13T10:00")).toBe(new Date("2026-11-13T10:00").toISOString());
-  });
 });
 
 describe("describeValidationDetail", () => {

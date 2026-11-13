@@ -66,7 +66,8 @@ function DiffCell({ line, side }: { line: InstructionsDiffLine | null; side: "ba
 export function VersionCompareView({ result }: { result: VersionCompareResult }) {
   const baseLabel = compareRefLabel(result.base.version);
   const targetLabel = compareRefLabel(result.target.version);
-  const instructionsChanged = result.instructions_diff.some((line) => line.op !== "equal");
+  const diffTruncated = result.instructions_diff_truncated === true;
+  const instructionsChanged = diffTruncated || result.instructions_diff.some((line) => line.op !== "equal");
   const fieldChanges = result.changes.filter((change) => change.path !== "instructions");
 
   if (result.identical) {
@@ -115,9 +116,15 @@ export function VersionCompareView({ result }: { result: VersionCompareResult })
 
       <section aria-labelledby="compare-instructions-heading">
         <h3 id="compare-instructions-heading" className="mb-2 text-sm font-semibold text-card-foreground">Instructions</h3>
+        {diffTruncated ? (
+          <p role="note" data-testid="instructions-diff-truncated" className="mb-2 text-sm text-muted-foreground">
+            Diff too large to show line by line.
+            {result.instructions_diff.length > 0 ? " The whole instructions are shown as replaced." : ""}
+          </p>
+        ) : null}
         {!instructionsChanged ? (
           <p className="text-sm text-muted-foreground">No changes to the instructions.</p>
-        ) : (
+        ) : diffTruncated && result.instructions_diff.length === 0 ? null : (
           <div className="overflow-x-auto rounded-md border border-border">
             <table className="w-full table-fixed font-mono text-xs" data-testid="instructions-diff">
               <caption className="sr-only">Instructions diff, {baseLabel} on the left, {targetLabel} on the right</caption>
@@ -186,7 +193,7 @@ export function VersionCompare({ agentId, base, target, onClose }: VersionCompar
         </button>
       </div>
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>
+        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p>
       ) : result ? (
         <VersionCompareView result={result} />
       ) : (

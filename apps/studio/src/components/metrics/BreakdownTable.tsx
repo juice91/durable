@@ -1,10 +1,10 @@
 "use client";
 
 import React from "react";
+import { formatCost, formatTokens } from "@/lib/format";
 import Link from "next/link";
 import {
   FAILED_STATUSES,
-  formatCost,
   formatCount,
   formatLatency,
   formatPercent,
@@ -28,6 +28,9 @@ export interface BreakdownTableProps {
   error?: string | null;
   emptyMessage?: string;
   note?: string;
+  /** Where a row's name (and a click on the row) leads, with the link's accessible name; default:
+   * the Traces list filtered to the row (`breakdownHref`). The Overview Dashboard opens Metrics. */
+  rowLink?: (item: BreakdownItem, name: string) => { href: string; label: string };
 }
 
 export const SORT_OPTIONS: { value: BreakdownSort; label: string }[] = [
@@ -56,7 +59,7 @@ function CostCell({ item }: { item: BreakdownItem }) {
   }
   return (
     <>
-      {formatCost(item.cost_usd)}
+      {formatCost(item.cost_usd) ?? "—"}
       {item.unpriced_requests > 0 && (
         <span className="block text-[11px] text-muted-foreground">+{formatCount(item.unpriced_requests)} unpriced</span>
       )}
@@ -76,6 +79,7 @@ export function BreakdownTable({
   error = null,
   emptyMessage = "No data in this period",
   note,
+  rowLink,
 }: BreakdownTableProps) {
   const sortId = `breakdown-sort-${by}`;
   const th = "px-3 py-2 font-medium text-muted-foreground whitespace-nowrap";
@@ -122,8 +126,9 @@ export function BreakdownTable({
             </thead>
             <tbody className="divide-y divide-border">
               {items.map((item) => {
-                const href = breakdownHref(item, by, filters);
                 const name = breakdownLabel(item, by);
+                const link = rowLink ? rowLink(item, name) : { href: breakdownHref(item, by, filters), label: `${name}: open matching runs` };
+                const href = link.href;
                 return (
                   <tr
                     key={item.key}
@@ -135,7 +140,7 @@ export function BreakdownTable({
                     }}
                   >
                     <th scope="row" className="px-3 py-2 text-left font-medium max-w-[16rem]">
-                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "model" ? item.key : `${name} (${item.key})`} aria-label={`${name}: open matching runs`}>
+                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "model" ? item.key : `${name} (${item.key})`} aria-label={link.label}>
                         {name}
                       </Link>
                     </th>
@@ -151,7 +156,7 @@ export function BreakdownTable({
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{formatPercent(item.error_rate)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{formatLatency(item.latency_p95_ms)}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">{formatCount(item.input_tokens + item.output_tokens)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{formatTokens(item.input_tokens + item.output_tokens)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap"><CostCell item={item} /></td>
                   </tr>
                 );

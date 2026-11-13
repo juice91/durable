@@ -1,5 +1,6 @@
 import React from "react";
-import { formatCost, formatDuration, formatTokens, type TraceTotals as Totals } from "@/lib/traces";
+import { formatCost, formatTokens } from "@/lib/format";
+import { formatDuration, type TraceTotals as Totals } from "@/lib/traces";
 
 function Stat({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId: string }) {
   return (
