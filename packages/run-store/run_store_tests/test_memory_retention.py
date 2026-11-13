@@ -440,11 +440,61 @@ def test_old_row_after_a_newer_one_is_blanked_in_place(store, runs, engine, tena
     assert _shape(store, tenant, conv) == [("observation", 1, 2, True)]
 
 
-def test_head_collapse_spans_a_reflection_written_around_a_mid_marker(store, runs, engine, tenant, agent):
-    """Rows 1..10 (new), 11..20 (old: blanked to a mid marker), 21..30; the reflection supersedes
-    1..10 and 21..30 around the marker, so it covers 1..30 while the marker 11..20 stays active.
-    When the reflection ages out, the head (reflection, marker) collapses to ONE marker 1..30: the
-    range is min(from)..max(to), not head[0].from..head[-1].to (which lost turns 21..30)."""
+def _newest(store, engine, tenant, conv):
+    """(the last row GET lists, markers included; the store's coverage end)."""
+    listed = store.list_observations(tenant, conv, include_markers=True)
+    covered = count(engine, "SELECT coalesce(max(covers_to_turn), 0) FROM memory_observations"
+                    " WHERE tenant_id = :t AND conversation_id = :c AND superseded_by IS NULL", t=tenant, c=conv)
+    return (listed[-1] if listed else None), covered
+
+
+def test_reflection_supersedes_a_marker_inside_its_range(store, runs, engine, tenant, agent):
+    """The race: the observer reads A 1..10, B 11..20, C 21..30 as visible, then the sweep blanks B
+    (old, after the newer A) before the reflection lands: the reflection over all three is stale.
+    The retry over the visible rows A and C covers 1..30 and supersedes the marker B with them, so no
+    active row overlaps: the last row GET lists is the store's newest, and deleting it (the API's
+    delete-newest) takes the marker along, leaving no turn hidden."""
+    conv = conversation(runs, tenant, agent, turns=31)
+    a = obs(store, tenant, agent, conv, 1, 10)
+    b = obs(store, tenant, agent, conv, 11, 20)
+    c = obs(store, tenant, agent, conv, 21, 30)
+    age(engine, tenant, "memory_observations", where="id = CAST(:i AS uuid)", i=b.id)
+    assert sweep_all(store, "observations", tenant, cutoff()).deleted == 1
+    assert _shape(store, tenant, conv) == [("observation", 1, 10, False), ("observation", 11, 20, True),
+                                           ("observation", 21, 30, False)]
+    assert store.reflect(tenant, agent, conv, supersede_ids=[a.id, b.id, c.id], content="r").status == "stale"
+
+    refl = store.reflect(tenant, agent, conv, supersede_ids=[a.id, c.id], content="r")
+    assert refl.status == "created" and set(refl.superseded) == {a.id, b.id, c.id}
+    assert _shape(store, tenant, conv) == [("reflection", 1, 30, False)]
+    last, covered = _newest(store, engine, tenant, conv)
+    assert last is not None and refl.observation is not None
+    assert last.id == refl.observation.id and last.covers_to_turn == covered == 30
+    snap = store.load_snapshot(tenant, agent, conv, observations=True)
+    assert [o.id for o in snap.observations] == [refl.observation.id] and snap.turn_numbers == (31,)
+
+    assert store.delete_observation(tenant, conv, last.id, only_latest=True) == 4  # with A, B and C
+    assert _newest(store, engine, tenant, conv) == (None, 0)
+    snap = store.load_snapshot(tenant, agent, conv, observations=True)
+    assert (snap.observations, snap.covered_to_turn) == ((), 0) and snap.turn_numbers[0] == 1
+
+
+def test_reflection_keeps_a_head_marker_active(store, runs, engine, tenant, agent):
+    """A marker before the reflection's start is not inside its range: it stays and keeps 1..2."""
+    conv = conversation(runs, tenant, agent, turns=4)
+    o1 = obs(store, tenant, agent, conv, 1, 2)
+    o3, o4 = obs(store, tenant, agent, conv, 3, 3), obs(store, tenant, agent, conv, 4, 4)
+    age(engine, tenant, "memory_observations", where="id = CAST(:i AS uuid)", i=o1.id)
+    sweep_all(store, "observations", tenant, cutoff())
+    refl = store.reflect(tenant, agent, conv, supersede_ids=[o3.id, o4.id], content="r")
+    assert set(refl.superseded) == {o3.id, o4.id}
+    assert _shape(store, tenant, conv) == [("observation", 1, 2, True), ("reflection", 3, 4, False)]
+
+
+def test_head_collapse_spans_overlapping_rows(store, runs, engine, tenant, agent):
+    """The safeguard: should a reflection 1..30 and a marker 11..20 both be active (forged here, as
+    data from before reflect superseded inner markers), the head collapses to ONE marker 1..30:
+    min(from)..max(to), not head[0].from..head[-1].to (which lost turns 21..30)."""
     conv = conversation(runs, tenant, agent, turns=31)
     a = obs(store, tenant, agent, conv, 1, 10)
     mid = obs(store, tenant, agent, conv, 11, 20)
@@ -452,7 +502,9 @@ def test_head_collapse_spans_a_reflection_written_around_a_mid_marker(store, run
     age(engine, tenant, "memory_observations", where="id = CAST(:i AS uuid)", i=mid.id)
     assert sweep_all(store, "observations", tenant, cutoff()).deleted == 1
     refl = store.reflect(tenant, agent, conv, supersede_ids=[a.id, c.id], content="r")
-    assert refl.status == "created"
+    with engine.begin() as conn:  # the overlap reflect no longer creates
+        conn.execute(text("UPDATE memory_observations SET superseded_by = NULL WHERE tenant_id = :t AND id = :i"),
+                     {"t": tenant, "i": mid.id})
     assert _shape(store, tenant, conv) == [("reflection", 1, 30, False), ("observation", 11, 20, True)]
     age(engine, tenant, "memory_observations", where="id = CAST(:i AS uuid)", i=refl.observation.id)
     assert sweep_all(store, "observations", tenant, cutoff()).deleted == 3  # the reflection and its two rows

@@ -322,6 +322,11 @@ def test_explain_uses_only_the_hnsw_index_of_the_dimension(store, runs, engine, 
     conv = conversation(runs, tenant, agent, resource="ana", turns=3)
     for n in (1, 2, 3):
         put(store, tenant, agent, conv, n, vec(dims, n), vec(dims, n + 7), model=model)
+    # Fresh statistics on every run, so the plan never depends on whether autovacuum analyzed the
+    # session's table earlier (with statistics, a btree index plus a sort wins on so few rows; the
+    # diagnostic turns sorts off, so only the ordered vector index can win).
+    with engine.begin() as conn:
+        conn.execute(text("ANALYZE message_embeddings"))
     plan = store.explain_search_recall(tenant, agent, conv, vec(dims, 1), embedding_model=model, scope=scope, top_k=3,
                                        exclude_turns=[3], min_score=0.1)
     assert f"ix_message_embeddings_embedding_{dims}" in plan, plan
@@ -329,6 +334,7 @@ def test_explain_uses_only_the_hnsw_index_of_the_dimension(store, runs, engine, 
         assert f"ix_message_embeddings_embedding_{other}" not in plan
     with engine.connect() as conn:  # a diagnostic only: it leaves no setting, row or lock behind
         assert conn.execute(text("SHOW enable_seqscan")).scalar() == "on"
+        assert conn.execute(text("SHOW enable_sort")).scalar() == "on"
     assert count(engine, "SELECT count(*) FROM message_embeddings WHERE tenant_id = :t", t=tenant) == 6
     assert [h.turn for h in search(store, tenant, agent, conv, vec(dims, 1), embedding_model=model,
                                    top_k=1)] == [1]

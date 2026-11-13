@@ -20,11 +20,12 @@ Tables (Alembic owns them; the models here are what `alembic check` compares):
   `Observation.is_marker`), so the swept turns neither come back into the history nor get observed
   (and paid for) again, and the prefix stays gap-free. Old active rows at the head of the prefix
   (with any marker already there) collapse into ONE marker covering `1..end` (min start to max
-  end of those rows: a reflection written around a mid marker spans it), which keeps the kind, run
-  and slot of the row reaching furthest; an old active row after a newer one is blanked in place
-  (it joins the head marker once the rows before it age out). Markers are never rendered: `load_snapshot` leaves
+  end of those rows, a safeguard should rows ever overlap), which keeps the kind, run and slot of
+  the row reaching furthest; an old active row after a newer one is blanked in place (it joins the
+  head marker once the rows before it age out). Markers are never rendered: `load_snapshot` leaves
   them out of `observations` but counts them in `covered_to_turn`; `list_observations` omits them
-  unless asked; `reflect` ignores them (a reflection supersedes only the rows after the marker);
+  unless asked; `reflect` never takes them in `supersede_ids` but supersedes the markers inside its
+  range, so no active rows overlap (a head marker stays: the reflection starts after it);
   retention never selects them again. `insert_observation` only writes non-empty content, so a
   marker is never mistaken for an observation.
 - `message_embeddings` (RM.8): semantic recall. One row per `(tenant_id, run_id, role)` (role
@@ -1406,8 +1407,10 @@ class MemoryStore:
 
         The reflection covers min(covers_from_turn)..max(covers_to_turn) of those rows, which must
         be exactly the active rows up to that end, retention markers aside ('stale' otherwise: a
-        concurrent reflection or deletion; nothing written). A marker at the head stays active and
-        keeps covering its turns; the reflection starts after it. Idempotent by (conversation, 'reflection', covers_to_turn): a
+        concurrent reflection, deletion or retention sweep; nothing written). Markers inside the
+        range are superseded with them (returned in `superseded`; the event's `superseded` counts
+        `supersede_ids` only), so no active row overlaps the reflection. A marker at the head stays
+        active and keeps covering its turns; the reflection starts after it. Idempotent by (conversation, 'reflection', covers_to_turn): a
         re-executed step gets status 'existing'. `event` defaults to data
         `{kind, covers_from_turn, covers_to_turn, approx_tokens, superseded}` (a count).
         Raises ConversationNotFound, ValueError for an empty or non-UUID id list."""
@@ -1458,6 +1461,19 @@ class MemoryStore:
             if active_up_to != set(ids):
                 session.rollback()
                 return ObservationWrite("stale", None, covered)
+            # Retention markers inside the range are superseded too, so no active row ever overlaps
+            # the reflection (a head marker, before covers_from, stays active).
+            markers = sorted(
+                str(i)
+                for i in session.execute(
+                    text(
+                        "SELECT id FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"
+                        " AND superseded_by IS NULL AND content = '' AND covers_from_turn >= :from"
+                        " AND covers_to_turn <= :to FOR UPDATE"
+                    ),
+                    {"t": tenant_id, "c": conv, "from": covers_from, "to": covers_to},
+                ).scalars()
+            )
             row = session.execute(
                 text(
                     "INSERT INTO memory_observations (tenant_id, agent_id, conversation_id, kind, covers_from_turn,"
@@ -1482,11 +1498,11 @@ class MemoryStore:
                     "UPDATE memory_observations SET superseded_by = :r"
                     " WHERE tenant_id = :t AND conversation_id = :c AND id = ANY(CAST(:ids AS uuid[]))"
                 ),
-                {"r": created.id, "t": tenant_id, "c": conv, "ids": ids},
+                {"r": created.id, "t": tenant_id, "c": conv, "ids": ids + markers},
             )
             self._event_or_rollback(session, tenant_id, event, created, superseded=len(ids))
             session.commit()
-            return ObservationWrite("created", created, max(covered, covers_to), tuple(ids))
+            return ObservationWrite("created", created, max(covered, covers_to), tuple(ids + markers))
 
     @staticmethod
     def _event_or_rollback(session, tenant_id: str, event: MemoryEvent | None, obs: Observation, **extra: Any) -> None:
@@ -2018,7 +2034,11 @@ class MemoryStore:
         disable_seqscan: bool = True,
     ) -> str:
         """EXPLAIN of exactly the SQL `search_recall` runs, with the same settings (diagnostics and
-        tests: a small table makes the planner prefer a sequential scan, hence `disable_seqscan`)."""
+        tests). On a small table the planner prefers a sequential scan, or a btree index on the
+        tenant, agent or conversation plus a sort by distance, whenever statistics exist. So
+        `disable_seqscan` (default True) also turns sorts off for the EXPLAIN only (`SET LOCAL`,
+        rolled back): the plan then shows whether the ordered vector index of the dimension is
+        usable at all, independently of the table's size and statistics."""
         with self.Session() as session:
             sql, params = self._prepare_recall(
                 session, tenant_id, agent_id, conversation_id, query_embedding, embedding_model, scope, top_k,
@@ -2026,6 +2046,7 @@ class MemoryStore:
             )
             if disable_seqscan:
                 session.execute(text("SET LOCAL enable_seqscan = off"))
+                session.execute(text("SET LOCAL enable_sort = off"))
             plan = "\n".join(r[0] for r in session.execute(text("EXPLAIN " + sql), params))
             session.rollback()
         return plan
@@ -2434,9 +2455,9 @@ class MemoryStore:
                 {"t": tenant_id, "ids": sorted(blank)},
             )
         if collapse:
-            # The head's rows may overlap (a reflection written around a mid marker spans it), so
-            # the marker covers min(from)..max(to) and keeps the kind, run and slot of the row
-            # reaching furthest (the latest of equals).
+            # A safeguard: `reflect` supersedes the markers inside its range, so active rows should
+            # never overlap; if they do (older data), the marker still covers min(from)..max(to) and
+            # keeps the kind, run and slot of the row reaching furthest (the latest of equals).
             last = max(reversed(head), key=lambda o: o.covers_to_turn)
             first = min(o.covers_from_turn for o in head)
             session.execute(
