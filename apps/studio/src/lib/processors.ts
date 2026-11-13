@@ -6,6 +6,7 @@
 // suggest that it could.
 import { ApiError, apiHeaders, BASE_URL, type Agent } from "./api";
 import type { JsonSchema } from "./tools";
+import { loadAgentLatestSpecs } from "./agentUsage";
 
 export type ProcessorType = "pii_redact" | "regex_blocklist" | "max_length" | "moderation";
 export type ProcessorPhase = "input" | "output";
@@ -281,37 +282,19 @@ export function processorUsage(agents: AgentProcessorSpecs[]): Record<ProcessorT
   return usage;
 }
 
-/** Maps `items` with at most `limit` calls of `fn` in flight; results keep the input order. */
-export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
-  return results;
-}
-
 export const USAGE_CONCURRENCY = 4;
 
 /**
- * Agents with their draft and latest published processor fields: one request per published agent,
- * at most `USAGE_CONCURRENCY` at a time. A version that cannot be read is marked `failed`.
+ * Agents with their draft and latest published processor fields, from the shared agents-and-versions
+ * scan (`loadAgentLatestSpecs` in `lib/agentUsage`): one request per published agent, at most
+ * `USAGE_CONCURRENCY` at a time. A version that cannot be read is marked `failed`.
  */
 export async function loadAgentProcessorSpecs(agents: Agent[]): Promise<AgentProcessorSpecs[]> {
-  return mapWithConcurrency(agents, USAGE_CONCURRENCY, async (agent): Promise<AgentProcessorSpecs> => {
-    const draft = agent.draft_spec as unknown as SpecProcessors;
-    if (agent.latest_version === null) return { agent, draft, latest: null };
-    try {
-      const version = await request<{ spec: SpecProcessors }>(
-        `/agents/${encodeURIComponent(agent.id)}/versions/${agent.latest_version}`,
-      );
-      return { agent, draft, latest: version.spec };
-    } catch {
-      return { agent, draft, latest: null, failed: true };
-    }
-  });
+  const specs = await loadAgentLatestSpecs(agents, { concurrency: USAGE_CONCURRENCY });
+  return specs.map(({ agent, draft, latest, failed }): AgentProcessorSpecs => ({
+    agent,
+    draft: draft as unknown as SpecProcessors,
+    latest: latest as unknown as SpecProcessors | null,
+    ...(failed ? { failed: true } : {}),
+  }));
 }

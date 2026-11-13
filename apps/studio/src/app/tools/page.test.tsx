@@ -8,6 +8,7 @@ import { startToolRun, ToolRunError, mapToolRunError } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 import { routes } from "@/lib/routes";
+import { toolsNavigation } from "@/components/tools/toolsTesting";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -15,6 +16,12 @@ vi.mock("@/lib/toolRuns", async (importOriginal) => {
   return { ...actual, startToolRun: vi.fn() };
 });
 vi.mock("@/lib/runs", () => ({ getRun: vi.fn(), subscribeRun: vi.fn() }));
+vi.mock("next/navigation", async () => (await import("@/components/tools/toolsTesting")).toolsNavigationModule);
+// "Used by" scans the agents; these tests are about running tools, so there are none.
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, agents: { ...actual.api.agents, list: vi.fn(async () => []) }, versions: { ...actual.api.versions, get: vi.fn() } } };
+});
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -48,6 +55,8 @@ describe("ToolsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     toolRunLedger.reset();
+    // The old page opened on the first tool's form; the Sheet now opens from ?tool=…&tab=run.
+    toolsNavigation.reset(routes.tool("tickets.create", { tab: "run" }));
     vi.mocked(listTools).mockResolvedValue(tools);
     vi.mocked(subscribeRun).mockReturnValue(() => undefined);
   });
@@ -60,7 +69,8 @@ describe("ToolsPage", () => {
     expect(screen.getByText("Disallowed")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Search tools"), { target: { value: "clock" } });
     const catalog = screen.getByLabelText("Tool catalog");
-    expect(within(catalog).queryByText("Create ticket")).not.toBeInTheDocument();
+    // The DataList search is debounced.
+    await waitFor(() => expect(within(catalog).queryByText("Create ticket")).not.toBeInTheDocument());
     expect(within(catalog).getByText("Current time")).toBeInTheDocument();
   });
 

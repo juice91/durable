@@ -334,7 +334,17 @@ export default function McpServerDetailPage() {
         />
       ) : null}
 
-      {server ? <McpToolSheet tool={openTool} serverName={server.name} onClose={() => setOpenTool(null)} /> : null}
+      {server ? (
+        <McpToolSheet
+          tool={openTool}
+          serverName={server.name}
+          onClose={() => setOpenTool(null)}
+          usedBy={openTool ? usage.usageForTool(server.name, openTool.name) : []}
+          usageStatus={usage.status}
+          usagePartial={usage.partial}
+          onRetryUsage={usage.reload}
+        />
+      ) : null}
     </>
   );
 }

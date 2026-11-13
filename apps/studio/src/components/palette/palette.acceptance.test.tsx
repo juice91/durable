@@ -200,7 +200,7 @@ describe("keyboard navigation and Enter", () => {
     const cases: [string, string][] = [
       ["wea", routes.agentChat(WEATHER_ID)],
       ["nightly", routes.workflow("wf-1")],
-      ["Get weather", routes.tools()],
+      ["Get weather", routes.tool("get_weather")],
       ["docs server", routes.mcpServer("srv-1")],
       ["New agent", routes.agentNew()],
       ["Go to settings", routes.settings()],

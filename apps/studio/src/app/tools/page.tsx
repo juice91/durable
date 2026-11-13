@@ -1,242 +1,191 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
-import { ToolRunResult } from "@/components/tools/ToolRunResult";
-import type { RunStatus } from "@/lib/runs";
-import { listTools, type ToolDefinition } from "@/lib/tools";
-import { ApiError } from "@/lib/api";
-import { startToolRun, ToolRunError } from "@/lib/toolRuns";
-import { canonicalInputKey, toolRunLedger, type PendingRun, type StartedRunNote } from "@/lib/toolRunLedger";
-import { routes } from "@/lib/routes";
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/frame/PageHeader";
+import { DataList, type DataListColumn } from "@/components/shared/DataList";
+import { RunsStartedElsewhere } from "@/components/tools/RunsStartedElsewhere";
+import { ToolSheet } from "@/components/tools/ToolSheet";
+import { buildToolRows, findToolRow, sourceLabel, toolUsageByKey, type ToolRow } from "@/components/tools/toolCatalog";
+import { Badge } from "@/components/ui/Badge";
+import { useUrlSheet, withSearchParams } from "@/components/ui/useUrlSheet";
+import { describeUsage, usageCountLabel, useAgentLatestSpecs, type AgentUsage } from "@/lib/agentUsage";
 import { navCrumb } from "@/lib/nav";
+import type { ToolTab } from "@/lib/routes/tools";
+import { listTools, type ToolDefinition } from "@/lib/tools";
 
-const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
+// DataList renders this on each row as data-testid (named `testId` so the test-id inventory sees it).
+const TOOL_ROW = { testId: "tool-row" } as const;
+const NO_USAGE: AgentUsage[] = [];
 
-/** True when the answer proves nothing was recorded for this run id, so it may be forgotten. */
-function isDefinitiveRefusal(reason: unknown): boolean {
-  if (reason instanceof ToolRunError) return reason.status >= 400 && reason.status < 500;
-  // Missing credentials are detected before any request is sent.
-  return reason instanceof ApiError && reason.status === 0;
+/**
+ * Tools: a DataList of the built-in catalog plus the MCP tools agents use. A row sets
+ * `?tool=<name>` (and `&server=` for an MCP tool) and opens the tool Sheet with Overview and Run
+ * (`&tab=run`) tabs, so a reload or a shared link reopens it. Nothing here is created, so the page
+ * registers no `c` action.
+ */
+export default function ToolsPage() {
+  // useSearchParams needs a Suspense boundary, or a static build bails out of prerendering the route.
+  return (
+    <Suspense fallback={null}>
+      <ToolsPageContent />
+    </Suspense>
+  );
 }
 
-type InputMode = "form" | "json";
-
-export default function ToolsPage() {
-  const [tools, setTools] = useState<ToolDefinition[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+function ToolsPageContent() {
+  const [catalog, setCatalog] = useState<ToolDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<InputMode>("form");
-  const [input, setInput] = useState<Record<string, unknown>>({});
-  const [rawInput, setRawInput] = useState("{}");
-  const [jsonError, setJsonError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [runBanner, setRunBanner] = useState<string | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [activeRun, setActiveRun] = useState<{ runId: string; status: RunStatus } | null>(null);
-  // Pending run ids and "Open run" notes live in toolRunLedger (sessionStorage), outside this
-  // component, so a lost response, an unmount or a reload never leads to a fresh run id for the
-  // same tool and input. They are read after mount only (the server render has no storage).
-  const [ledgerReady, setLedgerReady] = useState(false);
-  const [, setLedgerVersion] = useState(0);
-  // Each start request gets a generation; selecting another tool bumps it, so a late answer for the
-  // previous tool does not land in the new tool's panel. The request itself is never aborted:
-  // the server may already have accepted the run.
-  const requestGeneration = useRef(0);
-  const mounted = useRef(true);
+  const scan = useAgentLatestSpecs();
+  const sheet = useUrlSheet("tool", { clear: ["server", "tab"], history: "push" });
+  const router = useRouter();
+  const pathname = usePathname() ?? "";
+  const searchParams = useSearchParams();
+  const server = searchParams?.get("server") || null;
+  const tab: ToolTab = searchParams?.get("tab") === "run" ? "run" : "overview";
 
-  useEffect(() => {
-    mounted.current = true;
-    setLedgerReady(true);
-    const unsubscribe = toolRunLedger.subscribe(() => setLedgerVersion((version) => version + 1));
-    return () => {
-      mounted.current = false;
-      unsubscribe();
-    };
-  }, []);
-
-
-  useEffect(() => {
-    listTools().then((catalog) => {
-      setTools(catalog);
-      setSelectedId(catalog[0]?.id ?? null);
-    }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Failed to load tools"))
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    listTools()
+      .then(setCatalog)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Failed to load tools"))
       .finally(() => setLoading(false));
   }, []);
 
-  const selected = tools.find((tool) => tool.id === selectedId) || null;
-  const notes: StartedRunNote[] = ledgerReady ? toolRunLedger.notes() : [];
-  const pendingForSelected: PendingRun | undefined = ledgerReady && selected && !submitting
-    ? toolRunLedger.pending(selected.id, canonicalInputKey(input))
-    : undefined;
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return tools.filter((tool) => !needle || `${tool.title} ${tool.id} ${tool.description}`.toLowerCase().includes(needle));
-  }, [query, tools]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  const selectTool = (id: string) => {
-    if (id === selectedId) return;
-    requestGeneration.current += 1;
-    setSubmitting(false);
-    setSelectedId(id);
-    setInput({});
-    setRawInput("{}");
-    setJsonError(null);
-    setMode("form");
-    setRunBanner(null);
-    setFieldErrors({});
-    setActiveRun(null);
+  const rows = useMemo(() => buildToolRows(catalog, scan.agents, scan.latestSpecs), [catalog, scan.agents, scan.latestSpecs]);
+  const usage = useMemo(() => toolUsageByKey(scan.agents, scan.latestSpecs), [scan.agents, scan.latestSpecs]);
+  const usageOf = (row: ToolRow) => (scan.status === "ready" ? usage.get(row.key) ?? NO_USAGE : NO_USAGE);
+  const selected = findToolRow(rows, sheet.value, server);
+  // MCP rows come from the agents scan, built-in rows from the catalog.
+  const selectedLoading = !selected && (loading || (server !== null && scan.status === "loading"));
+
+  const openRow = (row: ToolRow) => {
+    // An MCP tool has no Run tab; a built-in tool keeps the tab that is showing.
+    if (row.source.kind === "mcp") sheet.open(row.name, { server: row.source.server, tab: null });
+    else sheet.open(row.name, { server: null });
   };
 
-  const runTool = async () => {
-    if (!selected || submitting || (mode === "json" && jsonError)) return;
-    const toolId = selected.id;
-    const toolTitle = selected.title;
-    const inputKey = canonicalInputKey(input);
-    // Reuse the id of any earlier request for this tool and input whose outcome is unknown.
-    const runId = toolRunLedger.pending(toolId, inputKey)?.runId ?? crypto.randomUUID();
-    toolRunLedger.remember({ toolId, toolTitle, inputKey, runId, state: "in_flight" });
-    const generation = ++requestGeneration.current;
-    const isCurrent = () => mounted.current && requestGeneration.current === generation;
-    setSubmitting(true);
-    setRunBanner(null);
-    setFieldErrors({});
-    try {
-      const accepted = await startToolRun(toolId, input, runId);
-      // Ledger updates happen even after an unmount: they are what a remounted page reads.
-      toolRunLedger.forget(toolId, inputKey, runId);
-      if (isCurrent()) setActiveRun({ runId: accepted.run_id, status: accepted.display_status });
-      else toolRunLedger.addNote({ runId: accepted.run_id, toolId, toolTitle });
-    } catch (reason: unknown) {
-      if (isDefinitiveRefusal(reason)) {
-        toolRunLedger.forget(toolId, inputKey, runId);
-      } else {
-        const state = reason instanceof ToolRunError && reason.status === 503 ? "not_started" : "uncertain";
-        toolRunLedger.remember({ toolId, toolTitle, inputKey, runId, state });
-      }
-      if (!isCurrent()) return;
-      if (reason instanceof ToolRunError) {
-        setRunBanner(reason.banner);
-        setFieldErrors(reason.fieldErrors);
-        if (Object.keys(reason.fieldErrors).length > 0 && mode === "json") setMode("form");
-      } else if (isDefinitiveRefusal(reason)) {
-        setRunBanner(reason instanceof Error ? reason.message : "Failed to start the tool run");
-      } else {
-        const detail = reason instanceof Error && reason.message ? `${reason.message}. ` : "";
-        setRunBanner(`${detail}${UNCERTAIN_MESSAGE}`);
-      }
-    } finally {
-      if (isCurrent()) setSubmitting(false);
-    }
+  const setTab = (next: ToolTab) => {
+    const current = typeof window !== "undefined" && window.location.pathname === pathname ? window.location.search : searchParams?.toString() ?? "";
+    router.replace(withSearchParams(pathname, new URLSearchParams(current), { tab: next === "run" ? "run" : null }), { scroll: false });
   };
 
-  const setFormInput = (next: Record<string, unknown>) => {
-    setInput(next);
-    setRawInput(JSON.stringify(next, null, 2));
-  };
-
-  const setJsonInput = (raw: string) => {
-    setRawInput(raw);
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-      setInput(parsed as Record<string, unknown>);
-      setJsonError(null);
-    } catch {
-      setJsonError("Enter valid JSON");
-    }
-  };
+  const columns: DataListColumn<ToolRow>[] = [
+    {
+      id: "name",
+      header: "Name",
+      sortable: true,
+      sortValue: (row) => row.title,
+      cell: (row) => (
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="truncate">{row.title}</span>
+          {row.title !== row.name ? <span className="truncate font-mono text-caption font-normal text-muted-foreground">{row.name}</span> : null}
+          {row.definition ? (
+            <span className="mt-1 flex flex-wrap gap-1 font-normal">
+              {row.definition.side_effect ? <Badge variant="warning">Side effect</Badge> : <Badge>Read only</Badge>}
+              {row.definition.allowed ? <Badge variant="success">Allowed</Badge> : <Badge variant="destructive">Disallowed</Badge>}
+            </span>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      id: "source",
+      header: "Source",
+      sortable: true,
+      sortValue: (row) => (row.source.kind === "builtin" ? "" : row.source.server),
+      className: "whitespace-nowrap",
+      cell: (row) => (
+        <span data-testid="tool-source" className={row.source.kind === "builtin" ? "text-muted-foreground" : "font-mono text-caption text-foreground"}>
+          {sourceLabel(row.source)}
+        </span>
+      ),
+    },
+    {
+      id: "description",
+      header: "Description",
+      className: "hidden md:table-cell md:max-w-md",
+      headerClassName: "hidden md:table-cell",
+      cell: (row) => <span className="line-clamp-2 text-muted-foreground">{row.description || "—"}</span>,
+    },
+    {
+      id: "used-by",
+      header: "Used by",
+      align: "end",
+      className: "whitespace-nowrap",
+      sortable: scan.status === "ready",
+      sortValue: (row) => usageOf(row).length,
+      cell: (row) => {
+        if (scan.status !== "ready") return <span className="text-muted-foreground" title={scan.status === "error" ? "Could not load agents" : undefined}>—</span>;
+        const list = usageOf(row);
+        const partialNote = scan.partial ? "Some published versions could not be read; other agents may also use it." : null;
+        const names = list.map((item) => `${item.agentName} (${describeUsage(item)})`).join("\n");
+        return (
+          <span
+            data-testid="tool-used-by-count"
+            data-count={list.length}
+            data-partial={scan.partial || undefined}
+            className={list.length === 0 ? "text-muted-foreground" : undefined}
+            title={[names, partialNote].filter(Boolean).join("\n") || undefined}
+          >
+            {usageCountLabel(list.length, scan.partial)}
+            {partialNote ? <span className="sr-only"> ({partialNote})</span> : null}
+          </span>
+        );
+      },
+    },
+  ];
 
   return (
     <>
       <PageHeader crumbs={[navCrumb("tools", { current: true })]} />
-    <div className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-6">
-        <p className="mt-1 text-muted-foreground">Explore platform tools, fill their inputs and run them.</p>
+      <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
+        <p className="text-body text-muted-foreground">The platform&apos;s built-in tools and the MCP tools agents use. Open one to see its schema and who uses it, or to run it.</p>
+        {sheet.isOpen ? null : <RunsStartedElsewhere />}
+        <DataList
+          label="Tool catalog"
+          testId="tool-list"
+          rows={rows}
+          columns={columns}
+          getRowId={(row) => row.key}
+          onRowOpen={openRow}
+          selectedRowId={selected?.key ?? null}
+          getRowLabel={(row) => `${row.title}, ${sourceLabel(row.source)}`}
+          getRowTestId={() => TOOL_ROW.testId}
+          searchPlaceholder="Search by name, id or description"
+          searchLabel="Search tools"
+          filterRow={(row, query) => {
+            const q = query.toLowerCase();
+            return `${row.title} ${row.name} ${row.description} ${sourceLabel(row.source)}`.toLowerCase().includes(q);
+          }}
+          noMatchText="No tools match your search."
+          loading={loading}
+          error={error}
+          onRetry={load}
+          empty={{ title: "No tools", description: "The platform's tool catalog is empty." }}
+        />
       </div>
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
-      {notes.length > 0 ? (
-        <ul data-testid="tool-runs-started-elsewhere" aria-label="Runs started for other tools" className="mb-4 space-y-2">
-          {notes.map((item) => (
-            <li key={item.runId} role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">
-              <span>Run started for {item.toolTitle} <span className="font-mono text-xs text-muted-foreground">({item.toolId})</span>:</span>
-              <Link href={routes.run(item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
-              <button type="button" aria-label={`Dismiss note for run ${item.runId}`} onClick={() => toolRunLedger.dismissNote(item.runId)} className="ml-auto text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {loading ? <p className="text-muted-foreground">Loading tools…</p> : null}
-      {!loading && !error ? (
-        <div className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
-          <aside className="space-y-3">
-            <label htmlFor="tool-search" className="sr-only">Search tools</label>
-            <input id="tool-search" type="search" placeholder="Search tools" value={query} onChange={(event) => setQuery(event.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-            <div className="space-y-2" aria-label="Tool catalog">
-              {filtered.map((tool) => (
-                <button key={tool.id} type="button" onClick={() => selectTool(tool.id)} className={`w-full rounded-md border p-3 text-left transition-colors ${selectedId === tool.id ? "border-primary bg-accent" : "border-border bg-card hover:bg-accent/60"}`}>
-                  <span className="block font-medium text-card-foreground">{tool.title}</span>
-                  <span className="block font-mono text-xs text-muted-foreground">{tool.id}</span>
-                  <span className="mt-2 line-clamp-2 block text-sm text-muted-foreground">{tool.description}</span>
-                  <span className="mt-2 flex flex-wrap gap-1">
-                    {tool.side_effect ? <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive-text">Side effect</span> : <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">Read only</span>}
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${tool.allowed ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive-text"}`}>{tool.allowed ? "Allowed" : "Disallowed"}</span>
-                  </span>
-                </button>
-              ))}
-              {filtered.length === 0 ? <p className="py-6 text-center text-sm text-muted-foreground">No tools match your search.</p> : null}
-            </div>
-          </aside>
-          {selected ? (
-            <div className="min-w-0 space-y-6">
-              <section className="rounded-lg border border-border bg-card p-5">
-                <h2 className="text-xl font-semibold text-card-foreground">{selected.title}</h2>
-                <p className="font-mono text-xs text-muted-foreground">{selected.id}</p>
-                <p className="mt-3 text-sm text-muted-foreground">{selected.description}</p>
-              </section>
-              <section className="rounded-lg border border-border bg-card p-5">
-                <div className="mb-4 flex items-center justify-between gap-4">
-                  <h3 className="font-semibold text-card-foreground">Input</h3>
-                  <div role="group" aria-label="Input mode" className="flex rounded-md border border-border p-1">
-                    {(["form", "json"] as const).map((item) => <button key={item} type="button" aria-pressed={mode === item} onClick={() => setMode(item)} className={`rounded px-3 py-1 text-sm ${mode === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>{item === "form" ? "Form" : "JSON"}</button>)}
-                  </div>
-                </div>
-                {mode === "form" ? <JsonSchemaForm schema={selected.input_schema} value={input} onChange={setFormInput} errors={fieldErrors} /> : (
-                  <div className="space-y-1">
-                    <label htmlFor="tool-input-json" className="sr-only">Tool input JSON</label>
-                    <textarea id="tool-input-json" rows={12} value={rawInput} onChange={(event) => setJsonInput(event.target.value)} className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-                    {jsonError ? <p role="alert" className="text-xs text-destructive-text">{jsonError}</p> : null}
-                  </div>
-                )}
-                <div className="mt-5 space-y-3 border-t border-border pt-4">
-                  {runBanner ? <p role="alert" data-testid="tool-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{runBanner}</p> : null}
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button type="button" onClick={runTool} disabled={submitting || (mode === "json" && Boolean(jsonError))} aria-busy={submitting} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">Run</button>
-                    {submitting ? <span className="text-xs text-muted-foreground" aria-live="polite">Starting…</span> : null}
-                    {pendingForSelected ? (
-                      <span data-testid="tool-run-reuse-hint" data-state={pendingForSelected.state} className="text-xs text-muted-foreground">
-                        {pendingForSelected.state === "not_started" ? "Running again sends the same request (same run id)." : UNCERTAIN_MESSAGE}
-                      </span>
-                    ) : null}
-                    {!selected.allowed ? <span className="text-xs text-muted-foreground">This tool is not in the platform allowlist; the API will refuse the run.</span> : null}
-                    {selected.allowed && selected.side_effect ? <span className="text-xs text-muted-foreground">This tool has side effects; each Run performs it once.</span> : null}
-                  </div>
-                </div>
-              </section>
-              {activeRun ? <ToolRunResult key={activeRun.runId} runId={activeRun.runId} initialStatus={activeRun.status} /> : null}
-              <section className="rounded-lg border border-border bg-card p-5">
-                <h3 className="mb-3 font-semibold text-card-foreground">Input schema</h3>
-                <pre className="overflow-x-auto rounded-md bg-muted p-4 text-xs text-foreground">{JSON.stringify(selected.input_schema, null, 2)}</pre>
-              </section>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+      <ToolSheet
+        name={sheet.value}
+        server={server}
+        row={selected}
+        loading={selectedLoading}
+        tab={tab}
+        onTabChange={setTab}
+        onOpenChange={sheet.onOpenChange}
+        usedBy={selected ? usageOf(selected) : NO_USAGE}
+        usageStatus={scan.status}
+        usagePartial={scan.partial}
+        onRetryUsage={scan.reload}
+        loadError={error}
+        onRetryLoad={load}
+      />
     </>
   );
 }

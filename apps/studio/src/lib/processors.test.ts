@@ -7,7 +7,6 @@ import {
   formatMatchCounts,
   isModerationRefusal,
   loadAgentProcessorSpecs,
-  mapWithConcurrency,
   processors,
   processorUsage,
   resultsQuery,
@@ -67,23 +66,6 @@ describe("describeValidationDetail", () => {
     expect(describeValidationDetail([{ loc: ["query", "run_id"], msg: "bad uuid" }])).toBe("run_id: bad uuid");
     expect(describeValidationDetail("text is larger than 32768 bytes (32 KiB)")).toBe("text is larger than 32768 bytes (32 KiB)");
     expect(describeValidationDetail(undefined)).toBeNull();
-  });
-});
-
-describe("mapWithConcurrency", () => {
-  it("never has more than the limit in flight and keeps the order", async () => {
-    let inFlight = 0;
-    let peak = 0;
-    const result = await mapWithConcurrency([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 4, async (n) => {
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      await new Promise((r) => setTimeout(r, 1 + (n % 3)));
-      inFlight -= 1;
-      return n * 2;
-    });
-    expect(peak).toBe(4);
-    expect(result).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
-    expect(await mapWithConcurrency([], 4, async (n: number) => n)).toEqual([]);
   });
 });
 

@@ -36,7 +36,8 @@ export const entityHref = {
   // The agent page's Chat tab (SL.6).
   agent: (id: string): string => routes.agentChat(id),
   workflow: (id: string): string => routes.workflow(id),
-  tool: (_id: string): string => routes.tools(),
+  // The tools page with that tool's Sheet open (SL.13).
+  tool: (id: string): string => routes.tool(id),
   // The server's detail page (SL.8).
   mcp: (id: string): string => routes.mcpServer(id),
 };
