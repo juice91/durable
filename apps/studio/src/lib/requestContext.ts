@@ -7,6 +7,7 @@
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
 import type { JsonSchema } from "@/lib/tools";
 import { routes } from "@/lib/routes";
+import { safeLocalStorage } from "@/lib/safeStorage";
 
 export type ContextFieldType = "string" | "integer" | "number" | "boolean" | "enum";
 
@@ -193,18 +194,10 @@ export function savedContextKey(agentId: string): string {
   return `${SAVED_CONTEXT_PREFIX}${credentialScope()}:${agentId}`;
 }
 
-function storage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 /** The saved context of this agent, or null (none, unreadable, or storage unavailable). */
 export function loadSavedContext(agentId: string): SavedRequestContext | null {
   try {
-    const raw = storage()?.getItem(savedContextKey(agentId));
+    const raw = safeLocalStorage()?.getItem(savedContextKey(agentId));
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || !isRecord(parsed.value)) return null;
@@ -224,7 +217,7 @@ export function loadSavedContext(agentId: string): SavedRequestContext | null {
 export function saveContext(agentId: string, value: RequestContextValue, version: ContextVersionRef): SavedRequestContext | null {
   const saved: SavedRequestContext = { value, version, saved_at: new Date().toISOString() };
   try {
-    const store = storage();
+    const store = safeLocalStorage();
     if (!store) return null;
     store.setItem(savedContextKey(agentId), JSON.stringify(saved));
     return saved;
@@ -236,7 +229,7 @@ export function saveContext(agentId: string, value: RequestContextValue, version
 /** Removes this agent's saved context; false when storage is unavailable. */
 export function clearSavedContext(agentId: string): boolean {
   try {
-    const store = storage();
+    const store = safeLocalStorage();
     if (!store) return false;
     store.removeItem(savedContextKey(agentId));
     return true;

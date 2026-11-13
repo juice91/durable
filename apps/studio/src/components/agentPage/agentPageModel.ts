@@ -6,6 +6,7 @@ import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes, type AgentChatRouteOptions } from "@/lib/routes";
 import { sectionsOf } from "@/components/agents/specSections";
 import { effectiveVersionRef, targetSpec, type VersionRef } from "@/components/playground/runOptions";
+import { readStorage, writeStorage } from "@/lib/safeStorage";
 
 /** The agent whose chat was opened last (`/playground` without an agent goes there). */
 export const LAST_AGENT_KEY = "studio.lastAgent";
@@ -30,29 +31,9 @@ export function agentLayoutKey(agentId: string): string {
   return `${AGENT_LAYOUT_KEY_PREFIX}${agentId}`;
 }
 
-function storage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function read(key: string): string | null {
-  try {
-    return storage()?.getItem(key) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function write(key: string, value: string): void {
-  try {
-    storage()?.setItem(key, value);
-  } catch {
-    // Not remembered: private mode or a full quota. Nothing depends on it.
-  }
-}
+const read = readStorage;
+// Not remembered on failure (private mode, a full quota): nothing depends on it.
+const write = (key: string, value: string): void => void writeStorage(key, value);
 
 export function readLastAgent(): string | null {
   return read(LAST_AGENT_KEY) || null;

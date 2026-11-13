@@ -195,7 +195,9 @@ export function CommandPalette() {
   const toggleSidebar = useCallback(() => {
     if (!frame) return;
     if (frame.isWide) frame.toggleSidebar();
-    else frame.setNavOpen(true);
+    // The drawer is a dialog: open it after the palette has closed and returned focus, so focus
+    // lands in the drawer (as the help command does).
+    else window.setTimeout(() => frame.setNavOpen(true), 0);
   }, [frame]);
 
   const openHelp = useCallback(() => {

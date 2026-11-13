@@ -21,9 +21,18 @@ export interface AgentPageValue {
   /** The version the chat targets; the Config panel describes it. Null: the latest. */
   configVersion: VersionRef;
   setConfigVersion: (ref: VersionRef) => void;
-  /** Threads pane: expanded (wide screens) or its Sheet open (below 1024 px). */
+  /**
+   * Threads pane, the user's choice: expanded (wide screens) or its Sheet open (below 1024 px). What
+   * the pane shows is `threadsOpen && !threadsAutoCollapsed`.
+   */
   threadsOpen: boolean;
+  /** A user's open or close (the toggle, `{`, a drag). Opening while auto-collapsed closes Config. */
   setThreadsOpen: (open: boolean) => void;
+  /**
+   * The threads pane is collapsed automatically because Config is open and threads + chat do not
+   * fit beside it (chatFit.ts). Not the user's layout: never saved.
+   */
+  threadsAutoCollapsed: boolean;
   /** Where the chat portals its temporary "Request context" section (inside the Config panel); null
    * while the Config panel is closed. */
   requestContextSlot: HTMLElement | null;

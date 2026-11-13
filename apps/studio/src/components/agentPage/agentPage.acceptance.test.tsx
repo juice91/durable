@@ -56,7 +56,7 @@ import { getRequestContext } from "@/lib/requestContext";
 import { EMPTY_FILTERS, listTraceRuns, traceFiltersToParams, type TraceRun } from "@/lib/traces";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations } from "@/test/a11y";
-import { FrameHarness, mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
+import { FrameHarness, mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { AgentLayout } from "./AgentLayout";
 import { ChatTab } from "./ChatTab";
 import { EditorTab } from "./EditorTab";
@@ -95,7 +95,10 @@ const trace = (id: string, extra: Partial<TraceRun> = {}): TraceRun =>
     ...extra,
   }) as unknown as TraceRun;
 
+// A desktop window: the Chat tab's threads and chat fit beside Config (jsdom's 1024 px does not).
+let restoreWidth: () => void = () => {};
 beforeEach(() => {
+  restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
   window.localStorage.clear();
   window.history.replaceState({}, "", routes.agentChat("a1"));
   nav.path = routes.agentChat("a1");
@@ -122,6 +125,7 @@ afterEach(() => {
   cleanup();
   media?.restore();
   media = undefined;
+  restoreWidth();
   document.documentElement.classList.remove("dark");
 });
 
@@ -239,7 +243,7 @@ describe("redirects, end to end", () => {
     openPage("a2", "chat", true, "c1");
     await waitFor(() => expect(getConversation).toHaveBeenCalledWith("c1"));
     expect(screen.queryByTestId("chat-other-agent")).toBeNull();
-    expect(window.location.pathname).toBe("/agents/a2/chat/c1");
+    expect(window.location.pathname).toBe(routes.agentChat("a2", { conversation: "c1" }));
   });
 
   it("the legacy ?conversation= on a chat URL still loads that conversation, and the route's conversation wins", async () => {
@@ -295,7 +299,7 @@ describe("tabs and the switcher", () => {
     vi.mocked(getConversation).mockResolvedValue({ id: "c1", agent_id: "a1", title: "T", turn_count: 0, created_at: "", updated_at: "", runs: [] });
     openPage("a1", "chat", true, "c1");
     await switchTo("Billing bot");
-    expect(nav.push).toHaveBeenCalledWith("/agents/a2/chat");
+    expect(nav.push).toHaveBeenCalledWith(routes.agentChat("a2"));
   });
 
   it("the switcher lists every agent and marks the current one; opening another agent's page re-titles it", async () => {

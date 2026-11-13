@@ -2,6 +2,7 @@ import { SIDE_PANEL_STORAGE_KEY } from "@/components/frame/frameStorage";
 import { SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
 import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
+import { safeLocalStorage } from "@/lib/safeStorage";
 import {
   AGENT_CONFIG_KEY_PREFIX,
   AGENT_LAYOUT_KEY_PREFIX,
@@ -93,13 +94,7 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
 ];
 
 /** localStorage, or null when it is unavailable or throws. */
-export function browserStorage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
+export const browserStorage = safeLocalStorage;
 
 function storedKeys(storage: Storage): string[] {
   const keys: string[] = [];

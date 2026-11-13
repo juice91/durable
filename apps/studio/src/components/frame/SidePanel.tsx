@@ -1,12 +1,13 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { IconButton } from "@/components/ui/IconButton";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
+import { useFrame } from "./FrameContext";
 import {
   clampSidePanelWidth,
   readSidePanelWidth,
@@ -14,8 +15,9 @@ import {
   SIDE_PANEL_MIN_WIDTH,
   sidePanelMaxWidth,
   writeSidePanelWidth,
+  type SidePanelClampOptions,
 } from "./frameStorage";
-import { matchesNow, useIsWide, WIDE_QUERY } from "./useMediaQuery";
+import { matchesNow, useIsWide, useViewportWidth, WIDE_QUERY } from "./useMediaQuery";
 
 /** Keyboard resize step, in px. */
 export const SIDE_PANEL_KEY_STEP = 16;
@@ -23,12 +25,15 @@ export const SIDE_PANEL_KEY_STEP = 16;
 interface Registration {
   id: string;
   title: string;
+  /** The width the page keeps in its main card beside the panel (caps the panel's maximum). */
+  mainMinWidth?: number;
 }
 
 interface SidePanelContextValue {
   active: Registration | null;
-  register: (registration: Registration, defaultOpen: boolean) => () => void;
-  rename: (id: string, title: string) => void;
+  register: (registration: Registration, defaultOpen: boolean | (() => boolean)) => () => void;
+  /** Keeps the registered panel's title and reservation current without re-registering. */
+  update: (id: string, changes: Pick<Registration, "title" | "mainMinWidth">) => void;
   open: boolean;
   setOpen: (open: boolean) => void;
   /** The saved width before clamping to the window. */
@@ -57,13 +62,14 @@ export function SidePanelProvider({ children }: { children: React.ReactNode }) {
   // The registration, also in a ref so cleanup and rename compare against the latest one.
   const activeRef = useRef<Registration | null>(null);
 
-  const register = useCallback((registration: Registration, defaultOpen: boolean) => {
+  const register = useCallback((registration: Registration, defaultOpen: boolean | (() => boolean)) => {
     activeRef.current = registration;
     setActive(registration);
     // `defaultOpen` means "open as a column". Below 1024 px the panel would be a modal Sheet over
     // the page, so it starts closed there. Read the media query now: during hydration `isWide` is
-    // still the server's guess (wide).
-    setOpen(defaultOpen && matchesNow(WIDE_QUERY));
+    // still the server's guess (wide). A function is evaluated here, on the client, so it may
+    // measure the window.
+    setOpen(matchesNow(WIDE_QUERY) && (typeof defaultOpen === "function" ? defaultOpen() : defaultOpen));
     return () => {
       if (activeRef.current?.id !== registration.id) return;
       activeRef.current = null;
@@ -72,10 +78,10 @@ export function SidePanelProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const rename = useCallback((id: string, title: string) => {
+  const update = useCallback((id: string, changes: Pick<Registration, "title" | "mainMinWidth">) => {
     const current = activeRef.current;
-    if (!current || current.id !== id || current.title === title) return;
-    activeRef.current = { id, title };
+    if (!current || current.id !== id || (current.title === changes.title && current.mainMinWidth === changes.mainMinWidth)) return;
+    activeRef.current = { id, ...changes };
     setActive(activeRef.current);
   }, []);
 
@@ -90,8 +96,8 @@ export function SidePanelProvider({ children }: { children: React.ReactNode }) {
   }, [isWide]);
 
   const value = useMemo<SidePanelContextValue>(
-    () => ({ active, register, rename, open, setOpen, width, setWidth, slot, setSlot, isWide }),
-    [active, register, rename, open, width, setWidth, slot, isWide],
+    () => ({ active, register, update, open, setOpen, width, setWidth, slot, setSlot, isWide }),
+    [active, register, update, open, width, setWidth, slot, isWide],
   );
   return <SidePanelContext.Provider value={value}>{children}</SidePanelContext.Provider>;
 }
@@ -104,6 +110,8 @@ export interface SidePanelControls {
   toggle: () => void;
   /** The registered panel's title. */
   title: string | null;
+  /** The saved width, before clamping to the window (`clampSidePanelWidth` gives the rendered one). */
+  width: number;
 }
 
 const noop = () => {};
@@ -114,40 +122,57 @@ export function useSidePanel(): SidePanelControls {
   const setOpen = context?.setOpen;
   const open = context?.open ?? false;
   const toggle = useCallback(() => setOpen?.(!open), [open, setOpen]);
-  if (!context) return { available: false, open: false, setOpen: noop, toggle: noop, title: null };
-  return { available: context.active !== null, open: context.active !== null && context.open, setOpen: context.setOpen, toggle, title: context.active?.title ?? null };
+  if (!context) return { available: false, open: false, setOpen: noop, toggle: noop, title: null, width: SIDE_PANEL_DEFAULT_WIDTH };
+  return {
+    available: context.active !== null,
+    open: context.active !== null && context.open,
+    setOpen: context.setOpen,
+    toggle,
+    title: context.active?.title ?? null,
+    width: context.width,
+  };
 }
 
 export interface SidePanelProps {
   /** Accessible name and header text ("Config"). */
   title: string;
-  /** Open when the page mounts. Default false: the panel is collapsed except where a page asks. */
-  defaultOpen?: boolean;
+  /**
+   * Open when the page mounts. Default false: the panel is collapsed except where a page asks. A
+   * function is called once, on the client, when the panel registers (it may measure the window).
+   */
+  defaultOpen?: boolean | (() => boolean);
+  /**
+   * The width the page needs to keep in its main card beside the panel. The panel's maximum (drag,
+   * keyboard and saved width) leaves this much room, never going below the panel's minimum.
+   */
+  mainMinWidth?: number;
   children: React.ReactNode;
 }
 
 /**
  * Registers the page's right-hand panel with the frame. From 1024 px it renders in the frame's slot
- * beside the main card (resizable, 360 px to half the window); below that it is a Sheet from the
+ * beside the main card (resizable, 360 px to half the window, less when the page reserves
+ * `mainMinWidth`); below that it is a Sheet from the
  * right, so it never takes a column on a phone. Outside the frame (a page rendered alone in a test)
  * the content renders in place.
  */
-export function SidePanel({ title, defaultOpen = false, children }: SidePanelProps) {
+export function SidePanel({ title, defaultOpen = false, mainMinWidth, children }: SidePanelProps) {
   const context = useContext(SidePanelContext);
   const id = useId();
   const register = context?.register;
-  const rename = context?.rename;
-  // Registered once per mount; the title is kept current separately so a rename does not reset `open`.
+  const update = context?.update;
+  // Registered once per mount; the title and reservation are kept current separately so a change
+  // does not reset `open`.
   const defaultOpenRef = useRef(defaultOpen);
-  const titleRef = useRef(title);
+  const registrationRef = useRef({ title, mainMinWidth });
   useLayoutEffect(() => {
     if (!register) return;
-    return register({ id, title: titleRef.current }, defaultOpenRef.current);
+    return register({ id, ...registrationRef.current }, defaultOpenRef.current);
   }, [id, register]);
   useLayoutEffect(() => {
-    titleRef.current = title;
-    rename?.(id, title);
-  }, [id, rename, title]);
+    registrationRef.current = { title, mainMinWidth };
+    update?.(id, { title, mainMinWidth });
+  }, [id, update, title, mainMinWidth]);
 
   if (!context) {
     return (
@@ -168,14 +193,6 @@ export function SidePanel({ title, defaultOpen = false, children }: SidePanelPro
   );
 }
 
-// The window width, for clamping the panel to half of it.
-function subscribeResize(onChange: () => void) {
-  window.addEventListener("resize", onChange);
-  return () => window.removeEventListener("resize", onChange);
-}
-const windowWidth = () => window.innerWidth;
-const serverWindowWidth = () => 1280;
-
 /**
  * The frame's column for the open side panel (wide screens only): a resize handle, a header with
  * the title and Close, and the body the panel portals into. Renders nothing when no panel is open.
@@ -184,14 +201,15 @@ export function SidePanelSlot({ className }: { className?: string }) {
   const context = useContext(SidePanelContext);
   const shown = Boolean(context && context.isWide && context.active && context.open);
   // Listen to window resizes only while a panel is shown.
-  const subscribe = useCallback((onChange: () => void) => (shown ? subscribeResize(onChange) : () => {}), [shown]);
-  const viewport = useSyncExternalStore(subscribe, windowWidth, serverWindowWidth);
+  const viewport = useViewportWidth(shown);
+  const sidebarCollapsed = useFrame()?.sidebarCollapsed ?? false;
   const titleId = useId();
   if (!context || !context.active || !shown) return null;
-  const width = clampSidePanelWidth(context.width, viewport);
+  const clamp: SidePanelClampOptions = { sidebarCollapsed, mainMinWidth: context.active.mainMinWidth };
+  const width = clampSidePanelWidth(context.width, viewport, clamp);
   return (
     <>
-      <SidePanelResizeHandle width={width} viewport={viewport} onResize={context.setWidth} />
+      <SidePanelResizeHandle width={width} viewport={viewport} clamp={clamp} onResize={context.setWidth} />
       <aside
         aria-labelledby={titleId}
         data-testid="side-panel"
@@ -220,13 +238,14 @@ export function SidePanelSlot({ className }: { className?: string }) {
 interface HandleProps {
   width: number;
   viewport: number;
+  clamp: SidePanelClampOptions;
   onResize: (width: number, persist: boolean) => void;
 }
 
 /** A keyboard and pointer resize handle on the panel's left edge (ArrowLeft widens, ArrowRight narrows). */
-function SidePanelResizeHandle({ width, viewport, onResize }: HandleProps) {
+function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps) {
   const drag = useRef<{ startX: number; startWidth: number; last: number } | null>(null);
-  const max = sidePanelMaxWidth(viewport);
+  const max = sidePanelMaxWidth(viewport, clamp);
 
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     let next: number | null = null;
@@ -236,7 +255,7 @@ function SidePanelResizeHandle({ width, viewport, onResize }: HandleProps) {
     else if (event.key === "End") next = max;
     if (next === null) return;
     event.preventDefault();
-    onResize(clampSidePanelWidth(next, viewport), true);
+    onResize(clampSidePanelWidth(next, viewport, clamp), true);
   }
 
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -249,7 +268,7 @@ function SidePanelResizeHandle({ width, viewport, onResize }: HandleProps) {
   function onPointerMove(event: React.PointerEvent<HTMLDivElement>) {
     if (!drag.current) return;
     // The panel is on the right: moving the pointer left widens it.
-    const next = clampSidePanelWidth(drag.current.startWidth + (drag.current.startX - event.clientX), viewport);
+    const next = clampSidePanelWidth(drag.current.startWidth + (drag.current.startX - event.clientX), viewport, clamp);
     drag.current.last = next;
     onResize(next, false);
   }

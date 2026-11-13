@@ -8,6 +8,7 @@ import { api, ApiError, type Agent, type AgentSpec, type AgentVersion } from "@/
 import { mcpServers, type McpServer, type McpTestResult } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations } from "@/test/a11y";
+import { ShortcutsProvider } from "@/components/shortcuts/ShortcutsProvider";
 
 // SL.8 acceptance: the /mcp DataList and the /mcp/[id] detail page, beyond the re-pointed P0 tests.
 
@@ -209,7 +210,8 @@ describe("MCP list: rows and row actions", () => {
   });
 
   it("`c` opens Add server, but not while typing, with a modifier, or over an open dialog", async () => {
-    render(<McpServersPage />);
+    // `c` is bound by the global shortcut provider (in the root layout).
+    render(<ShortcutsProvider><McpServersPage /></ShortcutsProvider>);
     await screen.findByTestId("mcp-server-row");
     expect(screen.getByTestId("mcp-add-server")).toHaveAttribute("aria-keyshortcuts", "c");
 

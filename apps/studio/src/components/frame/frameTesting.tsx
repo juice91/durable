@@ -12,9 +12,22 @@ export interface MatchMediaControl {
   restore: () => void;
 }
 
+/** A desktop window wide enough for the agent Chat tab's threads and chat beside Config. */
+export const TEST_WIDE_WIDTH = 1440;
+
+/** Sets `window.innerWidth` (jsdom's default is 1024); returns the restore function. */
+export function setWindowWidth(width: number): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+  return () => {
+    if (descriptor) Object.defineProperty(window, "innerWidth", descriptor);
+  };
+}
+
 /**
  * Replaces `window.matchMedia` so `(min-width: 1024px)` matches when `wide`; every other query
- * (the OS dark preference) does not match.
+ * (the OS dark preference) does not match. It does not touch `window.innerWidth` (jsdom: 1024 px):
+ * a test of width-dependent layout (the agent Chat tab beside Config) sets it with `setWindowWidth`.
  */
 export function mockMatchMedia(wide: boolean): MatchMediaControl {
   const original = window.matchMedia;

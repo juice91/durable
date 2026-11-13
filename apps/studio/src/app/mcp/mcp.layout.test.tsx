@@ -7,6 +7,15 @@ import { api, type Agent } from "@/lib/api";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations } from "@/test/a11y";
+import { ShortcutsProvider } from "@/components/shortcuts/ShortcutsProvider";
+
+// `c` is bound by the global provider, which reads the router.
+vi.mock("next/navigation", () => ({
+  useParams: () => ({}),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
+  usePathname: () => "/mcp",
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
@@ -57,7 +66,7 @@ describe("MCP servers list (layout)", () => {
   });
 
   it("opens Add server with the button and with `c`, but not while typing", async () => {
-    render(<McpServersPage />);
+    render(<ShortcutsProvider><McpServersPage /></ShortcutsProvider>);
     await screen.findByTestId("mcp-server-row");
     fireEvent.keyDown(screen.getByRole("searchbox"), { key: "c" });
     expect(screen.queryByRole("dialog")).toBeNull();

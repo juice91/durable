@@ -6,8 +6,8 @@ import { allNavItems, type NavItem } from "./nav";
  * Bound by `components/shortcuts/ShortcutsProvider` through the engine below: `?` (help), `c` (the
  * page's create action) and `g` + a letter from the nav registry. Bound elsewhere, and only listed
  * here for the help table: ⌘K / Ctrl+K (the palette), `[` (the sidebar, in the frame), `/` (the
- * DataList search binds it itself) and the DataList row keys. The agent page's `]` and `{` are
- * added to `SHORTCUT_SECTIONS` by the task that binds them (SL.10).
+ * DataList search binds it itself), the DataList row keys, and the agent page's `]` (Config) and
+ * `{` (conversations), bound by `AgentLayout`.
  *
  * Every single-key shortcut is ignored while focus is in a field and while a dialog or menu is
  * open (`shouldHandleShortcut` in components/frame/keyboard.ts).
@@ -166,6 +166,14 @@ export function shortcutSections(items: readonly NavItem[] = allNavItems): Short
       rows: items
         .filter((item) => item.gKey)
         .map((item) => ({ id: `nav:${item.id}`, label: item.label, keys: [[displayKey(G_PREFIX), displayKey(item.gKey as string)]], sequence: true })),
+    },
+    {
+      id: "agent",
+      title: "Agent page",
+      rows: [
+        { id: "agent-config", label: "Show or hide the Config panel", keys: [["]"]] },
+        { id: "agent-threads", label: "Show or hide the conversations pane (Chat tab)", keys: [["{"]] },
+      ],
     },
   ];
 }

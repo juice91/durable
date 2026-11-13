@@ -7,11 +7,10 @@ import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/She
 import { useIsWide } from "@/components/frame/useMediaQuery";
 import { agentLayoutKey } from "./agentPageModel";
 import { useAgentPage } from "./AgentPageContext";
+import { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX, threadsShown } from "./chatFit";
 
-/** Threads pane: 280 px by default, 240 px at least, collapsible. The chat keeps 360 px. */
-export const THREADS_DEFAULT_PX = 280;
-export const THREADS_MIN_PX = 240;
-export const CHAT_MIN_PX = 360;
+// The pane minimums live in chatFit.ts (one source for the panes and the fit decisions).
+export { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX };
 
 export const THREADS_TITLE = "Conversations";
 
@@ -44,6 +43,8 @@ export interface AgentChatPanesProps {
  * saved per agent in `localStorage["studio.agent-layout.v1.{id}"]`, the threads pane collapsible
  * with `{` or the header's Conversations button. Below 1024 px the chat takes the full width and the
  * threads open as a Sheet. The Config pane is the frame's side panel (registered by `AgentLayout`).
+ * While Config leaves no room for both panes, the page marks the threads auto-collapsed: the pane
+ * collapses without saving, and comes back (unless the user closed it) when the room returns.
  */
 export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesProps) {
   const page = useAgentPage();
@@ -52,13 +53,17 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
   const [localOpen, setLocalOpen] = useState(true);
   const threadsOpen = page ? page.threadsOpen : localOpen;
   const setThreadsOpen = page ? page.setThreadsOpen : setLocalOpen;
+  const autoCollapsed = page?.threadsAutoCollapsed ?? false;
+  // What the pane shows; `threadsOpen` is the user's choice, the only thing saved.
+  const shown = threadsShown(threadsOpen, autoCollapsed);
   const panelRef = usePanelRef();
   const groupRef = useGroupRef();
   const storageKey = agentLayoutKey(agentId);
 
   // The first time the panes exist, the saved layout decides whether threads start collapsed; after
-  // that, the toggle drives the pane.
+  // that, the toggle (and the auto-collapse) drives the pane.
   const adopted = useRef(false);
+  const lastUserOpen = useRef(threadsOpen);
   useEffect(() => {
     if (!isWide || !mounted) {
       adopted.current = false;
@@ -66,31 +71,44 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     }
     const panel = panelRef.current;
     if (!panel) return;
-    const collapsed = panel.isCollapsed();
     if (!adopted.current) {
       adopted.current = true;
-      if (collapsed === threadsOpen) setThreadsOpen(!collapsed);
-      return;
+      const savedOpen = !panel.isCollapsed();
+      lastUserOpen.current = savedOpen;
+      if (savedOpen !== threadsOpen) {
+        setThreadsOpen(savedOpen);
+        return;
+      }
     }
-    if (threadsOpen === !collapsed) return;
-    if (threadsOpen) panel.expand();
-    else panel.collapse();
+    const userChanged = lastUserOpen.current !== threadsOpen;
+    lastUserOpen.current = threadsOpen;
+    if (shown !== !panel.isCollapsed()) {
+      if (shown) panel.expand();
+      else panel.collapse();
+    }
+    // Only the user's choice is saved; an auto-collapse (or its undoing) is not.
+    if (!userChanged) return;
     // The kit saves user drags; a toggle (`{`, the header button) changes the pane in code, so it is
     // saved here, and a reload keeps it.
-    const layout = groupRef.current?.getLayout();
+    const layout = autoCollapsed ? undefined : groupRef.current?.getLayout();
     if (layout && Object.keys(layout).length > 0) writeStoredLayout(storageKey, layout);
-    // No measured layout (the group has no size yet): save the collapse itself, or forget a saved one.
+    // No measured layout (the group has no size yet, or the pane is auto-collapsed): save the
+    // collapse itself, or forget a saved one.
     else if (!threadsOpen) writeStoredLayout(storageKey, { threads: 0, chat: 100 });
     else if (readStoredLayout(storageKey)?.threads === 0) clearStoredLayout(storageKey);
-  }, [groupRef, isWide, mounted, panelRef, setThreadsOpen, storageKey, threadsOpen]);
+  }, [autoCollapsed, groupRef, isWide, mounted, panelRef, setThreadsOpen, shown, storageKey, threadsOpen]);
 
-  // Dragging the pane closed (or open) updates the toggle.
+  // Dragging the pane closed (or open) updates the toggle. A collapse or expand made in code (the
+  // toggle, the auto-collapse) already matches `shown` and changes nothing here.
+  // Read through a ref: the kit may report a resize with the callback from the render before.
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
   const onThreadsResize = useCallback(() => {
     const panel = panelRef.current;
     if (!panel || !adopted.current) return;
     const open = !panel.isCollapsed();
-    if (open !== threadsOpen) setThreadsOpen(open);
-  }, [panelRef, setThreadsOpen, threadsOpen]);
+    if (open !== shownRef.current) setThreadsOpen(open);
+  }, [panelRef, setThreadsOpen]);
 
   if (!mounted) return <div data-testid="agent-chat-panes" className="flex min-h-0 min-w-0 flex-1" />;
 
@@ -128,7 +146,7 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
         className="min-w-0"
       >
         {/* A collapsed pane keeps its content mounted (the list keeps its state) but out of reach. */}
-        <div className="flex h-full min-h-0 min-w-0 flex-col" hidden={!threadsOpen} aria-label={THREADS_TITLE} role="region">
+        <div className="flex h-full min-h-0 min-w-0 flex-col" hidden={!shown} aria-label={THREADS_TITLE} role="region">
           {threads}
         </div>
       </ResizablePanel>

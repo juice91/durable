@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { expectNoAxeViolations } from "@/test/a11y";
 import { DATALIST_SEARCH_DEBOUNCE_MS, DataList, type DataListColumn } from "./DataList";
+import { routes } from "@/lib/routes";
 
 interface Row { id: string; name: string; tools: number }
 const rows: Row[] = [
@@ -138,18 +139,18 @@ describe("DataList rows: keyboard and open", () => {
   it("href rows: first cell is a link; Enter on the link follows it; Enter on the row's other cell clicks the link", () => {
     const clicks: string[] = [];
     render(<div onClick={(e) => { const a = (e.target as HTMLElement).closest("a"); if (a) { e.preventDefault(); clicks.push(a.getAttribute("href") ?? ""); } }}>
-      <DataList {...base} rows={rows} getRowHref={(r) => `/agents/${r.id}`} />
+      <DataList {...base} rows={rows} getRowHref={(r) => routes.agentIndex(r.id)} />
     </div>);
     const link = screen.getByRole("link", { name: "Charlie" });
-    expect(link).toHaveAttribute("href", "/agents/a1");
+    expect(link).toHaveAttribute("href", routes.agentIndex("a1"));
     expect(screen.getAllByRole("link")).toHaveLength(3);
     const cell = within(link.closest("tr") as HTMLElement).getAllByRole("cell")[1];
     cell.tabIndex = 0;
     cell.focus();
     fireEvent.keyDown(cell, { key: "Enter" });
-    expect(clicks).toEqual(["/agents/a1"]);
+    expect(clicks).toEqual([routes.agentIndex("a1")]);
     fireEvent.click(cell);
-    expect(clicks).toEqual(["/agents/a1", "/agents/a1"]);
+    expect(clicks).toEqual([routes.agentIndex("a1"), routes.agentIndex("a1")]);
   });
 
   it("onRowOpen rows: buttons; arrows move; Enter on the focused button opens that row", () => {

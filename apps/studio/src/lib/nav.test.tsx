@@ -15,7 +15,7 @@ import {
   type NavItem,
 } from "@/lib/nav";
 import { routes } from "@/lib/routes";
-import { AgentsIcon, GitGraphIcon } from "@/lib/icons";
+import { AgentsIcon, WorkflowsIcon } from "@/lib/icons";
 
 const byId = (id: string): NavItem => {
   const item = navItems.find((candidate) => candidate.id === id);
@@ -146,7 +146,7 @@ describe("Navigation", () => {
     });
 
     test("should have proper viewBox", () => {
-      const { container } = render(<GitGraphIcon className="w-4 h-4" />);
+      const { container } = render(<WorkflowsIcon className="w-4 h-4" />);
       expect(container.querySelector("svg")).toHaveAttribute("viewBox", "0 0 24 24");
     });
   });

@@ -104,6 +104,14 @@ describe("shortcut sections", () => {
     expect(navigation.rows.find((row) => row.id === "nav:traces")?.keys).toEqual([["G", "T"]]);
   });
 
+  test("Agent page lists `]` (Config) and `{` (conversations)", () => {
+    const agent = shortcutSections().find((section) => section.id === "agent");
+    expect(agent?.rows.map((row) => [row.id, row.keys])).toEqual([
+      ["agent-config", [["]"]]],
+      ["agent-threads", [["{"]]],
+    ]);
+  });
+
   test("display helpers", () => {
     expect(displayKey("a")).toBe("A");
     expect(displayKey(",")).toBe(",");

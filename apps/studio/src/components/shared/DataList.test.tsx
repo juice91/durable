@@ -5,6 +5,7 @@ import { expectNoAxeViolations } from "@/test/a11y";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/Popover";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DATALIST_SEARCH_DEBOUNCE_MS, DataList, compareSortValues, nextSort, type DataListColumn } from "./DataList";
+import { routes } from "@/lib/routes";
 
 interface Agent {
   id: string;
@@ -47,9 +48,9 @@ describe("sort helpers", () => {
 
 describe("DataList", () => {
   it("renders an accessible table with link rows and sortable headers that toggle aria-sort", async () => {
-    render(<DataList label="Agents" rows={agents} columns={columns} getRowId={(row) => row.id} getRowHref={(row) => `/agents/${row.id}/chat`} />);
+    render(<DataList label="Agents" rows={agents} columns={columns} getRowId={(row) => row.id} getRowHref={(row) => routes.agentChat(row.id)} />);
     const table = screen.getByRole("table", { name: "Agents" });
-    expect(within(table).getByRole("link", { name: "Support bot" })).toHaveAttribute("href", "/agents/a1/chat");
+    expect(within(table).getByRole("link", { name: "Support bot" })).toHaveAttribute("href", routes.agentChat("a1"));
 
     const nameHeader = screen.getByRole("columnheader", { name: /Name/ });
     expect(nameHeader).toHaveAttribute("aria-sort", "none");
@@ -80,7 +81,7 @@ describe("DataList", () => {
       ...columns,
       { id: "actions", header: "Actions", cell: (row) => <button type="button" onClick={() => onAction(row.id)}>Delete {row.name}</button> },
     ];
-    render(<DataList label="Agents" rows={agents} columns={withAction} getRowId={(row) => row.id} getRowHref={(row) => `/agents/${row.id}/chat`} />);
+    render(<DataList label="Agents" rows={agents} columns={withAction} getRowId={(row) => row.id} getRowHref={(row) => routes.agentChat(row.id)} />);
     const link = screen.getByRole("link", { name: "Billing helper" });
     link.addEventListener("click", onLinkClick);
 
@@ -129,7 +130,7 @@ describe("DataList", () => {
     expect(onRowOpen).not.toHaveBeenCalled();
     unmount();
 
-    render(<DataList label="Agents" rows={agents} columns={withDelete} getRowId={(row) => row.id} getRowHref={(row) => `/agents/${row.id}/chat`} />);
+    render(<DataList label="Agents" rows={agents} columns={withDelete} getRowId={(row) => row.id} getRowHref={(row) => routes.agentChat(row.id)} />);
     screen.getAllByRole("link").forEach((link) => link.addEventListener("click", onLinkClick));
     fireEvent.click(screen.getByRole("button", { name: "Delete Archivist" }));
     const second = await screen.findByRole("dialog", { name: "Delete Archivist?" });
@@ -157,7 +158,7 @@ describe("DataList", () => {
         ),
       },
     ];
-    render(<DataList label="Agents" rows={agents} columns={withMenu} getRowId={(row) => row.id} getRowHref={(row) => `/agents/${row.id}/chat`} />);
+    render(<DataList label="Agents" rows={agents} columns={withMenu} getRowId={(row) => row.id} getRowHref={(row) => routes.agentChat(row.id)} />);
     fireEvent.click(screen.getByRole("button", { name: "Options for Archivist" }));
     const popover = await screen.findByRole("dialog", { name: "Options for Archivist" });
     const last = within(popover).getByRole("button", { name: "Last option" });
@@ -177,7 +178,7 @@ describe("DataList", () => {
         rows={agents}
         columns={columns}
         getRowId={(row) => row.id}
-        getRowHref={(row) => `/agents/${row.id}/chat`}
+        getRowHref={(row) => routes.agentChat(row.id)}
         searchPlaceholder="Search agents"
         filterRow={(row, query) => row.name.toLowerCase().includes(query.toLowerCase())}
       />,

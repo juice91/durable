@@ -8,6 +8,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Button } from "@/components/ui/Button";
 import { Kbd } from "@/components/ui/Kbd";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { shouldHandleShortcut } from "@/components/frame/keyboard";
 import { EmptyState } from "./EmptyState";
 
 /** Debounce for the search box, in ms. */
@@ -177,9 +178,8 @@ const DataListSearch = React.memo(
     useEffect(() => {
       if (!shortcut) return;
       const onKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "/" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-        if (isEditableTarget(event.target)) return;
-        if (document.querySelector("[role='dialog'], [role='alertdialog'], [role='menu']")) return;
+        // The frame's single-key guard: not while typing, with a modifier, or under a dialog or menu.
+        if (event.key !== "/" || !shouldHandleShortcut(event)) return;
         event.preventDefault();
         inputRef.current?.focus();
       };

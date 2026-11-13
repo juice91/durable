@@ -2,7 +2,6 @@
 
 import React from "react";
 import { formatTokens, formatUsd } from "@/lib/format";
-import {  } from "@/lib/metrics";
 import type { RunStatus } from "@/lib/runs";
 import { versionLabel, type BlockCode, type TurnUsage } from "./runOptions";
 import { routes } from "@/lib/routes";

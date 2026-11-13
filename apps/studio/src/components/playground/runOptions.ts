@@ -104,13 +104,6 @@ export function applyUrlState(url: URL, state: Partial<PlaygroundUrlState>): URL
   return url;
 }
 
-/** replaceState with the given keys changed; no-op outside a browser. */
-export function replaceUrlState(state: Partial<PlaygroundUrlState>): void {
-  if (typeof window === "undefined") return;
-  const url = applyUrlState(new URL(window.location.href), state);
-  if (url.href !== window.location.href) window.history.replaceState({}, "", url);
-}
-
 // ------------------------------------------------------------------------- version select
 
 /** `<select>` value of a version ref: "latest", "draft" or "v<n>". */
@@ -347,10 +340,6 @@ export interface TurnOptionErrors {
 }
 
 export const NO_OPTION_ERRORS: TurnOptionErrors = { context: null, model: null, version: null, general: null };
-
-export function hasOptionErrors(errors: TurnOptionErrors): boolean {
-  return Boolean(errors.context || errors.model || errors.version || errors.general);
-}
 
 /**
  * Maps a turn start's error body onto the controls. A 422 list puts `body.request_context.*`

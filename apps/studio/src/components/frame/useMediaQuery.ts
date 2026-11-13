@@ -45,3 +45,23 @@ export function matchesNow(query: string): boolean {
 export function useIsWide(): boolean {
   return useMediaQuery(WIDE_QUERY, true);
 }
+
+/** The window width the server (and the hydration pass) assumes: a common laptop width. */
+export const SERVER_VIEWPORT_WIDTH = 1280;
+
+function subscribeResize(onChange: () => void) {
+  window.addEventListener("resize", onChange);
+  return () => window.removeEventListener("resize", onChange);
+}
+const windowWidth = () => window.innerWidth;
+const serverWindowWidth = () => SERVER_VIEWPORT_WIDTH;
+const noSubscription = () => () => {};
+
+/**
+ * `window.innerWidth`, following resizes while `enabled`. The server and the hydration pass see
+ * SERVER_VIEWPORT_WIDTH, so whatever depends on it must not change the server markup's shape (use it
+ * for client-only parts, or accept one re-render after hydration).
+ */
+export function useViewportWidth(enabled = true): number {
+  return useSyncExternalStore(enabled ? subscribeResize : noSubscription, windowWidth, serverWindowWidth);
+}

@@ -87,6 +87,7 @@ import {
 import { usePathname } from "next/navigation";
 import { agentChatPathState, routes } from "@/lib/routes";
 import { useSidePanel } from "@/components/frame/SidePanel";
+import { matchesNow, WIDE_QUERY } from "@/components/frame/useMediaQuery";
 import { useAgentPage } from "./AgentPageContext";
 import { AgentChatPanes } from "./AgentChatPanes";
 import { MemoryCard } from "./MemoryCard";
@@ -727,7 +728,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       setConversationParam(conversation.id);
       void loadConversation(conversation.id);
       // On a phone the list is a Sheet over the chat: picking a conversation closes it.
-      if (page && !window.matchMedia?.("(min-width: 1024px)").matches) page.setThreadsOpen(false);
+      if (page && !matchesNow(WIDE_QUERY)) page.setThreadsOpen(false);
     },
     [conversationId, loadConversation, page, setConversationParam],
   );

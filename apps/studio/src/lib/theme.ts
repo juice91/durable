@@ -1,4 +1,5 @@
 import { SIDEBAR_ATTRIBUTE, SIDEBAR_COLLAPSED, SIDEBAR_STORAGE_KEY } from "./sidebarPref";
+import { safeLocalStorage } from "@/lib/safeStorage";
 
 /**
  * Studio theme: System / Light / Dark, default System.
@@ -21,16 +22,8 @@ export function isThemePreference(value: unknown): value is ThemePreference {
   return value === "system" || value === "light" || value === "dark";
 }
 
-function defaultStorage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 /** The stored preference, or "system" when nothing valid is stored or storage throws. */
-export function getStoredTheme(storage: Storage | null = defaultStorage()): ThemePreference {
+export function getStoredTheme(storage: Storage | null = safeLocalStorage()): ThemePreference {
   try {
     const value = storage?.getItem(THEME_STORAGE_KEY);
     return isThemePreference(value) ? value : DEFAULT_THEME;
@@ -40,7 +33,7 @@ export function getStoredTheme(storage: Storage | null = defaultStorage()): Them
 }
 
 /** Store the preference. Returns false when storage is unavailable or throws. */
-export function storeTheme(pref: ThemePreference, storage: Storage | null = defaultStorage()): boolean {
+export function storeTheme(pref: ThemePreference, storage: Storage | null = safeLocalStorage()): boolean {
   try {
     if (!storage) return false;
     storage.setItem(THEME_STORAGE_KEY, pref);
@@ -75,7 +68,7 @@ export function applyTheme(resolved: ResolvedTheme, root?: HTMLElement): void {
 }
 
 /** Store the preference and apply it now. Returns the resolved theme. */
-export function setTheme(pref: ThemePreference, storage: Storage | null = defaultStorage()): ResolvedTheme {
+export function setTheme(pref: ThemePreference, storage: Storage | null = safeLocalStorage()): ResolvedTheme {
   storeTheme(pref, storage);
   const resolved = resolveTheme(pref, prefersDark());
   applyTheme(resolved);

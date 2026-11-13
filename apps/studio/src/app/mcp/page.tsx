@@ -6,12 +6,12 @@ import { McpDeleteConfirm } from "@/components/mcp/McpDeleteConfirm";
 import { McpLastTest } from "@/components/mcp/McpLastTest";
 import { McpServerDialog } from "@/components/mcp/McpServerDialog";
 import { describeUsage, usageCountLabel, useMcpUsage } from "@/components/mcp/mcpUsage";
-import { useCreateShortcut } from "@/components/mcp/useCreateShortcut";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Kbd } from "@/components/ui/Kbd";
 import { PageHeader } from "@/components/frame/PageHeader";
+import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 import { ApiError } from "@/lib/api";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { describeMcpApiMessage, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
@@ -69,7 +69,8 @@ export default function McpServersPage() {
   }, [load]);
 
   const openCreate = useCallback(() => setForm({ mode: "create" }), []);
-  useCreateShortcut(openCreate, form === null && confirmDelete === null);
+  // `c` goes through the global shortcut provider (one listener, one guard), only while no dialog is open.
+  useCreateAction(form === null && confirmDelete === null ? openCreate : null);
 
   const replaceServer = (server: McpServer) =>
     setServers((current) => {

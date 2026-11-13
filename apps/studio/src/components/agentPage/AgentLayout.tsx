@@ -4,13 +4,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { usePathname } from "next/navigation";
 import { Link2, MessagesSquare, PanelRight } from "lucide-react";
 import { api, ApiError, type Agent, type AgentVersion } from "@/lib/api";
+import { sidebarAttributeCollapsed } from "@/lib/sidebarPref";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { navCrumb } from "@/lib/nav";
 import { agentTabOf, routes, type AgentTab } from "@/lib/routes";
 import { PageHeader, type Crumb } from "@/components/frame/PageHeader";
+import { useFrame } from "@/components/frame/FrameContext";
 import { SidePanel, useSidePanel } from "@/components/frame/SidePanel";
 import { shouldHandleShortcut } from "@/components/frame/keyboard";
-import { useIsWide } from "@/components/frame/useMediaQuery";
+import { useIsWide, useViewportWidth } from "@/components/frame/useMediaQuery";
 import { IconButton } from "@/components/ui/IconButton";
 import { toast } from "@/components/ui/Toaster";
 import { TooltipProvider } from "@/components/ui/Tooltip";
@@ -18,9 +20,15 @@ import type { VersionRef } from "@/components/playground/runOptions";
 import { AgentPageContext, type AgentPageValue } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
 import { THREADS_TITLE } from "./AgentChatPanes";
+import { CHAT_PANES_MIN_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 
 export const CONFIG_TITLE = "Config";
+
+/** The frame's size right now (client only: called from effects and the panel's registration). */
+function currentFrameSize(sidebarCollapsed: boolean) {
+  return { viewport: window.innerWidth, sidebarCollapsed };
+}
 
 const TABS: { id: AgentTab; label: string; testId: string }[] = [
   { id: "chat", label: "Chat", testId: "agent-tab-chat" },
@@ -42,7 +50,9 @@ export interface AgentLayoutProps {
  * across tabs. Header: the agent crumb with a switcher (to the same tab of another agent), the
  * Conversations toggle (Chat tab), the Config toggle and Copy link, and the Chat · Traces · Editor
  * tabs. The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
- * screens), a Sheet below 1024 px. Keys: `]` toggles Config, `{` the conversations pane.
+ * screens) when threads and chat fit beside it, a Sheet below 1024 px. Keys: `]` toggles Config, `{`
+ * the conversations pane. Where Config does not leave room for both panes, the threads pane
+ * collapses automatically while Config is open (chatFit.ts).
  */
 export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const pathname = usePathname();
@@ -61,9 +71,21 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const [threadsExpanded, setThreadsExpanded] = useState(true);
   const [threadsSheetOpen, setThreadsSheetOpen] = useState(false);
   const threadsOpen = isWide ? threadsExpanded : threadsSheetOpen;
-  const setThreadsOpen = isWide ? setThreadsExpanded : setThreadsSheetOpen;
   const sidePanel = useSidePanel();
   const { available: configAvailable, toggle: toggleConfig } = sidePanel;
+
+  // Does the Chat tab's threads + chat fit beside Config? (chatFit.ts.) The window width follows
+  // resizes on wide screens only; the server and the hydration pass assume 1280 px, which only feeds
+  // the client-only panes (they render after mount).
+  const viewport = useViewportWidth(isWide);
+  const sidebarCollapsed = useFrame()?.sidebarCollapsed ?? false;
+  const frameSize = useMemo(() => ({ viewport, sidebarCollapsed }), [viewport, sidebarCollapsed]);
+  const autoCollapsed =
+    tab === "chat" && threadsAutoCollapsed({ isWide, configOpen: sidePanel.open, frame: frameSize, panelWidth: chatPanelWidth(sidePanel.width, frameSize) });
+  const threadsVisible = isWide ? threadsShown(threadsExpanded, autoCollapsed) : threadsSheetOpen;
+  // Marks a Config open or close made for the user rather than by them, so it is not saved as their
+  // per-agent choice (the tab-change default, or closing Config to make room for threads).
+  const autoToggleRef = useRef(false);
 
   useEffect(() => {
     if (isWide) setThreadsSheetOpen(false);
@@ -122,18 +144,18 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
     }
   }, [agentId]);
 
-  // Config is open by default on the Chat tab (wide screens): applied whenever the tab becomes Chat,
-  // not only when the page mounts, unless the user opened or closed it there before (kept per agent).
+  // Config is open by default on the Chat tab (wide screens) when the panes fit beside it: applied
+  // whenever the tab becomes Chat, not only when the page mounts, unless the user opened or closed it
+  // there before (kept per agent).
   const { open: configOpen, setOpen: setConfigOpen } = sidePanel;
   // Only a tab change into Chat applies it: widening the window never opens the panel by itself (the
   // SL.4 rule), and the first visit is covered by the panel's own defaultOpen.
-  const autoToggleRef = useRef(false);
   const previousTabRef = useRef(tab);
   useEffect(() => {
     const enteredChat = tab === "chat" && previousTabRef.current !== "chat";
     previousTabRef.current = tab;
     if (!enteredChat || !isWide || !configAvailable) return;
-    const wanted = readConfigOpen(agentId) ?? true;
+    const wanted = configOpenByDefault(readConfigOpen(agentId), currentFrameSize(sidebarCollapsed));
     if (wanted === configOpen) return;
     autoToggleRef.current = true;
     setConfigOpen(wanted);
@@ -152,6 +174,23 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
     if (tab === "chat" && isWide && configAvailable) writeConfigOpen(agentId, configOpen);
   }, [agentId, configAvailable, configOpen, isWide, tab]);
 
+  // A user's open or close of the threads pane. Opening it while it is auto-collapsed closes Config
+  // (for them, not saved) so threads and chat get their room back.
+  const setThreadsOpen = useCallback(
+    (open: boolean) => {
+      if (!isWide) {
+        setThreadsSheetOpen(open);
+        return;
+      }
+      if (open && autoCollapsed) {
+        autoToggleRef.current = true;
+        setConfigOpen(false);
+      }
+      setThreadsExpanded(open);
+    },
+    [autoCollapsed, isWide, setConfigOpen],
+  );
+
   // `]` toggles Config; `{` the conversations pane (Chat tab). Ignored while typing or under a modal.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -161,12 +200,12 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
         toggleConfig();
       } else if (event.key === "{" && tab === "chat") {
         event.preventDefault();
-        setThreadsOpen(!threadsOpen);
+        setThreadsOpen(!threadsVisible);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsOpen]);
+  }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsVisible]);
 
   const copyLink = async () => {
     try {
@@ -189,11 +228,12 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       setConfigVersion,
       threadsOpen,
       setThreadsOpen,
+      threadsAutoCollapsed: isWide && autoCollapsed,
       requestContextSlot,
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, requestContextSlot, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, requestContextSlot, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -223,8 +263,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
           label={THREADS_TITLE}
           shortcut="{"
           size="sm"
-          aria-pressed={threadsOpen}
-          onClick={() => setThreadsOpen(!threadsOpen)}
+          aria-pressed={threadsVisible}
+          onClick={() => setThreadsOpen(!threadsVisible)}
           icon={icon(MessagesSquare)}
           data-testid="agent-threads-toggle"
         />
@@ -262,7 +302,16 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
             }))}
             tabsLabel="Agent sections"
           />
-          <SidePanel title={CONFIG_TITLE} defaultOpen={tab === "chat" && readConfigOpen(agentId) !== false}>
+          <SidePanel
+            title={CONFIG_TITLE}
+            // Runs once on the client at registration, possibly during hydration's first pass, when the
+            // frame still reports the expanded sidebar: read the pre-paint attribute too.
+            defaultOpen={() =>
+              tab === "chat" &&
+              configOpenByDefault(readConfigOpen(agentId), currentFrameSize(sidebarCollapsed || sidebarAttributeCollapsed()))
+            }
+            mainMinWidth={tab === "chat" ? CHAT_PANES_MIN_PX : undefined}
+          >
             {agent ? (
               <ConfigPanel
                 agent={agent}

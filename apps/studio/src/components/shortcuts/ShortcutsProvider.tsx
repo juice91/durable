@@ -43,18 +43,16 @@ export function useCreateAction(action: (() => void) | null): void {
   }, [register, enabled]);
 }
 
-function clickDeclaredCreate(): boolean {
+function declaredCreateTarget(): HTMLElement | null {
   const candidates = Array.from(document.querySelectorAll<HTMLElement>(`main [${CREATE_ACTION_ATTRIBUTE}]`));
-  const target = candidates.find((element) => !element.matches(":disabled, [aria-disabled='true']"));
-  if (!target) return false;
-  target.click();
-  return true;
+  return candidates.find((element) => !element.matches(":disabled, [aria-disabled='true']")) ?? null;
 }
 
 /**
  * Listens for the global single-key shortcuts and owns the help dialog. `?` opens help, `c` runs the
  * page's create action, `g` then a letter (within 1 s) opens a registry page. Keys typed in fields,
- * with modifiers, or while any dialog or menu is open are ignored (`shouldHandleShortcut`).
+ * with modifiers, or while any dialog or menu is open are ignored (`shouldHandleShortcut`). A `c` on a
+ * page with no create action is left alone (not prevented), so the key is not swallowed for nothing.
  */
 export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -75,15 +73,21 @@ export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const sequence = createKeySequence<GlobalBinding>(globalBindings());
-    function run(binding: GlobalBinding) {
+    /** Runs the binding; false when it had nothing to do (a `c` on a page without a create action). */
+    function run(binding: GlobalBinding): boolean {
       const action = binding.action;
       if (action.kind === "help") setHelpOpen(true);
       else if (action.kind === "navigate") routerRef.current.push(action.item.href);
       else {
         const registered = createActions.current[createActions.current.length - 1];
         if (registered) registered.run();
-        else clickDeclaredCreate();
+        else {
+          const target = declaredCreateTarget();
+          if (!target) return false;
+          target.click();
+        }
       }
+      return true;
     }
     function onKeyDown(event: KeyboardEvent) {
       if (!shouldHandleShortcut(event)) {
@@ -95,8 +99,7 @@ export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
       if (event.key === "Shift" || event.key === "Control" || event.key === "Meta" || event.key === "Alt") return;
       const result = sequence.feed(event.key, Date.now());
       if (result.match) {
-        event.preventDefault();
-        run(result.match);
+        if (run(result.match)) event.preventDefault();
       } else if (result.pending) {
         event.preventDefault();
       }

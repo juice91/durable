@@ -3,12 +3,9 @@ import {
   BookOpen,
   Bot,
   ChartLine,
-  FileText,
   Inbox,
   KeyRound,
-  LayoutDashboard,
   ListTree,
-  Play,
   Plug,
   ScrollText,
   Settings,
@@ -49,18 +46,5 @@ export const TracesIcon = studioIcon(ListTree, "TracesIcon");
 export const LogsIcon = studioIcon(ScrollText, "LogsIcon");
 export const SettingsIcon = studioIcon(Settings, "SettingsIcon");
 export const ApprovalsIcon = studioIcon(Inbox, "ApprovalsIcon");
-// Transitional pages (removed with their nav items in SL.6, SL.7 and SL.10).
-export const DashboardIcon = studioIcon(LayoutDashboard, "DashboardIcon");
-export const PlaygroundIcon = studioIcon(Play, "PlaygroundIcon");
+// Transitional page (removed with its nav item in SL.10).
 export const RequestContextIcon = studioIcon(KeyRound, "RequestContextIcon");
-
-// Earlier names, kept so existing imports compile. Each maps to its section's lucide icon.
-export const UsersIcon = AgentsIcon;
-export const PlayIcon = PlaygroundIcon;
-export const GitGraphIcon = WorkflowsIcon;
-export const WrenchIcon = ToolsIcon;
-export const CpuIcon = McpIcon;
-export const BoxIcon = ProcessorsIcon;
-export const ActivityIcon = TracesIcon;
-export const FileTextIcon = studioIcon(FileText, "FileTextIcon");
-export const BarChartIcon = MetricsIcon;

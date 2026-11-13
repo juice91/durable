@@ -54,13 +54,13 @@ import { startTurnWithOptions } from "@/components/playground/turnApi";
 import { getRequestContext } from "@/lib/requestContext";
 import { listTraceRuns } from "@/lib/traces";
 import { routes } from "@/lib/routes";
-import { FrameHarness, mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
+import { FrameHarness, mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { AgentLayout } from "./AgentLayout";
 import { ChatTab } from "./ChatTab";
 import { TracesTab } from "./TracesTab";
 import { playgroundClientTarget } from "./PlaygroundRedirect";
 import { AgentsListUI } from "@/components/agents/AgentsList";
-import { readConfigOpen } from "./agentPageModel";
+import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 import { AGENTS_VIEW_KEY, LAST_AGENT_KEY, agentLayoutKey } from "./agentPageModel";
 
 const specOf = (name: string, extra: object = {}): AgentSpec =>
@@ -73,7 +73,10 @@ const AGENTS: Agent[] = [
 
 let media: MatchMediaControl | undefined;
 
+// A desktop window: the Chat tab's threads and chat fit beside Config (jsdom's 1024 px does not).
+let restoreWidth: () => void = () => {};
 beforeEach(() => {
+  restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
   window.localStorage.clear();
   window.history.replaceState({}, "", routes.agentChat("a1"));
   nav.path = routes.agentChat("a1");
@@ -104,6 +107,9 @@ afterEach(() => {
   cleanup();
   media?.restore();
   media = undefined;
+  restoreWidth();
+  // `[` collapses the sidebar on <html data-sidebar>; it outlives a test.
+  document.documentElement.removeAttribute("data-sidebar");
 });
 
 function renderChat(wide = true) {
@@ -502,5 +508,84 @@ describe("agents list", () => {
     render(<AgentsListUI agents={AGENTS} />);
     await act(async () => undefined);
     expect(screen.getByTestId("agents-grid")).toBeInTheDocument();
+  });
+});
+
+describe("Chat beside Config at narrow desktop widths (review I3; widths injected, jsdom has no layout)", () => {
+  const threadsToggle = () => screen.getByRole("button", { name: "Conversations" });
+  const threadsList = () => screen.queryByRole("navigation", { name: "Conversations" });
+  const config = () => screen.queryByRole("complementary", { name: "Config" });
+
+  it("1100 px, nothing saved: Config starts closed and the threads are shown", async () => {
+    restoreWidth = setWindowWidth(1100);
+    renderChat();
+    await waitFor(() => expect(within(main()).getByRole("heading", { level: 1 })).toHaveTextContent("Support bot"));
+    await screen.findByRole("separator", { name: "Resize conversations panel" });
+    expect(config()).toBeNull();
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("opening Config where it does not fit collapses the threads without saving; closing it restores them", async () => {
+    restoreWidth = setWindowWidth(1100);
+    renderChat();
+    await screen.findByRole("separator", { name: "Resize conversations panel" });
+    fireEvent.keyDown(document.body, { key: "]" });
+    expect(await screen.findByRole("complementary", { name: "Config" })).toBeInTheDocument();
+    await waitFor(() => expect(threadsToggle()).toHaveAttribute("aria-pressed", "false"));
+    expect(threadsList()).toBeNull();
+    // The user's Config choice is saved; the automatic collapse is not their layout.
+    expect(readConfigOpen("a1")).toBe(true);
+    expect(window.localStorage.getItem(agentLayoutKey("a1"))).toBeNull();
+    fireEvent.keyDown(document.body, { key: "]" });
+    await waitFor(() => expect(config()).toBeNull());
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "true");
+    expect(threadsList()).toBeInTheDocument();
+  });
+
+  it("threads the user collapsed stay collapsed when Config closes", async () => {
+    restoreWidth = setWindowWidth(1100);
+    renderChat();
+    await screen.findByRole("separator", { name: "Resize conversations panel" });
+    fireEvent.keyDown(document.body, { key: "{" });
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "false");
+    fireEvent.keyDown(document.body, { key: "]" });
+    await screen.findByRole("complementary", { name: "Config" });
+    fireEvent.keyDown(document.body, { key: "]" });
+    await waitFor(() => expect(config()).toBeNull());
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "false");
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(agentLayoutKey("a1")) ?? "{}").threads).toBe(0));
+  });
+
+  it("a saved open wins; collapsing the sidebar to the rail returns the room and the threads", async () => {
+    restoreWidth = setWindowWidth(1100);
+    writeConfigOpen("a1", true);
+    renderChat();
+    expect(await screen.findByRole("complementary", { name: "Config" })).toBeInTheDocument();
+    await waitFor(() => expect(threadsToggle()).toHaveAttribute("aria-pressed", "false"));
+    fireEvent.keyDown(document.body, { key: "[" });
+    await waitFor(() => expect(threadsToggle()).toHaveAttribute("aria-pressed", "true"));
+    expect(config()).toBeInTheDocument();
+  });
+
+  it("opening the threads while auto-collapsed closes Config, without saving that close", async () => {
+    restoreWidth = setWindowWidth(1100);
+    renderChat();
+    await screen.findByRole("separator", { name: "Resize conversations panel" });
+    fireEvent.keyDown(document.body, { key: "]" });
+    await screen.findByRole("complementary", { name: "Config" });
+    await waitFor(() => expect(threadsToggle()).toHaveAttribute("aria-pressed", "false"));
+    fireEvent.click(threadsToggle());
+    await waitFor(() => expect(config()).toBeNull());
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "true");
+    expect(readConfigOpen("a1")).toBe(true);
+  });
+
+  it("at 1440 px the panel's maximum leaves threads + chat (574 px with the expanded sidebar)", async () => {
+    renderChat();
+    const handle = await screen.findByRole("separator", { name: "Resize side panel" });
+    expect(handle).toHaveAttribute("aria-valuemax", "574");
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(handle).toHaveAttribute("aria-valuenow", "574");
+    expect(threadsToggle()).toHaveAttribute("aria-pressed", "true");
   });
 });

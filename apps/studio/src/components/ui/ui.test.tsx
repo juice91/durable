@@ -3,7 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { expectNoAxeViolations } from "@/test/a11y";
 import { cn } from "@/lib/cn";
-import { AgentsIcon, GitGraphIcon, ICON_STROKE_WIDTH } from "@/lib/icons";
+import { AgentsIcon, ICON_STROKE_WIDTH, WorkflowsIcon } from "@/lib/icons";
+import { routes } from "@/lib/routes";
 
 const navigation = vi.hoisted(() => ({
   replace: vi.fn(),
@@ -60,7 +61,7 @@ beforeEach(() => {
   navigation.push.mockReset();
   navigation.back.mockReset();
   window.history.replaceState(null, "", "/");
-  navigation.pathname = "/traces";
+  navigation.pathname = routes.traces();
   navigation.search = "";
   window.localStorage.clear();
 });
@@ -75,11 +76,11 @@ describe("cn", () => {
 });
 
 describe("icons", () => {
-  it("renders lucide SVGs with Studio's stroke and keeps the old names", () => {
+  it("renders lucide SVGs with Studio's stroke", () => {
     const { container } = render(
       <>
         <AgentsIcon className="size-4" />
-        <GitGraphIcon className="size-4" />
+        <WorkflowsIcon className="size-4" />
       </>,
     );
     const svgs = container.querySelectorAll("svg");
@@ -253,8 +254,8 @@ function UrlSheetHarness() {
 
 describe("useUrlSheet", () => {
   it("builds query strings with additions and removals", () => {
-    expect(withSearchParams("/traces", new URLSearchParams("status=failed"), { trace: "a b", tab: null })).toBe("/traces?status=failed&trace=a+b");
-    expect(withSearchParams("/traces", new URLSearchParams("trace=1"), { trace: null })).toBe("/traces");
+    expect(withSearchParams(routes.traces(), new URLSearchParams("status=failed"), { trace: "a b", tab: null })).toBe(`${routes.traces()}?status=failed&trace=a+b`);
+    expect(withSearchParams(routes.traces(), new URLSearchParams("trace=1"), { trace: null })).toBe(routes.traces());
   });
 
   it("opens from the URL parameter and removes it (and the cleared ones) on close", async () => {
@@ -262,13 +263,13 @@ describe("useUrlSheet", () => {
     const { rerender } = render(<UrlSheetHarness />);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open run" }));
-    expect(navigation.replace).toHaveBeenCalledWith("/traces?status=failed&tab=events&trace=run%3A1", { scroll: false });
+    expect(navigation.replace).toHaveBeenCalledWith(`${routes.traces()}?status=failed&tab=events&trace=run%3A1`, { scroll: false });
 
     navigation.search = "status=failed&tab=events&trace=run%3A1";
     rerender(<UrlSheetHarness />);
     expect(await screen.findByRole("dialog", { name: "Trace run:1" })).toBeInTheDocument();
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
-    expect(navigation.replace).toHaveBeenLastCalledWith("/traces?status=failed", { scroll: false });
+    expect(navigation.replace).toHaveBeenLastCalledWith(`${routes.traces()}?status=failed`, { scroll: false });
   });
 });
 
@@ -286,22 +287,22 @@ function PushSheetHarness() {
 
 describe("useUrlSheet history and URL source", () => {
   it("push mode: the first open pushes, a switch replaces, and closing goes Back", () => {
-    navigation.pathname = "/tools";
+    navigation.pathname = routes.tools();
     const { rerender } = render(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Open tool" }));
-    expect(navigation.push).toHaveBeenCalledWith("/tools?tool=search", { scroll: false });
+    expect(navigation.push).toHaveBeenCalledWith(`${routes.tools()}?tool=search`, { scroll: false });
     navigation.search = "tool=search";
     rerender(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Switch tool" }));
     expect(navigation.push).toHaveBeenCalledTimes(1);
-    expect(navigation.replace).toHaveBeenCalledWith("/tools?tool=fetch", { scroll: false });
+    expect(navigation.replace).toHaveBeenCalledWith(`${routes.tools()}?tool=fetch`, { scroll: false });
     fireEvent.click(screen.getByRole("button", { name: "Close tool" }));
     expect(navigation.back).toHaveBeenCalledTimes(1);
     expect(navigation.replace).toHaveBeenCalledTimes(1);
   });
 
   it("push mode: closing after a link changed the value replaces instead of going Back", () => {
-    navigation.pathname = "/tools";
+    navigation.pathname = routes.tools();
     const { rerender } = render(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Open tool" }));
     navigation.search = "tool=search";
@@ -311,32 +312,32 @@ describe("useUrlSheet history and URL source", () => {
     rerender(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Close tool" }));
     expect(navigation.back).not.toHaveBeenCalled();
-    expect(navigation.replace).toHaveBeenCalledWith("/tools", { scroll: false });
+    expect(navigation.replace).toHaveBeenCalledWith(routes.tools(), { scroll: false });
   });
 
   it("push mode: closing a deep-linked Sheet replaces (there is nothing of ours to go Back to)", () => {
-    navigation.pathname = "/tools";
+    navigation.pathname = routes.tools();
     navigation.search = "tool=search";
     render(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Close tool" }));
     expect(navigation.back).not.toHaveBeenCalled();
-    expect(navigation.replace).toHaveBeenCalledWith("/tools", { scroll: false });
+    expect(navigation.replace).toHaveBeenCalledWith(routes.tools(), { scroll: false });
   });
 
   it("treats an empty parameter as closed", () => {
-    navigation.pathname = "/tools";
+    navigation.pathname = routes.tools();
     navigation.search = "tool=";
     render(<PushSheetHarness />);
     expect(screen.getByTestId("tool-state")).toHaveTextContent("closed");
   });
 
   it("builds the next URL from the live location when the window is on the same path", () => {
-    navigation.pathname = "/tools";
+    navigation.pathname = routes.tools();
     navigation.search = "q=old";
-    window.history.replaceState(null, "", "/tools?q=new&page=2");
+    window.history.replaceState(null, "", `${routes.tools()}?q=new&page=2`);
     render(<PushSheetHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Open tool" }));
-    expect(navigation.push).toHaveBeenCalledWith("/tools?q=new&page=2&tool=search", { scroll: false });
+    expect(navigation.push).toHaveBeenCalledWith(`${routes.tools()}?q=new&page=2&tool=search`, { scroll: false });
   });
 });
 
