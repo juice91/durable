@@ -17,6 +17,9 @@
   --color-accent-foreground: hsl(var(--accent-foreground));
   --color-destructive: hsl(var(--destructive));
   --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-destructive-text: hsl(var(--destructive-text));
+  --color-success: hsl(var(--success));
+  --color-warning: hsl(var(--warning));
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
@@ -41,8 +44,13 @@
     --muted-foreground: 240 3.8% 46.1%;
     --accent: 240 4.8% 95.9%;
     --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 72% 45%; /* white (--destructive-foreground) on it: >= 4.5:1 */
     --destructive-foreground: 0 0% 98%;
+    /* Destructive TEXT (on background, card and destructive/10-15 tints): >= 4.5:1. --destructive
+       stays for fills paired with --destructive-foreground. */
+    --destructive-text: 0 72% 42%;
+    --success: 142 72% 29%;
+    --warning: 35 92% 33%;
     --border: 240 5.9% 90%;
     --input: 240 5.9% 90%;
     --ring: 240 10% 3.9%;
@@ -66,6 +74,9 @@
     --accent-foreground: 0 0% 98%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 0 0% 98%;
+    --destructive-text: 0 91% 71%;
+    --success: 142 69% 58%;
+    --warning: 48 96% 53%;
     --border: 240 3.7% 15.9%;
     --input: 240 3.7% 15.9%;
     --ring: 240 4.9% 83.9%;

@@ -63,8 +63,26 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+BEFORE_EPOCH = "from and to must not be before 1970-01-01"
+
+
+def _before_epoch(value: datetime | None) -> bool:
+    """Whether `value` (naive = UTC) is before 1970-01-01; a value so early that converting it
+    overflows counts as before."""
+    if value is None:
+        return False
+    try:
+        return _utc(value) < EPOCH
+    except OverflowError:
+        return True
+
+
 def resolve_range(from_: datetime | None, to: datetime | None) -> tuple[datetime, datetime]:
-    """`[from, to)` in UTC: `to` defaults to now, `from` to 7 days before `to`."""
+    """`[from, to)` in UTC: `to` defaults to now, `from` to 7 days before `to`. Dates before 1970
+    are rejected (MetricsRangeError) before any arithmetic, which could overflow near year 1."""
+    if _before_epoch(from_) or _before_epoch(to):
+        raise MetricsRangeError(BEFORE_EPOCH)
     end = _utc(to) if to is not None else datetime.now(UTC)
     start = _utc(from_) if from_ is not None else end - DEFAULT_RANGE
     return start, end
@@ -83,8 +101,8 @@ def metrics_query(
     provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     kind: Literal["agent", "tool", "workflow"] | None = None,
 ) -> MetricsQuery:
-    start, end = resolve_range(from_, to)
     try:
+        start, end = resolve_range(from_, to)
         return MetricsQuery(
             tenant_id=principal.tenant_id,
             start=start,

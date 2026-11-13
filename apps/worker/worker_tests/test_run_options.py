@@ -123,7 +123,9 @@ def test_context_values_never_reach_events_other_than_the_model_output(worker, t
 
 
 def test_row_without_model_id_runs_the_spec_model(worker, tenant, client):
-    spec = {**CONTEXT_SPEC, "model": {"provider": "test", "name": "context"}}
+    # Optional fields only: a required one with no context fails (request_context_invalid, below).
+    fields = [{**f, "required": False} for f in CONTEXT_SPEC["context_fields"]]
+    spec = {**CONTEXT_SPEC, "model": {"provider": "test", "name": "context"}, "context_fields": fields}
     store = worker.run_store
     run_id, agent_id = _create(store, tenant, spec, "hi")  # no options: a pre-P0.8 row
     _enqueue(client, store, tenant, spec, "hi", run_id, agent_id)
@@ -131,6 +133,47 @@ def test_row_without_model_id_runs_the_spec_model(worker, tenant, client):
     assert run["status"] == "completed", run["error"]
     # No context: declared fields render empty, undeclared placeholders stay as written.
     assert run["output"] == "Instructions: Greet  on the  plan. Literal {{context.unknown}} stays."
+
+
+def test_missing_required_context_fails_before_any_model_request(worker, tenant, client):
+    """A run whose context misses a required field (the API never lets a caller do this; a workflow
+    agent step runs with an empty context) fails with request_context_invalid, no model request,
+    and a fixed message with no values."""
+    store = worker.run_store
+    run_id, agent_id = _create(store, tenant, CONTEXT_SPEC, "hi", request_context={"plan": "pro"},
+                               model_id="test:echo")
+    _enqueue(client, store, tenant, CONTEXT_SPEC, "hi", run_id, agent_id)
+    run = wait_terminal(store, tenant, run_id)
+    assert run["status"] == "failed"
+    assert run["error"] == "RequestContextInvalid: the request context does not match the agent's context fields"
+    events = event_rows(worker.engine, run_id)
+    assert [e[1] for e in events] == ["start", "end"]
+    assert events[-1][3]["error_code"] == "request_context_invalid"
+    assert "pro" not in json.dumps(events[-1][3])
+    assert _request_models(worker.engine, run_id) == []
+
+
+def test_request_context_invalid_is_pickle_safe_and_classified():
+    from eap_worker.errors import RequestContextInvalid, classify
+
+    exc = pickle.loads(pickle.dumps(RequestContextInvalid()))
+    assert str(exc) == "the request context does not match the agent's context fields"
+    failure = classify(exc)
+    assert (failure.status, failure.code, failure.error_type) == ("failed", "request_context_invalid", "RequestContextInvalid")
+
+
+def test_check_request_context_ignores_undeclared_keys_and_specs_without_fields():
+    from eap_schemas import AgentSpec
+    from eap_worker.errors import RequestContextInvalid
+    from eap_worker.workflow import _check_request_context
+
+    spec = AgentSpec.model_validate(CONTEXT_SPEC)
+    _check_request_context(spec, {"customer": "Ada", "extra": 1})
+    for bad in (None, {}, {"customer": 3}, {"customer": "Ada", "plan": "gold"}):
+        with pytest.raises(RequestContextInvalid):
+            _check_request_context(spec, bad)
+    plain = AgentSpec.model_validate({k: v for k, v in CONTEXT_SPEC.items() if k != "context_fields"})
+    _check_request_context(plain, None)
 
 
 def test_disallowed_override_fails_before_any_model_request(worker, tenant, client):
@@ -163,7 +206,8 @@ def test_draft_run_runs_its_snapshot(worker, tenant, client):
 def test_draft_safety_net_inserts_a_snapshot_not_version_zero(worker, tenant, client):
     """eap.start_run's idempotent insert (row missing) stores a draft run as the API would."""
     store = worker.run_store
-    spec = {**CONTEXT_SPEC, "model": {"provider": "test", "name": "context"}}
+    fields = [{**f, "required": False} for f in CONTEXT_SPEC["context_fields"]]  # the insert has no context
+    spec = {**CONTEXT_SPEC, "model": {"provider": "test", "name": "context"}, "context_fields": fields}
     run_id = enqueue_run(client, store, tenant_id=tenant, spec=spec, input_text="hi", app_version=APP_VERSION,
                          version=0, create_row=False)
     run = wait_terminal(store, tenant, run_id)

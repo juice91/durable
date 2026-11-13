@@ -225,6 +225,11 @@ def test_tenant_isolation(seeded):
         ("breakdown", {"by": "agent", "limit": 51}, None),
         ("breakdown", {"by": "tool"}, None),
         ("summary", {"kind": "nope"}, None),
+        ("summary", {"from": "0001-01-01", "compare": "previous"}, "from and to must not be before 1970-01-01"),
+        ("summary", {"from": "0001-01-01T00:00:00+01:00"}, "from and to must not be before 1970-01-01"),
+        ("summary", {"to": "0001-01-01"}, "from and to must not be before 1970-01-01"),
+        ("timeseries", {"from": "1969-12-31T23:59:59Z"}, "from and to must not be before 1970-01-01"),
+        ("breakdown", {"by": "agent", "from": "0001-01-01"}, "from and to must not be before 1970-01-01"),
     ],
 )
 def test_bounds_are_422(pg, tenant_of, path, params, detail):

@@ -223,6 +223,40 @@ def test_range_and_limit_caps(client, tenant, fake_loki):
     assert len(fake_loki.calls) == 1
 
 
+def test_omitted_to_clamps_a_window_past_the_maximum(client, tenant, fake_loki):
+    """The Studio "Last 7 days" preset sends only `from` = its now − 7 d; the server's now is later,
+    so the window is clamped to the last 7 days instead of 422."""
+    h = get_auth_header(tenant, "alice")
+    for days in (7, 30):
+        sent = datetime.now(UTC) - timedelta(days=days)
+        r = client.get("/api/v1/logs", params={"from": sent.isoformat()}, headers=h)
+        assert r.status_code == 200, r.text
+        call = fake_loki.calls[-1]
+        assert call["end_ns"] - call["start_ns"] == 7 * 86_400 * 10**9
+        assert datetime.fromisoformat(r.json()["to"]) - datetime.fromisoformat(r.json()["from"]) == timedelta(days=7)
+    # Both given and too long stays 422.
+    to = datetime.now(UTC)
+    r = client.get("/api/v1/logs", params={"from": (to - timedelta(days=8)).isoformat(), "to": to.isoformat()}, headers=h)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "the time range may span at most 7 days"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"from": "0001-01-01"},
+        {"from": "0001-01-01T00:00:00+01:00"},
+        {"to": "0001-01-01"},
+        {"from": "1969-12-31T23:00:00Z", "to": "1970-01-01T01:00:00Z"},
+    ],
+)
+def test_dates_before_1970_are_422(client, tenant, fake_loki, params):
+    r = client.get("/api/v1/logs", params=params, headers=get_auth_header(tenant, "alice"))
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == "from and to must not be before 1970-01-01"
+    assert fake_loki.calls == []
+
+
 def test_naive_times_are_utc(client, tenant, fake_loki):
     response = client.get(
         "/api/v1/logs", params={"from": "2026-11-10T00:00:00", "to": "2026-11-10T01:00:00"}, headers=get_auth_header(tenant, "alice")

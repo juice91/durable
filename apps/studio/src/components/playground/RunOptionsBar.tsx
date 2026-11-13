@@ -51,7 +51,7 @@ const selectClass =
 function FieldError({ id, message }: { id: string; message: string | null }) {
   if (!message) return null;
   return (
-    <p id={id} role="alert" className="mt-1 max-w-sm text-xs text-destructive">
+    <p id={id} role="alert" className="mt-1 max-w-sm text-xs text-destructive-text">
       {message}
     </p>
   );
@@ -195,7 +195,7 @@ export function RunOptionsBar(props: RunOptionsBarProps) {
           disabled={!selectedAgentId}
           className={`rounded-md border px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-60 ${
             contextHasErrors
-              ? "border-destructive/50 bg-destructive/10 text-destructive"
+              ? "border-destructive/50 bg-destructive/10 text-destructive-text"
               : "border-border bg-card text-card-foreground hover:bg-accent"
           }`}
         >

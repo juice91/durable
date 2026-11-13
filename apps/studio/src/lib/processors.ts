@@ -172,22 +172,19 @@ export const processors = {
   },
 };
 
-/** A `datetime-local` input value (local time, no offset) as an ISO timestamp, or undefined. */
-export function localInputToIso(value: string): string | undefined {
-  if (!value) return undefined;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-}
-
 /** The API refuses moderation in the test console with this 422 message. */
 export function isModerationRefusal(message: string): boolean {
   return /moderation.*test it in the playground/i.test(message);
 }
 
-/** "email ×2, phone ×1"; "No matches" when nothing matched. Counts only: never matched text. */
-export function formatMatchCounts(counts: Record<string, number> | undefined): string {
-  const entries = Object.entries(counts || {}).filter(([, n]) => n > 0);
-  if (entries.length === 0) return "No matches";
+/** "email ×2, phone ×1" from a processor's match_counts (zero and non-numeric counts left out);
+ * `empty` when nothing matched or the value is not a counts object. Counts only: never matched text. */
+export function formatMatchCounts(counts: unknown, empty = "No matches"): string {
+  if (counts === null || typeof counts !== "object" || Array.isArray(counts)) return empty;
+  const entries = Object.entries(counts as Record<string, unknown>).filter(
+    (entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0,
+  );
+  if (entries.length === 0) return empty;
   return entries.map(([kind, n]) => `${kind} ×${n}`).join(", ");
 }
 

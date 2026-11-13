@@ -244,7 +244,19 @@ export function clearSavedContext(agentId: string): boolean {
   }
 }
 
-/** The playground URL that opens with this agent selected (P0.19 reads `agent` and the saved context). */
-export function playgroundHref(agentId: string): string {
-  return `/playground?${new URLSearchParams({ agent: agentId }).toString()}`;
+/** The playground query flag that makes the saved preset win over the tab's remembered context. */
+export const PRESET_CONTEXT_PARAM = "context";
+export const PRESET_CONTEXT_VALUE = "preset";
+
+/**
+ * The playground URL that opens with this agent selected (P0.19 reads `agent`, `version` and the
+ * saved context). `version` (a number or "draft"; null: latest) is the version the preset was
+ * checked against; `preferPreset` adds `context=preset` so the saved preset replaces the context
+ * the playground remembered for this agent in the tab.
+ */
+export function playgroundHref(agentId: string, version: ContextVersionRef = null, preferPreset = false): string {
+  const params = new URLSearchParams({ agent: agentId });
+  if (version !== null) params.set("version", String(version));
+  if (preferPreset) params.set(PRESET_CONTEXT_PARAM, PRESET_CONTEXT_VALUE);
+  return `/playground?${params.toString()}`;
 }

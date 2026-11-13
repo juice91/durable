@@ -1,8 +1,8 @@
 import Link from "next/link";
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { tracePath } from "@/lib/traces";
 import { LogLevelBadge } from "./LogLevelBadge";
-import { formatLogTime, logKey, type LogItem } from "./logsQuery";
+import { formatLogTime, logRowKeys, type LogItem } from "./logsQuery";
 
 interface LogsTableProps {
   items: LogItem[];
@@ -43,6 +43,7 @@ function shortId(id: string): string {
 /** Log records as a table: time, level, service, message and, optionally, the run's trace.
  * Memoised: a parent re-render with the same items does not re-render every row. */
 export const LogsTable = React.memo(function LogsTable({ items, caption, showTraceLink = true, busy = false }: LogsTableProps) {
+  const rowKeys = useMemo(() => logRowKeys(items), [items]);
   return (
     <div className="overflow-x-auto rounded-md border border-border bg-card text-card-foreground">
       <table className="w-full text-sm" aria-busy={busy || undefined} data-testid="logs-table">
@@ -57,10 +58,10 @@ export const LogsTable = React.memo(function LogsTable({ items, caption, showTra
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {items.map((item) => {
+          {items.map((item, index) => {
             const { time, date } = formatLogTime(item.ts);
             return (
-              <tr key={logKey(item)} data-testid="log-row" className="align-top hover:bg-muted/30">
+              <tr key={rowKeys[index]} data-testid="log-row" className="align-top hover:bg-muted/30">
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">
                   <time dateTime={item.ts} title={`${date} ${time}`}>{time}</time>
                   <div className="text-[11px] text-muted-foreground">{date}</div>

@@ -109,7 +109,7 @@ describe("RequestContextPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save for playground" }));
     expect(screen.getByTestId("context-save-notice")).toHaveTextContent("Saved");
     expect(loadSavedContext("agent-1")).toMatchObject({ value: { tier: "silver", seats: 4 }, version: 2 });
-    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", "/playground?agent=agent-1");
+    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", "/playground?agent=agent-1&version=2&context=preset");
   });
 
   it("preselects a saved context and its version", async () => {
@@ -118,6 +118,8 @@ describe("RequestContextPage", () => {
     expect(await screen.findByLabelText(/Tier/)).toHaveValue("silver");
     expect(screen.getByLabelText("Version")).toHaveValue("1");
     expect(getRequestContext).toHaveBeenCalledWith("agent-1", 1);
+    // The link carries the preset's version and the flag that makes the preset win in the playground.
+    expect(screen.getByRole("link", { name: "Use in playground" })).toHaveAttribute("href", "/playground?agent=agent-1&version=1&context=preset");
     expect(screen.getByTestId("saved-context")).toHaveTextContent('"silver"');
   });
 

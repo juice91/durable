@@ -99,6 +99,8 @@ export const RANGE_PRESETS: ReadonlyArray<{ value: RangePreset; label: string; m
   { value: "24h", label: "Last 24 hours", ms: 24 * 60 * 60 * 1000 },
   { value: "7d", label: "Last 7 days", ms: MAX_RANGE_MS },
 ];
+/** How much shorter than the API maximum the widest preset's window is. */
+export const PRESET_HEADROOM_MS = 60_000;
 const PRESET_MS = new Map(RANGE_PRESETS.map((p) => [p.value, p.ms]));
 
 /** The Logs page URL state: `q`, `level`, `agent_id`, `run_id`, and the range as `range=<preset>`
@@ -201,7 +203,10 @@ export function logsRequestParams(
     if (filters.from) params.from = filters.from;
     if (filters.to) params.to = filters.to;
   } else if (filters.range) {
-    params.from = new Date(now - (PRESET_MS.get(filters.range) ?? 0)).toISOString();
+    // A window of exactly the API maximum is rejected (422) once `to` (now on the server) passes
+    // `from + 7 days`: keep a minute of headroom.
+    const ms = Math.min(PRESET_MS.get(filters.range) ?? 0, MAX_RANGE_MS - PRESET_HEADROOM_MS);
+    params.from = new Date(now - ms).toISOString();
   } else if (filters.run_id && run) {
     const lifetime = runLogsWindow(run, now);
     if (lifetime) Object.assign(params, lifetime);
@@ -242,6 +247,18 @@ export function olderPageTo(items: LogItem[]): string | null {
 
 export function logKey(item: LogItem): string {
   return [item.ts, item.service ?? "", item.span_id ?? "", item.run_id ?? "", item.level ?? "", item.message].join("\u0000");
+}
+
+/** One React key per row: `logKey`, plus the occurrence index for the second and later copies of
+ * an identical record in the same list (the API can return exact duplicates). */
+export function logRowKeys(items: readonly LogItem[]): string[] {
+  const seen = new Map<string, number>();
+  return items.map((item) => {
+    const base = logKey(item);
+    const count = seen.get(base) ?? 0;
+    seen.set(base, count + 1);
+    return count === 0 ? base : `${base}\u0000#${count}`;
+  });
 }
 
 /** `older` appended after `current`, without records already shown. */

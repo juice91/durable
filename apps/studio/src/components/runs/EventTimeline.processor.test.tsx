@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
 import { render, screen } from "@testing-library/react";
-import { EventTimeline, formatMatchCounts } from "./EventTimeline";
+import { formatMatchCounts } from "@/lib/processors";
+import { EventTimeline } from "./EventTimeline";
 import { type RunEvent } from "@/lib/runs";
 
 const processor = (seq: number, data: RunEvent["data"]): RunEvent => ({
@@ -26,7 +27,7 @@ describe("EventTimeline processor_result", () => {
     expect(line).toHaveTextContent("Input processor");
     expect(line).toHaveTextContent("pii_redact");
     expect(line).toHaveTextContent("redact");
-    expect(line).toHaveTextContent("2 email, 1 ipv4");
+    expect(line).toHaveTextContent("email ×2, ipv4 ×1");
     expect(line).not.toHaveTextContent("phone");
     expect(screen.queryByText(/SECRET/)).toBeNull();
     expect(screen.queryByText(/a@b\.c/)).toBeNull();
@@ -48,15 +49,15 @@ describe("EventTimeline processor_result", () => {
     expect(moderation).toHaveTextContent("Output processor");
     expect(moderation).toHaveTextContent("moderation");
     expect(moderation).toHaveTextContent("flagged: violence; reason: verdict_invalid");
-    expect(screen.getByText("block")).toHaveClass("text-red-700");
+    expect(screen.getByText("block")).toHaveClass("text-destructive-text");
     expect(maxLength).toHaveTextContent("truncate");
     expect(maxLength).toHaveTextContent("(request #3)");
   });
 
   it("formats match counts", () => {
-    expect(formatMatchCounts({ email: 1, iban: 3 })).toBe("1 email, 3 iban");
-    expect(formatMatchCounts({})).toBe("");
-    expect(formatMatchCounts(null)).toBe("");
-    expect(formatMatchCounts(["x"])).toBe("");
+    expect(formatMatchCounts({ email: 1, iban: 3 }, "")).toBe("email ×1, iban ×3");
+    expect(formatMatchCounts({}, "")).toBe("");
+    expect(formatMatchCounts(null, "")).toBe("");
+    expect(formatMatchCounts(["x"], "")).toBe("");
   });
 });

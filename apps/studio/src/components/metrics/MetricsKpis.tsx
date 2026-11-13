@@ -1,17 +1,16 @@
 "use client";
 
 import React from "react";
+import { formatTokens, formatUsd, parseCost } from "@/lib/format";
 import { KpiCard, type KpiCardProps } from "./KpiCard";
 import {
   FAILED_STATUSES,
   computeDelta,
-  formatCost,
   formatCostWithPricing,
   formatCount,
   formatLatency,
   formatPercent,
   formatRange,
-  parseCost,
   tracesHref,
   type MetricValues,
   type MetricsFilters,
@@ -71,9 +70,9 @@ export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: 
     tokens: {
       id: "tokens",
       label: "Tokens",
-      value: formatCount(tokens(cur)),
-      delta: has(prev) ? computeDelta(tokens(cur), tokens(prev!), "neutral", formatCount) : null,
-      hint: `${formatCount(cur.input_tokens)} in · ${formatCount(cur.output_tokens)} out${cur.unmeasured_requests ? ` · ${formatCount(cur.unmeasured_requests)} requests not measured` : ""}`,
+      value: formatTokens(tokens(cur)),
+      delta: has(prev) ? computeDelta(tokens(cur), tokens(prev!), "neutral", formatTokens) : null,
+      hint: `${formatTokens(cur.input_tokens)} in · ${formatTokens(cur.output_tokens)} out${cur.unmeasured_requests ? ` · ${formatCount(cur.unmeasured_requests)} requests not measured` : ""}`,
     },
     cost: {
       id: "cost",
@@ -104,7 +103,7 @@ export function costDelta(cur: MetricValues, prev: MetricValues | null): PeriodD
   if (prev.requests <= prev.unpriced_requests) {
     return { direction: "flat", percent: null, absolute: 0, tone: "neutral", text: "no previous priced data", noPrevious: true };
   }
-  return computeDelta(parseCost(cur.cost_usd), parseCost(prev.cost_usd), "lower-better", formatCost);
+  return computeDelta(parseCost(cur.cost_usd), parseCost(prev.cost_usd), "lower-better", formatUsd);
 }
 
 /** "Compared with Nov 6, 00:00 – Nov 13, 00:00 UTC", or null without a comparison. */

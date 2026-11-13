@@ -92,8 +92,8 @@ describe("DashboardPage", () => {
     await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("12"));
     expect(screen.getByTestId("kpi-error_rate-value")).toHaveTextContent("27.3%");
     expect(screen.getByTestId("kpi-latency_p95-value")).toHaveTextContent("4.2 s");
-    expect(screen.getByTestId("kpi-tokens-value")).toHaveTextContent("17.5K");
-    expect(screen.getByTestId("kpi-cost-value")).toHaveTextContent("$0.04");
+    expect(screen.getByTestId("kpi-tokens-value")).toHaveTextContent("17,500");
+    expect(screen.getByTestId("kpi-cost-value")).toHaveTextContent("$0.042");
     expect(screen.getByTestId("kpi-runs-delta")).toHaveTextContent("up 100% from 6");
     expect(screen.queryByTestId("kpi-latency_p50")).toBeNull();
     expect(screen.getByText("Runs and failures")).toBeInTheDocument();

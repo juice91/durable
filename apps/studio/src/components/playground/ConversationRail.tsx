@@ -201,7 +201,7 @@ export function ConversationRail({
       </button>
 
       {error && (
-        <p role="alert" className="mb-2 text-sm text-destructive">
+        <p role="alert" className="mb-2 text-sm text-destructive-text">
           {error}
         </p>
       )}
@@ -243,7 +243,7 @@ export function ConversationRail({
                     className="w-full rounded border border-border bg-card px-2 py-1 text-sm text-card-foreground"
                   />
                   {renameError && (
-                    <p role="alert" className="mt-1 text-xs text-destructive">
+                    <p role="alert" className="mt-1 text-xs text-destructive-text">
                       {renameError}
                     </p>
                   )}

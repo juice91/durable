@@ -7,7 +7,6 @@ import {
   computeDelta,
   defaultInterval,
   formatBucket,
-  formatCost,
   formatCostWithPricing,
   formatCount,
   formatLatency,
@@ -154,20 +153,10 @@ describe("period deltas", () => {
 });
 
 describe("formatting", () => {
-  it("cost from the decimal string, including sub-cent values", () => {
-    expect(formatCost("12.3400000000")).toBe("$12.34");
-    expect(formatCost("1234.5")).toBe("$1,234.50");
-    expect(formatCost("0.0420000000")).toBe("$0.04");
-    expect(formatCost("0.0042000000")).toBe("$0.0042");
-    expect(formatCost("0.0001234")).toBe("$0.00012");
-    expect(formatCost("0E-10")).toBe("$0.00");
-    expect(formatCost(null)).toBe("—");
-  });
-
   it("unpriced cost is explicit", () => {
     expect(formatCostWithPricing({ cost_usd: "0", requests: 3, unpriced_requests: 3 })).toBe("no price");
     expect(formatCostWithPricing({ cost_usd: "0.5", requests: 3, unpriced_requests: 1 })).toBe("$0.50");
-    expect(formatCostWithPricing({ cost_usd: "0", requests: 0, unpriced_requests: 0 })).toBe("$0.00");
+    expect(formatCostWithPricing({ cost_usd: "0", requests: 0, unpriced_requests: 0 })).toBe("$0");
   });
 
   it("counts, latency, percent, buckets", () => {

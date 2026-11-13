@@ -105,14 +105,23 @@ describe("query building and the URL", () => {
   });
 
   it.each([
-    ["15m", 15 * 60_000], ["1h", 3_600_000], ["6h", 6 * 3_600_000], ["24h", 24 * 3_600_000], ["7d", 7 * 24 * 3_600_000],
-  ])("turns the %s preset into from = now - preset and no to", async (preset, ms) => {
+    ["15m", 15 * 60_000], ["1h", 3_600_000], ["6h", 6 * 3_600_000], ["24h", 24 * 3_600_000], ["7d", 7 * 24 * 3_600_000 - 60_000],
+  ])("turns the %s preset into from = now - preset (7d: one minute short of the API maximum) and no to", async (preset, ms) => {
     const now = Date.UTC(2026, 10, 13, 12, 0, 0);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);
     startAt(`range=${preset}&level=warn`);
     await waitFor(() => expect(searchLogs).toHaveBeenCalled());
     expect(calls()).toEqual([{ limit: 100, level: "warn", from: new Date(now - ms).toISOString() }]);
+  });
+
+  it("shows the window the API actually searched (e.g. a clamped 7-day window)", async () => {
+    const from = "2026-11-06T12:00:30+00:00";
+    const to = "2026-11-13T12:00:30+00:00";
+    vi.mocked(searchLogs).mockResolvedValue({ items: [log("one")], from, to, limit: 100 });
+    startAt("range=7d");
+    const line = await screen.findByTestId("logs-window");
+    expect(line).toHaveTextContent(`Searched ${new Date(from).toLocaleString()} to ${new Date(to).toLocaleString()}`);
   });
 
   it("lets custom from/to override range", async () => {

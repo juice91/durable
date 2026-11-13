@@ -80,6 +80,32 @@ describe("VersionCompareView", () => {
     expect(screen.getByText(/cut short/)).toBeInTheDocument();
     expect(screen.getByText("No changes to the instructions.")).toBeInTheDocument();
   });
+
+  it("says the diff is too large when instructions_diff_truncated is set, above the coarse block replace", () => {
+    render(
+      <VersionCompareView
+        result={result({
+          instructions_diff_truncated: true,
+          instructions_diff: [
+            { op: "removed", text: "old 1", base_line: 1, target_line: null },
+            { op: "added", text: "new 1", base_line: null, target_line: 1 },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByTestId("instructions-diff-truncated")).toHaveTextContent("Diff too large to show line by line");
+    expect(screen.getByTestId("instructions-diff")).toBeInTheDocument();
+  });
+
+  it("shows only the notice when the truncated diff is empty, and nothing when the field is absent", () => {
+    const { unmount } = render(<VersionCompareView result={result({ instructions_diff_truncated: true, instructions_diff: [] })} />);
+    expect(screen.getByTestId("instructions-diff-truncated")).toHaveTextContent("Diff too large to show line by line");
+    expect(screen.queryByTestId("instructions-diff")).not.toBeInTheDocument();
+    expect(screen.queryByText("No changes to the instructions.")).not.toBeInTheDocument();
+    unmount();
+    render(<VersionCompareView result={result()} />);
+    expect(screen.queryByTestId("instructions-diff-truncated")).not.toBeInTheDocument();
+  });
 });
 
 describe("VersionCompare", () => {

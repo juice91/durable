@@ -50,7 +50,7 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
     return (
       <fieldset className="space-y-3 rounded-md border border-border p-4">
         <legend className="px-1 text-sm font-medium text-foreground">{label}{required ? " *" : ""}</legend>
-        {error ? <p role="alert" data-testid={`field-error-${fieldPath.join(".")}`} className="text-xs text-destructive">{error}</p> : null}
+        {error ? <p role="alert" data-testid={`field-error-${fieldPath.join(".")}`} className="text-xs text-destructive-text">{error}</p> : null}
         {Object.entries(schema.properties || {}).map(([childName, childSchema]) => (
           <Field
             key={childName}
@@ -104,7 +104,7 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
       {labelNode}
       {control}
       {schema.description ? <p className="text-xs text-muted-foreground">{schema.description}</p> : null}
-      {error ? <p role="alert" data-testid={`field-error-${fieldPath.join(".")}`} className="text-xs text-destructive">{error}</p> : null}
+      {error ? <p role="alert" data-testid={`field-error-${fieldPath.join(".")}`} className="text-xs text-destructive-text">{error}</p> : null}
     </div>
   );
 }
@@ -131,7 +131,7 @@ export function JsonSchemaForm({ schema, value, onChange, errors, idPrefix = "sc
       ))}
       {Object.keys(schema.properties || {}).length === 0 ? <p className="text-sm text-muted-foreground">This tool takes no input.</p> : null}
       {unmatched.length > 0 ? (
-        <ul role="alert" data-testid="field-errors-unmatched" className="space-y-1 text-xs text-destructive">
+        <ul role="alert" data-testid="field-errors-unmatched" className="space-y-1 text-xs text-destructive-text">
           {unmatched.map(([key, message]) => <li key={key}><span className="font-mono">{key}</span>: {message}</li>)}
         </ul>
       ) : null}

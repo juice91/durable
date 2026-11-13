@@ -265,7 +265,7 @@ describe("acceptance: two turns of one conversation, two models", () => {
     await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
     expect(texts("turn-badge-model")).toEqual(["openai:gpt-4.1-mini", "openai:gpt-4.1"]);
     expect(texts("turn-badge-tokens")).toEqual(["1,200 in · 300 out tokens", "4,000 in · 500 out tokens"]);
-    expect(texts("turn-badge-cost")).toEqual(["$0.0012", "$0.02"]);
+    expect(texts("turn-badge-cost")).toEqual(["$0.0012", "$0.020"]);
     expect(texts("turn-badge-version")).toEqual(["v1", "v1"]);
     const badges = screen.getAllByTestId("turn-badge");
     expect(within(badges[0]).queryByText("override")).not.toBeInTheDocument();
@@ -281,7 +281,7 @@ describe("acceptance: two turns of one conversation, two models", () => {
     finish([["openai:gpt-4.1-mini", 100, 10, "0.001"], ["openai:gpt-4.1-mini", 200, 20, "0.002"]]);
     await waitFor(() => expect(screen.getByTestId("turn-badge-cost")).toBeInTheDocument());
     expect(screen.getByTestId("turn-badge-tokens")).toHaveTextContent("300 in · 30 out tokens");
-    expect(screen.getByTestId("turn-badge-cost")).toHaveTextContent("$0.003");
+    expect(screen.getByTestId("turn-badge-cost")).toHaveTextContent("$0.0030");
   });
 
   it("shows 'no price' when any request in the turn was unpriced", async () => {
@@ -332,7 +332,7 @@ describe("acceptance: two turns of one conversation, two models", () => {
     await waitFor(() => expect(screen.getAllByTestId("turn-badge")).toHaveLength(2));
     expect(texts("turn-badge-model")).toEqual(["openai:gpt-4.1-mini", "openai:gpt-4.1"]);
     expect(texts("turn-badge-tokens")).toEqual(["70 in · 7 out tokens", "9,000 in · 90 out tokens"]);
-    expect(texts("turn-badge-cost")).toEqual(["$0.00070", "$0.05"]);
+    expect(texts("turn-badge-cost")).toEqual(["$0.00070", "$0.050"]);
     expect(texts("turn-badge-version")).toEqual(["v1", "v2"]);
     const pills = screen.getAllByTestId("turn-badge").map((b) => within(b).queryByText("override") !== null);
     expect(pills).toEqual([false, true]);

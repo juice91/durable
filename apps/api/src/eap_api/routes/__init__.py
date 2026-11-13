@@ -470,7 +470,9 @@ def compare_versions(
 
     `changes` is the field-level change list over the specs as today's AgentSpec dumps them
     (`[{path, kind, before, after}]`, kind added/removed/changed), `instructions_diff` a line diff
-    of the instructions. Read-only.
+    of the instructions, and `instructions_diff_truncated` true when the instructions were too long
+    for a line diff (more than ~2,000 lines on a side) and the diff is one whole-block replace.
+    Read-only.
     """
     agent = _tenant_agent(db, principal.tenant_id, agent_id)
     base_side = _compare_side(db, agent, _parse_side("base", base))

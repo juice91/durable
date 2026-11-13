@@ -89,7 +89,7 @@ export function ContextPanel({
         <div
           role="alert"
           data-testid="context-turn-errors"
-          className="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+          className="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text"
         >
           <p className="font-medium">The message was not sent: the request context was refused.</p>
           {turnErrors.banner && <p className="mt-1">{turnErrors.banner}</p>}
@@ -108,7 +108,7 @@ export function ContextPanel({
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading context fields…</p>
       ) : loadError ? (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-sm text-destructive-text">
           {loadError}
         </p>
       ) : info ? (

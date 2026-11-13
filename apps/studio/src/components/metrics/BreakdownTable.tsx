@@ -1,10 +1,10 @@
 "use client";
 
 import React from "react";
+import { formatCost, formatTokens } from "@/lib/format";
 import Link from "next/link";
 import {
   FAILED_STATUSES,
-  formatCost,
   formatCount,
   formatLatency,
   formatPercent,
@@ -59,7 +59,7 @@ function CostCell({ item }: { item: BreakdownItem }) {
   }
   return (
     <>
-      {formatCost(item.cost_usd)}
+      {formatCost(item.cost_usd) ?? "—"}
       {item.unpriced_requests > 0 && (
         <span className="block text-[11px] text-muted-foreground">+{formatCount(item.unpriced_requests)} unpriced</span>
       )}
@@ -156,7 +156,7 @@ export function BreakdownTable({
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{formatPercent(item.error_rate)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{formatLatency(item.latency_p95_ms)}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">{formatCount(item.input_tokens + item.output_tokens)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{formatTokens(item.input_tokens + item.output_tokens)}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap"><CostCell item={item} /></td>
                   </tr>
                 );

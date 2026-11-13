@@ -4,7 +4,8 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { getRun } from "@/lib/runs";
-import { EMPTY_FILTERS, isoToLocalInput, listTraceRuns, localInputToIso, type TraceRun } from "@/lib/traces";
+import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
+import { EMPTY_FILTERS, listTraceRuns, type TraceRun } from "@/lib/traces";
 import { LogsTable } from "@/components/logs/LogsTable";
 import { LogsUnavailable } from "@/components/logs/LogsUnavailable";
 import { useLogSearch } from "@/components/logs/useLogSearch";
@@ -85,6 +86,11 @@ function useRunOptions(agentId: string | null, nonce: number): RunOptions {
     [agentId, known, state.runs],
   );
   return { runs: current ? state.runs : [], loading: !current || state.loading, failed: current && state.failed, agentRunIds };
+}
+
+function formatWindowTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
 /** The selected run's times, for the "Run lifetime" window. `status` "failed" means the window is
@@ -390,7 +396,7 @@ function LogsSearch() {
       </form>
 
       {problem ? (
-        <p role="alert" data-testid="logs-filter-problem" className="mb-4 text-sm text-destructive">
+        <p role="alert" data-testid="logs-filter-problem" className="mb-4 text-sm text-destructive-text">
           {problem}
         </p>
       ) : null}
@@ -405,6 +411,13 @@ function LogsSearch() {
       ) : null}
 
       <p className="sr-only" aria-live="polite" data-testid="logs-status">{status}</p>
+      {!problem && !search.error && search.window ? (
+        // The window the API actually searched: it may differ from the one asked for (a range
+        // without `to` ends at the server's now, and one past 7 days is clamped to the last 7).
+        <p className="mb-3 text-xs text-muted-foreground" data-testid="logs-window">
+          Searched {formatWindowTime(search.window.from)} to {formatWindowTime(search.window.to)}
+        </p>
+      ) : null}
 
       {problem ? null : search.error ? (
         <LogsUnavailable error={search.error} onRetry={() => setNonce((n) => n + 1)} />

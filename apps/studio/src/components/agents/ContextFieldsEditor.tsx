@@ -45,7 +45,7 @@ export function ContextFieldsEditor({ value, onChange, usedNames, onInsertPlaceh
         <code className="font-mono">tenant_id</code>, <code className="font-mono">user_id</code> and{" "}
         <code className="font-mono">run_id</code> are reserved.
       </p>
-      {sectionError ? <p role="alert" data-testid="context-fields-error" className="text-xs text-destructive">{sectionError}</p> : null}
+      {sectionError ? <p role="alert" data-testid="context-fields-error" className="text-xs text-destructive-text">{sectionError}</p> : null}
       {value.length === 0 ? <p className="text-xs text-muted-foreground">No context fields.</p> : null}
       <ol className="space-y-3">
         {value.map((field, index) => {
@@ -133,7 +133,7 @@ export function ContextFieldsEditor({ value, onChange, usedNames, onInsertPlaceh
               </div>
               {/* Polite and persistent: announced when the problems change, not on every keystroke. */}
               <div id={`${prefix}-problems`} aria-live="polite" data-testid={`${prefix}-problems`}>
-                {problems.map((problem) => <p key={problem} className="text-xs text-destructive">{problem}</p>)}
+                {problems.map((problem) => <p key={problem} className="text-xs text-destructive-text">{problem}</p>)}
               </div>
             </li>
           );

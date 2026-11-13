@@ -3,8 +3,8 @@ import React from "react";
 const LEVEL_STYLES: Record<string, string> = {
   debug: "bg-muted text-muted-foreground",
   info: "bg-accent text-accent-foreground",
-  warn: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
-  error: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+  warn: "bg-warning/15 text-warning",
+  error: "bg-destructive/15 text-destructive-text",
   fatal: "bg-destructive text-destructive-foreground",
 };
 

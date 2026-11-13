@@ -1147,6 +1147,37 @@ describe("PlaygroundPage run options (P0.19)", () => {
     expect(lastOptions()?.request_context).toEqual({ tier: "gold" });
   });
 
+  it("lets the saved preset win over the tab's remembered context with context=preset, then drops the flag", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    const { saveContext } = await import("@/lib/requestContext");
+    saveContext("agent-1", { tier: "gold" }, "draft");
+    const key = "eap.playground.context.v1:anon:agent-1";
+    window.sessionStorage.setItem(key, JSON.stringify({ value: { tier: "silver" } }));
+    window.history.replaceState({}, "", "/playground?agent=agent-1&version=draft&context=preset");
+    await renderReady();
+    fireEvent.click(await screen.findByRole("button", { name: /1 of 1 set/ }));
+    expect(screen.getByText("Using the preset saved for this agent.")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("context")).toBeNull();
+    expect(params.get("version")).toBe("draft");
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toEqual({ tier: "gold" });
+    expect(lastOptions()?.version).toBe("draft");
+  });
+
+  it("keeps the tab's remembered context over the preset without the flag", async () => {
+    vi.mocked(getRequestContext).mockImplementation(async (agentId, version) => tierInfo(agentId, version));
+    const { saveContext } = await import("@/lib/requestContext");
+    saveContext("agent-1", { tier: "gold" }, null);
+    window.sessionStorage.setItem("eap.playground.context.v1:anon:agent-1", JSON.stringify({ value: { tier: "silver" } }));
+    window.history.replaceState({}, "", "/playground?agent=agent-1");
+    await renderReady();
+    await screen.findByRole("button", { name: /1 of 1 set/ });
+    await sendMessage("Hi");
+    expect(lastOptions()?.request_context).toEqual({ tier: "silver" });
+  });
+
   it("sends no context to a version without context fields, even when a value is remembered", async () => {
     window.sessionStorage.setItem(`eap.playground.context.v1:anon:agent-1`, JSON.stringify({ value: { stale: 1 } }));
     await renderReady();

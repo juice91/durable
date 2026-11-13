@@ -36,6 +36,9 @@ export interface VersionCompareResult {
   changes: SpecChange[];
   truncated: boolean;
   instructions_diff: InstructionsDiffLine[];
+  /** The instructions were too large for a line diff: `instructions_diff` is then a whole-block
+   * replace (every base line removed, then every target line added) or empty. Absent on older APIs. */
+  instructions_diff_truncated?: boolean;
 }
 
 export function compareRefLabel(ref: CompareRef): string {

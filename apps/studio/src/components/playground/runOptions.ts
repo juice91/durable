@@ -8,7 +8,13 @@
 // everywhere); a preset outlives the tab only when saved with the explicit button (P0.16 storage).
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import type { ModelOption } from "@/lib/metrics";
-import { credentialScope, mapContextErrors, type RequestContextValue } from "@/lib/requestContext";
+import {
+  PRESET_CONTEXT_PARAM,
+  PRESET_CONTEXT_VALUE,
+  credentialScope,
+  mapContextErrors,
+  type RequestContextValue,
+} from "@/lib/requestContext";
 import type { RunEvent } from "@/lib/runs";
 
 /** A turn's target: a published version, the draft, or null for the latest published version. */
@@ -47,6 +53,8 @@ export interface PlaygroundUrlState {
   version: VersionRef;
   /** The model override as `provider:name`, or null for the version's model. */
   model: string | null;
+  /** `context=preset` (from the Request Context page): the saved preset wins over the tab's context. */
+  preferPreset: boolean;
 }
 
 const MODEL_ID_RE = /^[A-Za-z0-9_.-]+:\S.{0,199}$/;
@@ -70,7 +78,17 @@ export function parseUrlState(search: string): PlaygroundUrlState {
     conversation: params.get("conversation") || null,
     version: parseVersionParam(params.get("version")),
     model: parseModelParam(params.get("model")),
+    preferPreset: params.get(PRESET_CONTEXT_PARAM) === PRESET_CONTEXT_VALUE,
   };
+}
+
+/** Removes the one-shot `context=preset` flag from the URL so a reload or later edits are not overridden. */
+export function stripPreferPresetParam(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has(PRESET_CONTEXT_PARAM)) return;
+  url.searchParams.delete(PRESET_CONTEXT_PARAM);
+  window.history.replaceState(window.history.state, "", url);
 }
 
 /** Writes the given keys onto `url` (null removes one); other parameters are kept. */
@@ -284,6 +302,15 @@ export function loadPlaygroundContext(agentId: string): RequestContextValue | nu
     return isRecord(parsed) && isRecord(parsed.value) ? parsed.value : null;
   } catch {
     return null;
+  }
+}
+
+/** Forgets the context remembered for this agent in this tab. */
+export function clearPlaygroundContext(agentId: string): void {
+  try {
+    storage()?.removeItem(playgroundContextKey(agentId));
+  } catch {
+    // Storage unavailable: nothing remembered.
   }
 }
 

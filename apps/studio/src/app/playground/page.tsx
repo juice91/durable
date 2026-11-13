@@ -38,6 +38,7 @@ import {
   contextToSend,
   effectiveVersionRef,
   hasOutputProcessors,
+  clearPlaygroundContext,
   loadPlaygroundContext,
   optionsFromRun,
   overrideFor,
@@ -45,6 +46,7 @@ import {
   replaceUrlState,
   resolveModelChoice,
   savePlaygroundContext,
+  stripPreferPresetParam,
   specModelId,
   targetSpec,
   turnBlock,
@@ -310,11 +312,13 @@ export default function PlaygroundPage() {
   );
 
   /** Select an agent: its remembered playground context, else its saved preset (P0.16). */
-  const selectAgent = useCallback((agentId: string) => {
+  const selectAgent = useCallback((agentId: string, preferPreset = false) => {
     agentRef.current = agentId;
     setSelectedAgentId(agentId);
-    const remembered = agentId ? loadPlaygroundContext(agentId) : null;
     const preset = agentId ? loadSavedContext(agentId) : null;
+    // "Use in playground" (`context=preset`): the saved preset replaces the tab's remembered context.
+    if (preferPreset && preset !== null) clearPlaygroundContext(agentId);
+    const remembered = agentId ? loadPlaygroundContext(agentId) : null;
     setContextValue(remembered ?? preset?.value ?? {});
     setPresetAvailable(preset !== null);
     setPresetMessage(remembered === null && preset !== null ? "Using the preset saved for this agent." : null);
@@ -422,7 +426,8 @@ export default function PlaygroundPage() {
         initialConversationRef.current = initial.conversation;
         const fromUrl = initial.agent ? items.find((agent) => agent.id === initial.agent) : undefined;
         const chosen = fromUrl ?? items.find((agent) => agent.latest_version !== null) ?? items[0];
-        selectAgent(chosen?.id ?? "");
+        selectAgent(chosen?.id ?? "", Boolean(fromUrl) && initial.preferPreset);
+        stripPreferPresetParam();
         if (fromUrl || !initial.agent) {
           setRequestedVersion(initial.version);
           setPendingModelId(initial.model);
@@ -936,7 +941,7 @@ export default function PlaygroundPage() {
           )}
 
           {optionErrors.general && (
-            <div role="alert" data-testid="turn-options-error" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <div role="alert" data-testid="turn-options-error" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">
               {optionErrors.general}
             </div>
           )}

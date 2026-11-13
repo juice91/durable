@@ -1,6 +1,6 @@
 """Postgres store for durable runs and event logging."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 import json
@@ -406,11 +406,32 @@ def _iso_conversation(
     }
 
 
+# A running run whose heartbeat is older than this shows as `recovering` (display status only).
+RECOVERING_AFTER = timedelta(seconds=20)
+
+
 def _display_status(run: RunModel) -> str:
     if run.status == "running" and run.heartbeat_at is not None:
-        if (datetime.now(timezone.utc) - run.heartbeat_at).total_seconds() > 20:
+        if datetime.now(timezone.utc) - run.heartbeat_at > RECOVERING_AFTER:
             return "recovering"
     return run.status
+
+
+def _status_condition(statuses: list[str]) -> Any:
+    """`status IN (...)`; the display-only `recovering` matches running runs with a stale heartbeat
+    (as _display_status), so a list filter on it is not always empty. `running` keeps matching every
+    running run, recovering ones included."""
+    conditions = []
+    stored = [s for s in statuses if s != "recovering"]
+    if stored:
+        conditions.append(RunModel.status.in_(stored))
+    if "recovering" in statuses:
+        conditions.append(
+            (RunModel.status == "running")
+            & RunModel.heartbeat_at.is_not(None)
+            & (RunModel.heartbeat_at < datetime.now(timezone.utc) - RECOVERING_AFTER)
+        )
+    return or_(*conditions)
 
 
 def _run_dict(run: RunModel) -> dict[str, Any]:
@@ -888,10 +909,8 @@ class RunStore:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if agent_id is not None:
             query = query.where(RunModel.agent_id == str(agent_id))
-        if isinstance(status, str):
-            query = query.where(RunModel.status == status)
-        elif status is not None:
-            query = query.where(RunModel.status.in_(list(status)))
+        if status is not None:
+            query = query.where(_status_condition([status] if isinstance(status, str) else list(status)))
         if created_from is not None:
             query = query.where(RunModel.created_at >= created_from)
         if created_to is not None:

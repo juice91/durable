@@ -64,7 +64,7 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0 }: { workflowId:
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="text-sm text-destructive-text">{error}</p> : null}
       {runs && runs.length === 0 ? <p className="text-sm text-muted-foreground">No runs yet.</p> : null}
       {runs && runs.length > 0 ? (
         <div className="overflow-x-auto">

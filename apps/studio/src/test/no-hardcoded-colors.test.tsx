@@ -84,3 +84,29 @@ describe("Non-playground components", () => {
     }
   });
 });
+
+// Status and level colours must come from theme tokens (destructive, success, warning, muted, ...),
+// never Tailwind palette hues: these files used to hardcode them.
+const TOKEN_ONLY_FILES = [
+  "components/traces/spanStyles.ts",
+  "components/logs/LogLevelBadge.tsx",
+  "components/runs/EventTimeline.tsx",
+];
+const PALETTE_COLOR =
+  /\b(?:bg|text|border|ring|divide|fill|stroke|from|via|to|outline|decoration|shadow|accent|caret|placeholder)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b|\b(?:bg|text|border)-(?:white|black)\b|#[0-9a-fA-F]{3,8}\b/;
+
+describe("Status and level styles", () => {
+  it.each(TOKEN_ONLY_FILES)("%s uses theme tokens only", (relative) => {
+    const lines = fs.readFileSync(path.join(componentsDir, "..", relative), "utf-8").split("\n");
+    const violations = lines
+      .map((content, index) => ({ line: index + 1, content: content.trim() }))
+      .filter(({ content }) => PALETTE_COLOR.test(content));
+    expect(violations).toEqual([]);
+  });
+
+  it("the token check catches palette colours", () => {
+    expect(PALETTE_COLOR.test('ok: "bg-green-600 dark:bg-green-500"')).toBe(true);
+    expect(PALETTE_COLOR.test('"dark:text-red-400"')).toBe(true);
+    expect(PALETTE_COLOR.test('ok: "bg-success", error: "text-destructive-text", w: "bg-warning/15"')).toBe(false);
+  });
+});

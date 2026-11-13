@@ -1,7 +1,8 @@
 "use client";
 
 import React from "react";
-import { formatCost, formatCount } from "@/lib/metrics";
+import { formatTokens, formatUsd } from "@/lib/format";
+import {  } from "@/lib/metrics";
 import { tracePath } from "@/lib/traces";
 import type { RunStatus } from "@/lib/runs";
 import { versionLabel, type BlockCode, type TurnUsage } from "./runOptions";
@@ -44,14 +45,14 @@ function sentence(text: string): string {
 function costText(usage: TurnUsage): string {
   if (!usage.recorded) return "";
   if (!usage.measured) return "cost not reported";
-  return usage.costUsd === null ? "no price" : formatCost(usage.costUsd);
+  return usage.costUsd === null ? "no price" : formatUsd(usage.costUsd);
 }
 
 function tokensText(usage: TurnUsage, running: boolean): string {
   if (!usage.recorded) return running ? "tokens pending" : "usage not recorded";
   // The provider reported no usage for some request: its zeros are not real counts.
   if (!usage.measured) return "tokens not reported";
-  return `${formatCount(usage.inputTokens)} in · ${formatCount(usage.outputTokens)} out tokens`;
+  return `${formatTokens(usage.inputTokens)} in · ${formatTokens(usage.outputTokens)} out tokens`;
 }
 
 export function TurnFooter({ turn }: { turn: TurnView }) {
@@ -74,7 +75,7 @@ export function TurnFooter({ turn }: { turn: TurnView }) {
           role={turn.announce ? "alert" : undefined}
           data-testid="turn-blocked"
           data-code={turn.block.code}
-          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-text"
         >
           <p className="font-medium">{BLOCK_TITLES[turn.block.code]}</p>
           <p>{turn.block.message ? sentence(turn.block.message) : BLOCK_FALLBACK[turn.block.code]}</p>

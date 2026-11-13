@@ -161,12 +161,12 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
           <div className="space-y-1">
             <label htmlFor="workflow-input-json" className="sr-only">Workflow input JSON</label>
             <textarea id="workflow-input-json" data-testid="workflow-input-json" rows={10} value={rawInput} onChange={(event) => setJsonInput(event.target.value)} className="w-full rounded-md border border-input bg-background p-3 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-            {jsonError ? <p role="alert" className="text-xs text-destructive">{jsonError}</p> : null}
+            {jsonError ? <p role="alert" className="text-xs text-destructive-text">{jsonError}</p> : null}
           </div>
         )
       ) : null}
       <div className="mt-5 space-y-3 border-t border-border pt-4">
-        {banner ? <p role="alert" data-testid="workflow-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{banner}</p> : null}
+        {banner ? <p role="alert" data-testid="workflow-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{banner}</p> : null}
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"

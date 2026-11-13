@@ -70,7 +70,7 @@ export function McpToolPicker({ value, onChange }: McpToolPickerProps) {
             return (
               <li key={mcpToolKey(ref)} data-testid="mcp-selected-tool" className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1 text-sm">
                 <span className="font-mono text-card-foreground">{ref.server}/{ref.tool}</span>
-                {warning ? <span className="text-xs text-destructive">{warning}</span> : null}
+                {warning ? <span className="text-xs text-destructive-text">{warning}</span> : null}
                 <button type="button" aria-label={`Remove ${ref.server}/${ref.tool}`} className="text-xs text-muted-foreground hover:text-card-foreground" onClick={() => toggle(ref)}>Remove</button>
               </li>
             );
@@ -101,7 +101,7 @@ export function McpToolPicker({ value, onChange }: McpToolPickerProps) {
               />
               <button type="button" className={secondaryButton} onClick={() => addTyped(server)}>Add</button>
             </div>
-            {result?.status === "error" ? <p className="text-xs text-destructive">Could not list tools: {describeMcpError(result.error_code)} You can still type a tool name.</p> : null}
+            {result?.status === "error" ? <p className="text-xs text-destructive-text">Could not list tools: {describeMcpError(result.error_code)} You can still type a tool name.</p> : null}
             {result?.status === "ok" ? (
               result.tools.length === 0 ? <p className="text-xs text-muted-foreground">This server offers no tools.</p> : (
                 <div className="flex flex-wrap gap-2">

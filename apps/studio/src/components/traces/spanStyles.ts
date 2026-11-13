@@ -1,19 +1,19 @@
 import type { SpanKind, SpanStatus } from "@/lib/traces";
 
-/** Bar and dot colours per span status (theme tokens where one fits; status hues follow StatusPill). */
+/** Bar and dot colours per span status: theme tokens only (success/warning are defined in globals.css). */
 export const STATUS_BAR: Record<SpanStatus, string> = {
-  ok: "bg-green-600 dark:bg-green-500",
+  ok: "bg-success",
   error: "bg-destructive",
   running: "bg-primary/60 animate-pulse",
-  waiting: "bg-yellow-500 dark:bg-yellow-400",
+  waiting: "bg-warning",
   incomplete: "bg-muted-foreground/50",
 };
 
 export const STATUS_TEXT: Record<SpanStatus, string> = {
-  ok: "text-green-700 dark:text-green-400",
-  error: "text-destructive dark:text-red-400",
+  ok: "text-success",
+  error: "text-destructive-text",
   running: "text-card-foreground",
-  waiting: "text-yellow-700 dark:text-yellow-400",
+  waiting: "text-warning",
   incomplete: "text-muted-foreground",
 };
 

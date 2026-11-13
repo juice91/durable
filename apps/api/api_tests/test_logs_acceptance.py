@@ -460,8 +460,11 @@ def test_range_over_seven_days_is_422(client, tenant, source):
     for extra in (timedelta(seconds=1), timedelta(days=1), timedelta(days=365)):
         r = _get(client, tenant, **{"from": (to - timedelta(days=7) - extra).isoformat(), "to": to.isoformat()})
         assert r.status_code == 422 and "7 days" in r.json()["detail"]
-    assert _get(client, tenant, **{"from": "2020-01-01T00:00:00Z"}).status_code == 422  # to defaults to now
     assert source.calls == []
+    # Without `to` (defaults to the server's now) a longer window is clamped to the last 7 days.
+    clamped = _get(client, tenant, **{"from": "2020-01-01T00:00:00Z"})
+    assert clamped.status_code == 200
+    assert source.calls[-1]["end_ns"] - source.calls[-1]["start_ns"] == 7 * 86_400 * 10**9
     ok = _get(client, tenant, **{"from": (to - timedelta(days=7)).isoformat(), "to": to.isoformat()})
     assert ok.status_code == 200
 
