@@ -31,7 +31,7 @@ from sqlalchemy import (
     true,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 
 from eap_run_store.cursor import ConversationCursor, RunCursor
 from sqlalchemy.orm import (
@@ -60,7 +60,7 @@ class Base(DeclarativeBase):
 
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
-RUN_KINDS = ("agent", "tool", "workflow")
+RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest")
 
 # runs.error of a run whose hand-off to the orchestrator failed (the API could not enqueue it).
 # Stable text: RunStore.requeue_after_enqueue_failure recognises the state by it.
@@ -69,17 +69,24 @@ ENQUEUE_FAILED_ERROR = (
 )
 
 # An agent run names exactly one of its published agent version and a draft snapshot (a draft test
-# run), and no tool or workflow; a tool run names its tool only and is never a conversation turn; a
-# workflow run names its published workflow version only. Same text as migration 0010_run_options.
+# run), and no tool or workflow; a tool run names its tool only and is never a conversation turn
+# (it may name a knowledge base: the search tester); a workflow run names its published workflow
+# version only; a kb_ingest run names its knowledge base only. Same text as migration
+# 0011_knowledge_bases.
 RUN_KIND_TARGET_CHECK = (
     "(kind = 'agent' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
-    " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
+    " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL AND knowledge_base_id IS NULL)"
     " OR (kind = 'tool' AND tool_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
     " AND draft_spec IS NULL AND conversation_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
     " OR (kind = 'workflow' AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL"
     " AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL AND tool_id IS NULL"
-    " AND conversation_id IS NULL)"
+    " AND conversation_id IS NULL AND knowledge_base_id IS NULL)"
+    " OR (kind = 'kb_ingest' AND knowledge_base_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
+    " AND draft_spec IS NULL AND tool_id IS NULL AND conversation_id IS NULL AND workflow_id IS NULL"
+    " AND workflow_version IS NULL)"
 )
+# run_model_requests.operation (0011_knowledge_bases): a chat model request or an embedding call.
+MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
 RUN_PARENT_LINK_CHECK = (
@@ -182,6 +189,12 @@ class RunModel(Base):
     # (agent_version NULL); a retry relaunches from it, never from the live draft.
     request_context: Mapped[dict | None] = mapped_column("request_context", JSONB, nullable=True)
     draft_spec: Mapped[dict | None] = mapped_column("draft_spec", JSONB, nullable=True)
+    # The knowledge base a kb_ingest run ingests into (0011_knowledge_bases; a tool run of the search
+    # tester may name one too). No FK: the run outlives a deleted knowledge base as its audit and
+    # cost record.
+    knowledge_base_id: Mapped[str | None] = mapped_column(
+        "knowledge_base_id", PG_UUID(as_uuid=False), nullable=True
+    )
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -204,6 +217,8 @@ class RunModel(Base):
         Index("ix_runs_tenant_tool_created", "tenant_id", "tool_id", "created_at"),
         Index("ix_runs_tenant_workflow_created", "tenant_id", "workflow_id", "created_at"),
         Index("ix_runs_parent_run", "parent_run_id"),
+        # A knowledge base's runs (ingest progress, summed cost), newest first.
+        Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
     )
 
 
@@ -262,11 +277,16 @@ class RunModelRequestModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
+    # 'chat' (a model request) or 'embedding' (an embedding call: output_tokens 0). 0011.
+    operation: Mapped[StrAnnotated] = mapped_column(
+        "operation", String, nullable=False, default="chat", server_default=text("'chat'")
+    )
 
     __table_args__ = (
         ForeignKeyConstraint(
             ["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"], name="fk_run_model_requests_tenant_run"
         ),
+        CheckConstraint("operation IN ('chat', 'embedding')", name="ck_run_model_requests_operation"),
         Index("ix_run_model_requests_tenant_created", "tenant_id", "created_at"),
         Index("ix_run_model_requests_tenant_model_created", "tenant_id", "model_id", "created_at"),
     )
@@ -446,6 +466,7 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
         "finished_at": run.finished_at,
         "request_context": run.request_context,
         "draft_spec": run.draft_spec,
+        "knowledge_base_id": run.knowledge_base_id,
     }
 
 
@@ -571,9 +592,13 @@ class RunStore:
         run_id: UUID,
         trace_id: str | None = None,
         traceparent: str | None = None,
+        *,
+        knowledge_base_id: UUID | str | None = None,
     ) -> tuple[UUID, bool]:
         """Create a tool run (kind 'tool': one call of `tool_id`, `input` = its JSON arguments as text).
 
+        `knowledge_base_id`: the knowledge base the run searches (the knowledge base search tester),
+        so its cost is listed with the knowledge base's runs; the caller has checked the tenant.
         Same idempotency and tenant rules as create_run: (run_id, created), RunIdConflict for
         another tenant's run_id, and an existing row of this tenant is returned as is.
         """
@@ -585,6 +610,7 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
+            knowledge_base_id=None if knowledge_base_id is None else str(knowledge_base_id),
         )
 
     def create_workflow_run(
@@ -607,6 +633,29 @@ class RunStore:
             kind="workflow",
             workflow_id=str(workflow_id),
             workflow_version=workflow_version,
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_kb_ingest_run(
+        self,
+        tenant_id: str,
+        knowledge_base_id: UUID | str,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create a knowledge base ingest run (kind 'kb_ingest': `input` = the canonical JSON of
+        `{document_id, doc_version}` or `{reindex: generation}`). The caller has checked that the
+        knowledge base belongs to `tenant_id` (KnowledgeStore). Same idempotency and tenant rules as
+        create_run."""
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="kb_ingest",
+            knowledge_base_id=str(knowledge_base_id),
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
@@ -854,6 +903,7 @@ class RunStore:
         kind: str | None = None,
         tool_id: str | None = None,
         workflow_id: UUID | str | None = None,
+        knowledge_base_id: UUID | str | None = None,
         parent_run_id: UUID | str | None = None,
         created_from: datetime | None = None,
         created_to: datetime | None = None,
@@ -869,7 +919,8 @@ class RunStore:
         skipped or repeated across pages.
 
         Child runs (a workflow's agent steps) are listed only when `parent_run_id` names their
-        workflow run; otherwise only top-level runs are returned. `workflow_id` filters workflow runs.
+        workflow run; otherwise only top-level runs are returned. `workflow_id` filters workflow runs,
+        `knowledge_base_id` a knowledge base's runs (its kb_ingest and search tester runs).
 
         Drill-down from metrics (P0.6): `status` may be several statuses (any of them),
         `created_from` / `created_to` bound `created_at` to `[from, to)`, and `model` / `provider`
@@ -884,6 +935,8 @@ class RunStore:
             query = query.where(RunModel.parent_run_id.is_(None))
         if workflow_id is not None:
             query = query.where(RunModel.workflow_id == str(workflow_id))
+        if knowledge_base_id is not None:
+            query = query.where(RunModel.knowledge_base_id == str(knowledge_base_id))
         if before is not None:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if agent_id is not None:
@@ -1165,6 +1218,65 @@ class RunStore:
             ]
 
 
+def append_event_in_session(
+    session,
+    tenant_id: str,
+    run_id: UUID | str,
+    event_key: str,
+    type: RunEventType | str,
+    data: dict | None = None,
+    usage: dict[str, Any] | None = None,
+) -> tuple[RunEvent, bool]:
+    """EventLog.append's work inside the caller's open ORM session, which commits it: a store that
+    must write its own rows, an event and a usage row in one transaction (KnowledgeStore) uses this.
+    Same rules as EventLog.append (seq under the runs row lock, repeated key = no write).
+    Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
+    from sqlalchemy.dialects.postgresql import insert
+
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
+    owned = session.execute(
+        text("SELECT id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+    if owned is None:
+        raise RunNotFound(tenant_id, run_id)
+
+    existing_event = session.execute(
+        select(ExecutionEventModel).where(
+            ExecutionEventModel.tenant_id == tenant_id,
+            ExecutionEventModel.run_id == str(run_id),
+            ExecutionEventModel.event_key == event_key,
+        )
+    ).scalar_one_or_none()
+    if existing_event is not None:
+        # Event already exists, return it without consuming seq
+        return _run_event_from_model(existing_event), False
+
+    new_seq = session.execute(
+        text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
+        {"run_id": str(run_id)},
+    ).scalar_one() + 1
+    event_model = ExecutionEventModel(
+        tenant_id=tenant_id,
+        run_id=str(run_id),
+        seq=new_seq,
+        event_key=event_key,
+        type=type,
+        data=data or {},
+        ts=datetime.now(timezone.utc),
+    )
+    session.add(event_model)
+    session.flush()
+    if usage is not None:
+        row = {"created_at": event_model.ts, **usage, "tenant_id": tenant_id, "run_id": str(run_id)}
+        session.execute(
+            insert(RunModelRequestModel).values(**row).on_conflict_do_nothing(constraint="run_model_requests_pkey")
+        )
+    return _run_event_from_model(event_model), True
+
+
 class EventLog:
     """Event log for a run."""
 
@@ -1188,7 +1300,8 @@ class EventLog:
         `usage`: a model request's usage row (the run_model_requests columns except tenant_id and
         run_id: request_key, model_id, provider_model_name, input_tokens, output_tokens,
         cache_read_tokens, cache_write_tokens, usage_measured, cost_usd, price_source, and
-        optionally created_at), inserted in the event's transaction with ON CONFLICT DO NOTHING. A
+        optionally operation ('chat' by default, 'embedding' for an embedding call) and
+        created_at), inserted in the event's transaction with ON CONFLICT DO NOTHING. A
         repeated key writes no row: the first event's row stands, so usage and cost are recorded
         exactly once per request and never recomputed.
         Raises RunNotFound (and writes nothing) if the run does not exist or belongs to another tenant.
@@ -1196,60 +1309,13 @@ class EventLog:
         if not tenant_id:
             raise ValueError("tenant_id is required")
         with self.Session() as session:
-            # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
-            owned = session.execute(
-                text("SELECT id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-                {"run_id": str(run_id), "tenant_id": tenant_id},
-            ).fetchone()
-            if owned is None:
+            try:
+                event, created = append_event_in_session(session, tenant_id, run_id, event_key, type, data, usage)
+            except RunNotFound:
                 session.rollback()
-                raise RunNotFound(tenant_id, run_id)
-
-            # Check if event with this event_key already exists
-            existing_event = session.execute(
-                select(ExecutionEventModel).where(
-                    ExecutionEventModel.tenant_id == tenant_id,
-                    ExecutionEventModel.run_id == str(run_id),
-                    ExecutionEventModel.event_key == event_key
-                )
-            ).scalar_one_or_none()
-            
-            if existing_event is not None:
-                # Event already exists, return it without consuming seq
-                session.commit()
-                return _run_event_from_model(existing_event), False
-
-            # Get max seq for this run
-            result = session.execute(
-                text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
-                {"run_id": str(run_id)}
-            ).scalar_one()
-            new_seq = result + 1
-
-            # Create the event
-            event_model = ExecutionEventModel(
-                tenant_id=tenant_id,
-                run_id=str(run_id),
-                seq=new_seq,
-                event_key=event_key,
-                type=type,
-                data=data or {},
-                ts=datetime.now(timezone.utc),
-            )
-            session.add(event_model)
-            if usage is not None:
-                from sqlalchemy.dialects.postgresql import insert
-
-                session.flush()
-                row = {"created_at": event_model.ts, **usage, "tenant_id": tenant_id, "run_id": str(run_id)}
-                session.execute(
-                    insert(RunModelRequestModel)
-                    .values(**row)
-                    .on_conflict_do_nothing(constraint="run_model_requests_pkey")
-                )
+                raise
             session.commit()
-
-            return _run_event_from_model(event_model), True
+            return event, created
 
     def get_event(self, tenant_id: str, run_id: UUID | str, event_key: str) -> RunEvent | None:
         """The run's event with this key, or None (no such event, or another tenant's run)."""

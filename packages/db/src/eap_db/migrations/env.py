@@ -82,7 +82,10 @@ def run_migrations_online() -> None:
 
     engine = create_engine(_database_url(), poolclass=pool.NullPool)
     try:
-        with engine.connect() as connection:
+        # begin(), not connect(): _configure's search-path query autobegins the connection's
+        # transaction, so Alembic's begin_transaction() joins it as an external one and never
+        # commits; this block commits it (a failed migration rolls everything back).
+        with engine.begin() as connection:
             _configure(connection)
             with context.begin_transaction():
                 context.run_migrations()
