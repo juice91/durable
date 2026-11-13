@@ -547,6 +547,35 @@ def test_markdown_raw_script_and_style_blocks_are_dropped() -> None:
     assert "keep one" in a.text and "keep two" in a.text and "kept html" in a.text
 
 
+@pytest.mark.parametrize("md", ["<!-- only a comment -->", "<!-- a -->\n\n<!--\nmulti\nline\n-->\n", "<!-- unterminated"])
+def test_markdown_comment_only_files_extract_nothing(md: str) -> None:
+    doc = extract(md, "text/markdown")
+    assert doc.extracted_chars == 0
+    assert chunk(doc) == []
+
+
+def test_markdown_comments_between_paragraphs_are_dropped_and_paragraphs_kept() -> None:
+    md = (
+        "# A\n\nFirst paragraph.\n\n<!-- block comment -->\n\nSecond <!-- inline\nspanning --> paragraph."
+        "\n\n<!-- note -->trailing text\n\n## B <!-- heading comment -->\n\nThird."
+    )
+    doc = extract(md, "text/markdown")
+    joined = "\n".join(f"{s.heading}\n{s.text}" for s in doc.sections)
+    assert "<!--" not in joined and "comment" not in joined and "spanning" not in joined
+    for kept in ("First paragraph.", "Second", "paragraph.", "trailing text", "Third."):
+        assert kept in joined
+    assert [s.heading for s in doc.sections] == ["", "A", "B"]
+    assert doc.extracted_chars == len(re.sub(r"\s", "", "AFirstparagraph.Secondparagraph.trailingtextBThird."))
+
+
+def test_comments_inside_code_are_kept_as_code() -> None:
+    md = "# A\n\n```html\n<!-- fenced comment -->\n<p>x</p>\n```\n\nUse `<!-- span -->` here.\n\n    <!-- indented code -->\n"
+    [_, a] = extract(md, "text/markdown").sections
+    assert "<!-- fenced comment -->" in a.text
+    assert "`<!-- span -->`" in a.text
+    assert "<!-- indented code -->" in a.text
+
+
 def _bounded(fn, seconds: float, peak_bytes: int):
     tracemalloc.start()
     started = time.perf_counter()

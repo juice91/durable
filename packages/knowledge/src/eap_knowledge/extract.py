@@ -153,11 +153,21 @@ def _markdown_sections(content: str) -> list[_Raw]:
     content = _strip_front_matter(content)
     lines = content.split("\n")
     tokens = MarkdownIt("commonmark").parse(content)
-    # Raw HTML script/style/noscript/template blocks are dropped, as in HTML uploads.
-    for tok in tokens:
-        if tok.type == "html_block" and tok.map is not None and _MD_DROPPED_BLOCK.match(tok.content):
-            for k in range(tok.map[0], min(tok.map[1], len(lines))):
+    # Raw HTML script/style/noscript/template blocks and HTML comments (block and inline) are
+    # dropped, as in HTML uploads. Edits keep the line count, so token line maps stay valid; code
+    # fences and code spans are never touched.
+    for i, tok in enumerate(tokens):
+        if tok.map is None:
+            continue
+        start, stop = tok.map[0], min(tok.map[1], len(lines))
+        if tok.type == "html_block" and _MD_DROPPED_BLOCK.match(tok.content):
+            for k in range(start, stop):
                 lines[k] = ""
+        elif tok.type == "html_block" and "<!--" in tok.content:
+            lines[start:stop] = _COMMENT.sub(_newlines_only, "\n".join(lines[start:stop])).split("\n")
+        elif tok.type == "inline" and tok.children and not (i and tokens[i - 1].type == "heading_open"):
+            if any(_is_inline_comment(child) for child in tok.children):
+                lines[start:stop] = _drop_inline_comments("\n".join(lines[start:stop]), tok.children).split("\n")
     # Top-level headings only (a heading inside a list item or blockquote stays body text), with
     # their source line span [start, end).
     heads: list[tuple[int, int, int, str]] = []
@@ -170,6 +180,44 @@ def _markdown_sections(content: str) -> list[_Raw]:
         stop = heads[idx + 1][0] if idx + 1 < len(heads) else len(lines)
         raw.append((level, text, "\n".join(lines[end:stop]), None))
     return raw
+
+
+_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+
+
+def _newlines_only(match: re.Match[str]) -> str:
+    return "\n" * match.group(0).count("\n")
+
+
+def _is_inline_comment(child) -> bool:  # type: ignore[no-untyped-def]  # markdown_it Token
+    return child.type == "html_inline" and child.content.startswith("<!--")
+
+
+def _drop_inline_comments(block: str, children) -> str:  # type: ignore[no-untyped-def]
+    """Remove the inline comment tokens from the block's source, matched in source order.
+
+    A cursor walks the children: text, code spans and other inline HTML move it forward when found,
+    so a ``<!--`` inside a code span is never taken for a comment. A child that cannot be located
+    (escapes, entities, blockquote markers) is skipped, which at worst keeps a comment.
+    """
+    out: list[str] = []
+    cursor = 0
+    for child in children:
+        content = child.content
+        if not content:
+            continue
+        pos = block.find(content, cursor)
+        if pos < 0:
+            continue
+        if _is_inline_comment(child):
+            out.append(block[cursor:pos])
+            out.append("\n" * content.count("\n"))
+            cursor = pos + len(content)
+        elif child.type in ("text", "code_inline", "html_inline"):
+            out.append(block[cursor : pos + len(content)])
+            cursor = pos + len(content)
+    out.append(block[cursor:])
+    return "".join(out)
 
 
 def _inline_text(inline) -> str:  # type: ignore[no-untyped-def]  # markdown_it Token
