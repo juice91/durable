@@ -25,10 +25,12 @@ and a `cost_note` instead of a cost.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timezone
@@ -39,6 +41,7 @@ from typing import Annotated, Any, TypeVar
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -79,6 +82,7 @@ from eap_run_store.knowledge import (
 )
 from eap_schemas import KnowledgeBaseNotFound
 from eap_schemas.embedding_policy import EmbeddingModel, EmbeddingModelNotAllowed, EmbeddingModelPolicy
+from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchInput
 
 log = logging.getLogger("eap_api")
 
@@ -1084,6 +1088,187 @@ def cancel_reindex(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> 
     kb = _kb_or_404(store, principal.tenant_id, kb_id)
     _retry_deadlock_once(lambda: store.cancel_reindex(principal.tenant_id, kb["id"]))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ------------------------------------------------------------------------------ search tester (RM.11)
+
+SEARCH_WAIT_SECONDS = 15.0
+SEARCH_POLL_SECONDS = 0.2  # first poll interval, backing off to SEARCH_POLL_MAX_SECONDS
+SEARCH_POLL_MAX_SECONDS = 1.0
+
+
+class KnowledgeSearchRequest(BaseModel):
+    """Body of POST /knowledge-bases/{id}/search. `run_id` (optional, client-generated) makes a retry
+    idempotent, as for tool runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+    top_k: int = 8
+    min_score: float | None = None
+    filter: dict[str, Any] | None = None
+    run_id: uuid.UUID | None = None
+
+
+def _safe_errors(exc: ValidationError, prefix: list[Any]) -> list[dict[str, Any]]:
+    """loc/msg/type only: never the rejected values (a query can hold anything a user typed)."""
+    return [
+        {"loc": [*prefix, *err["loc"]], "msg": err["msg"], "type": err["type"]}
+        for err in exc.errors(include_url=False, include_context=False, include_input=False)
+    ]
+
+
+async def _search_body(request: Request) -> KnowledgeSearchRequest:
+    try:
+        return KnowledgeSearchRequest.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_safe_errors(exc, ["body"]))
+
+
+def _search_view(run: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """(status code, body): 200 with the result (or the failure) once the tool run ended, else 202
+    with the run id to follow through GET /runs/{id}."""
+    view: dict[str, Any] = {
+        "run_id": str(run["id"]),
+        "kind": "tool",
+        "tool_id": KNOWLEDGE_SEARCH_TOOL_ID,
+        "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") else None,
+        "status": run["status"],
+        "display_status": run["display_status"],
+        "trace_id": run.get("trace_id"),
+    }
+    if run["status"] == "completed":
+        try:
+            view["result"] = json.loads(run["output"] or "null")
+        except ValueError:  # pragma: no cover - the worker stores canonical JSON
+            view["result"] = None
+        return status.HTTP_200_OK, view
+    if run["status"] in TERMINAL_RUN_STATUSES:
+        view["error"] = run.get("error")
+        return status.HTTP_200_OK, view
+    return status.HTTP_202_ACCEPTED, view
+
+
+@_kb.post(
+    "/{kb_id}/search",
+    responses={
+        202: {"description": "Still running after the wait: follow GET /runs/{run_id}"},
+        409: {"model": ErrorDetail},
+        422: {"model": ErrorDetail},
+        503: {"model": EnqueueFailedResponse},
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": KnowledgeSearchRequest.model_json_schema()}},
+        }
+    },
+)
+async def search_knowledge_base(
+    kb_id: str,
+    request: Request,
+    principal: PrincipalDep,  # before the body: 401 wins over 422
+    body: Annotated[KnowledgeSearchRequest, Depends(_search_body)],
+    store: KnowledgeDep,
+    stores: StoresDep,
+    launcher: LauncherDep,
+    wait: Annotated[float, Query(ge=0.0, le=SEARCH_WAIT_SECONDS)] = SEARCH_WAIT_SECONDS,
+) -> JSONResponse:
+    """Search one knowledge base the way an agent's `retrieve` tool does (the search tester).
+
+    The API never embeds: this records a tool run of the hidden platform tool `knowledge.search`
+    (kind 'tool', `knowledge_base_id` set, so its embedding cost is listed with the knowledge base)
+    and enqueues it like POST /tools/{id}/runs, then waits up to `wait` seconds (default and maximum
+    15) for it. 200 `{run_id, status: completed, result: {knowledge_base_id, embedding_model, hits:
+    [{n, title, url, ref, kb_id, document_id, document_key, chunk_id, doc_version, score,
+    document_title, heading_path, metadata, content, content_truncated}], text}}`; 200 with
+    `status` failed and `error` when the run failed; 202 `{run_id, status}` while it is still
+    running. 404 unknown knowledge base (another tenant's too); 422 invalid body or settings (loc,
+    msg and type only); 409 `run_id` already used by another request; 503 hand-off failed (the run
+    is marked failed; retry with the same run_id). The wait polls the run from every 0.2 s backing
+    off to 1 s, and stops early when the client disconnects (the run itself goes on)."""
+    tenant_id = principal.tenant_id
+    kb = await asyncio.to_thread(_kb_or_404, store, tenant_id, kb_id)
+    try:
+        validated = KnowledgeSearchInput.model_validate(
+            {
+                "knowledge_base_id": kb["id"],
+                "query": body.query,
+                "top_k": body.top_k,
+                "min_score": body.min_score,
+                "filter": body.filter,
+            }
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_safe_errors(exc, ["body"]))
+    input_json = _canonical_json(validated.model_dump(mode="json"))
+    run_store, _ = stores
+    run_id = body.run_id or uuid.uuid4()
+    trace_id, traceparent = current_trace_context()
+
+    def create() -> tuple[dict[str, Any], bool]:
+        try:
+            _, created = run_store.create_tool_run(
+                tenant_id, KNOWLEDGE_SEARCH_TOOL_ID, input_json, run_id,
+                trace_id=trace_id, traceparent=traceparent, knowledge_base_id=kb["id"],
+            )
+        except RunIdConflict:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
+        run = run_store.get_run(tenant_id, run_id)
+        if run is None:  # pragma: no cover - deleted between insert and read
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+        if not created and (
+            run["kind"] != "tool" or run["tool_id"] != KNOWLEDGE_SEARCH_TOOL_ID or run["input"] != input_json
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
+            )
+        return run, created
+
+    run, created = await asyncio.to_thread(create)
+
+    def hand_off() -> None:
+        owns_handoff = created or run_store.requeue_after_enqueue_failure(tenant_id, run_id)
+        if not owns_handoff and run["status"] in TERMINAL_RUN_STATUSES:
+            return  # a retry of a finished search: answer what was recorded
+        try:
+            launcher.launch_tool(
+                run_id=run_id, tenant_id=tenant_id, tool_id=KNOWLEDGE_SEARCH_TOOL_ID,
+                input_json=run["input"], traceparent=run.get("traceparent"),
+            )
+        except Exception as exc:
+            log_failure(
+                log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
+                run_id=str(run_id), tenant_id=tenant_id,
+            )
+            if owns_handoff:
+                try:
+                    run_store.mark_enqueue_failed(tenant_id, run_id)
+                except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
+                    log_failure(
+                        log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
+                        level=logging.ERROR, run_id=str(run_id), tenant_id=tenant_id,
+                    )
+            raise HandOffFailed(str(run_id)) from None
+
+    try:
+        await asyncio.to_thread(hand_off)
+    except HandOffFailed as failed:
+        return failed.response()
+    log.info("knowledge search run %s queued: tenant=%s kb=%s", run_id, tenant_id, kb["id"])
+
+    deadline = time.monotonic() + wait
+    interval = SEARCH_POLL_SECONDS
+    while True:
+        current = await asyncio.to_thread(run_store.get_run, tenant_id, run_id) or run
+        if current["error"] == ENQUEUE_FAILED_ERROR and current["status"] == "failed":
+            # A concurrent owner's enqueue failed, but this one succeeded: the workflow exists.
+            current = {**current, "status": "queued", "display_status": "queued"}
+        code, view = _search_view(current)
+        if code == status.HTTP_200_OK or time.monotonic() >= deadline or await request.is_disconnected():
+            return _json(code, view)
+        await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+        interval = min(SEARCH_POLL_MAX_SECONDS, interval * 1.5)
 
 
 router.include_router(_upload)

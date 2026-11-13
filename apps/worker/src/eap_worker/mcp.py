@@ -565,16 +565,28 @@ def mcp_toolset_for_run(engine: Engine, tenant_id: str, refs: Sequence[McpToolRe
 
 
 class RunToolset(AbstractToolset[Any]):
-    """The run's built-in tools plus its MCP tools. Unlike CombinedToolset, rebuilding a tool from a
-    recorded definition (the call step) routes by name, so it never lists the MCP server's tools."""
+    """The run's built-in tools plus its MCP tools (`mcp`) and its platform tools (`platform`,
+    eap_worker.platform_tools: retrieve, ...); either may be None. Unlike CombinedToolset, rebuilding
+    a tool from a recorded definition (the call step) routes by name, so it never lists the MCP
+    server's tools or reads the platform tools' data again. Names never clash: AgentSpec validation
+    and the reserved platform tool names prevent it, and get_tools refuses it anyway."""
 
-    def __init__(self, builtin: AbstractToolset[Any], mcp: McpToolset) -> None:
+    def __init__(
+        self,
+        builtin: AbstractToolset[Any],
+        mcp: McpToolset | None = None,
+        platform: Any | None = None,  # eap_worker.platform_tools.PlatformToolset (imported lazily)
+    ) -> None:
         self.builtin = builtin
         self.mcp = mcp
+        self.platform = platform
 
     @property
     def id(self) -> str | None:
         return None
+
+    def _members(self) -> list[AbstractToolset[Any]]:
+        return [t for t in (self.builtin, self.mcp, self.platform) if t is not None]
 
     async def __aenter__(self) -> RunToolset:
         await self.builtin.__aenter__()
@@ -584,16 +596,20 @@ class RunToolset(AbstractToolset[Any]):
         return await self.builtin.__aexit__(*args)
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
-        builtin = await self.builtin.get_tools(ctx)
-        mcp = await self.mcp.get_tools(ctx)
-        clash = sorted(set(builtin) & set(mcp))
-        if clash:  # AgentSpec validation prevents this; never let one tool shadow another
-            raise ValueError(f"tool name used twice: {clash[0]}")
-        return {**builtin, **mcp}
+        merged: dict[str, ToolsetTool[Any]] = {}
+        for member in self._members():
+            tools = await member.get_tools(ctx)
+            clash = sorted(set(merged) & set(tools))
+            if clash:  # never let one tool shadow another
+                raise ValueError(f"tool name used twice: {clash[0]}")
+            merged.update(tools)
+        return merged
 
     async def get_tool_for_tool_def(self, tool_def: ToolDefinition, ctx: RunContext[Any]) -> ToolsetTool[Any]:
-        if tool_def.name in self.mcp.refs:
+        if self.mcp is not None and tool_def.name in self.mcp.refs:
             return await self.mcp.get_tool_for_tool_def(tool_def, ctx)
+        if self.platform is not None and tool_def.name in self.platform.names:
+            return await self.platform.get_tool_for_tool_def(tool_def, ctx)
         return await self.builtin.get_tool_for_tool_def(tool_def, ctx)
 
     async def call_tool(
@@ -602,8 +618,8 @@ class RunToolset(AbstractToolset[Any]):
         return await tool.toolset.call_tool(name, tool_args, ctx, tool)
 
     def apply(self, visitor: Any) -> None:
-        self.builtin.apply(visitor)
-        self.mcp.apply(visitor)
+        for member in self._members():
+            member.apply(visitor)
 
 
 __all__ = ["McpServerConn", "McpToolUnavailable", "McpToolset", "RunToolset", "failure_code", "load_servers", "mcp_toolset_for_run"]

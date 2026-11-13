@@ -29,6 +29,12 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  agent re-prompts; then `Echo: <first prompt>`. Models a thinking model's empty answer.
 - `test:think-tool` (P0.17) first thinks `SECRET plan` AND calls the first offered tool with `{}`;
                  after the tool returned, answers `Done.`. Proves unchecked thinking is never stored.
+- `test:retrieve` (RM.11) calls the platform tool `retrieve` once (if offered) with
+                 `{"search_query": <user input>}`, or with the input itself when it is a JSON object
+                 holding `search_query` (so a test can pass `knowledge_base` too). Then answers
+                 `According to [1] <title>: <url>` from the first numbered source of the result,
+                 `No sources found.` for an empty result, and `Retrieve error: <message>` after a tool
+                 error or a retry prompt (it never calls again). Without the tool: `Echo: <input>`.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -331,6 +337,55 @@ def scripted_think_tool_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-think-tool")
 
 
+RETRIEVE_TOOL = "retrieve"
+_FIRST_SOURCE = re.compile(r"^\[1\] (.*) — (\S+)$", re.MULTILINE)
+
+
+def _retrieve_args(prompt: str) -> dict[str, Any]:
+    try:
+        request = json.loads(prompt)
+    except ValueError:
+        request = None
+    if isinstance(request, dict) and "search_query" in request:
+        return request
+    return {"search_query": prompt}
+
+
+def _retrieve_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    offered = {t.name for t in info.function_tools}
+    parts = [p for m in messages if isinstance(m, ModelRequest) for p in m.parts]
+    retries = [p for p in parts if isinstance(p, RetryPromptPart) and p.tool_name == RETRIEVE_TOOL]
+    returns = [r for r in _tool_returns(messages) if r.tool_name == RETRIEVE_TOOL]
+    if retries:
+        return "text", f"Retrieve error: {retries[-1].model_response()}"
+    if returns:
+        last = returns[-1]
+        if last.outcome != "success":
+            return "text", f"Retrieve error: {last.content}"
+        found = _FIRST_SOURCE.search(str(last.content))
+        if found is None:
+            return "text", "No sources found."
+        return "text", f"According to [1] {found.group(1)}: {found.group(2)}"
+    if RETRIEVE_TOOL in offered:
+        return "tool", _retrieve_args(_last_prompt(messages))
+    return "text", f"Echo: {_last_prompt(messages)}"
+
+
+def scripted_retrieve_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        kind, value = _retrieve_plan(messages, info)
+        return ModelResponse(parts=[ToolCallPart(RETRIEVE_TOOL, value) if kind == "tool" else TextPart(value)])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        kind, value = _retrieve_plan(messages, info)
+        if kind == "tool":
+            yield {0: DeltaToolCall(name=RETRIEVE_TOOL, json_args=json.dumps(value))}
+        else:
+            yield value
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-retrieve")
+
+
 def litellm_model(name: str, settings: WorkerSettings) -> Model:
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -443,6 +498,8 @@ def make_resolver(settings_getter: Any):
                 return scripted_think_first_model()
             if name == "think-tool":
                 return scripted_think_tool_model()
+            if name == "retrieve":
+                return scripted_retrieve_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

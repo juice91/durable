@@ -94,6 +94,61 @@ RETRIEVE_TOOL_NAME = "retrieve"
 UPDATE_WORKING_MEMORY_TOOL_NAME = "update_working_memory"
 RESERVED_TOOL_NAMES: frozenset[str] = frozenset({RETRIEVE_TOOL_NAME, UPDATE_WORKING_MEMORY_TOOL_NAME})
 KNOWLEDGE_SEARCH_TOOL_ID = "knowledge.search"
+MAX_SEARCH_QUERY_CHARS = 2000
+
+
+class KnowledgeSearchInput(BaseModel):
+    """Input of the hidden ``knowledge.search`` tool (the knowledge base search tester, RM.11).
+
+    The tenant always comes from the run, never from this input. `filter` follows the spec filter
+    rules (`eap_schemas.knowledge.validate_filter`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    knowledge_base_id: str
+    query: str = Field(min_length=1, max_length=MAX_SEARCH_QUERY_CHARS)
+    top_k: int = Field(default=8, ge=1, le=20)
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    filter: dict[str, Any] | None = None
+
+    @field_validator("knowledge_base_id")
+    @classmethod
+    def _uuid(cls, value: str) -> str:
+        import uuid
+
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            raise ValueError("knowledge_base_id must be a UUID") from None
+
+    @field_validator("query")
+    @classmethod
+    def _query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value
+
+    @field_validator("filter")
+    @classmethod
+    def _filter(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        from eap_schemas.knowledge import validate_filter
+
+        checked = validate_filter(value)
+        return None if checked is None else {k: list(v) if isinstance(v, tuple) else v for k, v in checked.items()}
+
+
+# Hidden platform tools: registered in the worker for tool runs only, never in TOOL_DECLARATIONS
+# (so never in the tool catalog, the agent tool picker or a workflow tool step), and refused in an
+# agent spec's `tools` at publish and at run time.
+KNOWLEDGE_SEARCH_DECLARATION = ToolDeclaration(
+    id=KNOWLEDGE_SEARCH_TOOL_ID,
+    title="Knowledge base search",
+    description="Search one knowledge base of the tenant (the knowledge base search tester)",
+    side_effect=False,
+    external_idempotent=False,
+    input_model=KnowledgeSearchInput,
+)
+HIDDEN_TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {KNOWLEDGE_SEARCH_TOOL_ID: KNOWLEDGE_SEARCH_DECLARATION}
 
 
 def builtin_tool_name(tool_id: str) -> str:

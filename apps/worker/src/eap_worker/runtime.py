@@ -62,6 +62,11 @@ class WorkerRuntime:
         self.event_log = EventLog(self.engine)
         self.tickets = FakeExternalTicketService(self.engine)
         self.registry: ToolRegistry = default_registry()
+        # Hidden platform tools (knowledge.search, RM.11): tool runs only; an agent spec that lists
+        # one is refused (eap_worker.platform_tools.check_no_hidden_tools).
+        from eap_worker.platform_tools import register_platform_tools
+
+        register_platform_tools(self.registry)
 
     def check_schema(self) -> None:
         """Fail fast unless Alembic has migrated eap_app to head; the worker never creates tables."""
@@ -69,9 +74,13 @@ class WorkerRuntime:
 
     @cached_property
     def allowed_tools(self) -> frozenset[str]:
+        # Hidden platform tools (knowledge.search) are never allowed for agents or workflow steps;
+        # only a tool run may call one (eap_worker.tool_run.check_tool_step, hidden_ok).
+        from eap_worker.platform_tools import HIDDEN_TOOL_IDS
+
         if self.settings.allowed_tools is None:
-            return frozenset(self.registry.tool_ids())
-        return self.settings.allowed_tools
+            return frozenset(self.registry.tool_ids()) - HIDDEN_TOOL_IDS
+        return self.settings.allowed_tools - HIDDEN_TOOL_IDS
 
     def deps_for(
         self, run_id: str, tenant_id: str, spec: AgentSpec, request_context: dict[str, Any] | None = None

@@ -18,7 +18,9 @@ from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, VersionRestore
 from eap_api.version_diff import compare_specs
 from eap_processors import processor_errors
-from eap_schemas import AgentSpec, canonical_spec_hash
+from eap_run_store import KnowledgeStore
+from eap_schemas import AgentSpec, canonical_spec_hash, reserved_tool_name_conflicts
+from eap_schemas.tools import HIDDEN_TOOL_DECLARATIONS
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.processors import processor_models
 from eap_schemas.request_context import placeholder_errors
@@ -262,6 +264,38 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
         raise HTTPException(status_code=422, detail=f"instructions: {errors[0]}")
 
     _check_mcp_servers(db, tenant_id, spec)
+    _check_platform_tools(spec)
+    _check_knowledge_bases(db, tenant_id, spec)
+
+
+def _check_platform_tools(spec: AgentSpec) -> None:
+    """No built-in or MCP tool may take a reserved platform tool name (`retrieve`,
+    `update_working_memory`), checked for every spec (AgentSpec itself checks only specs that use
+    knowledge or memory, so stored specs keep validating). Hidden platform tools (knowledge.search)
+    are for tool runs only and never part of an agent."""
+    conflicts = reserved_tool_name_conflicts(spec)
+    if conflicts:
+        raise HTTPException(
+            status_code=422, detail=f"tool name '{conflicts[0]}' is reserved for a platform tool"
+        )
+    for tool_id in spec.tools:
+        if tool_id in HIDDEN_TOOL_DECLARATIONS:
+            raise HTTPException(
+                status_code=422, detail=f"tool '{tool_id}' is a platform tool and cannot be added to an agent"
+            )
+
+
+def _check_knowledge_bases(db: Session, tenant_id: str, spec: AgentSpec) -> None:
+    """Every attached knowledge base must exist in the principal's tenant (422 naming the first that
+    does not). Another tenant's knowledge base is reported exactly like an unknown one. A knowledge
+    base deleted after publish gives the run's retrieve tool a model-visible error instead."""
+    ids = [ref.id for ref in spec.knowledge_bases]
+    if not ids:
+        return
+    existing = KnowledgeStore(db.get_bind()).existing_knowledge_base_ids(tenant_id, ids)
+    for kb_id in ids:
+        if kb_id not in existing:
+            raise HTTPException(status_code=422, detail=f"knowledge base '{kb_id}' does not exist in this tenant")
 
 
 def _tenant_agent(db: Session, tenant_id: str, agent_id: uuid.UUID, *, lock: bool = False) -> AgentModel:

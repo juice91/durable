@@ -25,7 +25,8 @@ Step layout of a run (each line is a DBOS step, so recovery replays recorded res
                                         usage and cost and, in the same transaction, its
                                         run_model_requests row (eap_worker.pricing)
     eap.append_event   tool:{id}:call   tool_call (before the tool runs)
-    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create, MCP tools (mcp__<server>__<tool>)
+    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create, MCP tools (mcp__<server>__<tool>),
+                                        platform tools (retrieve)
     eap.append_event   tool:{id}:result tool_result
     ... (next model request) ...
     eap.append_event   end              run_completed | run_failed
@@ -77,6 +78,13 @@ later turn's history. A spec with output processors publishes no NOTIFY deltas.
     eap.append_event   processor:output:{i}:model:{n}   processor_result
     eap.append_event   model:{n}:final         model_message with the processed text
 
+Retrieval (RAG and memory milestone, RM.11; eap_worker.platform_tools): a spec that attaches knowledge
+bases gets the platform tool `retrieve` as the third member of its RunToolset. It adds NO step: its
+knowledge base names are read inside the existing get_tools step, and the search (query embedding,
+its `embedding` event and usage row under `embed:retrieve:{tool_call_id}`, then the SQL search)
+runs inside the existing call_tool step, whose result is checkpointed. Its `tool_result` event also
+carries the structured `sources`. A spec without knowledge bases keeps its exact toolset and steps.
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -115,13 +123,15 @@ from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR
+from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore
 from eap_schemas import AgentSpec
+from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import render_instructions
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import InputBlocked, OutputBlocked, classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
+from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
 from eap_worker.processors import (
@@ -152,16 +162,27 @@ def _instructions(ctx: RunContext[WorkerDeps]) -> str:
     return render_instructions(spec.instructions, ctx.deps.request_context, spec.context_fields)
 
 
+def _knowledge_store() -> KnowledgeStore:
+    """The worker's KnowledgeStore (cheap: a sessionmaker on the runtime's engine)."""
+    return KnowledgeStore(get_runtime().engine)
+
+
 async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     """Only the published spec's tools: built-ins checked against registry + allowlist, plus its MCP
-    tools (eap_worker.mcp). No I/O here: MCP server rows and secrets are read later, inside the
-    discovery step and inside a newly reserved call, so a replayed step needs neither the database
-    nor the platform key. A spec without MCP tools gets exactly the FunctionToolset it always did."""
+    tools (eap_worker.mcp), plus the platform tools it uses (eap_worker.platform_tools: `retrieve`
+    when it attaches knowledge bases). No I/O here: MCP server rows and secrets, and knowledge base
+    names, are read later, inside the get_tools step (and MCP secrets inside a newly reserved call),
+    so a replayed step needs neither the database nor the platform key. A spec without MCP tools and
+    platform tools gets exactly the FunctionToolset it always did."""
     rt = get_runtime()
-    builtin: FunctionToolset[RunDeps] = toolset_for_spec(ctx.deps.spec, rt.registry, ctx.deps.allowed_tools)
-    if not ctx.deps.spec.mcp_tools:
+    spec = ctx.deps.spec
+    check_no_hidden_tools(spec)
+    builtin: FunctionToolset[RunDeps] = toolset_for_spec(spec, rt.registry, ctx.deps.allowed_tools)
+    mcp = mcp_toolset_for_run(rt.engine, ctx.deps.tenant_id, spec.mcp_tools) if spec.mcp_tools else None
+    platform = platform_toolset_for_run(ctx.deps, knowledge=_knowledge_store)
+    if mcp is None and platform is None:
         return builtin
-    return RunToolset(builtin, mcp_toolset_for_run(rt.engine, ctx.deps.tenant_id, ctx.deps.spec.mcp_tools))
+    return RunToolset(builtin, mcp, platform)
 
 
 def _text_of(event: Any) -> str | None:
@@ -427,6 +448,15 @@ def _is_side_effect_unknown(exc: BaseException, seen: set[int] | None = None) ->
     return False
 
 
+def _tool_sources(part: ToolReturnPart) -> list[Any] | None:
+    """The structured sources of a platform `retrieve` result (ToolReturn metadata, never sent to
+    the model), for the tool_result event; None for every other tool."""
+    if part.tool_name != RETRIEVE_TOOL_NAME or part.outcome != "success" or not isinstance(part.metadata, dict):
+        return None
+    sources = part.metadata.get("sources")
+    return to_jsonable_python(sources, fallback=str) if isinstance(sources, list) else None
+
+
 async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCallPart], *sources: list[Any]) -> None:
     results = _find_tool_results({c.tool_call_id for c in calls}, *sources)
     for call in calls:
@@ -440,6 +470,9 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
                 "status": "error" if part.outcome in ("failed", "retried") else "ok",
                 "content": to_jsonable_python(part.content, fallback=str),
             }
+            sources = _tool_sources(part)
+            if sources is not None:
+                data["sources"] = sources
         elif isinstance(part, RetryPromptPart):
             data = {
                 "tool_call_id": call.tool_call_id,
@@ -666,6 +699,7 @@ async def _run_body(
         model_id = effective_model_id(spec, link)
         provider, _, model_name = model_id.partition(":")
         rt.settings.allowed_models.check(provider, model_name)
+        check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
         deps = rt.deps_for(run_id, tenant_id, spec, link.get("request_context") or None)
         output, new_messages = await _drive_agent(run_id, deps, input_text, history, model_id)

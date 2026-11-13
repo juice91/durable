@@ -55,6 +55,7 @@ from eap_runtime import ToolNotAllowedError, UnknownToolError, run_side_effect
 from eap_worker.config import TOOL_WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import ToolInputInvalid, classify
+from eap_worker.platform_tools import HIDDEN_TOOL_IDS
 from eap_worker.runtime import get_runtime
 from eap_worker.workflow import _heartbeat, _is_side_effect_unknown, append_event_step, finish_run_step
 
@@ -105,14 +106,21 @@ async def start_tool_run_step(run_id: str, tenant_id: str, tool_id: str, input_j
 
 
 @DBOS.step(name="eap.check_tool", retries_allowed=False)
-async def check_tool_step(tool_id: str, args: dict[str, Any]) -> dict[str, Any]:
+async def check_tool_step(tool_id: str, args: dict[str, Any], hidden_ok: bool = False) -> dict[str, Any]:
     """The worker-side policy check, checkpointed so a replay takes the same path even if the
     allowlist changed meanwhile. Returns {"rejected": None | code, "side_effect", "args"} where
-    `args` is the input as the tool's input model accepts it (JSON mode)."""
+    `args` is the input as the tool's input model accepts it (JSON mode).
+
+    Hidden platform tools (knowledge.search, RM.11) pass only with `hidden_ok`, which only the tool
+    run path sets (the API starts such a run only from the knowledge base search endpoint); a
+    workflow tool step naming one is `unknown_tool`. They are not governed by EAP_ALLOWED_TOOLS."""
     rt = get_runtime()
     if tool_id not in rt.registry.tool_ids():
         return {"rejected": "unknown_tool"}
-    if tool_id not in rt.allowed_tools:
+    if tool_id in HIDDEN_TOOL_IDS:
+        if not hidden_ok:
+            return {"rejected": "unknown_tool"}
+    elif tool_id not in rt.allowed_tools:
         return {"rejected": "tool_not_allowed"}
     try:
         declaration = rt.registry.get_declaration(tool_id)
@@ -234,7 +242,7 @@ async def _tool_run_body(run_id: str, tenant_id: str, tool_id: str, input_json: 
     called = False
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
-        check = await check_tool_step(tool_id, raw_args)
+        check = await check_tool_step(tool_id, raw_args, hidden_ok=True)
         if check["rejected"] is not None:
             raise _REJECTIONS[check["rejected"]](tool_id)
         args = check["args"]
