@@ -1,5 +1,5 @@
-"""Agent memory in Postgres (RAG and memory milestone, RM.5 and RM.8; migrations 0012_memory and
-0013_semantic_recall).
+"""Agent memory in Postgres (RAG and memory milestone, RM.5, RM.8 and RM.15 retention; migrations
+0012_memory and 0013_semantic_recall).
 
 Tables (Alembic owns them; the models here are what `alembic check` compares):
 
@@ -14,7 +14,19 @@ Tables (Alembic owns them; the models here are what `alembic check` compares):
   `covers_from_turn..covers_to_turn`; a row is active while `superseded_by` is NULL. The active rows
   of a conversation cover a gap-free prefix of its turns, `1..covered_to_turn`: `insert_observation`
   accepts only `covers_from_turn = covered_to_turn + 1`, and `reflect` replaces exactly the active
-  rows up to its end.
+  rows up to its end (retention markers aside, below).
+  **Retention markers** (RM.15): when retention removes the text of an active row, the row's turns
+  stay covered by a text-free marker (an active row with `content = ''` and `approx_tokens = 0`;
+  `Observation.is_marker`), so the swept turns neither come back into the history nor get observed
+  (and paid for) again, and the prefix stays gap-free. Old active rows at the head of the prefix
+  (with any marker already there) collapse into ONE marker covering `1..end` (min start to max
+  end of those rows: a reflection written around a mid marker spans it), which keeps the kind, run
+  and slot of the row reaching furthest; an old active row after a newer one is blanked in place
+  (it joins the head marker once the rows before it age out). Markers are never rendered: `load_snapshot` leaves
+  them out of `observations` but counts them in `covered_to_turn`; `list_observations` omits them
+  unless asked; `reflect` ignores them (a reflection supersedes only the rows after the marker);
+  retention never selects them again. `insert_observation` only writes non-empty content, so a
+  marker is never mistaken for an observation.
 - `message_embeddings` (RM.8): semantic recall. One row per `(tenant_id, run_id, role)` (role
   `user` = the turn's processed input, `assistant` = its final answer), with the agent, the
   conversation's resource_id (NULL when it has none), conversation and turn, the processed text, the
@@ -59,9 +71,17 @@ holding a later one:
   `append_event_in_session`. `record_usage` (a priced request whose conversation is gone) takes
   only the run row.
 - `search_recall` and `recall_neighbours` take no lock (one read transaction each).
-- `delete_message_embeddings_before` (retention) locks a batch of embedding rows
-  `FOR UPDATE SKIP LOCKED` and deletes them: it never waits for, nor deadlocks with, a
-  `delete_conversation` or `forget_resource` holding some of those rows (they are left to it).
+- Retention (RM.15, `delete_retention_batch`; an operator-only sweep) never waits for a lock a
+  user-facing call holds while waiting for one of the sweep's, so it cannot deadlock, and leaves
+  conversations whose latest turn is queued or running alone. Message embeddings: it locks a batch
+  of embedding rows `FOR UPDATE SKIP LOCKED` and deletes them (rows a `delete_conversation` or
+  `forget_resource` holds are left to it). Observations and conversation working memory: it locks
+  the idle candidate conversations `FOR NO KEY UPDATE SKIP LOCKED` (skipping those a delete,
+  forget, turn start or observation writer holds), then the observation rows or the notes. A
+  working memory writer (KEY SHARE on the conversation, then the note) or `delete_working_memory`
+  (the note only) may hold a note: the sweep waits for it on that row only, while they never wait
+  for the sweep, and the age check is re-evaluated on the committed row. Resource working memory:
+  it locks the notes `FOR UPDATE SKIP LOCKED`. Watermarks are kept.
 - `delete_conversation` takes the conversation `FOR UPDATE` (waits for every writer above, and
   `create_turn`'s lock), deletes its working memory, observations and message embeddings, then
   updates its runs, then
@@ -211,6 +231,14 @@ RECALL_SCOPES = ("resource", "conversation")
 MAX_RECALL_TOP_K = 50
 MAX_MESSAGE_RANGE = 10
 MAX_RETENTION_BATCH = 10_000
+# Retention kinds (RM.15), in the order the sweep runs them. Forget watermarks have no retention
+# (they hold no text and must outlive the index steps they guard).
+RETENTION_KINDS = (
+    "message_embeddings",
+    "observations",
+    "conversation_working_memory",
+    "resource_working_memory",
+)
 LEDGER_PREFIX = "wm:"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 # Top-level string fields kept when an event is scrubbed (if they look like identifiers).
@@ -563,6 +591,11 @@ class Observation:
     superseded_by: str | None
     created_at: datetime
 
+    @property
+    def is_marker(self) -> bool:
+        """A retention marker: the turns stay covered, the text is gone (never rendered)."""
+        return self.content == ""
+
 
 @dataclass(frozen=True)
 class ObservationWrite:
@@ -610,6 +643,24 @@ class ForgetResult:
     conversations: tuple[str, ...]  # conversations deleted (include_conversations)
     busy_conversations: tuple[str, ...]  # skipped: a turn was still queued or running
     message_embeddings: int = 0  # recall rows of the resource deleted (RM.8)
+
+
+@dataclass(frozen=True)
+class RetentionBatch:
+    """One retention batch of one tenant and kind (`delete_retention_batch`). Counts only.
+
+    `deleted`: rows deleted. `skipped`: conversations (observations, conversation working memory)
+    or resource notes left alone because a turn is queued or running in them, or a concurrent
+    delete or writer holds their lock; the next sweep retries them (message embedding batches
+    leave such rows out of the selection and do not count them). `done`: nothing more for this
+    tenant and cutoff in this sweep; otherwise call again with `after=next_after` (a conversation
+    id for the conversation-keyed kinds, None for the others)."""
+
+    kind: str
+    deleted: int
+    skipped: int
+    done: bool
+    next_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -789,6 +840,51 @@ def _check_run(session, tenant_id: str, run_ids: Iterable[str | None], agent_id:
 def _require_tenant(tenant_id: str) -> None:
     if not tenant_id:
         raise ValueError("tenant_id is required")
+
+
+_TERMINAL = sorted(TERMINAL_RUN_STATUSES)
+# The latest turn of conversation `{conv}` is queued or running (binds :terminal).
+_LIVE_TURN_SQL = (
+    "SELECT 1 FROM (SELECT r.status FROM runs r WHERE r.tenant_id = :t AND r.conversation_id = {conv}"
+    " ORDER BY r.turn DESC LIMIT 1) l WHERE l.status <> ALL(CAST(:terminal AS text[]))"
+)
+_RETENTION_TENANTS_SQL = {
+    "message_embeddings": "SELECT DISTINCT tenant_id FROM message_embeddings WHERE created_at < :cut",
+    "observations": "SELECT DISTINCT tenant_id FROM memory_observations WHERE created_at < :cut AND content <> ''",
+    "conversation_working_memory": (
+        "SELECT DISTINCT tenant_id FROM working_memories WHERE scope = 'conversation' AND updated_at < :cut"
+    ),
+    "resource_working_memory": (
+        "SELECT DISTINCT tenant_id FROM working_memories WHERE scope = 'resource' AND updated_at < :cut"
+    ),
+}
+# Candidate conversations per conversation-keyed kind (retention markers are never candidates).
+_RETENTION_CANDIDATES_SQL = {
+    "observations": (
+        "SELECT DISTINCT conversation_id FROM memory_observations"
+        " WHERE tenant_id = :t AND created_at < :cut AND content <> ''"
+    ),
+    "conversation_working_memory": (
+        "SELECT DISTINCT conversation_id FROM working_memories"
+        " WHERE tenant_id = :t AND scope = 'conversation' AND updated_at < :cut"
+    ),
+}
+assert set(_RETENTION_TENANTS_SQL) == set(RETENTION_KINDS)
+
+
+def _retention_kind(kind: str) -> str:
+    if kind not in RETENTION_KINDS:
+        raise ValueError(f"unknown retention kind {kind!r}")
+    return kind
+
+
+def _retention_limit(limit: int) -> int:
+    return max(1, min(int(limit), MAX_RETENTION_BATCH))
+
+
+def _require_aware(cutoff: datetime) -> None:
+    if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
+        raise ValueError("cutoff must be a timezone-aware datetime")
 
 
 def _require_agent(agent_id: Any) -> str:
@@ -1309,8 +1405,9 @@ class MemoryStore:
         """Replace the active rows `supersede_ids` with one reflection, in one transaction.
 
         The reflection covers min(covers_from_turn)..max(covers_to_turn) of those rows, which must
-        be exactly the active rows up to that end ('stale' otherwise: a concurrent reflection or
-        deletion; nothing written). Idempotent by (conversation, 'reflection', covers_to_turn): a
+        be exactly the active rows up to that end, retention markers aside ('stale' otherwise: a
+        concurrent reflection or deletion; nothing written). A marker at the head stays active and
+        keeps covering its turns; the reflection starts after it. Idempotent by (conversation, 'reflection', covers_to_turn): a
         re-executed step gets status 'existing'. `event` defaults to data
         `{kind, covers_from_turn, covers_to_turn, approx_tokens, superseded}` (a count).
         Raises ConversationNotFound, ValueError for an empty or non-UUID id list."""
@@ -1353,7 +1450,7 @@ class MemoryStore:
                 for i in session.execute(
                     text(
                         "SELECT id FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"
-                        " AND superseded_by IS NULL AND covers_to_turn <= :to"
+                        " AND superseded_by IS NULL AND covers_to_turn <= :to AND content <> ''"
                     ),
                     {"t": tenant_id, "c": conv, "to": covers_to},
                 ).scalars()
@@ -1460,9 +1557,11 @@ class MemoryStore:
         *,
         agent_id: str | None = None,
         include_superseded: bool = False,
+        include_markers: bool = False,
     ) -> list[Observation]:
         """The conversation's observations and reflections (active only by default), ordered by
-        covered turns. `agent_id` restricts to that agent's rows ([] for another agent)."""
+        covered turns. `agent_id` restricts to that agent's rows ([] for another agent). Retention
+        markers (text-free, see the module docstring) only with `include_markers`."""
         _require_tenant(tenant_id)
         sql = f"SELECT {_OBS_COLUMNS} FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"
         params: dict[str, Any] = {"t": tenant_id, "c": str(conversation_id)}
@@ -1471,6 +1570,8 @@ class MemoryStore:
             params["a"] = str(agent_id)
         if not include_superseded:
             sql += " AND superseded_by IS NULL"
+        if not include_markers:
+            sql += " AND content <> ''"
         sql += " ORDER BY covers_from_turn, covers_to_turn, kind DESC, created_at"
         with self.engine.connect() as conn:
             return [_obs(r) for r in conn.execute(text(sql), params).mappings().all()]
@@ -1565,8 +1666,8 @@ class MemoryStore:
         - the conversation's resource_id;
         - `working` set: the note of its scope (keyed by the conversation id, or by the resource
           id; none when the conversation has no resource_id);
-        - `observations` True: the active observations and reflection; the turns they cover
-          (1..covered_to_turn) are left out of `turns`;
+        - `observations` True: the active observations and reflection (retention markers left
+          out); the turns they and any marker cover (1..covered_to_turn) are left out of `turns`;
         - the COMPLETED turns after that and before `before_turn` (all when None), then
           `history` limits (`MemoryConfig.effective_history()`; None = no limit).
 
@@ -1615,6 +1716,8 @@ class MemoryStore:
                         ).mappings().all()
                     )
                     covered = max((o.covers_to_turn for o in active), default=0)
+                    # Retention markers keep their turns covered but are never rendered or reflected.
+                    active = tuple(o for o in active if not o.is_marker)
 
                 sql = (
                     "SELECT turn, id, input, output, messages, created_at FROM runs"
@@ -2105,39 +2208,84 @@ class MemoryStore:
             )
         return out
 
-    def message_embedding_tenants_before(self, cutoff: datetime, *, limit: int = 1000) -> list[str]:
-        """Tenants that have message embeddings created before `cutoff` (timezone-aware), in id
-        order, at most `limit` (the retention sweep's tenant batches; an operator-only call)."""
-        if cutoff.tzinfo is None:
-            raise ValueError("cutoff must be timezone-aware")
+    # ------------------------------------------------------------------ retention (RM.15)
+
+    def retention_tenants(
+        self, kind: str, cutoff: datetime, *, after: str | None = None, limit: int = 1000
+    ) -> list[str]:
+        """Tenants that have `kind` rows older than `cutoff` (timezone-aware), in id order, after
+        `after` (keyset paging), at most `limit`. An operator-only call (the retention sweep): it
+        crosses tenants and returns ids only. Age is `created_at` for message embeddings and
+        observations (immutable rows), `updated_at` for working memory."""
+        sql = _RETENTION_TENANTS_SQL[_retention_kind(kind)]
+        _require_aware(cutoff)
         with self.engine.connect() as conn:
             return list(
                 conn.execute(
-                    text(
-                        "SELECT DISTINCT tenant_id FROM message_embeddings WHERE created_at < :cut"
-                        " ORDER BY tenant_id LIMIT :n"
-                    ),
-                    {"cut": cutoff, "n": max(1, min(int(limit), MAX_RETENTION_BATCH))},
+                    text(sql + " AND tenant_id > :after ORDER BY tenant_id LIMIT :n"),
+                    {"cut": cutoff, "after": after or "", "n": _retention_limit(limit)},
                 ).scalars()
             )
 
-    def delete_message_embeddings_before(self, tenant_id: str, cutoff: datetime, *, limit: int = 1000) -> int:
-        """Retention: delete up to `limit` of the tenant's message embeddings created before
-        `cutoff` (timezone-aware), oldest first, in one transaction. Returns the number deleted;
-        call again until it returns less than `limit`. Idempotent (a re-run deletes what is left).
-        Embeddings are immutable, so their age is `created_at`. Every agent of the tenant.
-        Rows locked by a concurrent delete_conversation or forget_resource are skipped
-        (`FOR UPDATE SKIP LOCKED`): that delete removes them. Forget watermarks are kept."""
+    def delete_retention_batch(
+        self, kind: str, tenant_id: str, cutoff: datetime, *, limit: int = 1000, after: str | None = None
+    ) -> RetentionBatch:
+        """Retention: delete one bounded batch of the tenant's `kind` rows older than `cutoff`
+        (timezone-aware), every agent, in one transaction; idempotent (a re-run deletes what is
+        left). Call again with `after=batch.next_after` until `batch.done`. Never waits for nor
+        deadlocks with a user-facing delete, and never touches a conversation whose latest turn is
+        queued or running:
+
+        - `message_embeddings`: up to `limit` rows, oldest first, locked `FOR UPDATE SKIP LOCKED`
+          (rows a delete_conversation or forget_resource holds are left to it), excluding
+          conversations with a live turn.
+        - `observations` and `conversation_working_memory`: up to `limit` conversations (id order,
+          after `after`) that have such rows; the idle ones (no live turn, filtered in the locking
+          query and re-checked under the lock) are locked `FOR NO KEY UPDATE SKIP LOCKED` (one a
+          delete, forget, turn start or observation writer holds is skipped), then their old rows
+          go. Conversation working memory: deleted. Observations: the text of every old row (and
+          of every row it superseded, recursively) is removed while coverage is kept by a
+          retention marker (module docstring): old rows at the head of the active prefix collapse
+          into one marker, an old active row after a newer one is blanked in place, superseded
+          rows are deleted. So the swept turns stay out of the history and are not re-observed,
+          and no turn is hidden without a covering row. `deleted` counts rows whose text went.
+        - `resource_working_memory`: up to `limit` resource notes, locked `FOR UPDATE SKIP LOCKED`,
+          excluding a note whose agent has a live turn in a conversation of that resource. That
+          check takes no conversation lock, so a turn may start right after it and find no note
+          (or merge into a fresh one): harmless, the note was older than the retention anyway and
+          the turn writes a new one; no text outlives the retention.
+
+        Forget watermarks are never deleted by retention."""
+        kind = _retention_kind(kind)
         _require_tenant(tenant_id)
-        if cutoff.tzinfo is None:
-            raise ValueError("cutoff must be timezone-aware")
+        _require_aware(cutoff)
+        n = _retention_limit(limit)
+        if kind == "message_embeddings":
+            return self._delete_embeddings_batch(tenant_id, cutoff, n)
+        if kind == "resource_working_memory":
+            return self._delete_resource_notes_batch(tenant_id, cutoff, n)
+        return self._delete_conversation_rows_batch(kind, tenant_id, cutoff, n, after or "")
+
+    def message_embedding_tenants_before(self, cutoff: datetime, *, limit: int = 1000) -> list[str]:
+        """Tenants with message embeddings created before `cutoff` (RM.8 name of
+        `retention_tenants("message_embeddings", ...)`)."""
+        return self.retention_tenants("message_embeddings", cutoff, limit=limit)
+
+    def delete_message_embeddings_before(self, tenant_id: str, cutoff: datetime, *, limit: int = 1000) -> int:
+        """Delete up to `limit` of the tenant's message embeddings created before `cutoff`; returns
+        the number deleted (RM.8 name of `delete_retention_batch("message_embeddings", ...)`).
+        Call again until it returns less than `limit`."""
+        return self.delete_retention_batch("message_embeddings", tenant_id, cutoff, limit=limit).deleted
+
+    def _delete_embeddings_batch(self, tenant_id: str, cutoff: datetime, n: int) -> RetentionBatch:
         with self.Session() as session:
             ids = session.execute(
                 text(
-                    "SELECT id FROM message_embeddings WHERE tenant_id = :t AND created_at < :cut"
-                    " ORDER BY created_at, id LIMIT :n FOR UPDATE SKIP LOCKED"
+                    "SELECT e.id FROM message_embeddings e WHERE e.tenant_id = :t AND e.created_at < :cut"
+                    " AND NOT EXISTS (" + _LIVE_TURN_SQL.format(conv="e.conversation_id") + ")"
+                    " ORDER BY e.created_at, e.id LIMIT :n FOR UPDATE OF e SKIP LOCKED"
                 ),
-                {"t": tenant_id, "cut": cutoff, "n": max(1, min(int(limit), MAX_RETENTION_BATCH))},
+                {"t": tenant_id, "cut": cutoff, "n": n, "terminal": _TERMINAL},
             ).scalars().all()
             deleted = 0
             if ids:
@@ -2146,7 +2294,163 @@ class MemoryStore:
                     {"t": tenant_id, "ids": [str(i) for i in ids]},
                 ).rowcount
             session.commit()
-        return deleted
+        return RetentionBatch("message_embeddings", deleted, 0, len(ids) < n)
+
+    def _delete_resource_notes_batch(self, tenant_id: str, cutoff: datetime, n: int) -> RetentionBatch:
+        with self.Session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT w.agent_id, w.scope_key FROM working_memories w"
+                    " WHERE w.tenant_id = :t AND w.scope = 'resource' AND w.updated_at < :cut"
+                    " AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.tenant_id = w.tenant_id"
+                    " AND c.agent_id = w.agent_id AND c.resource_id = w.scope_key"
+                    " AND EXISTS (" + _LIVE_TURN_SQL.format(conv="c.id") + "))"
+                    " ORDER BY w.updated_at, w.agent_id, w.scope_key LIMIT :n FOR UPDATE OF w SKIP LOCKED"
+                ),
+                {"t": tenant_id, "cut": cutoff, "n": n, "terminal": _TERMINAL},
+            ).all()
+            deleted = 0
+            if rows:
+                deleted = session.execute(
+                    text(
+                        "DELETE FROM working_memories w USING unnest(CAST(:a AS text[]), CAST(:k AS text[])) AS d(a, k)"
+                        " WHERE w.tenant_id = :t AND w.scope = 'resource' AND w.agent_id = d.a AND w.scope_key = d.k"
+                        " AND w.updated_at < :cut"
+                    ),
+                    {"t": tenant_id, "cut": cutoff, "a": [r.agent_id for r in rows], "k": [r.scope_key for r in rows]},
+                ).rowcount
+            session.commit()
+        return RetentionBatch("resource_working_memory", deleted, 0, len(rows) < n)
+
+    def _delete_conversation_rows_batch(
+        self, kind: str, tenant_id: str, cutoff: datetime, n: int, after: str
+    ) -> RetentionBatch:
+        params: dict[str, Any] = {"t": tenant_id, "cut": cutoff}
+        with self.Session() as session:
+            candidates = session.execute(
+                text(_RETENTION_CANDIDATES_SQL[kind] + " AND conversation_id > :after ORDER BY conversation_id LIMIT :n"),
+                {**params, "after": after, "n": n},
+            ).scalars().all()
+            if not candidates:
+                session.rollback()
+                return RetentionBatch(kind, 0, 0, True)
+            # Lock order: the conversation rows first, as every memory writer. FOR NO KEY UPDATE
+            # SKIP LOCKED: conflicts with (and skips) delete_conversation, forget_resource, a turn
+            # start and the observation writers; not with a working memory writer's KEY SHARE (its
+            # note row lock is then waited for, and the age check is re-evaluated on the new row).
+            # Conversations with a live turn are filtered in the locking query itself, so they are
+            # never locked by the sweep.
+            ids = {"t": tenant_id, "ids": list(candidates), "terminal": _TERMINAL}
+            locked = session.execute(
+                text(
+                    "SELECT c.id FROM conversations c WHERE c.tenant_id = :t AND c.id = ANY(CAST(:ids AS text[]))"
+                    " AND NOT EXISTS (" + _LIVE_TURN_SQL.format(conv="c.id") + ")"
+                    " ORDER BY c.id FOR NO KEY UPDATE SKIP LOCKED"
+                ),
+                ids,
+            ).scalars().all()
+            idle = list(locked)
+            if idle:
+                # Re-checked under the lock (a turn that committed after the statement's snapshot
+                # but before the lock was taken); a turn cannot start while the lock is held.
+                live = set(
+                    session.execute(
+                        text(
+                            "SELECT conversation_id FROM (SELECT DISTINCT ON (conversation_id) conversation_id, status"
+                            " FROM runs WHERE tenant_id = :t AND conversation_id = ANY(CAST(:ids AS text[]))"
+                            " ORDER BY conversation_id, turn DESC) l WHERE l.status <> ALL(CAST(:terminal AS text[]))"
+                        ),
+                        {**ids, "ids": idle},
+                    ).scalars()
+                )
+                idle = [c for c in idle if c not in live]
+            deleted = 0
+            if idle and kind == "conversation_working_memory":
+                deleted = session.execute(
+                    text(
+                        "DELETE FROM working_memories WHERE tenant_id = :t AND scope = 'conversation'"
+                        " AND conversation_id = ANY(CAST(:ids AS text[])) AND updated_at < :cut"
+                    ),
+                    {**params, "ids": idle},
+                ).rowcount
+            elif idle:
+                deleted = sum(self._sweep_observations(session, tenant_id, conv, cutoff) for conv in idle)
+            session.commit()
+        done = len(candidates) < n
+        return RetentionBatch(kind, deleted, len(candidates) - len(idle), done, None if done else candidates[-1])
+
+    @staticmethod
+    def _sweep_observations(session, tenant_id: str, conv: str, cutoff: datetime) -> int:
+        """Remove the text of the conversation's observations older than `cutoff` (and of every
+        row they superseded), keeping coverage with a retention marker (module docstring). The
+        conversation is locked by the caller. Returns the number of rows whose text was removed."""
+        p = {"t": tenant_id, "c": conv, "cut": cutoff}
+        doomed = set(
+            str(i)
+            for i in session.execute(
+                text(
+                    "WITH RECURSIVE doomed AS ("
+                    " SELECT id FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"
+                    " AND created_at < :cut AND content <> ''"
+                    " UNION SELECT o.id FROM memory_observations o JOIN doomed d ON o.superseded_by = d.id"
+                    " WHERE o.tenant_id = :t)"
+                    " SELECT id FROM doomed"
+                ),
+                p,
+            ).scalars()
+        )
+        if not doomed:
+            return 0
+        active = [
+            _obs(r)
+            for r in session.execute(
+                text(
+                    f"SELECT {_OBS_COLUMNS} FROM memory_observations WHERE tenant_id = :t AND conversation_id = :c"
+                    " AND superseded_by IS NULL ORDER BY covers_from_turn, covers_to_turn FOR UPDATE"
+                ),
+                p,
+            ).mappings().all()
+        ]
+        head: list[Observation] = []  # the leading run of doomed rows and markers
+        for o in active:
+            if o.id not in doomed and not o.is_marker:
+                break
+            head.append(o)
+        head_ids = {o.id for o in head}
+        collapse = any(o.id in doomed for o in head)
+        blank = [o.id for o in active if o.id in doomed and o.id not in head_ids]
+        delete = (doomed - {o.id for o in active}) | (head_ids if collapse else set())
+        if delete:
+            session.execute(
+                text("DELETE FROM memory_observations WHERE tenant_id = :t AND id = ANY(CAST(:ids AS uuid[]))"),
+                {"t": tenant_id, "ids": sorted(delete)},
+            )
+        if blank:
+            session.execute(
+                text(
+                    "UPDATE memory_observations SET content = '', approx_tokens = 0"
+                    " WHERE tenant_id = :t AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"t": tenant_id, "ids": sorted(blank)},
+            )
+        if collapse:
+            # The head's rows may overlap (a reflection written around a mid marker spans it), so
+            # the marker covers min(from)..max(to) and keeps the kind, run and slot of the row
+            # reaching furthest (the latest of equals).
+            last = max(reversed(head), key=lambda o: o.covers_to_turn)
+            first = min(o.covers_from_turn for o in head)
+            session.execute(
+                text(
+                    "INSERT INTO memory_observations (tenant_id, agent_id, conversation_id, kind, covers_from_turn,"
+                    " covers_to_turn, content, approx_tokens, run_id, created_at)"
+                    " VALUES (:t, :a, :c, :kind, :from, :to, '', 0, :run, :created)"
+                ),
+                {
+                    **p, "a": last.agent_id, "kind": last.kind, "from": first,
+                    "to": last.covers_to_turn, "run": last.run_id, "created": last.created_at,
+                },
+            )
+        return len(doomed)
 
     # ------------------------------------------------------------------ deletions
 
@@ -2319,6 +2623,8 @@ __all__ = [
     "ObservationNotLatest",
     "ResourceBusy",
     "ObservationWrite",
+    "RETENTION_KINDS",
+    "RetentionBatch",
     "RecallHit",
     "RecallMessage",
     "TurnText",

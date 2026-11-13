@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import math
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -403,6 +404,72 @@ class TestObservations:
         assert len(client.get(url, headers=h).json()["items"]) == 2
         assert client.delete(url, headers=h).json() == {"deleted": 2}
         assert client.delete(url, headers=h).json() == {"deleted": 0}
+
+
+class TestRetentionMarkers:
+    """RM.15: after a retention sweep the aged-out rows are text-free markers. GET lists them with
+    `expired: true` and counts them in `covered_to_turn`; DELETE's "newest" is the same row GET
+    shows last, markers included."""
+
+    def seed(self, pg, client, h, tenant: str) -> tuple[str, list[str]]:
+        aid = make_agent(client, h)
+        cid = new_conversation(client, h, aid)
+        for _ in range(3):
+            completed_turn(client, pg[1], h, cid)
+        store = memory_store(pg)
+        ids = []
+        for frm, to, content in ((1, 1, "first"), (2, 3, "second")):
+            written = store.insert_observation(tenant, aid, cid, covers_from_turn=frm, covers_to_turn=to, content=content)
+            assert written.observation is not None
+            ids.append(written.observation.id)
+        return cid, ids
+
+    @staticmethod
+    def age_and_sweep(pg, tenant: str, ids: list[str]) -> None:
+        with pg[1].state.database_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE memory_observations SET created_at = now() - interval '3 days'"
+                    " WHERE tenant_id = :t AND id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"t": tenant, "ids": ids},
+            )
+        cut = datetime.now(UTC) - timedelta(days=1)
+        assert memory_store(pg).delete_retention_batch("observations", tenant, cut).done
+
+    def test_sweep_keeps_covered_to_turn_and_lists_the_marker(self, pg, mem_tenant):
+        client, _ = pg
+        tenant, h = mem_tenant()
+        cid, ids = self.seed(pg, client, h, tenant)
+        url = f"{API}/conversations/{cid}/memory/observations"
+        self.age_and_sweep(pg, tenant, ids)
+        listed = client.get(url, headers=h).json()
+        assert listed["covered_to_turn"] == 3
+        [marker] = listed["items"]
+        assert (marker["expired"], marker["content"], marker["approx_tokens"]) == (True, "", 0)
+        assert (marker["covers_from_turn"], marker["covers_to_turn"]) == (1, 3)
+        # The newest row is the marker: it can be deleted, and its turns go back to the history.
+        assert client.delete(f"{url}/{marker['id']}", headers=h).status_code == 204
+        assert client.get(url, headers=h).json() == {"items": [], "covered_to_turn": 0}
+
+    def test_newest_marker_blocks_the_older_visible_row(self, pg, mem_tenant):
+        client, _ = pg
+        tenant, h = mem_tenant()
+        cid, (first, second) = self.seed(pg, client, h, tenant)
+        url = f"{API}/conversations/{cid}/memory/observations"
+        self.age_and_sweep(pg, tenant, [second])  # an old row after a newer one: blanked in place
+        listed = client.get(url, headers=h).json()
+        assert [(o["id"], o["expired"]) for o in listed["items"]] == [(first, False), (second, True)]
+        assert listed["items"][1]["content"] == "" and listed["covered_to_turn"] == 3
+        # GET shows the marker as newest, so the visible row before it is not the newest: 409, and
+        # nothing deleted (deleting it would leave turn 1 neither observed nor in the history).
+        r = client.delete(f"{url}/{first}", headers=h)
+        assert r.status_code == 409 and "newest" in r.json()["detail"] and "expired" in r.json()["detail"]
+        assert client.get(url, headers=h).json() == listed
+        assert client.delete(f"{url}/{second}", headers=h).status_code == 204
+        after = client.get(url, headers=h).json()
+        assert [o["id"] for o in after["items"]] == [first] and after["covered_to_turn"] == 1
+        assert client.delete(f"{url}/{first}", headers=h).status_code == 204
 
 
 # ---------------------------------------------------------------------------- forget resource

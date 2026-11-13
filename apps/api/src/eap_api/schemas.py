@@ -519,11 +519,14 @@ class ObservationResponse(BaseModel):
     run_id: str | None
     superseded_by: str | None
     created_at: datetime
+    # A retention marker (RM.15): its text aged out (`content` "", `approx_tokens` 0), but its turns
+    # stay covered so they are not observed again. Never shown to the model.
+    expired: bool = False
 
 
 class ObservationListResponse(BaseModel):
-    """`covered_to_turn`: the highest turn the active observations cover (0: none); history after
-    it is what the model sees verbatim."""
+    """`covered_to_turn`: the highest turn the active rows cover, expired markers included (0:
+    none); history after it is what the model sees verbatim."""
 
     items: list[ObservationResponse]
     covered_to_turn: int

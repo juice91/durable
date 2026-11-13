@@ -49,6 +49,11 @@ Rules:
   an older one would silently hide its turns from both the history and the observations. Older
   rows answer 409; clear them with DELETE .../observations (all), or delete the newer ones first.
   The check runs in the store under the conversation lock the observer's insert takes.
+  Retention markers (RM.15: rows whose text aged out, kept so their turns stay covered) are listed
+  with `expired: true` and `content: ""` and count as rows here: when a marker is the newest, the
+  visible rows before it answer 409 (deleting one would leave a hole under the marker's coverage),
+  and the marker itself may be deleted (its turns return to the verbatim history and are observed
+  again), after which the row before it is the newest.
 - Conflicts are 409 with distinct messages: a version conflict, a not-newest observation, and a
   busy resource (a queued or running turn in one of its conversations: nothing deleted,
   `Retry-After` set, `busy_conversations` listed).
@@ -219,6 +224,7 @@ def _obs_json(obs: Observation) -> dict[str, Any]:
         "run_id": obs.run_id,
         "superseded_by": obs.superseded_by,
         "created_at": obs.created_at,
+        "expired": obs.is_marker,
     }
 
 
@@ -537,10 +543,15 @@ def list_observations(
     include_superseded: bool = False,
 ) -> JSONResponse:
     """The conversation's observations and reflections ordered by covered turns (active only by
-    default), and `covered_to_turn`."""
+    default), and `covered_to_turn`. Retention markers are listed with `expired: true` and no
+    content; they count toward `covered_to_turn` like any active row."""
     conv = _conversation_or_404(stores, principal.tenant_id, conversation_id)
     rows = memory.list_observations(
-        principal.tenant_id, conv["id"], agent_id=conv["agent_id"], include_superseded=include_superseded
+        principal.tenant_id,
+        conv["id"],
+        agent_id=conv["agent_id"],
+        include_superseded=include_superseded,
+        include_markers=True,
     )
     covered = max((o.covers_to_turn for o in rows if o.superseded_by is None), default=0)
     return JSONResponse(content=jsonable_encoder({"items": [_obs_json(o) for o in rows], "covered_to_turn": covered}))
@@ -579,8 +590,9 @@ def delete_observation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "only the newest active observation can be deleted (deleting an older one would hide its "
-                "turns from the model); delete the newer ones first, or delete all observations"
+                "only the newest active observation (expired ones included) can be deleted (deleting an "
+                "older one would hide its turns from the model); delete the newer ones first, or delete "
+                "all observations"
             ),
         )
     if not deleted:
