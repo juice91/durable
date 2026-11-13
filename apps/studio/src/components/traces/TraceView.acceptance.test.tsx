@@ -5,6 +5,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { TraceView } from "./TraceView";
 import { getTrace, type Trace, type TraceSpan } from "@/lib/traces";
 import { ApiError } from "@/lib/api";
+import { searchLogs } from "@/components/logs/logsQuery";
+
+// The default logs panel fetches; keep these tests off the network.
+vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/logs/logsQuery")>()),
+  searchLogs: vi.fn(),
+}));
 
 vi.mock("@/lib/traces", async (importOriginal) => ({ ...(await importOriginal<object>()), getTrace: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -46,6 +53,9 @@ function base(): Trace {
 describe("TraceView acceptance", () => {
   beforeEach(() => {
     vi.mocked(getTrace).mockReset();
+    vi.mocked(searchLogs).mockReset();
+    // Never settles: these tests are not about logs, and a late response would update state outside act.
+    vi.mocked(searchLogs).mockReturnValue(new Promise(() => undefined));
   });
 
   it("an unpriced request says 'no price', an unmeasured one 'not recorded'; totals say 'no price'", async () => {

@@ -17,6 +17,7 @@ import {
 } from "@/lib/traces";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { SpanDetail } from "./SpanDetail";
+import { renderTraceLogsPanel } from "./TraceLogsPanel";
 import { TraceTotals } from "./TraceTotals";
 import { TraceWaterfall } from "./TraceWaterfall";
 
@@ -48,9 +49,8 @@ interface TraceViewProps {
   runId: string;
   /** Inside the run page: no page header (the page has its own). */
   embedded?: boolean;
-  /** The trace view's logs panel. P0.20 passes its component here (or sets it as the default);
-   * nothing is rendered in the slot until then. */
-  renderLogsPanel?: (props: TraceLogsSlotProps) => React.ReactNode;
+  /** The trace view's logs panel; defaults to the run's logs from GET /logs (P0.20), `null` hides it. */
+  renderLogsPanel?: ((props: TraceLogsSlotProps) => React.ReactNode) | null;
 }
 
 function useNames(): NameMaps {
@@ -79,7 +79,7 @@ function useNames(): NameMaps {
 
 /** The built-in trace of one run: totals, truncation notices, the span waterfall and the selected
  * span's detail. Polls while the run is not finished. */
-export function TraceView({ runId, embedded = false, renderLogsPanel }: TraceViewProps) {
+export function TraceView({ runId, embedded = false, renderLogsPanel = renderTraceLogsPanel }: TraceViewProps) {
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
