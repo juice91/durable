@@ -12,6 +12,7 @@ members = [
     "eap-agent-runtime",
     "eap-api",
     "eap-db",
+    "eap-knowledge",
     "eap-observability",
     "eap-processors",
     "eap-run-store",
@@ -617,6 +618,21 @@ requires-dist = [
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+]
+
+[[package]]
+name = "eap-knowledge"
+version = "0.1.0"
+source = { editable = "packages/knowledge" }
+dependencies = [
+    { name = "eap-schemas" },
+    { name = "markdown-it-py" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-schemas", editable = "packages/shared-schemas" },
+    { name = "markdown-it-py", specifier = "==4.3.0" },
 ]
 
 [[package]]

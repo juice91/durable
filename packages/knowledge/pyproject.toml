@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-knowledge"
+version = "0.1.0"
+description = "Pure, deterministic document extraction and heading-aware chunking for EAP knowledge bases"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "eap-schemas",
+    # Chunk boundaries feed hash-based idempotency, so the Markdown parser is pinned exactly: a
+    # parser upgrade that moves a heading boundary is a chunker_version bump, not a silent change.
+    "markdown-it-py==4.3.0",
+]
+
+[tool.uv.sources]
+eap-schemas = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_knowledge"]
