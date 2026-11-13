@@ -25,6 +25,8 @@ dependencies = [
     "referencing>=0.30",
     # The policy-checked HTTP client's response hook caps MCP response bodies.
     "httpx2>=2.16",
+    # Default model prices for usage cost (eap_worker.pricing); already pinned via pydantic-ai.
+    "genai-prices>=0.2.3",
 ]
 
 [dependency-groups]

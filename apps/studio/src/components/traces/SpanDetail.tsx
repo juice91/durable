@@ -1,0 +1,214 @@
+"use client";
+
+import React from "react";
+import { buildTraceLink } from "@/lib/grafana";
+import {
+  KIND_LABELS,
+  formatCost,
+  formatDuration,
+  formatTokens,
+  spanLabel,
+  tracePath,
+  type NameMaps,
+  type SpanUsage,
+  type TraceSpan,
+} from "@/lib/traces";
+import { PayloadBlock, payloadText } from "./PayloadBlock";
+import { STATUS_LABELS, STATUS_TEXT } from "./spanStyles";
+
+// Attributes shown in their own sections rather than in the generic attribute list.
+const SHOWN = new Set([
+  "usage", "model_id", "provider_model_name", "cost_usd", "price_source", "error", "error_code",
+  "input_tokens", "output_tokens", "approval", "decision",
+]);
+
+function str(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function Row({ label, children, testId }: { label: string; children: React.ReactNode; testId?: string }) {
+  return (
+    <div className="flex justify-between gap-4 py-0.5" data-testid={testId}>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="text-right font-mono text-card-foreground break-all">{children}</dd>
+    </div>
+  );
+}
+
+function UsageSection({ span }: { span: TraceSpan }) {
+  const a = span.attributes;
+  const usage = (a.usage ?? null) as SpanUsage | null;
+  const cost = formatCost(a.cost_usd ?? null);
+  return (
+    <section aria-label="Model and usage" data-testid="span-usage">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Model and usage</h4>
+      <dl className="mt-1 text-sm">
+        <Row label="Model">{str(a.model_id) ?? "-"}</Row>
+        {str(a.provider_model_name) ? <Row label="Provider model">{a.provider_model_name as string}</Row> : null}
+        {usage ? (
+          <>
+            <Row label="Input tokens" testId="span-input-tokens">{formatTokens(usage.input_tokens)}</Row>
+            <Row label="Output tokens" testId="span-output-tokens">{formatTokens(usage.output_tokens)}</Row>
+            <Row label="Cache read tokens">{formatTokens(usage.cache_read_tokens)}</Row>
+            <Row label="Cache write tokens">{formatTokens(usage.cache_write_tokens)}</Row>
+            {!usage.usage_measured ? (
+              <p className="text-xs text-muted-foreground">The provider reported no usage; token counts are estimates.</p>
+            ) : null}
+          </>
+        ) : (
+          <Row label="Tokens" testId="span-input-tokens">not recorded</Row>
+        )}
+        <Row label="Cost" testId="span-cost">
+          {cost ?? (usage ? "no price" : "not recorded")}
+        </Row>
+        {str(a.price_source) ? <Row label="Price source">{a.price_source as string}</Row> : null}
+      </dl>
+    </section>
+  );
+}
+
+function RunUsageSection({ span }: { span: TraceSpan }) {
+  const a = span.attributes;
+  const tokensIn = typeof a.input_tokens === "number" ? a.input_tokens : null;
+  const tokensOut = typeof a.output_tokens === "number" ? a.output_tokens : null;
+  const cost = formatCost(str(a.cost_usd));
+  if (!str(a.model_id) && tokensIn === null && tokensOut === null && cost === null) return null;
+  return (
+    <section aria-label="Run usage" data-testid="span-usage">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Run usage</h4>
+      <dl className="mt-1 text-sm">
+        {str(a.model_id) ? <Row label="Model">{a.model_id as string}</Row> : null}
+        <Row label="Input tokens" testId="span-input-tokens">{tokensIn === null ? "not recorded" : formatTokens(tokensIn)}</Row>
+        <Row label="Output tokens" testId="span-output-tokens">{tokensOut === null ? "not recorded" : formatTokens(tokensOut)}</Row>
+        <Row label="Cost" testId="span-cost">{cost ?? (tokensIn === null ? "not recorded" : "no price")}</Row>
+      </dl>
+    </section>
+  );
+}
+
+function Links({ span }: { span: TraceSpan }) {
+  const a = span.attributes;
+  const links: Array<{ href: string; label: string; external?: boolean; testId: string }> = [];
+  const runId = str(a.run_id);
+  if ((span.kind === "run" || span.kind === "child_run") && runId) {
+    if (span.kind === "child_run") links.push({ href: tracePath(runId), label: "Open child run trace", testId: "span-link-child-trace" });
+    links.push({ href: `/runs/${encodeURIComponent(runId)}`, label: "Run details", testId: "span-link-run" });
+  }
+  const childRun = str(a.child_run_id);
+  if (span.kind === "workflow_step" && childRun) {
+    links.push({ href: tracePath(childRun), label: "Open child run trace", testId: "span-link-child-trace" });
+  }
+  const traceId = str(a.trace_id);
+  if (traceId) links.push({ href: buildTraceLink(traceId), label: "Open in Grafana", external: true, testId: "span-link-grafana" });
+  if (!links.length) return null;
+  return (
+    <div className="flex flex-wrap gap-3 text-sm">
+      {links.map((l) => (
+        <a
+          key={l.testId}
+          href={l.href}
+          data-testid={l.testId}
+          {...(l.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+          className="text-primary underline-offset-4 hover:underline"
+        >
+          {l.label}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function attrValue(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return payloadText(value);
+}
+
+interface SpanDetailProps {
+  span: TraceSpan | null;
+  names?: NameMaps;
+}
+
+/** The selected span: status, timing, error, model usage and cost, links, input, output and the
+ * remaining attributes. */
+export function SpanDetail({ span, names }: SpanDetailProps) {
+  if (!span) {
+    return (
+      <div className="rounded-md border border-border bg-card p-4 text-sm text-muted-foreground">
+        Select a span to see its details.
+      </div>
+    );
+  }
+  const a = span.attributes ?? {};
+  const durationMs = span.start && span.end ? Math.max(0, Date.parse(span.end) - Date.parse(span.start)) : null;
+  const error = str(a.error);
+  const errorCode = str(a.error_code);
+  const approval = a.approval as Record<string, unknown> | undefined;
+  const decision = a.decision as Record<string, unknown> | undefined;
+  const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && v !== null && v !== undefined);
+
+  return (
+    <aside aria-label="Span detail" data-testid="span-detail" className="space-y-4 rounded-md border border-border bg-card p-4">
+      <header>
+        <p className="text-xs uppercase tracking-wide text-muted-foreground">{KIND_LABELS[span.kind]}</p>
+        <h3 className="mt-0.5 break-words text-base font-semibold text-card-foreground">{spanLabel(span, names)}</h3>
+        <p className={`mt-1 text-sm font-medium ${STATUS_TEXT[span.status]}`} data-testid="span-status">
+          {STATUS_LABELS[span.status]}
+          {typeof a.run_status === "string" && a.run_status !== span.status ? ` (run ${a.run_status.replace("_", " ")})` : ""}
+        </p>
+      </header>
+
+      <dl className="text-sm">
+        <Row label="Start">{span.start ? new Date(span.start).toLocaleString() : "-"}</Row>
+        <Row label="End">{span.end ? new Date(span.end).toLocaleString() : !span.end ? "not finished" : "-"}</Row>
+        <Row label="Duration" testId="span-duration">{durationMs === null ? "-" : formatDuration(durationMs)}</Row>
+      </dl>
+
+      {error || errorCode ? (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-sm text-card-foreground" data-testid="span-error">
+          {errorCode ? <p className="font-mono text-xs">{errorCode}</p> : null}
+          {error ? <p>{error}</p> : null}
+        </div>
+      ) : null}
+
+      {span.kind === "model_request" ? <UsageSection span={span} /> : null}
+      {span.kind === "run" || span.kind === "child_run" ? <RunUsageSection span={span} /> : null}
+
+      {approval ? (
+        <section aria-label="Approval">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Approval</h4>
+          <dl className="mt-1 text-sm">
+            {str(approval.prompt) ? <Row label="Prompt">{approval.prompt as string}</Row> : null}
+            {str(approval.deadline) ? <Row label="Deadline">{approval.deadline as string}</Row> : null}
+            {decision ? (
+              <>
+                <Row label="Decision">{String(decision.type ?? "-").replace("step_", "")}</Row>
+                {str(decision.decided_by) ? <Row label="Decided by">{decision.decided_by as string}</Row> : null}
+                {str(decision.comment) ? <Row label="Comment">{decision.comment as string}</Row> : null}
+              </>
+            ) : (
+              <Row label="Decision">pending</Row>
+            )}
+          </dl>
+        </section>
+      ) : null}
+
+      <Links span={span} />
+
+      <PayloadBlock label="Input" value={span.input} truncatedBytes={span.truncated?.input} />
+      <PayloadBlock label="Output" value={span.output} truncatedBytes={span.truncated?.output} />
+
+      {others.length ? (
+        <section aria-label="Attributes">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Attributes</h4>
+          <dl className="mt-1 text-sm" data-testid="span-attributes">
+            {others.map(([k, v]) => (
+              <Row key={k} label={k}>{attrValue(v)}</Row>
+            ))}
+          </dl>
+        </section>
+      ) : null}
+    </aside>
+  );
+}

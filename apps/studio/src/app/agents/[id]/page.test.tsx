@@ -5,6 +5,12 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import AgentDetailPage from "./page";
 import { api, ApiError } from "@/lib/api";
 import { useRouter, useParams } from "next/navigation";
+import { compareVersions, restoreVersion } from "@/lib/agentVersions";
+
+vi.mock("@/lib/agentVersions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/agentVersions")>();
+  return { ...actual, compareVersions: vi.fn(), restoreVersion: vi.fn() };
+});
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -24,6 +30,12 @@ vi.mock("@/lib/api", () => ({
     }
   },
 }));
+
+vi.mock("@/components/agents/specSections", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/agents/specSections")>();
+  // Pending by default; the processor test resolves them with the fixtures.
+  return { ...actual, fetchProcessorCatalog: vi.fn(() => new Promise(() => undefined)), fetchModels: vi.fn(() => new Promise(() => undefined)) };
+});
 
 describe("AgentDetailPage", () => {
   beforeEach(() => {
@@ -84,6 +96,42 @@ describe("AgentDetailPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
 
     expect(await screen.findByTestId("agent-save-error")).toHaveTextContent("MCP server 'x' is disabled");
+  });
+
+  it("Publish 422 naming a processor shows inline under that processor, not in the page alert", async () => {
+    const { fetchProcessorCatalog, fetchModels } = await import("@/components/agents/specSections");
+    const { processorCatalogFixture, modelsFixture } = await import("@/components/agents/specSections.fixtures");
+    vi.mocked(fetchProcessorCatalog).mockResolvedValue(processorCatalogFixture);
+    vi.mocked(fetchModels).mockResolvedValue(modelsFixture);
+    (api.agents.get as any).mockResolvedValueOnce({
+      id: "a1",
+      name: "Test Agent",
+      draft_spec: {
+        spec_version: 1,
+        name: "Test Agent",
+        instructions: "Test",
+        model: { provider: "test", name: "echo" },
+        tools: [],
+        input_processors: [
+          { type: "pii_redact", config: { kinds: ["email"], action: "redact" } },
+          { type: "regex_blocklist", config: { patterns: ["(a)\\1"], action: "block" } },
+        ],
+      },
+      latest_version: 1,
+    });
+    (api.versions.list as any).mockResolvedValueOnce([]);
+    (api.versions.create as any).mockRejectedValueOnce(
+      new ApiError(422, "input_processors[1].config.patterns[0]: invalid RE2 pattern: backreferences are not supported"),
+    );
+
+    render(<AgentDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+
+    const inline = await screen.findByTestId("processor-input-1-error");
+    expect(inline).toHaveTextContent("invalid RE2 pattern");
+    expect(screen.getByTestId("processor-input-1")).toContainElement(inline);
+    expect(screen.queryByTestId("processor-input-0-error")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("agent-save-error")).not.toBeInTheDocument();
   });
 
   it("shows error screen only on initial load failure", async () => {
@@ -231,5 +279,50 @@ describe("AgentDetailPage", () => {
     fireEvent.click(screen.getByText("Save draft"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Publish" })).toBeEnabled());
     expect(screen.queryByText("Save the draft before publishing")).not.toBeInTheDocument();
+  });
+
+  it("Compare with latest compares the saved draft against the latest version", async () => {
+    vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent);
+    vi.mocked(api.versions.list).mockResolvedValueOnce([version(2), version(1)]);
+    vi.mocked(compareVersions).mockResolvedValueOnce({
+      agent_id: "a1",
+      base: { version: 2, spec: baseAgent.draft_spec, spec_hash: "h2", created_at: null, created_by: null, restored_from: null },
+      target: { version: "draft", spec: baseAgent.draft_spec, spec_hash: "h2", created_at: null, created_by: null, restored_from: null },
+      identical: true,
+      changes: [],
+      truncated: false,
+      instructions_diff: [],
+    });
+
+    render(<AgentDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Compare with latest (v2)" }));
+    expect(await screen.findByText("v2 and Draft have the same spec.")).toBeInTheDocument();
+    expect(compareVersions).toHaveBeenCalledWith("a1", 2, "draft");
+  });
+
+  it("Compare with latest is disabled while unsaved changes", async () => {
+    vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent);
+    vi.mocked(api.versions.list).mockResolvedValueOnce([version(1)]);
+    render(<AgentDetailPage />);
+    const nameInput = await screen.findByDisplayValue("Base Agent");
+    fireEvent.change(nameInput, { target: { value: "Edited" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Compare with latest (v1)" })).toBeDisabled());
+  });
+
+  it("restore reloads the agent and versions and resets the editor to the restored draft", async () => {
+    const restoredAgent = { ...baseAgent, latest_version: 3, draft_spec: { ...baseAgent.draft_spec, name: "Old Name" } };
+    vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent).mockResolvedValueOnce(restoredAgent);
+    vi.mocked(api.versions.list)
+      .mockResolvedValueOnce([version(2), version(1)])
+      .mockResolvedValueOnce([{ ...version(3), restored_from: 1 }, version(2), version(1)]);
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...version(3), restored_from: 1 });
+
+    render(<AgentDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Restore version 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+
+    expect(await screen.findByText("restored from v1")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("Old Name")).toBeInTheDocument();
+    expect(restoreVersion).toHaveBeenCalledWith("a1", 1, { discardDraft: false });
   });
 });

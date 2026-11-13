@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_workflow_runs_revision():
-    assert head_revisions() == {"0007_workflow_runs"}
+def test_single_head_is_the_run_options_revision():
+    assert head_revisions() == {"0010_run_options"}
 
 
 @requires_schema

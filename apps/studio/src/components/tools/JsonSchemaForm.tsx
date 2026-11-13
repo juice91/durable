@@ -11,6 +11,8 @@ interface JsonSchemaFormProps {
   onChange: (value: JsonObject) => void;
   /** Server-side messages keyed by dotted input path ("options.retries"), e.g. from a 422. */
   errors?: Record<string, string>;
+  /** Prefix of the generated element ids (default "schema"); set it when several forms share a page. */
+  idPrefix?: string;
 }
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -19,7 +21,7 @@ function labelFor(name: string, schema: JsonSchema): string {
   return schema.title || name.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function Field({ name, schema, value, required, onChange, path, fieldPath, errors }: {
+function Field({ name, schema, value, required, onChange, path, fieldPath, errors, idPrefix }: {
   name: string;
   schema: JsonSchema;
   value: unknown;
@@ -28,10 +30,11 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
   path: string;
   fieldPath: string[];
   errors?: Record<string, string>;
+  idPrefix: string;
 }) {
   const [touched, setTouched] = useState(false);
   const label = labelFor(name, schema);
-  const id = `schema-${path}`;
+  const id = `${idPrefix}-${path}`;
   const empty = value === undefined || value === null || value === "";
   let error = touched && required && empty ? `${label} is required` : "";
   if (touched && !empty && schema.type === "integer" && !Number.isInteger(value)) error = `${label} must be an integer`;
@@ -58,6 +61,7 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
             path={`${path}-${childName}`}
             fieldPath={[...fieldPath, childName]}
             errors={errors}
+            idPrefix={idPrefix}
             onChange={(next) => onChange({ ...objectValue, [childName]: next })}
           />
         ))}
@@ -105,7 +109,7 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
   );
 }
 
-export function JsonSchemaForm({ schema, value, onChange, errors }: JsonSchemaFormProps) {
+export function JsonSchemaForm({ schema, value, onChange, errors, idPrefix = "schema" }: JsonSchemaFormProps) {
   // Errors for paths the form has no top-level field for (e.g. an unexpected key from JSON mode).
   const properties = schema.properties || {};
   const unmatched = Object.entries(errors || {}).filter(([key]) => !(key.split(".")[0] in properties));
@@ -121,6 +125,7 @@ export function JsonSchemaForm({ schema, value, onChange, errors }: JsonSchemaFo
           path={name}
           fieldPath={[name]}
           errors={errors}
+          idPrefix={idPrefix}
           onChange={(next) => onChange({ ...value, [name]: next })}
         />
       ))}

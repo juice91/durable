@@ -16,6 +16,7 @@ terminal status and no further events (e.g. a client resuming after the final ev
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -74,7 +75,9 @@ class PostgresDeltaSource:
         async with self._lock:
             self._subscribers.setdefault(run_id, set()).add(queue)
             if self._listener_task is None or self._listener_task.done():
-                self._listener_task = asyncio.create_task(self._listen_forever())
+                # A fresh, empty context: the listener outlives this request and serves every
+                # tenant, so it must not inherit the request's tenant (log context) or trace.
+                self._listener_task = asyncio.create_task(self._listen_forever(), context=contextvars.Context())
         try:
             yield self._iterate(queue)
         finally:

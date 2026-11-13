@@ -20,6 +20,8 @@ dependencies = [
     "dbos>=3.5.0",
     "uvicorn>=0.34.0",
     "eap-secrets",
+    # Processor catalog test console and RE2 validation of blocklist patterns at publish.
+    "eap-processors",
     # Workflow run input is checked against the version's input_schema, with an empty
     # referencing.Registry (no remote $ref is ever retrieved).
     "jsonschema>=4.20",
@@ -41,3 +43,4 @@ eap-run-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
+eap-processors = { workspace = true }

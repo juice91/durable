@@ -1,8 +1,25 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { listTools, type ToolDefinition } from "@/lib/tools";
 import type { AgentSpec, McpToolRef } from "@/lib/api";
 import { mcpToolKey, withMcpTools } from "@/lib/mcpServers";
 import { McpToolPicker } from "./McpToolPicker";
+import { ProcessorsEditor } from "./ProcessorsEditor";
+import { ContextFieldsEditor } from "./ContextFieldsEditor";
+import {
+  errorTarget,
+  fetchModels,
+  fetchProcessorCatalog,
+  placeholderErrors,
+  placeholders,
+  sectionsDiffer,
+  sectionsOf,
+  withClientIds,
+  withSpecSections,
+  type ContextField,
+  type EditableProcessor,
+  type ModelOption,
+  type ProcessorCatalog,
+} from "./specSections";
 
 function sameMcpTools(a: McpToolRef[], b: McpToolRef[] | undefined): boolean {
   const other = b ?? [];
@@ -14,9 +31,15 @@ interface AgentEditorProps {
   onSubmit: (spec: AgentSpec) => Promise<void>;
   submitLabel: string;
   onDirtyChange?: (isDirty: boolean) => void;
+  /**
+   * The last save or publish error from the API, if any. Messages that name a processor
+   * (`input_processors[0]...`), the instructions (`instructions: ...`) or a processor model are
+   * shown next to that part of the form.
+   */
+  serverError?: string | null;
 }
 
-export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange }: AgentEditorProps) {
+export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError }: AgentEditorProps) {
   const [name, setName] = useState(initialData?.name || "");
   const [instructions, setInstructions] = useState(initialData?.instructions || "");
   const [provider, setProvider] = useState(initialData?.model.provider || "");
@@ -25,6 +48,17 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
   const [mcpTools, setMcpTools] = useState<McpToolRef[]>(initialData?.mcp_tools || []);
   const [temperature, setTemperature] = useState<string>(initialData?.model_settings?.temperature?.toString() || "");
   const [maxTokens, setMaxTokens] = useState<string>(initialData?.model_settings?.max_tokens?.toString() || "");
+  const [inputProcessors, setInputProcessors] = useState<EditableProcessor[]>(() => withClientIds(sectionsOf(initialData).input_processors));
+  const [outputProcessors, setOutputProcessors] = useState<EditableProcessor[]>(() => withClientIds(sectionsOf(initialData).output_processors));
+  // A server error naming `<phase>_processors[i]` is pinned to that processor's clientId when it
+  // arrives, so it follows the processor through reordering and disappears when it is removed.
+  const [pinnedServerError, setPinnedServerError] = useState<{ phase: "input" | "output"; clientId: string; message: string } | null>(null);
+  const [contextFields, setContextFields] = useState<ContextField[]>(sectionsOf(initialData).context_fields);
+  const [catalog, setCatalog] = useState<ProcessorCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const instructionsRef = useRef<HTMLTextAreaElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [tools, setTools] = useState<ToolDefinition[]>([]);
@@ -36,26 +70,44 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
       .catch((error: unknown) => setToolsError(error instanceof Error ? error.message : "Failed to load tools"));
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchProcessorCatalog()
+      .then((value) => { if (!cancelled) setCatalog(value); })
+      .catch((error: unknown) => { if (!cancelled) setCatalogError(error instanceof Error ? error.message : "Failed to load processors"); });
+    fetchModels()
+      .then((value) => { if (!cancelled) setModels(value); })
+      .catch((error: unknown) => { if (!cancelled) setModelsError(error instanceof Error ? error.message : "Failed to load models"); });
+    return () => { cancelled = true; };
+  }, []);
+
   const toggleTool = (tool: string) => {
     setSelectedTools((prev) =>
       prev.includes(tool) ? prev.filter((t) => t !== tool) : [...prev, tool]
     );
   };
 
+  const computeDirty = useCallback(() => (
+    name !== initialData?.name ||
+    instructions !== initialData?.instructions ||
+    provider !== initialData?.model.provider ||
+    modelName !== initialData?.model.name ||
+    selectedTools.length !== initialData?.tools.length ||
+    selectedTools.some((t) => !initialData?.tools.includes(t)) ||
+    !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
+    temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
+    maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "") ||
+    sectionsDiffer(
+      { input_processors: inputProcessors, output_processors: outputProcessors, context_fields: contextFields },
+      sectionsOf(initialData),
+    )
+  ), [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, inputProcessors, outputProcessors, contextFields, initialData]);
+
   const updateDirtyState = useCallback(() => {
-    const isDirty = 
-      name !== initialData?.name ||
-      instructions !== initialData?.instructions ||
-      provider !== initialData?.model.provider ||
-      modelName !== initialData?.model.name ||
-      selectedTools.length !== initialData?.tools.length ||
-      selectedTools.some((t) => !initialData?.tools.includes(t)) ||
-      !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
-      temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
-      maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "");
+    const isDirty = computeDirty();
     setIsDirty(isDirty);
     onDirtyChange?.(isDirty);
-  }, [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, initialData, onDirtyChange]);
+  }, [computeDirty, onDirtyChange]);
 
   // Track initial data changes
   const prevDataRef = { current: initialData };
@@ -68,31 +120,53 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
     setMcpTools(initialData?.mcp_tools || []);
     setTemperature(initialData?.model_settings?.temperature?.toString() || "");
     setMaxTokens(initialData?.model_settings?.max_tokens?.toString() || "");
+    setInputProcessors(withClientIds(sectionsOf(initialData).input_processors));
+    setOutputProcessors(withClientIds(sectionsOf(initialData).output_processors));
+    setContextFields(sectionsOf(initialData).context_fields);
     prevDataRef.current = initialData;
   }
 
-  // Report initial dirty state on mount
+  // Report the dirty state on mount and after every change
   useEffect(() => {
-    const isDirty = 
-      name !== initialData?.name ||
-      instructions !== initialData?.instructions ||
-      provider !== initialData?.model.provider ||
-      modelName !== initialData?.model.name ||
-      selectedTools.length !== initialData?.tools.length ||
-      selectedTools.some((t) => !initialData?.tools.includes(t)) ||
-      !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
-      temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
-      maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "");
-    setIsDirty(isDirty);
-    onDirtyChange?.(isDirty);
-  }, [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, initialData, onDirtyChange]);
+    updateDirtyState();
+  }, [updateDirtyState]);
+
+  const usedPlaceholders = placeholders(instructions);
+  const instructionProblems = placeholderErrors(instructions, contextFields);
+  const target = serverError ? errorTarget(serverError) : null;
+
+  // Pin a processor error to the processor it named at the moment the error arrived. Only a new
+  // serverError re-pins; edits to the lists afterwards must not move the message.
+  useEffect(() => {
+    const t = serverError ? errorTarget(serverError) : null;
+    if (!serverError || t?.kind !== "processor") {
+      setPinnedServerError(null);
+      return;
+    }
+    const list = t.phase === "input" ? inputProcessors : outputProcessors;
+    const processor = list[t.index];
+    setPinnedServerError(processor ? { phase: t.phase, clientId: processor.clientId, message: serverError } : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverError]);
+
+  const processorErrors = (phase: "input" | "output"): Record<string, string> =>
+    pinnedServerError && pinnedServerError.phase === phase ? { [pinnedServerError.clientId]: pinnedServerError.message } : {};
+
+  const insertPlaceholder = (fieldName: string) => {
+    const token = `{{context.${fieldName}}}`;
+    const element = instructionsRef.current;
+    const start = element?.selectionStart ?? instructions.length;
+    const end = element?.selectionEnd ?? instructions.length;
+    setInstructions(instructions.slice(0, start) + token + instructions.slice(end));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
 
-    // mcp_tools is left out entirely when empty, so the spec hash stays stable.
-    const spec: AgentSpec = withMcpTools({
+    // mcp_tools, the processor lists and context_fields are left out entirely when empty, so the
+    // spec hash stays stable for agents that do not use them.
+    const spec: AgentSpec = withSpecSections(withMcpTools({
       spec_version: 1,
       name,
       instructions,
@@ -105,7 +179,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
         temperature: temperature ? parseFloat(temperature) : null,
         max_tokens: maxTokens ? parseInt(maxTokens, 10) : null,
       },
-    }, mcpTools);
+    }, mcpTools), { input_processors: inputProcessors, output_processors: outputProcessors, context_fields: contextFields });
 
     setSubmitting(true);
     try {
@@ -140,6 +214,9 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
         </label>
         <textarea
           id="instructions"
+          ref={instructionsRef}
+          aria-invalid={instructionProblems.length > 0}
+          aria-describedby="placeholder-hints instructions-problems"
           value={instructions}
           onChange={(e) => {
             setInstructions(e.target.value);
@@ -149,6 +226,30 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
           className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
           required
         />
+        <p id="placeholder-hints" data-testid="placeholder-hints" className="mt-1 text-xs text-muted-foreground">
+          {contextFields.length > 0 ? (
+            <>
+              Context placeholders:{" "}
+              {contextFields.map((field, i) => (
+                <React.Fragment key={`${field.name}-${i}`}>
+                  {i > 0 ? ", " : null}
+                  <code className="font-mono">{`{{context.${field.name}}}`}</code>
+                </React.Fragment>
+              ))}
+            </>
+          ) : (
+            <>Add request context fields below to use <code className="font-mono">{"{{context.<name>}}"}</code> placeholders.</>
+          )}
+        </p>
+        {/* Polite and persistent: announced when the problems change, not on every keystroke. */}
+        <div id="instructions-problems" aria-live="polite">
+          {instructionProblems.map((problem) => (
+            <p key={problem} data-testid="placeholder-error" className="mt-1 text-xs text-destructive">{problem}</p>
+          ))}
+        </div>
+        {target?.kind === "instructions" && serverError && !instructionProblems.some((p) => serverError.endsWith(p)) ? (
+          <p role="alert" data-testid="instructions-server-error" className="mt-1 text-xs text-destructive">{serverError}</p>
+        ) : null}
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -213,6 +314,28 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange 
       </div>
 
       <McpToolPicker value={mcpTools} onChange={setMcpTools} />
+
+      <ProcessorsEditor
+        inputProcessors={inputProcessors}
+        outputProcessors={outputProcessors}
+        onInputChange={setInputProcessors}
+        onOutputChange={setOutputProcessors}
+        catalog={catalog}
+        catalogError={catalogError}
+        models={models}
+        modelsError={modelsError}
+        sectionError={target?.kind === "processors" ? serverError : null}
+        inputErrors={processorErrors("input")}
+        outputErrors={processorErrors("output")}
+      />
+
+      <ContextFieldsEditor
+        value={contextFields}
+        onChange={setContextFields}
+        usedNames={usedPlaceholders}
+        onInsertPlaceholder={insertPlaceholder}
+        sectionError={target?.kind === "context_fields" ? serverError : null}
+      />
 
       <div className="grid grid-cols-2 gap-4">
         <div>

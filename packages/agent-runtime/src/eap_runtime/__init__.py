@@ -10,7 +10,7 @@ from eap_runtime._side_effects import (
     TicketService,
     run_side_effect,
 )
-from eap_runtime._types import RunDeps
+from eap_runtime._types import RequestContext, RunDeps
 from eap_runtime._builder import build_agent
 from eap_runtime._toolset import check_spec_tools, toolset_for_spec
 
@@ -25,6 +25,7 @@ __all__ = [
     "SideEffectOutcomeUnknown",
     "run_side_effect",
     "RunDeps",
+    "RequestContext",
     "build_agent",
     "default_registry",
     "check_spec_tools",

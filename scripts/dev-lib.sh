@@ -19,6 +19,8 @@ ensure_env() {
     export DBOS_SYSTEM_DATABASE_URL="${DBOS_SYSTEM_DATABASE_URL:-$EAP_DBOS_URL}"
     export EAP_APP_VERSION="${EAP_APP_VERSION:-m1}"
     export EAP_AUTH_MODE="${EAP_AUTH_MODE:-dev}"
+    # Loki in the LGTM container (published on loopback by compose.yaml), for GET /logs.
+    export EAP_LOKI_URL="${EAP_LOKI_URL:-http://127.0.0.1:3100}"
 }
 
 # Ensure directories exist

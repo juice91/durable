@@ -5,6 +5,8 @@ import { api, ApiError } from "@/lib/api";
 import type { Agent, AgentVersion, AgentSpec } from "@/lib/api";
 import { AgentEditor } from "@/components/agents/AgentEditor";
 import { AgentVersionsPanel } from "@/components/agents/AgentVersionsPanel";
+import { VersionCompare } from "@/components/agents/VersionCompare";
+import { errorTarget } from "@/components/agents/specSections";
 
 export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -15,6 +17,9 @@ export default function AgentDetailPage() {
   const [publishing, setPublishing] = useState(false);
   const [lastPublishResult, setLastPublishResult] = useState<{ type: "success"; version: number } | { type: "conflict"; message: string } | null>(null);
   const [isDirty, setIsDirty] = useState(false);
+  const [comparingDraft, setComparingDraft] = useState(false);
+  // Bumped after a restore replaces the draft, so the editor re-reads it.
+  const [editorKey, setEditorKey] = useState(0);
   const router = useRouter();
   const params = useParams();
 
@@ -49,6 +54,7 @@ export default function AgentDetailPage() {
       setAgent(updated);
       setSaveError(null);
       setIsDirty(false);
+      setComparingDraft(false);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setSaveError(err.message || "Failed to save draft");
@@ -83,6 +89,23 @@ export default function AgentDetailPage() {
     }
   };
 
+  const handleRestored = async () => {
+    if (!agent) return;
+    setLastPublishResult(null);
+    setComparingDraft(false);
+    try {
+      const [updated, versionsData] = await Promise.all([api.agents.get(agent.id), api.versions.list(agent.id)]);
+      setAgent(updated);
+      setVersions(versionsData);
+      setIsDirty(false);
+      setEditorKey((key) => key + 1);
+    } catch {
+      setSaveError("Version restored, but reloading the agent failed; refresh the page");
+    }
+  };
+
+  const latestVersion = versions.reduce((max, v) => Math.max(max, v.version), 0);
+
   if (loadError && !agent) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -112,7 +135,8 @@ export default function AgentDetailPage() {
           <p className="text-sm text-muted-foreground mt-1">ID: {agent.id}</p>
         </div>
 
-        {saveError && (
+        {/* Errors that name a part of the form (a processor, the instructions) show inline there instead. */}
+        {saveError && !errorTarget(saveError) && (
           <div role="alert" data-testid="agent-save-error" className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">
             {saveError}
           </div>
@@ -131,15 +155,35 @@ export default function AgentDetailPage() {
             </div>
           )}
           <AgentEditor
+            key={editorKey}
             initialData={agent.draft_spec}
             onSubmit={handleSaveDraft}
             submitLabel="Save draft"
             onDirtyChange={setIsDirty}
+            serverError={saveError}
           />
           <div className="mt-4">
             {isDirty ? (
               <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-yellow-700 text-sm">
                 Save the draft before publishing
+              </div>
+            ) : null}
+            {latestVersion > 0 ? (
+              <div className="mb-3">
+                <button
+                  type="button"
+                  onClick={() => setComparingDraft((open) => !open)}
+                  disabled={isDirty}
+                  aria-expanded={comparingDraft}
+                  className="w-full rounded-md border border-border px-4 py-2 text-sm text-foreground hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {comparingDraft ? "Hide compare" : `Compare with latest (v${latestVersion})`}
+                </button>
+                {comparingDraft && !isDirty ? (
+                  <div className="mt-3">
+                    <VersionCompare agentId={agent.id} base={latestVersion} target="draft" onClose={() => setComparingDraft(false)} />
+                  </div>
+                ) : null}
               </div>
             ) : null}
             <button
@@ -152,7 +196,7 @@ export default function AgentDetailPage() {
           </div>
         </div>
 
-        <AgentVersionsPanel versions={versions} />
+        <AgentVersionsPanel versions={versions} agentId={agent.id} hasUnsavedEdits={isDirty} onRestored={handleRestored} />
     </div>
   );
 }

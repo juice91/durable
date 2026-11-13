@@ -59,7 +59,7 @@ def test_workflow_runs_revision_round_trip():
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT id, kind, workflow_id, parent_run_id FROM runs ORDER BY id")).all()
             assert [tuple(r) for r in rows] == [("a1", "agent", None, None), ("tl", "tool", None, None)]
-            assert schema_diff(conn) == []
+            # No schema_diff here: the models are at head (0008+); the round trip ends at head and checks it there.
 
         wf = {**_BLANK, "id": "w1", "kind": "workflow", "workflow_id": "wf", "workflow_version": 1}
         child = {**_BLANK, "id": "c1", "kind": "agent", "agent_id": "ag", "agent_version": 1,

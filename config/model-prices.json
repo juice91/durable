@@ -1,0 +1,10 @@
+{
+  "models": {
+    "test:*": [
+      {"effective_from": "2026-01-01", "input_per_mtok": "0", "output_per_mtok": "0"}
+    ],
+    "litellm:*": [
+      {"effective_from": "2026-01-01", "input_per_mtok": "0", "output_per_mtok": "0"}
+    ]
+  }
+}

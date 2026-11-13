@@ -8,14 +8,28 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from pydantic.functional_validators import model_validator
 
 from eap_schemas.mcp import McpToolRef, mcp_tool_name
+from eap_schemas.model_ref import ModelRef
+from eap_schemas.processors import (
+    MAX_PROCESSORS_PER_PHASE,
+    PROCESSOR_DECLARATIONS,
+    ModerationVerdict,
+    ProcessorDeclaration,
+    ProcessorSpec,
+)
+from eap_schemas.request_context import MAX_CONTEXT_FIELDS, ContextField
 from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
 
 __all__ = (
     "AgentSpec",
     "AgentVersion",
+    "ContextField",
     "McpToolRef",
     "ModelRef",
     "ModelSettings",
+    "ModerationVerdict",
+    "PROCESSOR_DECLARATIONS",
+    "ProcessorDeclaration",
+    "ProcessorSpec",
     "RunEvent",
     "RunEventType",
     "TOOL_DECLARATIONS",
@@ -23,35 +37,6 @@ __all__ = (
     "canonical_spec_hash",
     "mcp_tool_name",
 )
-
-
-class ModelRef(BaseModel):
-    """Reference to a model provider and name."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider: str
-    name: str
-
-    @field_validator("provider")
-    @classmethod
-    def validate_provider(cls, v):
-        """Validate provider is non-empty."""
-        if not v:
-            raise ValueError("provider cannot be empty")
-        if len(v) > 128:
-            raise ValueError("provider must be at most 128 characters")
-        return v
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v):
-        """Validate name is non-empty."""
-        if not v:
-            raise ValueError("name cannot be empty")
-        if len(v) > 128:
-            raise ValueError("name must be at most 128 characters")
-        return v
 
 
 class ModelSettings(BaseModel):
@@ -77,13 +62,31 @@ class AgentSpec(BaseModel):
     # MCP tools of the tenant's registered servers. Left out of every dump while empty, so specs
     # stored before this field existed keep their exact JSON and canonical_spec_hash.
     mcp_tools: Tuple[McpToolRef, ...] = ()
+    # Guardrails (eap_schemas.processors) and typed request context (eap_schemas.request_context),
+    # milestone P0. Same rule as mcp_tools: left out of every dump while empty, so the JSON and
+    # canonical_spec_hash of every spec stored before they existed stay exactly the same.
+    input_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    output_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    context_fields: Tuple[ContextField, ...] = Field(default=(), max_length=MAX_CONTEXT_FIELDS)
 
     @model_serializer(mode="wrap")
-    def _omit_empty_mcp_tools(self, handler):
+    def _omit_empty_optional_fields(self, handler):
         data = handler(self)
-        if not self.mcp_tools and isinstance(data, dict):
-            data.pop("mcp_tools", None)
+        if isinstance(data, dict):
+            for name in _OMIT_WHEN_EMPTY:
+                if not getattr(self, name):
+                    data.pop(name, None)
         return data
+
+    @model_validator(mode="after")
+    def check_context_fields(self):
+        """Context field names are unique."""
+        seen: set[str] = set()
+        for field in self.context_fields:
+            if field.name in seen:
+                raise ValueError(f"duplicate context field: {field.name}")
+            seen.add(field.name)
+        return self
 
     @model_validator(mode="after")
     def check_tool_names(self):
@@ -151,6 +154,11 @@ class AgentSpec(BaseModel):
             seen.add(tool_id)
 
         return tuple(tool_ids)
+
+
+# AgentSpec fields added after specs were first stored: omitted from dumps (and so from the hash)
+# while empty.
+_OMIT_WHEN_EMPTY = ("mcp_tools", "input_processors", "output_processors", "context_fields")
 
 
 def canonical_spec_hash(spec: AgentSpec) -> str:

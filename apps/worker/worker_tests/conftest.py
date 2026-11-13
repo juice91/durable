@@ -21,6 +21,12 @@ APP_DB_URL = os.environ.get(
 )
 DBOS_DB_URL = os.environ.get("EAP_TEST_DBOS_URL", "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos")
 APP_VERSION = "m1-test"
+# Usage cost (P0.1): price test:* at fixed non-zero values, so cost arithmetic is checkable. Set at
+# import, so subprocess workers started by tests inherit it.
+MODEL_PRICES_TEST_FILE = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "config", "model-prices.test.json"
+)
+os.environ.setdefault("EAP_MODEL_PRICES_FILE", os.path.abspath(MODEL_PRICES_TEST_FILE))
 
 
 def new_schema(prefix: str) -> str:
@@ -106,6 +112,7 @@ def cleanup_tenant(engine, tenant_id: str) -> None:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
         conn.execute(text("DELETE FROM fake_external_tickets WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM fake_external_ticket_calls WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM run_model_requests WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})

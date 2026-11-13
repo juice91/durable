@@ -7,6 +7,10 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline } from "@/components/runs/EventTimeline";
 import { RunSubject } from "@/components/runs/RunSubject";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
+import { TraceView } from "@/components/traces/TraceView";
+import { tracePath } from "@/lib/traces";
+
+const RUN_TABS = ["events", "trace"] as const;
 
 function failedEventStatus(status: unknown): "failed" | "needs_attention" {
   return status === "needs_attention" ? "needs_attention" : "failed";
@@ -17,6 +21,7 @@ export default function RunDetailPage() {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [partialText, setPartialText] = useState<Record<string, { text: string; attempt: string }>>({});
+  const [tab, setTab] = useState<(typeof RUN_TABS)[number]>("events");
   const router = useRouter();
   const params = useParams();
 
@@ -183,10 +188,53 @@ export default function RunDetailPage() {
           )}
         </div>
 
-        <div className="bg-card rounded-lg shadow p-6">
-          <h2 className="text-lg font-semibold mb-4 text-card-foreground">Event Timeline</h2>
-          <EventTimeline events={events} currentPartialText={partialText} status={status} />
+        <div role="tablist" aria-label="Run views" className="mb-3 flex items-center gap-1 border-b border-border">
+          {RUN_TABS.map((t, i) => (
+            <button
+              key={t}
+              type="button"
+              role="tab"
+              id={`run-tab-${t}`}
+              aria-selected={tab === t}
+              aria-controls={`run-panel-${t}`}
+              tabIndex={tab === t ? 0 : -1}
+              onClick={() => setTab(t)}
+              onKeyDown={(e) => {
+                // WAI-ARIA tabs: arrows (wrapping), Home and End move and activate.
+                const last = RUN_TABS.length - 1;
+                const next =
+                  e.key === "ArrowRight" ? (i === last ? 0 : i + 1)
+                  : e.key === "ArrowLeft" ? (i === 0 ? last : i - 1)
+                  : e.key === "Home" ? 0
+                  : e.key === "End" ? last
+                  : null;
+                if (next === null) return;
+                e.preventDefault();
+                setTab(RUN_TABS[next]);
+                document.getElementById(`run-tab-${RUN_TABS[next]}`)?.focus();
+              }}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium ${
+                tab === t ? "border-primary text-card-foreground" : "border-transparent text-muted-foreground hover:text-card-foreground"
+              }`}
+            >
+              {t === "events" ? "Events" : "Trace"}
+            </button>
+          ))}
         </div>
+
+        {tab === "events" ? (
+          <div id="run-panel-events" role="tabpanel" aria-labelledby="run-tab-events" className="bg-card rounded-lg shadow p-6">
+            <h2 className="text-lg font-semibold mb-4 text-card-foreground">Event Timeline</h2>
+            <EventTimeline events={events} currentPartialText={partialText} status={status} />
+          </div>
+        ) : (
+          <div id="run-panel-trace" role="tabpanel" aria-labelledby="run-tab-trace" className="space-y-2">
+            <a href={tracePath(run.run_id)} className="text-xs text-primary underline-offset-4 hover:underline">
+              Open full trace view
+            </a>
+            <TraceView runId={run.run_id} embedded />
+          </div>
+        )}
     </div>
   );
 }

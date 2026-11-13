@@ -1,29 +1,42 @@
 """Postgres store for durable runs and event logging."""
 
-from eap_run_store.cursor import InvalidRunCursor, RunCursor
+from eap_run_store.cursor import ConversationCursor, InvalidRunCursor, RunCursor
 from eap_run_store.store import (
     RunStore,
     EventLog,
     PostgresSideEffectStore,
     ConversationIdConflict,
     ConversationNotFound,
+    CONVERSATION_TITLE_MAX_LENGTH,
     RunIdConflict,
     RunNotFound,
     ENQUEUE_FAILED_ERROR,
     RUN_KINDS,
     TERMINAL_RUN_STATUSES,
     TurnInProgress,
+    auto_title,
     get_side_effect_store,
+)
+from eap_run_store.metrics import (
+    METRICS,
+    MetricsQuery,
+    MetricsQueryTimeout,
+    MetricsRangeError,
+    MetricsStore,
 )
 from eap_run_store.store import (
     Base,
     ConversationModel,
     RunModel,
     ExecutionEventModel,
+    RunModelRequestModel,
     SideEffectModel,
 )
 
 __all__ = [
+    "ConversationCursor",
+    "CONVERSATION_TITLE_MAX_LENGTH",
+    "auto_title",
     "InvalidRunCursor",
     "RunCursor",
     "RunStore",
@@ -42,5 +55,11 @@ __all__ = [
     "ConversationModel",
     "RunModel",
     "ExecutionEventModel",
+    "RunModelRequestModel",
     "SideEffectModel",
+    "METRICS",
+    "MetricsQuery",
+    "MetricsQueryTimeout",
+    "MetricsRangeError",
+    "MetricsStore",
 ]

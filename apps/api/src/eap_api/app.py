@@ -90,6 +90,28 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.workflow_runs import router as workflow_runs_router
 
     app.include_router(workflow_runs_router, prefix="/api/v1")
+    # Log search over Loki (EAP_LOKI_URL), tenant-scoped: GET /logs.
+    from eap_api.routes.logs import router as logs_router
+
+    app.include_router(logs_router, prefix="/api/v1")
+    # Processors (P0.9): GET /processors, POST /processors/test, GET /processor-results.
+    from eap_api.routes.processors import router as processors_router
+
+    app.include_router(processors_router, prefix="/api/v1")
+    # Run options (P0.8): GET /models; an agent's request context fields, schema and validation.
+    from eap_api.routes.models import router as models_router
+    from eap_api.routes.request_context import router as request_context_router
+
+    app.include_router(models_router, prefix="/api/v1")
+    app.include_router(request_context_router, prefix="/api/v1")
+    # Tenant-scoped run, token and cost metrics (P0.6): GET /metrics/summary|timeseries|breakdown.
+    from eap_api.routes.metrics import router as metrics_router
+
+    app.include_router(metrics_router, prefix="/api/v1")
+    # Built-in trace view (P0.7): GET /runs/{run_id}/trace, derived from durable events.
+    from eap_api.routes.traces import router as traces_router
+
+    app.include_router(traces_router, prefix="/api/v1")
     
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

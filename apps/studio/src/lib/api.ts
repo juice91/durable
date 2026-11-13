@@ -35,6 +35,8 @@ export interface AgentVersion {
   spec_hash: string;
   created_at: string;
   created_by: string;
+  /** Set when this version was published by restoring an older one. */
+  restored_from?: number | null;
 }
 
 export class ApiError extends Error {

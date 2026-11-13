@@ -1,20 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import TracesPage from "./page";
-import { listRuns } from "@/lib/runs";
+import { EMPTY_FILTERS, listTraceRuns as listRuns } from "@/lib/traces";
 import { api } from "@/lib/api";
 
+const nav = vi.hoisted(() => ({ query: "", replace: vi.fn() }));
+
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: nav.replace }),
+  useSearchParams: () => new URLSearchParams(nav.query),
 }));
 
-vi.mock("@/lib/runs", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/lib/runs")>();
+vi.mock("@/lib/traces", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/traces")>();
   return {
     ...original,
-    listRuns: vi.fn(),
+    listTraceRuns: vi.fn(),
   };
 });
 
@@ -54,6 +57,7 @@ describe("TracesPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    nav.query = "";
     vi.mocked(api.agents.list).mockResolvedValue([
       {
         id: "agent-1",
@@ -109,20 +113,18 @@ describe("TracesPage", () => {
     render(<TracesPage />);
 
     await waitFor(() => {
-      expect(listRuns).toHaveBeenCalledWith({
-        limit: 50,
-        before: undefined,
-        status: undefined,
-      });
+      expect(listRuns).toHaveBeenCalledWith(EMPTY_FILTERS, { limit: 50, before: undefined });
     });
   });
 
   it("shows the agent name instead of its UUID", async () => {
-    vi.mocked(listRuns).mockResolvedValue(mockResponse as any);
+    (listRuns as any).mockResolvedValue(mockResponse);
 
     render(<TracesPage />);
 
-    expect(await screen.findByText("Support assistant")).toBeInTheDocument();
+    // The name also appears in the agent filter's options, so look in the table.
+    const table = await screen.findByRole("table");
+    expect(await within(table).findByText("Support assistant")).toBeInTheDocument();
     expect(screen.queryByText("agent-1")).not.toBeInTheDocument();
   });
 
@@ -161,7 +163,7 @@ describe("TracesPage", () => {
 
     expect(await screen.findByRole("columnheader", { name: "Agent / Tool / Workflow" })).toBeInTheDocument();
     // Both the plain agent and the child row carry this name as a direct text node.
-    expect(await screen.findAllByText("Support assistant")).toHaveLength(2);
+    expect(await within(screen.getByRole("table")).findAllByText("Support assistant")).toHaveLength(2);
 
     const subjects = screen.getAllByTestId("run-subject");
     const plainAgent = subjects.find((node) => node.getAttribute("data-kind") === "agent" && !node.textContent?.includes("Part of"));
@@ -179,5 +181,142 @@ describe("TracesPage", () => {
     expect(child).toHaveTextContent("Part of workflow run parent-r... (step classify)");
     expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
     expect(screen.queryByText(/Tool: unknown/)).toBeNull();
+  });
+  it("shows model, tokens, cost and duration columns, and 'not recorded' for a run without usage", async () => {
+    (listRuns as any).mockResolvedValue({
+      items: [
+        { ...mockRuns[0], run_id: "run-usage", model_id: "openai:gpt-4.1-mini", model_overridden: true, input_tokens: 1200, output_tokens: 34,
+          cost_usd: "0.0012000000", started_at: "2026-11-12T10:00:01Z", finished_at: "2026-11-12T10:00:03.500Z" },
+        { ...mockRuns[0], run_id: "run-old", created_at: "2026-11-11T10:00:00Z", updated_at: "2026-11-11T10:00:02Z" },
+        { ...mockRuns[0], run_id: "run-unpriced", created_at: "2026-11-10T10:00:00Z", input_tokens: 5, output_tokens: 6, cost_usd: null },
+      ],
+      next_before: null,
+    });
+    render(<TracesPage />);
+    const rows = await screen.findAllByTestId("trace-row");
+    expect(rows[0].querySelector("[data-testid='trace-row-model']")).toHaveTextContent("openai:gpt-4.1-mini(override)");
+    expect(rows[0].querySelector("[data-testid='trace-row-tokens']")).toHaveTextContent("1,200 / 34");
+    expect(rows[0].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("$0.0012");
+    expect(rows[0].querySelector("[data-testid='trace-row-duration']")).toHaveTextContent("2.50 s");
+    expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", "/traces/run-usage");
+    expect(rows[1].querySelector("[data-testid='trace-row-tokens']")).toHaveTextContent("not recorded");
+    expect(rows[1].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("not recorded");
+    expect(rows[2].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("no price");
+  });
+
+  it("reads the drill-down filters from the URL and writes filter changes back", async () => {
+    nav.query = "status=failed,needs_attention&model=openai%3Agpt-4.1&from=2026-11-01T00%3A00%3A00&to=2026-11-02T00%3A00%3A00&agent_id=agent-1&kind=agent";
+    (listRuns as any).mockResolvedValue(mockResponse);
+    render(<TracesPage />);
+    await waitFor(() => expect(listRuns).toHaveBeenCalled());
+    expect((listRuns as any).mock.calls[0][0]).toEqual({
+      status: ["failed", "needs_attention"], model: "openai:gpt-4.1", provider: null,
+      from: "2026-11-01T00:00:00", to: "2026-11-02T00:00:00", agent_id: "agent-1", kind: "agent",
+    });
+    expect((screen.getByLabelText(/model/i) as HTMLInputElement).value).toBe("openai:gpt-4.1");
+
+    fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "completed" } });
+    const url = nav.replace.mock.calls.at(-1)![0] as string;
+    const params = new URLSearchParams(url.split("?")[1]);
+    expect(url.startsWith("/traces?")).toBe(true);
+    expect(params.get("status")).toBe("completed");
+    expect(params.get("model")).toBe("openai:gpt-4.1");
+    expect(params.get("agent_id")).toBe("agent-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(nav.replace).toHaveBeenLastCalledWith("/traces");
+  });
+
+  it("commits a text filter on Enter", async () => {
+    (listRuns as any).mockResolvedValue(mockResponse);
+    render(<TracesPage />);
+    const provider = await screen.findByLabelText(/provider/i);
+    fireEvent.change(provider, { target: { value: "anthropic" } });
+    fireEvent.keyDown(provider, { key: "Enter" });
+    expect(nav.replace).toHaveBeenLastCalledWith("/traces?provider=anthropic");
+  });
+
+  it("drops a slower response for old filters and a stale Load more page", async () => {
+    const deferred = () => {
+      let resolve!: (v: unknown) => void;
+      const promise = new Promise((r) => { resolve = r; });
+      return { promise, resolve };
+    };
+    const row = (id: string, at: string) => ({ ...mockRuns[0], run_id: id, created_at: at });
+    const first = deferred();
+    (listRuns as any).mockReturnValueOnce(first.promise);
+    const view = render(<TracesPage />);
+
+    // The filter changes before the first (unfiltered) response arrives.
+    const second = deferred();
+    (listRuns as any).mockReturnValueOnce(second.promise);
+    nav.query = "status=failed";
+    view.rerender(<TracesPage />);
+    await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(2));
+
+    await act(async () => second.resolve({ items: [row("run-new", "2026-11-12T10:00:00Z")], next_before: "cursor-new" }));
+    await act(async () => first.resolve({ items: [row("run-old", "2026-11-12T11:00:00Z")], next_before: "cursor-old" }));
+    let ids = screen.getAllByTestId("trace-row").map((r) => r.querySelector("[data-testid='trace-row-open']")!.getAttribute("href"));
+    expect(ids).toEqual(["/traces/run-new"]);
+
+    // Load more for "failed", then the filter changes again before that page arrives.
+    const more = deferred();
+    (listRuns as any).mockReturnValueOnce(more.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect((listRuns as any).mock.calls[2]).toEqual([expect.objectContaining({ status: ["failed"] }), { limit: 50, before: "cursor-new" }]);
+    const third = deferred();
+    (listRuns as any).mockReturnValueOnce(third.promise);
+    nav.query = "status=completed";
+    view.rerender(<TracesPage />);
+    await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(4));
+    await act(async () => third.resolve({ items: [row("run-completed", "2026-11-12T09:00:00Z")], next_before: null }));
+    await act(async () => more.resolve({ items: [row("run-stale-page", "2026-11-12T08:00:00Z")], next_before: null }));
+    ids = screen.getAllByTestId("trace-row").map((r) => r.querySelector("[data-testid='trace-row-open']")!.getAttribute("href"));
+    expect(ids).toEqual(["/traces/run-completed"]);
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("forgets the old filters' cursor when the new filters' first page fails", async () => {
+    (listRuns as any).mockResolvedValueOnce({ items: mockRuns, next_before: "cursor-a" });
+    const view = render(<TracesPage />);
+    expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
+
+    (listRuns as any).mockRejectedValueOnce(new Error("Service unavailable"));
+    nav.query = "status=failed";
+    view.rerender(<TracesPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(screen.queryAllByTestId("trace-row")).toHaveLength(0);
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    for (const call of (listRuns as any).mock.calls) expect(call[1].before).toBeUndefined();
+  });
+
+  it("dims the old rows (aria-busy) while a new first page loads", async () => {
+    (listRuns as any).mockResolvedValueOnce({ items: mockRuns, next_before: null });
+    const view = render(<TracesPage />);
+    await screen.findAllByTestId("trace-row");
+    expect(screen.getByTestId("traces-table")).toHaveAttribute("aria-busy", "false");
+
+    let resolve!: (v: unknown) => void;
+    (listRuns as any).mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    nav.query = "kind=tool";
+    view.rerender(<TracesPage />);
+    await waitFor(() => expect(screen.getByTestId("traces-table")).toHaveAttribute("aria-busy", "true"));
+    expect(screen.getByTestId("traces-table").className).toContain("opacity-50");
+    await act(async () => resolve({ items: [{ ...mockRuns[0], run_id: "run-tool" }], next_before: null }));
+    expect(screen.getByTestId("traces-table")).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByTestId("trace-row-open")).toHaveAttribute("href", "/traces/run-tool");
+  });
+
+  it("clears the old error as soon as the next first page starts", async () => {
+    (listRuns as any).mockRejectedValueOnce(new Error("boom"));
+    const view = render(<TracesPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+
+    (listRuns as any).mockReturnValueOnce(new Promise(() => undefined));
+    nav.query = "kind=agent";
+    view.rerender(<TracesPage />);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByText("Loading runs...")).toBeInTheDocument();
   });
 });

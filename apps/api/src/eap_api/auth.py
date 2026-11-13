@@ -4,6 +4,7 @@ import os
 import re
 from typing import Annotated
 
+from eap_observability import bind_log_context
 from fastapi import Depends, Header, HTTPException, status
 from pydantic import BaseModel
 
@@ -80,4 +81,8 @@ async def current_principal(
             detail=f"Invalid user ID format",
         )
     
-    return Principal(tenant_id=tenant_id.strip(), user_id=user_id.strip())
+    principal = Principal(tenant_id=tenant_id.strip(), user_id=user_id.strip())
+    # Log records for the rest of this request carry eap.tenant_id (the logs API filters on it). An
+    # async dependency runs in the request's own task, so the binding ends with the request.
+    bind_log_context(tenant_id=principal.tenant_id)
+    return principal

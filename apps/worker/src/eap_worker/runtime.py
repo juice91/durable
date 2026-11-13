@@ -20,7 +20,7 @@ from sqlalchemy.engine import Engine
 
 from eap_db import require_schema_at_head
 from eap_run_store import EventLog, PostgresSideEffectStore, RunStore
-from eap_runtime import RunDeps, ToolRegistry, default_registry
+from eap_runtime import RequestContext, RunDeps, ToolRegistry, default_registry
 from eap_schemas import AgentSpec
 from eap_worker.config import DELTA_CHANNEL, WorkerSettings
 from eap_worker.crash import crash_point
@@ -34,7 +34,8 @@ _MAX_DELTA_CHARS = 2000
 
 @dataclass(frozen=True)
 class WorkerDeps(RunDeps):
-    """Run deps for the generic agent: the runtime's RunDeps plus the run's published spec."""
+    """Run deps for the generic agent: the runtime's RunDeps (with the run's read-only
+    `request_context`) plus the run's spec (published version, or a draft run's snapshot)."""
 
     spec: AgentSpec
     allowed_tools: frozenset[str]
@@ -72,7 +73,9 @@ class WorkerRuntime:
             return frozenset(self.registry.tool_ids())
         return self.settings.allowed_tools
 
-    def deps_for(self, run_id: str, tenant_id: str, spec: AgentSpec) -> WorkerDeps:
+    def deps_for(
+        self, run_id: str, tenant_id: str, spec: AgentSpec, request_context: dict[str, Any] | None = None
+    ) -> WorkerDeps:
         return WorkerDeps(
             tenant_id=tenant_id,
             run_id=UUID(run_id),
@@ -80,6 +83,7 @@ class WorkerRuntime:
             ticket_service=_CrashAfterCallTicketService(self.tickets.for_tenant(tenant_id)),
             spec=spec,
             allowed_tools=self.allowed_tools,
+            request_context=RequestContext(request_context),
         )
 
     def tool_deps_for(self, run_id: str, tenant_id: str) -> RunDeps:

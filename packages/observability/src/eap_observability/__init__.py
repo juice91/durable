@@ -39,6 +39,15 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from opentelemetry.trace import Span, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from eap_observability.logcontext import (
+    RUN_LOG_ATTRIBUTE,
+    TENANT_LOG_ATTRIBUTE,
+    LogContextProcessor,
+    bind_log_context,
+    current_log_context,
+    log_context,
+    reset_log_context,
+)
 from eap_observability.redaction import (
     LOCAL_ONLY_LOG_ATTRIBUTE,
     RedactingLogProcessor,
@@ -131,9 +140,10 @@ def setup_logging(
         assert endpoint is not None
         exporter = OTLPLogExporter(endpoint=_signal_url(endpoint, "logs"))
     provider = LoggerProvider(resource=Resource.create({"service.name": service_name}))
-    # Every record on this provider (ours, and other libraries' handlers such as DBOS's) is cleaned
-    # before export: no exception text, tracebacks, credentials or local-only records.
-    provider.add_log_record_processor(RedactingLogProcessor(BatchLogRecordProcessor(exporter)))
+    # Every record on this provider (ours, and other libraries' handlers such as DBOS's) gets the
+    # current tenant and run ids (eap.tenant_id, eap.run_id; see log_context) and is cleaned before
+    # export: no exception text, tracebacks, credentials or local-only records.
+    provider.add_log_record_processor(LogContextProcessor(RedactingLogProcessor(BatchLogRecordProcessor(exporter))))
     # Global, so DBOS's own log handler (enable_otlp) exports through it instead of warning.
     set_logger_provider(provider)
     handler = LoggingHandler(level=level, logger_provider=provider)
@@ -220,7 +230,8 @@ def run_span(
 
     With `traceparent` (the API request span stored on the run) it is that span's child, so the
     run joins the request's trace; an unreadable traceparent falls back to the current context.
-    Non-recording when telemetry is off.
+    Non-recording when telemetry is off. Log records emitted inside the block carry the run's
+    `eap.tenant_id` and `eap.run_id` (log_context), whether or not telemetry is on.
     """
     provider = tracer_provider or _state.tracer_provider
     tracer = provider.get_tracer("eap_observability") if provider is not None else trace.NoOpTracer()
@@ -235,7 +246,10 @@ def run_span(
         "eap.agent_id": str(agent_id),
         "eap.agent_version": version,
     }
-    with tracer.start_as_current_span("eap.run", context=parent, attributes=attributes) as span:
+    with (
+        log_context(tenant_id=tenant_id, run_id=str(run_id)),
+        tracer.start_as_current_span("eap.run", context=parent, attributes=attributes) as span,
+    ):
         yield span
 
 
@@ -255,6 +269,13 @@ def set_run_outcome(span: Span, status: str, error_code: str | None = None) -> N
 
 __all__ = [
     "DBOS_OTEL_CARRIER_ATTRIBUTE",
+    "RUN_LOG_ATTRIBUTE",
+    "TENANT_LOG_ATTRIBUTE",
+    "LogContextProcessor",
+    "bind_log_context",
+    "current_log_context",
+    "log_context",
+    "reset_log_context",
     "LOCAL_ONLY_LOG_ATTRIBUTE",
     "exception_type",
     "log_failure",

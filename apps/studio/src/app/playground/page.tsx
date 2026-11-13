@@ -23,12 +23,14 @@ import {
   conversationToThread,
   type ThreadTurn,
 } from "@/components/playground/thread";
+import { ConversationRail } from "@/components/playground/ConversationRail";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { api, type Agent } from "@/lib/api";
 import {
   createConversation,
   getConversation,
   startTurn,
+  type Conversation,
 } from "@/lib/conversations";
 import {
   deltaReducer,
@@ -54,6 +56,13 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
 
 function failedEventStatus(status: unknown): "failed" | "needs_attention" {
   return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
+function setConversationParam(id: string | null) {
+  const url = new URL(window.location.href);
+  if (id === null) url.searchParams.delete("conversation");
+  else url.searchParams.set("conversation", id);
+  window.history.replaceState({}, "", url);
 }
 
 function messageText(message: AppendMessage): string {
@@ -167,8 +176,14 @@ export default function PlaygroundPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [runActive, setRunActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [railRefresh, setRailRefresh] = useState(0);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const restoredRef = useRef(false);
+  // Bumped whenever the thread switches (select, new conversation, agent change): a load or a turn
+  // start begun for the previous thread must not write into the new one or subscribe.
+  const generationRef = useRef(0);
+
+  const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
 
   const stopSubscription = useCallback(() => {
     unsubscribeRef.current?.();
@@ -215,6 +230,7 @@ export default function PlaygroundPage() {
           });
           if (nextEvent.type === "run_completed" || nextEvent.type === "run_failed") {
             setRunActive(false);
+            refreshRail();
           }
         },
         onDelta: (delta) => {
@@ -243,7 +259,7 @@ export default function PlaygroundPage() {
           ? subscribeRun(runId, handlers)
           : subscribeRun(runId, handlers, { initialLastSeq });
     },
-    [stopSubscription, updateTurn],
+    [refreshRail, stopSubscription, updateTurn],
   );
 
   useEffect(() => {
@@ -267,16 +283,19 @@ export default function PlaygroundPage() {
     };
   }, []);
 
-  // Reload: rebuild the whole thread from ?conversation=<id> and follow the in-flight turn, if any.
-  useEffect(() => {
-    if (!agentsLoaded || restoredRef.current) return;
-    restoredRef.current = true;
-    const id = new URLSearchParams(window.location.search).get("conversation");
-    if (!id) return;
-
-    let cancelled = false;
-    setRunActive(true);
-    void (async () => {
+  // Rebuild a whole thread from the API and follow its in-flight turn, if any. Used on reload
+  // (?conversation=<id>) and when a conversation is picked in the rail. Leaving a thread whose turn
+  // is streaming only stops this page's subscription: the run goes on server-side and is followed
+  // again when the thread is opened again.
+  const loadConversation = useCallback(
+    async (id: string) => {
+      stopSubscription();
+      const generation = ++generationRef.current;
+      const current = () => generation === generationRef.current;
+      setConversationId(id);
+      setTurns([]);
+      setError(null);
+      setRunActive(true);
       try {
         const conversation = await getConversation(id);
         const loaded = await Promise.all(
@@ -285,7 +304,7 @@ export default function PlaygroundPage() {
             events: await listEvents(run.run_id),
           })),
         );
-        if (cancelled) return;
+        if (!current()) return;
         setConversationId(conversation.id);
         setSelectedAgentId(conversation.agent_id);
         setTurns(
@@ -298,7 +317,6 @@ export default function PlaygroundPage() {
             error: run.error,
           })),
         );
-        setError(null);
         const latest = loaded[loaded.length - 1];
         if (!latest || TERMINAL_STATUSES.has(latest.run.display_status)) {
           setRunActive(false);
@@ -308,35 +326,56 @@ export default function PlaygroundPage() {
           // Recorded but maybe never started (the start request was interrupted): retrying the
           // same turn is idempotent and enqueues it if it was not.
           await startTurn(conversation.id, latest.run.run_id, latest.run.input).catch(() => undefined);
-          if (cancelled) return;
+          if (!current()) return;
         }
         const lastSeq = latest.events.reduce((max, item) => Math.max(max, item.seq), -1);
         followRun(latest.run.run_id, lastSeq);
       } catch {
-        if (!cancelled) {
+        if (current()) {
           setRunActive(false);
           setError("Failed to load conversation.");
         }
       }
-    })();
+    },
+    [followRun, stopSubscription],
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [agentsLoaded, followRun]);
+  // Reload: rebuild the thread named by ?conversation=<id>.
+  useEffect(() => {
+    if (!agentsLoaded || restoredRef.current) return;
+    restoredRef.current = true;
+    const id = new URLSearchParams(window.location.search).get("conversation");
+    if (id) void loadConversation(id);
+  }, [agentsLoaded, loadConversation]);
+
+  // Unmounting drops any pending load or turn start, as a thread switch does.
+  useEffect(
+    () => () => {
+      generationRef.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => stopSubscription, [stopSubscription]);
 
   const resetConversation = useCallback(() => {
     stopSubscription();
+    generationRef.current += 1;
     setConversationId(null);
     setTurns([]);
     setRunActive(false);
     setError(null);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("conversation");
-    window.history.replaceState({}, "", url);
+    setConversationParam(null);
   }, [stopSubscription]);
+
+  const handleSelectConversation = useCallback(
+    (conversation: Conversation) => {
+      if (conversation.id === conversationId) return;
+      setConversationParam(conversation.id);
+      void loadConversation(conversation.id);
+    },
+    [conversationId, loadConversation],
+  );
 
   const handleNewMessage = useCallback(
     async (message: AppendMessage) => {
@@ -347,6 +386,8 @@ export default function PlaygroundPage() {
       if (!selectedAgent || selectedAgent.latest_version === null) return;
 
       const runId = crypto.randomUUID();
+      const generation = generationRef.current;
+      const current = () => generation === generationRef.current;
       setRunActive(true);
       setError(null);
       stopSubscription();
@@ -358,27 +399,32 @@ export default function PlaygroundPage() {
       try {
         let id = conversationId;
         if (id === null) {
-          const created = await createConversation(
-            selectedAgentId,
-            input.slice(0, 80),
-            crypto.randomUUID(),
-          );
+          // No title: the API titles the conversation from its first turn.
+          const created = await createConversation(selectedAgentId, null, crypto.randomUUID());
           id = created.id;
-          setConversationId(id);
-          const url = new URL(window.location.href);
-          url.searchParams.set("conversation", id);
-          window.history.replaceState({}, "", url);
+          // The send is committed once the conversation exists: if the user switched threads
+          // meanwhile, the turn is still started below (no empty conversation is left behind),
+          // only this page no longer shows it.
+          if (current()) {
+            setConversationId(id);
+            setConversationParam(id);
+          }
         }
         const started = await startTurn(id, runId, input);
+        refreshRail();
+        // The user switched threads meanwhile: the turn is recorded and runs; it shows when its
+        // conversation is opened again.
+        if (!current()) return;
         updateTurn(runId, (turn) => ({ ...turn, displayStatus: started.display_status }));
         followRun(runId);
       } catch {
-        setTurns((current) => current.filter((turn) => turn.runId !== runId));
+        if (!current()) return;
+        setTurns((turns) => turns.filter((turn) => turn.runId !== runId));
         setRunActive(false);
         setError("Failed to send the message.");
       }
     },
-    [agents, conversationId, followRun, runActive, selectedAgentId, stopSubscription, updateTurn],
+    [agents, conversationId, followRun, refreshRail, runActive, selectedAgentId, stopSubscription, updateTurn],
   );
 
   const handleAgentChange = (agentId: string) => {
@@ -400,7 +446,17 @@ export default function PlaygroundPage() {
         : null;
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-8rem)] max-w-4xl flex-col">
+    <div className="mx-auto flex h-[calc(100vh-8rem)] max-w-6xl flex-col gap-4 md:flex-row">
+      <div className="flex max-h-56 min-h-0 md:max-h-none">
+        <ConversationRail
+          agentId={selectedAgent && selectedAgent.latest_version !== null ? selectedAgentId : ""}
+          selectedId={conversationId}
+          refreshKey={railRefresh}
+          onSelect={handleSelectConversation}
+          onNew={resetConversation}
+        />
+      </div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="mb-6">
           <h1 className="mb-3 text-2xl font-bold">Playground</h1>
           <div className="flex flex-wrap items-center gap-4">
@@ -443,16 +499,6 @@ export default function PlaygroundPage() {
               </div>
             )}
 
-            {turns.length > 0 && (
-              <button
-                type="button"
-                onClick={resetConversation}
-                disabled={runActive}
-                className="ml-auto rounded-md border border-border px-3 py-2 text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                New conversation
-              </button>
-            )}
           </div>
 
           {status === "recovering" && (
@@ -473,6 +519,7 @@ export default function PlaygroundPage() {
           running={runActive}
           onNew={handleNewMessage}
         />
+      </div>
     </div>
   );
 }

@@ -62,4 +62,32 @@ class RunCursor:
         return cls(created_at, canonical_id)
 
 
-__all__ = ["InvalidRunCursor", "MAX_CURSOR_LENGTH", "RunCursor"]
+@dataclass(frozen=True)
+class ConversationCursor:
+    """A position in the conversation list's (updated_at DESC, id DESC) order, as an opaque token.
+
+    Same token form as RunCursor (`{"t": <ISO updated_at>, "id": <uuid>}`, URL-safe base64), and the
+    same rule: a token only names a position, every query stays tenant-scoped. Conversations move to
+    the top when a turn starts (updated_at is bumped under the conversation lock), so paging is
+    keyset, never offset: a conversation that moves up while a client pages is not repeated on a
+    later page, and the conversations that did not move are neither skipped nor repeated.
+    """
+
+    updated_at: datetime
+    id: str
+
+    @classmethod
+    def after(cls, conversation: dict[str, Any]) -> ConversationCursor:
+        """The cursor positioned at `conversation` (a list_conversations row)."""
+        return cls(conversation["updated_at"], str(conversation["id"]))
+
+    def encode(self) -> str:
+        return RunCursor(self.updated_at, self.id).encode()
+
+    @classmethod
+    def decode(cls, token: str) -> ConversationCursor:
+        position = RunCursor.decode(token)
+        return cls(position.created_at, position.id)
+
+
+__all__ = ["ConversationCursor", "InvalidRunCursor", "MAX_CURSOR_LENGTH", "RunCursor"]

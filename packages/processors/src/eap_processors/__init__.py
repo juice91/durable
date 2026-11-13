@@ -1,0 +1,77 @@
+"""Deterministic processors (guardrails) for EAP agents: `pii_redact`, `regex_blocklist` and
+`max_length` on RE2, usable by the API (publish validation, test console) and the worker.
+
+Imports only the standard library, `eap_schemas` and `re2` (import-linter contract).
+"""
+
+from eap_processors.engine import (
+    CHAIN_TIME_BUDGET_SECONDS,
+    INPUT_TOO_LARGE,
+    MAX_PROCESSOR_INPUT_CHARS,
+    MAX_REDACTED_MATCHES,
+    MAX_REGEX_INPUT_CHARS,
+    OUTCOME_REASONS,
+    REGEX_REDACTION_MARKER,
+    ChainResult,
+    CompiledProcessor,
+    InvalidProcessorConfig,
+    ProcessorNeedsModel,
+    ProcessorOutcome,
+    ProcessorResult,
+    apply_deterministic,
+    compile_processors,
+    compiled_chain,
+    new_budget,
+    pii_marker,
+    processor_errors,
+)
+from eap_processors.pii import DETECTION_ORDER, Detection, detect, iban_valid, luhn_valid
+from eap_processors.regex import (
+    BUDGET_EXCEEDED,
+    MAX_PROGRAM_SIZE,
+    PATTERN_CACHE_SIZE,
+    RE2_MAX_MEM,
+    TOO_MANY_MATCHES,
+    MatchBudget,
+    MatchBudgetExceeded,
+    Re2PatternError,
+    compile_re2,
+    re2_pattern_error,
+)
+
+__all__ = [
+    "BUDGET_EXCEEDED",
+    "CHAIN_TIME_BUDGET_SECONDS",
+    "DETECTION_ORDER",
+    "INPUT_TOO_LARGE",
+    "MAX_PROCESSOR_INPUT_CHARS",
+    "MAX_PROGRAM_SIZE",
+    "MAX_REDACTED_MATCHES",
+    "MAX_REGEX_INPUT_CHARS",
+    "OUTCOME_REASONS",
+    "PATTERN_CACHE_SIZE",
+    "RE2_MAX_MEM",
+    "TOO_MANY_MATCHES",
+    "REGEX_REDACTION_MARKER",
+    "ChainResult",
+    "CompiledProcessor",
+    "Detection",
+    "InvalidProcessorConfig",
+    "MatchBudget",
+    "MatchBudgetExceeded",
+    "ProcessorNeedsModel",
+    "ProcessorOutcome",
+    "ProcessorResult",
+    "Re2PatternError",
+    "apply_deterministic",
+    "compile_processors",
+    "compile_re2",
+    "compiled_chain",
+    "new_budget",
+    "detect",
+    "iban_valid",
+    "luhn_valid",
+    "pii_marker",
+    "processor_errors",
+    "re2_pattern_error",
+]

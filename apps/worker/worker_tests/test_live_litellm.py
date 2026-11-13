@@ -40,3 +40,9 @@ def test_live_qwen_one_turn(worker, client, tenant, monkeypatch):
     assert [e[1] for e in events] == ["start", "model:0:final", "end"]
     assert events[1][2] == "model_message"
     assert run["output"]
+    # P0.1: the proxy reports streamed usage (Pydantic AI sends stream_options.include_usage), and
+    # litellm:* is priced only from the override file (0 in the repo and test price files).
+    usage = events[1][3]["usage"]
+    assert usage["measured"] is True and usage["input_tokens"] > 0 and usage["output_tokens"] > 0, usage
+    assert events[1][3]["model_id"] == "litellm:qwen3.8-thinking"
+    assert run["input_tokens"] == usage["input_tokens"] and run["cost_usd"] == 0

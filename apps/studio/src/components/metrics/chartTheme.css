@@ -1,0 +1,44 @@
+/* Chart theme tokens for the metrics components (Metrics page, Overview Dashboard).
+ *
+ * Same form as the app's theme variables in globals.css: each token is an HSL triple, used as
+ * `hsl(var(--viz-...))` through the `--viz-*-color` aliases, and EVERY token has its own dark value
+ * under the app's `.dark` class. Colours are paired per chart: series 1 + critical (runs vs failed)
+ * and series 1 + series 2 (p50/p95, input/output); series 2 and critical never share a chart.
+ * Each pair passes the dataviz palette validator (lightness band, chroma, CVD and normal-vision
+ * separation >= 15, contrast >= 3:1) against the light surface (white) and the dark one (#09090b).
+ * Gridlines, axis text and the surface follow the app's border, muted-foreground and card tokens. */
+.eap-viz {
+  --viz-series-1: 213 68% 50%;   /* blue   #2a78d6 */
+  --viz-series-2: 17 82% 56%;    /* orange #eb6834 */
+  --viz-critical: 0 61% 52%;     /* red    #d03b3b */
+  --viz-grid: var(--border);
+  --viz-axis: var(--muted-foreground);
+  --viz-surface: var(--card);
+
+  --viz-series-1-color: hsl(var(--viz-series-1));
+  --viz-series-2-color: hsl(var(--viz-series-2));
+  --viz-critical-color: hsl(var(--viz-critical));
+  --viz-grid-color: hsl(var(--viz-grid));
+  --viz-axis-color: hsl(var(--viz-axis));
+  --viz-surface-color: hsl(var(--viz-surface));
+}
+
+.dark .eap-viz {
+  --viz-series-1: 213 77% 56%;   /* blue   #3987e5 */
+  --viz-series-2: 17 70% 50%;    /* orange #d95926 */
+  --viz-critical: 0 72% 65%;     /* red    #e66767 */
+  --viz-grid: var(--border);
+  --viz-axis: var(--muted-foreground);
+  --viz-surface: var(--card);
+}
+
+@media (forced-colors: active) {
+  .eap-viz {
+    --viz-series-1-color: CanvasText;
+    --viz-series-2-color: Highlight;
+    --viz-critical-color: LinkText;
+    --viz-grid-color: GrayText;
+    --viz-axis-color: CanvasText;
+    --viz-surface-color: Canvas;
+  }
+}

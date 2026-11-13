@@ -49,7 +49,7 @@ from pydantic_ai.tools import Tool
 from pydantic_ai.usage import RunUsage
 from pydantic_core import to_jsonable_python
 
-from eap_observability import log_failure, run_span, set_run_outcome
+from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_run_store import PostgresSideEffectStore
 from eap_runtime import ToolNotAllowedError, UnknownToolError, run_side_effect
 from eap_worker.config import TOOL_WORKFLOW_NAME
@@ -211,7 +211,8 @@ async def tool_call_step(run_id: str, tenant_id: str, tool_id: str, args: dict[s
 
 @DBOS.workflow(name=TOOL_WORKFLOW_NAME)
 async def tool_run(run_id: str, tenant_id: str, tool_id: str, input_json: str) -> dict[str, Any]:
-    link = await start_tool_run_step(run_id, tenant_id, tool_id, input_json) or {}
+    with log_context(tenant_id=tenant_id, run_id=run_id):  # records before run_span carry the ids too
+        link = await start_tool_run_step(run_id, tenant_id, tool_id, input_json) or {}
     # run_span's agent attributes are empty for a tool run; the tool is named in its own attributes.
     with run_span(run_id, tenant_id, "", "", traceparent=link.get("traceparent")) as span:
         span.set_attribute("eap.run_kind", "tool")

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import "@testing-library/jest-dom";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import RunDetailPage from "./page";
 import {
   ApiError,
@@ -35,6 +35,12 @@ vi.mock("@/lib/grafana", () => ({
   buildTraceLink: vi.fn((traceId) => `http://grafana/explore?trace=${traceId}`),
   buildLogsLink: vi.fn((traceId) => `http://grafana/explore?logs=${traceId}`),
 }))
+
+vi.mock("@/components/traces/TraceView", () => ({
+  TraceView: ({ runId, embedded }: { runId: string; embedded?: boolean }) => (
+    <div data-testid="trace-view-stub">{`trace ${runId} ${embedded ? "embedded" : "page"}`}</div>
+  ),
+}));
 
 vi.mock("@/lib/sse", () => ({
   parseSSE: vi.fn(),
@@ -331,5 +337,43 @@ describe("RunDetailPage", () => {
     expect(screen.queryByRole("link", { name: /logs/i })).not.toBeInTheDocument();
     expect(grafanaLib.buildTraceLink).not.toHaveBeenCalled();
     expect(grafanaLib.buildLogsLink).not.toHaveBeenCalled();
+  });
+
+  it("switches to the Trace tab, which embeds the trace view and links the full view", async () => {
+    vi.mocked(getRun).mockResolvedValue(ticketRun);
+    vi.mocked(listEvents).mockResolvedValue([]);
+    vi.mocked(subscribeRun).mockReturnValue(() => undefined);
+    render(<RunDetailPage />);
+    const tab = await screen.findByRole("tab", { name: "Trace" });
+    expect(screen.getByRole("tab", { name: "Events" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("trace-view-stub")).toBeNull();
+    fireEvent.click(tab);
+    expect(tab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("trace-view-stub")).toHaveTextContent(`trace ${ticketRun.run_id} embedded`);
+    expect(screen.getByRole("link", { name: "Open full trace view" })).toHaveAttribute("href", `/traces/${ticketRun.run_id}`);
+  });
+
+  it("follows the ARIA tabs pattern: roving tabIndex and arrow, Home and End keys", async () => {
+    vi.mocked(getRun).mockResolvedValue(ticketRun);
+    vi.mocked(listEvents).mockResolvedValue([]);
+    vi.mocked(subscribeRun).mockReturnValue(() => undefined);
+    render(<RunDetailPage />);
+    const events = await screen.findByRole("tab", { name: "Events" });
+    const trace = screen.getByRole("tab", { name: "Trace" });
+    expect(events).toHaveAttribute("tabindex", "0");
+    expect(trace).toHaveAttribute("tabindex", "-1");
+    fireEvent.keyDown(events, { key: "ArrowRight" });
+    expect(trace).toHaveAttribute("aria-selected", "true");
+    expect(trace).toHaveAttribute("tabindex", "0");
+    expect(document.activeElement).toBe(trace);
+    fireEvent.keyDown(trace, { key: "ArrowRight" }); // wraps
+    expect(events).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(events);
+    fireEvent.keyDown(events, { key: "End" });
+    expect(trace).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(trace, { key: "Home" });
+    expect(events).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(events, { key: "ArrowLeft" }); // wraps backwards
+    expect(trace).toHaveAttribute("aria-selected", "true");
   });
 });

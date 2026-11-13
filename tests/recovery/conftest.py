@@ -606,6 +606,7 @@ class Harness:
                     for table in ("fake_external_tickets", "fake_external_ticket_calls"):
                         if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
                             conn.execute(text(f"DELETE FROM {table} WHERE idempotency_key LIKE :p"), {"p": f"{run_id}:%"})
+                conn.execute(text("DELETE FROM run_model_requests WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": self.tenant})

@@ -93,7 +93,7 @@ from dbos import DBOS, SetWorkflowID
 from pydantic import ValidationError
 from sqlalchemy import text
 
-from eap_observability import log_failure, run_span, set_run_outcome
+from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_schemas.workflows import (
     AgentStep,
     ApprovalStep,
@@ -679,7 +679,8 @@ def final_output(spec: WorkflowSpec, output: Any) -> Any:
 
 @DBOS.workflow(name=WORKFLOW_RUN_NAME)
 async def workflow_run(run_id: str, tenant_id: str, workflow_version_id: str, input_json: str) -> dict[str, Any]:
-    link = await start_workflow_run_step(run_id, tenant_id, workflow_version_id, input_json)
+    with log_context(tenant_id=tenant_id, run_id=run_id):  # records before run_span carry the ids too
+        link = await start_workflow_run_step(run_id, tenant_id, workflow_version_id, input_json)
     with run_span(run_id, tenant_id, "", "", traceparent=link.get("traceparent")) as span:
         span.set_attribute("eap.run_kind", "workflow")
         span.set_attribute("eap.workflow_id", str(link.get("workflow_id") or ""))

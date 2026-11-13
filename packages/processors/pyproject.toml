@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-processors"
+version = "0.1.0"
+description = "Deterministic input and output processors (guardrails) for EAP agents, on RE2"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "eap-schemas",
+    # RE2 bindings (linear-time matching, no backtracking): every regex here, user patterns
+    # and the built-in PII detectors, runs on RE2, never on Python's `re`.
+    "google-re2==1.1.20251105",
+]
+
+[tool.uv.sources]
+eap-schemas = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_processors"]

@@ -25,6 +25,11 @@ services:
       - "127.0.0.1:3002:3000"
       - "127.0.0.1:4317:4317"
       - "127.0.0.1:4318:4318"
+      # Loki's HTTP API, for the API's log search (EAP_LOKI_URL). Loopback only. Development only:
+      # this Loki has no auth (auth_enabled: false) and the OTLP ports above accept unauthenticated
+      # writes, so anything on this host could read every tenant's logs or forge records. Production
+      # needs Loki multi-tenancy or an authenticated gateway in front of it, and authenticated OTLP.
+      - "127.0.0.1:3100:3100"
     volumes:
       - lgtm_data:/var/lib/grafana
     healthcheck:

@@ -202,6 +202,8 @@ class TestStartRun:
         assert r.json() == {
             "run_id": run_id, "status": "queued", "display_status": "queued", "agent_id": agent_id, "version": 1,
             "trace_id": None,  # telemetry off in tests (no OTEL_EXPORTER_OTLP_ENDPOINT)
+            # Run options (P0.8): the effective model is recorded at insert.
+            "draft": False, "model_id": "test:ticket", "model_overridden": False,
         }
         assert len(fake_dbos.calls) == 1
         options, args = fake_dbos.calls[0]

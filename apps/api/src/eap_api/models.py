@@ -9,6 +9,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -83,6 +84,12 @@ class AgentVersionModel(Base):
     __tablename__ = "agent_versions"
     __table_args__ = (
         UniqueConstraint("agent_id", "version", name="uq_agent_version"),
+        # 0009: a restore names an existing version of the same agent as its source.
+        ForeignKeyConstraint(
+            ["agent_id", "restored_from"],
+            ["agent_versions.agent_id", "agent_versions.version"],
+            name="fk_agent_versions_restored_from",
+        ),
     )
 
     id: Mapped[UUIDAnnotated] = mapped_column(
@@ -102,8 +109,12 @@ class AgentVersionModel(Base):
         "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     created_by: Mapped[StrAnnotated] = mapped_column("created_by", String, nullable=False)
+    # The version this one was restored from (POST .../versions/{v}/restore); NULL for a publish.
+    restored_from: Mapped[int | None] = mapped_column("restored_from", Integer, nullable=True)
 
-    agent: Mapped["AgentModel"] = relationship("AgentModel", back_populates="versions")
+    agent: Mapped["AgentModel"] = relationship(
+        "AgentModel", back_populates="versions", foreign_keys=[agent_id]
+    )
 
     def to_dict(self) -> dict:
         """Convert to dict representation."""
@@ -116,6 +127,7 @@ class AgentVersionModel(Base):
             "spec_hash": self.spec_hash,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "created_by": self.created_by,
+            "restored_from": self.restored_from,
         }
 
     @classmethod

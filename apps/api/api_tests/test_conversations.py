@@ -69,7 +69,7 @@ class TestConversationCrud:
 
         listed = client.get("/api/v1/conversations", headers=h)
         assert listed.status_code == 200
-        assert [c["id"] for c in listed.json()] == [conv["id"]]
+        assert [c["id"] for c in listed.json()["items"]] == [conv["id"]]
 
         got = client.get(f"/api/v1/conversations/{conv['id']}", headers=h)
         assert got.status_code == 200
@@ -82,8 +82,8 @@ class TestConversationCrud:
         c1 = new_conversation(client, h, a1)
         c2 = new_conversation(client, h, a2)
         c3 = new_conversation(client, h, a1)
-        assert [c["id"] for c in client.get("/api/v1/conversations", headers=h).json()] == [c3, c2, c1]
-        assert [c["id"] for c in client.get(f"/api/v1/conversations?agent_id={a1}", headers=h).json()] == [c3, c1]
+        assert [c["id"] for c in client.get("/api/v1/conversations", headers=h).json()["items"]] == [c3, c2, c1]
+        assert [c["id"] for c in client.get(f"/api/v1/conversations?agent_id={a1}", headers=h).json()["items"]] == [c3, c1]
 
     def test_client_conversation_id_is_idempotent(self, pg, tenant_of):
         client, _ = pg
@@ -118,6 +118,7 @@ class TestTurns:
         assert r.json() == {
             "run_id": run1, "status": "queued", "display_status": "queued", "agent_id": agent_id, "version": 1,
             "trace_id": None, "conversation_id": conv_id, "turn": 1,
+            "draft": False, "model_id": "test:ticket", "model_overridden": False,
         }
         # The hand-off contract's six positional args are unchanged; the worker reads the
         # conversation link from the run row.
@@ -247,7 +248,82 @@ class TestTenantIsolation:
         calls = len(fake_dbos.calls)
         assert client.get(f"/api/v1/conversations/{conv_id}", headers=h2).status_code == 404
         assert turn(client, h2, conv_id).status_code == 404
-        assert client.get("/api/v1/conversations", headers=h2).json() == []
+        assert client.get("/api/v1/conversations", headers=h2).json() == {"items": [], "next_before": None}
         assert client.get(f"/api/v1/conversations/{uuid.uuid4()}", headers=h1).status_code == 404
         assert turn(client, h1, str(uuid.uuid4())).status_code == 404
         assert len(fake_dbos.calls) == calls
+
+
+class TestConversationListAndRename:
+    """P0.5: paged list (?limit=&before=), auto-title from the first turn, PATCH rename."""
+
+    def test_pages_with_an_opaque_cursor_newest_first(self, pg, tenant_of):
+        client, _ = pg
+        _, h = tenant_of()
+        agent_id = make_agent(client, h)
+        ids = [new_conversation(client, h, agent_id) for _ in range(3)]
+        first = client.get(f"/api/v1/conversations?agent_id={agent_id}&limit=2", headers=h).json()
+        assert [c["id"] for c in first["items"]] == [ids[2], ids[1]] and first["next_before"]
+        rest = client.get(
+            f"/api/v1/conversations?agent_id={agent_id}&limit=2&before={first['next_before']}", headers=h
+        ).json()
+        assert [c["id"] for c in rest["items"]] == [ids[0]] and rest["next_before"] is None
+        item = rest["items"][0]
+        assert item["turn_count"] == 0 and item["last_turn_status"] is None
+        assert {"last_turn_run_id", "last_turn_display_status", "title", "updated_at"} <= set(item)
+
+    @pytest.mark.parametrize("before", ["nope", "", "a" * 300])
+    def test_bad_cursor_or_limit_is_422(self, pg, tenant_of, before):
+        client, _ = pg
+        _, h = tenant_of()
+        assert client.get(f"/api/v1/conversations?before={before}", headers=h).status_code == 422
+        assert client.get("/api/v1/conversations?limit=0", headers=h).status_code == 422
+        assert client.get("/api/v1/conversations?limit=201", headers=h).status_code == 422
+
+    def test_first_turn_sets_the_title_and_moves_the_conversation_up(self, pg, tenant_of, fake_dbos):
+        client, _ = pg
+        _, h = tenant_of()
+        agent_id = make_agent(client, h)
+        older = new_conversation(client, h, agent_id)
+        newer = new_conversation(client, h, agent_id)
+        assert turn(client, h, older, input="Why is\nmy printer " + "x" * 80).status_code == 201
+        listed = client.get(f"/api/v1/conversations?agent_id={agent_id}", headers=h).json()["items"]
+        assert [c["id"] for c in listed] == [older, newer]
+        assert listed[0]["title"] == ("Why is my printer " + "x" * 80)[:60]
+        assert listed[0]["turn_count"] == 1 and listed[0]["last_turn_status"] == "queued"
+
+    def test_rename(self, pg, tenant_of, fake_dbos):
+        client, _ = pg
+        _, h = tenant_of()
+        _, other = tenant_of()
+        conv_id = new_conversation(client, h, make_agent(client, h))
+        r = client.patch(f"/api/v1/conversations/{conv_id}", json={"title": "  Billing question  "}, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["title"] == "Billing question"
+        # A user title survives the first turn.
+        assert turn(client, h, conv_id).status_code == 201
+        assert client.get(f"/api/v1/conversations/{conv_id}", headers=h).json()["title"] == "Billing question"
+        for bad in ["", "   ", "x" * 201, "two\nlines", {"title": "ok", "extra": 1}]:
+            body = bad if isinstance(bad, dict) else {"title": bad}
+            assert client.patch(f"/api/v1/conversations/{conv_id}", json=body, headers=h).status_code == 422, bad
+        assert client.patch(f"/api/v1/conversations/{conv_id}", json={"title": "x" * 200}, headers=h).status_code == 200
+        assert client.patch(f"/api/v1/conversations/{conv_id}", json={"title": "mine"}, headers=other).status_code == 404
+        assert client.patch(f"/api/v1/conversations/{uuid.uuid4()}", json={"title": "x"}, headers=h).status_code == 404
+        assert client.get(f"/api/v1/conversations/{conv_id}", headers=h).json()["title"] == "x" * 200
+
+    def test_create_title_follows_the_rename_rule_and_blank_means_untitled(self, pg, tenant_of, fake_dbos):
+        client, _ = pg
+        _, h = tenant_of()
+        agent_id = make_agent(client, h)
+        trimmed = create_conversation(client, h, agent_id, title="  Billing  ")
+        assert trimmed.status_code == 201 and trimmed.json()["title"] == "Billing"
+        for blank in ["", "   ", None]:
+            r = create_conversation(client, h, agent_id, title=blank)
+            assert r.status_code == 201 and r.json()["title"] is None, blank
+        for bad in ["a\nb", "tab\there", "x" * 201]:
+            assert create_conversation(client, h, agent_id, title=bad).status_code == 422, bad
+        assert create_conversation(client, h, agent_id, title="x" * 200).status_code == 201
+        # A blank title at create does not block the auto-title from the first turn.
+        conv_id = create_conversation(client, h, agent_id, title="  ").json()["id"]
+        assert turn(client, h, conv_id, input="First question").status_code == 201
+        assert client.get(f"/api/v1/conversations/{conv_id}", headers=h).json()["title"] == "First question"

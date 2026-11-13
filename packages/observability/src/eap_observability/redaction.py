@@ -33,6 +33,8 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status, StatusCode
 
+from eap_observability.logcontext import RUN_LOG_ATTRIBUTE, TENANT_LOG_ATTRIBUTE
+
 REDACTED = "[REDACTED]"
 TRUNCATED = "…[truncated]"
 # A log record carrying this attribute (extra={LOCAL_ONLY_LOG_ATTRIBUTE: True}) is never exported.
@@ -63,6 +65,10 @@ _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 _STATUS_TYPE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]{0,99})(?::|$)")
 # Attributes whose value is exception or error text: never exported.
 _DROPPED_ATTRIBUTES = frozenset({"exception.message", "exception.stacktrace", "error"})
+# Ids the logs API filters on: never redacted (a tenant id such as `sk-abcdef` would otherwise become
+# [REDACTED] and that tenant's logs unsearchable). They come from the principal or the run row.
+_ID_ATTRIBUTES = frozenset({TENANT_LOG_ATTRIBUTE, RUN_LOG_ATTRIBUTE})
+_ID_CONTEXT_KEYS = frozenset({"tenant_id", "run_id"})
 
 
 def redact(text: str, *, max_length: int = 500) -> str:
@@ -104,7 +110,11 @@ def log_failure(
     """
     error_type = safe_code(error_type) if error_type else exception_type(exc)
     code = safe_code(code)
-    ctx = {k: redact(str(v), max_length=_MAX_CONTEXT) for k, v in context.items() if v is not None}
+    ctx = {
+        k: str(v) if k in _ID_CONTEXT_KEYS else redact(str(v), max_length=_MAX_CONTEXT)
+        for k, v in context.items()
+        if v is not None
+    }
     logger.log(
         level,
         "%s: error_code=%s error_type=%s%s",
@@ -135,6 +145,9 @@ def _clean_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for key, value in (attributes or {}).items():
         if key in _DROPPED_ATTRIBUTES:
+            continue
+        if key in _ID_ATTRIBUTES and isinstance(value, str):
+            cleaned[key] = value
             continue
         if key == "exception.type":
             cleaned[key] = value if isinstance(value, str) and _TYPE_NAME.fullmatch(value) else "Exception"

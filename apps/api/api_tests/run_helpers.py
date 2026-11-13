@@ -93,6 +93,7 @@ def cleanup_tenant(engine: Any, tenant_id: str) -> None:
         run_ids = [r[0] for r in conn.execute(text("SELECT id FROM runs WHERE tenant_id = :t"), {"t": tenant_id})]
         for run_id in run_ids:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
+        conn.execute(text("DELETE FROM run_model_requests WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": tenant_id})

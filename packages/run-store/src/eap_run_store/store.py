@@ -1,18 +1,22 @@
 """Postgres store for durable runs and event logging."""
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 import json
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
     ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -21,14 +25,18 @@ from sqlalchemy import (
     text,
     func,
     case,
+    null,
+    or_,
     tuple_,
+    true,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
-from eap_run_store.cursor import RunCursor
+from eap_run_store.cursor import ConversationCursor, RunCursor
 from sqlalchemy.orm import (
     DeclarativeBase,
+    aliased,
     Mapped,
     mapped_column,
     sessionmaker,
@@ -60,16 +68,17 @@ ENQUEUE_FAILED_ERROR = (
     "EnqueueFailed: the run could not be started (enqueue_failed); retry the same request with the same run_id"
 )
 
-# An agent run names its agent version and no tool or workflow; a tool run names its tool only and
-# is never a conversation turn; a workflow run names its published workflow version only. Same text
-# as migration 0007_workflow_runs.
+# An agent run names exactly one of its published agent version and a draft snapshot (a draft test
+# run), and no tool or workflow; a tool run names its tool only and is never a conversation turn; a
+# workflow run names its published workflow version only. Same text as migration 0010_run_options.
 RUN_KIND_TARGET_CHECK = (
-    "(kind = 'agent' AND agent_id IS NOT NULL AND agent_version IS NOT NULL AND tool_id IS NULL"
-    " AND workflow_id IS NULL AND workflow_version IS NULL)"
+    "(kind = 'agent' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
+    " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
     " OR (kind = 'tool' AND tool_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
-    " AND conversation_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
+    " AND draft_spec IS NULL AND conversation_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL)"
     " OR (kind = 'workflow' AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL"
-    " AND agent_id IS NULL AND agent_version IS NULL AND tool_id IS NULL AND conversation_id IS NULL)"
+    " AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL AND tool_id IS NULL"
+    " AND conversation_id IS NULL)"
 )
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
@@ -100,6 +109,10 @@ class ConversationModel(Base):
         # Lets runs reference (tenant_id, conversation_id), so a run can only join its own tenant's thread.
         UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id_id"),
         Index("ix_conversations_tenant_updated", "tenant_id", "updated_at"),
+        # One agent's conversations in list order (0010_run_options).
+        Index(
+            "ix_conversations_tenant_agent_updated", "tenant_id", "agent_id", text("updated_at DESC"), text("id DESC")
+        ),
     )
 
 
@@ -150,6 +163,25 @@ class RunModel(Base):
     # run's span as a child of `traceparent`, and the Studio links to the trace by `trace_id`.
     trace_id: Mapped[StrAnnotated | None] = mapped_column("trace_id", String, nullable=True)
     traceparent: Mapped[StrAnnotated | None] = mapped_column("traceparent", String, nullable=True)
+    # Usage and cost (0008_run_usage). model_id: the effective model `provider:name`;
+    # model_overridden: it differs from the version's model at the caller's request. Totals are set
+    # by set_status when the run reaches a terminal status (SUM over run_model_requests, also over
+    # the child runs' rows for a workflow run; cost NULL if any request is unpriced). started_at is
+    # set once by mark_running. All NULL for runs recorded before 0008 ("not recorded").
+    model_id: Mapped[StrAnnotated | None] = mapped_column("model_id", String, nullable=True)
+    model_overridden: Mapped[bool] = mapped_column(
+        "model_overridden", Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    input_tokens: Mapped[int | None] = mapped_column("input_tokens", BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column("output_tokens", BigInteger, nullable=True)
+    cost_usd: Mapped[Decimal | None] = mapped_column("cost_usd", Numeric(20, 10), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column("started_at", DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column("finished_at", DateTime(timezone=True), nullable=True)
+    # Run options (0010_run_options). request_context: the validated request context (declared
+    # fields only; NULL = none). draft_spec: the agent draft snapshot of a draft test run
+    # (agent_version NULL); a retry relaunches from it, never from the live draft.
+    request_context: Mapped[dict | None] = mapped_column("request_context", JSONB, nullable=True)
+    draft_spec: Mapped[dict | None] = mapped_column("draft_spec", JSONB, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -200,6 +232,43 @@ class ExecutionEventModel(Base):
             name="fk_execution_events_tenant_run",
         ),
         Index("ix_execution_events_tenant_run", "tenant_id", "run_id"),
+        # One event type across the tenant's runs, by time (processor results).
+        Index("ix_execution_events_tenant_type_ts", "tenant_id", "type", "ts"),
+    )
+
+
+class RunModelRequestModel(Base):
+    """One model request of a run, with its usage and cost (0008_run_usage).
+
+    Written only by EventLog.append, in the transaction of the request's `model_message` event
+    (`request_key` = that event's key without `:final`, e.g. `model:0`), first write wins. The cost
+    is computed once, at record time, and never recomputed. Owned by the run's tenant (composite FK).
+    """
+
+    __tablename__ = "run_model_requests"
+
+    tenant_id: Mapped[StrAnnotated] = mapped_column("tenant_id", String, nullable=False)
+    run_id: Mapped[StrAnnotated] = mapped_column("run_id", String, primary_key=True)
+    request_key: Mapped[StrAnnotated] = mapped_column("request_key", String, primary_key=True)
+    model_id: Mapped[StrAnnotated] = mapped_column("model_id", String, nullable=False)
+    provider_model_name: Mapped[StrAnnotated | None] = mapped_column("provider_model_name", String, nullable=True)
+    input_tokens: Mapped[int] = mapped_column("input_tokens", BigInteger, nullable=False)
+    output_tokens: Mapped[int] = mapped_column("output_tokens", BigInteger, nullable=False)
+    cache_read_tokens: Mapped[int] = mapped_column("cache_read_tokens", BigInteger, nullable=False)
+    cache_write_tokens: Mapped[int] = mapped_column("cache_write_tokens", BigInteger, nullable=False)
+    usage_measured: Mapped[bool] = mapped_column("usage_measured", Boolean, nullable=False)
+    cost_usd: Mapped[Decimal | None] = mapped_column("cost_usd", Numeric(20, 10), nullable=True)
+    price_source: Mapped[StrAnnotated | None] = mapped_column("price_source", String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        "created_at", DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"], name="fk_run_model_requests_tenant_run"
+        ),
+        Index("ix_run_model_requests_tenant_created", "tenant_id", "created_at"),
+        Index("ix_run_model_requests_tenant_model_created", "tenant_id", "model_id", "created_at"),
     )
 
 
@@ -295,7 +364,34 @@ class TurnInProgress(Exception):
         return f"Conversation {self.conversation_id} is busy: turn run {self.run_id} is {self.status}"
 
 
-def _iso_conversation(conv: ConversationModel, turn_count: int) -> dict[str, Any]:
+CONVERSATION_TITLE_MAX_LENGTH = 200
+AUTO_TITLE_LENGTH = 60
+
+
+def auto_title(text: str) -> str | None:
+    """The title a conversation gets from its first turn's input: every run of whitespace (newlines
+    included) and every control character collapsed into one space, trimmed, then the first 60
+    characters (trailing space trimmed again). None when nothing printable is left."""
+    cleaned = "".join(" " if (ch.isspace() or not ch.isprintable()) else ch for ch in text)
+    title = " ".join(cleaned.split())[:AUTO_TITLE_LENGTH].rstrip()
+    return title or None
+
+
+def _latest_turn_display_status(status: str | None, heartbeat_at: datetime | None) -> str | None:
+    """As _display_status, for the latest-turn columns of a conversation query."""
+    if status == "running" and heartbeat_at is not None:
+        if (datetime.now(timezone.utc) - heartbeat_at).total_seconds() > 20:
+            return "recovering"
+    return status
+
+
+def _iso_conversation(
+    conv: ConversationModel,
+    turn_count: int,
+    last_turn: tuple[str | None, str | None, datetime | None] = (None, None, None),
+) -> dict[str, Any]:
+    """`last_turn` is the latest turn's (run id, status, heartbeat_at), all None without turns."""
+    last_run_id, last_status, last_heartbeat = last_turn
     return {
         "id": conv.id,
         "tenant_id": conv.tenant_id,
@@ -304,6 +400,9 @@ def _iso_conversation(conv: ConversationModel, turn_count: int) -> dict[str, Any
         "created_at": conv.created_at,
         "updated_at": conv.updated_at,
         "turn_count": turn_count,
+        "last_turn_run_id": last_run_id,
+        "last_turn_status": last_status,
+        "last_turn_display_status": _latest_turn_display_status(last_status, last_heartbeat),
     }
 
 
@@ -338,6 +437,83 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
         "turn": run.turn,
         "trace_id": run.trace_id,
         "traceparent": run.traceparent,
+        "model_id": run.model_id,
+        "model_overridden": bool(run.model_overridden),
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "cost_usd": run.cost_usd,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "request_context": run.request_context,
+        "draft_spec": run.draft_spec,
+    }
+
+
+# ---------------------------------------------------------------------------- usage totals (0008)
+
+
+# What mark_enqueue_failed records besides the status: the run is finished, without any model
+# request. Cleared (all NULL) when a failed hand-off is revived (mark_running, requeue).
+_ENQUEUE_FAILED_FINISH = ("finished_at", "input_tokens", "output_tokens", "cost_usd")
+
+
+def _enqueue_failed_finish() -> dict[str, Any]:
+    return {"finished_at": datetime.now(timezone.utc), "input_tokens": 0, "output_tokens": 0, "cost_usd": Decimal(0)}
+
+
+def _finish_values(tenant_id: str, run_id: str, status: str) -> dict[str, Any]:
+    """The columns a terminal set_status writes besides the status, as SQL expressions evaluated in
+    the same UPDATE: `finished_at` and the usage totals.
+
+    Totals are the SUM over the run's `run_model_requests` rows and, for a workflow run, over its
+    child runs' rows (a workflow run makes no model request itself). Tokens are 0 for a run without
+    requests; `cost_usd` is NULL if any request is unpriced, else the exact sum (0 without requests).
+    Computed from durable rows, so a re-executed finish step writes the same totals.
+    `finished_at` is kept when the run already has this terminal status (a re-executed finish
+    step), and set to now() otherwise."""
+    children = aliased(RunModel)
+    child_ids = select(children.id).where(children.tenant_id == tenant_id, children.parent_run_id == run_id)
+    rows = (
+        select(
+            func.coalesce(func.sum(RunModelRequestModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(RunModelRequestModel.output_tokens), 0).label("output_tokens"),
+            case(
+                (func.count() == func.count(RunModelRequestModel.cost_usd),
+                 func.coalesce(func.sum(RunModelRequestModel.cost_usd), 0)),
+                else_=None,
+            ).label("cost_usd"),
+        )
+        .where(
+            RunModelRequestModel.tenant_id == tenant_id,
+            or_(RunModelRequestModel.run_id == run_id, RunModelRequestModel.run_id.in_(child_ids)),
+        )
+        .subquery()
+    )
+    return {
+        "input_tokens": select(rows.c.input_tokens).scalar_subquery(),
+        "output_tokens": select(rows.c.output_tokens).scalar_subquery(),
+        "cost_usd": select(rows.c.cost_usd).scalar_subquery(),
+        "finished_at": case(
+            ((RunModel.status == status) & RunModel.finished_at.is_not(None), RunModel.finished_at),
+            else_=datetime.now(timezone.utc),
+        ),
+    }
+
+
+def _run_option_values(
+    request_context: dict[str, Any] | None,
+    draft_spec: dict[str, Any] | None,
+    model_id: str | None,
+    model_overridden: bool,
+) -> dict[str, Any]:
+    """Insert values for the run options of an agent run (0010_run_options; model_id from 0008).
+    An empty context is stored as NULL, like a run recorded before request context existed. SQL
+    NULL explicitly: a JSONB column would bind Python None as the JSON value `null`."""
+    return {
+        "request_context": request_context or null(),
+        "draft_spec": null() if draft_spec is None else draft_spec,
+        "model_id": model_id,
+        "model_overridden": bool(model_overridden),
     }
 
 
@@ -352,16 +528,24 @@ class RunStore:
         self,
         tenant_id: str,
         agent_id: UUID,
-        agent_version: int,
+        agent_version: int | None,
         input: str,
         run_id: UUID,
         trace_id: str | None = None,
         traceparent: str | None = None,
+        *,
+        request_context: dict[str, Any] | None = None,
+        draft_spec: dict[str, Any] | None = None,
+        model_id: str | None = None,
+        model_overridden: bool = False,
     ) -> tuple[UUID, bool]:
         """Create a new agent run. Idempotent: same run_id returns existing without creating second row.
 
         `trace_id`/`traceparent` are the creating API request's trace context (None when telemetry
-        is off); an existing row keeps the values it was created with.
+        is off); an existing row keeps the values it was created with, and so do the run options:
+        `request_context` (validated; None or empty is stored as NULL), `draft_spec` (a draft test
+        run's snapshot, with `agent_version` None), `model_id` (the effective model) and
+        `model_overridden`.
 
         Returns (UUID, created: bool) where created=False if the run already exists for this tenant
         (whatever its kind: the caller checks that it is the same request).
@@ -376,6 +560,7 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
+            **_run_option_values(request_context, draft_spec, model_id, model_overridden),
         )
 
     def create_tool_run(
@@ -493,6 +678,8 @@ class RunStore:
 
         `messages` is written once: a repeated call (a re-executed finish step) keeps the first value,
         so the history later turns read never changes after it was first recorded.
+        A terminal status (completed, failed, needs_attention) also sets `finished_at` and the usage
+        totals in the same statement (see _finish_values).
         Raises RunNotFound (and changes nothing) if the run does not exist or belongs to another tenant.
         """
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
@@ -502,16 +689,22 @@ class RunStore:
             values["error"] = error
         if messages is not None:
             values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+        if status in TERMINAL_RUN_STATUSES:
+            values.update(_finish_values(tenant_id, str(run_id), status))
         self._update_owned(tenant_id, run_id, values)
 
     def mark_enqueue_failed(self, tenant_id: str, run_id: UUID) -> bool:
         """The run could not be handed to the orchestrator: queued -> failed (ENQUEUE_FAILED_ERROR).
 
         Only a run still `queued` changes, so a workflow that did start (an enqueue that raised
-        after DBOS accepted it) is never overwritten. Returns whether the row changed."""
+        after DBOS accepted it) is never overwritten. Returns whether the row changed.
+
+        Like any terminal status it sets `finished_at` and the usage totals (zero: no model request
+        was made). mark_running and requeue_after_enqueue_failure clear them again when the run is
+        revived."""
         return self._conditional_update(
             tenant_id, run_id, RunModel.status == "queued",
-            {"status": "failed", "error": ENQUEUE_FAILED_ERROR},
+            {"status": "failed", "error": ENQUEUE_FAILED_ERROR, **_enqueue_failed_finish()},
         )
 
     def mark_running(self, tenant_id: str, run_id: UUID) -> bool:
@@ -530,6 +723,14 @@ class RunStore:
             "status": "running",
             "updated_at": datetime.now(timezone.utc),
             "error": case((RunModel.error == ENQUEUE_FAILED_ERROR, None), else_=RunModel.error),
+            # The first time a worker starts the run; a recovery or replay keeps it.
+            "started_at": func.coalesce(RunModel.started_at, datetime.now(timezone.utc)),
+            # A run revived from a failed hand-off is no longer finished: drop what
+            # mark_enqueue_failed recorded (same condition as the error above).
+            **{
+                column: case((RunModel.error == ENQUEUE_FAILED_ERROR, None), else_=getattr(RunModel, column))
+                for column in _ENQUEUE_FAILED_FINISH
+            },
         }
         with self.Session() as session:
             run = session.execute(
@@ -588,7 +789,12 @@ class RunStore:
             updated = session.execute(
                 update(RunModel)
                 .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, failed_handoff)
-                .values(status="queued", error=None, updated_at=datetime.now(timezone.utc))
+                .values(
+                    status="queued",
+                    error=None,
+                    updated_at=datetime.now(timezone.utc),
+                    **{column: None for column in _ENQUEUE_FAILED_FINISH},
+                )
                 .returning(RunModel.id)
             ).fetchone()
             session.commit()
@@ -644,11 +850,16 @@ class RunStore:
         limit: int = 50,
         before: RunCursor | None = None,
         agent_id: UUID | str | None = None,
-        status: str | None = None,
+        status: str | list[str] | tuple[str, ...] | None = None,
         kind: str | None = None,
         tool_id: str | None = None,
         workflow_id: UUID | str | None = None,
         parent_run_id: UUID | str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        statement_timeout_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
         `before` position in that order (RunCursor.after(last row of the previous page)),
@@ -658,7 +869,14 @@ class RunStore:
         skipped or repeated across pages.
 
         Child runs (a workflow's agent steps) are listed only when `parent_run_id` names their
-        workflow run; otherwise only top-level runs are returned. `workflow_id` filters workflow runs."""
+        workflow run; otherwise only top-level runs are returned. `workflow_id` filters workflow runs.
+
+        Drill-down from metrics (P0.6): `status` may be several statuses (any of them),
+        `created_from` / `created_to` bound `created_at` to `[from, to)`, and `model` / `provider`
+        keep runs that used that model (eap_run_store.metrics.run_model_condition). That filter is
+        two EXISTS lookups per run and may walk far back in history to fill a page, so the query
+        then runs under the metrics `statement_timeout` (`statement_timeout_ms`, default 5 s) and
+        raises MetricsQueryTimeout when it fires."""
         query = select(RunModel).where(RunModel.tenant_id == tenant_id)
         if parent_run_id is not None:
             query = query.where(RunModel.parent_run_id == str(parent_run_id))
@@ -670,15 +888,40 @@ class RunStore:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if agent_id is not None:
             query = query.where(RunModel.agent_id == str(agent_id))
-        if status is not None:
+        if isinstance(status, str):
             query = query.where(RunModel.status == status)
+        elif status is not None:
+            query = query.where(RunModel.status.in_(list(status)))
+        if created_from is not None:
+            query = query.where(RunModel.created_at >= created_from)
+        if created_to is not None:
+            query = query.where(RunModel.created_at < created_to)
+        timeout_ms = None
+        if model is not None or provider is not None:
+            from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS, run_model_condition
+
+            query = query.where(run_model_condition(RunModel, tenant_id, model, provider))
+            timeout_ms = int(statement_timeout_ms or DEFAULT_STATEMENT_TIMEOUT_MS)
         if kind is not None:
             query = query.where(RunModel.kind == kind)
         if tool_id is not None:
             query = query.where(RunModel.tool_id == tool_id)
         query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
         with self.Session() as session:
-            return [_run_dict(r) for r in session.execute(query).scalars()]
+            if timeout_ms is None:
+                return [_run_dict(r) for r in session.execute(query).scalars()]
+            from sqlalchemy.exc import DBAPIError
+
+            from eap_run_store.metrics import MetricsQueryTimeout
+
+            try:
+                # SET LOCAL: only this read's transaction, reset when the session ends it.
+                session.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
+                return [_run_dict(r) for r in session.execute(query).scalars()]
+            except DBAPIError as exc:
+                if getattr(getattr(exc, "orig", None), "sqlstate", None) == "57014":  # query_canceled
+                    raise MetricsQueryTimeout(timeout_ms) from None
+                raise
 
     # ------------------------------------------------------------------ conversations
 
@@ -710,43 +953,88 @@ class RunStore:
             existing = session.get(ConversationModel, conv_id)
             if existing is None or existing.tenant_id != tenant_id:
                 raise ConversationIdConflict(conv_id)
-            return _iso_conversation(existing, self._turn_count(session, conv_id)), inserted is not None
+            row = session.execute(self._conversation_select().where(ConversationModel.id == conv_id)).one()
+            return self._conversation_from_row(row), inserted is not None
 
     @staticmethod
-    def _turn_count(session, conversation_id: str) -> int:
-        return session.execute(
-            select(func.count()).select_from(RunModel).where(RunModel.conversation_id == conversation_id)
-        ).scalar_one()
+    def _conversation_select():
+        """Conversations joined to their latest turn (LATERAL, one index probe on
+        uq_runs_conversation_turn per conversation). Turns are numbered gap-free from 1 under the
+        conversation lock, so the latest turn number is the turn count."""
+        latest = (
+            select(RunModel.turn, RunModel.id, RunModel.status, RunModel.heartbeat_at)
+            .where(RunModel.conversation_id == ConversationModel.id)
+            .order_by(RunModel.turn.desc())
+            .limit(1)
+            .lateral("latest_turn")
+        )
+        return select(
+            ConversationModel,
+            func.coalesce(latest.c.turn, 0),
+            latest.c.id,
+            latest.c.status,
+            latest.c.heartbeat_at,
+        ).outerjoin(latest, true())
+
+    @staticmethod
+    def _conversation_from_row(row) -> dict[str, Any]:
+        conv, turn_count, run_id, run_status, heartbeat_at = row
+        return _iso_conversation(conv, turn_count, (run_id, run_status, heartbeat_at))
 
     def get_conversation(self, tenant_id: str, conversation_id: UUID | str) -> dict[str, Any] | None:
         """The tenant's conversation, or None (unknown, or another tenant's)."""
+        query = self._conversation_select().where(
+            ConversationModel.id == str(conversation_id), ConversationModel.tenant_id == tenant_id
+        )
         with self.Session() as session:
-            conv = session.execute(
-                select(ConversationModel).where(
-                    ConversationModel.id == str(conversation_id), ConversationModel.tenant_id == tenant_id
-                )
-            ).scalar_one_or_none()
-            return None if conv is None else _iso_conversation(conv, self._turn_count(session, conv.id))
+            row = session.execute(query).one_or_none()
+            return None if row is None else self._conversation_from_row(row)
 
-    def list_conversations(self, tenant_id: str, agent_id: UUID | str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        """The tenant's conversations, most recently active first."""
-        counts = (
-            select(RunModel.conversation_id, func.count().label("n"))
-            .where(RunModel.tenant_id == tenant_id, RunModel.conversation_id.is_not(None))
-            .group_by(RunModel.conversation_id)
-            .subquery()
-        )
-        query = (
-            select(ConversationModel, func.coalesce(counts.c.n, 0))
-            .outerjoin(counts, counts.c.conversation_id == ConversationModel.id)
-            .where(ConversationModel.tenant_id == tenant_id)
-            .order_by(ConversationModel.updated_at.desc(), ConversationModel.id)
-            .limit(limit)
-        )
+    def list_conversations(
+        self,
+        tenant_id: str,
+        agent_id: UUID | str | None = None,
+        limit: int = 100,
+        before: ConversationCursor | None = None,
+    ) -> list[dict[str, Any]]:
+        """The tenant's conversations ordered (updated_at DESC, id DESC), at most `limit`, strictly
+        after the `before` position (ConversationCursor.after(last row of the previous page)).
+
+        updated_at is the last activity: creation, then each turn start (create_turn). A rename does
+        not move a conversation. Each row carries turn_count and the latest turn's run id, status
+        and display status (None without turns)."""
+        query = self._conversation_select().where(ConversationModel.tenant_id == tenant_id)
         if agent_id is not None:
             query = query.where(ConversationModel.agent_id == str(agent_id))
+        if before is not None:
+            query = query.where(
+                tuple_(ConversationModel.updated_at, ConversationModel.id) < tuple_(before.updated_at, before.id)
+            )
+        query = query.order_by(ConversationModel.updated_at.desc(), ConversationModel.id.desc()).limit(limit)
         with self.Session() as session:
-            return [_iso_conversation(conv, n) for conv, n in session.execute(query).all()]
+            return [self._conversation_from_row(row) for row in session.execute(query).all()]
+
+    def rename_conversation(self, tenant_id: str, conversation_id: UUID | str, title: str) -> dict[str, Any]:
+        """Set the title (the caller validates it). Under the conversation's row lock, the lock
+        create_turn's auto-title takes, so a user title is never overwritten by a concurrent first
+        turn. updated_at is not changed: renaming does not reorder the list. Raises
+        ConversationNotFound for another tenant's or an unknown conversation."""
+        conv_id = str(conversation_id)
+        with self.Session() as session:
+            conv = session.execute(
+                select(ConversationModel)
+                .where(ConversationModel.id == conv_id, ConversationModel.tenant_id == tenant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if conv is None:
+                session.rollback()
+                raise ConversationNotFound(tenant_id, conv_id)
+            conv.title = title
+            session.commit()
+        renamed = self.get_conversation(tenant_id, conv_id)
+        if renamed is None:  # deleted in between; there is no delete today
+            raise ConversationNotFound(tenant_id, conv_id)
+        return renamed
 
     def list_turns(self, tenant_id: str, conversation_id: UUID | str) -> list[dict[str, Any]]:
         """The conversation's runs in turn order ([] for another tenant's conversation)."""
@@ -762,11 +1050,16 @@ class RunStore:
         self,
         tenant_id: str,
         conversation_id: UUID | str,
-        agent_version: int,
+        agent_version: int | None,
         input: str,
         run_id: UUID,
         trace_id: str | None = None,
         traceparent: str | None = None,
+        *,
+        request_context: dict[str, Any] | None = None,
+        draft_spec: dict[str, Any] | None = None,
+        model_id: str | None = None,
+        model_overridden: bool = False,
     ) -> tuple[UUID, bool]:
         """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
 
@@ -775,7 +1068,8 @@ class RunStore:
         the latest turn must be terminal (else TurnInProgress) and the new run gets turn = latest + 1.
         Raises ConversationNotFound for another tenant's or an unknown conversation, RunIdConflict
         if `run_id` belongs to another tenant.
-        `trace_id`/`traceparent` as in create_run.
+        `trace_id`/`traceparent` and the run options (`request_context`, `draft_spec` with
+        `agent_version` None for a draft turn, `model_id`, `model_overridden`) as in create_run.
         """
         from sqlalchemy.dialects.postgresql import insert
 
@@ -820,6 +1114,7 @@ class RunStore:
                     updated_at=now,
                     trace_id=trace_id,
                     traceparent=traceparent,
+                    **_run_option_values(request_context, draft_spec, model_id, model_overridden),
                 )
                 .on_conflict_do_nothing(constraint="runs_pkey")
                 .returning(RunModel.id)
@@ -833,6 +1128,10 @@ class RunStore:
                     raise RunIdConflict(run_id)
                 return UUID(raced["id"]), False
             conv.updated_at = now
+            # Auto-title, once: only the first turn, only when the conversation has no title (one the
+            # creator or a rename gave it), under the same row lock rename_conversation takes.
+            if latest is None and conv.title is None:
+                conv.title = auto_title(input)
             session.commit()
             return run_id, True
 
@@ -874,12 +1173,24 @@ class EventLog:
         self.Session = sessionmaker(bind=engine)
 
     def append(
-        self, tenant_id: str, run_id: UUID, event_key: str, type: RunEventType, data: dict | None = None
+        self,
+        tenant_id: str,
+        run_id: UUID,
+        event_key: str,
+        type: RunEventType,
+        data: dict | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> tuple[RunEvent, bool]:
         """Append an event to a run owned by `tenant_id`. Seq is assigned atomically.
 
         Returns (RunEvent, created: bool) where created=False if the event_key already exists.
         A repeated key never consumes a seq number.
+        `usage`: a model request's usage row (the run_model_requests columns except tenant_id and
+        run_id: request_key, model_id, provider_model_name, input_tokens, output_tokens,
+        cache_read_tokens, cache_write_tokens, usage_measured, cost_usd, price_source, and
+        optionally created_at), inserted in the event's transaction with ON CONFLICT DO NOTHING. A
+        repeated key writes no row: the first event's row stands, so usage and cost are recorded
+        exactly once per request and never recomputed.
         Raises RunNotFound (and writes nothing) if the run does not exist or belongs to another tenant.
         """
         if not tenant_id:
@@ -926,6 +1237,16 @@ class EventLog:
                 ts=datetime.now(timezone.utc),
             )
             session.add(event_model)
+            if usage is not None:
+                from sqlalchemy.dialects.postgresql import insert
+
+                session.flush()
+                row = {"created_at": event_model.ts, **usage, "tenant_id": tenant_id, "run_id": str(run_id)}
+                session.execute(
+                    insert(RunModelRequestModel)
+                    .values(**row)
+                    .on_conflict_do_nothing(constraint="run_model_requests_pkey")
+                )
             session.commit()
 
             return _run_event_from_model(event_model), True

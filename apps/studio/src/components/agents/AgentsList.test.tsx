@@ -55,3 +55,29 @@ describe("AgentsListUI", () => {
     expect(onSelect).toHaveBeenCalledWith("abc");
   });
 });
+
+describe("AgentsListUI search", () => {
+  const agents = [
+    { id: "1", name: "Support Bot", latest_version: 2 },
+    { id: "2", name: "Billing Helper", latest_version: null },
+    { id: "3", name: "support triage", latest_version: 1 },
+  ];
+
+  it("filters by name, case-insensitively, and announces the count", () => {
+    render(<AgentsListUI agents={agents} onSelect={vi.fn()} />);
+    const search = screen.getByRole("searchbox", { name: "Search agents" });
+    expect(screen.getByRole("status")).toHaveTextContent("3 agents");
+    fireEvent.change(search, { target: { value: "  SUPPORT " } });
+    expect(screen.getByText("Support Bot")).toBeInTheDocument();
+    expect(screen.getByText("support triage")).toBeInTheDocument();
+    expect(screen.queryByText("Billing Helper")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("2 of 3 agents");
+  });
+
+  it("shows a no-match state", () => {
+    render(<AgentsListUI agents={agents} onSelect={vi.fn()} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search agents" }), { target: { value: "zzz" } });
+    expect(screen.getByText("No matching agents")).toBeInTheDocument();
+    expect(screen.getByText('No agent name contains "zzz".')).toBeInTheDocument();
+  });
+});

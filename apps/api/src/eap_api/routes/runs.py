@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_observability import current_trace_context, log_failure
@@ -22,8 +21,15 @@ from eap_observability import current_trace_context, log_failure
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
-from eap_api.models import AgentModel, AgentVersionModel
+from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
+from eap_api.run_options import (
+    DRAFT_HANDOFF_VERSION,
+    check_spec_payload_size,
+    resolve_run_options,
+    same_options,
+    version_row as _version_row,
+)
 from eap_api.schemas import ErrorDetail, RunCreate
 from eap_api.sse import (
     DeltaSource,
@@ -36,7 +42,15 @@ from eap_api.sse import (
     release_stream_slot,
     run_event_stream,
 )
-from eap_run_store import ENQUEUE_FAILED_ERROR, EventLog, InvalidRunCursor, RunCursor, RunIdConflict, RunStore
+from eap_run_store import (
+    ENQUEUE_FAILED_ERROR,
+    EventLog,
+    InvalidRunCursor,
+    MetricsQueryTimeout,
+    RunCursor,
+    RunIdConflict,
+    RunStore,
+)
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
 
 log = logging.getLogger("eap_api")
@@ -85,7 +99,26 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "conversation_id": run.get("conversation_id"),
         "turn": run.get("turn"),
         "trace_id": run.get("trace_id"),
+        # Usage and cost (P0.1). Totals are null until the run finishes, and for runs recorded
+        # before usage existed ("not recorded"); cost_usd is a decimal string, null when any of the
+        # run's model requests had no price.
+        "model_id": run.get("model_id"),
+        "model_overridden": bool(run.get("model_overridden") or False),
+        "input_tokens": run.get("input_tokens"),
+        "output_tokens": run.get("output_tokens"),
+        "cost_usd": _decimal_str(run.get("cost_usd")),
+        "started_at": iso(run.get("started_at")),
+        "finished_at": iso(run.get("finished_at")),
+        # Run options (P0.8): a draft test run has `version` null and `draft` true; the validated
+        # request context ({} when none).
+        "draft": run.get("draft_spec") is not None,
+        "request_context": run.get("request_context") or {},
     }
+
+
+def _decimal_str(value: Any) -> str | None:
+    """A Numeric(20, 10) value as a plain decimal string ("0.0001230000"), or None."""
+    return None if value is None else format(value, "f")
 
 
 def _get_run_or_404(run_store: RunStore, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
@@ -95,36 +128,10 @@ def _get_run_or_404(run_store: RunStore, tenant_id: str, run_id: uuid.UUID) -> d
     return run
 
 
-def _version_row(db: Session, agent_id: uuid.UUID, version: int) -> AgentVersionModel | None:
-    return (
-        db.query(AgentVersionModel)
-        .filter(AgentVersionModel.agent_id == str(agent_id), AgentVersionModel.version == version)
-        .first()
-    )
-
-
-def resolve_version(db: Session, agent_id: uuid.UUID | str, requested: int | None) -> int:
-    """The requested published version, or the latest one when `requested` is None (409 if none, 404 if unknown)."""
-    if requested is None:
-        latest = db.query(func.max(AgentVersionModel.version)).filter(AgentVersionModel.agent_id == str(agent_id)).scalar()
-        if latest is None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent has no published version")
-        return latest
-    if _version_row(db, agent_id, requested) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    return requested
-
-
 def check_payload_size(db: Session, agent_id: uuid.UUID | str, version: int, input_text: str) -> None:
     version_row = _version_row(db, agent_id, version)
     assert version_row is not None
-    payload_bytes = len(json.dumps(version_row.spec).encode("utf-8")) + len(input_text.encode("utf-8"))
-    max_payload_bytes = int(os.environ.get("EAP_MAX_RUN_PAYLOAD_BYTES", str(256 * 1024)))
-    if payload_bytes > max_payload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"Run payload exceeds the {max_payload_bytes}-byte enqueue limit",
-        )
+    check_spec_payload_size(version_row.spec, input_text)
 
 
 def launch_recorded_run(
@@ -153,15 +160,20 @@ def launch_recorded_run(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This turn could not be started and a later turn has started since; start a new turn",
             )
-    version_row = _version_row(db, run["agent_id"], run["agent_version"])
-    assert version_row is not None  # versions are immutable and never deleted
+    if run.get("draft_spec") is not None:
+        # A draft test run: always its recorded snapshot, never the live draft (P0.8).
+        spec, handoff_version = run["draft_spec"], DRAFT_HANDOFF_VERSION
+    else:
+        version_row = _version_row(db, run["agent_id"], run["agent_version"])
+        assert version_row is not None  # versions are immutable and never deleted
+        spec, handoff_version = version_row.spec, run["agent_version"]
     try:
         launcher.launch(
             run_id=run_id,
             tenant_id=tenant_id,
             agent_id=uuid.UUID(str(run["agent_id"])),
-            version=run["agent_version"],
-            spec_json=json.dumps(version_row.spec),
+            version=handoff_version,
+            spec_json=json.dumps(spec),
             input_text=run["input"],
             traceparent=run.get("traceparent"),
         )
@@ -201,6 +213,9 @@ def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] |
             "display_status": run["display_status"],
             "agent_id": str(run["agent_id"]),
             "version": run["agent_version"],
+            "draft": run.get("draft_spec") is not None,
+            "model_id": run.get("model_id"),
+            "model_overridden": bool(run.get("model_overridden") or False),
             "trace_id": run["trace_id"],
             **(extra or {}),
         },
@@ -234,25 +249,31 @@ def start_run(
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    version_num = resolve_version(db, agent_id, body.version)
-    check_payload_size(db, agent_id, version_num, body.input)
-    # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
-    trace_id, traceparent = current_trace_context()
-
-    try:
-        run_id, created = run_store.create_run(
-            tenant_id, agent_id, version_num, body.input, body.run_id,
-            trace_id=trace_id, traceparent=traceparent,
+    # A retry of a recorded run is compared with the row (below) and relaunched as recorded; only a
+    # new run validates its options (a draft run against the live draft, then snapshotted).
+    run = run_store.get_run(tenant_id, body.run_id)
+    created = False
+    if run is None:
+        options = resolve_run_options(
+            db, tenant_id, agent,
+            version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
         )
-    except RunIdConflict:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-    run = _get_run_or_404(run_store, tenant_id, run_id)
+        # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
+        trace_id, traceparent = current_trace_context()
+        try:
+            run_id, created = run_store.create_run(
+                tenant_id, agent_id, options.target.version, body.input, body.run_id,
+                trace_id=trace_id, traceparent=traceparent, **options.store_kwargs(),
+            )
+        except RunIdConflict:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
+        run = _get_run_or_404(run_store, tenant_id, run_id)
 
     if not created and (
         run["agent_id"] != str(agent_id)
         or run["input"] != body.input
-        or (body.version is not None and run["agent_version"] != body.version)
         or run["conversation_id"] is not None
+        or not same_options(db, run, version=body.version, request_context=body.request_context, model=body.model)
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
@@ -260,6 +281,27 @@ def start_run(
 
     run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
     return started_response(run, created)
+
+
+MAX_STATUS_FILTERS = 10
+RUN_LIST_TIMEOUT_DETAIL = "Run list query timed out; narrow the time range or the filters"
+
+
+def _status_filter(values: list[str] | None) -> list[str] | None:
+    """`?status=a&status=b,c` as a de-duplicated list, None when absent (422 past MAX_STATUS_FILTERS)."""
+    if not values:
+        return None
+    statuses = list(dict.fromkeys(s.strip() for v in values for s in v.split(",") if s.strip()))
+    if len(statuses) > MAX_STATUS_FILTERS or any(len(s) > 32 for s in statuses):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"at most {MAX_STATUS_FILTERS} status values of at most 32 characters are allowed",
+        )
+    return statuses or None
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 @router.get("/runs")
@@ -272,17 +314,31 @@ def list_runs(
         Query(max_length=MAX_CURSOR_LENGTH, description="Opaque cursor: the previous page's next_before, verbatim"),
     ] = None,
     agent_id: uuid.UUID | None = None,
-    run_status: Annotated[str | None, Query(alias="status")] = None,
+    run_status: Annotated[list[str] | None, Query(alias="status")] = None,
     kind: Annotated[Literal["agent", "tool", "workflow"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     parent_run_id: uuid.UUID | None = None,
+    created_from: Annotated[datetime | None, Query(alias="from")] = None,
+    created_to: Annotated[datetime | None, Query(alias="to")] = None,
+    model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+    provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ) -> JSONResponse:
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
     this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow'), `tool_id` and
-    `workflow_id` filter. A workflow's child agent runs are listed only with `parent_run_id`."""
+    `workflow_id` filter. A workflow's child agent runs are listed only with `parent_run_id`.
+
+    Metrics drill-down (P0.6), same meaning as in GET /metrics/*: `status` may be repeated or
+    comma-separated (any of them; at most 10), `from` / `to` bound `created_at` to `[from, to)`
+    (ISO 8601, UTC without an offset; `from` must be before `to`), `model` (`provider:name`) and
+    `provider` keep runs that used that model, including through a workflow's child runs."""
+    statuses = _status_filter(run_status)
+    start = _utc(created_from) if created_from is not None else None
+    end = _utc(created_to) if created_to is not None else None
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
     run_store, _ = stores
     cursor = None
     if before is not None:
@@ -293,10 +349,15 @@ def list_runs(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="before is not a valid cursor; pass the previous page's next_before verbatim",
             )
-    runs = run_store.list_runs(
-        principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=run_status, kind=kind, tool_id=tool_id,
-        workflow_id=workflow_id, parent_run_id=parent_run_id,
-    )
+    try:
+        runs = run_store.list_runs(
+            principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=statuses, kind=kind,
+            tool_id=tool_id, workflow_id=workflow_id, parent_run_id=parent_run_id, created_from=start,
+            created_to=end, model=model, provider=provider,
+        )
+    except MetricsQueryTimeout:
+        # Only with `model` / `provider`: that filter runs under the metrics statement timeout.
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
     next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
     return JSONResponse(content={"items": [_run_json(r) for r in runs], "next_before": next_before})
 

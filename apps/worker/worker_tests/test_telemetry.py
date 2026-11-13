@@ -8,6 +8,7 @@ in-memory exporters (the workflow resolves the provider at run time) and off aga
 
 from __future__ import annotations
 
+import time
 import uuid
 
 import pytest
@@ -39,6 +40,29 @@ def telemetry(worker, monkeypatch):
     obs.shutdown_telemetry()
 
 
+RUN_SPAN_DEADLINE_S = 60.0
+
+
+def _run_spans(spans, run_id) -> list:
+    return [s for s in spans if s.name == "eap.run" and s.attributes["eap.run_id"] == str(run_id)]
+
+
+def _wait_for_run_span(finished, run_id, *, deadline_s: float = RUN_SPAN_DEADLINE_S) -> tuple[list, list]:
+    """(spans, logs) once the run's `eap.run` span has been exported.
+
+    The run row turns terminal inside `run_span` (eap.finish_run), before the run's last log record
+    and before the span ends, so `wait_terminal` returning does not mean the span exists yet; under
+    load that gap is long. Flush and poll until the span is there. Every record the run logs inside
+    the span was emitted before the span ended, so the same flush also has those logs.
+    """
+    end = time.monotonic() + deadline_s
+    while True:
+        spans, logs = finished()
+        if _run_spans(spans, run_id) or time.monotonic() >= end:
+            return spans, logs
+        time.sleep(0.05)
+
+
 def _api_request_trace(provider) -> tuple[str, str, int, int]:
     """What the API stores: the traceparent of its request span (ended long before the worker runs)."""
     with provider.get_tracer("api").start_as_current_span("POST /api/v1/agents/{agent_id}/runs") as span:
@@ -68,9 +92,9 @@ def test_run_joins_the_api_request_trace(worker, client, tenant, telemetry):
     run = wait_terminal(worker.run_store, tenant, run_id)
     assert run["status"] == "completed", run["error"]
 
-    spans, logs = finished()
+    spans, logs = _wait_for_run_span(finished, run_id)
     by_id = {s.context.span_id: s for s in spans}
-    runs = [s for s in spans if s.name == "eap.run" and s.attributes["eap.run_id"] == str(run_id)]
+    runs = _run_spans(spans, run_id)
     assert len(runs) == 1
     run_span = runs[0]
     assert run_span.context.trace_id == trace_int
@@ -101,8 +125,8 @@ def test_run_without_stored_traceparent_still_completes(worker, client, tenant, 
     run_id = enqueue_run(client, worker.run_store, tenant_id=tenant, spec=ticket_spec(), input_text="hi",
                          app_version=APP_VERSION)
     assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "completed"
-    spans, _ = finished()
-    (run_span,) = [s for s in spans if s.name == "eap.run" and s.attributes["eap.run_id"] == str(run_id)]
+    spans, _ = _wait_for_run_span(finished, run_id)
+    (run_span,) = _run_spans(spans, run_id)
     assert run_span.parent is None  # its own trace (DBOS tracing is off in this process)
 
 
@@ -162,7 +186,7 @@ def _assert_nothing_leaked(worker, tenant, run_id, finished) -> tuple[dict, list
     (failed,) = [e for e in event_rows(worker.engine, run_id) if e[2] == "run_failed"]
     assert not _leaks(repr(failed[3])), failed[3]
 
-    spans, logs = finished()
+    spans, logs = _wait_for_run_span(finished, run_id)
     for s in spans:
         text = repr(dict(s.attributes or {})) + repr([(e.name, dict(e.attributes or {})) for e in s.events])
         text += repr(s.status.description)
@@ -170,7 +194,7 @@ def _assert_nothing_leaked(worker, tenant, run_id, finished) -> tuple[dict, list
     for r in logs:
         text = repr(r.body) + repr(dict(r.attributes or {}))
         assert not _leaks(text), text
-    (run_span,) = [s for s in spans if s.name == "eap.run" and s.attributes["eap.run_id"] == str(run_id)]
+    (run_span,) = _run_spans(spans, run_id)
     assert run_span.attributes["eap.run_status"] == "failed"
     failure_logs = [r for r in logs if (r.attributes or {}).get("eap.run_id") == str(run_id)
                     and (r.attributes or {}).get("eap.error_code")]

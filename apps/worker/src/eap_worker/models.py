@@ -15,6 +15,9 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  `Turn {k}. You said: p1 | ... | pk. I answered {m} times before.` (every user
                  prompt in the messages, then the number of model responses among them). Used to
                  prove a conversation turn receives the earlier turns as message history.
+- `test:context` scripted model that answers with the instructions it was given (the spec's
+                 instructions after `{{context.<name>}}` rendering), as one streamed chunk:
+                 `Instructions: <rendered instructions>`. Proves run options reach the model.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -217,6 +220,20 @@ def scripted_history_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-history")
 
 
+def _context_answer(info: AgentInfo) -> str:
+    return f"Instructions: {info.instructions or ''}"
+
+
+def scripted_context_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(_context_answer(info))])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        yield _context_answer(info)
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-context")
+
+
 def litellm_model(name: str, settings: WorkerSettings) -> Model:
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -239,7 +256,7 @@ def make_resolver(settings_getter: Any):
 
     def resolve_model(ctx: ModelResolutionContext[Any], model_id: str) -> Model | None:
         if model_id == PLACEHOLDER_MODEL:
-            raise RuntimeError("agent run started without a per-run model from the spec")
+            raise RuntimeError("agent run started without a per-run model")
         provider, _, name = model_id.partition(":")
         settings_getter().allowed_models.check(provider, name)  # raises ModelNotAllowed
         if provider == "test":
@@ -251,6 +268,8 @@ def make_resolver(settings_getter: Any):
                 return scripted_history_model()
             if name == "mcp":
                 return scripted_mcp_model()
+            if name == "context":
+                return scripted_context_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

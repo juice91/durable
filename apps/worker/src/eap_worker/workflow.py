@@ -13,15 +13,17 @@ never disagree on the call shape, and workflows already queued or in flight reco
 
 Step layout of a run (each line is a DBOS step, so recovery replays recorded results):
 
-    eap.start_run                       ensure the runs row, status -> running; returns the turn link
-                                        and the stored request traceparent
+    eap.start_run                       ensure the runs row, status -> running; returns the turn link,
+                                        the stored request traceparent and the run options
     --- from here on, inside the `eap.run` span (child of the API request span) ---
     eap.append_event   start            run_started
     eap.load_history                    only for a conversation turn: the earlier COMPLETED turns'
                                         stored messages, passed to the agent as message_history
     eap-agent__dynamic_toolset__eap-spec-tools.get_tools
     eap-agent__model.request_stream     model request n (deltas NOTIFY'd live inside)
-    eap.append_event   model:{n}:final  model_message (from the checkpointed response)
+    eap.append_event   model:{n}:final  model_message (from the checkpointed response), with its
+                                        usage and cost and, in the same transaction, its
+                                        run_model_requests row (eap_worker.pricing)
     eap.append_event   tool:{id}:call   tool_call (before the tool runs)
     eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create, MCP tools (mcp__<server>__<tool>)
     eap.append_event   tool:{id}:result tool_result
@@ -38,6 +40,17 @@ Tracing: the API stores its request span's W3C traceparent on the run row. `eap.
 `run_span(..., traceparent=...)`, so every later step, model request and tool call is in the API
 request's trace. Spans are not durable state: a recovered run simply opens another `eap.run` span.
 A checkpoint written before tracing existed (None, or no "traceparent" key) runs untraced.
+
+Run options (milestone P0, P0.8 API / P0.11 worker): the effective model (`runs.model_id`, set when a
+caller overrides the spec's model), the request context (`runs.request_context`) and whether the run
+is a draft test run (`runs.draft_spec` set) also come back through `eap.start_run`'s recorded output,
+so a replay uses the model and context of the first attempt even if the row changed since. A
+checkpoint recorded before run options existed has no such keys and runs as before: the spec's model
+and an empty context. The effective model is re-checked against the allowlist before the first model
+request (and again by the resolver inside the model step). The request context is rendered into the
+instructions (`eap_schemas.render_instructions`, `{{context.<name>}}`) and given to tools as the
+read-only `RunDeps.request_context`; its values never go to spans or logs. A draft run is handed off
+with version 0 and its snapshot as spec_json, so the spec it runs is fixed at enqueue time.
 
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
@@ -75,15 +88,17 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
-from eap_observability import log_failure, run_span, set_run_outcome
+from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
 from eap_run_store import ENQUEUE_FAILED_ERROR
 from eap_schemas import AgentSpec
+from eap_schemas.request_context import render_instructions
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import classify
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
+from eap_worker.pricing import request_usage_input, usage_record
 from eap_worker.runtime import WorkerDeps, get_runtime
 
 log = logging.getLogger("eap_worker")
@@ -97,7 +112,11 @@ HEARTBEAT_SECONDS = 5.0
 
 
 def _instructions(ctx: RunContext[WorkerDeps]) -> str:
-    return ctx.deps.spec.instructions
+    # Rendered workflow-side from the recorded context, so every (re)execution sends the same text.
+    spec = ctx.deps.spec
+    if not spec.context_fields:
+        return spec.instructions
+    return render_instructions(spec.instructions, ctx.deps.request_context, spec.context_fields)
 
 
 async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
@@ -164,20 +183,40 @@ agent: Agent[WorkerDeps, str] = Agent(
 # --------------------------------------------------------------------------- steps (business writes)
 
 
+DRAFT_VERSION = 0  # the hand-off `version` of a draft test run (published versions start at 1)
+
+
 @DBOS.step(name="eap.start_run")
 async def start_run_step(
-    run_id: str, tenant_id: str, agent_id: str, version: int, input_text: str
+    run_id: str,
+    tenant_id: str,
+    agent_id: str,
+    version: int,
+    input_text: str,
+    spec_json: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Returns {"conversation_id", "turn", "traceparent", "superseded"}; conversation_id/turn are
-    None for a standalone run, traceparent is None when the API had telemetry off. `superseded` is
-    True when this turn must not run (see mark_running); the decision is part of this step's
-    recorded output, so a replayed workflow takes the same branch."""
+    """Returns {"conversation_id", "turn", "traceparent", "superseded", "model_id",
+    "request_context", "is_draft"}; conversation_id/turn are None for a standalone run, traceparent
+    is None when the API had telemetry off. `superseded` is True when this turn must not run (see
+    mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
+    the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
+    its validated context ({} when none), `is_draft` whether it is a draft test run."""
     rt = get_runtime()
 
     def work() -> dict[str, Any]:
         # The API inserts the row first (client-supplied run_id); this is an idempotent safety net.
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
-        rt.run_store.create_run(tenant_id, UUID(agent_id), version, input_text, UUID(run_id))
+        # A draft run (version 0) is stored like the API stores it: no version, the snapshot instead.
+        draft = version == DRAFT_VERSION and spec_json is not None
+        rt.run_store.create_run(
+            tenant_id,
+            UUID(agent_id),
+            None if draft else version,
+            input_text,
+            UUID(run_id),
+            draft_spec=_spec_dict(spec_json) if draft and spec_json is not None else None,
+            model_id=_spec_model_id(spec_json),
+        )
         # running, clearing an ENQUEUE_FAILED_ERROR in the same statement: the API marks a run failed
         # when its enqueue raised, yet DBOS may have accepted it, and then this workflow runs it.
         # A turn that a later turn has overtaken meanwhile stays failed and is not run (False).
@@ -190,6 +229,9 @@ async def start_run_step(
             "turn": run.get("turn"),
             "traceparent": run.get("traceparent"),
             "superseded": not started,
+            "model_id": run.get("model_id"),
+            "request_context": run.get("request_context") or {},
+            "is_draft": run.get("draft_spec") is not None,
         }
 
     return await asyncio.to_thread(work)
@@ -237,9 +279,27 @@ async def load_history_step(run_id: str, tenant_id: str, conversation_id: str, t
 
 
 @DBOS.step(name="eap.append_event")
-async def append_event_step(run_id: str, tenant_id: str, event_key: str, type: str, data: dict[str, Any]) -> int:
+async def append_event_step(
+    run_id: str,
+    tenant_id: str,
+    event_key: str,
+    type: str,
+    data: dict[str, Any],
+    usage: dict[str, Any] | None = None,
+) -> int:
+    """Write one durable event (idempotent per key). `usage` (pricing.request_usage_input) is given
+    only for a model request's `model:{n}:final` event: the request is priced here, the price and
+    tokens are added to the event's data, and its run_model_requests row is written in the event's
+    transaction (first write wins, so a re-executed step never re-prices). Same step, same position:
+    a run without usage and a checkpoint recorded before usage existed replay unchanged."""
     rt = get_runtime()
-    event, _created = await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data)
+    row = None
+    if usage is not None:
+        row, fields = usage_record(event_key.removesuffix(":final"), usage)
+        data = {**data, **fields}
+    event, _created = await asyncio.to_thread(
+        rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, row
+    )
     crash_point("after_event_write", event_key=event_key)
     return event.seq
 
@@ -275,6 +335,22 @@ def _parse_spec(spec_json: str | dict[str, Any]) -> AgentSpec:
     if isinstance(spec_json, str):
         return AgentSpec.model_validate_json(spec_json)
     return AgentSpec.model_validate(spec_json)
+
+
+def _spec_dict(spec_json: str | dict[str, Any]) -> dict[str, Any]:
+    return json.loads(spec_json) if isinstance(spec_json, str) else dict(spec_json)
+
+
+def _spec_model_id(spec_json: str | dict[str, Any] | None) -> str | None:
+    """The spec's model id for the safety-net insert, or None. Never raises: an invalid spec fails
+    the run later, inside the run body, with a durable run_failed."""
+    if spec_json is None:
+        return None
+    try:
+        spec = _parse_spec(spec_json)
+    except Exception:  # noqa: BLE001
+        return None
+    return model_id_for(spec.model.provider, spec.model.name)
 
 
 def _message_json(message: ModelMessage) -> dict[str, Any]:
@@ -334,10 +410,24 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
         await append_event_step(run_id, tenant_id, f"tool:{call.tool_call_id}:result", "tool_result", data)
 
 
+def effective_model_id(spec: AgentSpec, link: dict[str, Any]) -> str:
+    """The run's model: the recorded `model_id` from eap.start_run, else (a checkpoint recorded
+    before run options, or a row without one) the spec's model."""
+    recorded = link.get("model_id")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    return model_id_for(spec.model.provider, spec.model.name)
+
+
 async def _drive_agent(
-    run_id: str, deps: WorkerDeps, input_text: str, history: list[ModelMessage] | None = None
+    run_id: str,
+    deps: WorkerDeps,
+    input_text: str,
+    history: list[ModelMessage] | None = None,
+    model_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Run the agent; returns (output, this run's new messages as JSON)."""
+    """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
+    messages as JSON)."""
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
@@ -346,13 +436,15 @@ async def _drive_agent(
     if spec.model_settings.max_tokens is not None:
         settings["max_tokens"] = spec.model_settings.max_tokens
 
+    if model_id is None:
+        model_id = model_id_for(spec.model.provider, spec.model.name)
     n = 0
     pending: list[ToolCallPart] = []
     async with agent.iter(
         input_text,
         message_history=history or None,
         deps=deps,
-        model=model_id_for(spec.model.provider, spec.model.name),
+        model=model_id,
         model_settings=settings,
     ) as run:
         async for node in run:
@@ -371,6 +463,7 @@ async def _drive_agent(
                     f"model:{n}:final",
                     "model_message",
                     {"model_request": n, "text": text, "message": _message_json(response)},
+                    usage=request_usage_input(model_id, response.model_name, response.usage),
                 )
                 for call in calls:
                     await append_event_step(
@@ -404,12 +497,13 @@ async def agent_run(
     spec_json: str | dict[str, Any],
     input_text: str,
 ) -> dict[str, Any]:
-    link = await start_run_step(run_id, tenant_id, agent_id, version, input_text) or {}
-    if link.get("superseded"):
-        # Its hand-off failed (the run is failed with ENQUEUE_FAILED_ERROR) and a later turn has
-        # started since: running it now would run two turns at once. No event, no model call, no tool.
-        log.warning("run %s not started: a later turn of its conversation has started", run_id)
-        return {"status": "failed", "error": ENQUEUE_FAILED_ERROR, "error_code": "superseded"}
+    with log_context(tenant_id=tenant_id, run_id=run_id):  # records before run_span carry the ids too
+        link = await start_run_step(run_id, tenant_id, agent_id, version, input_text, spec_json) or {}
+        if link.get("superseded"):
+            # Its hand-off failed (the run is failed with ENQUEUE_FAILED_ERROR) and a later turn has
+            # started since: running it now would run two turns at once. No event, no model call, no tool.
+            log.warning("run %s not started: a later turn of its conversation has started", run_id)
+            return {"status": "failed", "error": ENQUEUE_FAILED_ERROR, "error_code": "superseded"}
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
         result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)
@@ -427,9 +521,10 @@ async def _run_body(
     input_text: str,
     link: dict[str, Any],
 ) -> dict[str, Any]:
-    await append_event_step(
-        run_id, tenant_id, "start", "run_started", {"agent_id": agent_id, "version": version, "input": input_text}
-    )
+    started: dict[str, Any] = {"agent_id": agent_id, "version": version, "input": input_text}
+    if link.get("is_draft"):
+        started["draft"] = True
+    await append_event_step(run_id, tenant_id, "start", "run_started", started)
     history: list[ModelMessage] | None = None
     if link.get("conversation_id") is not None:
         history_json = await load_history_step(run_id, tenant_id, link["conversation_id"], link["turn"])
@@ -438,11 +533,15 @@ async def _run_body(
     try:
         rt = get_runtime()
         spec = _parse_spec(spec_json)
-        # Model governance: re-checked here (not only at publish) because the policy may have
-        # changed since the version was published. Fails before any model request is made.
-        rt.settings.allowed_models.check(spec.model.provider, spec.model.name)
+        # Model governance: the effective model (an override recorded on the run, else the spec's)
+        # is re-checked here, not only at publish or run start, because the policy may have changed
+        # since. Fails before any model request is made.
+        model_id = effective_model_id(spec, link)
+        provider, _, model_name = model_id.partition(":")
+        rt.settings.allowed_models.check(provider, model_name)
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
-        output, new_messages = await _drive_agent(run_id, rt.deps_for(run_id, tenant_id, spec), input_text, history)
+        deps = rt.deps_for(run_id, tenant_id, spec, link.get("request_context") or None)
+        output, new_messages = await _drive_agent(run_id, deps, input_text, history, model_id)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
         status = "needs_attention" if _is_side_effect_unknown(exc) else failure.status

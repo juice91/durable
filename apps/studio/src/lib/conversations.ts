@@ -7,8 +7,19 @@ export interface Conversation {
   agent_id: string;
   title: string | null;
   turn_count: number;
+  /** The latest turn's run, or null for a conversation without turns. */
+  last_turn_run_id?: string | null;
+  last_turn_status?: string | null;
+  last_turn_display_status?: Run["display_status"] | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One page of GET /conversations, most recently active first. */
+export interface ConversationPage {
+  items: Conversation[];
+  /** Opaque cursor for the next page, or null when this was the last page. */
+  next_before: string | null;
 }
 
 /** A run that is a conversation turn (turn numbers start at 1). */
@@ -57,9 +68,23 @@ export function getConversation(conversationId: string): Promise<ConversationDet
   return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}`);
 }
 
-export function listConversations(agentId?: string): Promise<Conversation[]> {
-  const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
-  return send(`/api/v1/conversations${query}`);
+export function listConversations(
+  options: { agentId?: string; limit?: number; before?: string | null } = {},
+): Promise<ConversationPage> {
+  const params = new URLSearchParams();
+  if (options.agentId) params.set("agent_id", options.agentId);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.before) params.set("before", options.before);
+  const query = params.toString();
+  return send(`/api/v1/conversations${query ? `?${query}` : ""}`);
+}
+
+/** Rename (1–200 characters, one line); the list order does not change. */
+export function renameConversation(conversationId: string, title: string): Promise<Conversation> {
+  return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
 }
 
 /**

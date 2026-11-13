@@ -21,14 +21,14 @@ members = ["packages/*", "apps/api", "apps/worker"]
 eap-schemas = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Contracts layer (eap_schemas) depends on nothing else"
 type = "forbidden"
 source_modules = ["eap_schemas"]
-forbidden_modules = ["eap_runtime", "eap_run_store", "eap_api", "eap_worker", "sqlalchemy", "fastapi", "pydantic_ai", "dbos"]
+forbidden_modules = ["eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_processors", "sqlalchemy", "fastapi", "pydantic_ai", "dbos"]
 
 [[tool.importlinter.contracts]]
 name = "Agent runtime has no persistence, web or DBOS"
@@ -51,7 +51,7 @@ forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
 [[tool.importlinter.contracts]]
 name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets", "eap_processors"]
 forbidden_modules = ["opentelemetry"]
 # Direct imports only: the sanctioned path is eap_api/eap_worker -> eap_observability -> opentelemetry.
 # Every other root package is a source here, so any indirect chain must still end in a direct
@@ -65,6 +65,18 @@ source_modules = ["eap_secrets"]
 forbidden_modules = [
     "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability",
     "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos",
+]
+
+[[tool.importlinter.contracts]]
+name = "Processors import only the standard library, eap_schemas and re2"
+type = "forbidden"
+source_modules = ["eap_processors"]
+# The API (test console, publish validation) and the worker (runtime) import eap_processors; it
+# imports nothing of theirs and no I/O, web, database, agent or telemetry library.
+forbidden_modules = [
+    "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
+    "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos", "httpx",
+    "httpx2", "opentelemetry", "cryptography", "jsonschema", "anthropic", "openai",
 ]
 
 [[tool.importlinter.contracts]]

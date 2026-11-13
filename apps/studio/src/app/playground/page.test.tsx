@@ -7,7 +7,10 @@ import { api } from "@/lib/api";
 import {
   createConversation,
   getConversation,
+  listConversations,
+  renameConversation,
   startTurn,
+  type Conversation,
   type ConversationRun,
 } from "@/lib/conversations";
 import {
@@ -28,6 +31,8 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/lib/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
+  listConversations: vi.fn(),
+  renameConversation: vi.fn(),
   startTurn: vi.fn(),
 }));
 
@@ -192,6 +197,7 @@ beforeEach(() => {
   }));
   vi.mocked(getRun).mockImplementation(async (runId) => run(runId));
   vi.mocked(listEvents).mockResolvedValue([]);
+  vi.mocked(listConversations).mockResolvedValue({ items: [], next_before: null });
   vi.mocked(subscribeRun).mockImplementation((_runId, nextHandlers) => {
     handlers = nextHandlers;
     return unsubscribe;
@@ -217,7 +223,8 @@ describe("PlaygroundPage", () => {
 
     expect(createConversation).toHaveBeenCalledTimes(1);
     const [agentId, title, conversationId] = vi.mocked(createConversation).mock.calls[0];
-    expect([agentId, title]).toEqual(["agent-1", "Hello"]);
+    // The API titles the conversation from its first turn.
+    expect([agentId, title]).toEqual(["agent-1", null]);
     const [turnConversation, runId, input] = vi.mocked(startTurn).mock.calls[0];
     expect(turnConversation).toBe(conversationId);
     expect(runId).toMatch(
@@ -482,5 +489,193 @@ describe("PlaygroundPage", () => {
       "href",
       "https://example.com/tickets/42",
     );
+  });
+
+  describe("conversation rail", () => {
+    const listed = (id: string, title: string | null, agent_id = "agent-1"): Conversation => ({
+      id,
+      agent_id,
+      title,
+      turn_count: 1,
+      last_turn_run_id: `run-of-${id}`,
+      last_turn_status: "completed",
+      last_turn_display_status: "completed",
+      created_at: "2026-11-12T00:00:00Z",
+      updated_at: "2026-11-12T00:00:00Z",
+    });
+
+    it("lists the selected agent's conversations and reloads them after a turn starts", async () => {
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed("conv-1", "Earlier chat")],
+        next_before: null,
+      });
+      await renderReady();
+      expect(await screen.findByRole("button", { name: /^Earlier chat/ })).toBeInTheDocument();
+      expect(listConversations).toHaveBeenCalledWith({ agentId: "agent-1", limit: 30 });
+      const calls = vi.mocked(listConversations).mock.calls.length;
+      await sendMessage("Hello");
+      await waitFor(() => expect(vi.mocked(listConversations).mock.calls.length).toBeGreaterThan(calls));
+    });
+
+    it("loads a picked conversation into the thread and the URL", async () => {
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed("conv-1", "Earlier chat", "agent-1")],
+        next_before: null,
+      });
+      mockConversation(
+        [{ ...turnRun("run-1", 1, "My name is Ada", "completed"), output: "Hello Ada" }],
+        { "run-1": answered("My name is Ada", "Hello Ada") },
+      );
+      vi.mocked(getConversation).mockResolvedValueOnce({
+        ...(await getConversation("conv-1")),
+        agent_id: "agent-1",
+      });
+      await renderReady();
+      fireEvent.click(await screen.findByRole("button", { name: /^Earlier chat/ }));
+
+      expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
+      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-1");
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /^Earlier chat/ })).toHaveAttribute("aria-current", "true"),
+      );
+      expect(subscribeRun).not.toHaveBeenCalled();
+    });
+
+    it("switching away from a streaming turn stops its subscription without cancelling the turn", async () => {
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed("conv-1", "Earlier chat")],
+        next_before: null,
+      });
+      await renderReady();
+      await sendMessage("Long question");
+      const [streamingConversation, streamingRun] = vi.mocked(startTurn).mock.calls[0];
+      act(() => {
+        handlers.onEvent?.(event(0, "run_started", { input: "Long question" }));
+      });
+
+      mockConversation(
+        [{ ...turnRun("run-1", 1, "My name is Ada", "completed"), output: "Hello Ada" }],
+        { "run-1": answered("My name is Ada", "Hello Ada") },
+      );
+      fireEvent.click(await screen.findByRole("button", { name: /^Earlier chat/ }));
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
+      expect(screen.queryByText("Long question")).not.toBeInTheDocument();
+      await waitFor(() => expect(composer()).toBeEnabled());
+
+      // Going back rebuilds the streaming thread from the API and follows the same run again.
+      vi.mocked(getConversation).mockResolvedValue({
+        id: streamingConversation,
+        agent_id: "agent-1",
+        title: "Long question",
+        turn_count: 1,
+        created_at: "2026-11-12T00:00:00Z",
+        updated_at: "2026-11-12T00:00:00Z",
+        runs: [{ ...turnRun(streamingRun, 1, "Long question", "running"), conversation_id: streamingConversation }],
+      });
+      vi.mocked(listEvents).mockResolvedValue([event(0, "run_started", { input: "Long question" })]);
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed(streamingConversation, "Long question"), listed("conv-1", "Earlier chat")],
+        next_before: null,
+      });
+      act(() => {
+        handlers.onEvent?.(event(5, "run_completed", {})); // a late event of the stopped subscription
+      });
+      fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+      fireEvent.click(await screen.findByRole("button", { name: /^Long question/ }));
+      expect(await screen.findByText("Long question")).toBeInTheDocument();
+      await waitFor(() =>
+        expect(subscribeRun).toHaveBeenLastCalledWith(streamingRun, expect.any(Object), { initialLastSeq: 0 }),
+      );
+      expect(startTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a slow load once another conversation was picked", async () => {
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed("conv-a", "First"), listed("conv-b", "Second")],
+        next_before: null,
+      });
+      let releaseFirst: (value: Awaited<ReturnType<typeof getConversation>>) => void = () => {};
+      vi.mocked(getConversation).mockImplementation((id) =>
+        id === "conv-a"
+          ? new Promise((resolve) => {
+              releaseFirst = resolve;
+            })
+          : Promise.resolve({
+              id: "conv-b",
+              agent_id: "agent-1",
+              title: "Second",
+              turn_count: 1,
+              created_at: "2026-11-12T00:00:00Z",
+              updated_at: "2026-11-12T00:00:00Z",
+              runs: [{ ...turnRun("run-b", 1, "Second question", "completed"), output: "B" }],
+            }),
+      );
+      await renderReady();
+      fireEvent.click(await screen.findByRole("button", { name: /^First/ }));
+      fireEvent.click(screen.getByRole("button", { name: /^Second/ }));
+      expect(await screen.findByText("Second question")).toBeInTheDocument();
+      await act(async () => {
+        releaseFirst({
+          id: "conv-a",
+          agent_id: "agent-1",
+          title: "First",
+          turn_count: 1,
+          created_at: "2026-11-12T00:00:00Z",
+          updated_at: "2026-11-12T00:00:00Z",
+          runs: [turnRun("run-a", 1, "First question", "running")],
+        });
+      });
+      expect(screen.queryByText("First question")).not.toBeInTheDocument();
+      expect(subscribeRun).not.toHaveBeenCalled();
+      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-b");
+      expect(renameConversation).not.toHaveBeenCalled();
+    });
+
+    it("finishes a send whose conversation is still being created when the user switches threads", async () => {
+      vi.mocked(listConversations).mockResolvedValue({
+        items: [listed("conv-1", "Earlier chat")],
+        next_before: null,
+      });
+      mockConversation(
+        [{ ...turnRun("run-1", 1, "My name is Ada", "completed"), output: "Hello Ada" }],
+        { "run-1": answered("My name is Ada", "Hello Ada") },
+      );
+      let finishCreate: () => void = () => {};
+      vi.mocked(createConversation).mockImplementationOnce(
+        (agentId, title, id) =>
+          new Promise((resolve) => {
+            finishCreate = () =>
+              resolve({
+                id: id ?? "conv-new",
+                agent_id: agentId,
+                title,
+                turn_count: 0,
+                created_at: "2026-11-12T00:00:00Z",
+                updated_at: "2026-11-12T00:00:00Z",
+              });
+          }),
+      );
+      await renderReady();
+      fireEvent.change(composer(), { target: { value: "Sent before switching" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(createConversation).toHaveBeenCalledTimes(1));
+      const createdId = vi.mocked(createConversation).mock.calls[0][2];
+
+      fireEvent.click(await screen.findByRole("button", { name: /^Earlier chat/ }));
+      expect(await screen.findByText("Hello Ada")).toBeInTheDocument();
+      await act(async () => finishCreate());
+
+      // The turn is started on the new conversation (no empty conversation is left behind) ...
+      await waitFor(() => expect(startTurn).toHaveBeenCalledTimes(1));
+      const [turnConversation, , input] = vi.mocked(startTurn).mock.calls[0];
+      expect([turnConversation, input]).toEqual([createdId, "Sent before switching"]);
+      // ... but the thread the user switched to stays on screen and is not taken over.
+      expect(screen.queryByText("Sent before switching")).not.toBeInTheDocument();
+      expect(screen.getByText("Hello Ada")).toBeInTheDocument();
+      expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conv-1");
+      expect(subscribeRun).not.toHaveBeenCalled();
+      await waitFor(() => expect(composer()).toBeEnabled());
+    });
   });
 });
