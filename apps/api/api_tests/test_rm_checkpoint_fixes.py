@@ -92,7 +92,6 @@ def _agent_with_draft(client, h, memory=None):
 @pytest.mark.parametrize(
     ("memory", "message"),
     [
-        (OBSERVATIONAL, "observational memory is not available yet"),
         (SEMANTIC_RECALL, "semantic recall is not available yet"),
     ],
 )

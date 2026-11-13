@@ -47,6 +47,13 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  tool error or retry prompt; no tool call: just `Working memory:\n<note>`, `(none)`
                  without a block). The note echoed is the one rendered into the instructions, i.e.
                  as of the turn's start.
+- `test:observer` (RM.13) scripted observer/reflector for `eap-observer`: for a `TASK: observe`
+                 message, one note per `<turn number="N" date="D">` element, `turn N: <first 40 chars
+                 of the turn's first User: line>` (priority medium, date D); for `TASK: reflect`, one
+                 high-priority note `reflection of K notes over turns A-B` (K = the `<notes>` elements).
+                 Answers the `{"observations": [...]}` JSON of eap_worker.observational.
+- `test:observer-invalid` (RM.13) answers `I cannot summarise this.` (not the notes JSON), to prove
+                 an unparsable observer answer is a `memory_observe_failed` event, not a failed turn.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -499,6 +506,45 @@ def scripted_memory_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-memory")
 
 
+# ----------------------------------------------------------------------------- scripted observer (RM.13)
+
+_OBS_TURN_RE = re.compile(r'<turn number="(\d+)" date="([^"]*)">\n(.*?)\n</turn>', re.DOTALL)
+_OBS_NOTES_RE = re.compile(r'<notes turns="(\d+)-(\d+)"[^>]*>')
+_OBS_DATED_RE = re.compile(r"^- (\d{4}-\d{2}-\d{2}) ", re.MULTILINE)
+
+
+def scripted_observer_answer(prompt: str) -> str:
+    """`test:observer`'s answer to an eap-observer message (see the module docstring)."""
+    if prompt.startswith("TASK: reflect"):
+        spans = [(int(a), int(b)) for a, b in _OBS_NOTES_RE.findall(prompt)]
+        dates = _OBS_DATED_RE.findall(html.unescape(prompt))
+        lo = min((a for a, _ in spans), default=0)
+        hi = max((b for _, b in spans), default=0)
+        return json.dumps({"observations": [{
+            "date": max(dates, default=""), "priority": "high",
+            "text": f"reflection of {len(spans)} notes over turns {lo}-{hi}",
+        }]})
+    notes = []
+    for number, date, body in _OBS_TURN_RE.findall(prompt):
+        user = ""
+        for line in html.unescape(body).splitlines():
+            if line.startswith("User: "):
+                user = line[len("User: "):]
+                break
+        notes.append({"date": date, "priority": "medium", "text": f"turn {number}: {user[:40]}"})
+    return json.dumps({"observations": notes})
+
+
+def scripted_observer_model(mode: str = "valid") -> FunctionModel:
+    """`valid`: scripted_observer_answer; `invalid`: a sentence that is not the notes JSON."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        answer = scripted_observer_answer(_last_prompt(messages)) if mode == "valid" else "I cannot summarise this."
+        return ModelResponse(parts=[TextPart(answer)])
+
+    return FunctionModel(respond, model_name="scripted-observer" if mode == "valid" else f"scripted-observer-{mode}")
+
+
 def litellm_model(name: str, settings: WorkerSettings) -> Model:
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -615,6 +661,10 @@ def make_resolver(settings_getter: Any):
                 return scripted_retrieve_model()
             if name == "memory":
                 return scripted_memory_model()
+            if name == "observer":
+                return scripted_observer_model()
+            if name == "observer-invalid":
+                return scripted_observer_model("invalid")
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

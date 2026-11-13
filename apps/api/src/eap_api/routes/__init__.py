@@ -254,6 +254,19 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
                 ),
             )
 
+    # Memory's model calls (the observational memory observer, RM.13) are governed by the same chat
+    # allowlist; the worker re-checks it at call time and records a memory_observe_failed event.
+    if spec.memory is not None:
+        for ref in spec.memory.chat_models():
+            if not policy.allows(ref.provider, ref.name):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"observer model '{ref.provider}:{ref.name}' is not allowed on this platform "
+                        "(not in the EAP_ALLOWED_MODELS allowlist)"
+                    ),
+                )
+
     # Regex blocklist patterns must compile with RE2 (no backreferences or lookarounds, bounded
     # size, not matching empty text); eap_schemas only bounds their count and length.
     processor_problems = processor_errors(spec.input_processors, spec.output_processors)
@@ -270,19 +283,18 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
     _check_knowledge_bases(db, tenant_id, spec)
 
 
-# Memory features the spec can describe (RM.2) but the worker does not run yet. Until RM.13
-# (observational memory) and RM.14 (semantic recall) land, a spec that sets one would publish and
-# then silently do nothing, so publish, restore and draft runs refuse it. RM.13 and RM.14 remove
-# their entry here (the plan's task sections say so).
+# Memory features the spec can describe (RM.2) but the worker does not run yet. Until RM.14
+# (semantic recall) lands, a spec that sets one would publish and then silently do nothing, so
+# publish, restore and draft runs refuse it. RM.14 removes its entry here (the plan's task sections
+# say so); RM.13 removed observational memory's.
 UNAVAILABLE_MEMORY_FEATURES: tuple[tuple[str, str], ...] = (
-    ("observational", "observational memory is not available yet"),
     ("semantic_recall", "semantic recall is not available yet"),
 )
 
 
 def _check_memory_features(spec: AgentSpec) -> None:
-    """422 when the spec sets a memory feature that is not implemented yet (memory.observational,
-    memory.semantic_recall); remove it from the agent's memory settings to publish."""
+    """422 when the spec sets a memory feature that is not implemented yet (memory.semantic_recall);
+    remove it from the agent's memory settings to publish."""
     memory = spec.memory
     if memory is None:
         return

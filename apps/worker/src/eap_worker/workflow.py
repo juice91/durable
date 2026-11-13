@@ -107,6 +107,25 @@ update_working_memory's arguments are a placeholder there and in the model_messa
 events (eap_worker.memory.scrub_memory_messages; history re-renders the block from eap.load_memory). A spec without `memory`, a standalone run and a workflow child run keep their exact
 step layout, toolset and full history (up to EAP_MAX_HISTORY_BYTES).
 
+Observational memory (RM.13; eap_worker.observational): only for a spec with `memory.observational`
+AND a conversation turn that completed. eap.load_memory then also reads the active observations
+(the history starts after the turns they cover) and the instructions get an "Earlier in this
+conversation" block (never stored). After `eap.finish_run`, so the answer is never delayed and the
+run's status is already `completed`:
+
+    eap.finish_run
+    eap.memory_observe                  snapshot; decides observe / reflect / nothing (no write)
+    eap-observer__model.request         only to observe: the observer request (model per call,
+                                        allowlist checked inside the step)
+    eap.memory_observe_write            the observation, its `memory_updated` event and usage row
+                                        (`memory:observe:{turn}`) in one transaction, or one
+                                        `memory_observe_failed` event
+    eap-observer__model.request         only to reflect
+    eap.memory_reflect                  the reflection (`memory:reflect:{turn}`), or the failure event
+
+A failure there never changes the run's status. Without `memory.observational` the layout is the
+RM.12 one exactly (no post-turn step).
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -163,6 +182,7 @@ from eap_worker.memory import (
     scrub_memory_tool_args,
     with_memory,
 )
+from eap_worker.observational import observe_after_turn
 from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
@@ -809,6 +829,10 @@ async def _run_body(
     # complete event log.
     await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
     await finish_run_step(run_id, tenant_id, "completed", output, None, new_messages)
+    if spec.memory is not None and spec.memory.observational is not None and link.get("conversation_id") is not None:
+        # RM.13: post-turn observational memory, after the run is completed (never delays the answer,
+        # never fails the turn).
+        await observe_after_turn(run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec)
     return {"status": "completed", "output": output}
 
 

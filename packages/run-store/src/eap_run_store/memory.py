@@ -53,6 +53,11 @@ holding a later one:
   the conversation's forget watermark (written only by forget while it holds the conversation
   `FOR UPDATE`, so this check cannot race a forget), then inserts its embedding rows (a concurrent insert of the same `(run_id, role)` waits for the first
   and then skips), then the run row through `append_event_in_session` when an event is given.
+- `append_conversation_event` (RM.13: a post-turn step's event that writes no memory row, e.g.
+  `memory_observe_failed`) takes the conversation `FOR KEY SHARE` (`delete_conversation` waits for
+  it, and it fails with ConversationNotFound after one), then the run row through
+  `append_event_in_session`. `record_usage` (a priced request whose conversation is gone) takes
+  only the run row.
 - `search_recall` and `recall_neighbours` take no lock (one read transaction each).
 - `delete_message_embeddings_before` (retention) locks a batch of embedding rows
   `FOR UPDATE SKIP LOCKED` and deletes them: it never waits for, nor deadlocks with, a
@@ -105,7 +110,9 @@ Idempotency for DBOS steps (a re-executed step writes once):
   the agent, scope, scope key, version, format and changed keys, never the content; the same key
   for another scope or scope key (or a stored result naming another agent) is MemoryLedgerConflict.
 - observations: unique `(tenant_id, conversation_id, kind, covers_to_turn)`; a repeated insert or
-  reflection returns the existing row (`status='existing'`).
+  reflection returns the existing row (`status='existing'`). A slot written by ANOTHER run (both
+  run ids known) is not a repeat but a lost race: `overlap` (insert) or `stale` (reflect), and no
+  event is appended for a row this run did not write.
 - message embeddings: unique `(tenant_id, run_id, role)`; `index_turn` inserts with
   `ON CONFLICT DO NOTHING` and reports which roles already existed. An existing row is never
   replaced (not even under another embedding model: re-indexing after a model change is P1).
@@ -169,6 +176,7 @@ from eap_run_store.store import (
     RunNotFound,
     TurnInProgress,
     append_event_in_session,
+    insert_usage_in_session,
     validate_resource_id,
 )
 
@@ -861,6 +869,11 @@ _OBS_COLUMNS = (
 )
 
 
+def _written_by_other(existing: "Observation", run_id: str | None) -> bool:
+    """The slot's row was written by another run (a lost race, not a re-executed step)."""
+    return run_id is not None and existing.run_id is not None and str(existing.run_id) != str(run_id)
+
+
 def _append_event(session, tenant_id: str, event: MemoryEvent | None, default: dict[str, Any]) -> None:
     if event is None:
         return
@@ -1235,6 +1248,9 @@ class MemoryStore:
             _check_run(session, tenant_id, (run_id, None if event is None else event.run_id), agent, conv)
             existing = self._slot(session, tenant_id, conv, "observation", int(covers_to_turn))
             covered = self._covered_to(session, tenant_id, conv)
+            if existing is not None and _written_by_other(existing, run_id):
+                session.rollback()
+                return ObservationWrite("overlap", None, covered)
             if existing is not None:
                 self._event_or_rollback(session, tenant_id, event, existing)
                 session.commit()
@@ -1325,6 +1341,9 @@ class MemoryStore:
             covers_from = min(r["covers_from_turn"] for r in rows)
             covers_to = max(r["covers_to_turn"] for r in rows)
             existing = self._slot(session, tenant_id, conv, "reflection", covers_to)
+            if existing is not None and _written_by_other(existing, run_id):
+                session.rollback()
+                return ObservationWrite("stale", None, covered)
             if existing is not None:
                 self._event_or_rollback(session, tenant_id, event, existing, superseded=len(ids))
                 session.commit()
@@ -1390,6 +1409,49 @@ class MemoryStore:
         except Exception:
             session.rollback()
             raise
+
+    def append_conversation_event(
+        self, tenant_id: str, agent_id: str, conversation_id: str, event: MemoryEvent
+    ) -> bool:
+        """Append `event` (and its usage row) to a run of the conversation, while holding the
+        conversation `FOR KEY SHARE`, so nothing is ever appended to a run whose conversation was
+        deleted. For post-turn events that write no memory row (`memory_observe_failed`). Returns
+        whether the event was new (False: its key existed). The event's run must be a turn of this
+        conversation (RunNotFound). Raises ConversationNotFound (unknown, another tenant's or
+        agent's, or deleted): nothing written; see record_usage for the priced request."""
+        _require_tenant(tenant_id)
+        agent = _require_agent(agent_id)
+        conv = str(conversation_id)
+        with self.Session() as session:
+            self._lock_conversation(session, tenant_id, agent, conv, "KEY SHARE")
+            try:
+                _check_run(session, tenant_id, (event.run_id,), agent, conv)
+                _, created = append_event_in_session(
+                    session, tenant_id, event.run_id, event.event_key, event.type, dict(event.data or {}),
+                    dict(event.usage) if event.usage is not None else None,
+                )
+            except Exception:
+                session.rollback()
+                raise
+            session.commit()
+            return created
+
+    def record_usage(self, tenant_id: str, run_id: str, usage: Mapping[str, Any]) -> None:
+        """Record one priced request's `run_model_requests` row without an event (first write wins
+        per request key), refreshing a finished run's totals: a post-turn request whose
+        conversation was deleted while it ran (the provider charged; the run stays as the cost
+        record). Raises RunNotFound (another tenant's or an unknown run)."""
+        _require_tenant(tenant_id)
+        with self.Session() as session:
+            owned = session.execute(
+                text("SELECT id FROM runs WHERE tenant_id = :t AND id = :r FOR UPDATE"),
+                {"t": tenant_id, "r": str(run_id)},
+            ).first()
+            if owned is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
+            insert_usage_in_session(session, tenant_id, run_id, dict(usage))
+            session.commit()
 
     def list_observations(
         self,

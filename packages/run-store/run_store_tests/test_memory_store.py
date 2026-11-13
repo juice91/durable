@@ -688,3 +688,52 @@ def test_observation_cannot_run_past_the_last_completed_turn(store, runs, engine
     assert (ahead.status, ahead.observation) == ("ahead", None)
     assert store.insert_observation(tenant, agent, conv, covers_from_turn=1, covers_to_turn=2,
                                     content="x").status == "created"
+
+
+def _obs_event(run_id: str, key: str) -> MemoryEvent:
+    usage = {"model_id": "test:observer", "input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 0,
+             "cache_write_tokens": 0, "usage_measured": True, "request_key": key}
+    return MemoryEvent(run_id=run_id, event_key=key, usage=usage)
+
+
+def _events_and_usage(engine, run_id: str) -> tuple[int, int]:
+    return (count(engine, "SELECT count(*) FROM execution_events WHERE run_id = :r", r=run_id),
+            count(engine, "SELECT count(*) FROM run_model_requests WHERE run_id = :r", r=run_id))
+
+
+def test_a_slot_written_by_another_run_is_a_lost_race_without_an_event(store, runs, engine, tenant, agent):
+    """RM.13 review: a repeat by the SAME run is `existing` (its event once); the same slot from
+    ANOTHER run is `overlap` (insert) / `stale` (reflect), and that run gets no event."""
+    conv = conversation(runs, tenant, agent, turns=6)
+    run_a, run_b = run_of(engine, tenant, conv, 4), run_of(engine, tenant, conv, 5)
+
+    first = store.insert_observation(tenant, agent, conv, covers_from_turn=1, covers_to_turn=3, content="a",
+                                     run_id=run_a, event=_obs_event(run_a, "memory:observe:4"))
+    assert first.status == "created"
+    lost = store.insert_observation(tenant, agent, conv, covers_from_turn=1, covers_to_turn=3, content="b",
+                                    run_id=run_b, event=_obs_event(run_b, "memory:observe:5"))
+    assert (lost.status, lost.observation, lost.covered_to_turn) == ("overlap", None, 3)
+    assert _events_and_usage(engine, run_b) == (0, 0)
+    again = store.insert_observation(tenant, agent, conv, covers_from_turn=1, covers_to_turn=3, content="a2",
+                                     run_id=run_a, event=_obs_event(run_a, "memory:observe:4"))
+    assert again.status == "existing" and again.observation.id == first.observation.id
+    assert _events_and_usage(engine, run_a) == (1, 1)  # the event exactly once
+    [row] = store.list_observations(tenant, conv)
+    assert row.content == "a" and row.run_id == run_a
+
+    second = store.insert_observation(tenant, agent, conv, covers_from_turn=4, covers_to_turn=4, content="c",
+                                      run_id=run_a).observation
+    ids = [first.observation.id, second.id]
+    r = store.reflect(tenant, agent, conv, supersede_ids=ids, content="r", run_id=run_a,
+                      event=_obs_event(run_a, "memory:reflect:4"))
+    assert r.status == "created"
+    lost = store.reflect(tenant, agent, conv, supersede_ids=ids, content="r-b", run_id=run_b,
+                         event=_obs_event(run_b, "memory:reflect:5"))
+    assert (lost.status, lost.observation) == ("stale", None)
+    assert _events_and_usage(engine, run_b) == (0, 0)
+    replay = store.reflect(tenant, agent, conv, supersede_ids=ids, content="r2", run_id=run_a,
+                           event=_obs_event(run_a, "memory:reflect:4"))
+    assert replay.status == "existing" and replay.observation.id == r.observation.id
+    assert _events_and_usage(engine, run_a) == (2, 2)  # observe + reflect, each once
+    [active] = store.list_observations(tenant, conv)
+    assert (active.kind, active.content, active.run_id) == ("reflection", "r", run_a)

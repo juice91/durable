@@ -65,6 +65,15 @@
   `update_working_memory` uses `after_tool_call`: right after its write, event and ledger row
   committed; recovery is answered from the ledger.)
 
+- `observer_request` (RM.13): inside the observer's model request step
+  (`eap-observer__model.request`), right after the observer model answered and before the step
+  checkpoint (the run is already completed). Recovery calls the observer again; the observation,
+  its event and its usage row are written once, by the write step that follows.
+- `after_observation_write` (RM.13): inside `eap.memory_observe_write` / `eap.memory_reflect`,
+  right after the observation (or reflection, or failure event) transaction committed and before
+  the step checkpoint. Recovery re-runs the step: the slot answers `existing`, one row, one event,
+  one usage row.
+
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
 then recovers instead of crash-looping.
@@ -95,6 +104,8 @@ CRASH_POINTS = frozenset(
         "kb_before_finalize",
         "kb_finalize",
         "load_memory",
+        "observer_request",
+        "after_observation_write",
     }
 )
 

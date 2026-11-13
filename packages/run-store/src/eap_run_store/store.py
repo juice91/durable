@@ -566,6 +566,18 @@ def _finish_values(tenant_id: str, run_id: str, status: str) -> dict[str, Any]:
     Computed from durable rows, so a re-executed finish step writes the same totals.
     `finished_at` is kept when the run already has this terminal status (a re-executed finish
     step), and set to now() otherwise."""
+    return {
+        **_totals_values(tenant_id, run_id),
+        "finished_at": case(
+            ((RunModel.status == status) & RunModel.finished_at.is_not(None), RunModel.finished_at),
+            else_=datetime.now(timezone.utc),
+        ),
+    }
+
+
+def _totals_values(tenant_id: str, run_id: str) -> dict[str, Any]:
+    """The usage totals columns (`input_tokens`, `output_tokens`, `cost_usd`) as SQL expressions
+    over the run's (and its child runs') `run_model_requests` rows; see _finish_values."""
     children = aliased(RunModel)
     child_ids = select(children.id).where(children.tenant_id == tenant_id, children.parent_run_id == run_id)
     rows = (
@@ -588,11 +600,27 @@ def _finish_values(tenant_id: str, run_id: str, status: str) -> dict[str, Any]:
         "input_tokens": select(rows.c.input_tokens).scalar_subquery(),
         "output_tokens": select(rows.c.output_tokens).scalar_subquery(),
         "cost_usd": select(rows.c.cost_usd).scalar_subquery(),
-        "finished_at": case(
-            ((RunModel.status == status) & RunModel.finished_at.is_not(None), RunModel.finished_at),
-            else_=datetime.now(timezone.utc),
-        ),
     }
+
+
+def insert_usage_in_session(session, tenant_id: str, run_id: UUID | str, usage: dict[str, Any], at: datetime | None = None) -> None:
+    """Insert one `run_model_requests` row (first write wins per request key) inside the caller's
+    session, then, if the run is already finished (`finished_at` set: a post-turn step such as the
+    observer or the memory index runs after eap.finish_run), recompute its usage totals from its
+    rows in the same transaction. `status` and `finished_at` never change here. The caller holds (or
+    takes) the run row lock: append_event_in_session locks it first."""
+    from sqlalchemy.dialects.postgresql import insert
+
+    row = {"created_at": at or datetime.now(timezone.utc), **usage, "tenant_id": tenant_id, "run_id": str(run_id)}
+    session.execute(
+        insert(RunModelRequestModel).values(**row).on_conflict_do_nothing(constraint="run_model_requests_pkey")
+    )
+    session.execute(
+        update(RunModel)
+        .where(RunModel.tenant_id == tenant_id, RunModel.id == str(run_id), RunModel.finished_at.is_not(None))
+        .values(**_totals_values(tenant_id, str(run_id)))
+        .execution_options(synchronize_session=False)
+    )
 
 
 def _run_option_values(
@@ -1334,9 +1362,8 @@ def append_event_in_session(
     """EventLog.append's work inside the caller's open ORM session, which commits it: a store that
     must write its own rows, an event and a usage row in one transaction (KnowledgeStore) uses this.
     Same rules as EventLog.append (seq under the runs row lock, repeated key = no write).
+    A usage row inserted on a FINISHED run also refreshes the run's totals (insert_usage_in_session).
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
-    from sqlalchemy.dialects.postgresql import insert
-
     if not tenant_id:
         raise ValueError("tenant_id is required")
     # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
@@ -1374,10 +1401,8 @@ def append_event_in_session(
     session.add(event_model)
     session.flush()
     if usage is not None:
-        row = {"created_at": event_model.ts, **usage, "tenant_id": tenant_id, "run_id": str(run_id)}
-        session.execute(
-            insert(RunModelRequestModel).values(**row).on_conflict_do_nothing(constraint="run_model_requests_pkey")
-        )
+        # A usage row on a finished run (post-turn steps) also refreshes the run's totals.
+        insert_usage_in_session(session, tenant_id, run_id, usage, event_model.ts)
     return _run_event_from_model(event_model), True
 
 
