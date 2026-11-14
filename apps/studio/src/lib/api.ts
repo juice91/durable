@@ -39,10 +39,20 @@ export interface AgentVersion {
   restored_from?: number | null;
 }
 
+/** One item of a 422 `detail` list (pydantic): where (`loc`) and what (`msg`). */
+export interface ApiErrorDetail {
+  loc: (string | number)[];
+  msg: string;
+}
+
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  /** A 422's `detail` items, in order (empty for other errors). `message` joins their `msg`s. */
+  public details: ApiErrorDetail[];
+
+  constructor(public status: number, message: string, details: ApiErrorDetail[] = []) {
     super(message);
     this.name = "ApiError";
+    this.details = details;
   }
 }
 
@@ -58,17 +68,22 @@ export function apiHeaders(extra: HeadersInit = {}): HeadersInit {
 
 export async function apiErrorFromResponse(response: Response): Promise<ApiError> {
   let message = `HTTP ${response.status}`;
+  let details: ApiErrorDetail[] = [];
   try {
     const data = await response.json();
     if (response.status === 422 && Array.isArray(data.detail)) {
       message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
+      details = data.detail.map((e: { loc?: unknown; msg?: unknown }) => ({
+        loc: Array.isArray(e.loc) ? e.loc.filter((part): part is string | number => typeof part === "string" || typeof part === "number") : [],
+        msg: String(e.msg ?? ""),
+      }));
     } else if (typeof data.detail === "string") {
       message = data.detail;
     }
   } catch {
     // Keep the HTTP status fallback when the response is not JSON.
   }
-  return new ApiError(response.status, message);
+  return new ApiError(response.status, message, details);
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {

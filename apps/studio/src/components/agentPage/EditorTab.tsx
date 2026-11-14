@@ -40,6 +40,8 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The 422 locations of `saveError` (pydantic `detail[].loc`), for routing it to a step.
+  const [saveErrorLocations, setSaveErrorLocations] = useState<(string | number)[][]>([]);
   const [versions, setVersions] = useState<AgentVersion[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -80,6 +82,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
     if (!agent || submitting) return;
     setSubmitting(true);
     setSaveError(null);
+    setSaveErrorLocations([]);
     try {
       const updated = await api.agents.update(agent.id, spec);
       // The editor re-reports dirty against the saved spec (edits typed during the save stay dirty).
@@ -88,6 +91,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
       void refreshPage?.();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
+        setSaveErrorLocations((err.details ?? []).map((detail) => detail.loc));
         setSaveError(err.message || "Failed to save draft");
       } else {
         setSaveError("Failed to save draft");
@@ -102,6 +106,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
     setPublishing(true);
     setLastPublishResult(null);
     setSaveError(null);
+    setSaveErrorLocations([]);
     try {
       const version = await api.versions.create(agent.id);
       setLastPublishResult({ type: "success", version: version.version });
@@ -112,6 +117,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
       if (err instanceof ApiError && err.status === 409) {
         setLastPublishResult({ type: "conflict", message: err.message });
       } else if (err instanceof ApiError) {
+        setSaveErrorLocations((err.details ?? []).map((detail) => detail.loc));
         setSaveError(err.message || "Failed to publish version");
       } else {
         setSaveError("Failed to publish version");
@@ -230,6 +236,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
         submitLabel="Save draft"
         onDirtyChange={setIsDirty}
         serverError={saveError}
+        serverErrorLocations={saveErrorLocations}
         stepper={{
           activeStep: query.step,
           onStepChange: query.setStep,

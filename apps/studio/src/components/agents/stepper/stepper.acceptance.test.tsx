@@ -8,6 +8,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const nav = vi.hoisted(() => ({ search: "", path: "", push: vi.fn(), replace: vi.fn() }));
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => nav.path,
@@ -35,7 +37,7 @@ vi.mock("@/components/agents/specSections", async (importOriginal) => {
 import { api, ApiError, type AgentSpec } from "@/lib/api";
 import { compareVersions, restoreVersion } from "@/lib/agentVersions";
 import { routes } from "@/lib/routes";
-import { fetchModels, fetchProcessorCatalog } from "@/components/agents/specSections";
+import { CORE_STEP_IDS, fetchModels, fetchProcessorCatalog } from "@/components/agents/specSections";
 import { modelsFixture, processorCatalogFixture } from "@/components/agents/specSections.fixtures";
 import { mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH } from "@/components/frame/frameTesting";
 import { SidePanel, SidePanelProvider } from "@/components/frame/SidePanel";
@@ -172,9 +174,9 @@ describe("deep links and reload", () => {
 });
 
 describe("step navigation", () => {
-  it("Previous and Next walk all five steps in order with matching names and headings", async () => {
+  it("Previous and Next walk all seven steps in order with matching names and headings", async () => {
     await renderEditor();
-    const labels = ["Identity and model", "Instructions", "Tools", "Request context", "Processors"];
+    const labels = ["Identity and model", "Instructions", "Tools", "Request context", "Processors", "Knowledge", "Memory"];
     for (let index = 0; index < labels.length; index++) {
       expect(region(labels[index])).toBeVisible();
       expect(navButton(new RegExp(`^${labels[index]}`))).toHaveAttribute("aria-current", "step");
@@ -187,7 +189,7 @@ describe("step navigation", () => {
       }
     }
     fireEvent.click(screen.getByTestId("stepper-previous"));
-    expect(region("Request context")).toBeVisible();
+    expect(region("Knowledge")).toBeVisible();
   });
 
   it("only the active step's body is visible; the others stay mounted", async () => {
@@ -228,7 +230,7 @@ describe("step navigation", () => {
     await renderEditor();
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
     expect(select.value).toBe("tools");
-    expect(screen.getByText("Step 3 of 5")).toBeInTheDocument();
+    expect(screen.getByText("Step 3 of 7")).toBeInTheDocument();
     expect(Array.from(select.options).map((option) => option.value)).toEqual(EDITOR_STEPS.map((step) => step.id));
     expect(select.options[0].textContent).toContain("test:echo");
     fireEvent.change(screen.getByRole("textbox", { name: "Instructions", hidden: true }), { target: { value: "" } });
@@ -236,7 +238,7 @@ describe("step navigation", () => {
     fireEvent.change(select, { target: { value: "processors" } });
     expect(region("Processors")).toBeVisible();
     expect(lastReplace().params.get("step")).toBe("processors");
-    expect(screen.getByText("Step 5 of 5")).toBeInTheDocument();
+    expect(screen.getByText("Step 5 of 7")).toBeInTheDocument();
   });
 });
 
@@ -314,7 +316,8 @@ describe("byte-identical saves and unknown keys", () => {
     spec_version: 1,
     description: "Answers support questions",
     name: "Support bot",
-    memory: { observational: { enabled: true, window: 20 } },
+    // A valid memory config (RM.17 validates it), with a non-default observer window.
+    memory: { observational: { model: { provider: "test", name: "echo" }, observe_after_tokens: 20000, keep_recent_turns: 4, reflect_after_tokens: 8000 } },
     model: { name: "echo", provider: "test", region: "eu" },
     tools: ["clock"],
     model_settings: { max_tokens: 200, temperature: 0.3, top_p: 0.9 },
@@ -702,7 +705,9 @@ describe("registry contract", () => {
     },
     ownsError: (message) => message.startsWith("knowledge"),
   };
-  const STEPS = [...EDITOR_STEPS, knowledgeStep];
+  // The five built-in steps plus the fake: RM.17's real Knowledge and Memory steps are left out, so
+  // the fake's id and the unknown `memory` key below stay the contract's own.
+  const STEPS = [...EDITOR_STEPS.filter((step) => (CORE_STEP_IDS as readonly string[]).includes(step.id)), knowledgeStep];
   const STORED = { ...DRAFT, model_settings: { temperature: null, max_tokens: null }, memory: { on: true } } as unknown as AgentSpec;
 
   function Host({ onSubmit, serverError = null }: { onSubmit: (spec: AgentSpec) => Promise<void>; serverError?: string | null }) {

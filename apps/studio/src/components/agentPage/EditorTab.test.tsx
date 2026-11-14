@@ -14,6 +14,8 @@ import { api, ApiError } from "@/lib/api";
 import { useRouter, useParams } from "next/navigation";
 import { compareVersions, restoreVersion } from "@/lib/agentVersions";
 
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("@/lib/agentVersions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/agentVersions")>();
   return { ...actual, compareVersions: vi.fn(), restoreVersion: vi.fn() };

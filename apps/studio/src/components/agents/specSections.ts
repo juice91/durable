@@ -344,7 +344,12 @@ export function stepForErrorMessage(message: string): CoreStepId | null {
   if (target?.kind === "context_fields") return "request-context";
   // Anchored to the API's message prefixes for these keys only, so a message about another part of
   // the spec that merely mentions a tool or a model (a later step's) is not claimed here.
-  if (/^(mcp_tools|tools)(\[\d+\])?[.:\s]/.test(message) || /^MCP server '[^']*'/.test(message)) return "tools";
+  // "tool name 'retrieve' is reserved for a platform tool" (RM.17): raised once knowledge or memory
+  // is on, fixed on the Tools step (at save it arrives as a pydantic "Value error, ...").
+  if (/^(mcp_tools|tools)(\[\d+\])?[.:\s]/.test(message) || /^MCP server '[^']*'/.test(message) || /^(Value error, )?tool name '[^']*' is reserved/.test(message)) return "tools";
   if (/^(name|model|model_settings)(\.[a-z_]+)*[:\s]/.test(message) || /^Model [^\s]+ is not/.test(message)) return "identity";
+  // The spec and ModelRef validators at save (pydantic "Value error, ..."): the agent's name, or the
+  // model's provider or name.
+  if (/^Value error, (name|provider) (cannot be empty|must be at most)/.test(message)) return "identity";
   return null;
 }

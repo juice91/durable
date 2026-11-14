@@ -12,8 +12,19 @@ import { instructionsStep } from "./InstructionsStep";
 import { toolsStep } from "./ToolsStep";
 import { requestContextStep } from "./RequestContextStep";
 import { processorsStep } from "./ProcessorsStep";
+import { knowledgeStep } from "./KnowledgeStep";
+import { memoryStep } from "./MemoryStep";
 
-export const EDITOR_STEPS: readonly EditorStepDefinition[] = [identityStep, instructionsStep, toolsStep, requestContextStep, processorsStep];
+export const EDITOR_STEPS: readonly EditorStepDefinition[] = [
+  identityStep,
+  instructionsStep,
+  toolsStep,
+  requestContextStep,
+  processorsStep,
+  // RM.17: steps 6 and 7.
+  knowledgeStep,
+  memoryStep,
+];
 
 /** The first step: where the editor opens without (or with an unknown) `?step=`. */
 export const FIRST_STEP_ID = EDITOR_STEPS[0].id;
@@ -37,9 +48,32 @@ export function neighbourSteps(
   return { previous: index > 0 ? steps[index - 1] : null, next: index >= 0 && index < steps.length - 1 ? steps[index + 1] : null };
 }
 
-/** The step a save or publish error belongs to, or null when no step claims it. */
-export function stepForError(message: string | null | undefined, steps: readonly EditorStepDefinition[] = EDITOR_STEPS): string | null {
+/** The top-level spec key a 422 location points into (`["body", "spec", "memory", ...]` -> "memory"). */
+export function specKeyOfLocation(loc: readonly (string | number)[]): string | null {
+  let i = 0;
+  if (loc[i] === "body") i += 1;
+  if (loc[i] === "spec") i += 1;
+  else if (i > 0) return null; // a body field that is not the spec
+  const key = loc[i];
+  return typeof key === "string" ? key : null;
+}
+
+/**
+ * The step a save or publish error belongs to, or null when no step claims it. With the 422's
+ * locations, the first one inside a step's `specKeys` decides; otherwise the message text
+ * (`ownsError`).
+ */
+export function stepForError(
+  message: string | null | undefined,
+  steps: readonly EditorStepDefinition[] = EDITOR_STEPS,
+  locations: readonly (readonly (string | number)[])[] = [],
+): string | null {
   if (!message) return null;
+  for (const loc of locations) {
+    const key = specKeyOfLocation(loc);
+    const owner = key ? steps.find((step) => step.specKeys?.includes(key)) : undefined;
+    if (owner) return owner.id;
+  }
   return steps.find((step) => step.ownsError(message))?.id ?? null;
 }
 

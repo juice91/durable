@@ -4,6 +4,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const nav = vi.hoisted(() => ({ path: "/agents/a1/editor", push: vi.fn(), replace: vi.fn() }));
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => nav.path,

@@ -7,6 +7,8 @@ import { listTools } from "@/lib/tools";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import type { AgentSpec } from "@/lib/api";
 
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();

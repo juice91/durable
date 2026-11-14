@@ -13,6 +13,8 @@ import { listTools } from "@/lib/tools";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("next/navigation", () => ({
   // SL.11: the stepper writes `?step=` / `?compare=` with replace and reads them back.
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),

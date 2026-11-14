@@ -7,7 +7,9 @@ import { memorySummary } from "./agentPageModel";
 
 /**
  * The memory card pinned under the conversation list: four on/off badges read from the effective
- * spec. Read-only until RM.18 makes it expand into the memory inspector.
+ * spec, through the same helper as the editor's Memory step (`memoryFeatures` in
+ * components/agents/knowledgeMemory.ts). Read-only until RM.18 makes it expand into the memory
+ * inspector.
  */
 export function MemoryCard({ spec }: { spec: AgentSpec | null | undefined }) {
   const badges = memorySummary(spec);
@@ -15,6 +17,8 @@ export function MemoryCard({ spec }: { spec: AgentSpec | null | undefined }) {
     <section aria-labelledby="agent-memory-card-title" data-testid="memory-card" className="shrink-0 border-t border-border px-3 py-2">
       <h2 id="agent-memory-card-title" className="mb-1.5 text-caption font-semibold uppercase tracking-wide text-muted-foreground">
         Memory
+        {/* "Memory status": the Config panel's Memory section is another region on the same page. */}
+        <span className="sr-only"> status</span>
       </h2>
       <ul className="flex flex-wrap gap-1">
         {badges.map((badge) => (

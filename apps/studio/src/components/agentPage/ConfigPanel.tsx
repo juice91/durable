@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Agent, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
@@ -11,6 +11,8 @@ import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
+import { listKnowledgeBases } from "@/lib/knowledge";
+import { knowledgeBasesOf, knowledgeRefSummary, memorySummaryLines } from "@/components/agents/knowledgeMemory";
 
 /** Editor steps the "Edit" links open (the stepper's `?step=` ids, `stepper/registry.ts`). */
 export type ConfigStep = CoreStepId | (string & {});
@@ -75,6 +77,9 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
   const [wrap, setWrap] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
   const edit = (step: ConfigStep) => routes.agentEditor(agent.id, { step });
+  const knowledgeRefs = knowledgeBasesOf(spec);
+  const memoryLines = memorySummaryLines(spec);
+  const kbNames = useKnowledgeBaseNames(knowledgeRefs.length > 0);
 
   const copyInstructions = async () => {
     setCopied((await copyText(spec?.instructions ?? "")) ? "Instructions copied" : "Copying is not available here");
@@ -191,8 +196,57 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
               </dl>
             )}
           </Section>
+
+          <Section id="knowledge" title="Knowledge" count={knowledgeRefs.length} editHref={edit("knowledge")}>
+            {knowledgeRefs.length === 0 ? (
+              <p className={muted}>None</p>
+            ) : (
+              <ul className="space-y-1 text-caption" data-testid="config-knowledge">
+                {knowledgeRefs.map((ref, index) => (
+                  <li key={`${ref.id}-${index}`} className="min-w-0">
+                    <span className="block break-words">{kbNames?.get(ref.id) ?? <span className="break-all font-mono">{ref.id}</span>}</span>
+                    <span className={cn("block break-words", muted)}>{knowledgeRefSummary(ref)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
+          <Section id="memory" title="Memory" editHref={edit("memory")}>
+            {memoryLines.length === 0 ? (
+              <p className={muted}>Off</p>
+            ) : (
+              <dl className="space-y-1 text-caption" data-testid="config-memory">
+                {memoryLines.map(([label, detail]) => (
+                  <div key={label} className="min-w-0">
+                    <dt className={muted}>{label}</dt>
+                    <dd className="break-words">{detail}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </Section>
         </>
       )}
     </div>
   );
+}
+
+/** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */
+function useKnowledgeBaseNames(needed: boolean): Map<string, string> | null {
+  const [names, setNames] = useState<Map<string, string> | null>(null);
+  useEffect(() => {
+    if (!needed || names) return;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => listKnowledgeBases())
+      .then((items) => {
+        if (!cancelled) setNames(new Map((items ?? []).map((kb) => [kb.id, kb.name])));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [needed, names]);
+  return names;
 }

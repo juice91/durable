@@ -69,6 +69,12 @@ export interface EditorStepDefinition {
    * compete for a message.
    */
   ownsError: (message: string) => boolean;
+  /**
+   * Top-level spec keys this step owns (`knowledge_bases`, `memory`). A 422 whose `detail[].loc`
+   * points into one (`["body", "spec", <key>, ...]`) opens this step, before any `ownsError` text
+   * match. Optional: steps without it are routed by message text only.
+   */
+  specKeys?: readonly string[];
   /** Fields that block saving (required and empty, or invalid), in the step's field order. */
   missing?: (draft: EditorDraft, spec: AgentSpec) => MissingField[];
 }

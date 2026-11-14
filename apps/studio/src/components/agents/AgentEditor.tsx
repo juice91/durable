@@ -35,6 +35,8 @@ interface AgentEditorProps {
    * shown next to that part of the form; in the stepper, the step holding it opens.
    */
   serverError?: string | null;
+  /** The 422 `detail[].loc`s of `serverError`, when it had any: they route it to a step first. */
+  serverErrorLocations?: readonly (readonly (string | number)[])[];
   /** Show the steps one at a time in the stepper. Without it every step shows, in order, as one form. */
   stepper?: AgentEditorStepper;
   /** The steps (default: the registry's). */
@@ -42,13 +44,14 @@ interface AgentEditorProps {
 }
 
 export const AGENT_EDITOR_FORM_ID = "agent-editor-form";
+const NO_LOCATIONS: readonly (readonly (string | number)[])[] = [];
 
 /**
  * The agent spec editor. It owns the form state (`EditorDraft`) and renders each registered step
  * (`stepper/registry.ts`) with it. Every step stays mounted; under the stepper only the active one
  * is shown, so a step's own state (loaded MCP tools, an open picker) survives switching steps.
  */
-export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError = null, stepper, steps = EDITOR_STEPS }: AgentEditorProps) {
+export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError = null, serverErrorLocations = NO_LOCATIONS, stepper, steps = EDITOR_STEPS }: AgentEditorProps) {
   const [draft, setDraft] = useState<EditorDraft>(() => draftFromSpec(initialData));
   const [submitting, setSubmitting] = useState(false);
   const instructionsRef = useRef<HTMLTextAreaElement>(null);
@@ -84,7 +87,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
   const services = useMemo<StepServices>(() => ({ instructionsRef, insertPlaceholder }), [insertPlaceholder]);
 
   const errors = useMemo(() => ({ serverError, target: serverError ? errorTarget(serverError) : null }), [serverError]);
-  const errorStep = stepForError(serverError, steps);
+  const errorStep = stepForError(serverError, steps, serverErrorLocations);
 
   // A new save or publish error opens the step it belongs to.
   const onStepChange = stepper?.onStepChange;
@@ -104,11 +107,15 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
         if (missing.step !== stepper.activeStep) stepper.onStepChange(missing.step);
         setTimeout(() => {
           const element = document.getElementById(missing.fieldId);
-          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
             element.setCustomValidity(missing.message ?? "");
             element.focus();
             element.reportValidity();
             element.setCustomValidity("");
+          } else if (element instanceof HTMLElement) {
+            // A custom combobox or a button (an attachment's Detach): no validity
+            // API, so focus it; its step shows the message inline.
+            element.focus();
           }
         }, 0);
         return;

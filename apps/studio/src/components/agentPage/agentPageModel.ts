@@ -5,6 +5,7 @@
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes, type AgentChatRouteOptions } from "@/lib/routes";
 import { sectionsOf } from "@/components/agents/specSections";
+import { memoryFeatures, type MemoryFeature } from "@/components/agents/knowledgeMemory";
 import { effectiveVersionRef, targetSpec, type VersionRef } from "@/components/chat/runOptions";
 import { readStorage, writeStorage } from "@/lib/safeStorage";
 
@@ -126,35 +127,11 @@ export function effectiveConfig(
   };
 }
 
-/** The memory part of a spec (RM.13 and RM.14 shapes); absent on agents without memory. */
-interface MemorySpec {
-  history?: { last_turns?: number | null } | null;
-  working?: object | null;
-  observational?: object | null;
-  semantic_recall?: object | null;
-}
+export type MemoryBadge = MemoryFeature;
 
-export interface MemoryBadge {
-  id: "history" | "working" | "observational" | "semantic";
-  label: string;
-  on: boolean;
-}
-
-/** The memory card's four on/off badges, read from the effective spec. */
+/** The memory card's four on/off badges, read from the effective spec (the same helper as the editor's Memory step). */
 export function memorySummary(spec: AgentSpec | null | undefined): MemoryBadge[] {
-  const memory = (spec as { memory?: MemorySpec | null } | null | undefined)?.memory ?? null;
-  const turns = memory?.history?.last_turns;
-  return [
-    {
-      id: "history",
-      // Conversations replay their earlier turns without any memory config.
-      label: typeof turns === "number" ? `History ${turns} turns` : "History",
-      on: true,
-    },
-    { id: "working", label: "Working memory", on: Boolean(memory?.working) },
-    { id: "observational", label: "Observational", on: Boolean(memory?.observational) },
-    { id: "semantic", label: "Semantic recall", on: Boolean(memory?.semantic_recall) },
-  ];
+  return memoryFeatures(spec);
 }
 
 const PLACEHOLDER_SPLIT_RE = /(\{\{\s*context\.[a-z][a-z0-9_]{0,31}\s*\}\})/g;

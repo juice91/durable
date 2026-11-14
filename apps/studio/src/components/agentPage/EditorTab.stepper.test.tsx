@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const nav = vi.hoisted(() => ({ search: "", path: "", push: vi.fn(), replace: vi.fn(), back: vi.fn() }));
+// RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
+vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: nav.back, prefetch: vi.fn() }),
   usePathname: () => nav.path,
@@ -113,7 +115,7 @@ describe("stepped editor (SL.11)", () => {
     expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1", { step: "instructions" }), { scroll: false });
     expect(screen.getByTestId("stepper-previous")).toHaveAccessibleName("Previous step: Identity and model");
     expect(screen.getByTestId("stepper-next")).toHaveAccessibleName("Next step: Tools");
-    fireEvent.click(navButton(/^Processors/));
+    fireEvent.click(navButton(/^Memory/));
     expect(screen.queryByTestId("stepper-next")).toBeNull();
   });
 
