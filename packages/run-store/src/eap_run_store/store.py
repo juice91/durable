@@ -90,10 +90,17 @@ RUN_KIND_TARGET_CHECK = (
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
+# Invariant: runs nest at most two levels. Only an agent run can have a parent, and its parent is a
+# workflow run, which never has one; so a child's parent is its root run. pending_approvals.root_run_id
+# (0014_approvals) relies on this, and takes the parent's own parent if deeper nesting is ever added.
 RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
     " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
 )
+# runs.output_format (0014_approvals): `json` when runs.output is a structured output's canonical
+# JSON text; NULL = text. Same text as migration 0014_approvals.
+RUN_OUTPUT_FORMAT_CHECK = "output_format IN ('text', 'json')"
+RUN_OUTPUT_FORMATS = ("text", "json")
 # conversations.resource_id (0012_memory): the owner a conversation acts for, set once at creation.
 RESOURCE_ID_PATTERN = r"^[A-Za-z0-9_.:@-]{1,128}$"
 # Same text as migration 0012_memory.
@@ -211,6 +218,9 @@ class RunModel(Base):
     knowledge_base_id: Mapped[str | None] = mapped_column(
         "knowledge_base_id", PG_UUID(as_uuid=False), nullable=True
     )
+    # The format of `output` (0014_approvals): 'json' for a structured output (canonical JSON text),
+    # 'text' or NULL for text.
+    output_format: Mapped[str | None] = mapped_column("output_format", String, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -224,6 +234,7 @@ class RunModel(Base):
         CheckConstraint("(conversation_id IS NULL) = (turn IS NULL)", name="ck_runs_conversation_turn"),
         CheckConstraint(RUN_KIND_TARGET_CHECK, name="ck_runs_kind_target"),
         CheckConstraint(RUN_PARENT_LINK_CHECK, name="ck_runs_parent_link"),
+        CheckConstraint(RUN_OUTPUT_FORMAT_CHECK, name="ck_runs_output_format"),
         ForeignKeyConstraint(
             ["tenant_id", "parent_run_id"], ["runs.tenant_id", "runs.id"], name="fk_runs_tenant_parent_run"
         ),
@@ -449,11 +460,15 @@ def auto_title(text: str) -> str | None:
     return title or None
 
 
-def _latest_turn_display_status(status: str | None, heartbeat_at: datetime | None) -> str | None:
+def _latest_turn_display_status(
+    status: str | None, heartbeat_at: datetime | None, waiting_approval: bool = False
+) -> str | None:
     """As _display_status, for the latest-turn columns of a conversation query."""
     if status == "running" and heartbeat_at is not None:
         if (datetime.now(timezone.utc) - heartbeat_at).total_seconds() > 20:
             return "recovering"
+    if status == "running" and waiting_approval:
+        return "waiting_approval"
     return status
 
 
@@ -461,8 +476,10 @@ def _iso_conversation(
     conv: ConversationModel,
     turn_count: int,
     last_turn: tuple[str | None, str | None, datetime | None] = (None, None, None),
+    last_turn_waiting_approval: bool = False,
 ) -> dict[str, Any]:
-    """`last_turn` is the latest turn's (run id, status, heartbeat_at), all None without turns."""
+    """`last_turn` is the latest turn's (run id, status, heartbeat_at), all None without turns;
+    `last_turn_waiting_approval`: it has an open approval (0014_approvals)."""
     last_run_id, last_status, last_heartbeat = last_turn
     return {
         "id": conv.id,
@@ -475,7 +492,9 @@ def _iso_conversation(
         "turn_count": turn_count,
         "last_turn_run_id": last_run_id,
         "last_turn_status": last_status,
-        "last_turn_display_status": _latest_turn_display_status(last_status, last_heartbeat),
+        "last_turn_display_status": _latest_turn_display_status(
+            last_status, last_heartbeat, last_turn_waiting_approval
+        ),
     }
 
 
@@ -483,31 +502,55 @@ def _iso_conversation(
 RECOVERING_AFTER = timedelta(seconds=20)
 
 
-def _display_status(run: RunModel) -> str:
+# Display-only statuses (never stored): derived from the heartbeat and the approvals projection.
+DISPLAY_ONLY_STATUSES = ("recovering", "waiting_approval")
+
+
+def _display_status(run: RunModel, waiting_approval: bool = False) -> str:
+    """The stored status, except for a running run: `recovering` while its heartbeat is stale (a
+    worker restart, until recovery replays), else `waiting_approval` while it (or, for a workflow
+    run, one of its child runs) has an open pending_approvals row (`waiting_approval`, computed by
+    the read with eap_run_store.approvals.open_approval_exists)."""
     if run.status == "running" and run.heartbeat_at is not None:
         if datetime.now(timezone.utc) - run.heartbeat_at > RECOVERING_AFTER:
             return "recovering"
+    if run.status == "running" and waiting_approval:
+        return "waiting_approval"
     return run.status
+
+
+def _stale_heartbeat() -> Any:
+    return RunModel.heartbeat_at.is_not(None) & (
+        RunModel.heartbeat_at < datetime.now(timezone.utc) - RECOVERING_AFTER
+    )
 
 
 def _status_condition(statuses: list[str]) -> Any:
     """`status IN (...)`; the display-only `recovering` matches running runs with a stale heartbeat
-    (as _display_status), so a list filter on it is not always empty. `running` keeps matching every
-    running run, recovering ones included."""
+    and `waiting_approval` running runs with an open approval and a fresh heartbeat (as
+    _display_status), so a list filter on them is not always empty. `running` keeps matching every
+    running run, recovering and waiting ones included."""
     conditions = []
-    stored = [s for s in statuses if s != "recovering"]
+    stored = [s for s in statuses if s not in DISPLAY_ONLY_STATUSES]
     if stored:
         conditions.append(RunModel.status.in_(stored))
     if "recovering" in statuses:
-        conditions.append(
-            (RunModel.status == "running")
-            & RunModel.heartbeat_at.is_not(None)
-            & (RunModel.heartbeat_at < datetime.now(timezone.utc) - RECOVERING_AFTER)
-        )
+        conditions.append((RunModel.status == "running") & _stale_heartbeat())
+    if "waiting_approval" in statuses:
+        from eap_run_store.approvals import open_approval_exists
+
+        conditions.append((RunModel.status == "running") & ~_stale_heartbeat() & open_approval_exists())
     return or_(*conditions)
 
 
-def _run_dict(run: RunModel) -> dict[str, Any]:
+def _run_select() -> Any:
+    """SELECT runs plus whether each has an open approval (for _run_dict's display status)."""
+    from eap_run_store.approvals import open_approval_exists
+
+    return select(RunModel, open_approval_exists().label("waiting_approval"))
+
+
+def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
     return {
         "id": run.id,
         "tenant_id": run.tenant_id,
@@ -520,7 +563,7 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
         "parent_run_id": run.parent_run_id,
         "parent_step_id": run.parent_step_id,
         "status": run.status,
-        "display_status": _display_status(run),
+        "display_status": _display_status(run, waiting_approval),
         "input": run.input,
         "output": run.output,
         "error": run.error,
@@ -541,6 +584,7 @@ def _run_dict(run: RunModel) -> dict[str, Any]:
         "request_context": run.request_context,
         "draft_spec": run.draft_spec,
         "knowledge_base_id": run.knowledge_base_id,
+        "output_format": run.output_format,
     }
 
 
@@ -1001,13 +1045,14 @@ class RunStore:
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
         """Get a run by ID. Returns None if not found or belongs to another tenant.
 
-        display_status is `recovering` for a running run whose heartbeat is older than 20 s.
+        display_status is `recovering` for a running run whose heartbeat is older than 20 s, else
+        `waiting_approval` while it (or a child run of a workflow run) has an open approval.
         """
         with self.Session() as session:
-            run = session.execute(
-                select(RunModel).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
-            ).scalar_one_or_none()
-            return None if run is None else _run_dict(run)
+            row = session.execute(
+                _run_select().where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+            ).one_or_none()
+            return None if row is None else _run_dict(row[0], row[1])
 
     def list_runs(
         self,
@@ -1045,7 +1090,7 @@ class RunStore:
         two EXISTS lookups per run and may walk far back in history to fill a page, so the query
         then runs under the metrics `statement_timeout` (`statement_timeout_ms`, default 5 s) and
         raises MetricsQueryTimeout when it fires."""
-        query = select(RunModel).where(RunModel.tenant_id == tenant_id)
+        query = _run_select().where(RunModel.tenant_id == tenant_id)
         if parent_run_id is not None:
             query = query.where(RunModel.parent_run_id == str(parent_run_id))
         else:
@@ -1077,7 +1122,7 @@ class RunStore:
         query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
         with self.Session() as session:
             if timeout_ms is None:
-                return [_run_dict(r) for r in session.execute(query).scalars()]
+                return [_run_dict(r, waiting) for r, waiting in session.execute(query).all()]
             from sqlalchemy.exc import DBAPIError
 
             from eap_run_store.metrics import MetricsQueryTimeout
@@ -1085,7 +1130,7 @@ class RunStore:
             try:
                 # SET LOCAL: only this read's transaction, reset when the session ends it.
                 session.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
-                return [_run_dict(r) for r in session.execute(query).scalars()]
+                return [_run_dict(r, waiting) for r, waiting in session.execute(query).all()]
             except DBAPIError as exc:
                 if getattr(getattr(exc, "orig", None), "sqlstate", None) == "57014":  # query_canceled
                     raise MetricsQueryTimeout(timeout_ms) from None
@@ -1145,9 +1190,18 @@ class RunStore:
     def _conversation_select():
         """Conversations joined to their latest turn (LATERAL, one index probe on
         uq_runs_conversation_turn per conversation). Turns are numbered gap-free from 1 under the
-        conversation lock, so the latest turn number is the turn count."""
+        conversation lock, so the latest turn number is the turn count. The latest turn's open
+        approval (0014_approvals) feeds its display status."""
+        from eap_run_store.approvals import open_approval_exists
+
         latest = (
-            select(RunModel.turn, RunModel.id, RunModel.status, RunModel.heartbeat_at)
+            select(
+                RunModel.turn,
+                RunModel.id,
+                RunModel.status,
+                RunModel.heartbeat_at,
+                open_approval_exists().label("waiting_approval"),
+            )
             .where(RunModel.conversation_id == ConversationModel.id)
             .order_by(RunModel.turn.desc())
             .limit(1)
@@ -1159,12 +1213,13 @@ class RunStore:
             latest.c.id,
             latest.c.status,
             latest.c.heartbeat_at,
+            func.coalesce(latest.c.waiting_approval, False),
         ).outerjoin(latest, true())
 
     @staticmethod
     def _conversation_from_row(row) -> dict[str, Any]:
-        conv, turn_count, run_id, run_status, heartbeat_at = row
-        return _iso_conversation(conv, turn_count, (run_id, run_status, heartbeat_at))
+        conv, turn_count, run_id, run_status, heartbeat_at, waiting_approval = row
+        return _iso_conversation(conv, turn_count, (run_id, run_status, heartbeat_at), bool(waiting_approval))
 
     def get_conversation(self, tenant_id: str, conversation_id: UUID | str) -> dict[str, Any] | None:
         """The tenant's conversation, or None (unknown, or another tenant's)."""
@@ -1224,12 +1279,12 @@ class RunStore:
     def list_turns(self, tenant_id: str, conversation_id: UUID | str) -> list[dict[str, Any]]:
         """The conversation's runs in turn order ([] for another tenant's conversation)."""
         with self.Session() as session:
-            runs = session.execute(
-                select(RunModel)
+            rows = session.execute(
+                _run_select()
                 .where(RunModel.tenant_id == tenant_id, RunModel.conversation_id == str(conversation_id))
                 .order_by(RunModel.turn)
-            ).scalars().all()
-            return [_run_dict(r) for r in runs]
+            ).all()
+            return [_run_dict(r, waiting) for r, waiting in rows]
 
     def create_turn(
         self,
@@ -1458,6 +1513,65 @@ class EventLog:
             ).scalar_one_or_none()
             return None if event is None else _run_event_from_model(event)
 
+    def append_approval_waiting(
+        self,
+        tenant_id: str,
+        run_id: UUID | str,
+        kind: str,
+        approval_key: str,
+        data: dict[str, Any],
+    ) -> tuple[RunEvent, bool]:
+        """Record that the run waits for an approval: the waiting event and its open
+        pending_approvals row, in ONE transaction under the run-row lock (0014_approvals).
+
+        kind `tool`: event `tool:{tool_call_id}:approval:waiting`, type tool_approval_waiting, data
+        `{tool_call_id, tool_name, args, deadline, workflow_id}`. kind `step`: event
+        `step:{step_id}:waiting`, type step_waiting, data `{step_id, prompt, timeout_hours,
+        workflow_id, deadline}`. `data["deadline"]` (an aware datetime or ISO text; stored as ISO
+        text) is required, and a tool's `data["tool_name"]` too. The row copies tool_name, args
+        (≤ 8 KiB canonical JSON, else {"truncated": true}), prompt and the deadline from the data,
+        and the root run, agent and workflow from the run.
+
+        Returns (event, created). A repeated call (a replayed step) writes nothing and returns the
+        first event, whose deadline stands. Raises RunNotFound (writing nothing) for an unknown run
+        or another tenant's; any failure of the row write rolls the event back.
+        """
+        from eap_run_store import approvals
+
+        if kind not in approvals.APPROVAL_KINDS:
+            raise ValueError("kind must be 'tool' or 'step'")
+        if not approval_key:
+            raise ValueError("approval_key is required")
+        payload = dict(data or {})
+        deadline = payload.get("deadline")
+        if isinstance(deadline, datetime):
+            payload["deadline"] = deadline.isoformat()
+        if kind == "tool" and not payload.get("tool_name"):
+            raise ValueError("a tool approval needs data['tool_name']")
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        event_key = approvals.waiting_event_key(kind, approval_key)
+        with self.Session() as session:
+            try:
+                event, created = append_event_in_session(
+                    session, tenant_id, run_id, event_key, approvals.waiting_event_type(kind), payload
+                )
+                if created:
+                    approvals.insert_waiting_in_session(
+                        session,
+                        tenant_id=tenant_id,
+                        run_id=str(run_id),
+                        kind=kind,
+                        approval_key=approval_key,
+                        data=payload,
+                        requested_at=event.ts,
+                    )
+            except BaseException:
+                session.rollback()
+                raise
+            session.commit()
+            return event, created
+
     def append_step_decision(
         self, tenant_id: str, run_id: UUID | str, step_id: str, type: RunEventType, data: dict | None = None
     ) -> tuple[str, RunEvent | None]:
@@ -1468,58 +1582,101 @@ class EventLog:
         `step:{step_id}:waiting` event exists and no decision exists yet. Returns
         ("created", event), ("exists", the earlier decision) or ("not_waiting", None); exactly one
         caller ever gets "created" (the API's approve/reject and the worker's timeout race on it).
+        The step's pending_approvals row is closed in the same transaction (0014_approvals).
         Raises RunNotFound for an unknown run or another tenant's run. Same seq rules as append.
         """
+        from eap_run_store import approvals
+
+        if type not in approvals.STEP_DECISION_TYPES:
+            raise ValueError(f"a step decision is one of {approvals.STEP_DECISION_TYPES}")
+        return self._append_decision(tenant_id, run_id, "step", step_id, type, data)
+
+    def append_tool_decision(
+        self, tenant_id: str, run_id: UUID | str, tool_call_id: str, type: RunEventType, data: dict | None = None
+    ) -> tuple[str, RunEvent | None]:
+        """Record the one decision of a gated tool call, atomically under the run-row lock.
+
+        The decision is the event `tool:{tool_call_id}:approval:decision` (type tool_approved |
+        tool_denied | tool_approval_timed_out; data `{tool_call_id, decided_by, comment}`, decided_by
+        absent or None for a timeout). Same rules and results as append_step_decision: written only
+        while `tool:{tool_call_id}:approval:waiting` exists, no decision exists and the run is not
+        terminal (no `end` event); ("created", event) | ("exists", the earlier decision) |
+        ("not_waiting", None). The call's pending_approvals row is closed in the same transaction.
+        Raises RunNotFound for an unknown run or another tenant's run.
+        """
+        from eap_run_store import approvals
+
+        if type not in approvals.TOOL_DECISION_TYPES:
+            raise ValueError(f"a tool decision is one of {approvals.TOOL_DECISION_TYPES}")
+        return self._append_decision(tenant_id, run_id, "tool", tool_call_id, type, data)
+
+    def _append_decision(
+        self, tenant_id: str, run_id: UUID | str, kind: str, approval_key: str, type: str, data: dict | None
+    ) -> tuple[str, RunEvent | None]:
+        from eap_run_store import approvals
+
         if not tenant_id:
             raise ValueError("tenant_id is required")
-        decision_key = f"step:{step_id}:decision"
+        waiting_key = approvals.waiting_event_key(kind, approval_key)
+        decision_key = approvals.decision_event_key(kind, approval_key)
         with self.Session() as session:
-            owned = session.execute(
-                text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-                {"run_id": str(run_id), "tenant_id": tenant_id},
-            ).fetchone()
-            if owned is None:
+            try:
+                owned = session.execute(
+                    text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+                    {"run_id": str(run_id), "tenant_id": tenant_id},
+                ).fetchone()
+                if owned is None:
+                    raise RunNotFound(tenant_id, run_id)
+                keys = set(
+                    session.execute(
+                        select(ExecutionEventModel.event_key).where(
+                            ExecutionEventModel.run_id == str(run_id),
+                            ExecutionEventModel.event_key.in_([waiting_key, decision_key, "end"]),
+                        )
+                    ).scalars()
+                )
+                if decision_key in keys:
+                    existing = session.execute(
+                        select(ExecutionEventModel).where(
+                            ExecutionEventModel.run_id == str(run_id), ExecutionEventModel.event_key == decision_key
+                        )
+                    ).scalar_one()
+                    session.commit()
+                    return "exists", _run_event_from_model(existing)
+                if owned.status in TERMINAL_RUN_STATUSES or "end" in keys or waiting_key not in keys:
+                    session.rollback()
+                    return "not_waiting", None
+                new_seq = session.execute(
+                    text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
+                    {"run_id": str(run_id)},
+                ).scalar_one() + 1
+                event_model = ExecutionEventModel(
+                    tenant_id=tenant_id,
+                    run_id=str(run_id),
+                    seq=new_seq,
+                    event_key=decision_key,
+                    type=type,
+                    data=data or {},
+                    ts=datetime.now(timezone.utc),
+                )
+                session.add(event_model)
+                session.flush()
+                approvals.record_decision_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    run_id=str(run_id),
+                    kind=kind,
+                    approval_key=approval_key,
+                    event_type=type,
+                    data=data or {},
+                    decided_at=event_model.ts,
+                )
+                event = _run_event_from_model(event_model)
+            except BaseException:
                 session.rollback()
-                raise RunNotFound(tenant_id, run_id)
-            keys = set(
-                session.execute(
-                    select(ExecutionEventModel.event_key).where(
-                        ExecutionEventModel.run_id == str(run_id),
-                        ExecutionEventModel.event_key.in_([f"step:{step_id}:waiting", decision_key, "end"]),
-                    )
-                ).scalars()
-            )
-            if decision_key in keys:
-                existing = session.execute(
-                    select(ExecutionEventModel).where(
-                        ExecutionEventModel.run_id == str(run_id), ExecutionEventModel.event_key == decision_key
-                    )
-                ).scalar_one()
-                session.commit()
-                return "exists", _run_event_from_model(existing)
-            if (
-                owned.status in TERMINAL_RUN_STATUSES
-                or "end" in keys
-                or f"step:{step_id}:waiting" not in keys
-            ):
-                session.rollback()
-                return "not_waiting", None
-            new_seq = session.execute(
-                text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
-                {"run_id": str(run_id)},
-            ).scalar_one() + 1
-            event_model = ExecutionEventModel(
-                tenant_id=tenant_id,
-                run_id=str(run_id),
-                seq=new_seq,
-                event_key=decision_key,
-                type=type,
-                data=data or {},
-                ts=datetime.now(timezone.utc),
-            )
-            session.add(event_model)
+                raise
             session.commit()
-            return "created", _run_event_from_model(event_model)
+            return "created", event
 
     def list_events(self, tenant_id: str, run_id: UUID, after_seq: int = -1) -> list[RunEvent]:
         """List events for a run after a given seq. Returns empty for another tenant's run."""

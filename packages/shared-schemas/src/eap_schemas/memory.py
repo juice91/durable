@@ -37,7 +37,6 @@ No I/O here.
 from __future__ import annotations
 
 import copy
-import json
 import math
 import re
 from typing import Any, Literal
@@ -46,6 +45,16 @@ from pydantic import Field, field_validator, model_validator
 
 from eap_schemas._omit import OmitNoneModel
 from eap_schemas.embedding_policy import parse_embedding_model_id
+from eap_schemas.json_schema_subset import (
+    MAX_JSON_DEPTH,
+    SchemaSubsetInvalid,
+    is_scalar,
+    json_depth_exceeds,
+    json_size,
+    matches_type,
+    typed_key,
+)
+from eap_schemas.json_schema_subset import validate as validate_schema_subset
 from eap_schemas.model_ref import ModelRef
 from eap_schemas.processors import PiiRedactConfig
 
@@ -55,8 +64,8 @@ MAX_SCHEMA_DEPTH = 3
 MAX_SCHEMA_PROPERTIES = 50
 MAX_SCHEMA_ENUM_VALUES = 64
 MAX_WORKING_MEMORY_BYTES = 16 * 1024
-# Nesting cap (objects and arrays) for content, patches and schemas.
-MAX_JSON_DEPTH = 16
+# Nesting cap (objects and arrays) for content, patches and schemas: MAX_JSON_DEPTH (16), shared
+# with eap_schemas.json_schema_subset and re-exported here.
 DEFAULT_WORKING_MEMORY_TEMPLATE = "# User\n- Name:\n- Preferences:\n- Goals:"
 # Upper bound of the "Related earlier conversations" block.
 MAX_RECALL_BLOCK_BYTES = 8 * 1024
@@ -64,12 +73,6 @@ MAX_RECALL_BLOCK_BYTES = 8 * 1024
 WorkingMemoryScope = Literal["conversation", "resource"]
 WorkingMemoryFormat = Literal["markdown", "json"]
 RecallScope = Literal["resource", "conversation"]
-
-_SCALAR_TYPES = ("string", "number", "integer", "boolean")
-_ALLOWED_KEYWORDS = frozenset(
-    {"type", "properties", "items", "enum", "description", "title", "required", "additionalProperties"}
-)
-
 
 class WorkingMemoryInvalid(ValueError):
     """A working memory schema, patch or content breaks the rules. Model-visible; never echoes values."""
@@ -90,24 +93,19 @@ def _utf8_len(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
-def _json_len(value: Any) -> int:
-    return _utf8_len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+_SCALAR_TYPES = ("string", "number", "integer", "boolean")
+
+# Value helpers shared with the subset validator (eap_schemas.json_schema_subset).
+_json_len = json_size
+_is_scalar = is_scalar
+_typed_key = typed_key
+_matches_type = matches_type
 
 
 def _check_depth(value: Any, what: str, limit: int = MAX_JSON_DEPTH) -> None:
     """Raise WorkingMemoryInvalid if `value` nests objects or arrays deeper than `limit` (iterative)."""
-    stack: list[tuple[Any, int]] = [(value, 1)]
-    while stack:
-        node, depth = stack.pop()
-        if isinstance(node, dict):
-            children = node.values()
-        elif isinstance(node, list):
-            children = node
-        else:
-            continue
-        if depth > limit:
-            raise WorkingMemoryInvalid(f"{what} nests deeper than {limit} levels")
-        stack.extend((child, depth + 1) for child in children)
+    if json_depth_exceeds(value, limit):
+        raise WorkingMemoryInvalid(f"{what} nests deeper than {limit} levels")
 
 
 def _join(path: str, key: str) -> str:
@@ -117,129 +115,23 @@ def _join(path: str, key: str) -> str:
 # --- schema subset ------------------------------------------------------------------------------
 
 
-def _is_scalar(value: Any) -> bool:
-    if isinstance(value, float):
-        return math.isfinite(value)
-    return isinstance(value, (str, bool, int))
-
-
 def validate_working_memory_schema(schema: Any) -> dict[str, Any]:
     """Check that `schema` is inside the supported JSON Schema subset; return it unchanged.
 
-    Raises WorkingMemoryInvalid naming the offending path.
+    Delegates to the shared subset validator (eap_schemas.json_schema_subset, "working_memory"
+    dialect) with this module's limits. Raises WorkingMemoryInvalid naming the offending path.
     """
-    if not isinstance(schema, dict):
-        raise WorkingMemoryInvalid("the schema must be a JSON object")
-    _check_depth(schema, "the schema")
     try:
-        size = _json_len(schema)
-    except (TypeError, ValueError):
-        raise WorkingMemoryInvalid("the schema must be JSON") from None
-    if size > MAX_SCHEMA_BYTES:
-        raise WorkingMemoryInvalid(f"the schema must be at most {MAX_SCHEMA_BYTES} bytes")
-    if schema.get("type") != "object":
-        raise WorkingMemoryInvalid('the root must have "type": "object"')
-    root = {k: v for k, v in schema.items() if k != "$schema"}
-    if "$schema" in schema and not isinstance(schema["$schema"], str):
-        raise WorkingMemoryInvalid('"$schema" must be a string')
-    count = [0]
-    _check_node(root, "", depth=1, count=count)
-    return schema
-
-
-def _check_node(node: Any, path: str, *, depth: int, count: list[int], in_array: bool = False) -> None:
-    where = path or "(root)"
-    if not isinstance(node, dict):
-        raise WorkingMemoryInvalid("a schema must be a JSON object", where)
-    unknown = sorted(set(node) - _ALLOWED_KEYWORDS)
-    if unknown:
-        raise WorkingMemoryInvalid(f"unsupported keyword {unknown[0]!r}", where)
-    for key in ("description", "title"):
-        if key in node and not isinstance(node[key], str):
-            raise WorkingMemoryInvalid(f'"{key}" must be a string', where)
-    type_ = node.get("type")
-    if "enum" in node:
-        values = node["enum"]
-        if not isinstance(values, list) or not 1 <= len(values) <= MAX_SCHEMA_ENUM_VALUES:
-            raise WorkingMemoryInvalid(f'"enum" must be a list of 1 to {MAX_SCHEMA_ENUM_VALUES} values', where)
-        if not all(_is_scalar(v) for v in values):
-            raise WorkingMemoryInvalid('"enum" values must be strings, numbers or booleans', where)
-        if len({_typed_key(v) for v in values}) != len(values):
-            raise WorkingMemoryInvalid('"enum" values must be unique', where)
-        if type_ is not None:
-            if type_ not in _SCALAR_TYPES:
-                raise WorkingMemoryInvalid('an "enum" may only have a scalar "type"', where)
-            if not all(_matches_type(v, type_) for v in values):
-                raise WorkingMemoryInvalid(f'"enum" values must all be of type {type_}', where)
-        extra = set(node) - {"enum", "type", "description", "title"}
-        if extra:
-            raise WorkingMemoryInvalid(f"unsupported keyword {sorted(extra)[0]!r} on an enum", where)
-        return
-    if type_ in _SCALAR_TYPES:
-        extra = set(node) - {"type", "description", "title"}
-        if extra:
-            raise WorkingMemoryInvalid(f"unsupported keyword {sorted(extra)[0]!r} on a {type_}", where)
-        return
-    if in_array:
-        raise WorkingMemoryInvalid("array items must be a string, number, integer, boolean or enum", where)
-    if type_ == "array":
-        extra = set(node) - {"type", "items", "description", "title"}
-        if extra:
-            raise WorkingMemoryInvalid(f"unsupported keyword {sorted(extra)[0]!r} on an array", where)
-        if "items" not in node:
-            raise WorkingMemoryInvalid('an array needs "items"', where)
-        _check_node(node["items"], f"{path}[]", depth=depth, count=count, in_array=True)
-        return
-    if type_ == "object":
-        if depth > MAX_SCHEMA_DEPTH:
-            raise WorkingMemoryInvalid(f"objects may be nested at most {MAX_SCHEMA_DEPTH} deep", where)
-        if "items" in node:
-            raise WorkingMemoryInvalid('unsupported keyword "items" on an object', where)
-        properties = node.get("properties", {})
-        if not isinstance(properties, dict):
-            raise WorkingMemoryInvalid('"properties" must be an object', where)
-        additional = node.get("additionalProperties", True)
-        if not isinstance(additional, bool):
-            raise WorkingMemoryInvalid('"additionalProperties" must be true or false', where)
-        required = node.get("required", [])
-        if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
-            raise WorkingMemoryInvalid('"required" must be a list of property names', where)
-        for name, child in properties.items():
-            if not name or len(name) > 64:
-                raise WorkingMemoryInvalid("property names must be 1 to 64 characters", where)
-            count[0] += 1
-            if count[0] > MAX_SCHEMA_PROPERTIES:
-                raise WorkingMemoryInvalid(f"at most {MAX_SCHEMA_PROPERTIES} properties in total")
-            _check_node(child, _join(path, name), depth=depth + 1, count=count)
-        return
-    if type_ is None:
-        raise WorkingMemoryInvalid('a schema needs a "type" or an "enum"', where)
-    raise WorkingMemoryInvalid(f"unsupported type {type_!r}", where)
-
-
-def _typed_key(value: Any) -> tuple[str, Any]:
-    # Python treats True == 1 == 1.0; JSON does not distinguish 1 and 1.0 but does distinguish booleans.
-    if isinstance(value, bool):
-        return ("bool", value)
-    if isinstance(value, (int, float)):
-        return ("number", value)
-    return ("string", value)
-
-
-def _matches_type(value: Any, type_: str) -> bool:
-    if type_ == "string":
-        return isinstance(value, str)
-    if type_ == "boolean":
-        return isinstance(value, bool)
-    if type_ == "integer":
-        if isinstance(value, bool):
-            return False
-        return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value) and value.is_integer())
-    if type_ == "number":
-        if isinstance(value, bool):
-            return False
-        return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
-    return False
+        return validate_schema_subset(
+            schema,
+            max_depth=MAX_SCHEMA_DEPTH,
+            max_properties=MAX_SCHEMA_PROPERTIES,
+            max_bytes=MAX_SCHEMA_BYTES,
+            root_object=True,
+            dialect="working_memory",
+        )
+    except SchemaSubsetInvalid as exc:
+        raise WorkingMemoryInvalid(exc.reason, exc.path) from None
 
 
 # --- content ------------------------------------------------------------------------------------

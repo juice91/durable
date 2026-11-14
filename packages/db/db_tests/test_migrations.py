@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_semantic_recall_revision():
-    assert head_revisions() == {"0013_semantic_recall"}
+def test_single_head_is_the_approvals_revision():
+    assert head_revisions() == {"0014_approvals"}
 
 
 @requires_schema

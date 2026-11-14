@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
+from eap_schemas.approvals import ApprovalPolicy
 from eap_schemas.embedding_policy import (
     EmbeddingDimensionMismatch,
     EmbeddingModel,
@@ -22,6 +23,8 @@ from eap_schemas.knowledge import (
     approx_tokens,
     check_knowledge_base_refs,
 )
+from eap_schemas.json_schema_subset import SchemaSubsetInvalid
+from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.mcp import McpToolRef, mcp_tool_name
 from eap_schemas.memory import (
     HistoryConfig,
@@ -35,6 +38,7 @@ from eap_schemas.memory import (
     validate_working_memory_schema,
 )
 from eap_schemas.model_ref import ModelRef
+from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid, OutputSpec
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
     PROCESSOR_DECLARATIONS,
@@ -43,11 +47,27 @@ from eap_schemas.processors import (
     ProcessorSpec,
 )
 from eap_schemas.request_context import MAX_CONTEXT_FIELDS, ContextField
-from eap_schemas.tools import RESERVED_TOOL_NAMES, TOOL_DECLARATIONS, ToolDeclaration, builtin_tool_name
+from eap_schemas.tools import (
+    RESERVED_TOOL_NAMES,
+    RETRIEVE_TOOL_NAME,
+    TOOL_DECLARATIONS,
+    UPDATE_WORKING_MEMORY_TOOL_NAME,
+    ToolDeclaration,
+    builtin_tool_name,
+)
 
 __all__ = (
     "AgentSpec",
     "AgentVersion",
+    "ApprovalPolicy",
+    "MAX_FALLBACK_MODELS",
+    "OUTPUT_TOOL_NAME",
+    "OutputInvalid",
+    "OutputSpec",
+    "RunBudgetExceeded",
+    "SchemaSubsetInvalid",
+    "UsageLimitsSpec",
+    "approval_required_tool_names",
     "ChunkingConfig",
     "ContextField",
     "EmbeddingDimensionMismatch",
@@ -85,6 +105,9 @@ __all__ = (
 )
 
 
+MAX_FALLBACK_MODELS = 3
+
+
 class ModelSettings(BaseModel):
     """Settings for model inference."""
 
@@ -120,6 +143,14 @@ class AgentSpec(BaseModel):
     # it turns memory on with the default history limits.
     knowledge_bases: Tuple[KnowledgeBaseRef, ...] = Field(default=(), max_length=MAX_KNOWLEDGE_BASES_PER_AGENT)
     memory: MemoryConfig | None = None
+    # Agent capabilities milestone (AC.1): structured output, per-tool approval, usage limits and
+    # fallback models. Same rule: left out of every dump while empty (None, or no fallbacks), and
+    # every None field inside the sub-configs is dropped too, so every stored spec keeps its JSON
+    # and hash. A `limits` object with every cap None is turned into None.
+    output: OutputSpec | None = None
+    approvals: ApprovalPolicy | None = None
+    limits: UsageLimitsSpec | None = None
+    fallback_models: Tuple[ModelRef, ...] = Field(default=(), max_length=MAX_FALLBACK_MODELS)
 
     @model_serializer(mode="wrap")
     def _omit_empty_optional_fields(self, handler):
@@ -142,16 +173,57 @@ class AgentSpec(BaseModel):
 
     @model_validator(mode="after")
     def check_knowledge_and_memory(self):
-        """Unique knowledge bases; with knowledge or memory on, no tool takes a reserved platform name.
+        """Unique knowledge bases; no tool takes the name of a platform tool the spec turns on:
+        `retrieve` with knowledge bases, `update_working_memory` with memory, `final_result` with
+        `output`.
 
-        Only checked when the new fields are set, so no stored spec can stop validating. Publish
-        (RM.11) checks `reserved_tool_name_conflicts` for every spec.
+        Reserved per feature, so no stored spec can stop validating. Publish (RM.11) checks
+        `reserved_tool_name_conflicts` (all three names) for every spec.
         """
         check_knowledge_base_refs(self.knowledge_bases)
-        if self.knowledge_bases or self.memory is not None:
-            conflicts = reserved_tool_name_conflicts(self)
-            if conflicts:
-                raise ValueError(f"tool name {conflicts[0]!r} is reserved for a platform tool")
+        active = set()
+        if self.knowledge_bases:
+            active.add(RETRIEVE_TOOL_NAME)
+        if self.memory is not None:
+            active.add(UPDATE_WORKING_MEMORY_TOOL_NAME)
+        if self.output is not None:
+            active.add(OUTPUT_TOOL_NAME)
+        conflicts = [name for name in reserved_tool_name_conflicts(self) if name in active]
+        if conflicts:
+            raise ValueError(f"tool name {conflicts[0]!r} is reserved for a platform tool")
+        return self
+
+    @field_validator("limits")
+    @classmethod
+    def drop_empty_limits(cls, v):
+        """`limits: {}` (every cap None) is the same as no limits."""
+        return None if v is not None and v.is_empty() else v
+
+    @model_validator(mode="after")
+    def check_fallback_models(self):
+        """Fallback models are distinct and none is the primary model."""
+        seen: set[tuple[str, str]] = {(self.model.provider, self.model.name)}
+        for ref in self.fallback_models:
+            key = (ref.provider, ref.name)
+            if key == (self.model.provider, self.model.name):
+                raise ValueError(f"fallback model {ref.provider}:{ref.name} is the agent's primary model")
+            if key in seen:
+                raise ValueError(f"duplicate fallback model: {ref.provider}:{ref.name}")
+            seen.add(key)
+        return self
+
+    @model_validator(mode="after")
+    def check_approvals(self):
+        """Every approval entry names a built-in tool id of `tools` or `"<server>/<tool>"` of
+        `mcp_tools`; platform tools and the output tool can never require approval."""
+        if self.approvals is None:
+            return self
+        known = set(self.tools) | {f"{ref.server}/{ref.tool}" for ref in self.mcp_tools}
+        for entry in self.approvals.tools:
+            if entry in RESERVED_TOOL_NAMES or builtin_tool_name(entry) in RESERVED_TOOL_NAMES:
+                raise ValueError(f"approvals: {entry!r} is a platform tool and cannot require approval")
+            if entry not in known:
+                raise ValueError(f"approvals: {entry!r} is not a tool of this agent")
         return self
 
     @model_validator(mode="after")
@@ -231,12 +303,27 @@ _OMIT_WHEN_EMPTY = (
     "context_fields",
     "knowledge_bases",
     "memory",
+    "output",
+    "approvals",
+    "limits",
+    "fallback_models",
 )
+
+
+def approval_required_tool_names(spec: AgentSpec) -> frozenset[str]:
+    """Model-facing names of the spec's tools that need approval (built-in ids with dots as `__`,
+    MCP tools as `mcp_tool_name`). Empty without `approvals`."""
+    if spec.approvals is None:
+        return frozenset()
+    gated = set(spec.approvals.tools)
+    names = {builtin_tool_name(tool_id) for tool_id in spec.tools if tool_id in gated}
+    names |= {mcp_tool_name(ref.server, ref.tool) for ref in spec.mcp_tools if f"{ref.server}/{ref.tool}" in gated}
+    return frozenset(names)
 
 
 def reserved_tool_name_conflicts(spec: AgentSpec) -> tuple[str, ...]:
     """Model-facing names of the spec's built-in and MCP tools that are reserved platform tool
-    names (`retrieve`, `update_working_memory`), in spec order."""
+    names (`retrieve`, `update_working_memory`, `final_result`), in spec order."""
     names = [builtin_tool_name(tool_id) for tool_id in spec.tools]
     names += [mcp_tool_name(ref.server, ref.tool) for ref in spec.mcp_tools]
     return tuple(name for name in names if name in RESERVED_TOOL_NAMES)
@@ -337,6 +424,13 @@ RunEventType = Literal[
     "embedding",  # one per embedding call, key = request key: {model_id, inputs, input_tokens, cost_usd}
     "memory_observe_failed",  # the post-turn observer failed; the run status is unchanged
     "memory_updated",  # working memory or observations changed (Studio "memory updating")
+    # Agent capabilities milestone. Data carries ids, names, paths and counts; never output values.
+    "output_retry",  # key `output:{n}:retry`: {model_request, errors: [json paths]}
+    "tool_approval_waiting",  # key `tool:{id}:approval:waiting`: {tool_call_id, tool_name, args, deadline, workflow_id}
+    "tool_approved",  # written by the API, key `tool:{id}:approval:decision`: {tool_call_id, decided_by, comment}
+    "tool_denied",  # API (or the worker in eval runs, decided_by "eval"), same key
+    "tool_approval_timed_out",  # written by the worker on the deadline, same key (first writer wins)
+    "eval_case_result",  # eval runs, key `case:{case_id}`: status, counts, cost; no text
 ]
 
 

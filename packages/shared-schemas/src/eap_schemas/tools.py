@@ -88,11 +88,16 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
 # Platform tools (RAG and memory milestone). They are added to a run by the platform, never listed
 # in `AgentSpec.tools`: `retrieve` when the spec attaches knowledge bases, `update_working_memory`
 # when working memory is set and not read-only. No built-in or MCP tool may take these model-facing
-# names. `knowledge.search` is the hidden tool behind the knowledge base search tester (tool runs
-# only; excluded from the agent tool picker).
+# names. `final_result` (agent capabilities milestone) is the output tool of a spec with
+# structured output (eap_schemas.output); it is reserved the same way. `knowledge.search` is the
+# hidden tool behind the knowledge base search tester (tool runs only; excluded from the agent tool
+# picker).
 RETRIEVE_TOOL_NAME = "retrieve"
 UPDATE_WORKING_MEMORY_TOOL_NAME = "update_working_memory"
-RESERVED_TOOL_NAMES: frozenset[str] = frozenset({RETRIEVE_TOOL_NAME, UPDATE_WORKING_MEMORY_TOOL_NAME})
+OUTPUT_TOOL_NAME = "final_result"
+RESERVED_TOOL_NAMES: frozenset[str] = frozenset(
+    {RETRIEVE_TOOL_NAME, UPDATE_WORKING_MEMORY_TOOL_NAME, OUTPUT_TOOL_NAME}
+)
 KNOWLEDGE_SEARCH_TOOL_ID = "knowledge.search"
 MAX_SEARCH_QUERY_CHARS = 2000
 

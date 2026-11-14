@@ -389,7 +389,7 @@ def test_dimension_check():
 
 
 def test_reserved_tool_names_rejected_with_knowledge_or_memory():
-    assert RESERVED_TOOL_NAMES == {"retrieve", "update_working_memory"}
+    assert RESERVED_TOOL_NAMES == {"retrieve", "update_working_memory", "final_result"}  # final_result: AC.1
     plain = AgentSpec.model_validate({**MINIMAL, "tools": ["retrieve"]})  # stored specs keep validating
     from eap_schemas import reserved_tool_name_conflicts
 

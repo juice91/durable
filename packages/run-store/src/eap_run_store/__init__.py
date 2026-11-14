@@ -14,6 +14,8 @@ from eap_run_store.store import (
     RunNotFound,
     ENQUEUE_FAILED_ERROR,
     RUN_KINDS,
+    RUN_OUTPUT_FORMATS,
+    DISPLAY_ONLY_STATUSES,
     TERMINAL_RUN_STATUSES,
     MODEL_REQUEST_OPERATIONS,
     TurnInProgress,
@@ -22,6 +24,14 @@ from eap_run_store.store import (
     auto_title,
     get_side_effect_store,
     validate_resource_id,
+)
+from eap_run_store.approvals import (
+    APPROVAL_ARGS_MAX_BYTES,
+    APPROVAL_DECISIONS,
+    APPROVAL_KINDS,
+    ApprovalCursor,
+    ApprovalStore,
+    PendingApprovalModel,
 )
 from eap_run_store.knowledge import (
     ChunkInput,
@@ -90,6 +100,14 @@ from eap_run_store.store import (
 )
 
 __all__ = [
+    "APPROVAL_ARGS_MAX_BYTES",
+    "APPROVAL_DECISIONS",
+    "APPROVAL_KINDS",
+    "ApprovalCursor",
+    "ApprovalStore",
+    "PendingApprovalModel",
+    "RUN_OUTPUT_FORMATS",
+    "DISPLAY_ONLY_STATUSES",
     "ChunkInput",
     "DocumentNotFound",
     "EmbeddingProgress",

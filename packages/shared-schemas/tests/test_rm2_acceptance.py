@@ -453,9 +453,18 @@ KB_ON = {"knowledge_bases": [{"id": KB[0]}]}
 MEMORY_ON = {"memory": {}}
 
 
-@pytest.mark.parametrize("extra", [KB_ON, MEMORY_ON, {**KB_ON, **MEMORY_ON}])
-@pytest.mark.parametrize("name", ["retrieve", "update_working_memory"])
-def test_builtin_named_like_platform_tool_rejected(extra, name):
+# Reserved per feature since the AC.1 review (2026-11-15): `retrieve` with knowledge bases,
+# `update_working_memory` with memory (publish still refuses both for every spec).
+@pytest.mark.parametrize(
+    ("name", "extra"),
+    [
+        ("retrieve", KB_ON),
+        ("retrieve", {**KB_ON, **MEMORY_ON}),
+        ("update_working_memory", MEMORY_ON),
+        ("update_working_memory", {**KB_ON, **MEMORY_ON}),
+    ],
+)
+def test_builtin_named_like_platform_tool_rejected(name, extra):
     with pytest.raises(ValidationError, match="reserved"):
         AgentSpec.model_validate({**stored.MINIMAL, "tools": [name], **extra})
 
