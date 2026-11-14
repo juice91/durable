@@ -95,6 +95,12 @@ MIN_PGVECTOR = (0, 8, 0)
 
 
 def _ensure_vector_extension() -> None:
+    if op.get_context().as_sql:
+        # Offline (`alembic upgrade --sql`): no connection to check the installed extension with.
+        # The generated script creates it (a superuser must run that line, or create it first) and
+        # cannot check the pgvector version (0.8.0 or later): the online upgrade does both.
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        return
     conn = op.get_bind()
     row = conn.execute(
         sa.text(

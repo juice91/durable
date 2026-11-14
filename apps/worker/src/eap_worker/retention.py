@@ -76,6 +76,9 @@ DEFAULT_SCHEDULE = "0 3 * * *"  # daily, 03:00 UTC
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_MAX_STEPS = 2000
 MAX_BATCH_SIZE = 10_000  # MemoryStore clamps to MAX_RETENTION_BATCH as well
+# Upper bound of every *_DAYS setting (100 years): `scheduled_at - days` stays far inside datetime's
+# range (year 1), so the sweep can never raise OverflowError on a configured value.
+MAX_RETENTION_DAYS = 36_500
 TENANT_PAGE = 500
 KEEP = "keep"
 OFF = "off"  # EAP_MEMORY_RETENTION_DAYS=off: remove the shared schedule
@@ -106,8 +109,8 @@ def _days(name: str, raw: str | None) -> int | None:
         days = int(value)
     except ValueError:
         raise RetentionConfigError(name, "must be a positive number of days or 'keep'") from None
-    if days < 1:
-        raise RetentionConfigError(name, "must be a positive number of days or 'keep'")
+    if not 1 <= days <= MAX_RETENTION_DAYS:
+        raise RetentionConfigError(name, f"must be a number of days between 1 and {MAX_RETENTION_DAYS}, or 'keep'")
     return days
 
 
@@ -171,9 +174,9 @@ class RetentionConfig:
             return cls(days={})
         raw_days = context.get("days")
         days = {
-            k: int(v)
+            k: min(int(v), MAX_RETENTION_DAYS)  # a context stored by an older worker: never overflow
             for k, v in (raw_days.items() if isinstance(raw_days, Mapping) else ())
-            if k in RETENTION_KINDS and isinstance(v, int) and v >= 1
+            if k in RETENTION_KINDS and isinstance(v, int) and not isinstance(v, bool) and v >= 1
         }
         return cls(
             days=days,

@@ -136,10 +136,14 @@ def max_ingest_tokens() -> int:
 
 def check_knowledge_configuration() -> None:
     """Fail startup on a malformed EAP_ALLOWED_EMBEDDING_MODELS, EAP_EMBEDDING_QUERY_INSTRUCTIONS,
-    EAP_KB_MAX_DOCUMENT_BYTES or EAP_KB_MAX_INGEST_TOKENS (ValueError), not at the first request."""
+    EAP_KB_MAX_DOCUMENT_BYTES, EAP_KB_MAX_INGEST_TOKENS or EAP_KB_EXACT_SEARCH_MAX_CHUNKS
+    (ValueError), not at the first request."""
+    from eap_run_store.knowledge import check_exact_search_max_chunks
+
     EmbeddingModelPolicy.from_env()
     max_document_bytes()
     max_ingest_tokens()
+    check_exact_search_max_chunks()
 
 
 # The document upload's guard: the same checks as every JSON write route, with its own body cap.

@@ -401,3 +401,111 @@ def test_progressing_rounds_do_not_count_as_idle(monkeypatch):
         batch_results=stale_after_embedding * 4 + [{"status": "done", "embedded": 2, "total": 2}],
     )
     assert result["status"] == "switched" and result["embedded"] == 2
+
+
+# ------------------------------------------------------------------ final review: cost and run ends
+
+
+def test_a_refused_batch_records_its_usage_and_the_next_round_uses_new_keys(
+    client, worker, store, kb_tenant, small_batches, monkeypatch
+):
+    """The store refuses the first batch's vectors (the generation switched under the ingest) after
+    the provider charged: its usage is recorded with an `embedding` event under the batch's key, and
+    the next round's batches get new request keys (no usage row lost to a key conflict)."""
+    from eap_run_store.knowledge import GenerationNotWritable
+
+    real = KnowledgeStore.write_embeddings
+    refused: list[int] = []
+
+    def flaky(self, tenant_id, kb_id, generation, *args, **kwargs):
+        if not refused:
+            refused.append(1)
+            raise GenerationNotWritable(kb_id, generation)
+        return real(self, tenant_id, kb_id, generation, *args, **kwargs)
+
+    monkeypatch.setattr(KnowledgeStore, "write_embeddings", flaky)
+    kb_id = create_kb(store, kb_tenant)
+    doc_id, _, run_id, run = _ingest(client, worker, store, kb_tenant, kb_id, markdown_doc(6))
+    assert run["status"] == "completed", run["error"]
+    n = chunk_stats(worker.engine, kb_tenant, doc_id)[0]["n"]
+    events = event_rows(worker.engine, run_id)
+    assert_contiguous(events)
+    [(_, key, etype, data)] = [e for e in events if e[2] == "embedding"]
+    assert (key, data["phase"], data["refused"], data["batch"]) == ("embed:batch:0", "refused", "stale", 0)
+    keys = [u["request_key"] for u in usage_rows(worker.engine, run_id)]
+    assert keys == sorted(["embed:batch:0"] + [f"embed:batch:{i}" for i in range(1, 1 + math.ceil(n / 4))])
+    assert all(u["input_tokens"] > 0 for u in usage_rows(worker.engine, run_id))
+
+
+def test_a_refused_batch_replays_without_a_provider_call():
+    """A re-execution that finds the refused batch's `embedding` event replays its outcome."""
+    from eap_worker.kb_ingest import refusal_outcome
+
+    assert refusal_outcome("stale", "ingest", "test:hash", 3, 9) == {"status": "stale"}
+    assert refusal_outcome("knowledge_base_deleted", "ingest", "m", 0, 1) == {
+        "status": "missing", "reason": "knowledge_base_deleted"}
+    assert refusal_outcome("reindex_cancelled", "reindex", "m", 0, 1)["reason"] == "reindex_cancelled"
+    failed = refusal_outcome("embedding_dimension_mismatch", "ingest", "m", 3, 9)
+    assert (failed["status"], failed["code"], failed["embedded"], failed["total"]) == (
+        "failed", "embedding_dimension_mismatch", 3, 9)
+
+
+def test_a_failing_start_still_ends_the_run_failed(client, worker, store, kb_tenant, monkeypatch):
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("start exploded")
+
+    monkeypatch.setattr(KnowledgeStore, "get_ingest_source", broken)
+    kb_id = create_kb(store, kb_tenant)
+    doc_id, _, run_id, run = _ingest(client, worker, store, kb_tenant, kb_id, markdown_doc(2))
+    assert run["status"] == "failed"
+    assert run["error"] == "RuntimeError: the ingest failed with an internal error"
+    events = event_rows(worker.engine, run_id)
+    assert [(e[1], e[2]) for e in events] == [("end", "run_failed")]
+    assert events[0][3]["error_code"] == "internal_error" and "exploded" not in json.dumps(events[0][3])
+    doc = store.get_document_by_id(kb_tenant, doc_id)
+    assert doc["status"] == "failed" and doc["error"].startswith("internal_error")
+
+
+def test_a_failing_mark_failed_still_ends_the_run_failed(client, worker, store, kb_tenant, monkeypatch):
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("mark exploded")
+
+    monkeypatch.setenv("EAP_KB_MAX_INGEST_TOKENS", "1")  # fails the run (budget) before any provider call
+    monkeypatch.setattr(KnowledgeStore, "mark_document_failed", broken)
+    kb_id = create_kb(store, kb_tenant)
+    _, _, run_id, run = _ingest(client, worker, store, kb_tenant, kb_id, markdown_doc(2))
+    assert run["status"] == "failed" and run["error"].startswith("IngestBudgetExceeded:")
+    events = event_rows(worker.engine, run_id)
+    assert events[-1][1:3] == ("end", "run_failed") and events[-1][3]["error_code"] == "ingest_budget_exceeded"
+    assert_contiguous(events)
+
+
+@pytest.mark.parametrize("env", [
+    {"EAP_KB_MAX_INGEST_TOKENS": "0"},
+    {"EAP_KB_MAX_INGEST_TOKENS": "many"},
+    {"EAP_KB_EMBED_BATCH_CHUNKS": "x"},
+    {"EAP_KB_INGEST_CONCURRENCY": "0"},
+    {"EAP_KB_EXACT_SEARCH_MAX_CHUNKS": "lots"},
+    {"EAP_MEMORY_RETENTION_DAYS": "99999999"},
+    {"EAP_LITELLM_BASE_URL": "http://chat.test", "EAP_LITELLM_EMBEDDING_BASE_URL": "http://embed.test"},
+])
+def test_worker_start_rejects_settings_a_step_would_reject(monkeypatch, env):
+    from eap_worker.app import validate_startup
+    from eap_worker.config import WorkerSettings
+
+    for name in ("EAP_LITELLM_EMBEDDING_API_KEY", "EAP_LITELLM_BASE_URL", "EAP_LITELLM_EMBEDDING_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError):
+        validate_startup(WorkerSettings.from_env())
+
+
+def test_worker_start_accepts_the_defaults(monkeypatch):
+    from eap_worker.app import validate_startup
+    from eap_worker.config import WorkerSettings
+
+    for name in ("EAP_KB_MAX_INGEST_TOKENS", "EAP_KB_EMBED_BATCH_CHUNKS", "EAP_KB_INGEST_CONCURRENCY",
+                 "EAP_KB_EXACT_SEARCH_MAX_CHUNKS", "EAP_MEMORY_RETENTION_DAYS", "EAP_LITELLM_EMBEDDING_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    validate_startup(WorkerSettings.from_env())

@@ -312,6 +312,32 @@ def test_a_store_error_after_the_charged_recall_embedding_records_usage_and_a_fa
     assert_totals_match(worker, tenant, run_id)
 
 
+def test_a_failed_recall_writes_its_usage_in_the_failure_events_transaction(
+    worker, client, worker_settings, tenant, monkeypatch
+):
+    """Final review: the charged embedding's usage row comes with its `:failed` event (one
+    transaction, the event carries the call's counts), never from a separate record_usage write."""
+    agent = uuid.uuid4()
+    seed_turn(worker, tenant, agent, conversation(worker, tenant, agent)["id"], "the sky is green", "ok")
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("search exploded")
+
+    def no_separate_write(self, *args, **kwargs):
+        raise AssertionError("usage must be written with the failure event")
+
+    monkeypatch.setattr(MemoryStore, "search_recall", broken)
+    monkeypatch.setattr(MemoryStore, "record_usage", no_separate_write)
+    conv = conversation(worker, tenant, agent)
+    run_id, row = rturn(worker, client, worker_settings, tenant, conv, "what colour is the sky?", recall_spec())
+    assert row["status"] == "completed"
+    [(etype, data)] = by_key(event_rows(worker.engine, run_id), "embed:recall:1:failed")
+    assert etype == "embedding" and data["status"] == "failed" and data["stage"] == "recall"
+    assert data["inputs"] == 1 and data["input_tokens"] > 0 and data["model_id"] == "test:hash"
+    assert "embed:recall:1" in usage_keys(worker.engine, run_id)
+    assert_totals_match(worker, tenant, run_id)
+
+
 def test_another_tenants_rows_are_never_recalled(worker, client, worker_settings, tenant):
     from worker_tests.conftest import cleanup_tenant
 

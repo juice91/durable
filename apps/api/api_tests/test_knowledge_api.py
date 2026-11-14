@@ -729,3 +729,15 @@ def test_reindex_replay_while_failed_claims_the_generation(pg, tenant_of, fake_d
     ok = client.post(url, json={"embedding_model": "test:hash768", "run_id": rid}, headers=headers)
     assert ok.status_code == 202 and ok.json()["run_id"] == rid and len(fake_dbos.calls) == calls + 1
     assert ok.json()["knowledge_base"]["status"] == "reindexing"
+
+
+@pytest.mark.parametrize("value", ["lots", "-1"])
+def test_startup_rejects_a_bad_exact_search_cap(monkeypatch, value):
+    """Final review: EAP_KB_EXACT_SEARCH_MAX_CHUNKS fails the API at start, not silently per search."""
+    from eap_api.routes.knowledge import check_knowledge_configuration
+
+    monkeypatch.setenv("EAP_KB_EXACT_SEARCH_MAX_CHUNKS", value)
+    with pytest.raises(ValueError, match="EAP_KB_EXACT_SEARCH_MAX_CHUNKS"):
+        check_knowledge_configuration()
+    monkeypatch.setenv("EAP_KB_EXACT_SEARCH_MAX_CHUNKS", "0")
+    check_knowledge_configuration()

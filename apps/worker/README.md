@@ -77,6 +77,34 @@ it was built for (`require_schema_at_head`), so after the migration an old worke
 and a run recorded under `m1` with no `m1` worker left stays queued or running. If your platform
 may restart or reschedule workers during the window, drain instead.
 
+## Settings (RAG and memory)
+
+All optional; the commented defaults are in `.dev.env.example`. The worker parses every one of them
+at start (`eap_worker.app.validate_startup`, before DBOS launches or recovers anything), so a bad
+value stops the worker instead of failing each run.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `EAP_ALLOWED_EMBEDDING_MODELS` | `test:*` | Embedding model allowlist, `provider:name=dimensions` entries (e.g. `litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024`); checked before every embedding call. Must match the API's |
+| `EAP_EMBEDDING_QUERY_INSTRUCTIONS` | none | JSON `{model_id: instruction}`: the instruction prefixed to search queries (never to documents) |
+| `EAP_LITELLM_EMBEDDING_BASE_URL`, `EAP_LITELLM_EMBEDDING_API_KEY` | the chat gateway's URL and key | A separate gateway or virtual key for `litellm:*` embeddings. A URL other than the chat one requires its own key (the chat key is never sent to another host) |
+| `EAP_OPENAI_EMBEDDING_API_KEY` | none | Key for `openai:*` embedding models (always `api.openai.com`, never `OPENAI_API_KEY`) |
+| `EAP_EMBEDDING_MAX_BATCH_INPUTS`, `EAP_EMBEDDING_MAX_BATCH_TOKENS` | 32, 16384 | Caps per provider request; a larger call is split |
+| `EAP_EMBEDDING_TIMEOUT_S` | 120 | Per provider request (transport retries off; the step retries) |
+| `EAP_RECALL_TIMEOUT_S` | 8 | Deadline of each pre-turn recall query attempt |
+| `EAP_KB_INGEST_CONCURRENCY` | 2 | `eap.kb_ingest` runs at once per worker, on the `eap-kb-ingest` queue |
+| `EAP_KB_MAX_INGEST_TOKENS` | 2000000 | Per-run budget of un-cached approximate embedding tokens (`ingest_budget_exceeded` before any provider call) |
+| `EAP_KB_EMBED_BATCH_CHUNKS` | 64 | Un-embedded chunks per `eap.kb_embed_batch` step |
+| `EAP_MEMORY_RETENTION_DAYS` | unset | Retention in days (1 to 36500) of message embeddings and observations (by `created_at`) and conversation working memory (by `updated_at`); `off` removes the shared schedule. Unset on this worker: it schedules nothing and leaves another worker's schedule alone |
+| `EAP_MEMORY_RETENTION_EMBEDDING_DAYS`, `_OBSERVATION_DAYS`, `_WORKING_MEMORY_DAYS` | `EAP_MEMORY_RETENTION_DAYS` | Per-kind override: days (1 to 36500) or `keep` |
+| `EAP_MEMORY_RETENTION_RESOURCE_WORKING_MEMORY_DAYS` | unset (kept) | Opt-in retention of resource working memory, by `updated_at` |
+| `EAP_MEMORY_RETENTION_SCHEDULE` | `0 3 * * *` | Cron (UTC) of `eap.memory_retention` |
+| `EAP_MEMORY_RETENTION_BATCH_SIZE` | 500 (max 10000) | Rows or conversations per batch (one transaction, one step) |
+| `EAP_MEMORY_RETENTION_MAX_STEPS` | 2000 | Steps per run, shared round-robin by the kinds |
+
+Configure every worker alike: a stored retention schedule with other settings is replaced (with a
+warning) by the next worker that starts.
+
 ## Tests
 
 `uv run pytest apps/worker -q` needs the dev Postgres (`bash scripts/dev-db.sh up`). Each

@@ -113,6 +113,17 @@ class WorkerSettings:
         )
 
 
+def embedding_endpoint_problem(settings: WorkerSettings) -> str | None:
+    """Why `litellm:*` embedding calls would fail on configuration alone, or None. A separate
+    EAP_LITELLM_EMBEDDING_BASE_URL needs its own key (the chat key is never sent to another host);
+    checked at worker start, not first at an embedding call."""
+    embed_url = settings.litellm_embedding_base_url
+    chat_url = settings.litellm_base_url
+    if embed_url and embed_url.rstrip("/") != (chat_url or "").rstrip("/") and not settings.litellm_embedding_api_key:
+        return "EAP_LITELLM_EMBEDDING_API_KEY is required when EAP_LITELLM_EMBEDDING_BASE_URL is set to another host"
+    return None
+
+
 def kb_ingest_concurrency() -> int:
     """At most this many eap.kb_ingest runs at once per worker process (EAP_KB_INGEST_CONCURRENCY, default 2)."""
     return _positive_int(KB_INGEST_CONCURRENCY_ENV, DEFAULT_KB_INGEST_CONCURRENCY)

@@ -41,6 +41,31 @@ DBOS's own system database (`eap_dbos`) is managed by DBOS and is not covered he
   In both downgrades the fake external ticket service's rows are left alone (they stand for an
   external system). Deleting the rows is deliberate: a later re-upgrade must not hand a reused
   client `run_id` an old completed result or an old `reserved` reservation.
+  `0003_runs_tenant_created_index.py` adds `ix_runs_tenant_created` (a tenant's runs newest first).
+  `0008_run_usage.py` adds `run_model_requests` (one row per model request, keyed by
+  `(run_id, request_key)`, written in its event's transaction, `ON CONFLICT DO NOTHING`; `cost_usd`
+  fixed at record time), the run totals and timestamps on `runs` (`model_id`, `model_overridden`,
+  `input_tokens`, `output_tokens`, `cost_usd`, `started_at`, `finished_at`; NULL for older runs) and
+  `ix_execution_events_tenant_type_ts`. Downgrade drops them (usage data is lost).
+  `0009_version_restored_from.py` adds `agent_versions.restored_from` (a restore publishes a new
+  version and names its source; composite FK to the same agent's version). Downgrade drops it.
+  `0010_run_options.py` adds `runs.request_context` and `runs.draft_spec` (draft test runs), widens
+  `ck_runs_kind_target` and adds `ix_conversations_tenant_agent_updated`. **Downgrade deletes data:**
+  every draft run with its events, usage rows and reservations; drain the worker queue first.
+  `0011_knowledge_bases.py` (RAG) needs the `vector` extension (see pgvector below) and adds
+  `knowledge_bases` (active and pending generations), `kb_documents`, `kb_chunks` (an untyped
+  `public.vector` with `dimensions` and one partial HNSW index per dimension, 768, 1024, 1536),
+  `runs.knowledge_base_id`, the `kb_ingest` run kind and `run_model_requests.operation`
+  (`chat` | `embedding`). **Downgrade deletes data:** every `kb_ingest` run with its events, usage
+  rows and reservations, and all knowledge base content; the extension stays.
+  `0012_memory.py` adds `conversations.resource_id` (immutable), `working_memories` (one note per
+  agent, scope and scope key; conversation notes cascade with their conversation),
+  `memory_observations` (observations and reflections, `superseded_by`) and
+  `ix_side_effects_tenant_key_pattern` (prefix deletes of a run's ledger rows). Downgrade drops
+  them: all working memory, observations and resource ids are lost.
+  `0013_semantic_recall.py` adds `message_embeddings` (one row per indexed turn text and role,
+  partial HNSW per dimension, cascades from its conversation and its run) and
+  `memory_forget_watermarks` (a late index step after a forget skips). Downgrade drops both.
 - `src/eap_db/metadata.py` — the target metadata: the union of `eap_api.models.Base.metadata` (which
   also holds `eap_api.mcp_servers.models` and `eap_api.workflows.models`),
   `eap_run_store.Base.metadata` and `eap_worker.tickets.metadata`. Tables are defined only in those
@@ -81,6 +106,15 @@ uv run alembic -c packages/db/alembic.ini check          # "No new upgrade opera
 ```
 
 `stamp` only writes the `alembic_version` table; no table or row is touched.
+
+### Offline SQL (`upgrade --sql`)
+
+`uv run alembic -c packages/db/alembic.ini upgrade base:head --sql > upgrade.sql` writes the whole
+chain as SQL without a database connection (`EAP_DATABASE_URL` only selects the dialect). Offline,
+0011 cannot check the installed pgvector: it emits `CREATE EXTENSION IF NOT EXISTS vector SCHEMA
+public` instead, so run the script as a role that may create the extension (or create it first as a
+superuser), and make sure the server has pgvector 0.8.0 or later; an online `upgrade head` checks
+both. Verified against a fresh `pgvector/pgvector:0.8.2-pg17` database.
 
 ## pgvector (the `vector` extension)
 

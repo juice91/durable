@@ -392,9 +392,16 @@ def test_bad_config_stops_the_worker_at_start_and_schedules_nothing(crash_schema
             worker.stop()
         log = (tmp_path / f"bad-{env_name}.log").read_text()
         assert code != 0 and "RetentionConfigError" in log and env_name in log and "EAP_WORKER_READY" not in log
+    # The settings are validated before DBOS launches (eap_worker.app.validate_startup), so the
+    # system schema may not even have its schedule table: either way nothing is scheduled.
+    from sqlalchemy.exc import ProgrammingError
+
     client = client_of(crash_schema)
     try:
-        assert client.list_schedules(schedule_name_prefix=RETENTION_SCHEDULE_NAME) == []
+        try:
+            assert client.list_schedules(schedule_name_prefix=RETENTION_SCHEDULE_NAME) == []
+        except ProgrammingError as exc:
+            assert "workflow_schedules" in str(exc)
     finally:
         client.destroy()
 

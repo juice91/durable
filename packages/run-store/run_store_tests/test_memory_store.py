@@ -572,6 +572,37 @@ def test_scrub_event_data_keeps_only_ids_codes_and_numbers():
     assert scrub_event_data(out) == out and scrub_event_data(None) == {"redacted": True}
 
 
+def test_scrub_drops_numbers_outside_the_allowlist_and_text_keys():
+    """Final review BLOCKING 1: a number is personal data too (a phone number, a card's last four);
+    only structural numbers survive, and nothing under args/content/output/result, whatever its type."""
+    from eap_run_store import scrub_event_data
+
+    out = scrub_event_data({
+        "args": {"phone": 5551234567, "card_last4": 4242},
+        "content": {"Ada, ada@example.com": 1},
+        "result": 5551234567, "output": True, "input": 42,
+        "phone": 5551234567, "lookup": {"Ada": 3, "Bob": 4},
+        "model_request": 2, "turn": 3, "covers_to_turn": 3, "approx_tokens": 120, "redacted": 2,
+        "cost_usd": "0.0000123000", "stage": "index", "processor_type": "pii",
+        "usage": {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                  "measured": True, "provider_model_name": "qwen/q-1", "price_source": "catalog",
+                  "Ada": 1, "note": "Ada said hi"},
+        "match_counts": {"email": 2, "pattern_0": 1, "Ada, ada@example.com": 1, "phone": "x"},
+    })
+    assert out == {
+        "model_request": 2, "turn": 3, "covers_to_turn": 3, "approx_tokens": 120,
+        "cost_usd": "0.0000123000", "stage": "index", "processor_type": "pii",
+        "usage": {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                  "measured": True, "provider_model_name": "qwen/q-1", "price_source": "catalog"},
+        "match_counts": {"email": 2, "pattern_0": 1},
+        "redacted": True,
+    }
+    dumped = json.dumps(out)
+    for leak in ("5551234567", "4242", "ada@example.com", "Ada", "Bob", "42"):
+        assert leak not in dumped
+    assert scrub_event_data(out) == out
+
+
 def test_delete_conversation_scrubs_events_and_ledger(store, runs, engine, tenant, agent):
     conv = conversation(runs, tenant, agent, resource="u1", turns=2)
     run_ids = [run_of(engine, tenant, conv, n) for n in (1, 2)]
@@ -597,6 +628,39 @@ def test_delete_conversation_scrubs_events_and_ledger(store, runs, engine, tenan
                             "redacted": True}
     # another conversation's runs are untouched
     assert secret_hits(engine, tenant, [other_run]) == {"events": 6, "runs": 1, "ledger": 1}  # see above
+
+
+def test_delete_conversation_drops_numeric_args_and_text_keyed_results(store, runs, engine, tenant, agent):
+    """Final review BLOCKING 1: a numeric tool argument and a result with text keys survive no
+    deletion; the structural numbers the trace reads stay, and the trace still builds."""
+    from eap_run_store import EventLog
+    from eap_run_store.trace import TraceReader
+
+    conv = conversation(runs, tenant, agent, resource="u1", turns=1)
+    rid = run_of(engine, tenant, conv, 1)
+    log = EventLog(engine)
+    log.append(tenant, uuid.UUID(rid), "n0", "tool_call",
+               {"tool_name": "lookup", "tool_call_id": "t1", "args": {"phone": 5551234567, "card_last4": 4242}})
+    log.append(tenant, uuid.UUID(rid), "n1", "tool_result",
+               {"tool_name": "lookup", "tool_call_id": "t1", "content": {"Ada, ada@example.com": 1}})
+    log.append(tenant, uuid.UUID(rid), "n2", "tool_result",
+               {"tool_name": "lookup", "tool_call_id": "t2", "content": 5551234567, "phone": 4242})
+    log.append(tenant, uuid.UUID(rid), "n3", "embedding",
+               {"stage": "index", "model_id": "test:hash", "inputs": 2, "input_tokens": 9, "dimensions": 1024,
+                "turn": 1, "inserted": 2, "existing": 0})
+
+    assert store.delete_conversation(tenant, conv)
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT type, data FROM execution_events WHERE tenant_id = :t AND run_id = :r"
+                                 " ORDER BY seq"), {"t": tenant, "r": rid}).all()
+    dumped = json.dumps([r.data for r in rows])
+    for leak in ("5551234567", "4242", "ada@example.com", "Ada", "phone", "card_last4"):
+        assert leak not in dumped
+    assert rows[-1].data == {"stage": "index", "model_id": "test:hash", "inputs": 2, "input_tokens": 9,
+                             "dimensions": 1024, "turn": 1, "inserted": 2, "existing": 0, "redacted": True}
+    assert seqs_contiguous(engine, [rid])
+    trace = TraceReader(engine).read(tenant, rid)
+    assert trace is not None and "5551234567" not in json.dumps(trace, default=str)
 
 
 def test_forget_resource_scrubs_key_names_and_conversations(store, runs, engine, tenant, agent):

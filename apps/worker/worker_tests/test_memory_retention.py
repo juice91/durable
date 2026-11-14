@@ -78,6 +78,8 @@ def test_config_default_covers_the_plan_kinds_and_overrides():
     {"EAP_MEMORY_RETENTION_BATCH_SIZE": "10001"},
     {"EAP_MEMORY_RETENTION_MAX_STEPS": "x"},
     {"EAP_MEMORY_RETENTION_OBSERVATION_DAYS": "off"},  # `off` is only for EAP_MEMORY_RETENTION_DAYS
+    {"EAP_MEMORY_RETENTION_DAYS": "36501"},  # over MAX_RETENTION_DAYS: the cutoff would overflow
+    {"EAP_MEMORY_RETENTION_EMBEDDING_DAYS": "999999999999"},
 ])
 def test_config_rejects_bad_values(env):
     with pytest.raises(RetentionConfigError) as exc:
@@ -89,6 +91,20 @@ def test_config_off_is_explicit():
     cfg = RetentionConfig.from_env({"EAP_MEMORY_RETENTION_DAYS": "OFF", "EAP_MEMORY_RETENTION_EMBEDDING_DAYS": "3"})
     assert cfg.off and not cfg.enabled
     assert not RetentionConfig.from_env({}).off
+
+
+def test_the_largest_allowed_days_never_make_the_sweep_raise():
+    from eap_worker.retention import MAX_RETENTION_DAYS
+
+    cfg = RetentionConfig.from_env({"EAP_MEMORY_RETENTION_DAYS": str(MAX_RETENTION_DAYS)})
+    assert cfg.days["observations"] == MAX_RETENTION_DAYS
+    fake = Fake({})
+    out = sweep(cfg, datetime(2026, 1, 1, tzinfo=timezone.utc), fake.tenant_page, fake.batch)
+    assert out is not None
+    # A context stored by an older worker with an unbounded value is clamped, never an OverflowError.
+    stale = RetentionConfig.from_context({"days": {"observations": 10**12}})
+    assert stale.days == {"observations": MAX_RETENTION_DAYS}
+    sweep(stale, datetime(2026, 1, 1, tzinfo=timezone.utc), fake.tenant_page, fake.batch)
 
 
 def test_context_tolerates_garbage():

@@ -22,8 +22,11 @@ they were before platform tools existed.
 - References are grouped by the knowledge base's embedding model (one query embedding per model)
   and then by (filter, top_k, min_score) (one `KnowledgeStore.search` per group). The merged hits
   are ordered by score and cut at the largest top_k of the searched references.
-- Embedding usage: request key `embed:retrieve:{tool_call_id}` (a second embedding model in one
-  call: `embed:retrieve:{tool_call_id}:{i}`, i = 1, 2, ... in model-id order), written with its
+- Embedding usage: request key `embed:retrieve:{tool_call_id}` when the call searches one embedding
+  model; with several, each model's key is `embed:retrieve:{tool_call_id}:{model_id}` (models in
+  sorted order). The suffix is the model's own id, never its position, so a knowledge base deleted
+  or reindexed between a crash and the re-execution cannot move one model's usage onto another's
+  key. Each is written with its
   `embedding` event in one transaction (`record_embedding`), so a re-executed call step records it
   once. Retryable provider errors are retried inside the call (read-only, so harmless); any failure
   left becomes a fixed model-visible tool error, logged with a code only.
@@ -245,10 +248,12 @@ def plan_searches(
     return [(model, list(by_model[model].values())) for model in sorted(by_model)]
 
 
-def embedding_request_key(tool_call_id: str, index: int) -> str:
-    """`embed:retrieve:{tool_call_id}` for the first (usually only) embedding model, then `:{i}`."""
+def embedding_request_key(tool_call_id: str, model_id: str | None = None) -> str:
+    """`embed:retrieve:{tool_call_id}` for a call that searches one embedding model (`model_id`
+    None), else `embed:retrieve:{tool_call_id}:{model_id}`: stable per model, whatever other models
+    the call searches or in which order."""
     base = f"embed:retrieve:{tool_call_id}"
-    return base if index == 0 else f"{base}:{index}"
+    return base if model_id is None else f"{base}:{model_id}"
 
 
 async def _embed_query_retrying(
@@ -287,9 +292,11 @@ async def search_knowledge(
     plan = plan_searches(targets, models)
     hits: dict[str, SearchHit] = {}
     limit = 0
-    for index, (model, groups) in enumerate(plan):
+    several = len(plan) > 1
+    for model, groups in plan:
         call = await _embed_query_retrying(
-            settings, tenant_id=tenant_id, run_id=run_id, request_key=embedding_request_key(tool_call_id, index),
+            settings, tenant_id=tenant_id, run_id=run_id,
+            request_key=embedding_request_key(tool_call_id, model if several else None),
             model_id=model, text=query,
         )
         await asyncio.to_thread(record_embedding, event_log, tenant_id, run_id, call)

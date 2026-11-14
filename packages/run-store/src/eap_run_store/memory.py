@@ -96,11 +96,15 @@ holding a later one:
 
 Scrubbing (deletion keeps runs, events and usage rows as the audit and cost record, without text).
 `scrub_event_data(data)` replaces an event's `data` with `{"redacted": true, ...kept}`, where kept
-is, at the top level only: numbers, booleans and nulls; objects whose values are all numbers (usage
-counts); and strings under SCRUB_KEEP_STRING_KEYS (ids, model and tool names, statuses and codes)
-that also match the identifier pattern `^[A-Za-z0-9_.:@/-]{1,128}$`. Every other string, list and
-object is dropped (inputs, message parts, tool args and results, error messages, processor details,
-working memory key names). Type, seq, key and ts stay, so seq stays gap-free; `run_model_requests`
+is an allowlist, at the top level only: numbers under SCRUB_KEEP_NUMBER_KEYS (structural counts,
+versions, turns and sizes the trace and Studio read); strings under SCRUB_KEEP_STRING_KEYS (ids,
+model and tool names, statuses, codes, decimal costs) that also match the identifier pattern
+`^[A-Za-z0-9_.:@/-]{1,128}$`; the `usage` object reduced to its fixed token, measured and
+price-source keys; `match_counts` with identifier-like kind keys and int values; and booleans and
+nulls. Nothing under SCRUB_CONTENT_KEYS (args, content, output, result, input, ...) survives, of any
+type. Every other number, string, list and object is dropped, whatever its keys (inputs, message
+parts, numeric tool args and results, text-keyed objects, error messages, processor details,
+working memory key names). An int `redacted` count is replaced by the `true` marker. Type, seq, key and ts stay, so seq stays gap-free; `run_model_requests`
 rows and run totals are untouched.
 
 What each deletion removes:
@@ -244,10 +248,31 @@ LEDGER_PREFIX = "wm:"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 # Top-level string fields kept when an event is scrubbed (if they look like identifiers).
 SCRUB_KEEP_STRING_KEYS = frozenset({
-    "agent_id", "action", "code", "conversation_id", "error_code", "finish_reason", "format", "kind",
-    "model_id", "phase", "price_source", "processor", "provider_model_name", "request_key", "run_id",
-    "scope", "status", "step_id", "tool_call_id", "tool_id", "tool_name", "type",
+    "agent_id", "action", "code", "conversation_id", "cost_usd", "error_code", "finish_reason",
+    "format", "kind", "mode", "model_id", "phase", "price_source", "processor", "processor_type",
+    "provider_model_name", "request_key", "run_id", "scope", "stage", "status", "step_id",
+    "tool_call_id", "tool_id", "tool_name", "type",
 })
+# Top-level number fields kept when an event is scrubbed: structural counts, versions, positions
+# and sizes the trace builder (trace.py), metrics and Studio read. Any other number (a tool's
+# numeric argument or result, a workflow input) is dropped: numbers can be personal data too.
+SCRUB_KEEP_NUMBER_KEYS = frozenset({
+    "agent_version", "approx_tokens", "attempt", "batch", "chunk_count", "chunks", "covers_from_turn",
+    "covers_to_turn", "dimensions", "doc_version", "embedded", "existing", "filled", "generation",
+    "groups", "hits", "index", "input_tokens", "inputs", "inserted", "messages", "model_request",
+    "notes", "other_changed_keys", "output_tokens", "pending", "pending_tokens", "requests",
+    "superseded", "timeout_hours", "tokens", "total", "turn", "turns", "version", "written",
+})
+# Keys whose value is never kept, whatever its type: they hold what a user, a tool or a model said.
+SCRUB_CONTENT_KEYS = frozenset({
+    "args", "content", "delta", "error", "input", "messages_json", "output", "raw_args", "result",
+    "text", "value",
+})
+# The `usage` object (pricing.usage_record): fixed keys, numbers, a bool and identifier strings.
+_SCRUB_USAGE_NUMBER_KEYS = frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"})
+_SCRUB_USAGE_STRING_KEYS = frozenset({"provider_model_name", "price_source"})
+# `match_counts` (processor_result): count per PII kind or `pattern_<i>`; keys must look like one.
+_SCRUB_COUNT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 # ---------------------------------------------------------------------------------------- models
@@ -763,20 +788,61 @@ def apply_history_limits(
     return kept, len(turns) - len(kept)
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _scrub_usage(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, v in value.items():
+        if key in _SCRUB_USAGE_NUMBER_KEYS and _is_number(v):
+            out[key] = v
+        elif key == "measured" and isinstance(v, bool):
+            out[key] = v
+        elif key in _SCRUB_USAGE_STRING_KEYS and (v is None or (isinstance(v, str) and _IDENTIFIER.fullmatch(v))):
+            out[key] = v
+    return out
+
+
+def _scrub_match_counts(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        k: v for k, v in value.items()
+        if isinstance(k, str) and _SCRUB_COUNT_KEY.fullmatch(k) and isinstance(v, int) and not isinstance(v, bool)
+    }
+
+
 def scrub_event_data(data: Any) -> dict[str, Any]:
-    """An event's data without any text (see the module docstring): `{"redacted": true, ...kept}`."""
+    """An event's data without any text (see the module docstring): `{"redacted": true, ...kept}`.
+
+    Allowlist only: numbers under SCRUB_KEEP_NUMBER_KEYS, identifier strings under
+    SCRUB_KEEP_STRING_KEYS, `usage` and `match_counts` through their fixed shapes, and booleans and
+    nulls except under SCRUB_CONTENT_KEYS. Everything else (any other number, string, list or object,
+    whatever its keys) is dropped."""
     kept: dict[str, Any] = {}
     if isinstance(data, dict):
         for key, value in data.items():
-            if value is None or isinstance(value, (bool, int, float)):
+            if key in SCRUB_CONTENT_KEYS:
+                continue
+            if value is None or isinstance(value, bool):
                 kept[key] = value
+            elif _is_number(value):
+                if key in SCRUB_KEEP_NUMBER_KEYS:
+                    kept[key] = value
             elif isinstance(value, str):
                 if key in SCRUB_KEEP_STRING_KEYS and _IDENTIFIER.fullmatch(value):
                     kept[key] = value
-            elif isinstance(value, dict) and all(
-                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()
-            ):
-                kept[key] = dict(value)
+            elif key == "usage":
+                usage = _scrub_usage(value)
+                if usage is not None:
+                    kept[key] = usage
+            elif key == "match_counts":
+                counts = _scrub_match_counts(value)
+                if counts is not None:
+                    kept[key] = counts
     kept["redacted"] = True
     return kept
 
@@ -2653,6 +2719,8 @@ __all__ = [
     "WorkingMemoryModel",
     "WorkingMemoryVersionConflict",
     "WorkingMemoryWrite",
+    "SCRUB_CONTENT_KEYS",
+    "SCRUB_KEEP_NUMBER_KEYS",
     "SCRUB_KEEP_STRING_KEYS",
     "apply_history_limits",
     "ledger_row_key",

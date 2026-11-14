@@ -161,8 +161,8 @@ def test_plan_searches_groups_by_model_then_settings():
     plan = plan_searches(targets, {a: "test:hash", b: "test:hash", c: "test:hash768"})
     assert [m for m, _ in plan] == ["test:hash", "test:hash768"]
     assert [ids for _, ids in plan[0][1]] == [[a, b]] and [ids for _, ids in plan[1][1]] == [[c]]
-    assert embedding_request_key("call_1", 0) == "embed:retrieve:call_1"
-    assert embedding_request_key("call_1", 1) == "embed:retrieve:call_1:1"
+    assert embedding_request_key("call_1") == "embed:retrieve:call_1"
+    assert embedding_request_key("call_1", "test:hash768") == "embed:retrieve:call_1:test:hash768"
 
 
 def test_retrieve_definition_offers_the_attached_names_only():
@@ -288,7 +288,9 @@ def test_knowledge_bases_of_two_embedding_models_are_searched_together(worker, c
     events = event_rows(worker.engine, run_id)
     [call] = by_type(events, "tool_call")
     embedding_keys = [k for _, k, t, _ in events if t == "embedding"]
-    assert embedding_keys == [f"embed:retrieve:{call['tool_call_id']}", f"embed:retrieve:{call['tool_call_id']}:1"]
+    # Stable per model (its id, never its position): sorted by model id.
+    assert embedding_keys == [f"embed:retrieve:{call['tool_call_id']}:test:hash",
+                              f"embed:retrieve:{call['tool_call_id']}:test:hash768"]
     assert {d["model_id"] for d in by_type(events, "embedding")} == {"test:hash", "test:hash768"}
     assert {s["kb_id"] for s in by_type(events, "tool_result")[0]["sources"]} == {a["id"], b["id"]}
 

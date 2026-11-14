@@ -45,6 +45,15 @@ Durability:
   un-embedded, so the same batch is embedded again (one bounded duplicate provider charge) and the
   usage row is written once, on commit. A crash after the commit and before the checkpoint finds the
   batch's event (`embed:batch:{i}`) and returns its recorded counts without a provider call.
+- A batch embedded (and charged) whose vectors the store then refuses (the generation switched, the
+  knowledge base was deleted, the reindex cancelled, a dimension mismatch) still records its usage:
+  an `embedding` event under the batch's key, `{phase: refused, refused: <reason>}`, with its
+  run_model_requests row in one transaction. A re-execution finds that event and replays the
+  refusal without a provider call. A stale batch advances the batch number, so the next round's
+  request keys never collide with the refused one's.
+- The run always ends: a failure in eap.start_ingest, in the run_started write or in
+  eap.kb_mark_failed still writes run_failed and sets the status 'failed' (the document or knowledge
+  base mark is best effort).
 - `eap.kb_chunk` is idempotent (ON CONFLICT DO NOTHING per (document, version, generation,
   ordinal)); a finalisation is one transaction and answers 'already_active' when repeated.
 - Failures are classified inside the steps and checkpointed as text-free failure dicts, so a replay
@@ -154,6 +163,7 @@ __all__ = [
     "max_ingest_tokens",
     "progress_message",
     "start_ingest_step",
+    "validate_settings",
 ]
 
 
@@ -190,10 +200,21 @@ def max_ingest_tokens() -> int:
 
 
 def _batch_chunks() -> int:
+    """EAP_KB_EMBED_BATCH_CHUNKS: un-embedded chunks per batch (default 64; below 1 means 1)."""
     raw = os.environ.get(BATCH_CHUNKS_ENV)
     if raw is None or not raw.strip():
         return DEFAULT_BATCH_CHUNKS
-    return max(1, int(raw))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        raise ValueError(f"{BATCH_CHUNKS_ENV} must be a positive integer, got {raw!r}") from None
+
+
+def validate_settings() -> None:
+    """Parse the ingest settings that the steps read (EAP_KB_MAX_INGEST_TOKENS,
+    EAP_KB_EMBED_BATCH_CHUNKS), so a bad value fails the worker at start, not each run."""
+    max_ingest_tokens()
+    _batch_chunks()
 
 
 def batch_request_key(index: int) -> str:
@@ -295,6 +316,21 @@ def _embedding_failure(exc: BaseException, model_id: str) -> dict[str, Any]:
         else "the embedding provider request failed"
     )
     return _failure("embedding_failed", exception_type(exc), message)
+
+
+REFUSAL_REASONS = ("stale", "knowledge_base_deleted", "reindex_cancelled", "embedding_dimension_mismatch")
+
+
+def refusal_outcome(reason: str, mode: str, model_id: str, embedded: int, total: int) -> dict[str, Any]:
+    """The step result of a batch whose vectors the store refused after the provider call (the
+    `refused` code of its `embedding` event): stale (chunk again), cancelled, or a failure."""
+    if reason == "stale":
+        return {"status": "stale"}
+    if reason == "embedding_dimension_mismatch":
+        return {**_embedding_failure(EmbeddingDimensionMismatch(model_id, 0, 0), model_id), "embedded": embedded, "total": total}
+    if reason in ("knowledge_base_deleted", "reindex_cancelled"):
+        return _cancelled(reason)
+    return _failure("internal_error", "IngestFailed", "the ingest failed with an internal error")
 
 
 def _scope(mode: str, document_id: str | None, doc_version: int | None) -> dict[str, Any]:
@@ -500,6 +536,9 @@ async def kb_embed_batch_step(
         # Committed before a crash (after the commit, before the checkpoint): the batch's event holds
         # its counts. No provider call, nothing written twice.
         done = rt.event_log.get_event(tenant_id, run_id, key)
+        if done is not None and done.type == _embeddings.EMBEDDING_EVENT_TYPE:
+            # The batch was embedded and paid for, but the store refused the vectors: replay the refusal.
+            return refusal_outcome(str(done.data.get("refused", "")), mode, embedding_model, embedded_before, total)
         if done is not None:
             d = done.data
             return {
@@ -573,18 +612,31 @@ async def kb_embed_batch_step(
         "message": progress_message(expected, total),
     }
 
+    def refused(reason: str) -> dict[str, Any]:
+        # The provider call was made (and is charged): record its usage even though the store refused
+        # the vectors, as an `embedding` event under the batch's key with its run_model_requests row in
+        # ONE transaction (first write wins, so a re-execution never records it twice). The event
+        # also makes a re-execution replay this refusal without another provider call.
+        rt.event_log.append(
+            tenant_id, UUID(str(run_id)), key, _embeddings.EMBEDDING_EVENT_TYPE,
+            {**call.event_data, "phase": "refused", "batch": index, "refused": reason}, usage=call.usage,
+        )
+        return refusal_outcome(reason, mode, embedding_model, embedded_before + filled, total)
+
     def write() -> dict[str, Any]:
         try:
             result = store.write_embeddings(
                 tenant_id, kb_id, generation, vectors, embedding_model=embedding_model, run_id=run_id,
                 event_key=key, event_type=INGEST_PROGRESS, event_data=data, usage=call.usage,
             )
-        except (KnowledgeBaseNotFound, GenerationNotWritable) as exc:
-            return gone(exc)
+        except KnowledgeBaseNotFound:
+            return refused("knowledge_base_deleted")
+        except GenerationNotWritable:
+            return refused("reindex_cancelled" if mode == "reindex" else "stale")
         except GenerationModelMismatch:
-            return {"status": "stale"} if mode == "ingest" else _cancelled("reindex_cancelled")
-        except EmbeddingDimensionMismatch as exc:
-            return {**_embedding_failure(exc, embedding_model), "embedded": embedded_before + filled, "total": total}
+            return refused("stale" if mode == "ingest" else "reindex_cancelled")
+        except EmbeddingDimensionMismatch:
+            return refused("embedding_dimension_mismatch")
         return {
             "status": "embedded", "embedded": embedded_before + filled + result.written, "total": total,
             "written": result.written, "filled": filled, "tokens": tokens, "requests": call.requests,
@@ -680,12 +732,16 @@ async def kb_mark_failed_step(
 @DBOS.workflow(name=KB_INGEST_WORKFLOW_NAME)
 async def kb_ingest(run_id: str, tenant_id: str, kb_id: str, input_json: str) -> dict[str, Any]:
     with log_context(tenant_id=tenant_id, run_id=run_id):
-        start = await start_ingest_step(run_id, tenant_id, kb_id, input_json)
+        try:
+            params = json.loads(input_json)
+            start = await start_ingest_step(run_id, tenant_id, kb_id, input_json)
+        except Exception as exc:  # noqa: BLE001 - a run that cannot start still ends failed, never 'running'
+            return await _fail(run_id, tenant_id, kb_id, _ctx_of(input_json), exc)
     with run_span(run_id, tenant_id, "", "", traceparent=start.get("traceparent")) as span:
         span.set_attribute("eap.run_kind", "kb_ingest")
         span.set_attribute("eap.knowledge_base_id", kb_id)
         log.info("kb_ingest run %s started: tenant=%s kb=%s", run_id, tenant_id, kb_id)
-        result = await _ingest_body(run_id, tenant_id, kb_id, json.loads(input_json), start)
+        result = await _ingest_body(run_id, tenant_id, kb_id, params, start)
         set_run_outcome(span, result["status"], result.get("error_code"))
         log.info("kb_ingest run %s %s", run_id, result["status"])
         return result
@@ -699,6 +755,19 @@ class _Ctx:
         self.document_id = document_id
         self.doc_version = doc_version
         self.generation: int | None = None
+
+
+def _ctx_of(input_json: str) -> _Ctx:
+    """The run's context from its input, tolerating a malformed one (the failure path's use)."""
+    try:
+        params = json.loads(input_json)
+        if "reindex" in params:
+            ctx = _Ctx("reindex", None, None)
+            ctx.generation = int(params["reindex"])
+            return ctx
+        return _Ctx("ingest", str(params["document_id"]), int(params["doc_version"]))
+    except Exception:  # noqa: BLE001 - only ids for the failure record
+        return _Ctx("ingest", None, None)
 
 
 def _cancel(reason: str) -> IngestFailed:
@@ -726,9 +795,10 @@ async def _ingest_body(
         started["generation"] = int(params["reindex"])
     else:
         started.update(document_id=ctx.document_id, doc_version=ctx.doc_version)
-    await append_event_step(run_id, tenant_id, "start", "run_started", started)
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
+        # Inside the try: a failed run_started write (after DBOS's retries) still fails the run.
+        await append_event_step(run_id, tenant_id, "start", "run_started", started)
         result = await _drive(run_id, tenant_id, kb_id, ctx, start)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         heartbeat.cancel()
@@ -798,6 +868,9 @@ async def _drive(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, start: dict
                     )
                     _raise_failure(out)
                     if out["status"] == "stale":
+                        # A refused batch may have recorded usage under this index's request key:
+                        # the next round's batches must use new keys, or their usage rows conflict.
+                        index += 1
                         stale = True
                         break
                     if out["status"] == "done":
@@ -882,16 +955,23 @@ def _classify(exc: BaseException) -> IngestFailed:
 
 
 async def _fail(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, exc: BaseException) -> dict[str, Any]:
+    """End the run failed: mark the document / knowledge base (best effort: a failure to mark never
+    keeps the run 'running'), then the durable run_failed event and the status."""
     failure = _classify(exc)
     log_failure(
         log, "kb_ingest run failed", exc, code=failure.code, error_type=failure.error_type,
         run_id=run_id, tenant_id=tenant_id,
     )
     counts: dict[str, Any] = {}
-    if failure.code != INGEST_CANCELLED:
-        counts = await kb_mark_failed_step(
-            run_id, tenant_id, kb_id, ctx.mode, failure.code, ctx.generation, ctx.document_id, ctx.doc_version
-        )
+    if failure.code != INGEST_CANCELLED and (ctx.mode == "reindex" or ctx.document_id is not None):
+        try:
+            counts = await kb_mark_failed_step(
+                run_id, tenant_id, kb_id, ctx.mode, failure.code, ctx.generation, ctx.document_id, ctx.doc_version
+            )
+        except Exception as mark_exc:  # noqa: BLE001 - the run must still end failed
+            log_failure(log, "kb_ingest mark-failed failed", mark_exc, code="kb_mark_failed_failed",
+                        run_id=run_id, tenant_id=tenant_id)
+            counts = {}
     data: dict[str, Any] = {"status": "failed", "error": failure.error, "error_code": failure.code}
     if counts:
         data.update(

@@ -45,7 +45,8 @@ Steps (eap_worker.workflow):
 Failures never fail the turn. An embedding model removed from the allowlist since publish
 (`embedding_model_not_allowed`), a provider error after the step's own retries, a dimension
 mismatch, a recall query past its deadline (`embedding_timeout`), a store error after a charged
-embedding (its usage row is still recorded) or a redaction that cannot finish: the step records ONE
+embedding (its usage row is written in the failure event's own transaction, with the call's counts)
+or a redaction that cannot finish: the step records ONE
 `embedding` event under
 `embed:recall:{turn}:failed` / `embed:index:{turn}:failed` with {"stage", "status": "failed",
 "error_code", "model_id"} (no text) and returns; recall then proceeds without the block. Anything
@@ -180,20 +181,28 @@ def _date(value: Any) -> str:
 
 def _record_failure(
     store: MemoryStore, *, tenant_id: str, agent_id: str, conversation_id: str, run_id: str, request_key: str,
-    stage: str, model_id: str, code: str, inputs: int,
+    stage: str, model_id: str, code: str, inputs: int, call: Any = None,
 ) -> bool:
     """One text-free `embedding` event (`{request_key}:failed`) for a failed recall or index.
-    Returns False when the conversation is gone (nothing written)."""
+    With `call` (the embedding was made and charged, the write after it failed), the event carries
+    the call's counts and its usage row, written in the event's ONE transaction. Returns False when
+    the conversation is gone (no event; a charged call's usage is still recorded on its own)."""
+    data: dict[str, Any] = {"stage": stage, "status": "failed", "error_code": code, "model_id": model_id,
+                            "inputs": inputs, "input_tokens": 0}
+    if call is not None:
+        data = {**call.event_data, **{k: v for k, v in data.items() if k != "input_tokens"}}
     event = MemoryEvent(
         run_id=run_id,
         event_key=failed_key(request_key),
         type=EMBEDDING_EVENT_TYPE,
-        data={"stage": stage, "status": "failed", "error_code": code, "model_id": model_id, "inputs": inputs,
-              "input_tokens": 0},
+        data=data,
+        usage=None if call is None else call.usage,
     )
     try:
         store.append_conversation_event(tenant_id, agent_id, conversation_id, event)
     except ConversationNotFound:
+        if call is not None:
+            _record_usage_only(store, tenant_id, run_id, call.usage)
         return False
     log.warning("run %s: semantic recall %s failed code=%s model=%s", run_id, stage, code, model_id)
     return True
@@ -311,10 +320,10 @@ async def memory_recall_step(
         timeout=settings.recall_timeout_s,
     )
 
-    def fail(code: str) -> dict[str, Any]:
+    def fail(code: str, charged: Any = None) -> dict[str, Any]:
         written = _record_failure(store, tenant_id=tenant_id, agent_id=agent_id, conversation_id=conversation_id,
                                   run_id=run_id, request_key=request_key, stage="recall", model_id=model_id,
-                                  code=code, inputs=1)
+                                  code=code, inputs=1, call=charged)
         return {**base, "status": "failed" if written else "conversation_deleted", "error_code": code}
 
     if error is not None or call is None:
@@ -342,8 +351,7 @@ async def memory_recall_step(
         except Exception as exc:  # noqa: BLE001 - the embedding was charged: record it, never fail the turn
             log_failure(log, "semantic recall search failed", exc, code=classify(exc).code, run_id=run_id,
                         tenant_id=tenant_id)
-            _record_usage_only(store, tenant_id, run_id, call.usage)
-            return fail(classify(exc).code)
+            return fail(classify(exc).code, call)  # the failure event carries the usage row
         groups = fit_recall(build_groups(hit_turns, neighbours, conversation_id))
         shown = sum(len(g["messages"]) for g in groups)
         event = MemoryEvent(
@@ -431,10 +439,10 @@ async def memory_index_step(
     base: dict[str, Any] = {"status": "indexed", "error_code": None, "inserted": [], "existing": [], "redacted": 0}
     store = _store()
 
-    def fail(code: str, inputs: int) -> dict[str, Any]:
+    def fail(code: str, inputs: int, charged: Any = None) -> dict[str, Any]:
         written = _record_failure(store, tenant_id=tenant_id, agent_id=agent_id, conversation_id=conversation_id,
                                   run_id=run_id, request_key=request_key, stage="index", model_id=model_id,
-                                  code=code, inputs=inputs)
+                                  code=code, inputs=inputs, call=charged)
         return {**base, "status": "failed" if written else "conversation_deleted", "error_code": code}
 
     try:
@@ -471,8 +479,7 @@ async def memory_index_step(
         except Exception as exc:  # noqa: BLE001 - the embedding was charged: record it, never fail the turn
             log_failure(log, "semantic recall index write failed", exc, code=classify(exc).code, run_id=run_id,
                         tenant_id=tenant_id)
-            _record_usage_only(store, tenant_id, run_id, call.usage)
-            return fail(classify(exc).code, len(texts))
+            return fail(classify(exc).code, len(texts), call)  # the failure event carries the usage row
         if result.skipped:
             # Forgotten after this turn existed: no rows, no event; the provider still charged.
             _record_usage_only(store, tenant_id, run_id, call.usage)

@@ -289,6 +289,20 @@ def exact_search_max_chunks() -> int:
         return EXACT_SEARCH_MAX_CHUNKS
 
 
+def check_exact_search_max_chunks() -> None:
+    """Startup check (API and worker): EAP_KB_EXACT_SEARCH_MAX_CHUNKS, when set, is an integer
+    of 0 or more. ValueError otherwise (searches would silently use the default)."""
+    raw = os.environ.get(EXACT_SEARCH_MAX_CHUNKS_ENV)
+    if raw is None or not raw.strip():
+        return
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{EXACT_SEARCH_MAX_CHUNKS_ENV} must be an integer of 0 or more, got {raw!r}") from None
+    if value < 0:
+        raise ValueError(f"{EXACT_SEARCH_MAX_CHUNKS_ENV} must be an integer of 0 or more, got {raw!r}")
+
+
 # ---------------------------------------------------------------------------------------- errors
 
 

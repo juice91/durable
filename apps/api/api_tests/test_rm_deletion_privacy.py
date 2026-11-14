@@ -17,6 +17,7 @@ knowledge base (force).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -117,6 +118,44 @@ def test_delete_conversation_leaves_zero_rows_and_scrubs_the_retrieved_text(w):
     after = w.snap()
     w.delete(f"{API}/conversations/{t.c1}", status=404)
     assert w.snap() == after
+
+
+def test_delete_conversation_drops_numeric_tool_args_and_text_keyed_results(w):
+    """Final review BLOCKING 1: numbers are personal data too. A tool call with numeric arguments and
+    a result whose keys are text leave nothing behind; structural numbers stay; the trace still loads."""
+    t = w.t
+    run_id = t.runs[t.c1]
+    planted = [
+        ("tool:n1:call", "tool_call",
+         {"tool_name": "lookup", "tool_call_id": "n1", "args": {"phone": 5551234567, "card_last4": 4242}}),
+        ("tool:n1:result", "tool_result",
+         {"tool_name": "lookup", "tool_call_id": "n1", "content": {"Ada, ada@example.com": 1}}),
+        ("tool:n2:result", "tool_result",
+         {"tool_name": "lookup", "tool_call_id": "n2", "content": 5551234567, "phone": 5551234567}),
+    ]
+    with w.engine.begin() as conn:
+        for key, type_, data in planted:
+            seq = conn.execute(text("SELECT COALESCE(MAX(seq), -1) + 1 FROM execution_events WHERE run_id = :r"),
+                               {"r": run_id}).scalar_one()
+            conn.execute(text(
+                "INSERT INTO execution_events (tenant_id, run_id, seq, event_key, type, data, ts)"
+                " VALUES (:t, :r, :s, :k, :ty, CAST(:d AS jsonb), now())"
+            ), {"t": t.name, "r": run_id, "s": seq, "k": key, "ty": type_, "d": json.dumps(data)})
+
+    w.delete(f"{API}/conversations/{t.c1}", status=204)
+    w.assert_conversation_gone("c1")
+    for leak in ("5551234567", "4242", "ada@example.com", "card_last4"):
+        assert w.n("SELECT count(*) FROM execution_events x WHERE tenant_id = :t AND run_id = :r AND x.data::text LIKE :p",
+                   r=run_id, p=f"%{leak}%") == 0, leak
+    with w.engine.connect() as conn:
+        rows = conn.execute(text("SELECT seq, data FROM execution_events WHERE tenant_id = :t AND run_id = :r"
+                                 " ORDER BY seq"), {"t": t.name, "r": run_id}).all()
+    assert [r.seq for r in rows] == list(range(len(rows)))
+    assert all(r.data.get("redacted") is True for r in rows)
+    r = w.client.get(f"{API}/runs/{run_id}/trace", headers=t.headers)
+    assert r.status_code == 200, r.text[:300]
+    assert "5551234567" not in r.text and "ada@example.com" not in r.text
+    w.assert_other_tenant_untouched()
 
 
 # ----------------------------------------------------------------------------- forget per agent

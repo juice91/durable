@@ -53,6 +53,7 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     """Configure resources (failing fast unless eap_app is at the latest migration), construct DBOS
     and launch it (recovery runs here)."""
     settings = settings or WorkerSettings.from_env()
+    validate_startup(settings)
     configure_runtime(settings)
     setup_worker_telemetry()
     DBOS(config=dbos_config(settings))
@@ -70,6 +71,24 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     # eap.memory_retention (RM.15): scheduled when EAP_MEMORY_RETENTION_* is set, removed on =off.
     _retention.apply_retention_schedule()
     return settings
+
+
+def validate_startup(settings: WorkerSettings) -> None:
+    """Fail at start (before DBOS launches or recovers anything) on settings that would otherwise
+    first fail inside a step: the ingest caps, the ingest queue's concurrency, the exact-search
+    fallback cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
+    from eap_run_store.knowledge import check_exact_search_max_chunks
+
+    from eap_worker.config import embedding_endpoint_problem
+
+    _kb_ingest.validate_settings()
+    check_exact_search_max_chunks()
+    kb_ingest_concurrency()
+    _retention.RetentionConfig.from_env()
+    queue_polling_interval()
+    problem = embedding_endpoint_problem(settings)
+    if problem is not None:
+        raise ValueError(problem)
 
 
 def queue_polling_interval() -> float:
