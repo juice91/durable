@@ -804,7 +804,7 @@ def test_approval_required_tool_names_are_model_facing():
 
 @pytest.mark.parametrize("ref", ["retrieve", "update_working_memory", "final_result"])
 def test_platform_tool_names_cannot_require_approval(ref):
-    expected = f"Value error, approvals: '{ref}' is a platform tool and cannot require approval"
+    expected = f"Value error, approvals.tools[0]: '{ref}' is a platform tool and cannot require approval"
     assert _approval_error({**TOOLED, "approvals": {"tools": [ref]}}) == expected
     # even when a stored spec lists the reserved name as a tool, and with every spec shape around it
     listed = {**TOOLED, "tools": [*TOOLED["tools"], ref], "approvals": {"tools": [ref]}}
@@ -819,7 +819,7 @@ def test_platform_tool_names_cannot_require_approval(ref):
 ])
 def test_approval_refs_outside_the_spec_are_rejected_with_a_message(ref):
     assert _approval_error({**TOOLED, "approvals": {"tools": [ref]}}) == (
-        f"Value error, approvals: {ref!r} is not a tool of this agent")
+        f"Value error, approvals.tools[0]: {ref!r} is not a tool of this agent")
 
 
 def test_mcp_ref_must_match_the_spec_not_just_exist_somewhere():

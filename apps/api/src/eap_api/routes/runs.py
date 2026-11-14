@@ -77,7 +77,11 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
     `knowledge_base_id` set, `input` its JSON mode, see eap_api.launcher). An agent run has `agent_id`/`version` and `tool_id`
     null; a tool run has `tool_id`, `agent_id`/`version` null, and `input`/`output` as JSON text; a
     workflow run has `workflow_id`/`workflow_version`, input/output as JSON text. A workflow's agent
-    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise)."""
+    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise).
+
+    A structured-output run (`runs.output_format` json, agent capabilities milestone) also has
+    `output_json`, the validated object; `output` stays its canonical JSON text. The key is absent
+    for text runs and for runs without output."""
     iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
     return {
         "run_id": str(run["id"]),
@@ -95,6 +99,7 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "display_status": run["display_status"],
         "input": run["input"],
         "output": run["output"],
+        **_output_json(run),
         "error": run["error"],
         "heartbeat_at": iso(run["heartbeat_at"]),
         "created_at": iso(run["created_at"]),
@@ -117,6 +122,20 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "draft": run.get("draft_spec") is not None,
         "request_context": run.get("request_context") or {},
     }
+
+
+def _output_json(run: dict[str, Any]) -> dict[str, Any]:
+    """`{"output_json": <object>}` for a run whose output is structured (`output_format` json:
+    `output` is the canonical JSON text of the validated object), else `{}`, so the key is present
+    only for json runs. Output that does not parse (never written by the worker; a defence) is
+    `output_json: null`; a run without output yet (queued, running, failed) has no key either."""
+    if run.get("output_format") != "json" or run.get("output") is None:
+        return {}
+    try:
+        return {"output_json": json.loads(run["output"])}
+    except (ValueError, RecursionError):  # RecursionError: nesting deeper than the parser's limit
+        log.warning("run %s has output_format json but its output is not JSON", run.get("id"))
+        return {"output_json": None}
 
 
 def _decimal_str(value: Any) -> str | None:
@@ -318,7 +337,7 @@ def list_runs(
     ] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
-    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest"] | None, Query()] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     knowledge_base_id: uuid.UUID | None = None,
@@ -331,7 +350,8 @@ def list_runs(
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest'), `tool_id`,
+    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest' | 'eval'; eval
+    runs exist from 0015_evals, until then the filter lists nothing), `tool_id`,
     `workflow_id` and `knowledge_base_id` filter (a knowledge base's runs: its kb_ingest runs and its
     search tester tool runs; add `kind=kb_ingest` for the ingest runs only). A workflow's child agent runs are listed only with `parent_run_id`.
 

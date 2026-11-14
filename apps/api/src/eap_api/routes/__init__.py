@@ -1,7 +1,10 @@
 """Route definitions for the control-plane API."""
 
+import json
 import logging
-from typing import Annotated
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -16,7 +19,7 @@ from eap_api.database import get_session
 from eap_api.mcp_servers.models import McpServerModel
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, VersionRestore
+from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, PublishWarning, VersionRestore
 from eap_api.version_diff import compare_specs
 from eap_observability import log_failure
 from eap_processors import processor_errors
@@ -254,6 +257,8 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_ru
             ),
         )
 
+    _check_fallback_models(policy, spec)
+
     # Processors that call a model (moderation) are governed by the same allowlist.
     for ref in processor_models(spec.input_processors + spec.output_processors):
         if not policy.allows(ref.provider, ref.name):
@@ -293,6 +298,165 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_ru
     _check_platform_tools(spec)
     if not draft_run:
         _check_knowledge_bases(db, tenant_id, spec)
+
+
+def _check_fallback_models(policy: ModelPolicy, spec: AgentSpec) -> None:
+    """Every fallback model passes the chat allowlist (EAP_ALLOWED_MODELS), and the Anthropic
+    temperature rule covers the whole chain: a fallback answers with the spec's model settings.
+    AgentSpec already checks that fallbacks are distinct and none is the primary model. The worker
+    re-checks the allowlist at run start and in the resolver. 422 naming `fallback_models[i]`."""
+    for i, ref in enumerate(spec.fallback_models):
+        if not policy.allows(ref.provider, ref.name):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"fallback_models[{i}]: model '{ref.provider}:{ref.name}' is not allowed on this platform "
+                    "(not in the EAP_ALLOWED_MODELS allowlist)"
+                ),
+            )
+        if ref.provider == "anthropic" and spec.model_settings.temperature is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"fallback_models[{i}]: model '{ref.provider}:{ref.name}' does not accept a temperature "
+                    "setting; remove model_settings.temperature or this fallback model"
+                ),
+            )
+
+
+# Publish warnings (agent capabilities milestone, AC.7): advice in the publish and restore
+# responses, never a refusal. Each is {code, path, message}.
+WARNING_COST_CAP_UNPRICED = "cost_cap_unpriced_model"
+WARNING_REDACTION_FIXED_VALUES = "redaction_may_break_output_schema"
+
+
+# _override_price: what the operator price override file says about one model.
+PRICE_UNUSABLE = "unusable"  # unreadable, invalid, or named by the environment but missing
+PRICE_NONE = "none"  # no entry with a period in effect
+PRICE_ZERO = "zero"  # the period in effect prices input and output at 0
+PRICE_SET = "priced"
+
+
+def _override_price(model_id: str, today: date) -> str:
+    """What the operator price override file (EAP_MODEL_PRICES_FILE) says about `model_id`, with
+    the worker's lookup rules (eap_worker.pricing: the exact key, then `provider:*`; of that key's
+    periods, the latest one in effect today). PRICE_UNUSABLE when the file is unreadable or invalid,
+    or named by the environment but missing: the worker then prices nothing at all."""
+    from eap_api.routes.knowledge import _prices_file  # lazy: knowledge imports routes.runs
+
+    path, explicit = _prices_file()
+    try:
+        models = json.loads(path.read_text(encoding="utf-8"))["models"]
+        if not isinstance(models, dict):
+            return PRICE_UNUSABLE
+    except FileNotFoundError:
+        if explicit:
+            return PRICE_UNUSABLE
+        models = {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return PRICE_UNUSABLE
+    provider = model_id.partition(":")[0]
+    for key in (model_id, f"{provider}:*"):
+        periods = models.get(key)
+        if not isinstance(periods, list):
+            continue
+        in_effect = []
+        for period in periods:
+            try:
+                start = date.fromisoformat(str(period["effective_from"]))
+                prices = (Decimal(str(period["input_per_mtok"])), Decimal(str(period["output_per_mtok"])))
+            except (KeyError, TypeError, ValueError, InvalidOperation):
+                return PRICE_UNUSABLE
+            if start <= today:
+                in_effect.append((start, prices))
+        if in_effect:
+            _, (input_price, output_price) = max(in_effect, key=lambda p: p[0])
+            return PRICE_ZERO if input_price == 0 and output_price == 0 else PRICE_SET
+    return PRICE_NONE
+
+
+def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[str, str]]:
+    """With `limits.max_cost_usd`, one warning per model of the chain (primary, then fallbacks)
+    whose requests will count as $0 toward the cap: recorded without a price, or priced at $0 (the
+    repository's default price file prices `test:*` and `litellm:*` at 0).
+
+    The API reads only the override file. Providers outside it (`test`, `litellm`) are definitely
+    unpriced without an entry; other providers are priced by genai-prices in the worker, which the
+    API cannot consult, so they get no warning without an entry. An unusable override file prices
+    nothing, so then every model of the chain is warned about."""
+    from eap_api.routes.knowledge import OVERRIDE_ONLY_PROVIDERS  # lazy, as above
+
+    if spec.limits is None or spec.limits.max_cost_usd is None:
+        return []
+    day = today or datetime.now(timezone.utc).date()
+    chain = [("model", spec.model)] + [(f"fallback_models[{i}]", ref) for i, ref in enumerate(spec.fallback_models)]
+    warnings: list[dict[str, str]] = []
+    for path, ref in chain:
+        model_id = f"{ref.provider}:{ref.name}"
+        price = _override_price(model_id, day)
+        if price == PRICE_UNUSABLE:
+            reason = (
+                "the model price override file is unreadable, invalid or missing, so no model has a price; "
+                "its requests count as $0"
+            )
+        elif price == PRICE_ZERO:
+            reason = f"'{model_id}' is priced at $0, so its requests count as $0"
+        elif price == PRICE_NONE and ref.provider in OVERRIDE_ONLY_PROVIDERS:
+            reason = f"'{model_id}' has no price in the model price override file; its requests count as $0"
+        else:
+            continue
+        warnings.append(PublishWarning(
+            code=WARNING_COST_CAP_UNPRICED,
+            path=path,
+            message=f"{path}: {reason} toward limits.max_cost_usd, so the cost limit may not stop the run",
+        ).model_dump())
+    return warnings
+
+
+def _fixed_string_paths(schema: Any, path: str = "") -> list[str]:
+    """JSON paths (into the output object, `items[]` for array items) of every schema node that
+    fixes a string value through `enum` or `const`."""
+    if not isinstance(schema, dict):
+        return []
+    found: list[str] = []
+    values = list(schema.get("enum") or []) + ([schema["const"]] if "const" in schema else [])
+    if any(isinstance(v, str) for v in values):
+        found.append(path or "$")
+    for name, sub in (schema.get("properties") or {}).items():
+        found += _fixed_string_paths(sub, f"{path}.{name}" if path else name)
+    if isinstance(schema.get("items"), dict):
+        found += _fixed_string_paths(schema["items"], f"{path}[]" if path else "[]")
+    return found
+
+
+def _redaction_warnings(spec: AgentSpec) -> list[dict[str, str]]:
+    """With structured output, an output processor that redacts (`pii_redact` or `regex_blocklist`
+    with action `redact`) rewrites string fields; a redacted `enum` or `const` string no longer
+    validates, and the run then ends `output_blocked` (schema_invalid_after_processing)."""
+    if spec.output is None:
+        return []
+    fields = _fixed_string_paths(spec.output.json_schema)
+    if not fields:
+        return []
+    warnings: list[dict[str, str]] = []
+    for i, processor in enumerate(spec.output_processors):
+        if processor.type not in ("pii_redact", "regex_blocklist") or processor.config.action != "redact":
+            continue
+        path = f"output_processors[{i}]"
+        warnings.append(PublishWarning(
+            code=WARNING_REDACTION_FIXED_VALUES,
+            path=path,
+            message=(
+                f"{path}: {processor.type} redacts output text, and the output schema fixes string values "
+                f"({', '.join(fields[:5])}); a redacted value fails the schema and the run ends output_blocked"
+            ),
+        ).model_dump())
+    return warnings
+
+
+def publish_warnings(spec: AgentSpec) -> list[dict[str, str]]:
+    """Publish-time advice for a spec that passed _check_publishable (publish and restore)."""
+    return _cost_cap_warnings(spec) + _redaction_warnings(spec)
 
 
 def _check_memory_features(spec: AgentSpec) -> None:
@@ -413,7 +577,14 @@ def publish_version(
     principal: Annotated[Principal, Depends(current_principal)],
     db: SessionDep,
 ) -> dict:
-    """Publish the agent's draft as a new version."""
+    """Publish the agent's draft as a new version.
+
+    201 with the version and `warnings`: publish-time advice that does not block the publish,
+    `[{code, path, message}]` (`cost_cap_unpriced_model`: `limits.max_cost_usd` is set and a model
+    of the chain has no price; `redaction_may_break_output_schema`: an output processor redacts
+    while the output schema fixes string values). 422 for a spec the platform refuses, naming the
+    field (`fallback_models[i]: ...` for a fallback model off the allowlist or one that refuses the
+    spec's temperature)."""
     # Lock the agent row before reading the draft and the latest version, like restore does: a
     # publish and a restore (which may discard the draft) then run one after the other, so a draft a
     # restore discarded can never be published, and "no changes since latest" is judged on the state
@@ -432,6 +603,7 @@ def publish_version(
     spec = validate_stored_draft(agent.draft_spec)
 
     _check_publishable(db, principal.tenant_id, spec)
+    warnings = publish_warnings(spec)
 
     draft_hash = canonical_spec_hash(spec)
 
@@ -461,7 +633,7 @@ def publish_version(
         )
     db.refresh(version)
 
-    return JSONResponse(content=_version_to_response(version), status_code=201)
+    return JSONResponse(content={**_version_to_response(version), "warnings": warnings}, status_code=201)
 
 
 @router.get(
@@ -599,7 +771,8 @@ def restore_version(
     `restored_from = version_num` and the same `spec_hash`, and passes the same checks as a publish
     under today's policy. The draft becomes the restored spec. 409 when the source already is (or
     equals) the latest version, when the draft has unpublished changes and `discard_draft` is not
-    set, or when a concurrent publish or restore won the version number.
+    set, or when a concurrent publish or restore won the version number. The response carries
+    `warnings` as publish does.
     """
     discard_draft = request.discard_draft if request is not None else False
     # Lock the agent row: a concurrent draft edit cannot slip between the dirty-draft check and the
@@ -673,7 +846,9 @@ def restore_version(
         )
     db.refresh(restored)
 
-    return JSONResponse(content=_version_to_response(restored), status_code=201)
+    return JSONResponse(
+        content={**_version_to_response(restored), "warnings": publish_warnings(spec)}, status_code=201
+    )
 
 
 @router.get(

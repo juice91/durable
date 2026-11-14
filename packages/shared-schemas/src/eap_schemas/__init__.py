@@ -203,12 +203,14 @@ class AgentSpec(BaseModel):
     def check_fallback_models(self):
         """Fallback models are distinct and none is the primary model."""
         seen: set[tuple[str, str]] = {(self.model.provider, self.model.name)}
-        for ref in self.fallback_models:
+        for i, ref in enumerate(self.fallback_models):
             key = (ref.provider, ref.name)
             if key == (self.model.provider, self.model.name):
-                raise ValueError(f"fallback model {ref.provider}:{ref.name} is the agent's primary model")
+                raise ValueError(
+                    f"fallback_models[{i}]: fallback model {ref.provider}:{ref.name} is the agent's primary model"
+                )
             if key in seen:
-                raise ValueError(f"duplicate fallback model: {ref.provider}:{ref.name}")
+                raise ValueError(f"fallback_models[{i}]: duplicate fallback model: {ref.provider}:{ref.name}")
             seen.add(key)
         return self
 
@@ -219,11 +221,11 @@ class AgentSpec(BaseModel):
         if self.approvals is None:
             return self
         known = set(self.tools) | {f"{ref.server}/{ref.tool}" for ref in self.mcp_tools}
-        for entry in self.approvals.tools:
+        for i, entry in enumerate(self.approvals.tools):
             if entry in RESERVED_TOOL_NAMES or builtin_tool_name(entry) in RESERVED_TOOL_NAMES:
-                raise ValueError(f"approvals: {entry!r} is a platform tool and cannot require approval")
+                raise ValueError(f"approvals.tools[{i}]: {entry!r} is a platform tool and cannot require approval")
             if entry not in known:
-                raise ValueError(f"approvals: {entry!r} is not a tool of this agent")
+                raise ValueError(f"approvals.tools[{i}]: {entry!r} is not a tool of this agent")
         return self
 
     @model_validator(mode="after")

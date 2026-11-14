@@ -24,7 +24,12 @@ MAX_DIFF_LINE_PRODUCT = 4_000_000
 
 def normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """The spec as today's AgentSpec dumps it, so defaults added since a version was published do
-    not show up as changes. A spec that no longer validates is compared as stored."""
+    not show up as changes. A spec that no longer validates is compared as stored.
+
+    The agent-capabilities fields (`output`, `approvals`, `limits`, `fallback_models`) diff like any
+    other: absent while empty, so adding one is a single `added` entry; inside them every leaf has
+    its own path (`output.json_schema.properties.x`, `fallback_models[1]`). AgentSpec normalises
+    `limits.max_cost_usd`, so "0.50" and "0.5" are no change."""
     try:
         return AgentSpec.model_validate(spec).model_dump(mode="json")
     except ValidationError:

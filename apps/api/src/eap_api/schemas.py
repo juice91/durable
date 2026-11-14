@@ -64,6 +64,17 @@ class AgentVersionResponse(BaseModel):
     restored_from: int | None = None
 
 
+class PublishWarning(BaseModel):
+    """Publish-time advice in the publish and restore responses (`warnings`); never blocks a publish.
+    `path` names the spec field (`model`, `fallback_models[1]`, `output_processors[0]`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["cost_cap_unpriced_model", "redaction_may_break_output_schema"]
+    path: str
+    message: str
+
+
 class VersionRestore(BaseModel):
     """Body of POST /agents/{id}/versions/{v}/restore (optional). `discard_draft` lets a restore
     replace a draft that has unpublished changes; without it such a restore is a 409."""
