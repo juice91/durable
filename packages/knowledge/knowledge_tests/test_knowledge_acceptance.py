@@ -153,7 +153,7 @@ def _outline(name: str) -> list[tuple[tuple[str, ...], str | None]]:
 def test_readme_outline_paths_and_anchors() -> None:
     base = URL + "#"
     assert _outline("readme") == [
-        (("Orca Runtime", "Install"), base + "install"),  # the tiny H1 preamble merged into Install
+        (("Orca Runtime",), base + "orca-runtime"),  # the tiny H1 section with Install merged in: its title
         (("Orca Runtime", "Usage", "Configuration"), base + "configuration"),
         (("Orca Runtime", "Usage", "Scheduling"), base + "scheduling"),
         (("Orca Runtime", "Usage", "Scheduling", "Retries"), base + "retries"),
@@ -219,7 +219,7 @@ def test_plain_text_has_no_heading_and_anchors_to_the_page() -> None:
 def test_cjk_outline_chunks_and_unicode_anchors() -> None:
     chunks = _chunks("cjk")
     assert [(c.heading_path, c.anchor) for c in chunks[:2]] == [
-        (("快速入门", "安装步骤"), URL + "#安装步骤"),
+        (("快速入门",), URL + "#快速入门"),  # the tiny H1 section with 安装步骤 merged in
         (("快速入门", "配置说明"), URL + "#配置说明"),
     ]
     assert len(chunks) >= 3 and all(c.approx_tokens <= SMALL.max_tokens for c in chunks)
@@ -363,10 +363,13 @@ GOLDEN = {
     # readme and cjk changed deliberately before v1 was frozen (review item 7): a tiny section merged
     # into the next one now has the receiving section's heading line between the carried text and
     # its body. html and plain merge nothing at this config and are unchanged.
-    "readme": (16, "5ffa12873539f730063f50a5afeaf61019ed95df17b6c5374eb09b8ad63cfa9f", "09dfdfb48a26", "a63b1e15dcc8"),
+    # Changed again in place on 2026-11-14 (milestone browser check): a merged section keeps the FIRST
+    # section's title, path and anchor (it was the receiver's). Only the merged chunk (the first one of
+    # readme and cjk) changed; a changed re-upload re-embeds just that chunk.
+    "readme": (16, "4d79e59be6ce27c390ee5315f6a5068c48879e9583d967a2e4e79f2d3d38b11c", "b8ffbaeaa419", "a63b1e15dcc8"),
     "html": (3, "d47215b364655bd12f44354a09fc8e872b9778a13e7de8eccc2b7cc539cdf7dd", "36cce6f814bf", "384d5a6db34a"),
     "plain": (10, "34a47e10fb6c464b2cbe78c7c5bdedc44af083b50da10f9f6582fed354df4249", "ffb5dd8aacd9", "6748c83d5f7b"),
-    "cjk": (4, "9f5d1b0fedd16dc765cd42162edef67ab23ac8de546959aae1540930e65deaa9", "ff1239c61977", "267d2664f341"),
+    "cjk": (4, "f36076c40eecdfc2c2e3c227439e178dbeebc7eac9d01534978e11c4c952a319", "4968f6b1c52a", "267d2664f341"),
 }
 
 

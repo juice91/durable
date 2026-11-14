@@ -32,6 +32,7 @@ from eap_worker.models import scripted_observer_answer
 from eap_worker.observational import (
     OBSERVER_PROMPT_VERSION,
     observe_prompt,
+    observer_workflow_id,
     parse_notes,
     render_notes,
 )
@@ -43,6 +44,13 @@ from worker_tests.test_working_memory import MEMORY_TURN, conversation, memory_s
 OBSERVER = {"provider": "test", "name": "observer"}
 OBSERVE_STEPS = ["eap.memory_observe", "eap-observer__model.request", "eap.memory_observe_write"]
 REFLECT_STEPS = ["eap.memory_observe", "eap-observer__model.request", "eap.memory_reflect"]
+# In the run's own workflow: the observer child workflow's enqueue (recorded under its name), then its result.
+OBSERVE_RUN = ["eap.memory_observe_run", "DBOS.getResult"]
+
+
+def post_turn_steps(schema: str, run_id) -> list[str]:
+    """The run workflow's steps followed by its observer workflow's (`{run_id}:memory-observe`)."""
+    return step_names(schema, run_id) + step_names(schema, observer_workflow_id(str(run_id)))
 
 
 @pytest.fixture
@@ -202,13 +210,13 @@ def test_observations_replace_old_turns_in_the_next_turns_context(worker, client
         # ~680 tokens per turn: with keep_recent_turns=2, turn 4 is the first with > 1000 older tokens.
         run_id, row = obs_turn(worker, client, worker_settings, tenant, conv, fact(i, 150), spec)
         assert row["status"] == "completed"
-        assert step_names(schema, run_id) == MEMORY_TURN + ["eap.memory_observe"]  # below the threshold
+        assert post_turn_steps(schema, run_id) == MEMORY_TURN + OBSERVE_RUN + ["eap.memory_observe"]  # below the threshold
         runs.append(run_id)
     assert observations(worker, tenant, conv["id"]) == []
 
     run_id, row = obs_turn(worker, client, worker_settings, tenant, conv, fact(4, 150), spec)
     assert row["status"] == "completed"
-    assert step_names(schema, run_id) == MEMORY_TURN + OBSERVE_STEPS
+    assert post_turn_steps(schema, run_id) == MEMORY_TURN + OBSERVE_RUN + OBSERVE_STEPS
     [obs] = observations(worker, tenant, conv["id"])
     assert (obs.kind, obs.covers_from_turn, obs.covers_to_turn) == ("observation", 1, 2)
     assert "turn 1: Fact 1: word word" in obs.content and "turn 2: Fact 2:" in obs.content
@@ -246,7 +254,7 @@ def test_fewer_unobserved_turns_than_keep_recent_turns_are_never_observed(worker
     for i in (1, 2, 3):  # each turn alone is far above the threshold
         run_id, row = obs_turn(worker, client, worker_settings, tenant, conv, fact(i, 1500), spec)
         assert row["status"] == "completed"
-        assert step_names(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + ["eap.memory_observe"]
+        assert post_turn_steps(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + OBSERVE_RUN + ["eap.memory_observe"]
     assert observations(worker, tenant, conv["id"]) == []
 
 
@@ -269,7 +277,7 @@ def test_reflection_supersedes_the_active_observations(worker, client, worker_se
     spec = obs_spec(keep=4, observe_after=200_000, reflect_after=1000)
     run_id, row = obs_turn(worker, client, worker_settings, tenant, conv, "hello", spec)
     assert row["status"] == "completed"
-    assert step_names(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + REFLECT_STEPS
+    assert post_turn_steps(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + OBSERVE_RUN + REFLECT_STEPS
     [active] = observations(worker, tenant, conv["id"])
     assert (active.kind, active.covers_from_turn, active.covers_to_turn) == ("reflection", 1, 2)
     assert "reflection of 2 notes over turns 1-2" in active.content and "2026-11-02" in active.content
@@ -335,6 +343,94 @@ def test_a_deleted_conversation_is_a_no_op_for_the_post_turn_steps(worker, tenan
                                              None, None, memory_json))
         assert out["status"] == "conversation_deleted"
     assert event_rows(worker.engine, run_id) == []
+
+
+# --------------------------------------------------------------------------- racing observers
+
+
+def _race_setup(worker, tenant, monkeypatch):
+    """A conversation of four completed ~1250-token turns, and an observer request slowed down by
+    one second (counted before it is sent), so two observers started together overlap."""
+    import eap_worker.observational as obs
+
+    agent = uuid.uuid4()
+    conv = conversation(worker, tenant, agent)
+    runs = [completed_turn(worker, tenant, conv["id"], fact(i, 1000)) for i in (1, 2, 3, 4)]
+    calls: list[str] = []
+    real = obs.ask_observer
+
+    async def slow_observer(prompt: str, model_id: str):
+        calls.append(prompt)
+        await asyncio.sleep(1.0)
+        return await real(prompt, model_id)
+
+    monkeypatch.setattr(obs, "ask_observer", slow_observer)
+    return agent, conv, runs, calls
+
+
+def _race_outcome(worker, tenant, conv, runs):
+    rows = observations(worker, tenant, conv["id"], superseded=True)
+    events = [e for r in runs for e in event_rows(worker.engine, r)]
+    failed = [(k, d) for _, k, t, d in events if t == "memory_observe_failed"]
+    observe_usage = [k for r in runs for k in usage_keys(worker.engine, r) if k.startswith("memory:observe:")]
+    return rows, failed, observe_usage
+
+
+def test_racing_observers_of_one_conversation_never_pay_for_a_conflicting_request(worker, tenant, monkeypatch):
+    """Turns 3 and 4 finish together; their observers (keep_recent_turns=1) would plan turns 1-2 and
+    1-3. Through the partitioned queue they run one after the other, so the second plans from the
+    first's observation: every request made is written, and there is no observation_conflict."""
+    from eap_schemas import AgentSpec
+    from eap_worker.observational import observe_after_turn
+
+    agent, conv, runs, calls = _race_setup(worker, tenant, monkeypatch)
+    spec = AgentSpec.model_validate(obs_spec(keep=1))
+
+    async def race():
+        return await asyncio.gather(*(
+            observe_after_turn(str(runs[t - 1]), tenant, str(agent), conv["id"], t, spec) for t in (3, 4)
+        ))
+
+    summaries = asyncio.run(race())
+    assert all("error" not in s for s in summaries), summaries
+    rows, failed, observe_usage = _race_outcome(worker, tenant, conv, runs)
+    assert failed == []  # no observation_conflict (and no other failure)
+    assert len(calls) == len(rows) == len(observe_usage) >= 1  # every paid request was written, once
+    assert [s["observe"] for s in summaries].count("created") == len(rows)
+    covered = sorted((o.covers_from_turn, o.covers_to_turn) for o in rows)
+    assert covered[0][0] == 1 and covered[-1][1] == 3  # turns 1-3 observed, turn 4 kept
+    assert all(a[1] + 1 == b[0] for a, b in zip(covered, covered[1:]))  # contiguous, no overlap
+    for r in runs[2:]:
+        assert_totals_match(worker, tenant, r)
+
+
+def test_without_the_queue_racing_observers_lose_a_paid_request(worker, tenant, monkeypatch):
+    """The control for the test above: the same two observer workflows started directly (not through
+    the partitioned queue) both call the model, and the later write fails with observation_conflict.
+    This is the waste the queue removes."""
+    from dbos import SetWorkflowID
+
+    from eap_schemas.memory import MemoryConfig
+    from eap_worker.models import model_id_for
+    from eap_worker.observational import OBSERVATION_CONFLICT, memory_observe_run
+
+    agent, conv, runs, calls = _race_setup(worker, tenant, monkeypatch)
+    memory_json = MemoryConfig.model_validate(obs_spec(keep=1)["memory"]).model_dump(mode="json")
+    model_id = model_id_for(OBSERVER["provider"], OBSERVER["name"])
+
+    async def start(t: int):
+        with SetWorkflowID(f"{runs[t - 1]}:direct-observe"):
+            return await memory_observe_run(str(runs[t - 1]), tenant, str(agent), conv["id"], t, memory_json, None,
+                                            model_id)
+
+    async def race():
+        return await asyncio.gather(start(3), start(4))
+
+    asyncio.run(race())
+    rows, failed, observe_usage = _race_outcome(worker, tenant, conv, runs)
+    assert len(calls) == 2 and len(rows) == 1
+    assert [d["error_code"] for _, d in failed] == [OBSERVATION_CONFLICT]
+    assert len(observe_usage) == 2  # the losing request was still paid for
 
 
 # --------------------------------------------------------------------------- crash recovery

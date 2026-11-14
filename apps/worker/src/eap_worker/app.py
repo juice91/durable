@@ -6,7 +6,13 @@ from dbos import DBOS, DBOSConfig
 from eap_observability import dbos_otel_config, otlp_endpoint_from_env, setup_logging, setup_telemetry
 from eap_observability.agents import instrument_pydantic_ai
 
-from eap_worker.config import KB_INGEST_QUEUE_NAME, QUEUE_NAME, WorkerSettings, kb_ingest_concurrency
+from eap_worker.config import (
+    KB_INGEST_QUEUE_NAME,
+    MEMORY_OBSERVE_QUEUE_NAME,
+    QUEUE_NAME,
+    WorkerSettings,
+    kb_ingest_concurrency,
+)
 from eap_worker.runtime import configure_runtime
 
 # Importing registers the generic agent, its DBOS steps, the queue and the workflow. This must
@@ -66,6 +72,13 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     DBOS.register_queue(
         KB_INGEST_QUEUE_NAME,
         worker_concurrency=kb_ingest_concurrency(),
+        polling_interval_sec=queue_polling_interval(),
+    )
+    # eap.memory_observe_run (RM.13): one observer workflow at a time per conversation (the partition
+    # key), across all workers, so overlapping observers never pay for a request that cannot be written.
+    DBOS.register_queue(
+        MEMORY_OBSERVE_QUEUE_NAME,
+        partition_concurrency=1,
         polling_interval_sec=queue_polling_interval(),
     )
     # eap.memory_retention (RM.15): scheduled when EAP_MEMORY_RETENTION_* is set, removed on =off.

@@ -181,6 +181,35 @@ def test_partial_failure_keeps_old_version_and_retry_embeds_only_the_rest(
     assert [s["doc_version"] for s in chunk_stats(worker.engine, kb_tenant, doc_id)] == [v2]
 
 
+def test_the_document_is_ingesting_while_its_sections_are_embedded(
+    client, worker, store, kb_tenant, small_batches, monkeypatch
+):
+    """The browser check saw "Pending" while sections were being embedded. The document is 'pending'
+    only until the run starts: eap.start_ingest marks it 'ingesting' before chunking, so every
+    embedding call (first ingest, and a new version while the old one stays active) sees 'ingesting'."""
+    kb_id = create_kb(store, kb_tenant)
+    seen: list[str] = []
+    doc_ref: dict[str, str] = {}
+
+    def record(_n: int) -> None:
+        doc = store.get_document(kb_tenant, kb_id, "handbook")
+        doc_ref["id"] = doc["id"]
+        seen.append(doc["status"])
+
+    calls = _count_embed_calls(monkeypatch, on_call=record)
+    doc_id, _, _, run = _ingest(client, worker, store, kb_tenant, kb_id, markdown_doc(10))
+    assert run["status"] == "completed", run["error"]
+    assert len(calls) >= 3 and seen == ["ingesting"] * len(calls)
+    assert store.get_document_by_id(kb_tenant, doc_id)["status"] == "ready"
+
+    seen.clear()
+    _, v2, _, run = _ingest(client, worker, store, kb_tenant, kb_id, markdown_doc(10, tag="beta"))
+    assert run["status"] == "completed", run["error"]
+    assert seen and set(seen) == {"ingesting"}
+    doc = store.get_document_by_id(kb_tenant, doc_id)
+    assert (doc["status"], doc["active_version"]) == ("ready", v2)
+
+
 def test_document_deleted_mid_run_ends_cancelled(client, worker, store, kb_tenant, small_batches, monkeypatch):
     kb_id = create_kb(store, kb_tenant)
 

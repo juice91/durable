@@ -174,8 +174,11 @@ def test_lists_show_only_the_callers_own_rows(unchanged):
 
 def test_publish_and_draft_with_the_other_tenants_knowledge_base_are_refused(world):
     """A spec attaching A's knowledge base (alone or next to B's own): B's publish is 422 naming
-    only the id B sent, a draft test run is refused, nothing is enqueued, no version or run is
-    created for B, and A's rows are untouched."""
+    only the id B sent and creates no version. A draft test run is accepted like one of a draft
+    whose knowledge base was deleted (the API cannot tell the two apart without an existence oracle
+    across tenants): its snapshot holds only the ids B sent, nothing of A is in the answer, and the
+    worker's tenant-scoped retrieve finds no rows for it (worker_tests/test_retrieve.py
+    test_tenant_isolation_and_deleted_knowledge_base_are_tool_errors). A's rows are untouched."""
     from sqlalchemy import text
 
     w = world
@@ -192,16 +195,18 @@ def test_publish_and_draft_with_the_other_tenants_knowledge_base_are_refused(wor
         assert p.json()["detail"] == f"knowledge base '{a.kb['id']}' does not exist in this tenant"
         _assert_no_leak_except_id(w, p)
         d = w.call("POST", f"{API}/agents/{agent_id}/runs", {"run_id": str(uuid.uuid4()), "input": "hi", "version": "draft"})
-        assert d.status_code == 422, (d.status_code, d.text[:300])
+        assert d.status_code == 201, (d.status_code, d.text[:300])
+        _assert_no_leak_except_id(w, d)
         with w.engine.connect() as conn:
             n_versions = conn.execute(text("SELECT count(*) FROM agent_versions WHERE agent_id = :a"),
                                       {"a": agent_id}).scalar_one()
-            n_runs = conn.execute(text("SELECT count(*) FROM runs WHERE agent_id = :a"), {"a": agent_id}).scalar_one()
-        assert (n_versions, n_runs) == (0, 0)
+            snapshots = conn.execute(text("SELECT draft_spec FROM runs WHERE agent_id = :a"), {"a": agent_id}).scalars().all()
+        assert n_versions == 0
+        # Only the ids B sent, nothing resolved from A.
+        assert [[r["id"] for r in s["knowledge_bases"]] for s in snapshots] == [[r["id"] for r in refs]]
     after = w.snapshot()
     assert after[a.name] == before[a.name]
-    assert after[b.name]["runs"] == before[b.name]["runs"]
-    assert len(w.fake.calls) == calls
+    assert len(w.fake.calls) == calls + 2
 
 
 def _assert_no_leak_except_id(w: World, r) -> None:

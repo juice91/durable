@@ -114,6 +114,9 @@ conversation" block (never stored). After `eap.finish_run`, so the answer is nev
 run's status is already `completed`:
 
     eap.finish_run
+    <enqueue eap.memory_observe_run>    child workflow `{run_id}:memory-observe` on the partitioned
+                                        queue `eap-memory-observe` (key: conversation id, one
+                                        running per conversation), then DBOS.getResult; its steps:
     eap.memory_observe                  snapshot; decides observe / reflect / nothing (no write)
     eap-observer__model.request         only to observe: the observer request (model per call,
                                         allowlist checked inside the step)
@@ -140,7 +143,7 @@ completed turn, one step indexes the processed input and the final answer:
     eap.finish_run
     eap.memory_index                    redact, embed (`embed:index:{turn}`), MemoryStore.index_turn
                                         with its `embedding` event and usage row in one transaction
-    eap.memory_observe ...              (RM.13, when configured)
+    eap.memory_observe_run ...          (RM.13, when configured: the observer child workflow)
 
 A recall or index failure (embedding model no longer allowed, provider error, redaction) is one
 text-free `embedding` event `embed:{recall|index}:{turn}:failed` and never fails the turn. Without

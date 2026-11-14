@@ -24,6 +24,7 @@ from worker_tests.conftest import event_rows, ticket_spec, wait_for, wait_termin
 from worker_tests.test_conversation import step_names
 from worker_tests.test_crash_recovery import crash_schema  # noqa: F401 - fixture
 from worker_tests.test_observational_memory import (
+    OBSERVE_RUN,
     OBSERVE_STEPS,
     assert_totals_match,
     REFLECT_STEPS,
@@ -32,6 +33,7 @@ from worker_tests.test_observational_memory import (
     fact,
     obs_spec,
     observations,
+    post_turn_steps,
     usage_keys,
     wait_workflow,
     workflow_status,
@@ -53,15 +55,25 @@ def otenant(worker, tenant) -> Iterator[str]:
             conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": tenant})
 
 
+class Gate(threading.Event):
+    """Set to release the held observer requests; `entered` is set once a request reached the gate
+    (the observer workflow left the queue and is at its model call)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+
+
 @pytest.fixture
-def gate(monkeypatch) -> Iterator[threading.Event]:
+def gate(monkeypatch) -> Iterator[Gate]:
     """Holds every observer request until the event is set (always released at teardown)."""
     import eap_worker.observational as ob
 
     real = ob.ask_observer
-    release = threading.Event()
+    release = Gate()
 
     async def held(prompt, model_id):
+        release.entered.set()
         await asyncio.to_thread(release.wait, 90)
         return await real(prompt, model_id)
 
@@ -151,7 +163,7 @@ def test_reflection_supersedes_and_the_next_context_shows_the_reflection_only(
                                  content=f"- 2026-11-0{i} [medium] SEED{i} " + "note " * 700)
     run_id, row = api_turn(api, worker, worker_settings, otenant, conv, "hello")
     assert row["status"] == "completed", row["error"]
-    assert step_names(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + REFLECT_STEPS
+    assert post_turn_steps(worker_settings.dbos_system_schema, run_id) == MEMORY_TURN + OBSERVE_RUN + REFLECT_STEPS
     [active] = observations(worker, otenant, conv)
     assert (active.kind, active.covers_from_turn, active.covers_to_turn) == ("reflection", 1, 2)
     old = [o for o in observations(worker, otenant, conv, superseded=True) if o.kind == "observation"]
@@ -259,7 +271,7 @@ def test_a_redaction_failure_is_a_failure_event_and_nothing_is_stored(
     # eap.memory_observe: no observer request is made (nothing to hold) and nothing is priced.
     conv, run_id = _failed_turn(api, worker, worker_settings, otenant, gate, spec, hold=False)
     _assert_failed(worker, otenant, conv, run_id, "memory_redaction_failed", usage=False)
-    assert "eap-observer__model.request" not in step_names(worker_settings.dbos_system_schema, run_id)
+    assert "eap-observer__model.request" not in post_turn_steps(worker_settings.dbos_system_schema, run_id)
 
 
 def test_a_failed_observation_is_retried_at_the_next_turn(api, worker, worker_settings, otenant, gate):
@@ -363,7 +375,9 @@ def test_a_conversation_deleted_while_the_observer_runs_appends_nothing(api, wor
     conv = api_conv(api, otenant, agent)
     run_id, row = api_turn(api, worker, worker_settings, otenant, conv, fact(1, 600), wait=False)
     assert row["status"] == "completed"
-    assert workflow_status(worker_settings.dbos_system_schema, run_id) != "SUCCESS"  # the observer request is held
+    assert workflow_status(worker_settings.dbos_system_schema, run_id) != "SUCCESS"
+    # The observer workflow may still wait in its queue: delete only once it is at the model call.
+    assert gate.entered.wait(60), "the observer request never started"
     assert api.delete(f"/api/v1/conversations/{conv}", headers=auth(otenant)).status_code == 204
     gate.set()
     wait_workflow(worker_settings.dbos_system_schema, run_id, 90)  # the workflow ends cleanly (a no-op)
@@ -500,4 +514,4 @@ def test_step_layout_only_a_completed_conversation_turn_with_observational_gets_
     # A completed turn below the threshold: exactly the one decision step.
     run_id, row = turn(worker, client, otenant, conversation(worker, otenant), "hi", obs_spec(model="echo"))
     wait_workflow(schema, run_id)
-    assert step_names(schema, run_id) == MEMORY_TURN + ["eap.memory_observe"] and OBSERVE_STEPS[0] == "eap.memory_observe"
+    assert post_turn_steps(schema, run_id) == MEMORY_TURN + OBSERVE_RUN + ["eap.memory_observe"] and OBSERVE_STEPS[0] == "eap.memory_observe"

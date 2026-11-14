@@ -57,7 +57,13 @@ Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{ca
 Totals count every model request of the run and its child runs, moderation requests included
 (`moderation_requests` says how many of them were moderation checks), embedding calls included
 (`embedding_requests`, with `embedding_input_tokens` and `embedding_cost_usd`; RM.19) and observer
-and reflector requests included (`memory_requests`).
+and reflector requests included (`memory_requests`). `input_tokens`, `output_tokens` and
+`cost_usd` are over all of them; the split by operation (request_operation, as Metrics classifies
+requests) is `chat_requests`, `chat_input_tokens`, `chat_output_tokens`, `chat_cost_usd` (the
+agent's model only: what a chat turn shows), `memory_input_tokens`, `memory_output_tokens`,
+`memory_cost_usd` (observer and reflector), `moderation_input_tokens`, `moderation_output_tokens`,
+`moderation_cost_usd`, plus the embedding fields above; chat + memory + moderation + embedding
+input tokens equal `input_tokens`. A run span carries the same token split for its own requests.
 
 Status: `ok`, `error`, `running` (not finished yet), `waiting` (an approval step waiting for a
 decision) or `incomplete` (never finished, and the run has ended). Run spans keep the run's own
@@ -472,6 +478,9 @@ class _Builder:
             "model_id": run.get("model_id"),
             "input_tokens": run.get("input_tokens"),
             "output_tokens": run.get("output_tokens"),
+            # The run's own requests split by operation: `chat_*` is the agent's model (`model_id`)
+            # only; memory (observer, reflector), moderation and embedding tokens apart.
+            **_run_usage_split(rd),
             "cost_usd": _dec(run.get("cost_usd")),
             "trace_id": run.get("trace_id"),
             "error": run.get("error"),
@@ -815,6 +824,7 @@ class _Builder:
         embed_cost = Decimal(0)
         sums = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
         cost = Decimal(0)
+        split = _UsageSplit()
         for rd in [self.data.root, *self.data.children]:
             keys = {e["event_key"].removesuffix(":final") for e in rd.events if e["type"] == "model_message"}
             keys |= set(rd.requests)
@@ -825,6 +835,7 @@ class _Builder:
                 if request_key.startswith(("memory:observe:", "memory:reflect:")):
                     memory += 1
                 row = rd.requests.get(request_key)
+                split.add(request_key, row)
                 if row is None:
                     continue
                 recorded += 1
@@ -857,6 +868,7 @@ class _Builder:
             "memory_requests": memory,
             "embedding_input_tokens": embed_tokens,
             "embedding_cost_usd": None if embed_unpriced else format(embed_cost, "f"),
+            **split.totals(),
             "tool_calls": sum(1 for s in self.spans if s["kind"] in ("tool_call", "retrieve")),
             **{k: (None if no_usage else v) for k, v in sums.items()},
             "cost_usd": None if (unpriced or unrecorded) else format(cost, "f"),
@@ -865,6 +877,80 @@ class _Builder:
             "duration_ms": duration_ms,
             "status": root["status"],
         }
+
+
+def request_operation(request_key: str, row: dict[str, Any] | None) -> str:
+    """The request's operation, as eap_run_store.metrics.operation_key classifies it: `embedding`
+    (its row's operation), `moderation`, `observer`, `reflector`, else `chat` (the agent's model).
+    A request without a usage row is classified by its key (an embedding always has a row)."""
+    if row is not None and row.get("operation") == "embedding":
+        return "embedding"
+    if request_key.startswith("moderation:"):
+        return "moderation"
+    if request_key.startswith("memory:observe:"):
+        return "observer"
+    if request_key.startswith("memory:reflect:"):
+        return "reflector"
+    return "chat"
+
+
+# The split of a run's (or trace's) usage (RM.19 follow-up): the agent's chat model, observational
+# memory (observer + reflector), moderation and embedding requests apart, so the chat model's tokens
+# are never labelled with embedding or observer tokens. Every request is in exactly one group, so
+# chat + memory + moderation + embedding input tokens == input_tokens (and the same for output).
+_SPLIT_GROUPS = {"chat": "chat", "observer": "memory", "reflector": "memory", "moderation": "moderation",
+                 "embedding": "embedding"}
+
+
+class _UsageSplit:
+    def __init__(self) -> None:
+        self.tokens = {g: {"input": 0, "output": 0} for g in ("chat", "memory", "moderation", "embedding")}
+        self.cost = {g: Decimal(0) for g in self.tokens}
+        self.requests = {g: 0 for g in self.tokens}
+        self.recorded = {g: 0 for g in self.tokens}
+        self.unpriced = {g: 0 for g in self.tokens}
+
+    def add(self, request_key: str, row: dict[str, Any] | None) -> None:
+        group = _SPLIT_GROUPS[request_operation(request_key, row)]
+        self.requests[group] += 1
+        if row is None:
+            return
+        self.recorded[group] += 1
+        self.tokens[group]["input"] += int(row.get("input_tokens") or 0)
+        self.tokens[group]["output"] += int(row.get("output_tokens") or 0)
+        if row.get("cost_usd") is None:
+            self.unpriced[group] += 1
+        else:
+            self.cost[group] += Decimal(str(row["cost_usd"]))
+
+    def totals(self, *, cost: bool = True) -> dict[str, Any]:
+        """`{chat,memory,moderation}_{input,output}_tokens` and `chat_requests`; with `cost`, also
+        `{chat,memory,moderation}_cost_usd` (null when one of the group's requests is unpriced or has
+        no usage row). Tokens are null when the group has requests but none was recorded. The
+        embedding group's input tokens and cost are `embedding_input_tokens` / `embedding_cost_usd`
+        (added by the caller; embeddings have no output tokens)."""
+        out: dict[str, Any] = {"chat_requests": self.requests["chat"]}
+        for g in ("chat", "memory", "moderation"):
+            none = self.requests[g] > 0 and self.recorded[g] == 0
+            out[f"{g}_input_tokens"] = None if none else self.tokens[g]["input"]
+            out[f"{g}_output_tokens"] = None if none else self.tokens[g]["output"]
+            if cost:
+                missing = self.unpriced[g] or self.requests[g] - self.recorded[g]
+                out[f"{g}_cost_usd"] = None if missing else format(self.cost[g], "f")
+        return out
+
+    def embedding_input_tokens(self) -> int:
+        return self.tokens["embedding"]["input"]
+
+
+def _run_usage_split(rd: RunData) -> dict[str, Any]:
+    """The run span's usage split (its own requests only, not its child runs'): the chat model's
+    tokens apart from memory, moderation and embedding tokens. Costs stay on the trace totals."""
+    split = _UsageSplit()
+    keys = {e["event_key"].removesuffix(":final") for e in rd.events if e["type"] == "model_message"}
+    for request_key in keys | set(rd.requests):
+        split.add(request_key, rd.requests.get(request_key))
+    return {**split.totals(cost=False), "embedding_input_tokens": split.embedding_input_tokens()}
 
 
 def _run_name(run: dict[str, Any]) -> str:

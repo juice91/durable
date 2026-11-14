@@ -219,10 +219,16 @@ def _check_mcp_servers(db: Session, tenant_id: str, spec: AgentSpec) -> None:
             raise HTTPException(status_code=422, detail=f"MCP server '{name}' is disabled")
 
 
-def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
+def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_run: bool = False) -> None:
     """Publish-time policy, applied by publish and by restore (a restore is re-validated under
-    today's policy, not the one in force when the source version was published). 422 on the first
-    failure."""
+    today's policy, not the one in force when the source version was published), and by a draft
+    test run (`draft_run`, run_options._draft_target). 422 on the first failure.
+
+    A draft run skips only the knowledge base existence check: a draft whose knowledge bases were
+    deleted (DELETE /knowledge-bases/{id} lists draft references and needs force=true) runs like a
+    published version that attaches one, and its retrieve tool answers "The attached knowledge bases
+    no longer exist." The worker resolves knowledge bases within the run's tenant only, so an id of
+    another tenant still finds nothing."""
     _check_memory_features(spec)
 
     policy = ModelPolicy.from_env()
@@ -285,7 +291,8 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec) -> None:
 
     _check_mcp_servers(db, tenant_id, spec)
     _check_platform_tools(spec)
-    _check_knowledge_bases(db, tenant_id, spec)
+    if not draft_run:
+        _check_knowledge_bases(db, tenant_id, spec)
 
 
 def _check_memory_features(spec: AgentSpec) -> None:
@@ -334,7 +341,8 @@ def _check_platform_tools(spec: AgentSpec) -> None:
 def _check_knowledge_bases(db: Session, tenant_id: str, spec: AgentSpec) -> None:
     """Every attached knowledge base must exist in the principal's tenant (422 naming the first that
     does not). Another tenant's knowledge base is reported exactly like an unknown one. A knowledge
-    base deleted after publish gives the run's retrieve tool a model-visible error instead."""
+    base deleted after publish (or from a draft, whose test runs skip this check) gives the run's
+    retrieve tool a model-visible error instead."""
     ids = [ref.id for ref in spec.knowledge_bases]
     if not ids:
         return

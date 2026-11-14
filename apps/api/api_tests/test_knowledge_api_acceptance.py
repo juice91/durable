@@ -390,7 +390,10 @@ def test_force_false_and_unreferenced_delete(pg, tenant_of, fake_dbos, kb_cleanu
     client, _ = pg
     _, h = tenant_of()
     kb = _create_kb(client, h)
-    agent = _agent(client, h, "gamma", [kb["id"]])  # draft only: does not block
+    agent = _agent(client, h, "gamma", [kb["id"]])  # draft only: blocks too, marked as a draft
+    blocked = client.delete(f"{API}/knowledge-bases/{kb['id']}?force=false", headers=h)
+    assert blocked.status_code == 409 and [(a["agent_id"], a["draft"]) for a in blocked.json()["agents"]] == [(agent, True)]
+    assert client.patch(f"{API}/agents/{agent}", json={"spec": SPEC}, headers=h).status_code == 200
     assert client.delete(f"{API}/knowledge-bases/{kb['id']}?force=false", headers=h).status_code == 204
     assert client.delete(f"{API}/knowledge-bases/{kb['id']}?force=true", headers=h).status_code == 404
     assert client.get(f"{API}/agents/{agent}", headers=h).status_code == 200

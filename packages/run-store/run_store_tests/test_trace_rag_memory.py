@@ -187,6 +187,39 @@ def test_totals_split_embeddings_and_memory():
     assert t["memory_requests"] == 1
 
 
+def test_totals_split_the_chat_model_from_embedding_memory_and_moderation_tokens():
+    """The chat model's tokens are its own requests only (what the chat turn shows), with embedding
+    and observer tokens apart; the groups add up to the all-request totals."""
+    requests = {**REQUESTS, "moderation:input:0": _row("moderation:input:0", inp=7, out=1, cost=None, model="test:mod")}
+    events = _events(AGENT_EVENTS)
+    trace = build_trace(TraceInput(root=RunData(run=_run(), events=events, requests=requests)))
+    t = trace["totals"]
+    assert t["chat_requests"] == 3
+    assert (t["chat_input_tokens"], t["chat_output_tokens"]) == (350, 35)  # model:0..2 only
+    assert Decimal(t["chat_cost_usd"]) == Decimal("0.035")
+    assert (t["memory_input_tokens"], t["memory_output_tokens"]) == (50, 20)
+    assert Decimal(t["memory_cost_usd"]) == Decimal("0.002")
+    assert (t["moderation_input_tokens"], t["moderation_output_tokens"], t["moderation_cost_usd"]) == (7, 1, None)
+    assert t["embedding_input_tokens"] == 14
+    groups_in = t["chat_input_tokens"] + t["memory_input_tokens"] + t["moderation_input_tokens"] + t["embedding_input_tokens"]
+    groups_out = t["chat_output_tokens"] + t["memory_output_tokens"] + t["moderation_output_tokens"]
+    assert (groups_in, groups_out) == (t["input_tokens"], t["output_tokens"]) == (421, 56)
+    # The run span carries the same token split for its own requests.
+    (root,) = _by_kind(trace)["run"]
+    a = root["attributes"]
+    assert (a["chat_input_tokens"], a["chat_output_tokens"], a["embedding_input_tokens"]) == (350, 35, 14)
+    assert (a["memory_input_tokens"], a["memory_output_tokens"]) == (50, 20)
+    assert "chat_cost_usd" not in a
+
+
+def test_usage_split_without_usage_rows_is_null_for_the_unrecorded_groups():
+    """Runs recorded before usage existed: chat tokens unknown (null), not zero; an empty group is 0."""
+    trace = build_trace(TraceInput(root=RunData(run=_run(), events=_events(AGENT_EVENTS), requests={})))
+    t = trace["totals"]
+    assert t["chat_requests"] == 3 and t["chat_input_tokens"] is None and t["chat_cost_usd"] is None
+    assert t["memory_input_tokens"] == 0 and t["moderation_input_tokens"] == 0
+
+
 def test_no_memory_text_in_span_attributes():
     events = [dict(e) for e in _events(AGENT_EVENTS)]
     # A forged event carrying text must not have it copied into attributes (allowlists only).

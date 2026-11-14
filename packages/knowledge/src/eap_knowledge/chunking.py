@@ -99,24 +99,33 @@ def _heading_line(section: Section) -> str:
 def _merge_small(sections: list[Section], min_tokens: int) -> list[Section]:
     """Merge each section under ``min_tokens`` into the next one; the last one into the previous.
 
-    The receiving section keeps its heading path, title and anchor; the merged-in sections' headings
-    stay in the text so nothing is lost, and the receiver's own heading line is put between the
-    carried text and its body. A heading too long for the prefix also keeps its full line in the body.
+    A merged section keeps the FIRST merged section's heading path, title and anchor (its text
+    starts there, and the anchor link lands there); every later section's heading stays in the text
+    as a Markdown heading line, so nothing is lost. The first section's own heading is the chunk
+    title, so its line is not repeated in the text, unless it is too long for the prefix (then its
+    full line is the start of the text, as for any section). A tiny last section (with anything
+    carried into it) joins the previous one with its heading line.
     """
     out: list[Section] = []
-    carry = ""
+    first: Section | None = None
+    as_head = ""  # the group's text with `first` as the title
+    as_tail = ""  # the group's text when it joins the previous section (first heading line kept)
     last = len(sections) - 1
     for i, section in enumerate(sections):
-        own_line = _heading_line(section) if carry or len(section.heading) > MAX_HEADING_CHARS else ""
-        text = _join(carry, own_line, section.text)
-        if approx_tokens(text) >= min_tokens or (i == last and not out):
-            out.append(replace(section, text=text))
+        piece = _join(_heading_line(section), section.text)
+        if first is None:
+            first = section
+            long_line = _heading_line(section) if len(section.heading) > MAX_HEADING_CHARS else ""
+            as_head, as_tail = _join(long_line, section.text), piece
+        else:
+            as_head, as_tail = _join(as_head, piece), _join(as_tail, piece)
+        if approx_tokens(as_head) >= min_tokens or (i == last and not out):
+            out.append(replace(first, text=as_head))
         elif i < last:
-            carry = _join(carry, _heading_line(section), section.text)
             continue
-        else:  # a tiny last section joins the previous one
-            out[-1] = replace(out[-1], text=_join(out[-1].text, carry, _heading_line(section), section.text))
-        carry = ""
+        else:  # a tiny last group joins the previous section
+            out[-1] = replace(out[-1], text=_join(out[-1].text, as_tail))
+        first, as_head, as_tail = None, "", ""
     return out
 
 

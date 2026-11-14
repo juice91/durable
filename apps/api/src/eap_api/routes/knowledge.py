@@ -18,8 +18,8 @@ and not only dots (`.` and `..` would be normalized away by a client, onto the k
 app answers 404, never a 307, to a trailing-slash path (redirect_slashes=False). The document list
 is paged (`limit`, `after`, `next_after`), and GET /knowledge-bases/{id} adds the ingest spend.
 
-Deleting a knowledge base that an agent's latest published version attaches answers 409 with the
-agents, unless `force=true`. Deletes retry once on a deadlock (SQLSTATE 40P01): chunk-row locks
+Deleting a knowledge base that an agent's latest published version or current draft attaches
+answers 409 with the agents (`draft: true` for a draft-only reference), unless `force=true`. Deletes retry once on a deadlock (SQLSTATE 40P01): chunk-row locks
 have no fixed order against an in-flight ingest (the RM.4 review).
 
 The reindex dry run prices its token estimate from the operator price override file
@@ -515,24 +515,38 @@ def _orphaned(document: dict[str, Any]) -> bool:
 
 
 def referencing_agents(store: KnowledgeStore, tenant_id: str, kb_id: str) -> list[dict[str, Any]]:
-    """The tenant's agents whose latest published version attaches `kb_id` (spec.knowledge_bases),
-    archived agents included. One query: the latest version per agent through the unique
-    (agent_id, version) index, then a JSONB containment test on the spec."""
+    """The tenant's agents whose latest published version OR current draft attaches `kb_id`
+    (spec.knowledge_bases), archived agents included, one entry per agent: `version` is the latest
+    published version when it attaches the knowledge base, else null; `draft` is true when only the
+    draft attaches it (a draft test run of such an agent would get the retrieve tool's "no longer
+    exist" error after a forced delete, like a published version). One query: the latest version per
+    agent through the unique (agent_id, version) index, then JSONB containment tests on both specs."""
     needle = json.dumps([{"id": str(kb_id)}])
     with store.engine.connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT a.id, a.name, a.archived, v.version FROM agents a"
-                " JOIN LATERAL (SELECT av.version, av.spec FROM agent_versions av"
+                "SELECT id, name, archived, version, in_published FROM ("
+                " SELECT a.id, a.name, a.archived, v.version,"
+                "  coalesce(v.spec -> 'knowledge_bases' @> CAST(:needle AS jsonb), false) AS in_published,"
+                "  coalesce(a.draft_spec -> 'knowledge_bases' @> CAST(:needle AS jsonb), false) AS in_draft"
+                " FROM agents a"
+                " LEFT JOIN LATERAL (SELECT av.version, av.spec FROM agent_versions av"
                 "   WHERE av.agent_id = a.id AND av.tenant_id = a.tenant_id ORDER BY av.version DESC LIMIT 1) v"
                 " ON true"
-                " WHERE a.tenant_id = :t AND v.spec -> 'knowledge_bases' @> CAST(:needle AS jsonb)"
-                " ORDER BY a.name, a.id"
+                " WHERE a.tenant_id = :t) refs"
+                " WHERE in_published OR in_draft"
+                " ORDER BY name, id"
             ),
             {"t": tenant_id, "needle": needle},
         ).mappings().all()
     return [
-        {"agent_id": str(r["id"]), "agent_name": r["name"], "version": r["version"], "archived": bool(r["archived"])}
+        {
+            "agent_id": str(r["id"]),
+            "agent_name": r["name"],
+            "version": r["version"] if r["in_published"] else None,
+            "archived": bool(r["archived"]),
+            "draft": not r["in_published"],
+        }
         for r in rows
     ]
 
@@ -682,8 +696,9 @@ def delete_knowledge_base(
     force: Annotated[bool, Query()] = False,
 ) -> Response:
     """Delete the knowledge base; its documents and chunks cascade, its runs stay. 409
-    {detail, agents: [{agent_id, agent_name, version, archived}]} when an agent's latest published
-    version attaches it, unless `force=true` (runs of such versions then get a tool error). An
+    {detail, agents: [{agent_id, agent_name, version, archived, draft}]} when an agent's latest
+    published version or current draft attaches it (`draft` true and `version` null when only the
+    draft does), unless `force=true` (runs of such versions and drafts then get a tool error). An
     in-flight ingest run ends failed (`ingest_cancelled`) when it finds the knowledge base gone."""
     tenant_id = principal.tenant_id
     kb = _kb_or_404(store, tenant_id, kb_id)

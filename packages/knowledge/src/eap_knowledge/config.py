@@ -16,7 +16,15 @@ from eap_schemas.knowledge import CHUNKER_VERSION, ChunkingConfig
 
 # Versions of the chunking algorithm this package implements. Any change that can move a chunk
 # boundary or change an embed text is a new version; a knowledge base keeps the version it was
-# created with in its chunking config.
+# created with in its chunking config. Exception, 2026-11-14: version 1 was changed in place so a
+# merged section keeps its first section's title, path and anchor (it took a later heading as its
+# title). Only merged chunks' embed texts changed. Existing knowledge bases keep the old titles until
+# a document is uploaded again with a change (content, title, metadata, source URL or MIME type),
+# which stores a new version; then only its merged chunks are re-embedded. An identical upload
+# (`unchanged`, no run), a reingest of a ready version and a reindex (it copies chunks without
+# re-chunking) keep the old chunks. A new version would have
+# left every existing knowledge base on the wrong titles for good (a knowledge base cannot move to a
+# new chunker version).
 SUPPORTED_CHUNKER_VERSIONS = frozenset({1})
 
 # The chunker's full identity: the algorithm version plus the Unicode database it ran against

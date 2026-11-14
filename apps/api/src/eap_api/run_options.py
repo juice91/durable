@@ -3,8 +3,9 @@
 A run start (`POST /agents/{id}/runs`, `POST /conversations/{id}/runs`) may carry:
 
 - `version`: a published version number, null for the latest one, or `"draft"`: a draft test run.
-  The agent's current draft is validated exactly as a publish would (`_check_publishable`) and its
-  snapshot is stored on the run (`runs.draft_spec`, `agent_version` NULL). The hand-off passes it as
+  The agent's current draft is validated as a publish would (`_check_publishable`), except that a
+  deleted knowledge base is not a 422 (the run's retrieve tool answers "no longer exist", as for a
+  published version), and its snapshot is stored on the run (`runs.draft_spec`, `agent_version` NULL). The hand-off passes it as
   `spec_json` with `version=0`; a retry relaunches from the snapshot, never from the live draft.
 - `request_context`: values for the target spec's `context_fields`, validated with
   `eap_schemas.request_context.validate_request_context` (unknown keys, reserved identity names,
@@ -94,7 +95,9 @@ def _draft_target(db: Session, tenant_id: str, agent: AgentModel) -> RunTarget:
     if agent.draft_spec is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent has no draft")
     spec = validate_stored_draft(agent.draft_spec)
-    _check_publishable(db, tenant_id, spec)
+    # Like a publish, except that a deleted knowledge base is the retrieve tool's error at run time
+    # (as for a published version), not a 422 here.
+    _check_publishable(db, tenant_id, spec, draft_run=True)
     snapshot = spec.model_dump(mode="json")
     return RunTarget(version=None, spec=spec, spec_dict=snapshot, draft_spec=snapshot)
 

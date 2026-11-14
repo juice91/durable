@@ -131,7 +131,13 @@ Deploy the API and the worker together, in this order:
      `resource_id`. A turn whose `eap.start_run` was recorded by an older worker must not be
      recovered by the new one;
    - P0.17's processor steps (`eap.input_processors`, `eap.output_processors`) are part of the
-     layout the new worker replays; a run started before them cannot be recovered by it either.
+     layout the new worker replays; a run started before them cannot be recovered by it either;
+   - a turn of an agent with `memory.observational` no longer runs the observer steps itself: after
+     `eap.finish_run` it enqueues the child workflow `eap.memory_observe_run` (id
+     `{run_id}:memory-observe`, on `eap-memory-observe`) and records `DBOS.getResult`; the old
+     `eap.memory_observe` / observer request / `eap.memory_observe_write` / `eap.memory_reflect`
+     steps run inside that child. A turn recorded with the inline observer steps cannot be
+     recovered by the new worker, and the reverse.
 
    A spec with neither `knowledge_bases` nor `memory` keeps its exact step names, so only memory
    turns are at risk, but drain everything: it is the only safe rule.
@@ -152,7 +158,15 @@ Deploy the API and the worker together, in this order:
    listen on `eap-kb-ingest`, which is one more reason not to mix versions. Size
    `EAP_KB_MAX_INGEST_TOKENS` before the first reindex of a large knowledge base (the rule is in
    `.dev.env.example`).
-5. **New optional settings** (all in `.dev.env.example`): `EAP_ALLOWED_EMBEDDING_MODELS`,
+5. **New queue `eap-memory-observe`.** Observational memory runs as `eap.memory_observe_run`, which
+   each turn's `eap.agent_run` enqueues there with the conversation id as partition key; the queue
+   is registered with `partition_concurrency=1`, so at most one observer runs per conversation
+   across all workers (an overlapping observer never pays for a request it cannot write). Every
+   worker of this version listens on `eap-agent-runs`, `eap-kb-ingest` and `eap-memory-observe`;
+   an old worker listens on none of the new ones, and the turn that enqueued an observer waits for
+   it, so drain (step 1) before switching versions, and keep a queue-wide stop on this one too: no
+   `eap.memory_observe_run` may be `ENQUEUED` or `PENDING` when the old workers stop.
+6. **New optional settings** (all in `.dev.env.example`): `EAP_ALLOWED_EMBEDDING_MODELS`,
    `EAP_EMBEDDING_QUERY_INSTRUCTIONS`, `EAP_KB_*`, the `EAP_LITELLM_EMBEDDING_*` pair, and
    `EAP_AUDIT_HASH_SALT` (set it per deployment so the forget audit log's resource hash cannot be
    looked up offline).

@@ -79,7 +79,8 @@ SCANNER_OUTLINE = [
     (2, "E ref in a heading"),
 ]
 # Pins the scanner's output: a scanner change that moves a heading or a line shows up here.
-SCANNER_GOLDEN = (4, "ef4815e424b23cd686837669a8a1d67addb72975c83e3ab2a7eb023a2405e010")
+# 2026-11-14: a merged section keeps the first section's title (one merged chunk changed).
+SCANNER_GOLDEN = (4, "3cd6cc4da20f9306d81c329b5bb5f3b0f23b3d99bf76bc15e7901bac739c088a")
 
 
 def _markdown_it_headings(text: str) -> list[tuple[int, str]]:

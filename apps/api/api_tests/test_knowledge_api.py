@@ -289,14 +289,14 @@ def test_delete_referenced_knowledge_base_needs_force(pg, tenant_of, fake_dbos, 
     agent = client.post(f"{API}/agents", json={"spec": spec}, headers=headers)
     assert agent.status_code == 201, agent.text
     agent_id = agent.json()["id"]
-    # A draft reference does not block; only the latest published version counts.
+    # An unreferenced knowledge base is deleted at once.
     assert client.delete(f"{API}/knowledge-bases/{spare['id']}", headers=headers).status_code == 204
     assert client.post(f"{API}/agents/{agent_id}/versions", headers=headers).status_code == 201
 
     blocked = client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers)
     assert blocked.status_code == 409
     assert blocked.json()["agents"] == [
-        {"agent_id": agent_id, "agent_name": SPEC["name"], "version": 1, "archived": False}
+        {"agent_id": agent_id, "agent_name": SPEC["name"], "version": 1, "archived": False, "draft": False}
     ]
     assert SPEC["name"] in blocked.json()["detail"]
 
@@ -304,6 +304,58 @@ def test_delete_referenced_knowledge_base_needs_force(pg, tenant_of, fake_dbos, 
     assert client.patch(f"{API}/agents/{agent_id}", json={"spec": SPEC}, headers=headers).status_code == 200
     assert client.post(f"{API}/agents/{agent_id}/versions", headers=headers).status_code == 201
     assert client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers).status_code == 204
+
+
+def test_a_draft_only_reference_blocks_the_delete_and_the_draft_still_runs_after_force(
+    pg, tenant_of, fake_dbos, kb_cleanup
+):
+    """A knowledge base attached only by an agent's draft: 409 lists the agent with draft=true and
+    version null; after a forced delete the draft test run starts (201, the retrieve tool answers
+    "no longer exist" in the worker) while publishing that draft is still 422."""
+    client, _ = pg
+    _, headers = tenant_of()
+    kb = _create_kb(client, headers)
+    agent_id = client.post(
+        f"{API}/agents", json={"spec": {**SPEC, "knowledge_bases": [{"id": kb["id"]}]}}, headers=headers
+    ).json()["id"]
+    blocked = client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["agents"] == [
+        {"agent_id": agent_id, "agent_name": SPEC["name"], "version": None, "archived": False, "draft": True}
+    ]
+    # A published version without it and a draft that still has it: still a draft-only reference.
+    assert client.patch(f"{API}/agents/{agent_id}", json={"spec": SPEC}, headers=headers).status_code == 200
+    assert client.post(f"{API}/agents/{agent_id}/versions", headers=headers).status_code == 201
+    spec = {**SPEC, "knowledge_bases": [{"id": kb["id"]}]}
+    assert client.patch(f"{API}/agents/{agent_id}", json={"spec": spec}, headers=headers).status_code == 200
+    [ref] = client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers).json()["agents"]
+    assert (ref["version"], ref["draft"]) == (None, True)
+
+    assert client.delete(f"{API}/knowledge-bases/{kb['id']}?force=true", headers=headers).status_code == 204
+    run_id = str(uuid.uuid4())
+    r = client.post(f"{API}/agents/{agent_id}/runs", json={"run_id": run_id, "input": "hi", "version": "draft"},
+                    headers=headers)
+    assert r.status_code == 201, r.text
+    [(options, args)] = fake_dbos.calls
+    assert options["workflow_id"] == run_id and args[3] == 0  # version 0: the draft snapshot
+    assert [ref["id"] for ref in json.loads(args[4])["knowledge_bases"]] == [kb["id"]]
+    r = client.post(f"{API}/agents/{agent_id}/versions", headers=headers)
+    assert r.status_code == 422 and r.json()["detail"] == f"knowledge base '{kb['id']}' does not exist in this tenant"
+
+
+def test_a_published_and_draft_reference_is_listed_once_as_published(pg, tenant_of, fake_dbos, kb_cleanup):
+    client, _ = pg
+    _, headers = tenant_of()
+    kb = _create_kb(client, headers)
+    spec = {**SPEC, "knowledge_bases": [{"id": kb["id"]}]}
+    agent_id = client.post(f"{API}/agents", json={"spec": spec}, headers=headers).json()["id"]
+    assert client.post(f"{API}/agents/{agent_id}/versions", headers=headers).status_code == 201
+    [ref] = client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers).json()["agents"]
+    assert (ref["version"], ref["draft"]) == (1, False)
+    # The draft drops it, the published version still has it: listed as published, not draft.
+    assert client.patch(f"{API}/agents/{agent_id}", json={"spec": SPEC}, headers=headers).status_code == 200
+    [ref] = client.delete(f"{API}/knowledge-bases/{kb['id']}", headers=headers).json()["agents"]
+    assert (ref["version"], ref["draft"]) == (1, False)
 
 
 def test_force_delete(pg, tenant_of, fake_dbos, kb_cleanup):

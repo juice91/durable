@@ -452,10 +452,14 @@ class EmbeddingModelListResponse(BaseModel):
 
 
 class KnowledgeBaseReference(BaseModel):
+    """An agent attaching the knowledge base: through its latest published version (`version`), or
+    only through its current draft (`draft` true, `version` null)."""
+
     agent_id: str
     agent_name: str
-    version: int
+    version: int | None
     archived: bool
+    draft: bool = False
 
 
 class EnqueueFailedResponse(BaseModel):
@@ -467,7 +471,7 @@ class EnqueueFailedResponse(BaseModel):
 
 class KnowledgeBaseInUse(BaseModel):
     """409 of DELETE /knowledge-bases/{id} without force: the agents whose latest published version
-    attaches the knowledge base."""
+    or current draft attaches the knowledge base."""
 
     detail: str
     agents: list[KnowledgeBaseReference]

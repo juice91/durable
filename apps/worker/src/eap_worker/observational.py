@@ -6,7 +6,14 @@ step layout.
 
 When. After `eap.finish_run` (the run is already `completed` and its `run_completed` event written,
 so the user's answer is never delayed), the workflow (eap_worker.workflow) calls
-`observe_after_turn`, which runs these steps:
+`observe_after_turn`, which enqueues the child workflow `eap.memory_observe_run` (id
+`{run_id}:memory-observe`) on the queue `eap-memory-observe` with the conversation id as partition
+key (at most one running per conversation, across all workers; eap_worker.config) and waits for it.
+In the run's workflow this is the child enqueue and one `DBOS.getResult`. Serialising per
+conversation means a later turn's observer takes its snapshot only after an earlier one wrote, so
+it never pays for a request covering turns another observer already covered (before this, turns
+arriving faster than the observer made overlapping observers each call the model and then lose the
+write with `observation_conflict`). The child workflow runs these steps:
 
     eap.memory_observe                 one MemoryStore.load_snapshot (REPEATABLE READ, observations on)
                                        of the conversation up to this turn; decides what to do and
@@ -36,7 +43,8 @@ so the user's answer is never delayed), the workflow (eap_worker.workflow) calls
 Failure handling. The user's turn never fails here: the run stays `completed`. A failed observer
 (model error after the step's retries, a model removed from the allowlist since publish, an
 answer that is not the notes JSON, redaction that cannot finish) or a lost race (another turn's
-observation got there first: `overlap`/`gap`/`ahead`/`stale`) writes ONE `memory_observe_failed`
+observation got there first: `overlap`/`gap`/`ahead`/`stale`; the per-conversation queue makes this
+rare, e.g. a workflow recovered from before the queue existed) writes ONE `memory_observe_failed`
 event (key `memory:observe:{turn}:failed` / `memory:reflect:{turn}:failed`; data: stage,
 error_code, covered turns, and the request's usage and cost when a request was answered, so a
 failed request is still priced once), and nothing else. The next turn's `eap.memory_observe` sees
@@ -87,7 +95,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import ResolveModelId
@@ -100,6 +108,7 @@ from eap_observability import log_failure
 from eap_run_store import ConversationNotFound, MemoryEvent, MemoryStore, RunNotFound
 from eap_schemas.memory import MemoryConfig, ObservationalMemoryConfig
 from eap_schemas.processors import PiiRedactConfig
+from eap_worker.config import MEMORY_OBSERVE_QUEUE_NAME, MEMORY_OBSERVE_WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import classify
 from eap_worker.memory import MemoryRedactionFailed, redact_memory_write
@@ -632,12 +641,21 @@ async def _request(prompt: str, model_id: str) -> tuple[list[dict[str, Any]] | N
     return notes, None, usage
 
 
+def observer_workflow_id(run_id: str) -> str:
+    """The id of a turn's eap.memory_observe_run child workflow (one per run, so a replayed enqueue
+    attaches to the same workflow)."""
+    return f"{run_id}:memory-observe"
+
+
 async def observe_after_turn(
     run_id: str, tenant_id: str, agent_id: str, conversation_id: str, turn: int, spec: Any
 ) -> dict[str, Any]:
     """The post-turn observational memory work of a completed turn (workflow code, after
-    eap.finish_run). Never raises an `Exception`: a failure is logged (and, where possible, recorded
-    as `memory_observe_failed`), and the turn stays completed. Returns a summary for logs/tests."""
+    eap.finish_run): enqueue eap.memory_observe_run on MEMORY_OBSERVE_QUEUE_NAME, partitioned by
+    conversation (at most one running per conversation), and wait for it. Never raises an
+    `Exception` except DBOS's own signals about THIS workflow: a failure is logged (and, where
+    possible, recorded as `memory_observe_failed`), and the turn stays completed. Returns a summary
+    for logs/tests."""
     memory: MemoryConfig = spec.memory
     config = memory.observational
     assert config is not None
@@ -645,6 +663,33 @@ async def observe_after_turn(
     redact = memory.effective_redact(tuple(spec.input_processors))
     redact_json = None if redact is None else redact.model_dump(mode="json")
     model_id = model_id_for(config.model.provider, config.model.name)
+    conv = str(conversation_id)
+    try:
+        with SetWorkflowID(observer_workflow_id(run_id)), SetEnqueueOptions(queue_partition_key=conv):
+            handle = await DBOS.enqueue_workflow_async(
+                MEMORY_OBSERVE_QUEUE_NAME, memory_observe_run, run_id, tenant_id, agent_id, conv, int(turn),
+                memory_json, redact_json, model_id,
+            )
+        return await handle.get_result()
+    except Exception as exc:  # noqa: BLE001 - the user's turn is completed; never fail it from here
+        # This workflow's own cancellation or non-determinism is re-raised; the observer workflow's
+        # cancellation (DBOSAwaitedWorkflowCancelledError) only ends the observation.
+        if is_dbos_control_flow(exc) and type(exc).__name__ != "DBOSAwaitedWorkflowCancelledError":
+            raise
+        log_failure(log, "observational memory failed", exc, code=classify(exc).code, run_id=run_id,
+                    tenant_id=tenant_id)
+        return {"observe": None, "reflect": None, "error": classify(exc).code}
+
+
+@DBOS.workflow(name=MEMORY_OBSERVE_WORKFLOW_NAME)
+async def memory_observe_run(
+    run_id: str, tenant_id: str, agent_id: str, conversation_id: str, turn: int, memory_json: dict[str, Any],
+    redact_json: dict[str, Any] | None, model_id: str,
+) -> dict[str, Any]:
+    """The observer workflow of turn `turn` of run `run_id` (steps in the module docstring). Runs
+    only on MEMORY_OBSERVE_QUEUE_NAME with the conversation as partition key, so it never overlaps
+    another observer of the same conversation: its eap.memory_observe snapshot is taken after the
+    previous observer's write, and a range another turn already covers is never sent to the model."""
     conv = str(conversation_id)
     summary: dict[str, Any] = {"observe": None, "reflect": None}
     try:
@@ -702,11 +747,13 @@ __all__ = [
     "ask_observer",
     "failed_event_key",
     "is_dbos_control_flow",
+    "memory_observe_run",
     "memory_observe_step",
     "observe_after_turn",
     "observe_event_key",
     "observe_prompt",
     "observe_write_step",
+    "observer_workflow_id",
     "observer",
     "parse_notes",
     "reflect_prompt",

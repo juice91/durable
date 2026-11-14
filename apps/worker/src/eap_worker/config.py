@@ -23,6 +23,13 @@ DELTA_CHANNEL = "eap_run_deltas"
 # name. Runs enqueued on QUEUE_NAME before the split still run there.
 KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 KB_INGEST_CONCURRENCY_ENV = "EAP_KB_INGEST_CONCURRENCY"
+# Post-turn observational memory (RM.13) runs as its own workflow, eap.memory_observe_run, enqueued by
+# the turn's eap.agent_run on this partitioned queue with the conversation id as partition key and at
+# most ONE running per partition (globally). So observer runs of one conversation never overlap: a
+# later turn's observer plans from a snapshot that already holds the earlier one's observation, and
+# never pays for a request whose write would lose the race (`observation_conflict`).
+MEMORY_OBSERVE_QUEUE_NAME = "eap-memory-observe"
+MEMORY_OBSERVE_WORKFLOW_NAME = "eap.memory_observe_run"
 DEFAULT_KB_INGEST_CONCURRENCY = 2
 
 _DEFAULT_APP_DB = "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"

@@ -26,7 +26,7 @@ from worker_tests.conftest import APP_VERSION, enqueue_run, event_rows, cleanup_
 from worker_tests.test_conversation import step_names
 from worker_tests.test_kb_ingest_acceptance import api, auth  # noqa: F401 - fixture
 from worker_tests.test_observational_memory import (
-    OBSERVER, assert_totals_match, by_key, usage_keys, wait_workflow, workflow_status,
+    OBSERVE_RUN, OBSERVER, assert_totals_match, by_key, post_turn_steps, usage_keys, wait_workflow, workflow_status,
 )
 from worker_tests.test_semantic_recall import RECALL, RECALL_TURN, embeddings, stored_messages
 from worker_tests.test_telemetry import _wait_for_run_span, telemetry  # noqa: F401 - fixture
@@ -518,7 +518,7 @@ def test_step_layout_without_recall_is_unchanged_and_with_recall_and_observation
     # A conversation turn: recall after load_memory, index after finish_run, then the observational steps.
     agent = new_agent(api, rt, observational={"model": OBSERVER, "observe_after_tokens": 100_000})
     run_id, _ = say(api, worker, worker_settings, rt, new_conv(api, rt, agent), "hello")
-    assert step_names(schema, run_id) == RECALL_TURN + ["eap.memory_observe"]
+    assert post_turn_steps(schema, run_id) == RECALL_TURN + OBSERVE_RUN + ["eap.memory_observe"]
     assert RECALL_TURN[:3] + RECALL_TURN[4:-1] == MEMORY_TURN  # recall/index are the only additions
 
 

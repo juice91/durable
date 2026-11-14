@@ -278,12 +278,46 @@ def test_no_source_url_means_no_anchor_and_preamble_anchors_to_page() -> None:
 
 def test_tiny_sections_merge_into_the_next_and_keep_their_heading() -> None:
     md = "# Top\n\n## Small\n\ntiny bit\n\n## Big\n\n" + _sentences(20) + "\n\n## Last\n\nend"
-    chunks = chunk(extract(md, "text/markdown"))
+    chunks = chunk(extract(md, "text/markdown", source_url="https://x/doc"))
     assert len(chunks) == 1
     [c] = chunks
-    assert c.heading_path == ("Top", "Big")
-    assert c.text.startswith("## Small\n\ntiny bit\n\n## Big\n\n")
+    # The merged section is titled by its FIRST section, where its text (and its anchor link) starts.
+    assert (c.heading_path, c.title, c.anchor) == (("Top", "Small"), "Small", "https://x/doc#small")
+    assert c.text.startswith("tiny bit\n\n## Big\n\n")
     assert c.text.endswith("\n\n## Last\n\nend")
+    assert c.embed_text.startswith("path: Top > Small\n\ntitle: Small\n\n")
+
+
+def test_a_merged_section_never_takes_a_later_heading_as_its_title() -> None:
+    """The browser check's case: a tiny "Incident 524" merged with "Incident 525" was titled
+    "Incident 525" while its text started with "## Incident 524"."""
+    md = ("# Incidents\n\n## Incident 524\n\nDisk full on db-2.\n\n## Incident 525\n\n" + _sentences(20)
+          + "\n\n## Incident 526\n\n" + _sentences(20, seed=1))
+    chunks = chunk(extract(md, "text/markdown", source_url="https://x/inc"))
+    assert [(c.title, c.anchor) for c in chunks] == [
+        ("Incident 524", "https://x/inc#incident-524"), ("Incident 526", "https://x/inc#incident-526")
+    ]
+    first = chunks[0]
+    assert first.text.startswith("Disk full on db-2.\n\n## Incident 525\n\n")
+    assert "## Incident 524" not in first.text  # the title is in the prefix, never repeated
+    assert "title: Incident 524" in first.embed_text and "Incident 525" not in first.embed_text.split("\n\n")[1]
+
+
+def test_several_tiny_sections_take_the_first_title_and_a_tiny_tail_joins_the_previous() -> None:
+    md = "## A\n\na\n\n## B\n\nb\n\n## C\n\n" + _sentences(20) + "\n\n## D\n\nd\n\n## E\n\ne"
+    [c] = chunk(extract(md, "text/markdown"))
+    assert c.title == "A" and c.heading_path == ("A",)
+    assert c.text.startswith("a\n\n## B\n\nb\n\n## C\n\n")
+    assert c.text.endswith("## D\n\nd\n\n## E\n\ne")  # the tiny tail group keeps its first heading line
+
+
+def test_a_long_first_heading_keeps_its_full_line_when_merged() -> None:
+    long = "L" * 200
+    md = f"## {long}\n\nx\n\n## Next\n\n" + _sentences(20)
+    # min_tokens 100: the long heading line (~50 tokens) alone does not reach it, so Next merges in.
+    c = chunk(extract(md, "text/markdown"), ChunkingConfig(max_tokens=512, overlap_tokens=64, min_tokens=100))[0]
+    assert c.title.startswith("LLL") and len(c.title) == 128
+    assert c.text.startswith(f"## {long}\n\nx\n\n## Next\n\n")
 
 
 def test_single_tiny_section_still_chunks() -> None:
