@@ -124,6 +124,13 @@ describe("Sidebar", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Traces");
   });
 
+  test("the theme trigger's visible text is part of its name (\"Theme System\" in \"Theme: System\")", () => {
+    render(<FrameHarness />);
+    const trigger = within(sidebar()).getByTestId("theme-menu-trigger");
+    expect(trigger.textContent).toBe("Theme System");
+    expect(trigger).toHaveAccessibleName("Theme: System");
+  });
+
   test("the theme menu stores the chosen theme", async () => {
     render(<FrameHarness />);
     const trigger = within(sidebar()).getByTestId("theme-menu-trigger");

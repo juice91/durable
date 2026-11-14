@@ -204,7 +204,7 @@ describe("processor detail: every catalog type", () => {
       expect(screen.getByRole("form", { name: "Processor test console" })).toBeInTheDocument();
       expect(screen.queryByTestId("console-unavailable")).toBeNull();
     } else {
-      expect(screen.getByTestId("console-unavailable")).toHaveTextContent("Test it in the playground");
+      expect(screen.getByTestId("console-unavailable")).toHaveTextContent("Test it in an agent's chat");
       expect(screen.queryByTestId("console-layout")).toBeNull();
     }
     await waitFor(() => expect(resultCalls().length).toBeGreaterThan(0));

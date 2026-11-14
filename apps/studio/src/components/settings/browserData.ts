@@ -87,7 +87,7 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
   {
     id: "last-agent",
     label: "Last agent",
-    description: "The agent the playground reopens.",
+    description: "The agent the chat reopens.",
     keys: [LAST_AGENT_KEY],
     prefixes: [],
     clearGroup: "layout",

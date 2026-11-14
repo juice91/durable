@@ -132,6 +132,43 @@ describe("ConversationRail", () => {
     expect(onRenamed).toHaveBeenCalledWith(expect.objectContaining({ title: "Billing" }));
   });
 
+  it("returns focus to the conversation's row after a rename is saved or cancelled (browser check)", async () => {
+    vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer")]));
+    vi.mocked(renameConversation).mockResolvedValue(conv("c1", "Billing"));
+    renderRail();
+    fireEvent.click(await screen.findByRole("button", { name: "Rename Printer" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Conversation title" }), { key: "Escape" });
+    expect(screen.getByRole("button", { name: /^Printer/ })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Rename Printer" }));
+    const input = screen.getByRole("textbox", { name: "Conversation title" });
+    fireEvent.change(input, { target: { value: "Billing" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Billing/ })).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("draws the Rename button in full-strength muted text, never faded below contrast (browser check)", async () => {
+    vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer")]));
+    renderRail();
+    const rename = await screen.findByRole("button", { name: "Rename Printer" });
+    expect(rename).toHaveClass("text-muted-foreground");
+    expect(rename.className).not.toMatch(/(^|\s)(group-hover:|focus-visible:|focus:)?opacity-/);
+  });
+
+  it("leaves focus where the user moved it when leaving the field commits the rename", async () => {
+    vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer")]));
+    vi.mocked(renameConversation).mockResolvedValue(conv("c1", "Billing"));
+    renderRail();
+    fireEvent.click(await screen.findByRole("button", { name: "Rename Printer" }));
+    const input = screen.getByRole("textbox", { name: "Conversation title" });
+    fireEvent.change(input, { target: { value: "Billing" } });
+    const newButton = screen.getByRole("button", { name: "New conversation" });
+    newButton.focus();
+    fireEvent.blur(input);
+    await screen.findByRole("button", { name: /^Billing/ });
+    expect(newButton).toHaveFocus();
+  });
+
   it("cancels with Escape and refuses an empty title", async () => {
     vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer")]));
     renderRail();

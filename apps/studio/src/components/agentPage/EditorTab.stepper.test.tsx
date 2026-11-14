@@ -381,6 +381,16 @@ describe("SL.11 review fixes", () => {
     expect(alert).toHaveTextContent("Internal error");
   });
 
+  it("number fields never announce a max below their min (browser check)", async () => {
+    await renderEditor();
+    for (const label of ["Max tokens (optional)", "Temperature (0–2)"]) {
+      const input = screen.getByLabelText(label) as HTMLInputElement;
+      expect(input.min, label).not.toBe("");
+      expect(input.max, label).not.toBe("");
+      expect(Number(input.max), label).toBeGreaterThanOrEqual(Number(input.min));
+    }
+  });
+
   it("M4: number fields are checked inline and block Save at the field", async () => {
     await renderEditor();
     fireEvent.change(screen.getByLabelText("Max tokens (optional)"), { target: { value: "1.5" } });

@@ -122,6 +122,21 @@ describe("MCP server detail page", () => {
     expect(mcpServers.remove).toHaveBeenCalledWith("srv-1");
   });
 
+  it("after a confirmed delete focus lands on the page's main, not <body> (browser check)", async () => {
+    vi.mocked(mcpServers.remove).mockResolvedValue(undefined);
+    const { rerender } = render(<main tabIndex={-1}><McpServerDetailPage /></main>);
+    fireEvent.click(await screen.findByTestId("mcp-delete"));
+    const dialog = await screen.findByRole("dialog", { name: "Delete docs?" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete server" })).toBeEnabled());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete server" }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.mcp()));
+    // Until the navigation lands, the confirm stays open and busy (no flash of the old page's focus).
+    expect(screen.getByRole("dialog", { name: "Delete docs?" })).toHaveAttribute("aria-busy", "true");
+    // The navigation unmounts the detail page.
+    rerender(<main tabIndex={-1} />);
+    expect(document.querySelector("main")).toHaveFocus();
+  });
+
   it("opening the confirm while the result is fresh still re-checks: cached list, Re-checking…, Delete disabled until the answer", async () => {
     render(<McpServerDetailPage />);
     await screen.findAllByTestId("mcp-used-by-agent");

@@ -33,6 +33,15 @@ interface AgentVersion {
   restored_from?: number | null;
 }
 
+/**
+ * Where focus goes after a restore closes its confirm (the row menu that opened it is gone): the
+ * "Version N published, restored from vM" notice, else the page's main (ConfirmDialog's default).
+ */
+export const RESTORE_NOTICE_ATTRIBUTE = "data-restore-notice";
+function restoreFocusTarget(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[${RESTORE_NOTICE_ATTRIBUTE}]`);
+}
+
 type RestoreState = { version: number; discard: boolean; busy: boolean; error: string | null };
 
 export interface VersionRestoreOptions {
@@ -107,6 +116,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
         error={restore.error}
         onConfirm={() => run(restore)}
         onCancel={() => setRestore(null)}
+        fallbackFocus={restoreFocusTarget}
       />
     ) : (
       <ConfirmDialog
@@ -125,6 +135,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
         error={restore.error}
         onConfirm={() => run(restore)}
         onCancel={() => setRestore(null)}
+        fallbackFocus={restoreFocusTarget}
       />
     )
   ) : null;
@@ -291,7 +302,7 @@ export function AgentVersionsPanel({ versions, agentId, hasUnsavedEdits = false,
         </p>
       ) : null}
       {restore.notice ? (
-        <p role="status" className="mb-3 rounded-md border border-border bg-muted p-2 text-label text-foreground">
+        <p role="status" data-restore-notice="" tabIndex={-1} className="mb-3 rounded-md border border-border bg-muted p-2 text-label text-foreground outline-none">
           {restore.notice}
         </p>
       ) : null}

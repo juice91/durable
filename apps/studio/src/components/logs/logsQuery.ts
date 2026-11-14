@@ -308,11 +308,22 @@ export function traceLogsParams(
     const lifetime = run ? runLogsWindow(run, now) : null;
     return lifetime ? { ...params, ...lifetime } : params;
   }
-  params.from = microsToIso(start);
   const end = window?.end ? isoToMicros(window.end) : null;
-  if (end !== null) params.to = microsToIso(Math.max(end, start) + 1000);
+  if (end !== null && end <= start) {
+    // A zero-length span (a processor's block, a refused tool call) is stamped at one instant, and
+    // its own log lines land a few milliseconds either side of it: pad the window both ways so they
+    // show (the browser check found a 0 ms span's blocking log line missing).
+    params.from = microsToIso(start - ZERO_SPAN_PAD_MS * 1000);
+    params.to = microsToIso(start + ZERO_SPAN_PAD_MS * 1000 + 1000);
+    return params;
+  }
+  params.from = microsToIso(start);
+  if (end !== null) params.to = microsToIso(end + 1000);
   return params;
 }
+
+/** How far a zero-length span's log window reaches each side of its instant. */
+export const ZERO_SPAN_PAD_MS = 250;
 
 // ---------------------------------------------------------------------------- run window
 

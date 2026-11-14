@@ -290,7 +290,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The context last edited in the playground for this agent, or null. */
+/** The context last edited in the chat for this agent (this tab), or null. */
 export function loadPlaygroundContext(agentId: string): RequestContextValue | null {
   try {
     const raw = storage()?.getItem(playgroundContextKey(agentId));

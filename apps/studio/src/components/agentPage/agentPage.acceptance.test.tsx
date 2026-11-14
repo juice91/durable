@@ -487,6 +487,9 @@ describe("the Config panel is read-only and matches the version", () => {
     expect(panel.getByTestId("config-instructions")).toHaveTextContent("Version two text {{context.plan}}");
     expect(panel.getByTestId("config-instructions").querySelector("mark")).toHaveTextContent("{{context.plan}}");
     const tools = within(section(/^Tools/));
+    // The count is a separate word of the heading's name (browser check: it read "Tools3").
+    expect(panel.getByRole("heading", { name: "Tools 3" })).toBeInTheDocument();
+    expect(panel.getByRole("heading", { name: /^Request context fields \d+$/ })).toBeInTheDocument();
     expect(tools.getByText("create_ticket")).toBeInTheDocument();
     expect(tools.getByText("lookup_order")).toBeInTheDocument();
     expect(tools.getByText(/find_customer/)).toHaveTextContent("MCP crm");

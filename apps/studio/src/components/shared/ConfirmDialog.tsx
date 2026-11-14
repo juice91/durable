@@ -20,6 +20,16 @@ interface ConfirmDialogProps {
   confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  /**
+   * Where focus goes when the dialog closes and the element that opened it is gone (a menu item, or
+   * the row of what was deleted). Defaults to the page's `<main>`; never left on <body>.
+   */
+  fallbackFocus?: () => HTMLElement | null;
+}
+
+/** The page's main landmark (focusable: the skip link targets it), or null outside the frame. */
+function mainLandmark(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("main[tabindex]") ?? document.querySelector<HTMLElement>("main");
 }
 
 // Open dialogs, bottom to top. While any is open, every other child of <body> is inert (including
@@ -77,11 +87,13 @@ function popDialog(container: HTMLElement) {
  * inert, focus starts on Cancel and is trapped inside, Escape cancels (unless busy), an outside click
  * does nothing, and focus returns to the element that opened it (when that element still exists).
  */
-export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, confirmDisabled = false, onConfirm, onCancel }: ConfirmDialogProps) {
+export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, confirmDisabled = false, onConfirm, onCancel, fallbackFocus }: ConfirmDialogProps) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const fallbackRef = useRef(fallbackFocus);
+  fallbackRef.current = fallbackFocus;
 
   useEffect(() => {
     // Runs before the dialog content mounts, so focus is still on the opener.
@@ -100,7 +112,13 @@ export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = 
     return () => {
       popDialog(container);
       const previous = returnFocusRef.current;
-      if (previous && previous.isConnected) previous.focus();
+      if (previous && previous.isConnected) {
+        previous.focus();
+        return;
+      }
+      // The opener is gone (the action removed it): focus a sensible element, never <body>.
+      const fallback = fallbackRef.current?.() ?? mainLandmark();
+      fallback?.focus({ preventScroll: true });
     };
   }, [container]);
 

@@ -245,12 +245,19 @@ interface HandleProps {
   onResize: (width: number, persist: boolean) => void;
 }
 
-/** A keyboard and pointer resize handle on the panel's left edge (ArrowLeft widens, ArrowRight narrows). */
+/**
+ * A keyboard and pointer resize handle on the panel's left edge (ArrowLeft widens, ArrowRight
+ * narrows). Where the window leaves no range (the maximum is the minimum) it is inert: no resize
+ * cursor, `aria-disabled`, out of the tab order. Clamping to the window is display-only: a key or
+ * drag that changes nothing on screen saves nothing, so a wider saved width survives a narrow window.
+ */
 function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps) {
   const drag = useRef<{ startX: number; startWidth: number; last: number } | null>(null);
   const max = sidePanelMaxWidth(viewport, clamp);
+  const fixed = max <= SIDE_PANEL_MIN_WIDTH;
 
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (fixed) return;
     let next: number | null = null;
     if (event.key === "ArrowLeft") next = width + SIDE_PANEL_KEY_STEP;
     else if (event.key === "ArrowRight") next = width - SIDE_PANEL_KEY_STEP;
@@ -258,11 +265,12 @@ function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps
     else if (event.key === "End") next = max;
     if (next === null) return;
     event.preventDefault();
-    onResize(clampSidePanelWidth(next, viewport, clamp), true);
+    const clamped = clampSidePanelWidth(next, viewport, clamp);
+    if (clamped !== width) onResize(clamped, true);
   }
 
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
+    if (fixed || event.button !== 0) return;
     event.preventDefault();
     drag.current = { startX: event.clientX, startWidth: width, last: width };
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -278,7 +286,7 @@ function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps
 
   function onPointerUp(event: React.PointerEvent<HTMLDivElement>) {
     if (!drag.current) return;
-    onResize(drag.current.last, true);
+    if (drag.current.last !== drag.current.startWidth) onResize(drag.current.last, true);
     drag.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   }
@@ -291,7 +299,8 @@ function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps
       aria-valuemin={SIDE_PANEL_MIN_WIDTH}
       aria-valuemax={max}
       aria-valuenow={width}
-      tabIndex={0}
+      aria-disabled={fixed || undefined}
+      tabIndex={fixed ? -1 : 0}
       data-testid="side-panel-resize"
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
@@ -299,9 +308,9 @@ function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       // In the 8 px gap left of the panel (its left border is at 0): centred 12 px out, 8 px wide.
-      className="group absolute inset-y-0 -left-3 flex w-2 cursor-col-resize touch-none items-stretch justify-center outline-none"
+      className={`group absolute inset-y-0 -left-3 flex w-2 touch-none items-stretch justify-center outline-none ${fixed ? "cursor-default" : "cursor-col-resize"}`}
     >
-      <span className="w-px rounded-full bg-transparent transition-colors group-hover:bg-border-strong group-focus-visible:bg-ring motion-reduce:transition-none" />
+      <span className={`w-px rounded-full bg-transparent transition-colors ${fixed ? "" : "group-hover:bg-border-strong group-focus-visible:bg-ring"} motion-reduce:transition-none`} />
     </div>
   );
 }

@@ -108,11 +108,11 @@ describe("Processors list and detail", () => {
     expect(usage).toHaveTextContent("v2");
   });
 
-  it("a model-calling type has no console, only 'test in the playground'", async () => {
+  it("a model-calling type has no console, only 'test in the chat'", async () => {
     render(<Detail type="moderation" />);
     const card = await screen.findByTestId("processor-card");
-    expect(within(card).getByText(/test in the playground/)).toBeInTheDocument();
-    expect(screen.getByTestId("console-unavailable")).toHaveTextContent("Test it in the playground");
+    expect(within(card).getByText(/test in the chat/)).toBeInTheDocument();
+    expect(screen.getByTestId("console-unavailable")).toHaveTextContent("Test it in an agent's chat");
     expect(screen.queryByRole("form", { name: "Processor test console" })).not.toBeInTheDocument();
     expect(await screen.findByTestId("processor-usage-empty")).toBeInTheDocument();
   });
@@ -222,13 +222,13 @@ describe("Processors list and detail", () => {
     expect(within(result).queryByTestId("console-output")).not.toBeInTheDocument();
   });
 
-  it("offers moderation only as 'test in the playground' and maps the API refusal", async () => {
+  it("offers moderation only as 'test in the chat' and maps the API refusal", async () => {
     vi.mocked(processors.test).mockRejectedValue(new ApiError(422, "moderation calls a model and cannot run in the test console; test it in the playground"));
     render(<Detail />);
-    const option = await screen.findByRole("option", { name: "Moderation (test in the playground)" });
+    const option = await screen.findByRole("option", { name: "Moderation (test in the chat)" });
     expect(option).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
-    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in the playground");
+    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in an agent's chat");
   });
 
   it("shows an error when the catalog cannot be loaded", async () => {

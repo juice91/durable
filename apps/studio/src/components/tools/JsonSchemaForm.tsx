@@ -89,7 +89,8 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
     }} />;
   } else {
     const numeric = schema.type === "number" || schema.type === "integer";
-    control = <input id={id} aria-invalid={Boolean(error)} type={numeric ? "number" : "text"} step={schema.type === "integer" ? 1 : numeric ? "any" : undefined} className={inputClass} value={value == null ? "" : String(value)} onBlur={() => setTouched(true)} onChange={(event) => {
+    const bounds = numeric ? numberBounds(schema) : {};
+    control = <input id={id} aria-invalid={Boolean(error)} type={numeric ? "number" : "text"} {...bounds} step={schema.type === "integer" ? 1 : numeric ? "any" : undefined} className={inputClass} value={value == null ? "" : String(value)} onBlur={() => setTouched(true)} onChange={(event) => {
       const raw = event.target.value;
       if (!numeric || raw === "") onChange(raw);
       else {
@@ -137,4 +138,16 @@ export function JsonSchemaForm({ schema, value, onChange, errors, idPrefix = "sc
       ) : null}
     </div>
   );
+}
+
+/**
+ * `min` / `max` for a number input, from the schema's bounds. Only a consistent pair is passed: a
+ * max below the min would be announced as such (the browser check found number fields reporting a
+ * max below their min). A lone minimum or maximum is passed as is.
+ */
+export function numberBounds(schema: JsonSchema): { min?: number; max?: number } {
+  const min = typeof schema.minimum === "number" && Number.isFinite(schema.minimum) ? schema.minimum : undefined;
+  const max = typeof schema.maximum === "number" && Number.isFinite(schema.maximum) ? schema.maximum : undefined;
+  if (min !== undefined && max !== undefined && max < min) return {};
+  return { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) };
 }

@@ -147,7 +147,23 @@ export function ConversationRail({
     setRenameError(null);
   };
 
+  // After a rename ends the field unmounts: focus returns to that conversation's row, unless the
+  // user already moved it somewhere else (leaving the field also commits the rename).
+  const refocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const id = refocusRef.current;
+    if (id === null || editingId !== null) return;
+    refocusRef.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const row = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("button[data-conversation]") ?? []).find(
+      (button) => button.dataset.conversation === id,
+    );
+    row?.focus();
+  });
+
   const cancelRename = () => {
+    refocusRef.current = editingId;
     setEditingId(null);
     setRenameError(null);
   };
@@ -167,6 +183,7 @@ export function ConversationRail({
     try {
       const renamed = await renameConversation(conversation.id, title);
       setItems((current) => current.map((item) => (item.id === renamed.id ? { ...item, ...renamed } : item)));
+      refocusRef.current = conversation.id;
       setEditingId(null);
       setRenameError(null);
       onRenamed?.(renamed);
@@ -271,7 +288,8 @@ export function ConversationRail({
                   type="button"
                   aria-label={`Rename ${label}`}
                   onClick={() => startRename(conversation)}
-                  className={cn("shrink-0 rounded-md px-2 py-1.5 text-caption text-muted-foreground opacity-70 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100", focusRing)}
+                  // Full-strength muted text (>= 4.5:1 on every surface in both themes); no opacity, which drops it under.
+                  className={cn("shrink-0 rounded-md px-2 py-1.5 text-caption text-muted-foreground hover:text-foreground", focusRing)}
                 >
                   Rename
                 </button>

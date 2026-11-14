@@ -87,7 +87,7 @@ export function ProcessorOverview({ item, limits }: { item: ProcessorDeclaration
           <h2 id="processor-overview" className="text-title font-semibold text-foreground">Overview</h2>
           <p className="font-mono text-caption text-muted-foreground">{item.id}</p>
         </div>
-        {item.deterministic ? null : <Badge variant="neutral">Calls a model · test in the playground</Badge>}
+        {item.deterministic ? null : <Badge variant="neutral">Calls a model · test in the chat</Badge>}
       </div>
       <p className="text-body text-foreground">{item.description}</p>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-label">

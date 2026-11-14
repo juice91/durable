@@ -41,7 +41,13 @@ function Section({
       <div className="mb-1.5 flex items-center gap-2">
         <h3 id={headingId} className="min-w-0 flex-1 truncate text-label font-semibold text-foreground">
           {title}
-          {count !== undefined ? <span className="ml-1.5 text-caption font-normal tabular-nums text-muted-foreground">{count}</span> : null}
+          {/* A real space keeps the count apart in the accessible name ("Tools 1", not "Tools1"). */}
+          {count !== undefined ? (
+            <>
+              {" "}
+              <span className="ml-1 text-caption font-normal tabular-nums text-muted-foreground">{count}</span>
+            </>
+          ) : null}
         </h3>
         {editHref ? (
           <Link href={editHref} aria-label={`Edit ${title.toLowerCase()}`} className={cn("rounded-sm text-caption text-muted-foreground hover:text-foreground hover:underline", focusRing)}>

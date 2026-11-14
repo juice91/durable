@@ -148,6 +148,9 @@ export function ThemeMenu({ rail }: { rail: boolean }) {
         >
           {icons}
           <span data-rail-hidden="" className="min-w-0 truncate">Theme</span>
+          {/* Whitespace between the two words (flex hides it): the visible text reads "Theme System",
+              which the name "Theme: System" contains (label-content-name-mismatch). */}
+          {" "}
           <span data-rail-hidden="" className="ml-auto text-caption">{current.label}</span>
         </DropdownMenuTrigger>
       )}

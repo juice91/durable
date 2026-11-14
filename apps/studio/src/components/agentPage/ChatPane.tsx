@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext } from "react";
+import React, { createContext, useContext, useEffect } from "react";
 import {
   AssistantRuntimeProvider,
   MessagePrimitive,
@@ -83,6 +83,11 @@ export interface ChatPaneProps {
   header?: React.ReactNode;
   /** The composer (rendered inside the thread runtime). */
   composer: React.ReactNode;
+  /** Text to put back in the composer (a refused send); a new `key` puts it back again. */
+  restoreDraft?: { text: string; key: number } | null;
+  /** Called once `restoreDraft` is in the composer, so the caller drops it (a remount of the pane,
+   * when the window crosses 1024 px, must not put old text back). */
+  onDraftRestored?: () => void;
 }
 
 /**
@@ -91,13 +96,21 @@ export interface ChatPaneProps {
  * grouped (space between turns, each turn's badge under its last message), and a "Scroll to bottom"
  * button appears once the transcript is scrolled up.
  */
-export function ChatPane({ messages, disabled, running, onNew, turnViews, toolInfos, landingTitle, landingDescription, header, composer }: ChatPaneProps) {
+export function ChatPane({ messages, disabled, running, onNew, turnViews, toolInfos, landingTitle, landingDescription, header, composer, restoreDraft = null, onDraftRestored }: ChatPaneProps) {
   const runtime = useExternalStoreRuntime({
     messages,
     isDisabled: disabled,
     isRunning: running,
     onNew,
   });
+  // assistant-ui empties the composer when it sends; a refused send puts the text back.
+  const restoredRef = React.useRef(onDraftRestored);
+  restoredRef.current = onDraftRestored;
+  useEffect(() => {
+    if (!restoreDraft) return;
+    runtime.thread.composer.setText(restoreDraft.text);
+    restoredRef.current?.();
+  }, [restoreDraft, runtime]);
   const empty = messages.length === 0;
   const turnStarts = React.useMemo(() => turnStartMessageIds(messages), [messages]);
 

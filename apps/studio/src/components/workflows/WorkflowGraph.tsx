@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import {
   Background,
   Handle,
@@ -124,10 +124,35 @@ function edgeStyle(edge: GraphEdge, dead: boolean): Partial<Edge> {
 /** React Flow's own colour variables, pointed at our tokens (its defaults are fixed greys). */
 const FLOW_STYLE = {
   "--xy-background-color": "transparent",
-  "--xy-attribution-background-color": "hsl(var(--surface) / 0.8)",
+  // The credit's own look is in globals.css (`.react-flow__attribution`), on our tokens.
+  "--xy-attribution-background-color": "transparent",
 } as React.CSSProperties;
 
 const FIT_PADDING = 0.2;
+
+/**
+ * The graph drawing (React Flow's renderer) is the role="img", labelled; the wrapper is a group.
+ * React Flow's attribution panel is the renderer's sibling, so its credit link stays a real link
+ * outside the image (a link inside an image is a nested interactive control). React Flow renders
+ * the renderer itself, so the attributes are set on it after each render that may add it.
+ */
+function useGraphImage(graphRef: React.RefObject<HTMLDivElement | null>, label: string) {
+  useEffect(() => {
+    const root = graphRef.current;
+    if (!root) return;
+    const mark = () => {
+      const renderer = root.querySelector<HTMLElement>(".react-flow__renderer");
+      if (!renderer) return;
+      if (renderer.getAttribute("role") !== "img") renderer.setAttribute("role", "img");
+      if (renderer.getAttribute("aria-label") !== label) renderer.setAttribute("aria-label", label);
+    };
+    mark();
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(mark);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [graphRef, label]);
+}
 
 function zoomDuration(): number {
   return matchesNow("(prefers-reduced-motion: reduce)") ? 0 : 150;
@@ -202,6 +227,9 @@ export function WorkflowCanvas(props: WorkflowCanvasProps) {
 
 function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectStep, className, controlsClassName, children }: WorkflowCanvasProps) {
   const graph = useMemo(() => buildWorkflowGraph(spec), [spec]);
+  const graphRef = useRef<HTMLDivElement | null>(null);
+  const graphLabel = `Execution graph of ${spec.name} with ${graph.nodes.length} steps`;
+  useGraphImage(graphRef, graphLabel);
 
   const nodes: Node<StepNodeData>[] = useMemo(
     () => graph.nodes.map((n) => ({
@@ -230,9 +258,10 @@ function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectS
   return (
     <div data-testid="workflow-canvas" className={cn("eap-viz relative h-full min-h-0 w-full min-w-0 overflow-hidden bg-background", className)}>
       <div
+        ref={graphRef}
         data-testid="workflow-graph"
-        role="img"
-        aria-label={`Execution graph of ${spec.name} with ${graph.nodes.length} steps`}
+        role="group"
+        aria-label="Workflow graph"
         className="absolute inset-0"
       >
         <ReactFlow
@@ -250,22 +279,14 @@ function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectS
           elementsSelectable={Boolean(onSelectStep)}
           onNodeClick={onSelectStep ? (_, node) => onSelectStep(node.id) : undefined}
           minZoom={0.2}
-          // The credit link is drawn below, outside the role="img" surface (a link inside it is a
-          // nested interactive control).
-          proOptions={{ hideAttribution: true }}
+          // React Flow's own credit, visible (hiding it needs a Pro licence, and warns). It is a
+          // sibling of the drawing, which alone is the role="img" (useGraphImage).
+          attributionPosition="top-right"
         >
           <Background gap={16} color="var(--viz-grid-color)" />
         </ReactFlow>
       </div>
       {children}
-      <a
-        href="https://reactflow.dev"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="absolute right-2 top-1 z-0 rounded-sm px-1 text-badge text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        React Flow
-      </a>
       <ZoomControls className={cn("absolute bottom-3 right-3 z-10", controlsClassName)} />
     </div>
   );

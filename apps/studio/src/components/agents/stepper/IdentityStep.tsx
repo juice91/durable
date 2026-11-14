@@ -65,6 +65,9 @@ export function IdentityStep({ draft, onChange }: StepProps) {
             id="maxTokens"
             type="number"
             min={1}
+            // An explicit max (the largest whole number the editor accepts): without one the field
+            // was announced with a max below its min of 1.
+            max={Number.MAX_SAFE_INTEGER}
             step={1}
             value={draft.maxTokens}
             onChange={(e) => onChange({ maxTokens: e.target.value })}

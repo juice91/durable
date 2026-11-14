@@ -117,6 +117,18 @@ describe("trace Sheet: spans", () => {
     expect(rows[4]).toHaveAttribute("data-status", "error");
   });
 
+  it("each span row's name contains its visible text in order (kind, name, duration), then the status (browser check)", async () => {
+    vi.mocked(getTrace).mockResolvedValue(fixture());
+    render(<View runId="wfrun-1" />);
+    const rows = await screen.findAllByTestId("trace-span-row");
+    for (const row of rows) {
+      const visible = (row.textContent ?? "").replace(/[▸▾]/g, " ").replace(/\s+/g, " ").trim();
+      const name = (row.getAttribute("aria-label") ?? "").replace(/,/g, "");
+      expect(name.startsWith(visible), `${name} starts with ${visible}`).toBe(true);
+    }
+    expect(rows[3].getAttribute("aria-label")).toMatch(/^LLM /);
+  });
+
   it("shows a model request's tokens, cost, collapsed input and server truncation", async () => {
     vi.mocked(getTrace).mockResolvedValue(fixture());
     render(<View runId="wfrun-1" />);

@@ -206,7 +206,13 @@ describe("Workflow graph acceptance", () => {
     const { unmount } = render(<WorkflowDetailPage />);
     await screen.findByTestId("workflow-graph");
 
-    expect(screen.getByTestId("workflow-graph")).toHaveAttribute("role", "img");
+    // The drawing is the image (labelled); React Flow's own credit link is visible beside it, outside
+    // the image, instead of hidden with a licence-only option that warns (browser check).
+    const graphElement = screen.getByTestId("workflow-graph");
+    expect(graphElement).toHaveAttribute("role", "group");
+    expect(await within(graphElement).findByRole("img", { name: /^Execution graph of .+ with 5 steps$/ })).toBeInTheDocument();
+    const credit = within(graphElement).getByRole("link", { name: "React Flow attribution" });
+    expect(credit.closest('[role="img"]')).toBeNull();
     expect(screen.getByTestId("workflow-node-classify")).toHaveAttribute("data-step-type", "agent");
     expect(screen.getByTestId("workflow-node-lookup")).toHaveAttribute("data-step-type", "tool");
     expect(screen.getByTestId("workflow-node-route")).toHaveAttribute("data-step-type", "branch");

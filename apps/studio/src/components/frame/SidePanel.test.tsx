@@ -54,12 +54,22 @@ function ConfigToggle() {
   );
 }
 
-function AgentPage({ withPanel = true, defaultOpen = true, title = "Config" }: { withPanel?: boolean; defaultOpen?: boolean; title?: string }) {
+function AgentPage({
+  withPanel = true,
+  defaultOpen = true,
+  title = "Config",
+  mainMinWidth,
+}: {
+  withPanel?: boolean;
+  defaultOpen?: boolean;
+  title?: string;
+  mainMinWidth?: number;
+}) {
   return (
     <>
       <ConfigToggle />
       {withPanel ? (
-        <SidePanel title={title} defaultOpen={defaultOpen}>
+        <SidePanel title={title} defaultOpen={defaultOpen} mainMinWidth={mainMinWidth}>
           <p>Model: gpt-test</p>
         </SidePanel>
       ) : null}
@@ -133,6 +143,38 @@ describe("SidePanel (1024 px and up)", () => {
     fireEvent.keyDown(handle, { key: "End" });
     expect(handle).toHaveAttribute("aria-valuenow", "800");
     expect(screen.getByTestId("side-panel")).toHaveStyle({ width: "800px" });
+  });
+
+  test("with no room to resize (max = min) the handle is inert, and a wider saved width is kept (browser check)", () => {
+    writeSidePanelWidth(600);
+    setViewport(1024);
+    render(<FrameHarness><AgentPage mainMinWidth={900} /></FrameHarness>);
+    const handle = screen.getByRole("separator", { name: "Resize side panel" });
+    expect(handle).toHaveAttribute("aria-valuemax", String(SIDE_PANEL_MIN_WIDTH));
+    expect(handle).toHaveAttribute("aria-valuenow", String(SIDE_PANEL_MIN_WIDTH));
+    expect(handle).toHaveAttribute("aria-disabled", "true");
+    expect(handle).toHaveAttribute("tabindex", "-1");
+    expect(handle).toHaveClass("cursor-default");
+    expect(handle).not.toHaveClass("cursor-col-resize");
+    for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) fireEvent.keyDown(handle, { key });
+    fireEvent.pointerDown(handle, { button: 0, clientX: 500 });
+    fireEvent.pointerUp(handle, { clientX: 400 });
+    // Clamping is display-only: the saved 600 px comes back when the window is wide again.
+    expect(JSON.parse(window.localStorage.getItem(SIDE_PANEL_STORAGE_KEY)!)).toEqual({ width: 600 });
+    expect(screen.getByTestId("side-panel")).toHaveStyle({ width: `${SIDE_PANEL_MIN_WIDTH}px` });
+  });
+
+  test("a key that changes nothing on screen saves nothing (the clamped width never overwrites a wider saved one)", () => {
+    writeSidePanelWidth(1200);
+    render(<FrameHarness><AgentPage /></FrameHarness>);
+    const handle = screen.getByRole("separator", { name: "Resize side panel" });
+    expect(handle).toHaveAttribute("aria-valuenow", "800");
+    expect(handle).not.toHaveAttribute("aria-disabled");
+    fireEvent.keyDown(handle, { key: "End" });
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(JSON.parse(window.localStorage.getItem(SIDE_PANEL_STORAGE_KEY)!)).toEqual({ width: 1200 });
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(JSON.parse(window.localStorage.getItem(SIDE_PANEL_STORAGE_KEY)!)).toEqual({ width: 784 });
   });
 
   test("dragging the handle left widens the panel and saves on release", () => {

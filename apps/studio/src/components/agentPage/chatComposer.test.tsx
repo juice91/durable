@@ -9,7 +9,7 @@ import { createConversation, getConversation, listConversations } from "@/lib/co
 import { fetchModels } from "@/lib/metrics";
 import { RequestContextValidationError, getRequestContext, listPresets, savePreset, saveContext, validateRequestContext, type RequestContextInfo } from "@/lib/requestContext";
 import { listEvents, subscribeRun, type RunEvent, type RunEventData } from "@/lib/runs";
-import { startTurnWithOptions } from "@/components/chat/turnApi";
+import { TurnStartError, startTurnWithOptions } from "@/components/chat/turnApi";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { ChatTab } from "./ChatTab";
@@ -303,6 +303,24 @@ describe("request context popover", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("do not send");
   });
 
+  it("focus stays in the popover after saving, cancelling and deleting a preset (browser check)", async () => {
+    await renderChat();
+    fireEvent.click(screen.getByRole("button", { name: /Request context/ }));
+    fireEvent.change(await screen.findByLabelText(/Tier/), { target: { value: "gold" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save as…" })).toBeEnabled(), { timeout: 2000 });
+    fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Save as…" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Preset name" }), { target: { value: "Gold" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save preset" }));
+    expect(screen.getByRole("combobox", { name: "Preset" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    // The select is disabled with no presets left: Save as… takes focus.
+    expect(screen.getByRole("button", { name: "Save as…" })).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("a name problem is shown inline and nothing is saved", async () => {
     await renderChat();
     fireEvent.click(screen.getByRole("button", { name: /Request context/ }));
@@ -381,4 +399,129 @@ describe("request context popover", () => {
       await expectNoAxeViolations(document.body);
     });
   }, AXE_TIMEOUT_MS);
+});
+
+describe("a refused send keeps the message (browser check, IMPORTANT)", () => {
+  const message = () => screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+  const send = (text: string) => {
+    fireEvent.change(message(), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  };
+
+  it("a context the server refuses on a first send: nothing is created, the URL stays, the text comes back", async () => {
+    window.sessionStorage.setItem("eap.playground.context.v1:anon:a1", JSON.stringify({ value: { tier: "gold", customer_name: "Ada Lovelace" } }));
+    vi.mocked(validateRequestContext).mockImplementation(async (_agent, value) => {
+      if ("customer_name" in value) throw new RequestContextValidationError(422, null, { customer_name: "is not a context field of this agent" });
+      return value;
+    });
+    await renderChat();
+    const before = window.location.pathname;
+    send("Hello Ada");
+    expect(await screen.findByTestId("context-turn-errors")).toHaveTextContent("customer_name");
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(startTurnWithOptions).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe(before);
+    await waitFor(() => expect(message()).toHaveValue("Hello Ada"));
+    expect(screen.getByTestId("unsent-message")).toHaveTextContent("Hello Ada");
+    expect(screen.getByRole("dialog", { name: "Request context" })).toBeInTheDocument();
+    // Fix the context (drop the unknown key) and send the same text: it goes.
+    fireEvent.change(screen.getByLabelText(/Tier/), { target: { value: "silver" } });
+    vi.mocked(validateRequestContext).mockImplementation(async (_agent, value) => value);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(startTurnWithOptions).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(startTurnWithOptions).mock.calls[0][2]).toBe("Hello Ada");
+    expect(createConversation).toHaveBeenCalledTimes(1);
+    const created = (await vi.mocked(createConversation).mock.results[0].value) as { id: string };
+    await waitFor(() => expect(window.location.pathname).toBe(`/agents/a1/chat/${created.id}`));
+  });
+
+  it("a turn refused after its new conversation was created: the URL stays, the text comes back, and the retry reuses that conversation", async () => {
+    let n = 0;
+    vi.mocked(createConversation).mockImplementation(async (agentId, title) => {
+      n += 1;
+      return { id: `conv-${n}`, agent_id: agentId, title, turn_count: 0, created_at: "", updated_at: "" } as never;
+    });
+    vi.mocked(startTurnWithOptions).mockRejectedValueOnce(new TurnStartError(422, "model 'openai:gpt-4.1' is not allowed on this platform"));
+    await renderChat();
+    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "openai:gpt-4.1" } });
+    const before = window.location.pathname;
+    send("Keep me");
+    expect(await screen.findByText(/is not allowed on this platform/)).toBeInTheDocument();
+    await waitFor(() => expect(message()).toHaveValue("Keep me"));
+    expect(window.location.pathname).toBe(before);
+    expect(screen.getByTestId("chat-landing")).toBeInTheDocument();
+    // Retry with the version's model: the same conversation, now in the address.
+    fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(startTurnWithOptions).toHaveBeenCalledTimes(2));
+    expect(createConversation).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(startTurnWithOptions).mock.calls[1][0]).toBe("conv-1");
+    await waitFor(() => expect(window.location.pathname).toBe("/agents/a1/chat/conv-1"));
+  });
+
+  it("a refusal in an existing conversation puts the text back too", async () => {
+    vi.mocked(startTurnWithOptions)
+      .mockImplementationOnce(async (conversationId, runId) => ({
+        run_id: runId, status: "queued", display_status: "queued", agent_id: "a1", version: 2, draft: false,
+        model_id: "openai:gpt-4.1-mini", model_overridden: false, conversation_id: conversationId, turn: 1,
+      }) as never)
+      .mockRejectedValueOnce(new TurnStartError(500, "boom"));
+    await renderChat();
+    send("first");
+    await waitFor(() => expect(screen.getByTestId("chat-composer-dock")).toHaveAttribute("data-docked", "true"));
+    // The first turn has to end before the composer takes another message.
+    const handlers = vi.mocked(subscribeRun).mock.calls[0][1];
+    act(() => handlers.onEvent?.(event(5, "run_completed", {})));
+    await waitFor(() => expect(message()).toBeEnabled());
+    send("second");
+    expect(await screen.findByText(/Failed to send the message/)).toBeInTheDocument();
+    await waitFor(() => expect(message()).toHaveValue("second"));
+  });
+});
+
+describe("a put-back draft is applied once (pre-merge review N1)", () => {
+  it("does not come back when the pane remounts after a later successful send", async () => {
+    // A matchMedia whose 1024 px query can be flipped, firing its change listeners.
+    let wide = true;
+    const listeners = new Set<() => void>();
+    const original = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      get matches() {
+        return query === "(min-width: 1024px)" ? wide : false;
+      },
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const composerText = () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!;
+      vi.mocked(startTurnWithOptions).mockRejectedValueOnce(new TurnStartError(500, "boom"));
+      await renderChat();
+      fireEvent.change(composerText(), { target: { value: "Refused text" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(composerText()).toHaveValue("Refused text"));
+      // Send something else, which goes through.
+      fireEvent.change(composerText(), { target: { value: "Accepted text" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(startTurnWithOptions).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(composerText()).toHaveValue(""));
+      // The window crosses 1024 px: the panes switch layout and the chat pane remounts.
+      const before = screen.getByTestId("chat-pane");
+      act(() => {
+        wide = false;
+        listeners.forEach((listener) => listener());
+      });
+      await waitFor(() => expect(screen.getByTestId("agent-chat-panes")).toHaveAttribute("data-layout", "narrow"));
+      expect(screen.getByTestId("chat-pane")).not.toBe(before);
+      expect(composerText()).toHaveValue("");
+    } finally {
+      window.matchMedia = original;
+    }
+  });
 });

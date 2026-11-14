@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useId, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { cn } from "@/lib/cn";
 import { RequestContextIcon } from "@/lib/icons";
@@ -320,6 +320,19 @@ function PresetControls({
   const refresh = useCallback(() => setPresets(listPresets(agentId)), [agentId]);
   useEffect(refresh, [refresh]);
 
+  // Saving, cancelling or deleting removes or disables the focused control: focus moves to the
+  // preset select, else Save as…, else the presets group, never to the page body.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectRef = useRef<HTMLSelectElement | null>(null);
+  const saveAsRef = useRef<HTMLButtonElement | null>(null);
+  const [refocus, setRefocus] = useState(0);
+  useEffect(() => {
+    if (refocus === 0) return;
+    const target = [selectRef.current, saveAsRef.current].find((element) => element && !element.disabled) ?? rootRef.current;
+    target?.focus();
+  }, [refocus]);
+  const focusAfter = () => setRefocus((n) => n + 1);
+
   // Only a value the server accepted for the current version's fields may be saved.
   const accepted = fieldsKnown && validation.status === "valid" ? validation.accepted : null;
   const selected = presetName !== null && presets.some((preset) => preset.name === presetName) ? presetName : null;
@@ -360,14 +373,16 @@ function PresetControls({
       return;
     }
     refresh();
+    focusAfter();
     onPresetNameChange(null);
     onPresetMessage(`Deleted preset “${selected}”.`);
   };
 
   return (
-    <div className="space-y-2" data-testid="context-presets">
+    <div ref={rootRef} tabIndex={-1} aria-label="Presets" role="group" className="space-y-2 outline-none" data-testid="context-presets">
       <div className="flex flex-wrap items-center gap-2">
         <select
+          ref={selectRef}
           aria-label="Preset"
           className={selectClass}
           value={selected ?? ""}
@@ -383,6 +398,7 @@ function PresetControls({
         </select>
         <div className="flex flex-wrap gap-1">
           <Button
+            ref={saveAsRef}
             size="sm"
             onClick={() => {
               setNaming(true);
@@ -410,7 +426,10 @@ function PresetControls({
             // The popover renders inside the composer's form in React's tree (portals bubble): a
             // submit here must never reach it and send the message.
             event.stopPropagation();
-            if (save(draftName, "Saved")) setNaming(false);
+            if (save(draftName, "Saved")) {
+              setNaming(false);
+              focusAfter();
+            }
           }}
         >
           <div className="min-w-0 flex-1">
@@ -437,7 +456,14 @@ function PresetControls({
           <Button size="sm" variant="primary" type="submit" disabled={!accepted}>
             Save preset
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setNaming(false)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setNaming(false);
+              focusAfter();
+            }}
+          >
             Cancel
           </Button>
         </form>

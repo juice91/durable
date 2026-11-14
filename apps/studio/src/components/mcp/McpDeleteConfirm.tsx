@@ -19,10 +19,12 @@ interface McpDeleteConfirmProps {
   error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Where focus goes after a delete removed the opener (its row); defaults to the page's main. */
+  fallbackFocus?: () => HTMLElement | null;
 }
 
 /** "Delete {name}?" with the agents whose draft or latest version uses the server's tools. */
-export function McpDeleteConfirm({ server, usageStatus, usageRefreshing = false, usagePartial = false, usage, busy, error, onConfirm, onCancel }: McpDeleteConfirmProps) {
+export function McpDeleteConfirm({ server, usageStatus, usageRefreshing = false, usagePartial = false, usage, busy, error, onConfirm, onCancel, fallbackFocus }: McpDeleteConfirmProps) {
   let references: React.ReactNode;
   if (usageStatus === "loading") {
     references = <p>Checking which agents use it…</p>;
@@ -68,6 +70,7 @@ export function McpDeleteConfirm({ server, usageStatus, usageRefreshing = false,
       busy={busy}
       error={error}
       onConfirm={onConfirm}
+      fallbackFocus={fallbackFocus}
       onCancel={onCancel}
     />
   );

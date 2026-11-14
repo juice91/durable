@@ -1,7 +1,7 @@
 "use client";
 
 import { navigateGuarded } from "./navigationGuard";
-import React, { useEffect } from "react";
+import React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChevronRight, ChevronsUpDown } from "lucide-react";
@@ -11,6 +11,7 @@ import { focusRing } from "@/components/ui/Button";
 import { Combobox, type ComboboxOption } from "@/components/ui/Combobox";
 import { LinkTabs, type LinkTab } from "@/components/ui/Tabs";
 import { PRODUCT_NAME } from "./brand";
+import { useDocumentTitle } from "./useDocumentTitle";
 
 
 /** `"{title} · AI Platform Studio"`, or the product name alone. */
@@ -102,10 +103,7 @@ export function PageHeader({ crumbs, actions, tabs, tabsLabel, actionRow, docume
   const ancestors = crumbs.slice(0, -1);
   const titleText = documentTitle ?? (typeof last?.label === "string" ? last.label : typeof last?.label === "number" ? String(last.label) : null);
 
-  useEffect(() => {
-    if (titleText === null) return;
-    document.title = documentTitleFor(titleText);
-  }, [titleText]);
+  useDocumentTitle(titleText === null ? null : documentTitleFor(titleText));
 
   const { className: titleClassName, ...restTitleProps } = titleProps ?? {};
   return (

@@ -140,7 +140,8 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
     >
       <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
         <h2 id="workflow-run-heading" className="text-label font-semibold text-foreground">
-          Run{version != null ? <span className="ml-2 text-caption font-normal text-muted-foreground"><span className="sr-only">, </span>version {version}</span> : null}
+          {/* A plain space, not a hidden ", " glued after "Run": the name read "Run , version 1". */}
+          Run{version != null ? <>{" "}<span className="ml-1 text-caption font-normal text-muted-foreground">(version {version})</span></> : null}
         </h2>
         <div role="group" aria-label="Input mode" className="flex rounded-md border border-border p-0.5">
           {(["form", "json"] as const).map((item) => (

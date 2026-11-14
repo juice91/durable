@@ -47,7 +47,7 @@ function actionVariant(action: string): "destructive" | "neutral" | "info" {
 
 /**
  * Runs deterministic processors, in order, on a sample in this request only: nothing is stored.
- * Moderation calls a model and is tested in the playground instead. The form sits in a 22rem
+ * Moderation calls a model and is tested in an agent's chat instead. The form sits in a 22rem
  * column with the result (outcomes, processed text, response JSON) beside it; stacked below 1024 px.
  */
 export function ProcessorTestConsole({ catalog, initialType }: { catalog: ProcessorCatalog; initialType?: ProcessorType }) {
@@ -181,7 +181,7 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
                     }}
                   >
                     {testable.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-                    {untestable.map((item) => <option key={item.id} value={item.id} disabled>{item.title} (test in the playground)</option>)}
+                    {untestable.map((item) => <option key={item.id} value={item.id} disabled>{item.title} (test in the chat)</option>)}
                   </select>
                 </div>
                 <div className="flex flex-wrap gap-1">

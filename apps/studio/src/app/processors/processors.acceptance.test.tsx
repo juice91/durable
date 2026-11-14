@@ -86,10 +86,10 @@ describe("Processors page acceptance", () => {
   it("the test console refuses moderation: the option is disabled and the API 422 is mapped", async () => {
     handlers["/processors/test"] = () => ({ status: 422, body: { detail: "moderation calls a model and cannot run in the test console; test it in the playground" } });
     render(<Detail />);
-    const option = await screen.findByRole("option", { name: "Moderation (test in the playground)" });
+    const option = await screen.findByRole("option", { name: "Moderation (test in the chat)" });
     expect(option).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
-    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in the playground");
+    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in an agent's chat");
   });
 
   it("outcome filters reach the API, always narrowed to the page's type, and Reset keeps the type", async () => {

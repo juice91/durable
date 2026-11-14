@@ -52,6 +52,7 @@ describe("helpers", () => {
 
   it("recognises the moderation refusal", () => {
     expect(isModerationRefusal("moderation calls a model and cannot run in the test console; test it in the playground")).toBe(true);
+    expect(isModerationRefusal("Moderation calls a model, so it cannot run in the test console. Test it in an agent's chat.")).toBe(true);
     expect(isModerationRefusal("text is larger than 32768 bytes (32 KiB)")).toBe(false);
   });
 

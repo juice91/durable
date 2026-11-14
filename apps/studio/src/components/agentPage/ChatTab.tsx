@@ -51,8 +51,10 @@ import {
 } from "@/lib/conversations";
 import { fetchModels, type ModelOption } from "@/lib/metrics";
 import {
+  RequestContextValidationError,
   getRequestContext,
   latestPreset,
+  validateRequestContext,
   type RequestContextInfo,
   type RequestContextValue,
 } from "@/lib/requestContext";
@@ -233,6 +235,15 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   const [presetMessage, setPresetMessage] = useState<string | null>(null);
   const [optionErrors, setOptionErrors] = useState<TurnOptionErrors>(NO_OPTION_ERRORS);
   const [unsentInput, setUnsentInput] = useState<string | null>(null);
+  // A refused or failed send puts its text back in the composer (assistant-ui empties it on send).
+  const [restoreDraft, setRestoreDraft] = useState<{ text: string; key: number } | null>(null);
+  const draftKeyRef = useRef(0);
+  const putBack = useCallback((text: string) => setRestoreDraft({ text, key: ++draftKeyRef.current }), []);
+  // Applied once: a later remount of the chat pane must not put it back.
+  const clearRestoreDraft = useCallback(() => setRestoreDraft(null), []);
+  // A conversation created for a first send whose turn was then refused: not shown or put in the URL
+  // until a turn starts in it, and reused by the next send so a refusal leaves no extra conversation.
+  const pendingConversationRef = useRef<{ agentId: string; id: string } | null>(null);
   // The URL is written only after it has been read, so a reload never loses its options.
   const [urlReady, setUrlReady] = useState(false);
 
@@ -481,6 +492,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       stopSubscription();
       const generation = ++generationRef.current;
       const current = () => generation === generationRef.current;
+      // Opening another conversation drops a first send's unused conversation.
+      pendingConversationRef.current = null;
       setConversationId(id);
       setTurns([]);
       setError(null);
@@ -574,6 +587,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
 
   const resetConversation = useCallback(() => {
     stopSubscription();
+    pendingConversationRef.current = null;
     generationRef.current += 1;
     setConversationId(null);
     setTurns([]);
@@ -625,6 +639,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       if (modelChoiceError) {
         setOptionErrors((errors) => ({ ...errors, model: modelChoiceError }));
         setUnsentInput(input);
+        putBack(input);
         return;
       }
 
@@ -641,6 +656,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       setError(null);
       setOptionErrors(NO_OPTION_ERRORS);
       setUnsentInput(null);
+      // A new send supersedes any text a refusal was putting back.
+      setRestoreDraft(null);
       setAnnounceRunId(null);
       stopSubscription();
       // Known only when the target spec is: the draft's from the agent, a version's from the list.
@@ -665,23 +682,42 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
 
       try {
         let id = conversationId;
+        const firstTurn = id === null;
         if (id === null) {
-          // No title: the API titles the conversation from its first turn.
-          const created = await createConversation(selectedAgentId, null, crypto.randomUUID());
-          id = created.id;
-          // The send is committed once the conversation exists: if the user switched threads
-          // meanwhile, the turn is still started below (no empty conversation is left behind),
-          // only this page no longer shows it.
-          if (current()) {
-            setConversationId(id);
-            setConversationParam(id);
+          // A first send checks its context before creating anything, so a refused context leaves
+          // no empty conversation and the address does not move. Only a refusal stops it here: if
+          // the check itself fails, the turn start below is the judge.
+          if (options.request_context !== null) {
+            try {
+              await validateRequestContext(selectedAgentId, options.request_context, options.version);
+            } catch (refusal) {
+              if (refusal instanceof RequestContextValidationError && refusal.status === 422) {
+                throw new TurnStartError(422, Object.entries(refusal.fieldErrors).map(([field, msg]) => ({ loc: ["body", "request_context", field], msg, type: "value_error" }))
+                  .concat(refusal.banner ? [{ loc: ["body", "request_context"], msg: refusal.banner, type: "value_error" }] : []));
+              }
+            }
+          }
+          const pending = pendingConversationRef.current;
+          if (pending && pending.agentId === selectedAgentId) {
+            id = pending.id;
+          } else {
+            // No title: the API titles the conversation from its first turn.
+            const created = await createConversation(selectedAgentId, null, crypto.randomUUID());
+            id = created.id;
+            pendingConversationRef.current = { agentId: selectedAgentId, id };
           }
         }
         const started = await startTurnWithOptions(id, runId, input, options);
+        if (pendingConversationRef.current?.id === id) pendingConversationRef.current = null;
         refreshRail();
         // The user switched threads meanwhile: the turn is recorded and runs; it shows when its
         // conversation is opened again.
         if (!current()) return;
+        // The conversation has its first turn: now it is shown and goes in the address.
+        if (firstTurn) {
+          setConversationId(id);
+          setConversationParam(id);
+        }
         updateTurn(runId, (turn) => ({
           ...turn,
           displayStatus: started.display_status,
@@ -695,6 +731,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         if (!current()) return;
         setTurns((existing) => existing.filter((turn) => turn.runId !== runId));
         setRunActive(false);
+        // The text goes back in the composer, ready to send again once the problem is fixed.
+        putBack(input);
         if (reason instanceof TurnStartError && reason.status === 422) {
           // Shown next to the control the refusal is about.
           const errors = classifyTurnError(reason.status, reason.detail, options);
@@ -716,6 +754,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       defaultModelId,
       followRun,
       modelChoiceError,
+      putBack,
       refreshRail,
       runActive,
       selectedAgent,
@@ -938,6 +977,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             toolInfos={toolInfos}
             landingTitle={selectedAgent?.name ?? "Chat"}
             header={header}
+            restoreDraft={restoreDraft}
+            onDraftRestored={clearRestoreDraft}
             composer={
               <Composer
                 chips={chips}

@@ -107,6 +107,18 @@ describe("AgentVersionsPanel compare and restore", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Version 5 published, restored from v1");
   });
 
+  it("after Restore and publish, focus moves to the published notice, not the page body (browser check)", async () => {
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...v(5, 1), spec: {}, created_by: "alice" } as never);
+    render(<AgentVersionsPanel versions={versions} agentId="a1" />);
+    await chooseVersionAction(1, "Restore this version");
+    const dialog = await screen.findByRole("dialog", { name: "Restore version 1?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent("Version 5 published, restored from v1");
+    expect(notice).toHaveFocus();
+  });
+
   it("dirty-draft 409 offers discard draft and restore", async () => {
     vi.mocked(restoreVersion)
       .mockRejectedValueOnce(new ApiError(409, "the draft has unpublished changes since version 4; publish them, or restore with discard_draft: true to replace the draft"))

@@ -325,6 +325,8 @@ export default function McpServersPage() {
           error={deleteError}
           onConfirm={() => void deleteServer(confirmDelete)}
           onCancel={() => openDeleteDialog(null)}
+          // The deleted server's row (whose menu opened this) is gone: focus goes to the page title.
+          fallbackFocus={() => headingRef.current}
         />
       ) : null}
     </>

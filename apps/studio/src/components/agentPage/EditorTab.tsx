@@ -203,7 +203,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
       ) : null}
       {isDirty ? <div className={`${notice} border-warning/40 bg-warning/10 text-warning-text`}>Save the draft before publishing</div> : null}
       {compareRestore.notice ? (
-        <p role="status" className={`${notice} border-border bg-muted text-foreground`}>
+        <p role="status" data-restore-notice="" tabIndex={-1} className={`${notice} border-border bg-muted text-foreground outline-none`}>
           {compareRestore.notice}
         </p>
       ) : null}

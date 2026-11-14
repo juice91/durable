@@ -274,6 +274,32 @@ html[data-sidebar="collapsed"] [data-sidebar-root] [data-rail-item] {
 }
 
 /*
+ * React Flow's credit (the workflow graph). Its stock style is #999 on rgba(255,255,255,.5): low
+ * contrast in light, a pale patch in dark. Ours: no background, the link in muted-foreground
+ * (>= 4.5:1 on every surface in both themes, see contrast.test.ts), a visible focus ring. Two
+ * classes, so it wins over React Flow's one-class rules whichever stylesheet loads last.
+ */
+.react-flow .react-flow__attribution {
+  background: transparent;
+  padding: 2px 4px;
+}
+.react-flow .react-flow__attribution a {
+  color: var(--color-muted-foreground);
+  font-size: var(--text-badge);
+  line-height: var(--text-badge--line-height);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+}
+.react-flow .react-flow__attribution a:hover {
+  color: var(--color-foreground);
+  text-decoration: underline;
+}
+.react-flow .react-flow__attribution a:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 1px;
+}
+
+/*
  * Reduced motion (WCAG 2.3.3, plan decision "Accessibility"): when the OS asks for less motion,
  * every transition and animation finishes at once, in any component or library (Radix enter/exit,
  * sonner toasts, react-resizable-panels, the composer dock, React Flow's fit view), and smooth

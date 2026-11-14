@@ -94,6 +94,10 @@ describe("workflow detail: Graph tab layout (SL.14)", () => {
     const panel = screen.getByRole("region", { name: "Workflow" });
     expect(panel).toHaveStyle({ width: `${PANEL_DEFAULT_WIDTH}px` });
     expect(within(panel).getByTestId("workflow-run-panel")).toBeInTheDocument();
+    // Browser check: the heading read "Run , version 1".
+    const runHeading = within(panel).getByRole("heading", { name: /^Run/ });
+    expect(runHeading).toHaveAccessibleName(/^Run( \(version \d+\))?$/);
+    expect(runHeading.textContent).not.toMatch(/\s,/);
     expect(within(panel).getByRole("heading", { name: "Recent runs" })).toBeInTheDocument();
     expect(within(panel).getByTestId("workflow-all-runs")).toHaveAttribute("href", routes.workflow("wf-1", { tab: "runs" }));
     expect(within(panel).getByTestId("workflow-step-list")).toBeInTheDocument();

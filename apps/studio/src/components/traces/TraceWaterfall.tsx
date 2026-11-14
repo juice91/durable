@@ -65,7 +65,9 @@ const RowItem = memo(function RowItem({
       aria-level={depth + 1}
       aria-selected={selected}
       aria-expanded={expandable ? !isCollapsed : undefined}
-      aria-label={`${label}, ${STATUS_LABELS[status]}, ${duration}`}
+      // The name starts with the row's visible text in order (kind, name, duration), then the status:
+      // speech input can say what is on screen (label-content-name-mismatch).
+      aria-label={`${KIND_BADGE[kind]} ${label} ${duration}, ${STATUS_LABELS[status]}`}
       tabIndex={focusable ? 0 : -1}
       data-testid="trace-span-row"
       data-span-id={spanId}
@@ -97,8 +99,8 @@ const RowItem = memo(function RowItem({
         )}
         <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
           {KIND_BADGE[kind]}
-        </span>
-        <span className="truncate" title={label}>{label}</span>
+        </span>{" "}
+        <span className="truncate" title={label}>{label}</span>{" "}
         {timeline ? null : (
           <span data-testid="trace-span-dot" className={`ml-1 inline-block size-2 shrink-0 rounded-full ${STATUS_BAR[status]}`} aria-hidden="true" />
         )}
@@ -120,7 +122,7 @@ const RowItem = memo(function RowItem({
           />
         )}
       </div>
-      ) : null}
+      ) : null}{" "}
       <div className="w-24 shrink-0 whitespace-nowrap pl-2 text-right font-mono text-xs text-muted-foreground">{duration}</div>
     </div>
   );

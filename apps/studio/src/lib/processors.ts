@@ -105,7 +105,7 @@ export interface ProcessorResultFilters {
   before?: string | null;
 }
 
-export const MODERATION_TEST_MESSAGE = "Moderation calls a model, so it cannot run in the test console. Test it in the playground.";
+export const MODERATION_TEST_MESSAGE = "Moderation calls a model, so it cannot run in the test console. Test it in an agent's chat.";
 
 /**
  * A 422 validation list keeps each entry's field location ("processors.0.config.max_chars: …"),
@@ -176,7 +176,8 @@ export const processors = {
 
 /** The API refuses moderation in the test console with this 422 message. */
 export function isModerationRefusal(message: string): boolean {
-  return /moderation.*test it in the playground/i.test(message);
+  // The API still says "playground" (its wording predates the agent chat); accept either.
+  return /moderation.*test it in (the playground|.*chat)/i.test(message);
 }
 
 /** "email ×2, phone ×1" from a processor's match_counts (zero and non-numeric counts left out);

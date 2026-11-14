@@ -148,9 +148,13 @@ export default function McpServerDetailPage() {
     deleting.current = true;
     setBusy(true);
     setDeleteError(null);
+    let leaving = false;
     try {
       await mcpServers.remove(current.id);
-      setConfirmDelete(false);
+      // The confirm stays open (busy) until the navigation unmounts this page: closing it first would
+      // return focus to the Delete button just before it disappears, leaving focus on <body>. Its
+      // unmount then moves focus to the page's main.
+      leaving = true;
       router.push(routes.mcp());
     } catch (reason: unknown) {
       if (reason instanceof ApiError && reason.status === 404) {
@@ -160,8 +164,10 @@ export default function McpServerDetailPage() {
         setDeleteError(errorMessage(reason, "The server could not be deleted"));
       }
     } finally {
-      deleting.current = false;
-      setBusy(false);
+      if (!leaving) {
+        deleting.current = false;
+        setBusy(false);
+      }
     }
   };
 
