@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { MoreHorizontal } from "lucide-react";
 import { ApiError } from "@/lib/api";
@@ -72,12 +72,17 @@ export interface VersionRestore {
 export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, onRestored }: VersionRestoreOptions): VersionRestore {
   const [restore, setRestore] = useState<RestoreState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Set when a restore succeeded: its confirm then sends focus to the notice, not back to its opener.
+  const restoredRef = useRef(false);
+  const skipOpenerReturn = useCallback(() => restoredRef.current, []);
 
   const run = async (state: RestoreState) => {
     if (!agentId) return;
+    restoredRef.current = false;
     setRestore({ ...state, busy: true, error: null });
     try {
       const created = await restoreVersion(agentId, state.version, { discardDraft: state.discard });
+      restoredRef.current = true;
       setRestore(null);
       setNotice(`Version ${created.version} published, restored from v${state.version}`);
       onRestored?.(created);
@@ -93,6 +98,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
 
   const start = useCallback((version: number) => {
     setNotice(null);
+    restoredRef.current = false;
     setRestore({ version, discard: false, busy: false, error: null });
   }, []);
   const clearNotice = useCallback(() => setNotice(null), []);
@@ -117,6 +123,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
         onConfirm={() => run(restore)}
         onCancel={() => setRestore(null)}
         fallbackFocus={restoreFocusTarget}
+        skipOpenerReturn={skipOpenerReturn}
       />
     ) : (
       <ConfirmDialog
@@ -136,6 +143,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
         onConfirm={() => run(restore)}
         onCancel={() => setRestore(null)}
         fallbackFocus={restoreFocusTarget}
+        skipOpenerReturn={skipOpenerReturn}
       />
     )
   ) : null;

@@ -119,6 +119,49 @@ describe("AgentVersionsPanel compare and restore", () => {
     expect(notice).toHaveFocus();
   });
 
+  it("after a successful restore the confirm never returns focus to its opener, even one still on screen (browser re-check)", async () => {
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...v(5, 1), spec: {}, created_by: "alice" } as never);
+    const { useVersionRestore } = await import("./AgentVersionsPanel");
+    function SheetLike() {
+      const restore = useVersionRestore({ agentId: "a1", latest: 4 });
+      return (
+        <>
+          <button type="button" onClick={() => restore.start(1)}>Restore v1</button>
+          {restore.notice ? <p role="status" data-restore-notice="" tabIndex={-1}>{restore.notice}</p> : null}
+          {restore.dialog}
+        </>
+      );
+    }
+    render(<SheetLike />);
+    const opener = screen.getByRole("button", { name: "Restore v1" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveFocus();
+  });
+
+  it("a cancelled confirm still returns focus to its opener", async () => {
+    const { useVersionRestore } = await import("./AgentVersionsPanel");
+    function SheetLike() {
+      const restore = useVersionRestore({ agentId: "a1", latest: 4 });
+      return (
+        <>
+          <button type="button" onClick={() => restore.start(1)}>Restore v1</button>
+          {restore.dialog}
+        </>
+      );
+    }
+    render(<SheetLike />);
+    const opener = screen.getByRole("button", { name: "Restore v1" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
+  });
+
   it("dirty-draft 409 offers discard draft and restore", async () => {
     vi.mocked(restoreVersion)
       .mockRejectedValueOnce(new ApiError(409, "the draft has unpublished changes since version 4; publish them, or restore with discard_draft: true to replace the draft"))

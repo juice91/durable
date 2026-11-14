@@ -25,6 +25,11 @@ interface ConfirmDialogProps {
    * the row of what was deleted). Defaults to the page's `<main>`; never left on <body>.
    */
   fallbackFocus?: () => HTMLElement | null;
+  /**
+   * Checked when the dialog closes: true sends focus to `fallbackFocus` even though the opener still
+   * exists (after a restore the opener, a Sheet's "Restore vN", is about to disappear with the Sheet).
+   */
+  skipOpenerReturn?: () => boolean;
 }
 
 /** The page's main landmark (focusable: the skip link targets it), or null outside the frame. */
@@ -87,13 +92,15 @@ function popDialog(container: HTMLElement) {
  * inert, focus starts on Cancel and is trapped inside, Escape cancels (unless busy), an outside click
  * does nothing, and focus returns to the element that opened it (when that element still exists).
  */
-export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, confirmDisabled = false, onConfirm, onCancel, fallbackFocus }: ConfirmDialogProps) {
+export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = "Cancel", busy = false, error = null, destructive = false, confirmDisabled = false, onConfirm, onCancel, fallbackFocus, skipOpenerReturn }: ConfirmDialogProps) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const fallbackRef = useRef(fallbackFocus);
   fallbackRef.current = fallbackFocus;
+  const skipOpenerRef = useRef(skipOpenerReturn);
+  skipOpenerRef.current = skipOpenerReturn;
 
   useEffect(() => {
     // Runs before the dialog content mounts, so focus is still on the opener.
@@ -112,7 +119,7 @@ export function ConfirmDialog({ title, description, confirmLabel, cancelLabel = 
     return () => {
       popDialog(container);
       const previous = returnFocusRef.current;
-      if (previous && previous.isConnected) {
+      if (previous && previous.isConnected && !skipOpenerRef.current?.()) {
         previous.focus();
         return;
       }
