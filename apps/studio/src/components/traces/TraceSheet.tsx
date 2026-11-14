@@ -18,6 +18,7 @@ import { toast } from "@/components/ui/Toaster";
 import { useFrame } from "@/components/frame/FrameContext";
 import { useViewportWidth } from "@/components/frame/useMediaQuery";
 import { RunEventsPanel } from "@/components/runs/RunEventsPanel";
+import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
 import { runKind } from "@/components/runs/RunSubject";
 import type { RunKind } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
@@ -59,11 +60,22 @@ export interface TraceSheetProps {
   closeFocusTarget?: (runId: string) => HTMLElement | null;
 }
 
-/** The "Open agent" / "Open workflow" link for a run. */
-function subjectLink(run: TraceRun): { href: string; label: string } | null {
+/** The "Open agent" / "Open workflow" / "Open knowledge base" link for a run. A kb_ingest run links
+ * to its knowledge base's Ingest runs tab, named when `knowledgeBaseNames` has it (RM.19). */
+export function subjectLink(
+  run: TraceRun,
+  knowledgeBaseNames: Record<string, string> = {},
+): { href: string; label: string } | null {
   const kind = runKind(run);
   if (kind === "workflow" && run.workflow_id) return { href: routes.workflowRun(run.workflow_id, run.run_id), label: "Open workflow" };
   if (kind === "agent" && run.agent_id) return { href: routes.agentChat(run.agent_id), label: "Open agent" };
+  if (kind === "kb_ingest" && run.knowledge_base_id) {
+    const name = knowledgeBaseNames[run.knowledge_base_id];
+    return {
+      href: routes.knowledgeBase(run.knowledge_base_id, { tab: "runs" }),
+      label: name ? `Open knowledge base: ${name}` : "Open knowledge base",
+    };
+  }
   return null;
 }
 
@@ -139,12 +151,18 @@ interface TraceSheetBodyProps {
 
 function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggleExpanded, detailBeside }: TraceSheetBodyProps) {
   const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId);
-  const names = useNames();
+  const baseNames = useNames();
   const [mode, setMode] = useState<SpanTreeMode>("timeline");
   const root = trace?.spans[0] ?? null;
   const selected = trace?.spans.find((s) => s.id === selectedId) ?? null;
   const run = trace?.run ?? null;
-  const link = run ? subjectLink(run) : null;
+  // Knowledge base names only when the trace shows one: a kb_ingest run or a retrieve span.
+  const needsKbNames = Boolean(
+    trace && (runKind(trace.run) === "kb_ingest" || trace.spans.some((s) => s.kind === "retrieve")),
+  );
+  const knowledgeBaseNames = useKnowledgeBaseNames(needsKbNames);
+  const names = useMemo(() => ({ ...baseNames, knowledgeBaseNames }), [baseNames, knowledgeBaseNames]);
+  const link = run ? subjectLink(run, knowledgeBaseNames) : null;
 
   const copyId = () => {
     void copyText(runId).then((copied) => toast(copied ? "Run id copied" : "Could not copy the run id"));
@@ -201,7 +219,7 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
             <StatusPill status={run.display_status} />
             <Badge variant="outline">{KIND_LABELS[runKind(run)]}</Badge>
             {link ? (
-              <Link href={link.href} className="text-label text-info-text underline-offset-4 hover:underline" data-testid="trace-sheet-subject-link">
+              <Link href={link.href} title={link.label} className="min-w-0 max-w-full truncate text-label text-info-text underline-offset-4 hover:underline" data-testid="trace-sheet-subject-link">
                 {link.label}
               </Link>
             ) : null}

@@ -28,6 +28,19 @@ export function TraceTotals({ totals }: { totals: Totals }) {
       costHint = `${parts.join(", ")} of ${totals.model_requests} requests`;
     }
   }
+  // RM.19: embedding and observer / reflector requests are among the model requests; say how many,
+  // and what the embeddings cost, only when there are any (older traces render as before).
+  const embeddings = totals.embedding_requests ?? 0;
+  const memory = totals.memory_requests ?? 0;
+  const requestExtras = [
+    embeddings ? `${embeddings} embedding` : null,
+    memory ? `${memory} observer or reflector` : null,
+  ].filter(Boolean).join(", ");
+  const embeddingCost = embeddings ? formatCost(totals.embedding_cost_usd ?? null) : null;
+  if (embeddings) {
+    const embeddingHint = `embeddings ${embeddingCost ?? "no price"}, ${formatTokens(totals.embedding_input_tokens ?? 0)} tokens`;
+    costHint = costHint ? `${costHint}; ${embeddingHint}` : embeddingHint;
+  }
   const tokens = (v: number | null) => (v === null ? (totals.model_requests > 0 ? "not recorded" : "-") : formatTokens(v));
   const cache = (totals.cache_read_tokens ?? 0) + (totals.cache_write_tokens ?? 0);
   return (
@@ -37,7 +50,7 @@ export function TraceTotals({ totals }: { totals: Totals }) {
         testId="totals-requests"
         label="Model requests"
         value={formatTokens(totals.model_requests)}
-        hint={`${totals.tool_calls} tool call${totals.tool_calls === 1 ? "" : "s"}, ${totals.runs} run${totals.runs === 1 ? "" : "s"}`}
+        hint={`${totals.tool_calls} tool call${totals.tool_calls === 1 ? "" : "s"}, ${totals.runs} run${totals.runs === 1 ? "" : "s"}${requestExtras ? `; ${requestExtras}` : ""}`}
       />
       <Stat testId="totals-input-tokens" label="Input tokens" value={tokens(totals.input_tokens)} />
       <Stat testId="totals-output-tokens" label="Output tokens" value={tokens(totals.output_tokens)} />

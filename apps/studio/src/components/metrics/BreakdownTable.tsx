@@ -8,6 +8,7 @@ import {
   formatCount,
   formatLatency,
   formatPercent,
+  operationLabel,
   tracesHref,
   type BreakdownBy,
   type BreakdownItem,
@@ -45,15 +46,19 @@ export const SORT_OPTIONS: { value: BreakdownSort; label: string }[] = [
   { value: "cost", label: "Cost" },
 ];
 
-/** The display name of a breakdown row: the agent's name, its id if deleted, or the model id. */
+/** The display name of a breakdown row: the agent's name, its id if deleted, the model id or the
+ * operation's label. */
 export function breakdownLabel(item: BreakdownItem, by: BreakdownBy): string {
   if (by === "model") return item.key;
+  if (by === "operation") return operationLabel(item.key);
   return item.label ?? `Deleted agent (${item.key.slice(0, 8)})`;
 }
 
-/** The drill-down for a row: the Traces list filtered to this agent or model. */
+/** The drill-down for a row: the Traces list filtered to this agent or model. The Traces list has
+ * no operation filter, so an operation row opens the runs of the same filters (pages narrow the
+ * Metrics page instead, with `rowLink`). */
 export function breakdownHref(item: BreakdownItem, by: BreakdownBy, filters: MetricsFilters, failedOnly = false): string {
-  const narrowed = by === "agent" ? { agent_id: item.key } : { model: item.key };
+  const narrowed = by === "agent" ? { agent_id: item.key } : by === "model" ? { model: item.key } : {};
   return tracesHref(filters, failedOnly ? { ...narrowed, status: FAILED_STATUSES } : narrowed);
 }
 
@@ -125,7 +130,7 @@ export function BreakdownTable({
           <table className="w-full text-sm tabular-nums">
             <thead className="bg-muted/50">
               <tr>
-                <th scope="col" className={`${th} text-left`}>{by === "agent" ? "Agent" : "Model"}</th>
+                <th scope="col" className={`${th} text-left`}>{by === "agent" ? "Agent" : by === "model" ? "Model" : "Operation"}</th>
                 <th scope="col" className={`${th} text-right`}>Runs</th>
                 <th scope="col" className={`${th} text-right`}>Failed</th>
                 <th scope="col" className={`${th} text-right`}>Error rate</th>
@@ -150,7 +155,7 @@ export function BreakdownTable({
                     }}
                   >
                     <th scope="row" className="px-3 py-2 text-left font-medium max-w-[16rem]">
-                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "model" ? item.key : `${name} (${item.key})`} aria-label={link.label}>
+                      <Link href={href} className="block truncate text-foreground hover:underline" title={by === "agent" ? `${name} (${item.key})` : item.key} aria-label={link.label}>
                         {name}
                       </Link>
                     </th>

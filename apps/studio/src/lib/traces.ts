@@ -3,7 +3,58 @@
 import { BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
 import type { Run, RunKind } from "./runs";
 
-export type SpanKind = "run" | "child_run" | "model_request" | "tool_call" | "processor" | "workflow_step";
+export type SpanKind =
+  | "run"
+  | "child_run"
+  | "model_request"
+  | "tool_call"
+  | "processor"
+  | "workflow_step"
+  // RAG and memory spans (RM.19): see eap_run_store.trace. Attributes are ids, counts, scores,
+  // model, usage and cost; never memory or chunk text.
+  | "retrieve"
+  | "embedding"
+  | "memory_recall"
+  | "memory_index"
+  | "observer"
+  | "reflector"
+  | "working_memory"
+  | "ingest";
+
+/** Every span kind, in legend order. */
+export const SPAN_KINDS: readonly SpanKind[] = [
+  "run", "child_run", "model_request", "tool_call", "processor", "workflow_step",
+  "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
+];
+
+/** The RAG and memory span kinds (RM.19). */
+export const RAG_SPAN_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["retrieve", "embedding", "ingest"]);
+export const MEMORY_SPAN_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>([
+  "memory_recall", "memory_index", "observer", "reflector", "working_memory",
+]);
+
+/** One retrieved source on a `retrieve` span (`attributes.hits`): never the chunk text. */
+export interface RetrieveHit {
+  n?: number;
+  title?: string | null;
+  /** The section's anchor URL (render only when `isSafeHttpUrl`). */
+  url?: string | null;
+  /** The URL, or `kb:{document_key}` when the document has no source URL. */
+  ref?: string | null;
+  kb_id?: string | null;
+  document_id?: string | null;
+  document_key?: string | null;
+  chunk_id?: string | null;
+  doc_version?: number | null;
+  score?: number | null;
+}
+
+/** A knowledge base attached to the agent version (`attributes.knowledge_bases` of a retrieve span). */
+export interface RetrieveKnowledgeBase {
+  id: string;
+  top_k: number | null;
+  min_score: number | null;
+}
 export type SpanStatus = "ok" | "error" | "running" | "waiting" | "incomplete";
 
 export interface SpanUsage {
@@ -51,6 +102,13 @@ export interface TraceTotals {
   unrecorded_requests: number;
   duration_ms: number | null;
   status: string;
+  /** RM.19 (absent from older APIs): moderation, embedding and observer / reflector requests among
+   * `model_requests`, and the embedding calls' input tokens and cost (null when one is unpriced). */
+  moderation_requests?: number;
+  embedding_requests?: number;
+  memory_requests?: number;
+  embedding_input_tokens?: number;
+  embedding_cost_usd?: string | null;
 }
 
 export interface TraceTruncation {
@@ -202,16 +260,29 @@ function str(value: unknown): string | null {
 export interface NameMaps {
   agentNames?: Record<string, string>;
   workflowNames?: Record<string, string>;
+  /** Knowledge base id -> name (kb_ingest runs, retrieve hits). */
+  knowledgeBaseNames?: Record<string, string>;
+}
+
+function num(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /** A readable span label. Run spans' API names are ids, so agents and workflows are looked up by
  * name (falling back to a short id); other spans keep the API name. */
-export function spanLabel(span: TraceSpan, { agentNames = {}, workflowNames = {} }: NameMaps = {}): string {
+export function spanLabel(
+  span: TraceSpan,
+  { agentNames = {}, workflowNames = {}, knowledgeBaseNames = {} }: NameMaps = {},
+): string {
   const a = span.attributes ?? {};
   if (span.kind === "run" || span.kind === "child_run") {
     const kind = str(a.run_kind);
     if (kind === "tool") return `Tool: ${str(a.tool_id) ?? "unknown"}`;
-    if (kind === "kb_ingest") return "Knowledge ingest";
+    if (kind === "kb_ingest") {
+      const id = str(a.knowledge_base_id);
+      const name = id ? knowledgeBaseNames[id] : undefined;
+      return name ? `Knowledge ingest: ${name}` : "Knowledge ingest";
+    }
     if (kind === "workflow") {
       const id = str(a.workflow_id);
       const name = id ? (workflowNames[id] ?? short(id)) : "unknown";
@@ -230,6 +301,27 @@ export function spanLabel(span: TraceSpan, { agentNames = {}, workflowNames = {}
   if (span.kind === "tool_call") return `Tool call: ${span.name}`;
   if (span.kind === "processor") return `Processor: ${span.name}${str(a.phase) ? ` (${a.phase})` : ""}`;
   if (span.kind === "workflow_step") return `Step: ${span.name}${str(a.step_type) ? ` (${a.step_type})` : ""}`;
+  if (span.kind === "retrieve") {
+    const kb = str(a.knowledge_base);
+    const hits = num(a.hit_count);
+    return `Retrieve${kb ? ` from ${kb}` : ""}${hits !== null ? ` (${hits} hit${hits === 1 ? "" : "s"})` : ""}`;
+  }
+  if (span.kind === "embedding") {
+    const batch = num(a.batch);
+    return `Embedding${batch !== null ? ` batch ${batch}` : ""}: ${str(a.model_id) ?? "unknown model"}`;
+  }
+  if (span.kind === "memory_recall") {
+    const hits = num(a.hits);
+    return `Semantic recall${hits !== null ? ` (${hits} hit${hits === 1 ? "" : "s"})` : ""}`;
+  }
+  if (span.kind === "memory_index") return "Memory index";
+  if (span.kind === "observer") return "Observer";
+  if (span.kind === "reflector") return "Reflector";
+  if (span.kind === "working_memory") {
+    const version = num(a.version);
+    return `Working memory update${version !== null ? ` (v${version})` : ""}`;
+  }
+  if (span.kind === "ingest") return `Ingest: ${span.name}`;
   return span.name;
 }
 
@@ -240,6 +332,14 @@ export const KIND_LABELS: Record<SpanKind, string> = {
   tool_call: "Tool call",
   processor: "Processor",
   workflow_step: "Workflow step",
+  retrieve: "Retrieve",
+  embedding: "Embedding",
+  memory_recall: "Semantic recall",
+  memory_index: "Memory index",
+  observer: "Observer",
+  reflector: "Reflector",
+  working_memory: "Working memory",
+  ingest: "Ingest phase",
 };
 
 // ---------------------------------------------------------------------------- formatting

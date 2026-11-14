@@ -20,6 +20,14 @@ Filters:
 - `model` (our id `provider:name`) / `provider`: usage by the request's model; a run matches when its
   recorded `model_id` matches or it (or, for a workflow run, one of its child runs) made a request
   with that model.
+- `operation` (RM.19): what a request was for, one of OPERATIONS, which partition the usage rows:
+  `embedding` (`run_model_requests.operation = 'embedding'`: knowledge base ingest, retrieve, the
+  search tester, semantic recall and indexing), and among chat requests `moderation` (request key
+  `moderation:`), `observer` (`memory:observe:`), `reflector` (`memory:reflect:`) and `chat` (every
+  other model request). The filter also takes `memory`: observer, reflector and the semantic recall
+  and index embeddings (`embed:recall:`, `embed:index:`). Usage by the request's operation; a run
+  matches when it (or one of its child runs) made such a request (its recorded `model_id` alone
+  does not count).
 
 Every query is filtered on the tenant first. Bounds: a range of at most MAX_RANGE, at most
 MAX_BUCKETS time buckets, at most MAX_GROUPS breakdown groups, and a per-transaction
@@ -36,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import Float, and_, cast, false, func, literal, or_, select, text
+from sqlalchemy import Float, and_, case, cast, false, func, literal, literal_column, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import aliased, sessionmaker
 from sqlalchemy.orm import join as orm_join
@@ -52,7 +60,12 @@ BLOCKED_ERROR_CODES = ("input_blocked", "output_blocked")
 
 Interval = Literal["hour", "day"]
 INTERVALS: dict[str, timedelta] = {"hour": timedelta(hours=1), "day": timedelta(days=1)}
-BreakdownBy = Literal["agent", "model"]
+BreakdownBy = Literal["agent", "model", "operation"]
+# What a model request was for (RM.19): a partition of run_model_requests (see the module docstring).
+OPERATIONS = ("chat", "moderation", "observer", "reflector", "embedding")
+# Values the `operation` filter takes: every operation plus `memory` (observer, reflector, recall
+# and index embeddings), which overlaps the others and is never a breakdown group.
+OPERATION_FILTERS = (*OPERATIONS, "memory")
 BreakdownSort = Literal["runs", "failed", "requests", "tokens", "cost"]
 
 RUN_METRICS = (
@@ -101,10 +114,13 @@ class MetricsQuery:
     model: str | None = None
     provider: str | None = None
     kind: str | None = None
+    operation: str | None = None
 
     def __post_init__(self) -> None:
         if not self.tenant_id:
             raise ValueError("tenant_id is required")
+        if self.operation is not None and self.operation not in OPERATION_FILTERS:
+            raise MetricsRangeError(f"operation must be one of {', '.join(OPERATION_FILTERS)}")
         if self.start.tzinfo is None or self.end.tzinfo is None:
             raise ValueError("start and end must be timezone-aware")
         if self.start >= self.end:
@@ -127,22 +143,57 @@ def _model_match(column: Any, model: str | None, provider: str | None) -> Any:
         conds.append(column == model)
     if provider is not None:
         conds.append(column.startswith(f"{provider}:", autoescape=True))
-    return and_(*conds)
+    return and_(*conds) if conds else literal(True)
 
 
-def run_model_condition(run: Any, tenant_id: str, model: str | None, provider: str | None) -> Any:
-    """SQL: the top-level run `run` (a RunModel or alias) used the model / provider.
+def _starts(column: Any, prefix: str) -> Any:
+    return column.startswith(prefix, autoescape=True)
 
-    True when its recorded `model_id` matches, or it made a matching model request, or one of its
-    child runs (workflow agent steps) did. Each EXISTS is an index lookup: the request table by its
-    primary key `(run_id, …)`, the child runs by `ix_runs_parent_run`."""
-    if model is None and provider is None:
+
+def operation_key(req: Any) -> Any:
+    """SQL: the request's operation (one of OPERATIONS) from its `operation` column and request key."""
+    return case(
+        (req.operation == "embedding", literal("embedding")),
+        (_starts(req.request_key, "moderation:"), literal("moderation")),
+        (_starts(req.request_key, "memory:observe:"), literal("observer")),
+        (_starts(req.request_key, "memory:reflect:"), literal("reflector")),
+        else_=literal("chat"),
+    )
+
+
+def operation_match(req: Any, operation: str | None) -> Any:
+    """SQL: the request `req` (a RunModelRequestModel alias) is of `operation` (OPERATION_FILTERS)."""
+    if operation is None:
+        return literal(True)
+    if operation == "memory":
+        return or_(
+            and_(req.operation == "chat", or_(_starts(req.request_key, "memory:observe:"), _starts(req.request_key, "memory:reflect:"))),
+            and_(req.operation == "embedding", or_(_starts(req.request_key, "embed:recall:"), _starts(req.request_key, "embed:index:"))),
+        )
+    if operation == "embedding":
+        return req.operation == "embedding"
+    return and_(req.operation == "chat", operation_key(req) == operation)
+
+
+def _request_match(req: Any, model: str | None, provider: str | None, operation: str | None) -> Any:
+    return and_(_model_match(req.model_id, model, provider), operation_match(req, operation))
+
+
+def run_model_condition(
+    run: Any, tenant_id: str, model: str | None, provider: str | None, operation: str | None = None
+) -> Any:
+    """SQL: the top-level run `run` (a RunModel or alias) used the model / provider (/ operation).
+
+    True when it made a matching model request, or one of its child runs (workflow agent steps)
+    did, or (without an operation) its recorded `model_id` matches. Each EXISTS is an index lookup:
+    the request table by its primary key `(run_id, …)`, the child runs by `ix_runs_parent_run`."""
+    if model is None and provider is None and operation is None:
         return literal(True)
     req = aliased(RunModelRequestModel)
     child = aliased(RunModel)
     child_req = aliased(RunModelRequestModel)
     own = select(literal(1)).where(
-        req.run_id == run.id, req.tenant_id == tenant_id, _model_match(req.model_id, model, provider)
+        req.run_id == run.id, req.tenant_id == tenant_id, _request_match(req, model, provider, operation)
     ).exists()
     via_child = (
         select(literal(1))
@@ -151,10 +202,12 @@ def run_model_condition(run: Any, tenant_id: str, model: str | None, provider: s
         .where(
             child.parent_run_id == run.id,
             child.tenant_id == tenant_id,
-            _model_match(child_req.model_id, model, provider),
+            _request_match(child_req, model, provider, operation),
         )
         .exists()
     )
+    if operation is not None:
+        return or_(own, via_child)
     return or_(and_(run.model_id.is_not(None), _model_match(run.model_id, model, provider)), own, via_child)
 
 
@@ -169,8 +222,8 @@ def _run_where(q: MetricsQuery, r: Any) -> list[Any]:
         conds.append(r.agent_id == q.agent_id)
     if q.kind is not None:
         conds.append(r.kind == q.kind)
-    if q.model is not None or q.provider is not None:
-        conds.append(run_model_condition(r, q.tenant_id, q.model, q.provider))
+    if q.model is not None or q.provider is not None or q.operation is not None:
+        conds.append(run_model_condition(r, q.tenant_id, q.model, q.provider, q.operation))
     return conds
 
 
@@ -182,6 +235,8 @@ def _usage_from(q: MetricsQuery) -> tuple[Any, Any, list[Any]]:
     conds = [req.tenant_id == q.tenant_id, req.created_at >= q.start, req.created_at < q.end]
     if q.model is not None or q.provider is not None:
         conds.append(_model_match(req.model_id, q.model, q.provider))
+    if q.operation is not None:
+        conds.append(operation_match(req, q.operation))
     if q.agent_id is not None:
         conds.append(r.agent_id == q.agent_id)
     if q.kind == "workflow":
@@ -363,10 +418,33 @@ class MetricsStore:
         usage_row = session.execute(
             select(*_usage_columns(req)).select_from(_usage_source(q, req, rr)).where(*conds)
         ).one()
-        return {**_runs_dict(runs_row), **_usage_dict(usage_row)}
+        return {**_runs_dict(runs_row), **_usage_dict(usage_row), "operations": self._operations(session, q)}
+
+    def _operations(self, session: Any, q: MetricsQuery) -> dict[str, dict[str, Any]]:
+        """Usage per operation (every one of OPERATIONS, zero-filled; they sum to the totals) plus
+        `memory` (observer, reflector, recall and index embeddings), under the same filters."""
+        req, rr, conds = _usage_from(q)
+        key = operation_key(req).label("key")
+        rows = session.execute(
+            select(key, *_usage_columns(req))
+            .select_from(_usage_source(q, req, rr))
+            .where(*conds)
+            .group_by(literal_column("1"))  # by position, as in _by_request
+        ).all()
+        out = {op: _empty_usage() for op in OPERATIONS}
+        for row in rows:
+            out[row.key] = _usage_dict(row)
+        memory = session.execute(
+            select(*_usage_columns(req))
+            .select_from(_usage_source(q, req, rr))
+            .where(*conds, operation_match(req, "memory"))
+        ).one()
+        out["memory"] = _usage_dict(memory)
+        return out
 
     def summary(self, q: MetricsQuery, *, compare_previous: bool = False) -> dict[str, Any]:
-        """`{"current": {...}, "previous": {...} | None}` with every metric in METRICS."""
+        """`{"current": {...}, "previous": {...} | None}` with every metric in METRICS, plus
+        `operations`: `{operation: usage metrics}` for OPERATIONS and `memory` (RM.19)."""
         with self._session() as session:
             current = self._summary(session, q)
             previous = self._summary(session, q.previous()) if compare_previous else None
@@ -409,14 +487,17 @@ class MetricsStore:
         (keys are agent ids; tool and workflow runs have no agent and are not listed).
         `by="model"`: usage per request model id; `runs`, `completed`, `failed` and
         `needs_attention` count the distinct top-level runs whose requests in the range used that
-        model, by their status; latency is None."""
+        model, by their status; latency is None.
+        `by="operation"`: the same per request operation (OPERATIONS; keys are operation names)."""
         if not 1 <= limit <= MAX_GROUPS:
             raise MetricsRangeError(f"limit must be between 1 and {MAX_GROUPS}")
         if by == "agent":
             return self._by_agent(q, sort, limit)
         if by == "model":
-            return self._by_model(q, sort, limit)
-        raise MetricsRangeError("by must be 'agent' or 'model'")
+            return self._by_request(q, sort, limit, lambda req: req.model_id)
+        if by == "operation":
+            return self._by_request(q, sort, limit, operation_key)
+        raise MetricsRangeError("by must be 'agent', 'model' or 'operation'")
 
     def _by_agent(self, q: MetricsQuery, sort: str, limit: int) -> list[dict[str, Any]]:
         r = aliased(RunModel)
@@ -463,13 +544,16 @@ class MetricsStore:
                 runs_by = {row.key: row for row in session.execute(run_query(keys)).all()}
         return [{"key": k, **_runs_dict(runs_by.get(k)), **_usage_dict(usage_by.get(k))} for k in keys]
 
-    def _by_model(self, q: MetricsQuery, sort: str, limit: int) -> list[dict[str, Any]]:
+    def _by_request(self, q: MetricsQuery, sort: str, limit: int, key_of: Any) -> list[dict[str, Any]]:
+        """Groups of requests by `key_of(req)` (the model id or the operation)."""
         req, rr, conds = _usage_from(q)
+        key = key_of(req)
         top = aliased(RunModel)
         top_id = top.id
         distinct_runs = func.count(func.distinct(top_id))
+        key_label = key.label("key")
         cols = [
-            req.model_id.label("key"),
+            key_label,
             *_usage_columns(req),
             distinct_runs.label("runs"),
             func.count(func.distinct(top_id)).filter(top.status == "completed").label("completed"),
@@ -494,8 +578,9 @@ class MetricsStore:
                 ),
             )
             .where(*conds)
-            .group_by(req.model_id)
-            .order_by(order, req.model_id)
+            # By position: a CASE key's bound parameters would not match between SELECT and GROUP BY.
+            .group_by(literal_column("1"))
+            .order_by(order, key_label)
             .limit(limit)
         )
         with self._session() as session:

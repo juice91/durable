@@ -98,7 +98,9 @@ export interface MetricsKpisProps {
 
 /** The cost change; "no previous priced data" when the previous period had no priced request
  * (a "$0.00" baseline would be misleading), none when nothing is priced now. */
-export function costDelta(cur: MetricValues, prev: MetricValues | null): PeriodDelta | null {
+type CostValues = Pick<MetricValues, "requests" | "unpriced_requests" | "cost_usd">;
+
+export function costDelta(cur: CostValues, prev: CostValues | null): PeriodDelta | null {
   if (!prev || cur.requests <= cur.unpriced_requests) return null;
   if (prev.requests <= prev.unpriced_requests) {
     return { direction: "flat", percent: null, absolute: 0, tone: "neutral", text: "no previous priced data", noPrevious: true };

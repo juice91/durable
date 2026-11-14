@@ -119,6 +119,147 @@ function ProcessorLine({ data }: { data: RunEvent["data"] }) {
   );
 }
 
+// ------------------------------------------------------------------ RAG and memory rows (RM.19)
+//
+// These events carry ids, counts, model and cost only (never memory, chunk or query text); the rows
+// read an allowlist of fields, so nothing else is shown even if an event carried it.
+
+type Fact = [label: string, value: string | null];
+
+function factNumber(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US") : null;
+}
+
+function factText(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function factCost(value: unknown): string | null {
+  const text = factText(value);
+  if (text === null) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? `$${n < 0.01 && n > 0 ? n.toPrecision(2) : n.toFixed(4)}` : null;
+}
+
+function Facts({ title, facts, tone = "normal", testId }: { title: string; facts: Fact[]; tone?: "normal" | "error"; testId: string }) {
+  const shown = facts.filter((f): f is [string, string] => f[1] !== null);
+  return (
+    <div className="text-sm" data-testid={testId}>
+      <span className={tone === "error" ? "font-semibold text-destructive-text" : "font-semibold text-card-foreground"}>{title}</span>
+      {shown.length > 0 && (
+        <span className="mt-1 block break-words text-xs text-muted-foreground">
+          {shown.map(([label, value]) => `${label}: ${value}`).join(" · ")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+const EMBEDDING_STAGE_TITLES: Record<string, string> = { recall: "Semantic recall", index: "Memory index" };
+
+function EmbeddingLine({ data }: { data: RunEvent["data"] }) {
+  const stage = factText(data.stage);
+  const failed = data.status === "failed";
+  const title = `${(stage && EMBEDDING_STAGE_TITLES[stage]) || "Embedding"}${failed ? " failed" : ""}`;
+  return (
+    <Facts
+      testId="event-embedding"
+      title={title}
+      tone={failed ? "error" : "normal"}
+      facts={[
+        ["error", factText(data.error_code)],
+        ["model", factText(data.model_id)],
+        ["dimensions", factNumber(data.dimensions)],
+        ["inputs", factNumber(data.inputs)],
+        ["tokens", failed ? null : factNumber(data.input_tokens)],
+        ["cost", factCost(data.cost_usd)],
+        ["hits", factNumber(data.hits)],
+        ["turns", factNumber(data.turns)],
+        ["messages", factNumber(data.messages)],
+        ["inserted", factNumber(data.inserted)],
+        ["already indexed", factNumber(data.existing)],
+        ["redacted", factNumber(data.redacted)],
+      ]}
+    />
+  );
+}
+
+const INGEST_PHASE_TITLES: Record<string, string> = {
+  chunked: "Document chunked",
+  embedding: "Embedding batch",
+  finalized: "Ingest finalized",
+};
+
+function IngestLine({ data }: { data: RunEvent["data"] }) {
+  const phase = factText(data.phase);
+  const progress =
+    factNumber(data.embedded) !== null && factNumber(data.total) !== null
+      ? `${factNumber(data.embedded)} of ${factNumber(data.total)} sections`
+      : null;
+  return (
+    <Facts
+      testId="event-ingest-progress"
+      title={(phase && INGEST_PHASE_TITLES[phase]) || "Ingest progress"}
+      facts={[
+        ["batch", factNumber(data.batch)],
+        ["embedded", progress],
+        ["chunks", factNumber(data.chunks)],
+        ["model", factText(data.model_id)],
+        ["tokens", factNumber(data.input_tokens)],
+        ["tokens to embed", factNumber(data.pending_tokens)],
+        ["cost", factCost(data.cost_usd)],
+        ["generation", factNumber(data.generation)],
+      ]}
+    />
+  );
+}
+
+function MemoryLine({ data, failed }: { data: RunEvent["data"]; failed: boolean }) {
+  const stage = factText(data.stage);
+  const usage = data.usage && typeof data.usage === "object" ? (data.usage as Record<string, unknown>) : null;
+  const covers =
+    factNumber(data.covers_from_turn) !== null && factNumber(data.covers_to_turn) !== null
+      ? `${factNumber(data.covers_from_turn)} to ${factNumber(data.covers_to_turn)}`
+      : null;
+  if (stage === "observe" || stage === "reflect") {
+    const who = stage === "reflect" ? "Reflector" : "Observer";
+    return (
+      <Facts
+        testId="event-memory-observer"
+        title={failed ? `${who} failed` : stage === "reflect" ? "Observations reflected" : "Observations added"}
+        tone={failed ? "error" : "normal"}
+        facts={[
+          ["error", factText(data.error_code)],
+          ["turns", covers],
+          ["notes", factNumber(data.notes)],
+          ["approx. tokens", factNumber(data.approx_tokens)],
+          ["superseded", factNumber(data.superseded)],
+          ["redacted", factNumber(data.redacted)],
+          ["model", factText(data.model_id)],
+          ["tokens in", usage ? factNumber(usage.input_tokens) : null],
+          ["tokens out", usage ? factNumber(usage.output_tokens) : null],
+          ["cost", factCost(data.cost_usd)],
+        ]}
+      />
+    );
+  }
+  const keys = Array.isArray(data.changed_keys) ? data.changed_keys.filter((k): k is string => typeof k === "string") : [];
+  return (
+    <Facts
+      testId="event-memory-working"
+      title={failed ? "Memory update failed" : "Working memory updated"}
+      tone={failed ? "error" : "normal"}
+      facts={[
+        ["error", factText(data.error_code)],
+        ["scope", factText(data.scope)],
+        ["version", factNumber(data.version)],
+        ["changed", keys.length ? keys.join(", ") : null],
+        ["redacted", factNumber(data.redacted)],
+      ]}
+    />
+  );
+}
+
 function EventItem({ event }: EventItemProps) {
   const renderContent = () => {
     switch (event.type) {
@@ -206,6 +347,14 @@ function EventItem({ event }: EventItemProps) {
         );
       case "processor_result":
         return <ProcessorLine data={event.data} />;
+      case "embedding":
+        return <EmbeddingLine data={event.data} />;
+      case "ingest_progress":
+        return <IngestLine data={event.data} />;
+      case "memory_updated":
+        return <MemoryLine data={event.data} failed={false} />;
+      case "memory_observe_failed":
+        return <MemoryLine data={event.data} failed />;
       default:
         return <JsonBlock value={event.data} />;
     }

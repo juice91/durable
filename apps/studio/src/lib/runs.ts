@@ -106,7 +106,9 @@ export interface RunEvent {
     // Processors (P0.17): one per processor that ran, keyed `processor:{phase}:{i}` (or
     // `processor:output:{i}:model:{n}`). Data: phase, index, processor_type, action, match_counts,
     // reason, categories; never the processed or matched text.
-    | "processor_result";
+    | "processor_result"
+    // RAG and memory (RM.10 to RM.14; rows in RM.19): counts, ids, model and cost, never text.
+    | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed";
   data: RunEventData;
   ts: string;
 }

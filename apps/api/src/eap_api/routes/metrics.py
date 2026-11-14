@@ -7,7 +7,9 @@ counted twice). See eap_run_store.metrics for the exact definitions of every fil
 
 Common query parameters: `from`, `to` (ISO 8601; a value without an offset is UTC; default the last
 7 days ending now), `agent_id`, `model` (our id `provider:name`), `provider`, `kind`
-(`agent` | `tool` | `workflow`). Bounds: `from < to`, a range of at most 90 days, at most 400 time
+(`agent` | `tool` | `workflow` | `kb_ingest`), `operation` (RM.19: `chat` | `moderation` |
+`observer` | `reflector` | `embedding`, a partition of the model requests, or `memory` = observer,
+reflector and the semantic recall and index embeddings). Bounds: `from < to`, a range of at most 90 days, at most 400 time
 buckets, at most 50 breakdown groups; all 422 with a fixed message. A query that exceeds the 5 s
 statement timeout answers 503. `cost_usd` is a decimal string (same form as the run API); latency
 is in milliseconds (float, null when no run in the period has finished); `error_rate` is
@@ -99,7 +101,8 @@ def metrics_query(
     agent_id: uuid.UUID | None = None,
     model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    kind: Literal["agent", "tool", "workflow"] | None = None,
+    kind: Literal["agent", "tool", "workflow", "kb_ingest"] | None = None,
+    operation: Literal["chat", "moderation", "observer", "reflector", "embedding", "memory"] | None = None,
 ) -> MetricsQuery:
     try:
         start, end = resolve_range(from_, to)
@@ -111,6 +114,7 @@ def metrics_query(
             model=model,
             provider=provider,
             kind=kind,
+            operation=operation,
         )
     except MetricsRangeError as exc:
         raise _unprocessable(exc.message)
@@ -124,14 +128,18 @@ def _iso(value: datetime) -> str:
 
 
 def _metrics_json(values: dict[str, Any], only: list[str] | None = None) -> dict[str, Any]:
-    out = {k: (format(v, "f") if k == "cost_usd" else v) for k, v in values.items() if k != "start" and k != "key"}
+    out = {
+        k: (format(v, "f") if k == "cost_usd" else {op: _metrics_json(u) for op, u in v.items()} if k == "operations" else v)
+        for k, v in values.items()
+        if k != "start" and k != "key"
+    }
     if only:
         out = {k: v for k, v in out.items() if k in only}
     return out
 
 
 def _filters_json(q: MetricsQuery) -> dict[str, Any]:
-    return {"agent_id": q.agent_id, "model": q.model, "provider": q.provider, "kind": q.kind}
+    return {"agent_id": q.agent_id, "model": q.model, "provider": q.provider, "kind": q.kind, "operation": q.operation}
 
 
 def _call(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -148,7 +156,10 @@ def metrics_summary(
     q: QueryDep, store: StoreDep, compare: Literal["previous"] | None = None
 ) -> JSONResponse:
     """Totals for `[from, to)` and, with `compare=previous`, for the period of equal length just
-    before it (`previous_from`, `previous_to`; `previous` is null without `compare`)."""
+    before it (`previous_from`, `previous_to`; `previous` is null without `compare`). Each period
+    also has `operations` (RM.19): the usage metrics (requests, tokens, cost_usd, unpriced and
+    unmeasured requests) of each operation (`chat`, `moderation`, `observer`, `reflector`,
+    `embedding`; they sum to the totals) and of `memory`."""
     result = _call(store.summary, q, compare_previous=compare == "previous")
     prev = q.previous()
     return JSONResponse(content={
@@ -189,13 +200,13 @@ def metrics_breakdown(
     q: QueryDep,
     store: StoreDep,
     db: SessionDep,
-    by: Literal["agent", "model"],
+    by: Literal["agent", "model", "operation"],
     sort: Literal["runs", "failed", "requests", "tokens", "cost"] = "runs",
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> JSONResponse:
-    """The top `limit` agents or models by `sort` (descending). Items are `{"key", "label",
-    ...metrics}`: for an agent, `key` is its id and `label` its current name (null if it was
-    deleted); for a model, both are the model id."""
+    """The top `limit` agents, models or operations by `sort` (descending). Items are `{"key",
+    "label", ...metrics}`: for an agent, `key` is its id and `label` its current name (null if it was
+    deleted); for a model or an operation, both are the model id or the operation name."""
     items = _call(store.breakdown, q, by, sort=sort, limit=limit)
     labels: dict[str, str] = {}
     if by == "agent" and items:

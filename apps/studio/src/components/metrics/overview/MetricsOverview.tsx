@@ -3,6 +3,7 @@
 import React from "react";
 import { BreakdownTable } from "../BreakdownTable";
 import { MetricsKpis } from "../MetricsKpis";
+import { OperationKpis } from "../OperationKpis";
 import { RecentFailures } from "./RecentFailures";
 import { breakdownHref } from "../BreakdownTable";
 import {
@@ -81,6 +82,11 @@ export function MetricsOverview({
       ) : (
         <MetricsKpis summary={summary.data} filters={filters} loading={summary.loading} />
       )}
+      {/* RM.19: embedding and memory apart from chat, from the same summary (not while narrowed to
+          one operation: the main KPIs are that operation then). */}
+      {!summary.error && !state.operation ? (
+        <OperationKpis summary={summary.data} loading={summary.loading} state={state} />
+      ) : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <RecentFailures
           runs={failures.data}

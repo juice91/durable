@@ -9,7 +9,9 @@ import {
   presetRange,
   validateRange,
   MAX_BUCKETS,
+  OPERATION_LABELS,
   type MetricsKind,
+  type MetricsOperation,
   type MetricsPageState,
   type RangePreset,
 } from "@/lib/metrics";
@@ -85,7 +87,7 @@ export function MetricsFilterBar({
   const modelOptions = unique([...(state.model ? [state.model] : []), ...models]);
   const providerOptions = unique([...(state.provider ? [state.provider] : []), ...providers]);
   const agentKnown = !state.agent_id || agents.some((a) => a.id === state.agent_id);
-  const active = dimensions && (state.agent_id || state.model || state.provider || state.kind);
+  const active = dimensions && (state.agent_id || state.model || state.provider || state.kind || state.operation);
 
   return (
     <div className="rounded-lg border border-border bg-card p-3" role="group" aria-label="Metrics filters">
@@ -169,6 +171,21 @@ export function MetricsFilterBar({
                 <option value="agent">Agent</option>
                 <option value="workflow">Workflow</option>
                 <option value="tool">Tool</option>
+                <option value="kb_ingest">Knowledge ingest</option>
+              </select>
+            </label>
+            <label className={labelCls}>
+              Operation
+              <select
+                aria-label="Operation"
+                className={control}
+                value={state.operation ?? ""}
+                onChange={(e) => set({ operation: (e.target.value || null) as MetricsOperation | null })}
+              >
+                <option value="">All operations</option>
+                {(Object.keys(OPERATION_LABELS) as MetricsOperation[]).map((op) => (
+                  <option key={op} value={op}>{OPERATION_LABELS[op]}</option>
+                ))}
               </select>
             </label>
           </>

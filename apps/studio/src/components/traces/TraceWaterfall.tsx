@@ -11,7 +11,10 @@ import {
   type SpanStatus,
   type TraceWindow,
 } from "@/lib/traces";
-import { KIND_BADGE, STATUS_BAR, STATUS_LABELS } from "./spanStyles";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { KIND_BADGE, KIND_ICON, KIND_TONE, STATUS_BAR, STATUS_LABELS } from "./spanStyles";
+// The span kind icons use the chart tokens (`.eap-viz` scope below).
+import "@/components/metrics/chartTheme.css";
 
 /** "timeline": each span's bar on the trace's time axis (the waterfall). "tree": the span tree alone. */
 export type SpanTreeMode = "timeline" | "tree";
@@ -58,6 +61,8 @@ const RowItem = memo(function RowItem({
   offsetPct, widthPct, zeroLength, duration, mode, onSelect, onToggle, onKey, registerRef,
 }: RowItemProps) {
   const timeline = mode === "timeline";
+  // A span kind this bundle doesn't know yet (an older tab against a newer API) falls back to the tool icon.
+  const KindIcon = KIND_ICON[kind] ?? KIND_ICON.tool_call;
   return (
     <div
       ref={(el) => registerRef(spanId, el)}
@@ -97,6 +102,12 @@ const RowItem = memo(function RowItem({
         ) : (
           <span className="w-4 shrink-0" aria-hidden="true" />
         )}
+        <KindIcon
+          aria-hidden="true"
+          data-testid="trace-span-kind-icon"
+          strokeWidth={ICON_STROKE_WIDTH}
+          className={`size-3.5 shrink-0 ${KIND_TONE[kind] ?? "text-muted-foreground"}`}
+        />
         <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
           {KIND_BADGE[kind]}
         </span>{" "}
@@ -201,7 +212,7 @@ export function TraceWaterfall({
   const focusId = selectedId && indexById.has(selectedId) ? selectedId : rows[0]?.span.id;
 
   return (
-    <div className="rounded-md border border-border bg-card" data-span-mode={mode}>
+    <div className="eap-viz rounded-md border border-border bg-card" data-span-mode={mode}>
       <div className="flex border-b border-border bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
         {mode === "timeline" ? (
           <>

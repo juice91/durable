@@ -27,12 +27,37 @@ Spans (kind, where they come from, start → end):
   waiting data and the decision. Steps a parallel step's branches ran are nested under that
   parallel step (from the workflow spec, when the caller provides it); all others under the run.
 
+RAG and memory spans (RM.19). Attributes are ids, counts, scores, model, usage and cost only, never
+memory or chunk text; the retrieve span's input and output are the tool call's arguments and
+result, exactly what the `tool_call` span showed before (the model's query and the text it saw):
+- `retrieve`: a `tool_call` of the auto-added `retrieve` tool, or of the hidden `knowledge.search`
+  tool (the search tester's tool run), instead of a `tool_call` span. Attributes add `query`,
+  `knowledge_base` (the model's choice, a name), `top_k` (the tool run's argument, else the only
+  attached knowledge base's), `knowledge_bases` (`[{id, top_k, min_score}]` from the agent version's
+  spec, when the caller provides it), `hits` (the structured sources: n, title, url, ref, kb_id,
+  document_id, document_key, chunk_id, doc_version, score) and `hit_count`.
+- `embedding`: an `embedding` event (`embed:retrieve:{call}` nested under its retrieve span) or an
+  ingest batch (`ingest_progress` `embed:batch:{i}`), from the previous event to it: model,
+  dimensions, inputs, input type, usage and cost from its usage row.
+- `memory_recall` / `memory_index`: the `embedding` event of semantic recall (`embed:recall:{turn}`:
+  hits, turns, groups, messages, counts only) or indexing (`embed:index:{turn}`: inserted,
+  existing, redacted), the same way; `…:failed` keys give an `error` span with its `error_code`.
+- `observer` / `reflector`: a `memory_updated` (`memory:observe|reflect:{turn}`) or
+  `memory_observe_failed` (`…:failed`) event, from the previous event to it, with the chat usage of
+  `memory:{stage}:{turn}`: memory kind, covered turns, approx tokens, notes, redacted, superseded.
+- `working_memory`: a `memory_updated` event of `update_working_memory` (`memory:wm:{call}`),
+  zero length, under its tool call: scope, format, version and the changed keys (schema names).
+- `ingest`: the `chunked` and `finalized` phases of a kb_ingest run (zero length): generation,
+  embedded, total, pending tokens, document id and version.
+
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
 (whose events are idempotent by key) never shows a duplicate span. Spans are listed parents first.
 
 Totals count every model request of the run and its child runs, moderation requests included
-(`moderation_requests` says how many of them were moderation checks).
+(`moderation_requests` says how many of them were moderation checks), embedding calls included
+(`embedding_requests`, with `embedding_input_tokens` and `embedding_cost_usd`; RM.19) and observer
+and reflector requests included (`memory_requests`).
 
 Status: `ok`, `error`, `running` (not finished yet), `waiting` (an approval step waiting for a
 decision) or `incomplete` (never finished, and the run has ended). Run spans keep the run's own
@@ -80,7 +105,11 @@ PAYLOAD_BUDGET_BYTES = 2 * 1024 * 1024
 MIN_PREVIEW_BYTES = 256
 STATEMENT_TIMEOUT_MS = 5000
 
-SPAN_KINDS = ("run", "model_request", "tool_call", "processor", "workflow_step", "child_run")
+SPAN_KINDS = (
+    "run", "model_request", "tool_call", "processor", "workflow_step", "child_run",
+    # RM.19
+    "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
+)
 SPAN_STATUSES = ("ok", "error", "running", "waiting", "incomplete")
 
 class TraceQueryTimeout(Exception):
@@ -96,6 +125,11 @@ class TraceQueryTimeout(Exception):
 
 # (workflow_id, workflow_version) -> that version's spec as stored (a dict), or None.
 WorkflowSpecLoader = Callable[[str, int], "dict[str, Any] | None"]
+# (agent_id, agent_version) -> that version's spec as stored (a dict), or None.
+AgentSpecLoader = Callable[[str, int], "dict[str, Any] | None"]
+
+RETRIEVE_TOOL = "retrieve"
+KNOWLEDGE_SEARCH_TOOL = "knowledge.search"
 
 
 # ---------------------------------------------------------------------------- loading
@@ -117,6 +151,8 @@ class TraceInput:
     children: list[RunData] = field(default_factory=list)
     children_truncated: bool = False
     workflow_spec: dict[str, Any] | None = None
+    # (agent_id, agent_version) -> the spec's knowledge base refs, for runs with a retrieve call.
+    knowledge_refs: dict[tuple[str, int], list[dict[str, Any]]] = field(default_factory=dict)
 
 
 class TraceReader:
@@ -127,7 +163,11 @@ class TraceReader:
         self.statement_timeout_ms = int(STATEMENT_TIMEOUT_MS if statement_timeout_ms is None else statement_timeout_ms)
 
     def read(
-        self, tenant_id: str, run_id: UUID | str, workflow_spec: WorkflowSpecLoader | None = None
+        self,
+        tenant_id: str,
+        run_id: UUID | str,
+        workflow_spec: WorkflowSpecLoader | None = None,
+        agent_spec: AgentSpecLoader | None = None,
     ) -> dict[str, Any] | None:
         data = self.load(tenant_id, run_id)
         if data is None:
@@ -135,6 +175,8 @@ class TraceReader:
         run = data.root.run
         if run["kind"] == "workflow" and workflow_spec is not None and run.get("workflow_id"):
             data.workflow_spec = workflow_spec(run["workflow_id"], run["workflow_version"])
+        if agent_spec is not None:
+            data.knowledge_refs = load_knowledge_refs(data, agent_spec)
         return build_trace(data)
 
     def load(self, tenant_id: str, run_id: UUID | str) -> TraceInput | None:
@@ -215,6 +257,34 @@ class TraceReader:
         return TraceInput(root=loaded[0], children=loaded[1:], children_truncated=children_truncated)
 
 
+def _has_retrieve(rd: RunData) -> bool:
+    return any(e["type"] == "tool_call" and (e.get("data") or {}).get("tool_name") == RETRIEVE_TOOL for e in rd.events)
+
+
+def knowledge_refs_of(spec: Any) -> list[dict[str, Any]]:
+    """`[{id, top_k, min_score}]` of an agent spec's `knowledge_bases` (tolerant of a malformed spec)."""
+    refs = spec.get("knowledge_bases") if isinstance(spec, dict) else None
+    out = []
+    for ref in refs or ():
+        if isinstance(ref, dict) and isinstance(ref.get("id"), str):
+            out.append({"id": ref["id"], "top_k": ref.get("top_k", 8), "min_score": ref.get("min_score")})
+    return out
+
+
+def load_knowledge_refs(data: TraceInput, agent_spec: AgentSpecLoader) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """The knowledge base refs of each agent version whose run in the trace called `retrieve` (one
+    loader call per distinct version; runs without a retrieve call cost nothing)."""
+    refs: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for rd in [data.root, *data.children]:
+        agent_id, version = rd.run.get("agent_id"), rd.run.get("agent_version")
+        if agent_id is None or not isinstance(version, int) or not _has_retrieve(rd):
+            continue
+        key = (str(agent_id), version)
+        if key not in refs:
+            refs[key] = knowledge_refs_of(agent_spec(str(agent_id), version))
+    return refs
+
+
 # ---------------------------------------------------------------------------- building
 
 
@@ -291,6 +361,23 @@ def step_parents(spec: dict[str, Any] | None) -> dict[str, str]:
 
 # processor_result fields shown as span attributes (never the processed or matched text).
 PROCESSOR_ATTRIBUTES = ("processor_type", "action", "reason", "match_counts", "categories")
+# Fields of a retrieve source shown in `hits` (never the chunk text of a knowledge.search hit).
+HIT_ATTRIBUTES = ("n", "title", "url", "ref", "kb_id", "document_id", "document_key", "chunk_id", "doc_version", "score")
+# `embedding` and `ingest_progress` event fields shown as span attributes (ids and counts only).
+EMBEDDING_ATTRIBUTES = (
+    "stage", "model_id", "provider_model_name", "dimensions", "inputs", "input_type", "requests",
+    "usage_measured", "price_source", "hits", "turns", "groups", "messages", "turn", "inserted",
+    "existing", "redacted", "error_code", "batch", "chunks", "filled", "written", "approx_tokens",
+    "embedded", "total",
+)
+INGEST_ATTRIBUTES = ("phase", "generation", "embedded", "total", "pending_tokens", "document_id", "doc_version")
+# `memory_updated` / `memory_observe_failed` fields shown as span attributes (never memory text).
+OBSERVER_ATTRIBUTES = (
+    "stage", "covers_from_turn", "covers_to_turn", "approx_tokens", "notes", "redacted", "prompt_version",
+    "superseded", "error_code",
+)
+WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
+_EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
 _RUN_STATUS = {"completed": "ok", "failed": "error", "needs_attention": "error"}
 
@@ -389,6 +476,10 @@ class _Builder:
             "trace_id": run.get("trace_id"),
             "error": run.get("error"),
         }
+        if run["kind"] == "kb_ingest" or run.get("knowledge_base_id"):
+            attributes["knowledge_base_id"] = run.get("knowledge_base_id")
+            if start_event is not None and isinstance((start_event.get("data") or {}).get("mode"), str):
+                attributes["ingest_mode"] = start_event["data"]["mode"]
         if end_event is not None and end_event["type"] == "run_failed":
             data = end_event.get("data") or {}
             attributes["error_code"] = data.get("error_code")
@@ -466,8 +557,12 @@ class _Builder:
                     for k in ("error", "error_code"):
                         if rdata.get(k) is not None:
                             attrs[k] = rdata[k]
+                span_kind = "tool_call"
+                if data.get("tool_name") == RETRIEVE_TOOL or data.get("tool_id") == KNOWLEDGE_SEARCH_TOOL:
+                    span_kind = "retrieve"
+                    attrs.update(self._retrieve_attributes(rd, data, rdata))
                 self.add(
-                    f"{rid}:tool:{call_id}", run_span, "tool_call", str(data.get("tool_name") or call_id),
+                    f"{rid}:tool:{call_id}", run_span, span_kind, str(data.get("tool_name") or call_id),
                     event["ts"], (result or {}).get("ts"), status, attrs, data.get("args"), out,
                 )
             elif etype == "tool_result":
@@ -476,6 +571,12 @@ class _Builder:
                 )
             elif etype == "processor_result":
                 self._processor(rd, event, run_span)
+            elif etype == "embedding":
+                self._embedding(rd, event, previous, run_span)
+            elif etype == "ingest_progress":
+                self._ingest(rd, event, previous, run_span)
+            elif etype in ("memory_updated", "memory_observe_failed"):
+                self._memory(rd, event, previous, run_span)
             elif etype == "step_started":
                 self._step(rd, event, by_key, run_span, open_status)
             # An output processor checks a response before its model:{n}:final is written: the model
@@ -520,6 +621,133 @@ class _Builder:
         self.add(
             f"{rid}:{key}", run_span, "processor", str(data.get("processor_type") or data.get("type") or key),
             event["ts"], event["ts"], status, attrs,
+        )
+
+    # -- RAG and memory (RM.19)
+
+    def _retrieve_attributes(self, rd: RunData, call: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Query, knowledge base choice, top_k, the spec's refs and the hits (allowlisted fields)."""
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        run = rd.run
+        refs = self.data.knowledge_refs.get((str(run.get("agent_id")), run.get("agent_version")))
+        query = args.get("search_query", args.get("query"))
+        top_k = args.get("top_k")
+        if not isinstance(top_k, int) and refs is not None and len(refs) == 1:
+            top_k = refs[0].get("top_k")
+        sources = result.get("sources")
+        if not isinstance(sources, list):
+            content = result.get("content")
+            sources = content.get("hits") if isinstance(content, dict) else None
+        hits = [
+            {k: h.get(k) for k in HIT_ATTRIBUTES if k in h}
+            for h in (sources if isinstance(sources, list) else ())
+            if isinstance(h, dict)
+        ]
+        attrs: dict[str, Any] = {
+            "query": query if isinstance(query, str) else None,
+            "knowledge_base": args.get("knowledge_base") if isinstance(args.get("knowledge_base"), str) else None,
+            "top_k": top_k if isinstance(top_k, int) else None,
+            "hits": hits,
+            "hit_count": len(hits),
+        }
+        if refs is not None:
+            attrs["knowledge_bases"] = refs
+        return attrs
+
+    def _embedding_usage(self, rd: RunData, key: str, data: dict[str, Any]) -> dict[str, Any]:
+        """`request_key`, model attributes and usage of an embedding call: from its usage row (the
+        event key, without a `:failed` suffix), else the event's own `input_tokens` / `cost_usd`."""
+        base = key.removesuffix(":failed")
+        row = rd.requests.get(key) or rd.requests.get(base)
+        if row is not None:
+            usage, model_attrs = _model_usage(row, data, {})
+            return {"request_key": row["request_key"], **model_attrs, "usage": usage}
+        usage = None
+        if isinstance(data.get("input_tokens"), int) and data.get("status") != "failed":
+            usage = {
+                "input_tokens": data["input_tokens"], "output_tokens": 0, "cache_read_tokens": 0,
+                "cache_write_tokens": 0, "usage_measured": bool(data.get("usage_measured", True)),
+            }
+        return {
+            "request_key": base,
+            "model_id": data.get("model_id"),
+            "provider_model_name": data.get("provider_model_name"),
+            "cost_usd": data.get("cost_usd") if usage is not None else None,
+            "price_source": data.get("price_source"),
+            "usage": usage,
+        }
+
+    def _embedding(self, rd: RunData, event: dict[str, Any], previous: dict[str, Any] | None, run_span: str) -> None:
+        """An `embedding` event: retrieve and search tester (`embedding`, under the retrieve span),
+        semantic recall (`memory_recall`) or indexing (`memory_index`); `:failed` keys are errors."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        stage = data.get("stage")
+        kind = _EMBED_STAGE_KINDS.get(stage, "embedding")
+        failed = data.get("status") == "failed" or key.endswith(":failed")
+        parent = run_span
+        parts = key.split(":")
+        if kind == "embedding" and len(parts) >= 3 and parts[1] == "retrieve":
+            candidate = f"{rid}:tool:{parts[2]}"
+            parent = candidate if candidate in self.ids else run_span
+        attrs: dict[str, Any] = {"event_key": key}
+        attrs.update({k: data[k] for k in EMBEDDING_ATTRIBUTES if k in data})
+        attrs.update(self._embedding_usage(rd, key, data))
+        if failed:
+            attrs["error_code"] = data.get("error_code")
+        name = {"memory_recall": "semantic recall", "memory_index": "memory index"}.get(kind, "embedding")
+        self.add(
+            f"{rid}:{key}", parent, kind, name, (previous or event)["ts"], event["ts"],
+            "error" if failed else "ok", attrs,
+        )
+
+    def _ingest(self, rd: RunData, event: dict[str, Any], previous: dict[str, Any] | None, run_span: str) -> None:
+        """A kb_ingest `ingest_progress` event: an embedding batch (`embedding`, from the previous
+        event) or the chunked / finalized phase (`ingest`, zero length)."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        phase = data.get("phase")
+        if phase == "embedding" or key.startswith("embed:batch:"):
+            attrs: dict[str, Any] = {"event_key": key, "phase": "embedding"}
+            attrs.update({k: data[k] for k in EMBEDDING_ATTRIBUTES if k in data})
+            attrs.update(self._embedding_usage(rd, key, data))
+            batch = data.get("batch") if isinstance(data.get("batch"), int) else _request_index(key.removeprefix("embed:"))
+            self.add(
+                f"{rid}:{key}", run_span, "embedding", f"embedding batch {batch}" if batch is not None else "embedding",
+                (previous or event)["ts"], event["ts"], "ok", attrs,
+            )
+            return
+        attrs = {"event_key": key, **{k: data[k] for k in INGEST_ATTRIBUTES if k in data}}
+        self.add(f"{rid}:{key}", run_span, "ingest", str(phase or key), event["ts"], event["ts"], "ok", attrs)
+
+    def _memory(self, rd: RunData, event: dict[str, Any], previous: dict[str, Any] | None, run_span: str) -> None:
+        """`memory_updated` / `memory_observe_failed`: working memory (`memory:wm:{call}`, under its
+        tool call) or the observer / reflector (`memory:observe|reflect:{turn}[:failed]`)."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        parts = key.split(":")
+        if len(parts) >= 3 and parts[1] == "wm":
+            parent = f"{rid}:tool:{parts[2]}"
+            attrs = {"event_key": key, **{k: data[k] for k in WORKING_MEMORY_ATTRIBUTES if k in data}}
+            self.add(
+                f"{rid}:{key}", parent if parent in self.ids else run_span, "working_memory", "working memory",
+                event["ts"], event["ts"], "ok", attrs,
+            )
+            return
+        stage = data.get("stage") if data.get("stage") in ("observe", "reflect") else (parts[1] if len(parts) > 1 else None)
+        kind = "reflector" if stage == "reflect" else "observer"
+        failed = event["type"] == "memory_observe_failed" or key.endswith(":failed")
+        attrs = {"event_key": key, **{k: data[k] for k in OBSERVER_ATTRIBUTES if k in data}}
+        if isinstance(data.get("kind"), str):
+            attrs["memory_kind"] = data["kind"]
+        request_key = key.removesuffix(":failed")
+        row = rd.requests.get(request_key)
+        if row is not None or "usage" in data:
+            usage, model_attrs = _model_usage(row, data, {})
+            attrs.update(request_key=request_key, **model_attrs, usage=usage)
+        self.add(
+            f"{rid}:{key}", run_span, kind, kind, (previous or event)["ts"], event["ts"],
+            "error" if failed else "ok", attrs,
         )
 
     def _step(
@@ -582,7 +810,9 @@ class _Builder:
     # -- totals
 
     def totals(self) -> dict[str, Any]:
-        model_requests = recorded = unpriced = moderation = 0
+        model_requests = recorded = unpriced = moderation = embeddings = memory = embed_unpriced = 0
+        embed_tokens = 0
+        embed_cost = Decimal(0)
         sums = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
         cost = Decimal(0)
         for rd in [self.data.root, *self.data.children]:
@@ -592,16 +822,25 @@ class _Builder:
                 model_requests += 1
                 if request_key.startswith("moderation:"):
                     moderation += 1
+                if request_key.startswith(("memory:observe:", "memory:reflect:")):
+                    memory += 1
                 row = rd.requests.get(request_key)
                 if row is None:
                     continue
                 recorded += 1
                 for k in sums:
                     sums[k] += int(row.get(k) or 0)
+                is_embedding = row.get("operation") == "embedding"
+                if is_embedding:
+                    embeddings += 1
+                    embed_tokens += int(row.get("input_tokens") or 0)
                 if row.get("cost_usd") is None:
                     unpriced += 1
+                    embed_unpriced += int(is_embedding)
                 else:
                     cost += Decimal(str(row["cost_usd"]))
+                    if is_embedding:
+                        embed_cost += Decimal(str(row["cost_usd"]))
         unrecorded = model_requests - recorded
         no_usage = model_requests > 0 and recorded == 0
         root = self.data.root.run
@@ -614,7 +853,11 @@ class _Builder:
             "runs": 1 + len(self.data.children),
             "model_requests": model_requests,
             "moderation_requests": moderation,
-            "tool_calls": sum(1 for s in self.spans if s["kind"] == "tool_call"),
+            "embedding_requests": embeddings,
+            "memory_requests": memory,
+            "embedding_input_tokens": embed_tokens,
+            "embedding_cost_usd": None if embed_unpriced else format(embed_cost, "f"),
+            "tool_calls": sum(1 for s in self.spans if s["kind"] in ("tool_call", "retrieve")),
             **{k: (None if no_usage else v) for k, v in sums.items()},
             "cost_usd": None if (unpriced or unrecorded) else format(cost, "f"),
             "unpriced_requests": unpriced,
@@ -625,6 +868,8 @@ class _Builder:
 
 
 def _run_name(run: dict[str, Any]) -> str:
+    if run["kind"] == "kb_ingest":
+        return f"knowledge base {run.get('knowledge_base_id')} ingest"
     if run["kind"] == "tool":
         return f"tool {run.get('tool_id')}"
     if run["kind"] == "workflow":
@@ -726,6 +971,9 @@ __all__ = [
     "SPAN_STATUSES",
     "TraceInput",
     "TraceQueryTimeout",
+    "AgentSpecLoader",
+    "knowledge_refs_of",
+    "load_knowledge_refs",
     "TraceReader",
     "build_trace",
     "step_parents",

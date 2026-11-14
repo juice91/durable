@@ -9,9 +9,37 @@ import type { TraceFilters } from "./traces";
 
 // ------------------------------------------------------------------------------------- types
 
-export type MetricsKind = "agent" | "tool" | "workflow";
+export type MetricsKind = "agent" | "tool" | "workflow" | "kb_ingest";
 export type MetricsInterval = "hour" | "day";
-export type BreakdownBy = "agent" | "model";
+export type BreakdownBy = "agent" | "model" | "operation";
+
+/**
+ * What a model request was for (RM.19; the API's `operation`). The first five partition the usage
+ * rows: `embedding` (knowledge base ingest, retrieve, the search tester, semantic recall and index),
+ * and among chat requests `moderation`, `observer`, `reflector` and `chat` (every other model
+ * request). `memory` is a filter only: observer, reflector and the recall and index embeddings.
+ */
+export type MetricsOperation = "chat" | "moderation" | "observer" | "reflector" | "embedding" | "memory";
+
+/** The operations a `by=operation` breakdown returns (a partition of the requests). */
+export const BREAKDOWN_OPERATIONS: readonly Exclude<MetricsOperation, "memory">[] = [
+  "chat", "embedding", "observer", "reflector", "moderation",
+];
+
+/** Filter order and labels. */
+export const OPERATION_LABELS: Record<MetricsOperation, string> = {
+  chat: "Chat",
+  embedding: "Embedding",
+  memory: "Memory (all)",
+  observer: "Observer",
+  reflector: "Reflector",
+  moderation: "Moderation",
+};
+
+/** A breakdown row's name for an operation key (unknown keys as they are). */
+export function operationLabel(key: string): string {
+  return key === "memory" ? "Memory" : (OPERATION_LABELS as Record<string, string>)[key] ?? key;
+}
 export type BreakdownSort = "runs" | "failed" | "requests" | "tokens" | "cost";
 
 /** Every metric the API returns for a period, a bucket or a breakdown group. */
@@ -36,13 +64,24 @@ export interface MetricValues {
   cost_usd: string;
   unpriced_requests: number;
   unmeasured_requests: number;
+  /** Summary periods only (RM.19; absent from older APIs): the usage of each operation (they sum
+   * to the totals) and of `memory`. */
+  operations?: Partial<Record<MetricsOperation, UsageValues>>;
 }
+
+/** The usage half of the metrics (per operation in a summary). */
+export type UsageValues = Pick<
+  MetricValues,
+  "requests" | "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens" | "cost_usd" | "unpriced_requests" | "unmeasured_requests"
+>;
 
 export interface MetricsFilterEcho {
   agent_id: string | null;
   model: string | null;
   provider: string | null;
   kind: MetricsKind | null;
+  /** RM.19 (absent from older APIs). */
+  operation?: MetricsOperation | null;
 }
 
 export interface MetricsSummary {
@@ -84,6 +123,7 @@ export interface MetricsFilters {
   model?: string | null;
   provider?: string | null;
   kind?: MetricsKind | null;
+  operation?: MetricsOperation | null;
 }
 
 // ----------------------------------------------------------------------------- bounds
@@ -96,12 +136,12 @@ export const INTERVAL_MS: Record<MetricsInterval, number> = { hour: HOUR_MS, day
 
 // ------------------------------------------------------------------------ query strings
 
-/** The common query (`from`, `to`, `agent_id`, `model`, `provider`, `kind`); empty values left out. */
+/** The common query (`from`, `to`, `agent_id`, `model`, `provider`, `kind`, `operation`); empty values left out. */
 export function metricsQueryParams(filters: MetricsFilters): URLSearchParams {
   const params = new URLSearchParams();
   params.set("from", filters.from);
   params.set("to", filters.to);
-  for (const key of ["agent_id", "model", "provider", "kind"] as const) {
+  for (const key of ["agent_id", "model", "provider", "kind", "operation"] as const) {
     const value = filters[key];
     if (value) params.set(key, value);
   }
@@ -247,6 +287,8 @@ export interface MetricsPageState {
   model: string | null;
   provider: string | null;
   kind: MetricsKind | null;
+  /** RM.19; optional so states built before it stay valid (absent = no operation filter). */
+  operation?: MetricsOperation | null;
 }
 
 export const DEFAULT_PAGE_STATE: MetricsPageState = {
@@ -255,7 +297,8 @@ export const DEFAULT_PAGE_STATE: MetricsPageState = {
 
 type ParamReader = { get(name: string): string | null };
 
-const KINDS = new Set<string>(["agent", "tool", "workflow"]);
+const KINDS = new Set<string>(["agent", "tool", "workflow", "kb_ingest"]);
+const OPERATIONS = new Set<string>(Object.keys(OPERATION_LABELS));
 const RANGES = new Set<string>(["24h", "7d", "30d", "90d", "custom"]);
 
 export function parsePageState(params: ParamReader | null | undefined): MetricsPageState {
@@ -275,6 +318,7 @@ export function parsePageState(params: ParamReader | null | undefined): MetricsP
   }
   const interval = one("interval");
   const kind = one("kind");
+  const operation = one("operation");
   return {
     range,
     from: range === "custom" ? from : null,
@@ -284,6 +328,8 @@ export function parsePageState(params: ParamReader | null | undefined): MetricsP
     model: one("model"),
     provider: one("provider"),
     kind: kind && KINDS.has(kind) ? (kind as MetricsKind) : null,
+    // Present only when set, so states from before RM.19 compare equal.
+    ...(operation && OPERATIONS.has(operation) ? { operation: operation as MetricsOperation } : {}),
   };
 }
 
@@ -295,7 +341,7 @@ export function pageStateToParams(state: MetricsPageState): URLSearchParams {
     if (state.to) params.set("to", state.to);
   }
   if (state.interval) params.set("interval", state.interval);
-  for (const key of ["agent_id", "model", "provider", "kind"] as const) {
+  for (const key of ["agent_id", "model", "provider", "kind", "operation"] as const) {
     const v = state[key];
     if (v) params.set(key, v);
   }
@@ -308,13 +354,17 @@ export function pageStateToFilters(state: MetricsPageState, now: Date = new Date
     state.range === "custom" && state.from && state.to
       ? { from: state.from, to: state.to }
       : presetRange(state.range === "custom" ? "7d" : state.range, now);
-  return { from, to, agent_id: state.agent_id, model: state.model, provider: state.provider, kind: state.kind };
+  return {
+    from, to, agent_id: state.agent_id, model: state.model, provider: state.provider, kind: state.kind,
+    ...(state.operation ? { operation: state.operation } : {}),
+  };
 }
 
 // ----------------------------------------------------------------------- drill-down
 
 /** A link to the Traces list with the same filters (contract: `agent_id`, `model`, `provider`,
- * `status` comma-separated, `from`, `to`, `kind`), optionally narrowed. */
+ * `status` comma-separated, `from`, `to`, `kind`), optionally narrowed. The Traces list has no
+ * `operation` filter, so an operation is never carried over. */
 export function tracesHref(
   filters: MetricsFilters,
   overrides: Partial<MetricsFilters> & { status?: string[] } = {},
@@ -520,6 +570,16 @@ export function modelFilterOptions(
 /** The Metrics page narrowed to one agent, keeping every other filter (the Top agents drill-down). */
 export function metricsAgentHref(state: MetricsPageState, agentId: string): string {
   return routes.metrics(pageStateToParams({ ...state, agent_id: agentId }));
+}
+
+/** The Metrics page narrowed to one operation, keeping every other filter (RM.19 drill-down). */
+export function metricsOperationHref(state: MetricsPageState, operation: MetricsOperation): string {
+  return routes.metrics(pageStateToParams({ ...state, operation }));
+}
+
+/** Whether `key` is an operation the API's filter takes. */
+export function isMetricsOperation(key: string): key is MetricsOperation {
+  return OPERATIONS.has(key);
 }
 
 /** Run statuses the "Needs attention" panel lists: failed runs and runs that need attention. */

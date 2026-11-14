@@ -10,6 +10,7 @@ import {
   BreakdownTable,
   MetricsCharts,
   MetricsFilterBar,
+  UsageByOperation,
   useAutoRefresh,
   useMetricsQuery,
 } from "@/components/metrics";
@@ -147,7 +148,7 @@ function MetricsView() {
 
   const nothingYet =
     summary.data !== null && summary.data.current.runs === 0 && summary.data.current.requests === 0;
-  const filtered = Boolean(state.agent_id || state.model || state.provider || state.kind);
+  const filtered = Boolean(state.agent_id || state.model || state.provider || state.kind || state.operation);
 
   return (
     <>
@@ -228,6 +229,9 @@ function MetricsView() {
               loading={byModel.loading}
               error={byModel.error}
             />
+
+            {/* RM.19: from the summary's operations split, so no extra request. */}
+            <UsageByOperation summary={summary.data} state={state} />
           </>
         )}
       </div>

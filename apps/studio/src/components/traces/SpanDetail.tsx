@@ -15,6 +15,7 @@ import { PayloadBlock, payloadText } from "./PayloadBlock";
 import { STATUS_LABELS, STATUS_TEXT } from "./spanStyles";
 import type { TraceTab } from "@/lib/routes/observability";
 import { TraceLink } from "./TraceLink";
+import { KnowledgeBaseLink, RAG_SHOWN, RagSpanSection, USAGE_KINDS } from "./RagSpanSections";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -149,7 +150,10 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
   const errorCode = str(a.error_code);
   const approval = a.approval as Record<string, unknown> | undefined;
   const decision = a.decision as Record<string, unknown> | undefined;
-  const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && v !== null && v !== undefined);
+  const ragShown = new Set(RAG_SHOWN[span.kind] ?? []);
+  const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && !ragShown.has(k) && v !== null && v !== undefined);
+  // A model request always shows its usage; the RAG and memory kinds when they carry a model.
+  const showUsage = span.kind === "model_request" || (USAGE_KINDS.has(span.kind) && (str(a.model_id) !== null || a.usage != null));
 
   return (
     <aside aria-label="Span detail" data-testid="span-detail" className="space-y-4 rounded-md border border-border bg-card p-4">
@@ -175,7 +179,8 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
         </div>
       ) : null}
 
-      {span.kind === "model_request" ? <UsageSection span={span} /> : null}
+      {showUsage ? <UsageSection span={span} /> : null}
+      <RagSpanSection span={span} names={names} />
       {span.kind === "run" || span.kind === "child_run" ? <RunUsageSection span={span} /> : null}
 
       {approval ? (
@@ -198,6 +203,7 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
       ) : null}
 
       <Links span={span} />
+      <KnowledgeBaseLink span={span} names={names} />
 
       <PayloadBlock label="Input" value={span.input} truncatedBytes={span.truncated?.input} />
       <PayloadBlock label="Output" value={span.output} truncatedBytes={span.truncated?.output} />
