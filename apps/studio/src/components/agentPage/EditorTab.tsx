@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { MessageSquare } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
@@ -138,15 +138,44 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const latestVersion = versions.reduce((max, v) => Math.max(max, v.version), 0);
   const draftChanged = useMemo(() => (agent ? draftDiffersFromLatest(agent, versions) : false), [agent, versions]);
   // Restore from the compare Sheet: the same flow as a row's "Restore this version".
+  // After a restore from the compare Sheet, focus goes to the "Version N published" notice once the
+  // Sheet has closed and the editor has remounted (the Restore button and the Sheet are gone, so
+  // neither focus return has anywhere to go; the browser check found focus on <body>).
+  const noticeFocusPendingRef = useRef(false);
+  const [noticeFocusTick, setNoticeFocusTick] = useState(0);
   const compareRestore = useVersionRestore({
     agentId: agent?.id,
     latest: latestVersion,
     hasUnsavedEdits: isDirty,
     onRestored: () => {
+      noticeFocusPendingRef.current = true;
       query.closeCompare();
-      void handleRestored();
+      void handleRestored().finally(() => setNoticeFocusTick((tick) => tick + 1));
     },
   });
+  const compareOpen = query.compare !== null;
+  useEffect(() => {
+    if (!noticeFocusPendingRef.current || compareOpen) return;
+    const notice = document.querySelector<HTMLElement>("[data-restore-notice]");
+    if (!notice) return;
+    notice.focus();
+    noticeFocusPendingRef.current = false;
+    // Radix moves focus on a closing Sheet's or dialog's unmount in a timeout: check again after it.
+    const timer = window.setTimeout(() => {
+      const current = document.querySelector<HTMLElement>("[data-restore-notice]");
+      const active = document.activeElement;
+      if (current && (!active || active === document.body || !active.isConnected)) current.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [noticeFocusTick, compareOpen, editorKey, compareRestore.notice]);
+  // The Sheet's own focus return runs when its exit animation ends, which can be after the effect
+  // above: it then focuses the notice itself instead of returning focus to a gone opener (<body>).
+  const onCompareCloseFocus = useCallback((event: Event) => {
+    if (!noticeFocusPendingRef.current) return;
+    event.preventDefault();
+    const notice = document.querySelector<HTMLElement>("[data-restore-notice]");
+    if (notice) notice.focus();
+  }, []);
 
   if (loadError && !agent) {
     return (
@@ -244,7 +273,14 @@ export function EditorTab({ agentId }: { agentId: string }) {
           ),
         }}
       />
-      <CompareSheet agentId={agent.id} compare={query.compare} latest={latestVersion} onClose={query.closeCompare} restore={compareRestore} />
+      <CompareSheet
+        agentId={agent.id}
+        compare={query.compare}
+        latest={latestVersion}
+        onClose={query.closeCompare}
+        restore={compareRestore}
+        onCloseAutoFocus={onCompareCloseFocus}
+      />
       {compareRestore.dialog}
       {guardDialog}
     </div>

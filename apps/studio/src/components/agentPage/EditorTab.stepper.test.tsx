@@ -52,6 +52,9 @@ const version = (n: number, spec: AgentSpec) => ({ agent_id: "a1", version: n, s
 let restoreWidth: () => void = () => undefined;
 beforeEach(() => {
   vi.clearAllMocks();
+  // Some tests give the router a URL-writing implementation; never let it leak into the next one.
+  nav.replace.mockReset();
+  nav.push.mockReset();
   nav.search = "";
   nav.path = routes.agentEditor("a1");
   restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
@@ -471,6 +474,78 @@ describe("SL.11 review fixes", () => {
     await waitFor(() => expect(restoreVersion).toHaveBeenLastCalledWith("a1", 1, { discardDraft: true }));
     expect(await screen.findByText("Version 3 published, restored from v1")).toBeInTheDocument();
     expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1"), { scroll: false });
+  });
+
+  it("after Restore and publish from the compare Sheet, focus lands on the published notice (browser re-check)", async () => {
+    vi.mocked(compareVersions).mockResolvedValue({
+      agent_id: "a1",
+      base: { version: 1, spec: V1, spec_hash: "h1", created_at: null, created_by: null, restored_from: null },
+      target: { version: "draft", spec: DRAFT, spec_hash: "h2", created_at: null, created_by: null, restored_from: null },
+      identical: false, changes: [], truncated: false, instructions_diff: [],
+    } as never);
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...version(3, V1), restored_from: 1 } as never);
+    // The router writes the URL, so closing the compare really closes the Sheet.
+    nav.replace.mockImplementation((href: string) => {
+      nav.search = new URL(href, "http://studio.test").search.replace(/^\?/, "");
+    });
+    nav.search = "compare=1..draft";
+    await renderEditor();
+    const sheet = await screen.findByRole("dialog", { name: "Compare v1 with Draft" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Restore v1" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("a1", 1, { discardDraft: false }));
+    await waitFor(() => expect(api.agents.get).toHaveBeenCalledTimes(2));
+    await screen.findByText("Version 3 published, restored from v1");
+    await waitFor(() => expect(screen.queryByTestId("compare-sheet")).toBeNull());
+    // Let deferred focus moves (Radix's focus scope returns focus in a timeout) run first.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const notice = screen.getByText("Version 3 published, restored from v1");
+    expect(notice).toHaveAttribute("data-restore-notice");
+    expect(notice).toHaveFocus();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("after Restore and publish from a Sheet opened with Compare selected, focus lands on the notice (browser re-check)", async () => {
+    vi.mocked(compareVersions).mockResolvedValue({
+      agent_id: "a1",
+      base: { version: 1, spec: V1, spec_hash: "h1", created_at: null, created_by: null, restored_from: null },
+      target: { version: 2, spec: DRAFT, spec_hash: "h2", created_at: null, created_by: null, restored_from: null },
+      identical: false, changes: [], truncated: false, instructions_diff: [],
+    } as never);
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...version(3, V1), restored_from: 1 } as never);
+    let rerenderPage: () => void = () => undefined;
+    // Like Next's router, a navigation lands after the current work (not synchronously): the
+    // confirm closes first, with the Sheet still open, and the Sheet closes a moment later.
+    nav.replace.mockImplementation((href: string) => {
+      setTimeout(() => {
+        nav.search = new URL(href, "http://studio.test").search.replace(/^\?/, "");
+        act(() => rerenderPage());
+      }, 5);
+    });
+    nav.push.mockImplementation((href: string) => {
+      nav.search = new URL(href, "http://studio.test").search.replace(/^\?/, "");
+      rerenderPage();
+    });
+    const view = await renderEditor();
+    rerenderPage = () => view.rerender(<EditorTab agentId="a1" />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select version 2 for compare" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select version 1 for compare" }));
+    const compareSelected = screen.getByRole("button", { name: "Compare selected" });
+    compareSelected.focus();
+    fireEvent.click(compareSelected);
+    const sheet = await screen.findByTestId("compare-sheet");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Restore v1" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("a1", 1, { discardDraft: false }));
+    await waitFor(() => expect(api.agents.get).toHaveBeenCalledTimes(2));
+    await screen.findByText("Version 3 published, restored from v1");
+    await waitFor(() => expect(screen.queryByTestId("compare-sheet")).toBeNull());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByText("Version 3 published, restored from v1")).toHaveFocus();
   });
 
   it("M7: the dirty-draft 409 offers Discard draft and restore from a row in the stepper", async () => {

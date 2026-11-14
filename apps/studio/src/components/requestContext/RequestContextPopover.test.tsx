@@ -164,7 +164,8 @@ describe("Request context popover (P0.16 page tests, SL.10)", () => {
     fireEvent.change(json, { target: { value: '{"tier": "silver", "seats": 4}' } });
     fireEvent.click(screen.getByRole("button", { name: "Form" }));
     expect(screen.getByLabelText(/Tier/)).toHaveValue("silver");
-    expect(screen.getByLabelText(/Seats/)).toHaveValue(4);
+    // An unbounded integer is a text field (with a numeric keyboard): its value reads as text.
+    expect(screen.getByLabelText(/Seats/)).toHaveValue("4");
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Save as…" })).toBeEnabled(), SLOW);
     await saveAs("Silver team");

@@ -28,8 +28,13 @@ describe("JsonSchemaForm", () => {
     render(<JsonSchemaForm schema={schema} value={{}} onChange={() => undefined} />);
 
     expect(screen.getByLabelText(/Name \*/)).toHaveAttribute("type", "text");
-    expect(screen.getByLabelText(/Count \*/)).toHaveAttribute("step", "1");
-    expect(screen.getByLabelText("Ratio")).toHaveAttribute("type", "number");
+    // Unbounded numbers are text fields with a numeric keyboard (Chrome reports min = max = 0 for a
+    // type=number without bounds; browser re-check). Bounded ones stay spinbuttons (numberBounds test).
+    expect(screen.getByLabelText(/Count \*/)).toHaveAttribute("type", "text");
+    expect(screen.getByLabelText(/Count \*/)).toHaveAttribute("inputmode", "numeric");
+    expect(screen.getByLabelText(/Count \*/)).not.toHaveRole("spinbutton");
+    expect(screen.getByLabelText("Ratio")).toHaveAttribute("type", "text");
+    expect(screen.getByLabelText("Ratio")).toHaveAttribute("inputmode", "decimal");
     expect(screen.getByLabelText("Active")).toHaveAttribute("type", "checkbox");
     expect(screen.getByLabelText("Mode")).toHaveRole("combobox");
     expect(screen.getByLabelText("Tags")).toHaveAttribute("placeholder", "One item per line");

@@ -18,6 +18,9 @@ export interface CompareSheetProps {
   onClose: () => void;
   /** The editor's restore flow (confirm, dirty-draft 409, errors). */
   restore: VersionRestore;
+  /** Close focus handling; `preventDefault()` skips the Sheet's own return (a restore moves focus to
+   * its notice instead). */
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 /** The sides of a compare that can be restored: published versions other than the latest. */
@@ -31,11 +34,11 @@ export function restorableSides(compare: EditorCompare, latest: number): number[
  * restore"): changed fields and the instructions diff (`VersionCompare`), with "Restore vN" for a
  * published side that is not the latest.
  */
-export function CompareSheet({ agentId, compare, latest, onClose, restore }: CompareSheetProps) {
+export function CompareSheet({ agentId, compare, latest, onClose, restore, onCloseAutoFocus }: CompareSheetProps) {
   return (
     <Sheet open={compare !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
       {compare ? (
-        <SheetContent size="wide" aria-describedby={undefined} data-testid="compare-sheet">
+        <SheetContent size="wide" aria-describedby={undefined} data-testid="compare-sheet" onCloseAutoFocus={onCloseAutoFocus}>
           <SheetHeader
             title={compareTitle(compare.base, compare.target)}
             actions={restorableSides(compare, latest).map((version) => (

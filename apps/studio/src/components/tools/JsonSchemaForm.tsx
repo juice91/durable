@@ -33,6 +33,10 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
   idPrefix: string;
 }) {
   const [touched, setTouched] = useState(false);
+  // What was typed into an unbounded number field ("1." on the way to "1.5"): shown while it still
+  // reads as the stored value, so parsing on each keystroke never eats a decimal point. A value set
+  // from outside (JSON mode, a preset) replaces it.
+  const [typed, setTyped] = useState<string | null>(null);
   const label = labelFor(name, schema);
   const id = `${idPrefix}-${path}`;
   const empty = value === undefined || value === null || value === "";
@@ -90,8 +94,13 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
   } else {
     const numeric = schema.type === "number" || schema.type === "integer";
     const bounds = numeric ? numberBounds(schema) : {};
-    control = <input id={id} aria-invalid={Boolean(error)} type={numeric ? "number" : "text"} {...bounds} step={schema.type === "integer" ? 1 : numeric ? "any" : undefined} className={inputClass} value={value == null ? "" : String(value)} onBlur={() => setTouched(true)} onChange={(event) => {
+    // A number with bounds is a spinbutton with them. Without bounds Chrome reports
+    // aria-valuemin=0 and aria-valuemax=0 for type=number, so an unbounded number is a text field
+    // with a numeric keyboard; the number checks above still apply.
+    const spin = numeric && (bounds.min !== undefined || bounds.max !== undefined);
+    control = <input id={id} aria-invalid={Boolean(error)} type={spin ? "number" : "text"} inputMode={numeric && !spin ? (schema.type === "integer" ? "numeric" : "decimal") : undefined} {...bounds} step={spin ? (schema.type === "integer" ? 1 : "any") : undefined} className={inputClass} value={shownText(typed, value)} onBlur={() => setTouched(true)} onChange={(event) => {
       const raw = event.target.value;
+      setTyped(raw);
       if (!numeric || raw === "") onChange(raw);
       else {
         const number = Number(raw);
@@ -150,4 +159,12 @@ export function numberBounds(schema: JsonSchema): { min?: number; max?: number }
   const max = typeof schema.maximum === "number" && Number.isFinite(schema.maximum) ? schema.maximum : undefined;
   if (min !== undefined && max !== undefined && max < min) return {};
   return { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) };
+}
+
+/** The text a field shows: what was typed while it still stands for `value`, else the value. */
+export function shownText(typed: string | null, value: unknown): string {
+  const stored = value == null ? "" : String(value);
+  if (typed === null || typed === stored) return stored;
+  if (typeof value === "number" && typed.trim() !== "" && Number(typed) === value) return typed;
+  return stored;
 }
