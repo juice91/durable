@@ -302,3 +302,28 @@ def test_load_knowledge_refs_only_for_runs_that_retrieved():
     calls.clear()
     assert load_knowledge_refs(plain, loader) == {} and calls == []
     assert knowledge_refs_of(None) == [] and knowledge_refs_of({"knowledge_bases": "x"}) == []
+
+
+def test_retrieve_spans_of_one_turn_show_run_wide_numbers():
+    """Two parallel retrieve calls: the second call's sources continue from the first's (`numbering`
+    "run"), and each span's hits carry those numbers, as the model saw them."""
+    first = [{**SOURCES[0], "n": 1, "numbering": "run"}, {**SOURCES[1], "n": 2, "numbering": "run"}]
+    second = [{**SOURCES[0], "n": 3, "numbering": "run", "chunk_id": "ch9", "title": "Limits"}]
+    rows = [
+        ("start", "run_started", {"input": "refunds and limits"}),
+        ("model:0:final", "model_message", {"model_request": 0, "text": "", "message": {"parts": []}}),
+        ("tool:c1:call", "tool_call", {"tool_call_id": "c1", "tool_name": "retrieve", "args": {"search_query": "refunds"}}),
+        ("tool:c3:call", "tool_call", {"tool_call_id": "c3", "tool_name": "retrieve", "args": {"search_query": "limits"}}),
+        ("tool:c1:result", "tool_result", {"tool_call_id": "c1", "tool_name": "retrieve", "status": "ok",
+                                           "content": "[1] Install\n> a\n\n[2] FAQ\n> b", "sources": first}),
+        ("tool:c3:result", "tool_result", {"tool_call_id": "c3", "tool_name": "retrieve", "status": "ok",
+                                           "content": "[3] Limits\n> c", "sources": second}),
+        ("model:1:final", "model_message", {"model_request": 1, "text": "Refunds [1], limits [3]", "message": {"parts": []}}),
+        ("end", "run_completed", {"output": "Refunds [1], limits [3]"}),
+    ]
+    trace = build_trace(TraceInput(root=RunData(run=_run(), events=_events(rows), requests={})))
+    spans = {s["id"]: s for s in _by_kind(trace)["retrieve"]}
+    assert [h["n"] for h in spans["r1:tool:c1"]["attributes"]["hits"]] == [1, 2]
+    assert [h["n"] for h in spans["r1:tool:c3"]["attributes"]["hits"]] == [3]
+    assert spans["r1:tool:c3"]["attributes"]["hits"][0]["numbering"] == "run"
+    assert spans["r1:tool:c3"]["attributes"]["hits"][0]["title"] == "Limits"

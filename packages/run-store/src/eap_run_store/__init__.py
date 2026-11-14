@@ -41,6 +41,7 @@ from eap_run_store.knowledge import (
     ReindexEstimate,
     ReindexInProgress,
     SearchHit,
+    SearchResult,
     UpsertResult,
     WriteResult,
 )
@@ -107,6 +108,7 @@ __all__ = [
     "ReindexEstimate",
     "ReindexInProgress",
     "SearchHit",
+    "SearchResult",
     "UpsertResult",
     "WriteResult",
     "append_event_in_session",

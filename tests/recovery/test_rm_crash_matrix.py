@@ -30,6 +30,7 @@ asserts:
 | M1 | `after_tool_call` in `update_working_memory`, `load_memory` | the note is written once (version 1, one `memory_updated`, one ledger row) and the turn answers once |
 | O1 | `observer_request`, `after_observation_write` in the post-turn observation of turn 2 | the answer was already delivered (`completed`) at the kill; one observation row, one `memory:observe:2` event and usage row |
 | S1 | `recall_embedding` (pre-turn), `after_memory_index` (post-turn) in conversation B | one `embed:recall:1` and one `embed:index:1` event and usage row, one indexed row per role, and the fact from conversation A recalled |
+| R1 | `after_tool_call` in the SECOND `retrieve` call of a parallel batch (`EAP_CRASH_EVENT_KEY=retrieve:offset:[1-9]*`) | the re-executed call numbers its sources from the first call's (replayed) count again: run-wide numbers 1..k, k+1..; one `embed:retrieve:{id}` event and usage row per call; the answer's `[n]` match the sources |
 """
 
 from __future__ import annotations
@@ -509,3 +510,58 @@ def test_s1_crash_in_semantic_recall(rm: Harness, report: Callable[[str], None],
         if e.type == "embedding":
             assert "pelican" not in json.dumps(e.data), e.event_key
     report(f"RM S1 {crash_at}: one recall and one index event and usage row; 2 index rows; fact recalled")
+
+
+# --------------------------------------------------------------------------- R1: run-wide retrieve numbering
+
+
+def test_r1_crash_in_the_second_retrieve_call_of_a_batch(rm: Harness, report: Callable[[str], None]) -> None:
+    h = rm
+    healthy = start_worker(h, "worker0-healthy")
+    kb_id = create_kb(h)
+    _, _, ingest_run = put_doc(h, kb_id, markdown_doc(4, tag="kb"))
+    h.wait_completed(ingest_run)
+    healthy.stop()
+
+    first = start_worker(h, "worker1-crashing", crash_at="after_tool_call", event_key="retrieve:offset:[1-9]*")
+    spec = {
+        "name": "RAG agent",
+        "instructions": "Answer from the knowledge base.",
+        "model": {"provider": "test", "name": "retrieve-multi"},
+        "tools": [],
+        "knowledge_bases": [{"id": kb_id, "top_k": 2}],
+    }
+    agent_id = h.create_published_agent(spec)
+    run_id = str(uuid.uuid4())
+    rounds = [["Section 0 of the kb handbook", "Section 3 of the kb handbook"]]
+    r = h.post_run(agent_id, run_id, json.dumps({"rounds": rounds}))
+    assert r.status_code == 201, r.text
+    crash(h, first, "after_tool_call")
+    assert h.run_row(run_id)["status"] == "running"
+    before = h.events(run_id)
+    usage_before = usage_rows(h, run_id)
+    calls = [e.data["tool_call_id"] for e in before if e.type == "tool_call"]
+    assert len(calls) == 2, [e.event_key for e in before]
+    # Both calls embedded their query (the second right before the kill); no result is recorded yet.
+    assert [e.event_key for e in before if e.type == "embedding"] == [f"embed:retrieve:{c}" for c in calls]
+    assert not any(e.type == "tool_result" for e in before)
+
+    recover(h, run_id)
+    c1, c2 = calls
+    expected = ["start", "model:0:final", f"tool:{c1}:call", f"tool:{c2}:call", f"embed:retrieve:{c1}",
+                f"embed:retrieve:{c2}", f"tool:{c1}:result", f"tool:{c2}:result", "model:1:final", "end"]
+    events = assert_recovered_once(
+        h, run_id, before=before, usage_before=usage_before, expected_keys=expected,
+        expected_requests={
+            "model:0": ("test:retrieve-multi", "chat"), "model:1": ("test:retrieve-multi", "chat"),
+            f"embed:retrieve:{c1}": ("test:hash", "embedding"), f"embed:retrieve:{c2}": ("test:hash", "embedding"),
+        },
+    )
+    results = [e.data for e in events if e.type == "tool_result"]
+    assert [[s["n"] for s in r["sources"]] for r in results] == [[1, 2], [3, 4]]
+    by_n = {s["n"]: s for r in results for s in r["sources"]}
+    assert results[1]["content"].startswith("[3] ")
+    output = h.run_row(run_id)["output"]
+    for n in (1, 2, 3, 4):
+        assert f"[{n}] {by_n[n]['title']}: {by_n[n]['ref']}" in output, output
+    report(f"RM R1: second retrieve call re-executed, sources numbered 1-2 then 3-4, {len(events)} events")

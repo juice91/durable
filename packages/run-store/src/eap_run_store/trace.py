@@ -367,8 +367,10 @@ def step_parents(spec: dict[str, Any] | None) -> dict[str, str]:
 
 # processor_result fields shown as span attributes (never the processed or matched text).
 PROCESSOR_ATTRIBUTES = ("processor_type", "action", "reason", "match_counts", "categories")
-# Fields of a retrieve source shown in `hits` (never the chunk text of a knowledge.search hit).
-HIT_ATTRIBUTES = ("n", "title", "url", "ref", "kb_id", "document_id", "document_key", "chunk_id", "doc_version", "score")
+# Fields of a retrieve source shown in `hits` (never the chunk text of a knowledge.search hit). `n`
+# is the number the model saw: unique across the run when `numbering` is "run" (each call continues
+# from the run's earlier retrieve calls), per call from 1 in runs recorded before.
+HIT_ATTRIBUTES = ("n", "numbering", "title", "url", "ref", "kb_id", "document_id", "document_key", "chunk_id", "doc_version", "score")
 # `embedding` and `ingest_progress` event fields shown as span attributes (ids and counts only).
 EMBEDDING_ATTRIBUTES = (
     "stage", "model_id", "provider_model_name", "dimensions", "inputs", "input_type", "requests",

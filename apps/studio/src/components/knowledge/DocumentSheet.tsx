@@ -53,6 +53,13 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const onLoadedRef = React.useRef(onLoaded);
   onLoadedRef.current = onLoaded;
+  // The Sheet opens with focus on its title, never on Delete (the first tabbable control).
+  const titleRef = React.useRef<HTMLSpanElement>(null);
+  const focusTitle = (event: Event) => {
+    if (!titleRef.current) return;
+    event.preventDefault();
+    titleRef.current.focus();
+  };
 
   useEffect(() => {
     setLoaded(null);
@@ -122,9 +129,13 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns
   return (
     <Sheet open={documentKey !== null} onOpenChange={onOpenChange}>
       {documentKey !== null ? (
-        <SheetContent size="md" data-testid="knowledge-document-sheet">
+        <SheetContent size="md" data-testid="knowledge-document-sheet" onOpenAutoFocus={focusTitle}>
           <SheetHeader
-            title={doc?.title ?? documentKey}
+            title={
+              <span ref={titleRef} tabIndex={-1} data-testid="knowledge-document-title" className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                {doc?.title ?? documentKey}
+              </span>
+            }
             description={<span className="font-mono">{documentKey}</span>}
             actions={
               doc ? (

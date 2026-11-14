@@ -174,6 +174,7 @@ the database. A replay from before `run_completed` ends there; post-turn events 
 | M1 | `after_tool_call` in `update_working_memory`; `load_memory` | one note version, one `memory_updated` event, one ledger row (`wm:{run}:{call}|{agent}`), one tool result, two chat usage rows |
 | O1 | `observer_request`; `after_observation_write` in turn 2's post-turn observation | the turn was `completed` before the kill; one observation covering turn 1, one `memory:observe:2` event and usage row |
 | S1 | `recall_embedding` (pre-turn); `after_memory_index` (post-turn) | one `embed:recall:1` and one `embed:index:1` event and usage row, one indexed row per role, the fact from another conversation of the same user recalled, and no text in `embedding` events |
+| R1 | `after_tool_call` in the second `retrieve` call of a parallel batch (`EAP_CRASH_EVENT_KEY=retrieve:offset:[1-9]*`, model `test:retrieve-multi`) | the re-executed call numbers its sources after the first call's replayed result again (run-wide 1..2, then 3..4); one `embed:retrieve:{call}` event and usage row per call; every `[n]` in the answer names the source with that number |
 
 Not here: Studio checks (RM.16 to RM.19 are deferred until after the Studio redesign). The
 release note on draining in-flight runs before deploying this milestone is in

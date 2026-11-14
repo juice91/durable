@@ -256,3 +256,67 @@ describe("the letterless-link rule applies whenever the turn called retrieve (br
     expect(links()).toHaveLength(0);
   });
 });
+
+describe("several retrieve calls in one turn: run-wide numbers (milestone browser check, item 1)", () => {
+  const ev = (seq: number, type: RunEvent["type"], data: object): RunEvent => ({ seq, type, data: data as RunEvent["data"], ts: `2026-11-14T10:00:0${seq}Z` });
+  const src = (n: number, title: string, url: string, numbering: "run" | null = "run") => ({
+    n, ...(numbering ? { numbering } : {}), title, url, kb_id: "kb1", document_key: `${title.toLowerCase()}.md`,
+  });
+  /** The repro: two parallel retrieve calls (refunds; API limits); the worker numbers the second call's sources after the first's. */
+  const turn = (sourcesA: object[], sourcesB: object[]) =>
+    new Map(
+      [
+        ...toolCallInfos(
+          [
+            ev(1, "tool_call", { tool_call_id: "a", tool_name: "retrieve", args: { search_query: "refunds" } }),
+            ev(2, "tool_call", { tool_call_id: "b", tool_name: "retrieve", args: { search_query: "pro plan API calls per day" } }),
+            ev(3, "tool_result", { tool_call_id: "a", tool_name: "retrieve", status: "ok", content: "…", sources: sourcesA }),
+            ev(4, "tool_result", { tool_call_id: "b", tool_name: "retrieve", status: "ok", content: "…", sources: sourcesB }),
+          ],
+          false,
+        ),
+      ].map(([id, info]) => [`run-1:${id}`, info]),
+    );
+
+  it("each [n] links to the source the model read under that number, across both calls", () => {
+    const infosOfTurn = turn(
+      [src(1, "Refunds", "https://docs.test/billing#refunds"), src(2, "Refund policy", "https://docs.test/policy#refunds"),
+        src(3, "Invoices", "https://docs.test/billing#invoices"), src(4, "Cards", "https://docs.test/billing#cards")],
+      [src(5, "API limits", "https://docs.test/plans#api-limits"), src(6, "Pro plan", "https://docs.test/plans#pro")],
+    );
+    renderText("Refunds take five days [1][2]. The pro plan allows 10,000 calls per day [5].", infosOfTurn);
+    const byN = Object.fromEntries(links().map((a) => [a.getAttribute("data-citation"), a.getAttribute("href")]));
+    expect(byN).toEqual({
+      "1": "https://docs.test/billing#refunds",
+      "2": "https://docs.test/policy#refunds",
+      "5": "https://docs.test/plans#api-limits",
+    });
+    expect(screen.getAllByTestId("citation-link").find((a) => a.getAttribute("data-citation") === "5")).toHaveAccessibleName("Source 5: API limits");
+  });
+
+  it("citationSourcesForRun: the union of every call's run-numbered sources, in turn order", () => {
+    const map = citationSourcesForRun(turn([src(1, "A", "https://a.test"), src(2, "B", "https://b.test")], [src(3, "C", "https://c.test")]), "run-1");
+    expect([...map!.entries()].map(([n, s]) => [n, s.title])).toEqual([[1, "A"], [2, "B"], [3, "C"]]);
+    // A call that returned nothing does not hide the others.
+    const withEmpty = citationSourcesForRun(turn([src(1, "A", "https://a.test")], []), "run-1");
+    expect([...withEmpty!.keys()]).toEqual([1]);
+  });
+
+  it("old runs (sources without numbering, each call from [1]) keep the last call's sources", () => {
+    const infosOfTurn = turn(
+      [src(1, "Refunds", "https://docs.test/billing#refunds", null), src(2, "Invoices", "https://docs.test/billing#invoices", null)],
+      [src(1, "API limits", "https://docs.test/plans#api-limits", null)],
+    );
+    expect([...citationSourcesForRun(infosOfTurn, "run-1")!.entries()].map(([n, s]) => [n, s.title])).toEqual([[1, "API limits"]]);
+    renderText("Limits [1], refunds [2].", infosOfTurn);
+    expect(links().map((a) => a.getAttribute("href"))).toEqual(["https://docs.test/plans#api-limits"]);
+    expect(screen.getByText(/refunds \[2\]/)).toBeInTheDocument(); // no source [2] in the last call: plain text
+  });
+
+  it("parseSources keeps numbering only when it is \"run\"", () => {
+    expect(parseSources([{ n: 4, numbering: "run", title: "A", url: null }, { n: 1, numbering: "call", title: "B", url: null }])).toEqual([
+      { n: 4, numbering: "run", title: "A", url: null },
+      { n: 1, title: "B", url: null },
+    ]);
+  });
+});

@@ -84,6 +84,9 @@ knowledge base names are read inside the existing get_tools step, and the search
 its `embedding` event and usage row under `embed:retrieve:{tool_call_id}`, then the SQL search)
 runs inside the existing call_tool step, whose result is checkpointed. Its `tool_result` event also
 carries the structured `sources`. A spec without knowledge bases keeps its exact toolset and steps.
+Source numbers are unique across the run: each call continues from the sources the run's earlier
+retrieve calls returned (eap_worker.platform_tools.retrieve_offset; the RetrieveNumbering capability
+is a workflow-side hook around the call_tool step, so it adds no step either).
 
 Working memory and history limits (RM.12; eap_worker.memory): only for a spec with `memory` AND a
 conversation turn. `eap.start_run` also records the conversation's `resource_id` (None for a
@@ -207,7 +210,7 @@ from eap_worker.memory import (
 )
 from eap_worker.observational import observe_after_turn
 from eap_worker.recall import index_after_turn, recall_before_turn
-from eap_worker.platform_tools import check_no_hidden_tools, platform_toolset_for_run
+from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input, usage_record
 from eap_worker.processors import (
@@ -312,6 +315,8 @@ agent: Agent[WorkerDeps, str] = Agent(
     model_settings=ModelSettings(max_retries=0),
     capabilities=[
         ResolveModelId(make_resolver(lambda: get_runtime().settings)),
+        # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
+        RetrieveNumbering(),
         DBOSDurability(
             parallel_execution_mode="sequential",
             event_stream_handler=_publish_deltas,

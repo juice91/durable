@@ -521,3 +521,49 @@ describe("/knowledge/:id", () => {
     expect(await screen.findByTestId("knowledge-not-found")).toBeInTheDocument();
   });
 });
+
+describe("/knowledge/:id sheets (milestone browser check, item 3)", () => {
+  it("the document Sheet opens with focus on its title, never on Delete", async () => {
+    on("GET", /^\/knowledge-bases\/kb1\/documents\/install\.md$/, () => ({ body: doc("install.md") }));
+    await renderDetail();
+    const row = screen.getAllByTestId("knowledge-document-row").find((r) => within(r).queryByText("install"))!;
+    fireEvent.click(within(row).getByRole("button", { name: /install/ }));
+    await act(() => nextRouter.settle());
+    const sheet = await screen.findByTestId("knowledge-document-sheet");
+    await waitFor(() => expect(within(sheet).getByTestId("knowledge-document-title")).toHaveFocus());
+    expect(within(sheet).getByTestId("knowledge-document-delete")).not.toHaveFocus();
+    expect(within(sheet).getByTestId("knowledge-document-title")).toHaveTextContent("install");
+  });
+
+  it("closing the upload Sheet clears its files, metadata and paste form; reopening starts empty", async () => {
+    on("PUT", /\/documents\/[^/]+$/, (url) => {
+      const key = decodeURIComponent(url.pathname.split("/").pop()!);
+      return { status: 202, body: { unchanged: false, created: true, document: doc(key, { status: "pending" }), run_id: `run-${key}` } };
+    });
+    await renderDetail();
+    fireEvent.click(screen.getByTestId("knowledge-upload"));
+    let sheet = await screen.findByTestId("knowledge-upload-sheet");
+    fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), {
+      dataTransfer: { files: [new File(["# Guide"], "guide.md", { type: "text/markdown" }), new File(["%PDF"], "x.pdf", { type: "application/pdf" })] },
+    });
+    fireEvent.change(within(sheet).getByTestId("knowledge-upload-metadata"), { target: { value: "lang: en" } });
+    fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));
+    await waitFor(() => expect(within(sheet).getAllByTestId("knowledge-upload-file").map((r) => r.getAttribute("data-status"))).toEqual(["started", "refused"]));
+    fireEvent.mouseDown(within(sheet).getByTestId("knowledge-upload-tab-paste"));
+    fireEvent.click(within(sheet).getByTestId("knowledge-upload-tab-paste"));
+    fireEvent.change(await within(sheet).findByTestId("knowledge-paste-title"), { target: { value: "FAQ" } });
+
+    const footerClose = within(sheet).getAllByRole("button", { name: "Close" }).find((b) => b.textContent === "Close")!;
+    fireEvent.click(footerClose);
+    await waitFor(() => expect(screen.queryByTestId("knowledge-upload-sheet")).toBeNull());
+
+    fireEvent.click(screen.getByTestId("knowledge-upload"));
+    sheet = await screen.findByTestId("knowledge-upload-sheet");
+    expect(within(sheet).queryAllByTestId("knowledge-upload-file")).toHaveLength(0);
+    expect(within(sheet).getByTestId("knowledge-upload-metadata")).toHaveValue("");
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toBeDisabled();
+    fireEvent.mouseDown(within(sheet).getByTestId("knowledge-upload-tab-paste"));
+    fireEvent.click(within(sheet).getByTestId("knowledge-upload-tab-paste"));
+    expect(await within(sheet).findByTestId("knowledge-paste-title")).toHaveValue("");
+  });
+});

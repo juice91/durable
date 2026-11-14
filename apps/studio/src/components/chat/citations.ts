@@ -1,6 +1,10 @@
 // Citation links in assistant text (RM.16). An agent with knowledge bases gets the `retrieve` tool;
 // the model cites its numbered sources as `[n]`. The turn's `tool_result` event of that call carries
-// the structured sources `{n, title, url, ref, kb_id, document_id, document_key, chunk_id, score}`.
+// the structured sources `{n, numbering, title, url, ref, kb_id, document_id, document_key, chunk_id,
+// score}`. With `numbering: "run"` (worker since the milestone browser check), `n` is unique across
+// the whole turn: a second retrieve call continues from the first call's sources, so a turn with
+// several retrieve calls (e.g. two parallel calls) maps `[n]` over all of them. Older runs number
+// each call from 1; they keep the last call's sources (see citationSourcesForRun).
 //
 // Security rule (RAG plan, RM.16): a citation's link comes ONLY from `sources[n]` of the turn's
 // retrieve results, never from a URL in the model's text. Retrieved text is tenant content and the
@@ -17,6 +21,8 @@ export const RETRIEVE_TOOL_NAME = "retrieve";
 
 export interface CitationSource {
   n: number;
+  /** "run": `n` is unique across the turn's retrieve calls. Absent in runs recorded before. */
+  numbering?: "run";
   title: string;
   url: string | null;
   ref?: string;
@@ -42,6 +48,7 @@ export function parseSources(raw: unknown): CitationSource[] {
     if (typeof n !== "number" || !Number.isInteger(n) || n < 1) continue;
     out.push({
       n,
+      numbering: item.numbering === "run" ? "run" : undefined,
       title: typeof item.title === "string" && item.title ? item.title : `Source ${n}`,
       url: typeof item.url === "string" ? item.url : null,
       ref: typeof item.ref === "string" ? item.ref : undefined,
@@ -58,21 +65,29 @@ export function parseSources(raw: unknown): CitationSource[] {
 
 /**
  * `[n]` → source for one turn, or null when the turn made no retrieve call (its text is then left
- * as it is). The sources are the LAST retrieve call's (in the turn's order) that returned any: each
- * call numbers its sources from 1 and the answer follows the latest results, so earlier calls'
- * numbers are not mixed in (a mixed map could link `[2]` to another call's source). `infos` is the
- * chat's map keyed by `toolCallInfoKey(runId, callId)` = `${runId}:${callId}`.
+ * as it is). `infos` is the chat's map keyed by `toolCallInfoKey(runId, callId)` = `${runId}:${callId}`.
+ *
+ * Run-wide numbers (`numbering: "run"`): the union of every retrieve call's sources in the turn, in
+ * the turn's order (each number names one source; the first wins should two ever share one). This
+ * is what the model saw: with two parallel calls, the first call's sources are [1]..[k] and the
+ * second's [k+1].., so `[1]` and `[k+1]` link to their own documents.
+ *
+ * Older runs (sources without `numbering`): each call numbered its sources from 1, so only the LAST
+ * retrieve call that returned any is used (a mixed map could link `[2]` to another call's source).
  */
 export function citationSourcesForRun(infos: ReadonlyMap<string, ToolCallInfo>, runId: string): Map<number, CitationSource> | null {
   const prefix = `${runId}:`;
   let retrieved = false;
   let latest: CitationSource[] = [];
+  const runWide = new Map<number, CitationSource>();
   for (const [key, info] of infos) {
     if (!key.startsWith(prefix) || !info.sources) continue;
     retrieved = true;
     if (info.sources.length > 0) latest = info.sources;
+    for (const source of info.sources) if (source.numbering === "run" && !runWide.has(source.n)) runWide.set(source.n, source);
   }
   if (!retrieved) return null;
+  if (runWide.size > 0) return runWide;
   const map = new Map<number, CitationSource>();
   for (const source of latest) if (!map.has(source.n)) map.set(source.n, source);
   return map;

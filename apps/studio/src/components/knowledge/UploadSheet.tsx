@@ -91,6 +91,26 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
   const [pasteContent, setPasteContent] = useState("");
   const [pasteMetadata, setPasteMetadata] = useState("");
   const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null);
+  // Closing the Sheet clears it (the file list with its statuses, the metadata, the paste form), so
+  // reopening it in the same visit starts empty. Adjusted during render on the `open` change (no
+  // effect: the reopened Sheet never shows a frame of the old state).
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (!open) {
+      setItems([]);
+      setMetadataText("");
+      setDragging(false);
+      setError(null);
+      setPasteKey("");
+      setPasteTitle("");
+      setPasteFormat("text/markdown");
+      setPasteUrl("");
+      setPasteContent("");
+      setPasteMetadata("");
+      setPasteResult(null);
+    }
+  }
   // Aborted on unmount: no request outlives the Sheet's page, and no state is set after it.
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);

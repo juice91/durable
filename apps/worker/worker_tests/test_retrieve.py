@@ -137,8 +137,9 @@ def test_format_results_numbers_sources_and_caps_at_24_kib():
         "[1] T — https://x.test/a\n> alpha\n\n[2] Second line — kb:doc.md\n> beta\n\n" + RETRIEVE_INSTRUCTION
     )
     assert [s["n"] for s in sources] == [1, 2] and sources[1]["url"] is None and sources[1]["ref"] == "kb:doc.md"
-    assert set(sources[0]) == {"n", "title", "url", "ref", "kb_id", "document_id", "document_key", "chunk_id",
-                               "doc_version", "score"}
+    assert set(sources[0]) == {"n", "numbering", "title", "url", "ref", "kb_id", "document_id", "document_key",
+                               "chunk_id", "doc_version", "score"}
+    assert sources[0]["numbering"] == "run"  # `n` is unique across the run (test_retrieve_numbering.py)
     assert format_results([]) == (NO_RESULTS_TEXT, [])
 
     big = [hit(i, "é" * 7000) for i in range(1, 6)]  # 14 KB of UTF-8 each

@@ -192,14 +192,15 @@ def test_prompt_injected_chunk_text_cannot_change_the_tenant_or_the_knowledge_ba
     ingest(worker, rt, mine, "printer.md", [("Paper jams", f"Paper jams tray two. {injection}")])
 
     calls: list[tuple[str, list[str]]] = []
-    original = KnowledgeStore.search
+    # search_snapshot: the one search entry point (`search` delegates to it).
+    original = KnowledgeStore.search_snapshot
 
     def spy(self, tenant_id, knowledge_base_ids, *args, **kwargs):
         ids = list(knowledge_base_ids)
         calls.append((tenant_id, ids))
         return original(self, tenant_id, ids, *args, **kwargs)
 
-    monkeypatch.setattr(KnowledgeStore, "search", spy)
+    monkeypatch.setattr(KnowledgeStore, "search_snapshot", spy)
     spec = rag_spec({"id": mine["id"]})
     run_id, row = run(worker, client, rt, spec, "paper jams tray two")
     assert row["status"] == "completed", row["error"]

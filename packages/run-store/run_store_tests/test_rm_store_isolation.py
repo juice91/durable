@@ -220,6 +220,8 @@ def _cross_tenant_calls(a: World, b: World, ks: KnowledgeStore, ms: MemoryStore)
         "search": lambda: ks.search(B, [a.kb_id], vec(1), embedding_model=MODEL, top_k=10),
         "search_with_filter": lambda: ks.search(B, [a.kb_id], vec(1), embedding_model=MODEL, top_k=10,
                                                 metadata_filter={"team": "x"}),
+        # Neither hits nor `moved` (A's knowledge base under another model) for B.
+        "search_snapshot": lambda: ks.search_snapshot(B, [a.kb_id], vec(1), embedding_model="test:other", top_k=10),
         # KnowledgeStore writes / deletes
         "update_knowledge_base": lambda: ks.update_knowledge_base(B, a.kb_id, name="pwned"),
         "delete_knowledge_base": lambda: ks.delete_knowledge_base(B, a.kb_id),

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
 from uuid import UUID
@@ -41,13 +41,29 @@ def declared_context(spec: AgentSpec, request_context: dict[str, Any] | None) ->
     return {k: v for k, v in (request_context or {}).items() if k in declared}
 
 
+@dataclass
+class RetrieveTally:
+    """How many sources each retrieve call of the run returned (tool_call_id -> count), filled by
+    the RetrieveNumbering capability (eap_worker.platform_tools) from each call's result.
+
+    It is per workflow EXECUTION, not durable state: WorkerDeps builds a fresh one each time the
+    workflow function runs, and the capability's hook runs in the workflow, outside the call_tool
+    step, so on a replay it is rebuilt from the checkpointed results of the earlier call steps, in
+    the same order (parallel_execution_mode "sequential"). It is only consulted for calls of the
+    CURRENT model response, whose results are not yet in the run's messages."""
+
+    counts: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class WorkerDeps(RunDeps):
     """Run deps for the generic agent: the runtime's RunDeps (with the run's read-only
-    `request_context`) plus the run's spec (published version, or a draft run's snapshot)."""
+    `request_context`) plus the run's spec (published version, or a draft run's snapshot).
+    `retrieve_tally` is per workflow execution (a fresh one per deps), never durable state."""
 
     spec: AgentSpec
     allowed_tools: frozenset[str]
+    retrieve_tally: RetrieveTally = field(default_factory=RetrieveTally, kw_only=True, compare=False, repr=False)
 
 
 class _CrashAfterCallTicketService:

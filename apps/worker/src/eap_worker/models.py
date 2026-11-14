@@ -35,6 +35,10 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  `According to [1] <title>: <url>` from the first numbered source of the result,
                  `No sources found.` for an empty result, and `Retrieve error: <message>` after a tool
                  error or a retry prompt (it never calls again). Without the tool: `Echo: <input>`.
+- `test:retrieve-multi` takes `{"rounds": [[q, ...], ...]}`: one response per round with one
+                 `retrieve` call per query (several calls in one response, like a model's parallel
+                 calls), then answers `Sources: [n] <title>: <url>; ...` with every numbered source
+                 of every retrieve result of the turn, in order. Proves run-wide source numbers.
 - `test:memory` (RM.12) parses `remember <key>=<value>` (any number, values without spaces; a value
                  that parses as JSON is used as such, e.g. `age=42`) and `forget <key>` from the input
                  and, when `update_working_memory` is offered and there is something to change,
@@ -406,6 +410,61 @@ def scripted_retrieve_model() -> FunctionModel:
     return FunctionModel(respond, stream_function=stream, model_name="scripted-retrieve")
 
 
+_SOURCE_LINE = re.compile(r"^\[(\d+)\] (.*) — (\S+)$", re.MULTILINE)
+
+
+def _retrieve_multi_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    """`test:retrieve-multi`: the input is JSON `{"rounds": [[q, ...], ...]}` (each q a query string
+    or retrieve arguments). Round i is one model response with one retrieve call per query (the
+    agent runs them one after another, in order). After the last round it answers `Sources: ` and
+    every numbered source line of every retrieve result of the turn, in result order, as
+    `[n] <title>: <url>` joined by `; ` (`Sources: none` without any)."""
+    offered = {t.name for t in info.function_tools}
+    prompt = _last_prompt(messages)
+    try:
+        request = json.loads(prompt)
+    except ValueError:
+        request = None
+    rounds = request.get("rounds") if isinstance(request, dict) else None
+    if RETRIEVE_TOOL not in offered or not isinstance(rounds, list):
+        return "text", f"Echo: {prompt}"
+    # This turn's messages only: after the last user prompt.
+    start = 0
+    for i, m in enumerate(messages):
+        if isinstance(m, ModelRequest) and any(isinstance(p, UserPromptPart) for p in m.parts):
+            start = i
+    turn = messages[start:]
+    done = sum(
+        1 for m in turn if isinstance(m, ModelResponse) and any(isinstance(p, ToolCallPart) for p in m.parts)
+    )
+    if done < len(rounds):
+        queries = rounds[done] if isinstance(rounds[done], list) else [rounds[done]]
+        return "tools", [q if isinstance(q, dict) else {"search_query": str(q)} for q in queries]
+    lines = [
+        f"[{n}] {title}: {url}"
+        for r in _tool_returns(turn) if r.tool_name == RETRIEVE_TOOL
+        for n, title, url in _SOURCE_LINE.findall(str(r.content))
+    ]
+    return "text", "Sources: " + ("; ".join(lines) if lines else "none")
+
+
+def scripted_retrieve_multi_model() -> FunctionModel:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        kind, value = _retrieve_multi_plan(messages, info)
+        if kind == "tools":
+            return ModelResponse(parts=[ToolCallPart(RETRIEVE_TOOL, args) for args in value])
+        return ModelResponse(parts=[TextPart(value)])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        kind, value = _retrieve_multi_plan(messages, info)
+        if kind == "tools":
+            yield {i: DeltaToolCall(name=RETRIEVE_TOOL, json_args=json.dumps(args)) for i, args in enumerate(value)}
+        else:
+            yield value
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-retrieve-multi")
+
+
 WORKING_MEMORY_TOOL = "update_working_memory"
 _REMEMBER = re.compile(r"\bremember\s+([A-Za-z_][\w.-]*)=(\S+)", re.IGNORECASE)
 _FORGET = re.compile(r"\bforget\s+([A-Za-z_][\w.-]*)", re.IGNORECASE)
@@ -659,6 +718,8 @@ def make_resolver(settings_getter: Any):
                 return scripted_think_tool_model()
             if name == "retrieve":
                 return scripted_retrieve_model()
+            if name == "retrieve-multi":
+                return scripted_retrieve_multi_model()
             if name == "memory":
                 return scripted_memory_model()
             if name == "observer":

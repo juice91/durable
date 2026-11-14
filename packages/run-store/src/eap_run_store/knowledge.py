@@ -521,6 +521,18 @@ class SearchHit:
     score: float  # 1 - cosine distance
 
 
+@dataclass(frozen=True)
+class SearchResult:
+    """`KnowledgeStore.search_snapshot`'s answer: the hits, and `moved`: the requested knowledge bases
+    of the tenant that are, in the same snapshot as the search, under ANOTHER embedding model than
+    the query's (id -> that model). A knowledge base moves when a reindex switches its model between
+    the caller reading its model and the search: the caller re-embeds the query with the new model
+    and searches it again."""
+
+    hits: list[SearchHit]
+    moved: dict[str, str]
+
+
 _UNSET: Any = object()
 
 
@@ -1854,9 +1866,10 @@ class KnowledgeStore:
         top_k: int,
         min_score: float | None,
         metadata_filter: Mapping[str, Any] | None,
-    ) -> tuple[str, str, dict[str, Any]] | None:
-        """(ANN SQL, exact SQL, params) with this transaction's HNSW settings applied, or None when
-        no knowledge base is eligible."""
+    ) -> tuple[tuple[str, str, dict[str, Any]] | None, dict[str, str]]:
+        """((ANN SQL, exact SQL, params) with this transaction's HNSW settings applied, or None when
+        no knowledge base is eligible; the requested knowledge bases of the tenant under another
+        embedding model -> their model)."""
         _require_tenant(tenant_id)
         dims = len(query_embedding)
         if dims not in HNSW_DIMENSIONS:
@@ -1867,7 +1880,7 @@ class KnowledgeStore:
             raise ValueError("min_score must be between 0 and 1")
         ids = sorted({i for i in (_canonical_uuid(k) for k in knowledge_base_ids) if i is not None})
         if not ids:
-            return None
+            return None, {}
         # The tenant's knowledge bases among the ids: another tenant's id simply matches nothing.
         kbs = session.execute(
             text(
@@ -1880,8 +1893,9 @@ class KnowledgeStore:
             if kb["embedding_model"] == embedding_model and kb["dimensions"] != dims:
                 raise EmbeddingDimensionMismatch(embedding_model, kb["dimensions"], dims)
         eligible = [str(kb["id"]) for kb in kbs if kb["embedding_model"] == embedding_model]
+        moved = {str(kb["id"]): str(kb["embedding_model"]) for kb in kbs if kb["embedding_model"] != embedding_model}
         if not eligible:
-            return None
+            return None, moved
         clauses, params = _filter_clauses(metadata_filter)
         ef_search = min(HNSW_MAX_EF_SEARCH, max(MIN_EF_SEARCH, 4 * int(top_k)))
         # SET LOCAL equivalents (bindable): reset when this transaction ends.
@@ -1902,7 +1916,10 @@ class KnowledgeStore:
         if min_score is not None:
             params["max_distance"] = 1.0 - float(min_score)
         with_min = min_score is not None
-        return self._search_sql(dims, clauses, with_min), self._search_sql(dims, clauses, with_min, exact=True), params
+        return (
+            (self._search_sql(dims, clauses, with_min), self._search_sql(dims, clauses, with_min, exact=True), params),
+            moved,
+        )
 
     @staticmethod
     def _active_chunk_count(session, params: Mapping[str, Any], limit: int) -> int:
@@ -1950,14 +1967,38 @@ class KnowledgeStore:
         give no rows (use existing_knowledge_base_ids for the "no longer exists" error). Raises
         EmbeddingDimensionMismatch when a knowledge base of `embedding_model` has other dimensions
         than the query vector, ValueError for unsupported dimensions or top_k."""
+        return self.search_snapshot(
+            tenant_id, knowledge_base_ids, query_embedding, embedding_model=embedding_model, top_k=top_k,
+            min_score=min_score, metadata_filter=metadata_filter,
+        ).hits
+
+    def search_snapshot(
+        self,
+        tenant_id: str,
+        knowledge_base_ids: Iterable[str],
+        query_embedding: Sequence[float],
+        *,
+        embedding_model: str,
+        top_k: int,
+        min_score: float | None = None,
+        metadata_filter: Mapping[str, Any] | None = None,
+    ) -> SearchResult:
+        """`search`, plus which requested knowledge bases are under another embedding model
+        (SearchResult.moved), all read in ONE snapshot: the transaction is REPEATABLE READ and read
+        only, so the knowledge base models, the active generations and the chunks it sees are
+        consistent. A reindex that switches a knowledge base's model while the caller embedded the
+        query is therefore always reported in `moved` (never silently an empty result), and the
+        caller can re-embed with the new model and search again (eap_worker.platform_tools)."""
         with self.Session() as session:
-            prepared = self._prepare_search(
+            # First statement of the transaction: every later statement reads the same snapshot.
+            session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            prepared, moved = self._prepare_search(
                 session, tenant_id, knowledge_base_ids, query_embedding, embedding_model, top_k, min_score,
                 metadata_filter,
             )
             if prepared is None:
                 session.rollback()
-                return []
+                return SearchResult([], moved)
             sql, exact_sql, params = prepared
             rows = session.execute(text(sql), params).mappings().all()
             if len(rows) < int(top_k):
@@ -1965,7 +2006,7 @@ class KnowledgeStore:
                 if limit > 0 and len(rows) < self._active_chunk_count(session, params, limit) <= limit:
                     rows = session.execute(text(exact_sql), params).mappings().all()
             session.commit()
-        return [
+        return SearchResult([
             SearchHit(
                 chunk_id=str(r["id"]),
                 kb_id=str(r["kb_id"]),
@@ -1984,7 +2025,7 @@ class KnowledgeStore:
                 score=1.0 - float(r["distance"]),
             )
             for r in rows
-        ]
+        ], moved)
 
     def explain_search(
         self,
@@ -2004,7 +2045,7 @@ class KnowledgeStore:
         scan, hence `disable_seqscan`). Empty when the search would not query (no eligible
         knowledge base)."""
         with self.Session() as session:
-            prepared = self._prepare_search(
+            prepared, _moved = self._prepare_search(
                 session, tenant_id, knowledge_base_ids, query_embedding, embedding_model, top_k, min_score,
                 metadata_filter,
             )
@@ -2042,6 +2083,7 @@ __all__ = [
     "ReindexEstimate",
     "ReindexInProgress",
     "SearchHit",
+    "SearchResult",
     "UpsertResult",
     "WriteResult",
     "content_hash",

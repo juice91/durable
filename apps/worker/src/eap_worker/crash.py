@@ -10,7 +10,10 @@
 - `after_tool_call`: inside the `tickets.create` tool step, right after the external ticket
   service returned and before `side_effects.complete` and the DBOS step checkpoint (the side
   effect row stays `reserved`). Also inside an MCP tool step (eap_worker.mcp), right after the MCP
-  server answered `tools/call`, at the same point relative to `side_effects.complete`.
+  server answered `tools/call`, at the same point relative to `side_effects.complete`. Also inside
+  the platform `retrieve` call step (eap_worker.platform_tools), after the search and before the
+  checkpoint; there it is filtered by `EAP_CRASH_EVENT_KEY` against `retrieve:offset:{n}` (n: the
+  sources the run's earlier retrieve calls returned), so `retrieve:offset:[1-9]*` targets a later call.
 - `after_tool_run_call`: inside the `eap.tool_call` step of a tool test run (eap_worker.tool_run),
   right after the tool function returned and before its result is recorded (for a side-effecting
   tool: before `side_effects.complete` of the run's `{run_id}:tool` reservation; for any tool:

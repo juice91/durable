@@ -30,10 +30,16 @@ they were before platform tools existed.
   `embedding` event in one transaction (`record_embedding`), so a re-executed call step records it
   once. Retryable provider errors are retried inside the call (read-only, so harmless); any failure
   left becomes a fixed model-visible tool error, logged with a code only.
+- Sources are numbered across the whole run (turn), not per call: a call's sources continue from
+  the sources the run's earlier retrieve calls returned (retrieve_offset, from the run's own
+  messages and, for earlier calls of the same model response, the RetrieveTally the workflow-side
+  RetrieveNumbering capability fills from each call's checkpointed result). So when the model makes
+  several retrieve calls in one turn (in parallel or one after another), every `[n]` names exactly
+  one source, and each structured source carries `numbering: "run"`.
 - The result is at most MAX_RETRIEVE_RESULT_BYTES (24 KiB) of numbered sources,
   `[n] {title} — {anchor_url or "kb:{document_key}"}` each followed by the section text with every
   line quoted as `> ...` (so retrieved text cannot forge a `[n] ... — url` header), then the
-  fixed RETRIEVE_INSTRUCTION. Structured sources `{n, title, url, ref, kb_id, document_id,
+  fixed RETRIEVE_INSTRUCTION. Structured sources `{n, numbering: "run", title, url, ref, kb_id, document_id,
   document_key, chunk_id, doc_version, score}` travel in the ToolReturn's metadata (not sent to the
   model); the workflow copies them into the `tool_result` event as `sources`.
 - The tool is read-only: the call step's result is checkpointed by DBOS, so a replay returns the
@@ -61,14 +67,15 @@ from typing import Annotated, Any
 
 from pydantic import Field
 from pydantic_ai import RunContext, ToolFailed
-from pydantic_ai.messages import ToolReturn
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturn, ToolReturnPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_core import SchemaValidator, core_schema
 
 from eap_observability import log_failure
-from eap_run_store import KnowledgeStore, MemoryStore, SearchHit
+from eap_run_store import KnowledgeStore, MemoryStore, SearchHit, SearchResult
 from eap_runtime import RunDeps, ToolRegistry, UnknownToolError
 from eap_schemas import AgentSpec, EmbeddingDimensionMismatch, EmbeddingModelNotAllowed, KnowledgeBaseNotFound
 from eap_schemas.knowledge import MAX_RETRIEVE_RESULT_BYTES
@@ -80,6 +87,7 @@ from eap_schemas.tools import (
 )
 from eap_worker.crash import crash_point
 from eap_worker.embeddings import EmbeddingCall, embed_query, is_retryable, record_embedding
+from eap_worker.runtime import RetrieveTally
 
 log = logging.getLogger("eap_worker.platform_tools")
 
@@ -288,28 +296,65 @@ async def search_knowledge(
     """Embed `query` once per embedding model, record each call's usage with its `embedding` event
     (exactly once per request key), search every group, merge by score and cut at the largest top_k
     of the searched targets. `models` maps the live knowledge bases' ids to their embedding model
-    (from the tenant's rows: the tenant comes from the caller's trusted deps)."""
+    (from the tenant's rows: the tenant comes from the caller's trusted deps).
+
+    Reindex race: a knowledge base whose embedding model switches between the caller reading
+    `models` and its search would be skipped (its chunks are now under the new model, the query
+    vector under the old one). Each search reads the knowledge bases' models in the SAME snapshot
+    as the chunks (KnowledgeStore.search_snapshot), which reports such a knowledge base in `moved`;
+    those knowledge bases are then searched ONCE more with the query embedded under their new model
+    (the vector reused when the call already embedded that model, else a new embedding under the
+    request key `embed:retrieve:{tool_call_id}:{model}`, which never collides with the call's
+    first keys). A knowledge base that moves again meanwhile is left out (its search is empty), and
+    a failed retry (e.g. the new model no longer allowed) keeps the first pass's hits, logged."""
     plan = plan_searches(targets, models)
     hits: dict[str, SearchHit] = {}
+    vectors: dict[str, list[float]] = {}
     limit = 0
     several = len(plan) > 1
-    for model, groups in plan:
-        call = await _embed_query_retrying(
-            settings, tenant_id=tenant_id, run_id=run_id,
-            request_key=embedding_request_key(tool_call_id, model if several else None),
-            model_id=model, text=query,
-        )
-        await asyncio.to_thread(record_embedding, event_log, tenant_id, run_id, call)
+
+    async def vector_for(model: str, key_model: str | None) -> list[float]:
+        if model not in vectors:
+            call = await _embed_query_retrying(
+                settings, tenant_id=tenant_id, run_id=run_id,
+                request_key=embedding_request_key(tool_call_id, key_model), model_id=model, text=query,
+            )
+            await asyncio.to_thread(record_embedding, event_log, tenant_id, run_id, call)
+            vectors[model] = list(call.vector)
+        return vectors[model]
+
+    async def search_groups(model: str, groups: list[tuple[SearchTarget, list[str]]], vector: list[float]) -> dict[str, str]:
+        """Search each group under `model`; merge the hits; return the knowledge bases that moved."""
+        nonlocal limit
+        moved_now: dict[str, str] = {}
         for settings_of, kb_ids in groups:
             limit = max(limit, settings_of.top_k)
-            found = await asyncio.to_thread(
-                store.search, tenant_id, kb_ids, list(call.vector), embedding_model=model,
+            result: SearchResult = await asyncio.to_thread(
+                store.search_snapshot, tenant_id, kb_ids, vector, embedding_model=model,
                 top_k=settings_of.top_k, min_score=settings_of.min_score,
                 metadata_filter=dict(settings_of.filter) if settings_of.filter else None,
             )
-            for hit in found:
+            for hit in result.hits:
                 if hit.chunk_id not in hits or hits[hit.chunk_id].score < hit.score:
                     hits[hit.chunk_id] = hit
+            moved_now.update(result.moved)
+        return moved_now
+
+    moved: dict[str, str] = {}
+    for model, groups in plan:
+        moved.update(await search_groups(model, groups, await vector_for(model, model if several else None)))
+    if moved:
+        log.info(
+            "retrieve run=%s tool_call=%s knowledge_bases_moved=%d: searched again under their new embedding model",
+            run_id, tool_call_id, len(moved),
+        )
+        for model, groups in plan_searches([t for t in targets if t.kb_id in moved], moved):
+            # Best effort, always under the model-suffixed key: a failure keeps the first pass's hits.
+            try:
+                await search_groups(model, groups, await vector_for(model, model))
+            except Exception as exc:  # noqa: BLE001 - logged with a code only
+                log_failure(log, "retrieve retry under the new embedding model failed", exc,
+                            code=_failure_message(exc)[0], run_id=run_id, tenant_id=tenant_id)
     ordered = sorted(hits.values(), key=lambda h: (-h.score, h.chunk_id))
     return ordered[:limit]
 
@@ -354,10 +399,20 @@ def quote_section(content: str) -> str:
 _LINE_BREAKS = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 
 
-def source_record(n: int, hit: SearchHit) -> dict[str, Any]:
-    """The structured source of `[n]` (tool_result event `sources`; no section text)."""
-    return {
-        "n": n,
+# `numbering` of a structured source: its `n` is unique across the whole run (turn), continuing
+# from the sources earlier retrieve calls of the run returned. Sources without it (runs recorded
+# before) number each call from 1.
+SOURCE_NUMBERING = "run"
+
+
+def source_record(n: int, hit: SearchHit, *, run_numbered: bool = True) -> dict[str, Any]:
+    """The structured source of `[n]` (tool_result event `sources`; no section text). `n` is the
+    number the model sees, unique across the run (`numbering: "run"`; left out for the search
+    tester's single search, `run_numbered=False`)."""
+    record: dict[str, Any] = {"n": n}
+    if run_numbered:
+        record["numbering"] = SOURCE_NUMBERING
+    return record | {
         "title": source_title(hit),
         "url": hit.anchor_url,
         "ref": source_ref(hit),
@@ -370,9 +425,13 @@ def source_record(n: int, hit: SearchHit) -> dict[str, Any]:
     }
 
 
-def format_results(hits: Sequence[SearchHit], max_bytes: int = MAX_RETRIEVE_RESULT_BYTES) -> tuple[str, list[dict[str, Any]]]:
+def format_results(
+    hits: Sequence[SearchHit], max_bytes: int = MAX_RETRIEVE_RESULT_BYTES, *, offset: int = 0
+) -> tuple[str, list[dict[str, Any]]]:
     """(model-visible text, structured sources). At most `max_bytes` UTF-8 bytes in total: numbered
-    sources in score order, each `[n] {title} — {ref}` and its section text quoted line by line
+    sources in score order, numbered from `offset + 1` (the sources earlier retrieve calls of the
+    run returned, retrieve_offset: numbers are unique across the run), each `[n] {title} — {ref}`
+    and its section text quoted line by line
     with `> ` (quote_section: retrieved text cannot forge a source header), then the fixed
     instruction. A source that does not fit whole is cut (with `…`) when there is useful room, and
     nothing after it is included. No hits: NO_RESULTS_TEXT and no sources."""
@@ -384,7 +443,7 @@ def format_results(hits: Sequence[SearchHit], max_bytes: int = MAX_RETRIEVE_RESU
     sources: list[dict[str, Any]] = []
     used = 0
     for hit in hits:
-        n = len(blocks) + 1
+        n = offset + len(blocks) + 1
         head = f"[{n}] {source_title(hit)} — {source_ref(hit)}\n"
         sep = 2 if blocks else 0
         body = quote_section(hit.content)
@@ -405,6 +464,92 @@ def format_results(hits: Sequence[SearchHit], max_bytes: int = MAX_RETRIEVE_RESU
     text = "\n\n".join(blocks) + suffix
     assert len(text.encode("utf-8")) <= max_bytes
     return text, sources
+
+
+# ------------------------------------------------------------------------------- run-wide numbering
+
+
+def retrieve_tally(deps: Any) -> RetrieveTally | None:
+    tally = getattr(deps, "retrieve_tally", None)
+    return tally if isinstance(tally, RetrieveTally) else None
+
+
+def source_count(result: Any) -> int:
+    """The number of structured sources in a retrieve result (a ToolReturn, or a ToolReturnPart of
+    the run's messages); 0 for an error, a retry or anything else."""
+    if isinstance(result, ToolReturnPart):
+        if result.outcome != "success":
+            return 0
+        metadata = result.metadata
+    elif isinstance(result, ToolReturn):
+        metadata = result.metadata
+    else:
+        return 0
+    sources = metadata.get("sources") if isinstance(metadata, dict) else None
+    return len(sources) if isinstance(sources, list) else 0
+
+
+def retrieve_offset(
+    messages: Sequence[ModelMessage], run_id: str | None, tool_call_id: str | None, tally: RetrieveTally | None
+) -> int:
+    """The number of sources the run's retrieve calls BEFORE `tool_call_id` returned: the call's
+    sources are numbered from this + 1, so every `[n]` is unique across the run (turn).
+
+    Deterministic, from checkpointed data only: the run's own messages (`run_id`: pydantic-ai's
+    run id, derived from the DBOS workflow, so earlier turns' history never counts), walked in call
+    order (each model response's retrieve calls, in the response's order: the agent runs them
+    sequentially). A call whose result is in the messages counts its ToolReturnPart's sources; an
+    earlier call of the current response, whose result is not in the messages yet, counts the
+    tally's entry (its checkpointed result). A call missing from both (not expected) counts 0 and
+    is logged. `tool_call_id` not found: every retrieve call of the run counts."""
+    own = [m for m in messages if run_id is None or getattr(m, "run_id", None) == run_id]
+    returned: dict[str, int] = {}
+    for message in own:
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, ToolReturnPart) and part.tool_name == RETRIEVE_TOOL_NAME:
+                    returned[part.tool_call_id] = source_count(part)
+    total = 0
+    for message in own:
+        if not isinstance(message, ModelResponse):
+            continue
+        for part in message.parts:
+            if not isinstance(part, ToolCallPart) or part.tool_name != RETRIEVE_TOOL_NAME:
+                continue
+            if part.tool_call_id == tool_call_id:
+                return total
+            if part.tool_call_id in returned:
+                total += returned[part.tool_call_id]
+            elif tally is not None and part.tool_call_id in tally.counts:
+                total += tally.counts[part.tool_call_id]
+            else:
+                log.warning("retrieve numbering: no result recorded for an earlier call %s", part.tool_call_id)
+    return total
+
+
+@dataclass
+class RetrieveNumbering(AbstractCapability[Any]):
+    """Records each retrieve call's source count in the run's RetrieveTally (see there). Its hook
+    wraps the tool execution in the WORKFLOW, around the DBOS call_tool step, so it adds no step
+    and also sees the checkpointed result when the step is replayed."""
+
+    async def wrap_tool_execute(self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any, handler: Any) -> Any:
+        if call.tool_name != RETRIEVE_TOOL_NAME:
+            return await handler(args)
+        tally = retrieve_tally(ctx.deps)
+        try:
+            result = await handler(args)
+        except BaseException:
+            if tally is not None:
+                tally.counts.setdefault(call.tool_call_id, 0)
+            raise
+        if tally is not None:
+            tally.counts[call.tool_call_id] = source_count(result)
+        return result
+
+    @classmethod
+    def get_serialization_name(cls) -> str | None:
+        return None
 
 
 # ------------------------------------------------------------------------------- retrieve
@@ -502,13 +647,16 @@ class RetrieveTool(PlatformTool):
             code, message = _failure_message(exc)
             log_failure(log, "retrieve failed", exc, code=code, run_id=run_id, tenant_id=tenant_id)
             raise ToolFailed(message) from None
-        text, sources = format_results(hits)
+        offset = retrieve_offset(ctx.messages, ctx.run_id, ctx.tool_call_id, retrieve_tally(deps))
+        text, sources = format_results(hits, offset=offset)
         # Crash-injection tests: the query was embedded (its usage recorded) and searched, and the
-        # call step's result is not yet checkpointed; recovery re-executes the step.
-        crash_point("after_tool_call")
+        # call step's result is not yet checkpointed; recovery re-executes the step. Filtered by
+        # EAP_CRASH_EVENT_KEY against `retrieve:offset:{offset}` (`retrieve:offset:[1-9]*`: a call
+        # after the run's first sources, e.g. the second call of a parallel batch).
+        crash_point("after_tool_call", event_key=f"retrieve:offset:{offset}")
         log.info(
-            "retrieve run=%s tool_call=%s knowledge_bases=%d hits=%d sources=%d bytes=%d",
-            run_id, ctx.tool_call_id, len(targets), len(hits), len(sources), len(text.encode("utf-8")),
+            "retrieve run=%s tool_call=%s knowledge_bases=%d hits=%d sources=%d first_n=%d bytes=%d",
+            run_id, ctx.tool_call_id, len(targets), len(hits), len(sources), offset + 1, len(text.encode("utf-8")),
         )
         return ToolReturn(return_value=text, metadata={"sources": sources})
 
@@ -590,7 +738,7 @@ async def knowledge_search(
         "embedding_model": kb["embedding_model"],
         "hits": [
             {
-                **source_record(n, hit),
+                **source_record(n, hit, run_numbered=False),
                 "document_title": hit.document_title,
                 "heading_path": list(hit.heading_path),
                 "metadata": hit.metadata,
@@ -615,8 +763,11 @@ __all__ = [
     "NO_RESULTS_TEXT",
     "RETRIEVE_INSTRUCTION",
     "RETRIEVAL_FAILED",
+    "SOURCE_NUMBERING",
     "PlatformTool",
     "PlatformToolset",
+    "RetrieveNumbering",
+    "RetrieveTally",
     "RetrieveTool",
     "SearchTarget",
     "check_no_hidden_tools",
@@ -627,5 +778,8 @@ __all__ = [
     "platform_toolset_for_run",
     "register_platform_tools",
     "retrieve_definition",
+    "retrieve_offset",
+    "retrieve_tally",
     "search_knowledge",
+    "source_count",
 ]
