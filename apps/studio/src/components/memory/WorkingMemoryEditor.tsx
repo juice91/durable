@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
+  conflictMessage,
   deleteWorkingMemory,
   getWorkingMemory,
   noteText,
@@ -12,6 +13,7 @@ import {
   errorStatus,
 } from "@/lib/memory";
 import { cn } from "@/lib/cn";
+import { primeWorkingMemory, sharedWorkingMemory } from "@/lib/workingMemoryCache";
 import { Button, focusRing } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toaster";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -149,13 +151,15 @@ export function WorkingMemoryEditor({
   };
   const endEdit = () => setEdit(null);
 
-  const load = useCallback(async (): Promise<WorkingMemoryNote | null | undefined> => {
+  // One read per note and refresh, shared with every other editor of it (lib/workingMemoryCache):
+  // `force` skips a cached answer (a write was seen, Retry, Reload).
+  const load = useCallback(async (force = false): Promise<WorkingMemoryNote | null | undefined> => {
     const request = ++requestRef.current;
-    if (!target) return undefined;
+    if (!target || targetKey === null) return undefined;
     setLoading(true);
     setLoadError(null);
     try {
-      const loaded = await getWorkingMemory(target);
+      const loaded = await sharedWorkingMemory(targetKey, () => getWorkingMemory(target), { force });
       if (request !== requestRef.current) return undefined;
       setNote(loaded);
       return loaded;
@@ -170,24 +174,22 @@ export function WorkingMemoryEditor({
   }, [targetKey]);
 
   // Another note: load it (a draft applies only to its own note, see `edit`; a lifted draft of this
-  // note comes back after a remount).
+  // note comes back after a remount). A memory write was seen (`refreshKey`): read it again. An edit
+  // in progress keeps its text and base version, so saving it against a newer note answers 409
+  // instead of overwriting it. One effect, so a change of both is one read, and its development
+  // re-run (same target and refresh) none.
+  const seenRef = useRef<{ key: string | null; refresh: number } | null>(null);
   useEffect(() => {
-    setNote(null);
-    setSaveError(null);
-    setConflict(null);
-    void load();
-  }, [load]);
-
-  // A memory write was seen: reload. An edit in progress keeps its text and base version, so saving
-  // it against a newer note answers 409 instead of overwriting it.
-  const firstRefresh = useRef(true);
-  useEffect(() => {
-    if (firstRefresh.current) {
-      firstRefresh.current = false;
-      return;
+    const seen = seenRef.current;
+    seenRef.current = { key: targetKey, refresh: refreshKey };
+    if (seen && seen.key === targetKey && seen.refresh === refreshKey) return;
+    if (!seen || seen.key !== targetKey) {
+      setNote(null);
+      setSaveError(null);
+      setConflict(null);
     }
-    void load();
-  }, [refreshKey, load]);
+    void load(Boolean(seen) && seen?.refresh !== refreshKey);
+  }, [targetKey, refreshKey, load]);
 
   const dirty = editing && draft !== original;
   useEffect(() => {
@@ -224,11 +226,12 @@ export function WorkingMemoryEditor({
     setConflict(null);
     try {
       const saved = await putWorkingMemory(target, parsed.content, baseVersion);
+      if (targetKey !== null) primeWorkingMemory(targetKey, saved);
       setNote(saved);
       endEdit();
       toast.success("Working memory saved");
     } catch (error) {
-      if (errorStatus(error) === 409) setConflict(messageOf(error, "The note changed since the edit began."));
+      if (errorStatus(error) === 409) setConflict(conflictMessage(messageOf(error, "")));
       else setSaveError(messageOf(error, "Failed to save working memory."));
     } finally {
       setSaving(false);
@@ -237,7 +240,7 @@ export function WorkingMemoryEditor({
 
   // After a conflict: load the newer note into the editor (the edit has to be applied again).
   const reloadLatest = async () => {
-    const latest = await load();
+    const latest = await load(true);
     if (latest === undefined) return;
     if (latest && formatMismatchReason(latest.format, format)) {
       // The newer note is in the other format: nothing to edit (the read-only view explains).
@@ -258,13 +261,16 @@ export function WorkingMemoryEditor({
     setClearError(null);
     try {
       await deleteWorkingMemory(target, note.version);
+      if (targetKey !== null) primeWorkingMemory(targetKey, null);
       setNote(null);
       endEdit();
       setConfirmClear(false);
       toast.success("Working memory cleared");
     } catch (error) {
-      setClearError(messageOf(error, "Failed to clear working memory."));
-      if (errorStatus(error) === 409) void load();
+      if (errorStatus(error) === 409) {
+        setClearError(conflictMessage(messageOf(error, "")));
+        void load(true);
+      } else setClearError(messageOf(error, "Failed to clear working memory."));
     } finally {
       setClearing(false);
     }
@@ -312,7 +318,7 @@ export function WorkingMemoryEditor({
           <p role="alert" data-testid="memory-working-error" className="text-label text-destructive-text">
             {loadError}
           </p>
-          <Button size="sm" onClick={() => void load()}>
+          <Button size="sm" onClick={() => void load(true)}>
             Retry
           </Button>
         </div>

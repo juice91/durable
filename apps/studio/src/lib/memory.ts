@@ -4,6 +4,7 @@
 // hits, post-turn updates). Routes: apps/api/src/eap_api/routes/memory.py; deleting a conversation is
 // in lib/conversations.ts.
 import { BASE_URL, apiHeaders } from "./api";
+import { resetWorkingMemoryCache } from "./workingMemoryCache";
 
 // ------------------------------------------------------------------------------------- shapes
 
@@ -165,6 +166,20 @@ export async function putWorkingMemory(
   return (await response.json()) as WorkingMemoryNote;
 }
 
+/**
+ * A version conflict (409) in words: the API's detail names the If-Match header ("working memory is
+ * at version 4, not the If-Match version 3; reload it…"), which is not for people.
+ */
+export function conflictMessage(detail: string): string {
+  const match = /(?:does not exist \(version 0\)|is at version (\d+)), not the If-Match version (\d+)/.exec(detail);
+  if (!match) return "The note changed while you were editing it. Reload it and apply your edit again.";
+  const actual = match[1] === undefined ? 0 : Number(match[1]);
+  const expected = Number(match[2]);
+  if (actual === 0) return "The note was cleared while you were editing it. Reload, then apply your edit again.";
+  if (expected === 0) return `A note was written while you were editing (now version ${actual}). Reload it and apply your edit again.`;
+  return `The note changed while you were editing it: it is now version ${actual}, and your edit started from version ${expected}. Reload it and apply your edit again.`;
+}
+
 /** Clear the note (204 also when there was none); 409 when it changed since `ifMatch`. */
 export async function deleteWorkingMemory(target: WorkingMemoryTarget, ifMatch?: number): Promise<void> {
   await call(notePath(target), {
@@ -216,6 +231,9 @@ export async function forgetResource(resourceId: string, options: ForgetOptions)
     ? `/api/v1/agents/${enc(options.agentId)}/memory/resources/${enc(resourceId)}?${query}`
     : `/api/v1/memory/resources/${enc(resourceId)}?${query}`;
   const response = await call(path, { method: "DELETE" });
+  // The user's notes are gone (this agent's, or every agent's, and the deleted conversations'): no
+  // cached read may show one again. Every note is dropped, which covers the tenant-wide forget.
+  resetWorkingMemoryCache();
   return (await response.json()) as ForgetResult;
 }
 

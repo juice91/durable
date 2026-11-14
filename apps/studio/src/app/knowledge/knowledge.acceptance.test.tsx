@@ -500,6 +500,21 @@ describe("live ingest progress: at most 3 streams, polling for the rest", () => 
     await waitFor(() => expect(polled()).toBe(8));
   });
 
+  it("a pending document shows Ingesting as soon as its run stream reports run_started, before the 3 s re-read", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => json(200, { items: [doc("doc1.md", { status: "pending", chunk_count: 0, last_run_id: "run-live-1" }), doc("doc2.md", { status: "pending", chunk_count: 0, last_run_id: "run-live-2" })], next_after: null }));
+    await renderDetail();
+    await waitFor(() => expect(streams.has("run-live-1")).toBe(true));
+    const statuses = () => screen.getAllByTestId("knowledge-document-status").map((el) => [el.getAttribute("data-status"), el.textContent]);
+    expect(statuses()).toEqual([["pending", "Pending"], ["pending", "Pending"]]);
+    act(() => streams.get("run-live-1")!.push({ type: "run_started", data: { kind: "kb_ingest", mode: "ingest" } }));
+    await waitFor(() => expect(statuses()).toEqual([["ingesting", "Ingesting"], ["pending", "Pending"]]));
+    act(() => streams.get("run-live-2")!.push({ type: "ingest_progress", data: { phase: "chunked", embedded: 0, total: 4 } }));
+    await waitFor(() => expect(statuses()).toEqual([["ingesting", "Ingesting"], ["ingesting", "Ingesting"]]));
+    // No document re-read was needed for it.
+    expect(sent("GET", /\/documents\/doc\d\.md$/)).toHaveLength(0);
+  });
+
   it("a followed run that ends re-reads its document at once (ready, with its sections) and stops following it", async () => {
     on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => json(200, { items: inflight(1), next_after: null }));
     on("GET", /^\/knowledge-bases\/kb1\/documents\/doc1\.md$/, () => json(200, doc("doc1.md", { status: "ready", chunk_count: 12, last_run_id: "run-live-1" })));
@@ -577,6 +592,15 @@ describe("documents: retry, deep link, Back, versions, metadata, delete", () => 
     const sheet = await screen.findByTestId("knowledge-document-sheet");
     fireEvent.click(await within(sheet).findByTestId("knowledge-document-show-content"));
     expect(await within(sheet).findByTestId("knowledge-document-content")).toHaveTextContent("# Install Run it.");
+  });
+
+  it("Delete names one section in the singular", async () => {
+    nextRouter.reset(["/knowledge/kb1?doc=install.md"]);
+    on("GET", /^\/knowledge-bases\/kb1\/documents\/install\.md$/, () => json(200, doc("install.md", { chunk_count: 1 })));
+    render(<KeyboardHarness><KnowledgeBasePage /></KeyboardHarness>);
+    const sheet = await screen.findByTestId("knowledge-document-sheet");
+    fireEvent.click(await within(sheet).findByTestId("knowledge-document-delete"));
+    expect(await screen.findByText((_, el) => el?.tagName === "P" && /^Its 1 section is removed from search at once/.test(el.textContent ?? ""))).toBeInTheDocument();
   });
 
   it("Delete asks first (naming the sections), a failure keeps the Sheet and shows why, then it removes the document and closes", async () => {
@@ -850,6 +874,20 @@ describe("deleting a knowledge base", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete knowledge base" }));
     await waitFor(() => expect(deletes()).toHaveLength(1));
     expect(deletes()[0].url.searchParams.get("force")).toBeNull();
+  });
+
+  it("the API's 409 can list a draft-only agent (version null, draft true): it shows as \"(draft)\"", async () => {
+    on("DELETE", /^\/knowledge-bases\/kb1$/, (url) => (url.searchParams.get("force") === "true" ? json(204, null) : json(409, { detail: "attached", agents: [{ agent_id: "a1", agent_name: "Support", version: 3, archived: false, draft: false }, { agent_id: "a3", agent_name: "Drafty", version: null, archived: false, draft: true }] })));
+    const references = await openDelete();
+    await waitFor(() => expect(references).toHaveTextContent("No agent attaches it."));
+    fireEvent.click(screen.getByRole("button", { name: "Delete knowledge base" }));
+    await waitFor(() => expect(screen.getAllByTestId("knowledge-delete-reference")).toHaveLength(2));
+    expect(references).toHaveTextContent("These 2 agents attach it (their latest published version, or their draft)");
+    const [published, draft] = screen.getAllByTestId("knowledge-delete-reference");
+    expect(published).toHaveTextContent("Support v3");
+    expect(draft).toHaveTextContent("Drafty (draft)");
+    expect(draft).not.toHaveTextContent(/v\d|vnull/);
+    expect(within(draft).getByRole("link", { name: "Drafty" })).toHaveAttribute("href", expect.stringContaining("/agents/a3"));
   });
 
   it("when the scan missed it, the API's 409 lists the agents and turns the button into Delete anyway, which forces", async () => {

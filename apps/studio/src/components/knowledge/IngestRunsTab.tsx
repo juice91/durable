@@ -5,7 +5,7 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { TraceLink, useTraceSheet } from "@/components/traces/TraceLink";
 import { Button } from "@/components/ui/Button";
-import { durationBetween, formatDuration } from "@/lib/format";
+import { durationBetween, formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { listKnowledgeBaseRuns, type KnowledgeDocument } from "@/lib/knowledge";
 import type { Run, RunStatus } from "@/lib/runs";
 import { formatWhen } from "./knowledgeUi";
@@ -31,6 +31,32 @@ export function ingestRunMode(run: Pick<Run, "input">, documentTitles: ReadonlyM
   return "Ingest";
 }
 
+/** A kb_ingest run as GET /runs lists it: the run, plus its usage totals (null until it finishes). */
+export type IngestRun = Run & { input_tokens?: number | null; cost_usd?: string | null };
+
+/** What a finished kb_ingest run reports: sections (from its output) and embedding tokens and cost. */
+export interface IngestRunTotals {
+  /** The sections the knowledge base (or document) has after the run; null when not reported. */
+  sections: number | null;
+  /** Embedding tokens sent (the run's usage, else the output's approximate count); null when none. */
+  tokens: number | null;
+  /** The run's embedding cost (a decimal string); null when not recorded or unpriced. */
+  costUsd: string | null;
+}
+
+/** The totals of a kb_ingest run (all null while it runs, or when it failed before reporting). */
+export function ingestRunTotals(run: Pick<IngestRun, "output" | "input_tokens" | "cost_usd">): IngestRunTotals {
+  let output: { chunk_count?: unknown; approx_tokens?: unknown } = {};
+  try {
+    if (run.output) output = JSON.parse(run.output) ?? {};
+  } catch {
+    // Not JSON: no sections reported.
+  }
+  const sections = typeof output.chunk_count === "number" ? output.chunk_count : null;
+  const tokens = typeof run.input_tokens === "number" ? run.input_tokens : typeof output.approx_tokens === "number" ? output.approx_tokens : null;
+  return { sections, tokens, costUsd: run.cost_usd ?? null };
+}
+
 export interface IngestRunsTabProps {
   kbId: string;
   /** Loaded documents, to name each run's document. */
@@ -42,7 +68,7 @@ export interface IngestRunsTabProps {
 /** The knowledge base's kb_ingest runs (ingests and reindexes), newest first; a row opens its trace. */
 export function IngestRunsTab({ kbId, documents, refreshKey = 0 }: IngestRunsTabProps) {
   const sheet = useTraceSheet();
-  const [runs, setRuns] = useState<Run[]>([]);
+  const [runs, setRuns] = useState<IngestRun[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -83,7 +109,7 @@ export function IngestRunsTab({ kbId, documents, refreshKey = 0 }: IngestRunsTab
   const setRunIds = sheet?.setRunIds;
   const onVisible = useCallback((ids: string[]) => setRunIds?.(ids), [setRunIds]);
 
-  const columns: DataListColumn<Run>[] = [
+  const columns: DataListColumn<IngestRun>[] = [
     {
       id: "run",
       header: "Run",
@@ -118,6 +144,45 @@ export function IngestRunsTab({ kbId, documents, refreshKey = 0 }: IngestRunsTab
       cell: (run) => (
         <span className="text-caption tabular-nums text-muted-foreground">
           {TERMINAL.has(run.display_status) ? formatDuration(durationBetween(run.created_at, run.updated_at)) : "in progress"}
+        </span>
+      ),
+    },
+    {
+      id: "sections",
+      header: "Sections",
+      align: "end",
+      className: "hidden whitespace-nowrap sm:table-cell",
+      cell: (run) => {
+        const { sections } = ingestRunTotals(run);
+        return (
+          <span className="text-caption tabular-nums text-muted-foreground" data-testid="knowledge-run-sections">
+            {sections === null ? "—" : sections.toLocaleString("en-US")}
+          </span>
+        );
+      },
+    },
+    {
+      id: "tokens",
+      header: "Tokens",
+      align: "end",
+      className: "hidden whitespace-nowrap lg:table-cell",
+      cell: (run) => {
+        const { tokens } = ingestRunTotals(run);
+        return (
+          <span className="text-caption tabular-nums text-muted-foreground" data-testid="knowledge-run-tokens">
+            {tokens === null ? "—" : formatTokens(tokens)}
+          </span>
+        );
+      },
+    },
+    {
+      id: "cost",
+      header: "Cost",
+      align: "end",
+      className: "hidden whitespace-nowrap md:table-cell",
+      cell: (run) => (
+        <span className="text-caption tabular-nums text-muted-foreground" data-testid="knowledge-run-cost">
+          {formatCost(ingestRunTotals(run).costUsd) ?? "—"}
         </span>
       ),
     },

@@ -84,6 +84,7 @@ import { agentHasMemory, latestPublishedSpec, readActAs, writeActAs } from "@/co
 import { useMemoryActivity, type LatestTurn } from "@/components/memory/useMemoryActivity";
 import { draftDirty, targetKeyOf, type WorkingMemoryDraft, type WorkingMemoryDraftStore } from "@/components/memory/WorkingMemoryEditor";
 import { inspectorTarget } from "@/components/memory/MemoryInspector";
+import { primeWorkingMemory } from "@/lib/workingMemoryCache";
 import { WorkingMemoryGuard } from "@/components/memory/WorkingMemoryGuard";
 import { WORKING_MEMORY_GUARD_COPY } from "@/components/memory/memoryModel";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -410,6 +411,9 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
           ) {
             setRunActive(false);
           }
+          // Ended on the run's terminal status without an end event: the rail still shows the turn
+          // as queued or running (the end events refresh it above).
+          if (reason === "terminal_status") refreshRail();
         },
       };
       unsubscribeRef.current =
@@ -761,7 +765,10 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             // conversation's resource id, for new conversations only (it never changes after).
             const created = await createConversation(selectedAgentId, null, crypto.randomUUID(), newConversationUser || null);
             id = created.id;
-            pendingConversationRef.current = { agentId: selectedAgentId, id, actAs: newConversationUser, resourceId: created.resource_id ?? null, refused: false };
+            // A conversation just created has no conversation-scoped note: the inspector needs no
+            // read (a 404) until the turn writes one (`memory_updated` forces it).
+            primeWorkingMemory(targetKeyOf({ scope: "conversation", conversationId: id })!, null);
+            pendingConversationRef.current ={ agentId: selectedAgentId, id, actAs: newConversationUser, resourceId: created.resource_id ?? null, refused: false };
           }
           createdResourceId = pendingConversationRef.current?.id === id ? pendingConversationRef.current.resourceId : null;
           // A reused conversation's start is in flight again: not discardable until it is refused.

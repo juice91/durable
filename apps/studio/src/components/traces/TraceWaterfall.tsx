@@ -85,7 +85,7 @@ const RowItem = memo(function RowItem({
         selected ? "bg-accent text-accent-foreground" : "hover:bg-muted/60"
       }`}
     >
-      <div className={`flex ${timeline ? "w-2/5 shrink-0" : "min-w-0 flex-1"} items-center gap-1 overflow-hidden pr-2`} style={{ paddingLeft: `${depth * 16}px` }}>
+      <div className={`flex ${timeline ? "min-w-0 flex-1 sm:w-2/5 sm:flex-none sm:shrink-0" : "min-w-0 flex-1"} items-center gap-1 overflow-hidden pr-2`} style={{ paddingLeft: `${depth * 16}px` }}>
         {expandable ? (
           <button
             type="button"
@@ -112,12 +112,16 @@ const RowItem = memo(function RowItem({
           {KIND_BADGE[kind]}
         </span>{" "}
         <span className="truncate" title={label}>{label}</span>{" "}
-        {timeline ? null : (
+        {timeline ? (
+          // The bar shows the status; below sm it is hidden, so the dot stands in for it.
+          <span data-testid="trace-span-dot-narrow" className={`ml-1 inline-block size-2 shrink-0 rounded-full sm:hidden ${STATUS_BAR[status]}`} aria-hidden="true" />
+        ) : (
           <span data-testid="trace-span-dot" className={`ml-1 inline-block size-2 shrink-0 rounded-full ${STATUS_BAR[status]}`} aria-hidden="true" />
         )}
       </div>
       {timeline ? (
-      <div className="relative h-5 min-w-0 flex-1" aria-hidden="true">
+      // Below sm the bar column is hidden: at 390 px it left the name a few characters ("Mo…").
+      <div data-testid="trace-span-timeline" className="relative hidden h-5 min-w-0 flex-1 sm:block" aria-hidden="true">
         <div className="absolute inset-y-2 left-0 right-0 rounded bg-muted/40" />
         {zeroLength ? (
           <div
@@ -134,7 +138,7 @@ const RowItem = memo(function RowItem({
         )}
       </div>
       ) : null}{" "}
-      <div className="w-24 shrink-0 whitespace-nowrap pl-2 text-right font-mono text-xs text-muted-foreground">{duration}</div>
+      <div className="w-20 shrink-0 whitespace-nowrap pl-2 text-right font-mono text-xs text-muted-foreground sm:w-24">{duration}</div>
     </div>
   );
 });
@@ -216,11 +220,12 @@ export function TraceWaterfall({
       <div className="flex border-b border-border bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
         {mode === "timeline" ? (
           <>
-            <div className="w-2/5 shrink-0">Span</div>
-            <div className="flex min-w-0 flex-1 justify-between">
+            <div className="min-w-0 flex-1 sm:w-2/5 sm:flex-none sm:shrink-0">Span</div>
+            <div className="hidden min-w-0 flex-1 justify-between sm:flex">
               <span>0 ms</span>
               <span>{formatDuration(window?.durationMs ?? null)}</span>
             </div>
+            <div className="w-20 shrink-0 whitespace-nowrap text-right sm:hidden">{formatDuration(window?.durationMs ?? null)}</div>
           </>
         ) : (
           <>

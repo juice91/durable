@@ -124,7 +124,7 @@ export function KnowledgeStep({ spec, onSpecChange }: StepProps) {
           </ul>
         )}
         <p className={hintClass} aria-live="polite" data-testid="knowledge-count">
-          {refs.length} of {MAX_KNOWLEDGE_BASES_PER_AGENT} attached
+          {refs.length} attached (max {MAX_KNOWLEDGE_BASES_PER_AGENT})
         </p>
         {problemFor("list") ? <p className={problemClass}>{problemFor("list")}</p> : null}
       </fieldset>

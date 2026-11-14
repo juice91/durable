@@ -109,6 +109,68 @@ export interface TraceTotals {
   memory_requests?: number;
   embedding_input_tokens?: number;
   embedding_cost_usd?: string | null;
+  /** RM.19 follow-up (absent from older APIs): the usage split by operation. `chat_*` is the agent's
+   * model only; chat + memory + moderation + embedding input tokens equal `input_tokens`. Tokens are
+   * null when the group had requests but none was recorded; a cost is null when one is unpriced. */
+  chat_requests?: number;
+  chat_input_tokens?: number | null;
+  chat_output_tokens?: number | null;
+  chat_cost_usd?: string | null;
+  memory_input_tokens?: number | null;
+  memory_output_tokens?: number | null;
+  memory_cost_usd?: string | null;
+  moderation_input_tokens?: number | null;
+  moderation_output_tokens?: number | null;
+  moderation_cost_usd?: string | null;
+}
+
+/** One non-chat group of a usage split (memory: observer and reflector; moderation; embedding). */
+export interface UsageGroup {
+  id: "memory" | "moderation" | "embedding";
+  label: string;
+  inputTokens: number | null;
+  /** Embeddings have no output tokens: null. */
+  outputTokens: number | null;
+  /** Undefined where the source carries no cost (a run span); null when unpriced. */
+  costUsd?: string | null;
+}
+
+export interface UsageSplit {
+  chat: { inputTokens: number | null; outputTokens: number | null; costUsd?: string | null };
+  /** The other groups that used any tokens (or had requests), in a fixed order. */
+  others: UsageGroup[];
+}
+
+const GROUP_LABELS = { memory: "Memory (observer, reflector)", moderation: "Moderation", embedding: "Embedding" } as const;
+
+function tokenField(source: Record<string, unknown>, key: string): number | null {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The usage split of trace totals or a run span's attributes, or null when the response predates it
+ * (no `chat_input_tokens` key): callers then show the combined tokens as before. A group is listed
+ * when it has tokens, a cost, or requests (`{group}_requests` on the totals).
+ */
+export function usageSplit(source: Record<string, unknown> | null | undefined): UsageSplit | null {
+  if (!source || !("chat_input_tokens" in source)) return null;
+  const cost = (key: string): string | null | undefined => (key in source ? (typeof source[key] === "string" ? (source[key] as string) : null) : undefined);
+  const others: UsageGroup[] = [];
+  for (const id of ["memory", "moderation", "embedding"] as const) {
+    const inputTokens = tokenField(source, `${id}_input_tokens`);
+    const outputTokens = id === "embedding" ? null : tokenField(source, `${id}_output_tokens`);
+    const costUsd = cost(`${id}_cost_usd`);
+    const requests = tokenField(source, `${id}_requests`) ?? 0;
+    const used = (inputTokens ?? 0) > 0 || (outputTokens ?? 0) > 0 || requests > 0;
+    if (!used) continue;
+    others.push({ id, label: GROUP_LABELS[id], inputTokens, outputTokens, ...(costUsd !== undefined ? { costUsd } : {}) });
+  }
+  const chatCost = cost("chat_cost_usd");
+  return {
+    chat: { inputTokens: tokenField(source, "chat_input_tokens"), outputTokens: tokenField(source, "chat_output_tokens"), ...(chatCost !== undefined ? { costUsd: chatCost } : {}) },
+    others,
+  };
 }
 
 export interface TraceTruncation {

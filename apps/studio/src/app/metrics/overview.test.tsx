@@ -92,6 +92,20 @@ describe("Metrics Overview", () => {
     vi.unstubAllEnvs();
   });
 
+  it("an operation filter: Needs attention lists no runs (runs have no operation), says why, and links without a count", async () => {
+    search = "operation=observer";
+    mockFetch(okResponder);
+    render(<MetricsPage />);
+    const panel = await screen.findByTestId("recent-failures");
+    await waitFor(() => expect(callsTo("/summary").length).toBeGreaterThan(0));
+    expect(within(panel).getByTestId("recent-failures-operation")).toHaveTextContent("while the Observer filter is on");
+    expect(within(panel).queryAllByTestId("recent-failure")).toHaveLength(0);
+    expect(within(panel).getByTestId("recent-failures-all")).toHaveTextContent("View failed runs in Traces");
+    expect(within(panel).getByTestId("recent-failures-all")).not.toHaveTextContent(/View all \d/);
+    // No runs request for the panel while it cannot list them.
+    expect(calls.filter((u) => u.pathname === "/api/v1/runs")).toHaveLength(0);
+  });
+
   it("shows KPI cards with deltas, trends, top agents and the runs that need attention from the API", async () => {
     mockFetch(okResponder);
     render(<MetricsPage />);

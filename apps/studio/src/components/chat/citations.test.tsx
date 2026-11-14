@@ -227,3 +227,32 @@ describe("source extraction", () => {
     expect(citationHref({ n: 1, title: "a", url: null })).toBeNull();
   });
 });
+
+describe("the letterless-link rule applies whenever the turn called retrieve (browser check, item 9)", () => {
+  const ev = (seq: number, type: RunEvent["type"], data: object): RunEvent => ({ seq, type, data: data as RunEvent["data"], ts: `2026-11-14T10:00:0${seq}Z` });
+
+  for (const [name, events, running] of [
+    ["still running (no tool_result yet)", [ev(1, "tool_call", { tool_call_id: "r", tool_name: "retrieve", args: {} })], true],
+    ["ended without a result", [ev(1, "tool_call", { tool_call_id: "r", tool_name: "retrieve", args: {} })], false],
+    ["announced in a model message only", [ev(1, "model_message", { model_request: 0, tool_calls: [{ tool_call_id: "r", tool_name: "retrieve", args: {} }] })], true],
+    ["failed (error result without a tool name)", [ev(1, "tool_call", { tool_call_id: "r", tool_name: "retrieve", args: {} }), ev(2, "tool_result", { tool_call_id: "r", status: "error" })], false],
+  ] as const) {
+    it(`a retrieve call ${name}: [2](https://evil…) is plain text, not the model's link`, () => {
+      const infosOfTurn = new Map([...toolCallInfos(events as unknown as RunEvent[], running)].map(([id, info]) => [`run-1:${id}`, info]));
+      expect(citationSourcesForRun(infosOfTurn, "run-1")).toEqual(new Map());
+      renderText("Per the docs [2](https://evil.test/x).", infosOfTurn);
+      expect(document.querySelector('a[href*="evil"]')).toBeNull();
+      expect(screen.getByText(/\[2\]/)).toBeInTheDocument();
+    });
+  }
+
+  it("a turn that did not call retrieve keeps an ordinary nofollow link (accepted)", () => {
+    const infosOfTurn = new Map([...toolCallInfos([ev(1, "tool_call", { tool_call_id: "x", tool_name: "http_get", args: {} })], false)].map(([id, info]) => [`run-1:${id}`, info]));
+    expect(citationSourcesForRun(infosOfTurn, "run-1")).toBeNull();
+    renderText("See [2](https://evil.test/x).", infosOfTurn);
+    const link = document.querySelector('a[href*="evil"]');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute("rel", expect.stringContaining("nofollow"));
+    expect(links()).toHaveLength(0);
+  });
+});

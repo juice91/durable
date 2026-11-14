@@ -22,8 +22,9 @@ export interface ToolCallInfo {
   /** Milliseconds from the call event to its result event; null while unknown. */
   durationMs: number | null;
   /**
-   * A `retrieve` call's structured sources from its `tool_result` event (`[]` when it returned none);
-   * absent for every other tool. Citation links in the answer come only from these (RM.16).
+   * A `retrieve` call's structured sources from its `tool_result` event (`[]` when it returned none,
+   * failed, or has no result yet: the turn called retrieve all the same, so a link the model wrote
+   * as `[n](url)` is never trusted); absent for every other tool. Citation links in the answer come only from these (RM.16).
    */
   sources?: CitationSource[];
 }
@@ -44,19 +45,27 @@ function time(ts: string): number | null {
 export function toolCallInfos(events: readonly RunEvent[], turnRunning: boolean): Map<string, ToolCallInfo> {
   const started = new Map<string, number | null>();
   const results = new Map<string, { status: ToolCallStatus; at: number | null; sources?: CitationSource[] }>();
+  // Calls of the retrieve tool, known from the call (its result may not have come yet).
+  const retrieveCalls = new Set<string>();
+  const noteRetrieve = (id: string, name: unknown) => {
+    if (name === RETRIEVE_TOOL_NAME) retrieveCalls.add(id);
+  };
   for (const event of events) {
     if (event.type === "tool_call" && typeof event.data.tool_call_id === "string") {
       if (!started.has(event.data.tool_call_id)) started.set(event.data.tool_call_id, time(event.ts));
+      noteRetrieve(event.data.tool_call_id, event.data.tool_name);
     } else if (event.type === "model_message" && Array.isArray(event.data.tool_calls)) {
       for (const call of event.data.tool_calls) {
-        if (isRecord(call) && typeof call.tool_call_id === "string" && !started.has(call.tool_call_id)) {
-          started.set(call.tool_call_id, time(event.ts));
+        if (isRecord(call) && typeof call.tool_call_id === "string") {
+          if (!started.has(call.tool_call_id)) started.set(call.tool_call_id, time(event.ts));
+          noteRetrieve(call.tool_call_id, call.tool_name);
         }
       }
     } else if (event.type === "tool_result" && typeof event.data.tool_call_id === "string") {
       const raw = event.data.status;
       const status: ToolCallStatus = raw === "error" ? "error" : raw === "no_result" ? "no_result" : "ok";
-      const sources = event.data.tool_name === RETRIEVE_TOOL_NAME ? parseSources(event.data.sources) : undefined;
+      const retrieve = event.data.tool_name === RETRIEVE_TOOL_NAME || retrieveCalls.has(event.data.tool_call_id);
+      const sources = retrieve ? parseSources(event.data.sources) : undefined;
       results.set(event.data.tool_call_id, { status, at: time(event.ts), ...(sources ? { sources } : {}) });
     }
   }
@@ -65,7 +74,7 @@ export function toolCallInfos(events: readonly RunEvent[], turnRunning: boolean)
     const result = results.get(id);
     const start = started.get(id) ?? null;
     if (!result) {
-      infos.set(id, { status: turnRunning ? "running" : "no_result", durationMs: null });
+      infos.set(id, { status: turnRunning ? "running" : "no_result", durationMs: null, ...(retrieveCalls.has(id) ? { sources: [] } : {}) });
       continue;
     }
     const duration = start !== null && result.at !== null && result.at >= start ? result.at - start : null;

@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { Button } from "@/components/ui/Button";
-import { STUCK_INGEST_TEXT, describeIngestError, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
+import { STUCK_INGEST_TEXT, describeIngestError, displayedDocumentStatus, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
 import { DocumentStatusBadge, formatWhen } from "./knowledgeUi";
 import type { KnowledgeDocumentsState } from "./useKnowledgeDocuments";
 import { useStuckIngests } from "./useStuckIngests";
@@ -17,6 +17,8 @@ export interface DocumentsTabProps {
   docs: KnowledgeDocumentsState;
   /** Run id → its latest `ingest_progress` (useIngestProgress). */
   progress: Record<string, IngestProgress>;
+  /** Runs whose live stream reported they started (useIngestProgress): "Ingesting" before the re-read. */
+  startedRuns?: ReadonlySet<string>;
   /** The open document Sheet's key. */
   openDocument: string | null;
   onOpenDocument: (documentKey: string) => void;
@@ -29,7 +31,7 @@ function versionLabel(doc: KnowledgeDocument): string {
 }
 
 /** The Documents tab: status with live progress, sections, version, Retry for a failed ingest. */
-export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocument, onUpload }: DocumentsTabProps) {
+export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, onOpenDocument, onUpload }: DocumentsTabProps) {
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [actionError, setActionError] = useState<string | null>(null);
   // A Retry the API answered 409 "already being ingested": the run is going, not an error.
@@ -85,7 +87,7 @@ export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocumen
         const live = doc.last_run_id ? progress[doc.last_run_id] : undefined;
         return (
           <span className="flex min-w-0 flex-col items-start gap-0.5">
-            <DocumentStatusBadge status={doc.status} />
+            <DocumentStatusBadge status={displayedDocumentStatus(doc, startedRuns)} />
             {stuck.has(doc.document_key) ? (
               <span className="line-clamp-2 text-caption text-warning-text" data-testid="knowledge-document-stuck">
                 {STUCK_INGEST_TEXT[stuck.get(doc.document_key)!]}

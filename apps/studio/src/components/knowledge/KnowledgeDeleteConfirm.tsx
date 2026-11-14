@@ -4,7 +4,7 @@ import React from "react";
 import Link from "next/link";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { describeUsage, type AgentSpecsStatus, type AgentUsage } from "@/lib/agentUsage";
-import type { KnowledgeBase, KnowledgeBaseReference } from "@/lib/knowledge";
+import { referenceLabel, type KnowledgeBase, type KnowledgeBaseReference } from "@/lib/knowledge";
 import { routes } from "@/lib/routes";
 
 export interface KnowledgeDeleteConfirmProps {
@@ -14,7 +14,7 @@ export interface KnowledgeDeleteConfirmProps {
   usageStatus: AgentSpecsStatus;
   usageRefreshing?: boolean;
   usagePartial?: boolean;
-  /** The API's 409 list (agents whose latest published version attaches it): delete is then forced. */
+  /** The API's 409 list (agents whose latest published version, or draft only, attaches it): delete is then forced. */
   blockedBy: KnowledgeBaseReference[] | null;
   busy?: boolean;
   error?: string | null;
@@ -28,12 +28,20 @@ export function KnowledgeDeleteConfirm({ kb, usage, usageStatus, usageRefreshing
   if (blockedBy && blockedBy.length > 0) {
     references = (
       <>
-        <p>{blockedBy.length === 1 ? "This agent's" : `These ${blockedBy.length} agents'`} latest published version attaches it:</p>
+        <p>
+          {blockedBy.some((item) => item.draft || item.version === null)
+            ? blockedBy.length === 1
+              ? "This agent attaches it:"
+              : `These ${blockedBy.length} agents attach it (their latest published version, or their draft):`
+            : blockedBy.length === 1
+              ? "This agent's latest published version attaches it:"
+              : `These ${blockedBy.length} agents' latest published version attaches it:`}
+        </p>
         <ul className="mt-2 space-y-1" data-testid="knowledge-delete-reference-list">
           {blockedBy.map((item) => (
             <li key={item.agent_id} data-testid="knowledge-delete-reference" className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-              <Link href={routes.agentEditor(item.agent_id)} className="font-medium text-foreground underline-offset-4 hover:underline">{item.agent_name}</Link>
-              <span className="text-caption">v{item.version}{item.archived ? " (archived)" : ""}</span>
+              <Link href={routes.agentEditor(item.agent_id)} className="font-medium text-foreground underline-offset-4 hover:underline">{item.agent_name}</Link>{" "}
+              <span className="text-caption" data-draft={item.draft || item.version === null ? "true" : undefined}>{referenceLabel(item)}</span>
             </li>
           ))}
         </ul>

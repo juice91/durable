@@ -9,6 +9,7 @@ import { breakdownHref } from "../BreakdownTable";
 import {
   attentionCount,
   metricsAgentHref,
+  operationLabel,
   recentFailuresHref,
   type BreakdownItem,
   type BreakdownSort,
@@ -90,7 +91,8 @@ export function MetricsOverview({
       <div className="grid gap-4 lg:grid-cols-2">
         <RecentFailures
           runs={failures.data}
-          total={summary.data ? attentionCount(summary.data.current) : null}
+          total={summary.data && !state.operation ? attentionCount(summary.data.current) : null}
+          operation={state.operation ? operationLabel(state.operation) : null}
           viewAllHref={recentFailuresHref(filters)}
           agentNames={agentNames}
           workflowNames={workflowNames}

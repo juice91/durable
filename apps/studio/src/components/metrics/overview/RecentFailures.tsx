@@ -43,6 +43,12 @@ export interface RecentFailuresProps {
   error?: string | null;
   /** The title's heading level: 2 on its own, 3 inside the Metrics Overview section. */
   headingLevel?: 2 | 3;
+  /**
+   * The Metrics page's operation filter (its label), or null. Runs are not split by operation (the
+   * runs API has no such filter), so the panel then lists nothing and says why; the link goes to
+   * every failed run of the period, without a count.
+   */
+  operation?: string | null;
 }
 
 /** "Needs attention" in the Metrics Overview: the newest failed and needs-attention runs of the
@@ -56,9 +62,10 @@ export function RecentFailures({
   loading = false,
   error = null,
   headingLevel = 2,
+  operation = null,
 }: RecentFailuresProps) {
   const Heading = headingLevel === 3 ? "h3" : "h2";
-  const viewAll = total === null ? "View all in Traces" : `View all ${formatCount(total)} in Traces`;
+  const viewAll = operation ? "View failed runs in Traces" : total === null ? "View all in Traces" : `View all ${formatCount(total)} in Traces`;
   return (
     <section
       className="min-w-0 rounded-lg border border-border bg-card text-card-foreground"
@@ -79,7 +86,12 @@ export function RecentFailures({
         </Link>
       </div>
       <p className="px-4 pb-2 text-xs text-muted-foreground">Failed runs and runs that need attention, newest first.</p>
-      {error ? (
+      {operation ? (
+        <p className="px-4 pb-6 pt-2 text-sm text-muted-foreground" data-testid="recent-failures-operation">
+          Failed runs are not split by operation, so none are listed while the {operation} filter is on. Clear it to see
+          them, or open them in Traces.
+        </p>
+      ) : error ? (
         <p role="alert" className="mx-4 mb-4 rounded-md border border-destructive bg-destructive/10 p-3 text-sm text-foreground">
           {error}
         </p>

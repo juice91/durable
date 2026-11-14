@@ -16,6 +16,21 @@ import {
 } from "@/lib/conversations";
 
 export const CONVERSATION_PAGE_SIZE = 30;
+/**
+ * A turn's end event comes before its run's terminal status (the worker writes the event first), so
+ * the refresh a finished turn triggers can still read "Queued" or "Running". While a listed turn is
+ * not finished the first page is read again, `RAIL_SETTLE_MS` apart, at most `RAIL_SETTLE_READS`
+ * times after each refresh.
+ */
+export const RAIL_SETTLE_MS = 1500;
+export const RAIL_SETTLE_READS = 5;
+const UNFINISHED = new Set(["queued", "running", "recovering"]);
+
+/** Whether the row's latest turn has not finished (by its status). */
+export function turnUnfinished(conversation: Pick<Conversation, "last_turn_status" | "last_turn_display_status">): boolean {
+  const status = conversation.last_turn_display_status ?? conversation.last_turn_status;
+  return Boolean(status && UNFINISHED.has(status));
+}
 const TITLE_MAX_LENGTH = 200;
 
 const STATUS_LABELS: Record<string, string> = {
@@ -89,6 +104,11 @@ export function ConversationRail({
   const shownAgentRef = useRef<string | null>(null);
   itemsRef.current = items;
   nextBeforeRef.current = nextBefore;
+  // The quiet re-reads while a listed turn is unfinished (see RAIL_SETTLE_MS).
+  const [settle, setSettle] = useState(0);
+  const settleReadsRef = useRef(0);
+  const settleSourceRef = useRef<string | null>(null);
+  const settleSeenRef = useRef(0);
 
   // A rename in progress survives a refresh of the same agent's list, not an agent switch.
   useEffect(() => setEditingId(null), [agentId]);
@@ -98,6 +118,15 @@ export function ConversationRail({
   // keyboard focus and a rename in progress stay.
   useEffect(() => {
     const request = ++requestRef.current;
+    // A new refresh (or agent) starts the re-read budget again; a re-read spends one.
+    const source = `${agentId}|${refreshKey}`;
+    const settling = settleSourceRef.current === source && settleSeenRef.current !== settle;
+    settleSeenRef.current = settle;
+    if (settleSourceRef.current !== source) {
+      settleSourceRef.current = source;
+      settleReadsRef.current = 0;
+    }
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
     const agentChanged = shownAgentRef.current !== agentId;
     shownAgentRef.current = agentId;
     if (agentChanged) {
@@ -109,11 +138,18 @@ export function ConversationRail({
       setError(null);
       return;
     }
-    setLoading(true);
-    setError(null);
+    // A re-read is quiet: no loading state, and a failure keeps the list (the next refresh retries).
+    if (!settling) {
+      setLoading(true);
+      setError(null);
+    }
     listConversations({ agentId, limit: CONVERSATION_PAGE_SIZE })
       .then((page) => {
         if (request !== requestRef.current) return;
+        if (page.items.some(turnUnfinished) && settleReadsRef.current < RAIL_SETTLE_READS) {
+          settleReadsRef.current += 1;
+          settleTimer = setTimeout(() => setSettle((n) => n + 1), RAIL_SETTLE_MS);
+        }
         const previous = agentChanged ? [] : itemsRef.current;
         if (previous.length <= CONVERSATION_PAGE_SIZE) {
           setItems(page.items);
@@ -127,12 +163,15 @@ export function ConversationRail({
         setNextBefore(nextBeforeRef.current);
       })
       .catch(() => {
-        if (request === requestRef.current) setError("Failed to load conversations.");
+        if (request === requestRef.current && !settling) setError("Failed to load conversations.");
       })
       .finally(() => {
-        if (request === requestRef.current) setLoading(false);
+        if (request === requestRef.current && !settling) setLoading(false);
       });
-  }, [agentId, refreshKey]);
+    return () => {
+      if (settleTimer) clearTimeout(settleTimer);
+    };
+  }, [agentId, refreshKey, settle]);
 
   const loadMore = useCallback(() => {
     if (!nextBefore || loadingMore) return;

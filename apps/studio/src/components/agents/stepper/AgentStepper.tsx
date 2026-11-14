@@ -146,9 +146,11 @@ export function AgentStepper({ steps, statuses, errorSteps, activeStep, onStepCh
         <div className="min-w-0 px-4 py-4">
           {select}
           {children}
+          {/* `relative` on the buttons: their sr-only labels (position: absolute) stay inside them, not
+              at an ancestor outside the scroll area, where they added a page scroll at 390 px. */}
           <div className="mt-6 flex min-w-0 flex-wrap justify-between gap-2 border-t border-border pt-4">
             {previous ? (
-              <Button variant="secondary" onClick={() => onStepChange(previous.id)} data-testid="stepper-previous" className="max-w-full">
+              <Button variant="secondary" onClick={() => onStepChange(previous.id)} data-testid="stepper-previous" className="relative max-w-full">
                 <ChevronLeft {...ICON} />
                 <span className="sr-only">Previous step: </span>
                 <span className="truncate">{previous.label}</span>
@@ -157,7 +159,7 @@ export function AgentStepper({ steps, statuses, errorSteps, activeStep, onStepCh
               <span />
             )}
             {next ? (
-              <Button variant="secondary" onClick={() => onStepChange(next.id)} data-testid="stepper-next" className="max-w-full">
+              <Button variant="secondary" onClick={() => onStepChange(next.id)} data-testid="stepper-next" className="relative max-w-full">
                 <span className="sr-only">Next step: </span>
                 <span className="truncate">{next.label}</span>
                 <ChevronRight {...ICON} />

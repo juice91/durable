@@ -93,7 +93,8 @@ function MetricsView() {
     (signal) => fetchMetricsBreakdown(filters, "model", modelSort, 10, signal),
   );
   const failures = useMetricsQuery(
-    baseKey === null ? null : `${baseKey}|failures`,
+    // Runs have no operation: under an operation filter the panel says so instead of listing them.
+    baseKey === null || state.operation ? null : `${baseKey}|failures`,
     (signal) => listTraceRuns(recentFailuresFilters(filters), { limit: RECENT_FAILURES_LIMIT, signal }),
   );
 

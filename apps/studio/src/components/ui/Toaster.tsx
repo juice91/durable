@@ -1,9 +1,13 @@
 "use client";
 
 import React from "react";
-import { Toaster as SonnerToaster, toast } from "sonner";
+import { Toaster as SonnerToaster, toast as sonnerToast } from "sonner";
 
-export { toast };
+/**
+ * Show a toast. A declared export, not `export { toast }`: Next's "use client" transform does not
+ * see a re-exported import binding, and webpack then warned "'toast' is not exported" on every page.
+ */
+export const toast: typeof sonnerToast = sonnerToast;
 
 /**
  * Transient confirmations (copied, saved, restored), bottom-right. Styled with tokens, so it follows

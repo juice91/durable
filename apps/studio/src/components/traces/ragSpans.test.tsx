@@ -16,6 +16,7 @@ import {
   flattenSpans,
   spanLabel,
   traceWindow,
+  usageSplit,
   type TraceRun,
   type TraceSpan,
   type TraceTotals as Totals,
@@ -211,5 +212,84 @@ describe("TraceTotals embedding hint", () => {
     expect(screen.getByTestId("totals-requests")).toHaveTextContent("1 tool call, 1 run; 2 embedding, 1 observer or reflector");
     expect(screen.getByTestId("totals-cost")).toHaveTextContent("embeddings");
     expect(screen.getByTestId("totals-cost")).toHaveTextContent("30 tokens");
+  });
+});
+
+describe("usage split by operation (chat model apart from memory, moderation and embedding)", () => {
+  const base: Totals = {
+    runs: 1, model_requests: 5, tool_calls: 0, input_tokens: 1530, output_tokens: 140, cache_read_tokens: 0,
+    cache_write_tokens: 0, cost_usd: "0.0200000000", unpriced_requests: 0, unrecorded_requests: 0, duration_ms: 1200,
+    status: "completed", embedding_requests: 1, memory_requests: 1, moderation_requests: 1, embedding_input_tokens: 30,
+    embedding_cost_usd: "0.0000300000",
+  };
+  const split = {
+    chat_requests: 2, chat_input_tokens: 1000, chat_output_tokens: 100, chat_cost_usd: "0.0150000000",
+    memory_input_tokens: 400, memory_output_tokens: 40, memory_cost_usd: "0.0040000000",
+    moderation_input_tokens: 100, moderation_output_tokens: 0, moderation_cost_usd: null,
+  };
+
+  it("usageSplit: null for an older response; the groups that were used, in order", () => {
+    expect(usageSplit(base as unknown as Record<string, unknown>)).toBeNull();
+    const parsed = usageSplit({ ...base, ...split } as unknown as Record<string, unknown>)!;
+    expect(parsed.chat).toEqual({ inputTokens: 1000, outputTokens: 100, costUsd: "0.0150000000" });
+    expect(parsed.others.map((g) => [g.id, g.inputTokens, g.outputTokens, g.costUsd])).toEqual([
+      ["memory", 400, 40, "0.0040000000"],
+      ["moderation", 100, 0, null],
+      ["embedding", 30, null, "0.0000300000"],
+    ]);
+    // Unused groups are left out; a run span's split has no costs.
+    const run = usageSplit({ chat_input_tokens: 10, chat_output_tokens: 2, memory_input_tokens: 0, memory_output_tokens: 0, moderation_input_tokens: 0, moderation_output_tokens: 0, embedding_input_tokens: 0 })!;
+    expect(run.others).toEqual([]);
+    expect(run.chat).toEqual({ inputTokens: 10, outputTokens: 2 });
+    // Recorded nothing: null tokens.
+    expect(usageSplit({ chat_input_tokens: null, memory_requests: 1, memory_input_tokens: null })!.others[0]).toMatchObject({ id: "memory", inputTokens: null });
+  });
+
+  it("TraceTotals: the chat model's tokens in the token cards, the other operations on their own lines", () => {
+    render(<TraceTotals totals={{ ...base, ...split }} />);
+    expect(screen.getByTestId("totals-input-tokens")).toHaveTextContent("Chat input tokens1,000");
+    expect(screen.getByTestId("totals-input-tokens")).toHaveTextContent("1,530 with every request");
+    expect(screen.getByTestId("totals-output-tokens")).toHaveTextContent("Chat output tokens100");
+    expect(screen.getByTestId("totals-cost")).toHaveTextContent("chat $0.015");
+    expect(screen.getByTestId("totals-cost")).not.toHaveTextContent("embeddings");
+    expect(screen.getByTestId("totals-usage-memory")).toHaveTextContent("Memory (observer, reflector)400 in, 40 out, $0.004");
+    expect(screen.getByTestId("totals-usage-moderation")).toHaveTextContent("Moderation100 in, 0 out, no price");
+    expect(screen.getByTestId("totals-usage-embedding")).toHaveTextContent("Embedding30 input tokens, $0.00003");
+  });
+
+  it("TraceTotals: an older response keeps the combined cards and the embedding hint", () => {
+    render(<TraceTotals totals={base} />);
+    expect(screen.getByTestId("totals-input-tokens")).toHaveTextContent("Input tokens1,530");
+    expect(screen.queryByTestId("totals-other-usage")).toBeNull();
+    expect(screen.getByTestId("totals-cost")).toHaveTextContent("embeddings");
+  });
+
+  it("a chat-only trace shows no other-usage lines", () => {
+    render(<TraceTotals totals={{ ...base, embedding_requests: 0, memory_requests: 0, moderation_requests: 0, embedding_input_tokens: 0, ...split, memory_input_tokens: 0, memory_output_tokens: 0, moderation_input_tokens: 0 }} />);
+    expect(screen.queryByTestId("totals-other-usage")).toBeNull();
+    expect(screen.getByTestId("totals-input-tokens")).not.toHaveTextContent("with every request");
+  });
+
+  it("run span: Input tokens next to the model is the chat model's; memory and embedding tokens apart", () => {
+    const runSpan = span("run", {
+      run_kind: "agent", model_id: "gpt-x", input_tokens: 1430, output_tokens: 140, cost_usd: "0.02",
+      chat_requests: 2, chat_input_tokens: 1000, chat_output_tokens: 100, memory_input_tokens: 400, memory_output_tokens: 40,
+      moderation_input_tokens: 0, moderation_output_tokens: 0, embedding_input_tokens: 30,
+    });
+    render(<SpanDetail span={runSpan} />);
+    const usage = screen.getByTestId("span-usage");
+    expect(within(usage).getByText("gpt-x")).toBeInTheDocument();
+    expect(within(usage).getByTestId("span-input-tokens")).toHaveTextContent("1,000");
+    expect(within(usage).getByTestId("span-output-tokens")).toHaveTextContent("100");
+    expect(within(usage).getByTestId("span-usage-memory")).toHaveTextContent("400 in, 40 out");
+    expect(within(usage).getByTestId("span-usage-embedding")).toHaveTextContent("30");
+    expect(within(usage).queryByTestId("span-usage-moderation")).toBeNull();
+    // The split keys are not repeated in the generic attribute list.
+    expect(screen.queryByText("chat_input_tokens")).toBeNull();
+  });
+
+  it("run span from an older API: the combined tokens as before", () => {
+    render(<SpanDetail span={span("run", { run_kind: "agent", model_id: "gpt-x", input_tokens: 1430, output_tokens: 140 })} />);
+    expect(screen.getByTestId("span-input-tokens")).toHaveTextContent("1,430");
   });
 });

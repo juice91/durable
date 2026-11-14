@@ -142,11 +142,22 @@ export interface ReindexEstimate {
   reindex_pending: boolean;
 }
 
+/** One agent in a delete 409's `agents`: its latest published version, or (`draft`) its draft only. */
 export interface KnowledgeBaseReference {
   agent_id: string;
   agent_name: string;
-  version: number;
+  /** The published version that attaches it; null for a draft-only reference. */
+  version: number | null;
   archived: boolean;
+  /** The draft attaches it (no published version does). Absent from older APIs: false. */
+  draft?: boolean;
+}
+
+/** "v3", "v3 (archived)", "(draft)", "(draft, archived)" for a delete 409's reference. */
+export function referenceLabel(item: Pick<KnowledgeBaseReference, "version" | "archived" | "draft">): string {
+  const archived = item.archived ? "archived" : null;
+  if (item.draft || item.version === null) return `(${["draft", archived].filter(Boolean).join(", ")})`;
+  return `v${item.version}${archived ? " (archived)" : ""}`;
 }
 
 export interface SearchRequest {
@@ -641,6 +652,18 @@ export const KNOWLEDGE_BASE_STATUS_LABELS: Record<KnowledgeBaseStatus, string> =
 /** A document whose ingest has not ended: its run is worth following. */
 export function isIngestInFlight(document: Pick<KnowledgeDocument, "status">): boolean {
   return document.status === "pending" || document.status === "ingesting";
+}
+
+/**
+ * The status to show: "ingesting" for a pending document whose run's live stream already reported
+ * `run_started` or `ingest_progress` (the 3 s re-read has not caught up yet); else the stored one.
+ */
+export function displayedDocumentStatus(
+  document: Pick<KnowledgeDocument, "status" | "last_run_id">,
+  startedRuns: ReadonlySet<string> | null | undefined,
+): DocumentStatus {
+  if (document.status === "pending" && document.last_run_id && startedRuns?.has(document.last_run_id)) return "ingesting";
+  return document.status;
 }
 
 /**

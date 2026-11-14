@@ -14,6 +14,7 @@ import {
   isIngestInFlight,
   isSafeHttpUrl,
   progressLabel,
+  displayedDocumentStatus,
   type IngestProgress,
   type KnowledgeDocument,
 } from "@/lib/knowledge";
@@ -29,6 +30,8 @@ export interface DocumentSheetProps {
   /** The list's copy of it, if loaded (kept fresh by the poll); the Sheet reads it again on open. */
   listed: KnowledgeDocument | null;
   progress: IngestProgress | null;
+  /** Runs whose live stream reported they started: a pending document shows "Ingesting". */
+  startedRuns?: ReadonlySet<string>;
   onOpenChange: (open: boolean) => void;
   onDeleted: (documentKey: string) => void;
   /** The document as read here (fresher than the list's). */
@@ -39,7 +42,7 @@ export interface DocumentSheetProps {
  * One document (`?doc=<key>`): status and error, versions, metadata, source URL, its last ingest
  * run's trace, a content preview, and Delete (confirmed; its sections go with it).
  */
-export function DocumentSheet({ kbId, documentKey, listed, progress, onOpenChange, onDeleted, onLoaded }: DocumentSheetProps) {
+export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns, onOpenChange, onDeleted, onLoaded }: DocumentSheetProps) {
   const [loaded, setLoaded] = useState<KnowledgeDocument | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +143,7 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, onOpenChang
                 <dl className="grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-label sm:grid-cols-[8rem_minmax(0,1fr)]">
                   <dt className="text-muted-foreground">Status</dt>
                   <dd className="flex min-w-0 flex-col items-start gap-1">
-                    <DocumentStatusBadge status={doc.status} />
+                    <DocumentStatusBadge status={displayedDocumentStatus(doc, startedRuns)} />
                     {isIngestInFlight(doc) && progress ? <span className="text-caption text-muted-foreground">{progressLabel(progress)}</span> : null}
                     {doc.status === "failed" ? <span className="text-caption text-destructive-text">{describeIngestError(doc.error)}</span> : null}
                   </dd>
@@ -199,7 +202,7 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, onOpenChang
           {confirming && doc ? (
             <ConfirmDialog
               title={`Delete ${doc.title}?`}
-              description={<p>Its {doc.chunk_count} section{doc.chunk_count === 1 ? "" : "s"} are removed from search at once. An ingest in progress ends as cancelled.</p>}
+              description={<p>{doc.chunk_count === 1 ? "Its 1 section is" : `Its ${doc.chunk_count} sections are`} removed from search at once. An ingest in progress ends as cancelled.</p>}
               confirmLabel="Delete document"
               destructive
               busy={deleting}

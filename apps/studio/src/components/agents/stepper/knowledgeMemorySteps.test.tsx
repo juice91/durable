@@ -139,7 +139,7 @@ describe("Knowledge step", () => {
     const { saved } = setup(PLAIN);
     fireEvent.click(await screen.findByRole("checkbox", { name: "Product docs" }));
     expect(navButton(/^Knowledge/)).toHaveTextContent("1 knowledge base");
-    expect(screen.getByTestId("knowledge-count")).toHaveTextContent("1 of 8 attached");
+    expect(screen.getByTestId("knowledge-count")).toHaveTextContent("1 attached (max 8)");
     await save();
     expect((saved[0] as unknown as { knowledge_bases: unknown }).knowledge_bases).toEqual([{ id: KB1, top_k: 8 }]);
 

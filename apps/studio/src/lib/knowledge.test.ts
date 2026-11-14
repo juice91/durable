@@ -248,3 +248,26 @@ describe("ingestStuck", () => {
     expect(ingestStuck({ status: "failed", updated_at: old }, null, now)).toBe(false);
   });
 });
+
+describe("referenceLabel (delete 409 references)", () => {
+  it("a published version, archived, a draft-only reference, and an older API without `draft`", async () => {
+    const { referenceLabel } = await import("./knowledge");
+    expect(referenceLabel({ version: 3, archived: false, draft: false })).toBe("v3");
+    expect(referenceLabel({ version: 1, archived: true })).toBe("v1 (archived)");
+    expect(referenceLabel({ version: null, archived: false, draft: true })).toBe("(draft)");
+    expect(referenceLabel({ version: null, archived: true, draft: true })).toBe("(draft, archived)");
+  });
+});
+
+describe("displayedDocumentStatus", () => {
+  it("pending shows ingesting once its run started; other statuses and other runs stay as stored", async () => {
+    const { displayedDocumentStatus } = await import("./knowledge");
+    const started = new Set(["r1"]);
+    expect(displayedDocumentStatus({ status: "pending", last_run_id: "r1" }, started)).toBe("ingesting");
+    expect(displayedDocumentStatus({ status: "pending", last_run_id: "r2" }, started)).toBe("pending");
+    expect(displayedDocumentStatus({ status: "pending", last_run_id: null }, started)).toBe("pending");
+    expect(displayedDocumentStatus({ status: "ready", last_run_id: "r1" }, started)).toBe("ready");
+    expect(displayedDocumentStatus({ status: "failed", last_run_id: "r1" }, started)).toBe("failed");
+    expect(displayedDocumentStatus({ status: "pending", last_run_id: "r1" }, undefined)).toBe("pending");
+  });
+});

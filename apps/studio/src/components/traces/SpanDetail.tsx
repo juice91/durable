@@ -7,6 +7,7 @@ import {
   KIND_LABELS,
   formatDuration,
   spanLabel,
+  usageSplit,
   type NameMaps,
   type SpanUsage,
   type TraceSpan,
@@ -21,6 +22,9 @@ import { KnowledgeBaseLink, RAG_SHOWN, RagSpanSection, USAGE_KINDS } from "./Rag
 const SHOWN = new Set([
   "usage", "model_id", "provider_model_name", "cost_usd", "price_source", "error", "error_code",
   "input_tokens", "output_tokens", "approval", "decision",
+  // The run span's usage split (shown in Run usage).
+  "chat_requests", "chat_input_tokens", "chat_output_tokens", "memory_input_tokens", "memory_output_tokens",
+  "moderation_input_tokens", "moderation_output_tokens", "embedding_input_tokens",
 ]);
 
 function str(value: unknown): string | null {
@@ -68,19 +72,43 @@ function UsageSection({ span }: { span: TraceSpan }) {
   );
 }
 
+// Literal ids (the test-id inventory finds them in the source).
+const SPAN_GROUP_TEST_ID = {
+  memory: { testId: "span-usage-memory" },
+  moderation: { testId: "span-usage-moderation" },
+  embedding: { testId: "span-usage-embedding" },
+} as const;
+
 function RunUsageSection({ span }: { span: TraceSpan }) {
   const a = span.attributes;
   const tokensIn = typeof a.input_tokens === "number" ? a.input_tokens : null;
   const tokensOut = typeof a.output_tokens === "number" ? a.output_tokens : null;
   const cost = formatCost(str(a.cost_usd));
   if (!str(a.model_id) && tokensIn === null && tokensOut === null && cost === null) return null;
+  const split = usageSplit(a);
+  const show = (v: number | null) => (v === null ? "not recorded" : formatTokens(v));
   return (
     <section aria-label="Run usage" data-testid="span-usage">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Run usage</h4>
       <dl className="mt-1 text-sm">
         {str(a.model_id) ? <Row label="Model">{a.model_id as string}</Row> : null}
-        <Row label="Input tokens" testId="span-input-tokens">{tokensIn === null ? "not recorded" : formatTokens(tokensIn)}</Row>
-        <Row label="Output tokens" testId="span-output-tokens">{tokensOut === null ? "not recorded" : formatTokens(tokensOut)}</Row>
+        {split ? (
+          <>
+            {/* Next to the chat model: its own tokens only (older responses: the combined count). */}
+            <Row label="Input tokens" testId="span-input-tokens">{show(split.chat.inputTokens)}</Row>
+            <Row label="Output tokens" testId="span-output-tokens">{show(split.chat.outputTokens)}</Row>
+            {split.others.map((group) => (
+              <Row key={group.id} label={`${group.label} tokens`} testId={SPAN_GROUP_TEST_ID[group.id].testId}>
+                {group.id === "embedding" ? show(group.inputTokens) : `${show(group.inputTokens)} in, ${show(group.outputTokens)} out`}
+              </Row>
+            ))}
+          </>
+        ) : (
+          <>
+            <Row label="Input tokens" testId="span-input-tokens">{show(tokensIn)}</Row>
+            <Row label="Output tokens" testId="span-output-tokens">{show(tokensOut)}</Row>
+          </>
+        )}
         <Row label="Cost" testId="span-cost">{cost ?? (tokensIn === null ? "not recorded" : "no price")}</Row>
       </dl>
     </section>

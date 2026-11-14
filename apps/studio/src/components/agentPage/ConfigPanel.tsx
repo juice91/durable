@@ -204,7 +204,17 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
               <ul className="space-y-1 text-caption" data-testid="config-knowledge">
                 {knowledgeRefs.map((ref, index) => (
                   <li key={`${ref.id}-${index}`} className="min-w-0">
-                    <span className="block break-words">{kbNames?.get(ref.id) ?? <span className="break-all font-mono">{ref.id}</span>}</span>
+                    <span className="block break-words">
+                      {kbNames?.get(ref.id) ??
+                        (kbNames ? (
+                          // The list is the tenant's every knowledge base (not paged): absent is deleted.
+                          <span data-testid="config-knowledge-deleted" title={ref.id}>
+                            Deleted knowledge base <span className={cn("font-mono", muted)}>{shortId(ref.id)}</span>
+                          </span>
+                        ) : (
+                          <span className="break-all font-mono">{ref.id}</span>
+                        ))}
+                    </span>
                     <span className={cn("block break-words", muted)}>{knowledgeRefSummary(ref)}</span>
                   </li>
                 ))}
@@ -236,6 +246,11 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
       )}
     </div>
   );
+}
+
+/** The first 8 characters of an id ("1a2b3c4d…"), for a row that has no name to show. */
+function shortId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
 /** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */

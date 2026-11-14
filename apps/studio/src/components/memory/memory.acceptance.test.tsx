@@ -290,7 +290,7 @@ describe("working memory: create, edit, conflict, clear (If-Match end to end)", 
     notes.set(NOTE_PATH, { content: "their text", version: 3 });
     click("memory-working-save");
     const conflictBox = await screen.findByTestId("memory-working-conflict");
-    expect(conflictBox).toHaveTextContent("working memory is at version 3, not the If-Match version 2");
+    expect(conflictBox).toHaveTextContent("it is now version 3, and your edit started from version 2");
     expect(conflictBox).toHaveTextContent("Reload replaces it");
     expect(notes.get(NOTE_PATH)).toEqual({ content: "their text", version: 3 });
     expect(screen.getByTestId("memory-working-save")).toBeDisabled();
@@ -320,7 +320,7 @@ describe("working memory: create, edit, conflict, clear (If-Match end to end)", 
     fireEvent.click(await screen.findByTestId("memory-working-create"));
     notes.set(NOTE_PATH, { content: "already there", version: 1 });
     click("memory-working-save");
-    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("working memory is at version 1, not the If-Match version 0");
+    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("A note was written while you were editing (now version 1)");
     click("memory-working-reload");
     await waitFor(() => expect(screen.getByTestId("memory-working-textarea")).toHaveValue("already there"));
   });
@@ -345,7 +345,7 @@ describe("working memory: create, edit, conflict, clear (If-Match end to end)", 
     expect(await screen.findByTestId("memory-working-stale")).toHaveTextContent("version 3");
     expect(screen.getByTestId("memory-working-textarea")).toHaveValue("mine");
     click("memory-working-save");
-    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("not the If-Match version 2");
+    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("your edit started from version 2");
   });
 
   it("a 409 on Clear (the note changed) keeps it, says why and reloads the newer note", async () => {
@@ -354,7 +354,7 @@ describe("working memory: create, edit, conflict, clear (If-Match end to end)", 
     fireEvent.click(await screen.findByTestId("memory-working-clear"));
     notes.set(NOTE_PATH, { content: "newer", version: 5 });
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Clear" }));
-    expect(await screen.findByTestId("confirm-dialog-error")).toHaveTextContent("working memory is at version 5, not the If-Match version 2");
+    expect(await screen.findByTestId("confirm-dialog-error")).toHaveTextContent("it is now version 5, and your edit started from version 2");
     expect(notes.has(NOTE_PATH)).toBe(true);
     await waitFor(() => expect(writes("GET").filter((call) => call.path === NOTE_PATH).length).toBeGreaterThan(1));
   });
@@ -1082,7 +1082,7 @@ describe("Memory tab: a user's working memory", () => {
     click((await screen.findByTestId("memory-working-edit")).getAttribute("data-testid")!);
     notes.set(USER_PATH, { content: "agent update", version: 4 });
     click("memory-working-save");
-    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("working memory is at version 4, not the If-Match version 1");
+    expect(await screen.findByTestId("memory-working-conflict")).toHaveTextContent("it is now version 4, and your edit started from version 1");
     click("memory-working-reload");
     await waitFor(() => expect(screen.getByTestId("memory-working-textarea")).toHaveValue("agent update"));
   });

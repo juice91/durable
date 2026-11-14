@@ -1,5 +1,9 @@
-import { beforeAll, expect } from "vitest";
+import { beforeAll, beforeEach, expect } from "vitest";
 import "@testing-library/jest-dom/vitest";
+import { resetWorkingMemoryCache } from "@/lib/workingMemoryCache";
+
+// The shared working memory reads (module state) must not carry a note from one test to the next.
+beforeEach(() => resetWorkingMemoryCache());
 
 beforeAll(() => {
   process.env.TZ = "UTC";

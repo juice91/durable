@@ -41,12 +41,14 @@ describe("Config panel", () => {
     expect(listKnowledgeBases).not.toHaveBeenCalled();
   });
 
-  it("lists the knowledge bases by name (the id when unknown) with their settings, and the memory features", async () => {
+  it("lists the knowledge bases by name (a deleted one as such, with a short id) with their settings, and the memory features", async () => {
     render(<ConfigPanel agent={agent(FULL)} versions={[]} />);
     const knowledge = screen.getByRole("region", { name: /^Knowledge/ });
     expect(within(knowledge).getByRole("heading", { name: "Knowledge 2" })).toBeInTheDocument();
     expect(await within(knowledge).findByText("Product docs")).toBeInTheDocument();
-    expect(within(knowledge).getByText(KB2)).toBeInTheDocument();
+    const deleted = within(knowledge).getByTestId("config-knowledge-deleted");
+    expect(deleted).toHaveTextContent(`Deleted knowledge base ${KB2.slice(0, 8)}…`);
+    expect(deleted).toHaveAttribute("title", KB2);
     expect(within(knowledge).getByText("Top 5 · min score 0.3 · filter lang=en")).toBeInTheDocument();
     const memory = within(screen.getByTestId("config-memory"));
     expect(memory.getByText("Last 12 turns")).toBeInTheDocument();

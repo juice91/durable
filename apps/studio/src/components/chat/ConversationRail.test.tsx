@@ -2,7 +2,7 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationRail } from "./ConversationRail";
+import { ConversationRail, RAIL_SETTLE_MS, RAIL_SETTLE_READS, turnUnfinished } from "./ConversationRail";
 import {
   listConversations,
   renameConversation,
@@ -266,5 +266,66 @@ describe("ConversationRail", () => {
     );
     await waitFor(() => expect(listConversations).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("textbox", { name: "Conversation title" })).toHaveValue("Typing");
+  });
+});
+
+describe("ConversationRail: a finished turn's status settles", () => {
+  const queued = conv("c1", "Printer", { turn_count: 1, last_turn_status: "queued", last_turn_display_status: "queued" });
+  const done = conv("c1", "Printer", { turn_count: 1 });
+
+  it("turnUnfinished: queued, running and recovering", () => {
+    expect(turnUnfinished(queued)).toBe(true);
+    expect(turnUnfinished({ last_turn_status: "running", last_turn_display_status: "recovering" })).toBe(true);
+    expect(turnUnfinished(done)).toBe(false);
+    expect(turnUnfinished({ last_turn_status: null, last_turn_display_status: null })).toBe(false);
+  });
+
+  it("reads the list again while a turn shows unfinished (the end event comes before the run's status)", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(listConversations).mockResolvedValueOnce(page([queued])).mockResolvedValue(page([done]));
+      renderRail();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText("1 turn · Queued")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RAIL_SETTLE_MS);
+      });
+      expect(screen.getByText("1 turn · Completed")).toBeInTheDocument();
+      expect(listConversations).toHaveBeenCalledTimes(2);
+      // Settled: no more reads.
+      for (let step = 0; step < 3; step += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(RAIL_SETTLE_MS);
+        });
+      }
+      expect(listConversations).toHaveBeenCalledTimes(2);
+      // The re-read is quiet: no loading line.
+      expect(screen.queryByText(/Loading conversations/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops after RAIL_SETTLE_READS re-reads; a refresh starts the budget again", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(listConversations).mockResolvedValue(page([queued]));
+      const view = renderRail({ refreshKey: 0 });
+      for (let step = 0; step < RAIL_SETTLE_READS + 3; step += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(RAIL_SETTLE_MS);
+        });
+      }
+      expect(listConversations).toHaveBeenCalledTimes(1 + RAIL_SETTLE_READS);
+      view.rerender(<ConversationRail agentId="agent-1" selectedId={null} onSelect={vi.fn()} onNew={vi.fn()} refreshKey={1} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RAIL_SETTLE_MS);
+      });
+      expect(listConversations).toHaveBeenCalledTimes(1 + RAIL_SETTLE_READS + 2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

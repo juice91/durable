@@ -142,7 +142,7 @@ function KnowledgeBaseDetailView() {
   const documentByRun = useRef(new Map<string, string>());
   documentByRun.current = new Map(docs.documents.flatMap((doc) => (doc.last_run_id ? [[doc.last_run_id, doc.document_key] as [string, string]] : [])));
 
-  const progress = useIngestProgress(followed, (runId) => {
+  const { progress, started: startedRuns } = useIngestProgress(followed, (runId) => {
     const key = documentByRun.current.get(runId);
     if (key) docs.refresh(key);
     if (runId === reindexRunId) void loadKb();
@@ -307,6 +307,7 @@ function KnowledgeBaseDetailView() {
                 kbId={kb.id}
                 docs={docs}
                 progress={progress}
+                startedRuns={startedRuns}
                 openDocument={openDocument}
                 onOpenDocument={(key) => docSheet.open(key)}
                 onUpload={() => setUploadOpen(true)}
@@ -336,6 +337,7 @@ function KnowledgeBaseDetailView() {
             documentKey={openDocument}
             listed={listedDocument}
             progress={listedDocument?.last_run_id ? progress[listedDocument.last_run_id] ?? null : null}
+            startedRuns={startedRuns}
             onOpenChange={docSheet.onOpenChange}
             onLoaded={(doc) => {
               if (docs.documents.some((item) => item.document_key === doc.document_key)) docs.upsert(doc);

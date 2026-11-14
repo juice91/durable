@@ -1,5 +1,6 @@
 // Typed client for conversations: a thread with one agent whose turns are runs.
 import { BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
+import { resetWorkingMemoryCache } from "./workingMemoryCache";
 import type { Run } from "./runs";
 
 export interface Conversation {
@@ -84,6 +85,9 @@ export async function deleteConversation(conversationId: string): Promise<void> 
     method: "DELETE",
     headers: apiHeaders({}),
   });
+  // Its conversation working memory went with it (or it was already gone, 404): no cached read may
+  // show the note again. Every note is dropped (cheap: the next view reads it once).
+  if (response.ok || response.status === 404) resetWorkingMemoryCache();
   if (!response.ok) throw await apiErrorFromResponse(response);
 }
 

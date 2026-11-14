@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ingestProgress, type IngestProgress } from "@/lib/knowledge";
 import { subscribeRun, type RunEvent } from "@/lib/runs";
 
@@ -16,13 +16,23 @@ interface Live {
   events: RunEvent[];
 }
 
+export interface LiveIngest {
+  /** Run id → its latest `ingest_progress` (`{embedded, total}`). */
+  progress: Record<string, IngestProgress>;
+  /** Runs whose stream reported `run_started` or `ingest_progress`: their document is ingesting. */
+  started: ReadonlySet<string>;
+}
+
+const STARTED_EVENTS = new Set(["run_started", "ingest_progress"]);
+
 /**
  * Follows the given kb_ingest runs' streams (the first MAX_LIVE_INGEST_STREAMS of them) and returns
- * each one's latest `ingest_progress` (`{embedded, total}`). `onEnd(runId)` is called once when a
+ * each one's latest `ingest_progress` (`{embedded, total}`) and which runs have started. `onEnd(runId)` is called once when a
  * followed run ends (completed, failed, or gone), so the page can reload what it shows.
  */
-export function useIngestProgress(runIds: readonly string[], onEnd: (runId: string) => void): Record<string, IngestProgress> {
+export function useIngestProgress(runIds: readonly string[], onEnd: (runId: string) => void): LiveIngest {
   const [progress, setProgress] = useState<Record<string, IngestProgress>>({});
+  const [started, setStarted] = useState<ReadonlySet<string>>(() => new Set());
   const live = useRef(new Map<string, Live>());
   const ended = useRef(new Set<string>());
   const onEndRef = useRef(onEnd);
@@ -46,6 +56,9 @@ export function useIngestProgress(runIds: readonly string[], onEnd: (runId: stri
       try {
         entry.stop = subscribeRun(runId, {
           onEvent: (event) => {
+            if (STARTED_EVENTS.has(event.type as string)) {
+              setStarted((current) => (current.has(runId) ? current : new Set([...current, runId])));
+            }
             if ((event.type as string) !== "ingest_progress") return;
             entry.events.push(event);
             const latest = ingestProgress(entry.events);
@@ -74,5 +87,5 @@ export function useIngestProgress(runIds: readonly string[], onEnd: (runId: stri
     };
   }, []);
 
-  return progress;
+  return useMemo(() => ({ progress, started }), [progress, started]);
 }
