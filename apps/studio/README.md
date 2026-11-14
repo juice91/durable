@@ -34,6 +34,7 @@ components never write paths by hand. Query parameters below are part of the URL
 | `…/chat[/:conversationId]?version=&model=&context=` | `version`: a version number or `draft` (absent: latest). `model`: model override. `context=preset` applies the newest saved request-context preset; `context=open` opens the request-context popover. `context` is read once and removed from the URL. |
 | `/agents/:id/traces` | Agent page, Traces tab (the agent's runs). Hosts the trace Sheet: `?trace=<runId>&tab=events\|logs`. |
 | `/agents/:id/editor?step=&compare=` | Agent page, Editor tab. `step`: `identity`, `instructions`, `tools`, `request-context` or `processors`. `compare=a..b`: a version compare, each side a version number or `draft` (`3..draft`, `1..3`). |
+| `/agents/:id/memory[?resource=<user id>]` | Agent page, Memory tab (only for an agent with memory; otherwise it opens Chat): the users with memory or conversations, one user's working memory (view, edit, clear) and Forget user. |
 | `/workflows` | Workflows list. |
 | `/workflows/:id[?tab=runs]` | Workflow page: Graph tab (default), or Runs with `tab=runs`. |
 | `/workflows/:id/traces` | Workflow page, Traces tab. |
@@ -121,6 +122,7 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agent page layout | `studio.agent-layout.v1.<agentId>…`, `studio.agent-config.v1.<agentId>` | Pane widths on each agent's page, and whether its Config panel was left open or closed. | Layout |
 | Agents list view | `studio.agents.view` | List or Compact. | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
+| Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |
 | Last agent | `studio.lastAgent` | The agent the playground reopens. | Layout |
 | Request-context presets | `studio.requestContextPresets.v1.<credential scope>:<agentId>`, `eap.requestContext.v1:…` | Named request-context presets for each agent (and the single saved value they were migrated from). | Presets |
 
@@ -128,5 +130,6 @@ The agent layout prefix also covers `studio.agent-layout.v1.<agentId>:threads-px
 pane width last dragged to).
 
 Not listed in Settings: per-tab `sessionStorage`, gone when the tab closes — the chat's remembered
-request context (`eap.playground.context.v1:<credential scope>:<agentId>`) and the ledgers of tool
+request context (`eap.playground.context.v1:<credential scope>:<agentId>`), the chat's "Act as user"
+id (`eap.studio.actAs.v1:<credential scope>:<agentId>`) and the ledgers of tool
 and workflow runs started in this tab (`eap.studio.toolRuns.v1`, `eap.studio.workflowRuns.v1`).

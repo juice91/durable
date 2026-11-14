@@ -225,6 +225,12 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
                 ))}
               </dl>
             )}
+            {memoryLines.length > 0 ? (
+              // RM.18: each user's memory lives on the Memory tab.
+              <Link href={routes.agentMemory(agent.id)} data-testid="config-memory-open" className={cn("mt-2 inline-block rounded-sm text-caption text-info-text underline-offset-4 hover:underline", focusRing)}>
+                Memory per user
+              </Link>
+            ) : null}
           </Section>
         </>
       )}

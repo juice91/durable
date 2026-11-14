@@ -42,6 +42,7 @@ export { RouteIdError, seg, withQuery, type RouteQuery } from "./query";
 export type {
   AgentChatRouteOptions,
   AgentEditorRouteOptions,
+  AgentMemoryRouteOptions,
   AgentTab,
   PlaygroundRouteOptions,
   RequestContextRouteOptions,

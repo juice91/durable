@@ -1,11 +1,15 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { MoreHorizontal, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Button, focusRing } from "@/components/ui/Button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/DropdownMenu";
+import { toast } from "@/components/ui/Toaster";
+import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import {
+  deleteConversation,
   listConversations,
   renameConversation,
   type Conversation,
@@ -44,12 +48,15 @@ export interface ConversationRailProps {
   onNew: () => void;
   /** Called after a successful rename, with the updated conversation. */
   onRenamed?: (conversation: Conversation) => void;
+  /** Called after a conversation was deleted (or found already gone), with its id (RM.18). */
+  onDeleted?: (conversationId: string) => void;
 }
 
 /**
  * The playground's left rail: the selected agent's conversations, most recently active first, paged
  * with the API's opaque cursor. Select to load, rename inline (Enter or leaving the field saves,
- * Escape cancels), "New conversation". Arrow Up/Down move between conversations.
+ * Escape cancels), "New conversation". Arrow Up/Down move between conversations. Each row's menu
+ * also deletes the conversation (confirmed; RM.18).
  */
 export function ConversationRail({
   agentId,
@@ -58,6 +65,7 @@ export function ConversationRail({
   onSelect,
   onNew,
   onRenamed,
+  onDeleted,
 }: ConversationRailProps) {
   const [items, setItems] = useState<Conversation[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -67,6 +75,10 @@ export function ConversationRail({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<Conversation | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const newButtonRef = useRef<HTMLButtonElement | null>(null);
   // Only the latest request may write: an agent switch or refresh makes older responses stale.
   const requestRef = useRef(0);
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -194,6 +206,28 @@ export function ConversationRail({
     }
   };
 
+  const confirmDelete = async () => {
+    const conversation = deleting;
+    if (!conversation) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteConversation(conversation.id);
+      toast.success("Conversation deleted");
+    } catch (error) {
+      // 404: already gone (deleted elsewhere), which is what was asked. 409: a turn is running.
+      if ((error as { status?: unknown } | null)?.status !== 404) {
+        setDeleteError(error instanceof Error && error.message ? error.message : "Failed to delete the conversation.");
+        setDeleteBusy(false);
+        return;
+      }
+    }
+    setItems((current) => current.filter((item) => item.id !== conversation.id));
+    setDeleting(null);
+    setDeleteBusy(false);
+    onDeleted?.(conversation.id);
+  };
+
   const moveFocus = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const buttons = Array.from(
@@ -212,7 +246,7 @@ export function ConversationRail({
       aria-label="Conversations"
       className="flex min-h-0 w-full min-w-0 flex-1 flex-col"
     >
-      <Button onClick={onNew} disabled={!agentId} className="mb-2 w-full justify-start">
+      <Button ref={newButtonRef} onClick={onNew} disabled={!agentId} className="mb-2 w-full justify-start">
         <Plus aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} />
         New conversation
       </Button>
@@ -293,6 +327,31 @@ export function ConversationRail({
                 >
                   Rename
                 </button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={`Actions for ${label}`}
+                      data-testid="conversation-actions"
+                      className={cn("inline-flex size-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground hover:bg-fill-hover hover:text-foreground", focusRing)}
+                    >
+                      <MoreHorizontal aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-icon" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => startRename(conversation)}>Rename</DropdownMenuItem>
+                    <DropdownMenuItem
+                      destructive
+                      data-testid="conversation-delete"
+                      onSelect={() => {
+                        setDeleteError(null);
+                        setDeleting(conversation);
+                      }}
+                    >
+                      Delete conversation
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </li>
             );
           })}
@@ -309,6 +368,31 @@ export function ConversationRail({
           {loadingMore ? "Loading…" : "Load more"}
         </button>
       )}
+
+      {deleting ? (
+        <ConfirmDialog
+          title="Delete this conversation?"
+          description={
+            <>
+              <p>
+                “{conversationLabel(deleting)}” and its memory (observations, its working memory and its recall index) are deleted. Its runs stay
+                in Traces for cost and audit, with their text removed.
+              </p>
+              <p className="mt-2">Memory about the user stays; Forget user on the Memory tab removes it.</p>
+            </>
+          }
+          confirmLabel="Delete conversation"
+          destructive
+          busy={deleteBusy}
+          error={deleteError}
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => {
+            setDeleting(null);
+            setDeleteError(null);
+          }}
+          fallbackFocus={() => newButtonRef.current}
+        />
+      ) : null}
     </nav>
   );
 }

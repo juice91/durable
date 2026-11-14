@@ -259,7 +259,8 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     return (
       <div data-testid="agent-chat-panes" data-layout="narrow" className="flex min-h-0 min-w-0 flex-1 flex-col">
         {children}
-        <Sheet open={threadsOpen} onOpenChange={setThreadsOpen}>
+        {/* Escape or an outside tap is the user's close: it asks the close guard (RM.18). */}
+        <Sheet open={threadsOpen} onOpenChange={page ? page.requestThreadsOpen : setThreadsOpen}>
           <SheetContent size="md" aria-describedby={undefined} data-testid="agent-threads-sheet" className="left-0 right-auto border-l-0 border-r">
             <SheetHeader title={THREADS_TITLE} />
             <SheetBody className="flex flex-col p-0">{threads}</SheetBody>

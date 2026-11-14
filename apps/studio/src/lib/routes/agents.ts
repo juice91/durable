@@ -53,6 +53,11 @@ export function parseCompareParam(value: string | null | undefined): { base: Com
   return { base, target };
 }
 
+export interface AgentMemoryRouteOptions {
+  /** The user (resource id) whose memory the tab shows (RM.18). */
+  resource?: string | null;
+}
+
 export interface RequestContextRouteOptions {
   agent?: string | null;
   version?: RouteVersion;
@@ -62,8 +67,8 @@ function versionParam(version: RouteVersion): string | undefined {
   return version === null || version === undefined ? undefined : String(version);
 }
 
-/** Paths of the agent page's tabs, in header order. */
-export type AgentTab = "chat" | "traces" | "editor";
+/** Paths of the agent page's tabs, in header order. `memory` is listed only for an agent with memory (RM.18). */
+export type AgentTab = "chat" | "traces" | "editor" | "memory";
 
 export const agentRoutes = {
   /** `/agents`: the agents list. */
@@ -84,9 +89,18 @@ export const agentRoutes = {
   /** `/agents/:id/editor?step=&compare=`: the editor, versions and compare. */
   agentEditor: (id: string, opts: AgentEditorRouteOptions = {}): string =>
     withQuery(`/agents/${seg(id)}/editor`, { step: opts.step, compare: opts.compare }),
+  /** `/agents/:id/memory?resource=`: the agent's memory per user (RM.18; an agent without memory goes to Chat). */
+  agentMemory: (id: string, opts: AgentMemoryRouteOptions = {}): string =>
+    withQuery(`/agents/${seg(id)}/memory`, { resource: opts.resource }),
   /** The same tab of an agent (the header's agent switcher keeps the tab). */
   agentTab: (id: string, tab: AgentTab): string =>
-    tab === "chat" ? agentRoutes.agentChat(id) : tab === "traces" ? agentRoutes.agentTraces(id) : agentRoutes.agentEditor(id),
+    tab === "chat"
+      ? agentRoutes.agentChat(id)
+      : tab === "traces"
+        ? agentRoutes.agentTraces(id)
+        : tab === "memory"
+          ? agentRoutes.agentMemory(id)
+          : agentRoutes.agentEditor(id),
   /** `/playground?agent=&conversation=&version=&model=&context=` (keys in that order). A legacy URL since
    * SL.6: it redirects to `agentChat` (see `legacy.ts`). Kept for links that SL.10 retires. */
   playground: (opts: PlaygroundRouteOptions = {}): string =>
@@ -107,7 +121,7 @@ export const agentRoutes = {
 
 /** Which agent tab `pathname` shows (`/agents/a/chat/c` → "chat"), or null off the agent page. */
 export function agentTabOf(pathname: string | null | undefined): AgentTab | null {
-  const match = /^\/agents\/[^/]+\/(chat|traces|editor)(?:\/|$)/.exec(pathname ?? "");
+  const match = /^\/agents\/[^/]+\/(chat|traces|editor|memory)(?:\/|$)/.exec(pathname ?? "");
   return match ? (match[1] as AgentTab) : null;
 }
 

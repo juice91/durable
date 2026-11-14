@@ -46,6 +46,7 @@ import { TraceLink } from "@/components/traces/TraceLink";
 import { api, ApiError, type Agent, type AgentVersion } from "@/lib/api";
 import {
   createConversation,
+  deleteConversation,
   getConversation,
   type Conversation,
 } from "@/lib/conversations";
@@ -76,7 +77,16 @@ import { ComposerFieldError } from "./ComposerChip";
 import { ComposerModelChip, MODEL_ERROR_ID } from "./ComposerModelChip";
 import { ComposerVersionChip, VERSION_ERROR_ID } from "./ComposerVersionChip";
 import { ThreadsPanel } from "./ThreadsPanel";
+import { ComposerActAsChip } from "./ComposerActAsChip";
 import { chatUrlFor, effectiveConfig, writeLastAgent, type ChatUrlState } from "./agentPageModel";
+import { memoryOf } from "@/components/agents/knowledgeMemory";
+import { agentHasMemory, latestPublishedSpec, readActAs, writeActAs } from "@/components/memory/memoryModel";
+import { useMemoryActivity, type LatestTurn } from "@/components/memory/useMemoryActivity";
+import { draftDirty, targetKeyOf, type WorkingMemoryDraft, type WorkingMemoryDraftStore } from "@/components/memory/WorkingMemoryEditor";
+import { inspectorTarget } from "@/components/memory/MemoryInspector";
+import { WorkingMemoryGuard } from "@/components/memory/WorkingMemoryGuard";
+import { WORKING_MEMORY_GUARD_COPY } from "@/components/memory/memoryModel";
+import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 
 /** One turn of the conversation: a run plus what the thread and its badge need to draw it. */
 type Turn = ThreadTurn & {
@@ -105,6 +115,21 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
 
 function failedEventStatus(status: unknown): "failed" | "needs_attention" {
   return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
+/**
+ * Deletes a conversation this tab created for a first send that was refused, if it still has no
+ * turns (a turn start that failed in transit may have been recorded: then it is kept). Best effort:
+ * a 404 (already gone) or any failure is ignored, and nothing is shown.
+ */
+export async function discardEmptyConversation(conversationId: string): Promise<void> {
+  try {
+    const conversation = await getConversation(conversationId);
+    if (!conversation || conversation.turn_count !== 0 || (conversation.runs?.length ?? 0) > 0) return;
+    await deleteConversation(conversationId);
+  } catch {
+    // Best effort: an empty conversation left over is harmless.
+  }
 }
 
 function messageText(message: AppendMessage): string {
@@ -242,8 +267,16 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   // Applied once: a later remount of the chat pane must not put it back.
   const clearRestoreDraft = useCallback(() => setRestoreDraft(null), []);
   // A conversation created for a first send whose turn was then refused: not shown or put in the URL
-  // until a turn starts in it, and reused by the next send so a refusal leaves no extra conversation.
-  const pendingConversationRef = useRef<{ agentId: string; id: string } | null>(null);
+  // until a turn starts in it, and reused by the next send (for the same "Act as user") so a refusal
+  // leaves no extra conversation.
+  // `refused`: its turn start was refused or failed. Only such a conversation is ever discarded: while
+  // a start is in flight (the user may switch threads meanwhile) it is not, and once a start succeeds
+  // it stops being pending.
+  const pendingConversationRef = useRef<{ agentId: string; id: string; actAs: string; resourceId: string | null; refused: boolean } | null>(null);
+  // "Act as user" (RM.18): the resource id NEW conversations are created with ("" = the caller).
+  const [actAs, setActAs] = useState("");
+  // The open conversation's user: a resource id, null (none), undefined (no conversation or loading).
+  const [conversationResourceId, setConversationResourceId] = useState<string | null | undefined>(undefined);
   // The URL is written only after it has been read, so a reload never loses its options.
   const [urlReady, setUrlReady] = useState(false);
 
@@ -258,6 +291,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   const modelChoiceError = "error" in resolvedModel ? resolvedModel.error : null;
 
   const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
+  // The Memory tab and "Act as user" show only for an agent with memory (draft or latest version).
+  const memoryChip = agentHasMemory(selectedAgent, versions);
 
   /** Writes the chat's state to the address bar (replaceState: no history entry, no navigation). */
   const writeUrl = useCallback(
@@ -392,6 +427,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     initialConversationRef.current = routeConversationId ?? initial.conversation;
     urlStateRef.current = { conversation: initialConversationRef.current, version: initial.version, model: initial.model };
     selectAgent(agentId, initial.preferPreset);
+    setActAs(readActAs(agentId));
     if (initial.openContext) setContextOpen(true);
     stripPreferPresetParam();
     setRequestedVersion(initial.version);
@@ -492,9 +528,13 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       stopSubscription();
       const generation = ++generationRef.current;
       const current = () => generation === generationRef.current;
-      // Opening another conversation drops a first send's unused conversation.
+      // Opening another conversation drops a first send's unused conversation, and deletes it while it
+      // is still empty (not the one being opened).
+      const pending = pendingConversationRef.current;
       pendingConversationRef.current = null;
+      if (pending?.refused && pending.id !== id) void discardEmptyConversation(pending.id);
       setConversationId(id);
+      setConversationResourceId(undefined);
       setTurns([]);
       setError(null);
       setAnnounceRunId(null);
@@ -519,6 +559,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         );
         if (!current()) return;
         setConversationId(conversation.id);
+        setConversationResourceId(conversation.resource_id ?? null);
         setTurns(
           loaded.map(({ run, events }) => {
             const row = run as typeof run & RunUsageRow;
@@ -587,9 +628,13 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
 
   const resetConversation = useCallback(() => {
     stopSubscription();
+    // A new conversation: the unused one of a refused first send is deleted while still empty.
+    const pending = pendingConversationRef.current;
     pendingConversationRef.current = null;
+    if (pending?.refused) void discardEmptyConversation(pending.id);
     generationRef.current += 1;
     setConversationId(null);
+    setConversationResourceId(undefined);
     setTurns([]);
     setRunActive(false);
     setError(null);
@@ -680,6 +725,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         },
       ]);
 
+      // Read once per send: the chip may change while the request is in flight.
+      const newConversationUser = memoryChip ? actAs : "";
+      let createdResourceId: string | null = null;
+      // The conversation this send created (or reused), for the failure path below.
+      let sendConversation: string | null = null;
       try {
         let id = conversationId;
         const firstTurn = id === null;
@@ -698,14 +748,25 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             }
           }
           const pending = pendingConversationRef.current;
-          if (pending && pending.agentId === selectedAgentId) {
+          if (pending && pending.agentId === selectedAgentId && pending.actAs === newConversationUser) {
             id = pending.id;
           } else {
-            // No title: the API titles the conversation from its first turn.
-            const created = await createConversation(selectedAgentId, null, crypto.randomUUID());
+            // The empty conversation of a refused first send acts for another user ("Act as user"
+            // changed since): its resource id cannot change, so delete it rather than leave it empty.
+            if (pending) {
+              pendingConversationRef.current = null;
+              await discardEmptyConversation(pending.id);
+            }
+            // No title: the API titles the conversation from its first turn. "Act as user" sets the
+            // conversation's resource id, for new conversations only (it never changes after).
+            const created = await createConversation(selectedAgentId, null, crypto.randomUUID(), newConversationUser || null);
             id = created.id;
-            pendingConversationRef.current = { agentId: selectedAgentId, id };
+            pendingConversationRef.current = { agentId: selectedAgentId, id, actAs: newConversationUser, resourceId: created.resource_id ?? null, refused: false };
           }
+          createdResourceId = pendingConversationRef.current?.id === id ? pendingConversationRef.current.resourceId : null;
+          // A reused conversation's start is in flight again: not discardable until it is refused.
+          if (pendingConversationRef.current?.id === id) pendingConversationRef.current.refused = false;
+          sendConversation = id;
         }
         const started = await startTurnWithOptions(id, runId, input, options);
         if (pendingConversationRef.current?.id === id) pendingConversationRef.current = null;
@@ -716,6 +777,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         // The conversation has its first turn: now it is shown and goes in the address.
         if (firstTurn) {
           setConversationId(id);
+          setConversationResourceId(createdResourceId);
           setConversationParam(id);
         }
         updateTurn(runId, (turn) => ({
@@ -728,6 +790,17 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         }));
         followRun(runId);
       } catch (reason) {
+        if (sendConversation !== null) {
+          const pending = pendingConversationRef.current;
+          if (pending?.id === sendConversation) {
+            // Refused or failed: the next send reuses it, a switch discards it.
+            pending.refused = true;
+          } else if (!current()) {
+            // The user left this thread while the start was in flight, and it then failed: nothing
+            // else will discard it (the re-read keeps it if the turn was recorded after all).
+            void discardEmptyConversation(sendConversation);
+          }
+        }
         if (!current()) return;
         setTurns((existing) => existing.filter((turn) => turn.runId !== runId));
         setRunActive(false);
@@ -747,12 +820,14 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       }
     },
     [
+      actAs,
       chosenModelId,
       contextInfo,
       contextValue,
       conversationId,
       defaultModelId,
       followRun,
+      memoryChip,
       modelChoiceError,
       putBack,
       refreshRail,
@@ -849,6 +924,57 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   }, [turns]);
 
   const memorySpec = selectedAgent ? effectiveConfig(selectedAgent, versions, versionRef).spec : null;
+  const memoryConfig = memoryOf(memorySpec);
+  const latestTurn = useMemo<LatestTurn | null>(
+    () => (latest ? { runId: latest.runId, status: latest.displayStatus, events: latest.events } : null),
+    [latest],
+  );
+  const memoryActivity = useMemoryActivity(latestTurn, {
+    observational: Boolean(memoryConfig?.observational),
+    semanticRecall: Boolean(memoryConfig?.semantic_recall),
+  });
+  const handleConversationDeleted = useCallback(
+    (id: string) => {
+      if (pendingConversationRef.current?.id === id) pendingConversationRef.current = null;
+      if (id === conversationId) resetConversation();
+    },
+    [conversationId, resetConversation],
+  );
+  // The inspector's working memory edit, kept here above the panes: a closed threads Sheet, a hidden
+  // memory card or the panes' remount at 1024 px does not lose it. While it is unsaved, every way of
+  // leaving it asks first through one Discard dialog (`askDiscard`), and leaving the page through the
+  // editor's guard (WorkingMemoryGuard).
+  const [memoryDraft, setMemoryDraft] = useState<WorkingMemoryDraft | null>(null);
+  const [pendingDiscard, setPendingDiscard] = useState<{ proceed: () => void; reason: string } | null>(null);
+  // Unsaved only while it is the note on screen: after the version chip moves to a spec with the other
+  // working memory scope (or none), the inspector no longer shows it and nothing asks about it. It
+  // is kept, so moving back shows it again.
+  const inspectorKey = memoryConfig ? targetKeyOf(inspectorTarget(selectedAgentId, conversationId, conversationResourceId, memorySpec).target) : null;
+  const memoryDirty = draftDirty(memoryDraft) && memoryDraft?.key === inspectorKey;
+  const memoryDirtyRef = useRef(memoryDirty);
+  memoryDirtyRef.current = memoryDirty;
+  const askDiscard = useCallback((proceed: () => void, reason?: string) => {
+    if (memoryDirtyRef.current) setPendingDiscard({ proceed, reason: reason ?? WORKING_MEMORY_GUARD_COPY.description });
+    else proceed();
+  }, []);
+  const askDiscardOnClose = useCallback(
+    (close: () => void) => askDiscard(close, "The working memory edit is not saved. Closing the conversations pane discards it."),
+    [askDiscard],
+  );
+  const draftStore = useMemo<WorkingMemoryDraftStore>(() => ({ draft: memoryDraft, setDraft: setMemoryDraft }), [memoryDraft]);
+  // Another conversation (after the Discard dialog, or a deleted one): its edit no longer applies.
+  useEffect(() => setMemoryDraft(null), [conversationId]);
+  const setThreadsCloseGuard = page?.agentId === agentId ? page.setThreadsCloseGuard : undefined;
+  useEffect(() => {
+    if (!setThreadsCloseGuard) return;
+    setThreadsCloseGuard(memoryDirty ? askDiscardOnClose : null);
+    return () => setThreadsCloseGuard(null);
+  }, [askDiscardOnClose, memoryDirty, setThreadsCloseGuard]);
+
+  const handleActAsChange = (resourceId: string) => {
+    setActAs(resourceId);
+    writeActAs(selectedAgentId, resourceId);
+  };
   const threads = (
     <ThreadsPanel
       agentId={selectedAgent ? selectedAgentId : ""}
@@ -856,7 +982,21 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       refreshKey={railRefresh}
       onSelect={handleSelectConversation}
       onNew={resetConversation}
+      onDeleted={handleConversationDeleted}
       memorySpec={memorySpec}
+      memoryInspector={
+        selectedAgent && memoryConfig
+          ? {
+              agentId: selectedAgentId,
+              conversationId,
+              resourceId: conversationResourceId,
+              publishedSpec: latestPublishedSpec(selectedAgent, versions),
+              activity: memoryActivity,
+              draftStore,
+              askDiscard,
+            }
+          : undefined
+      }
     />
   );
 
@@ -881,6 +1021,14 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         error={modelError}
         disabled={optionsDisabled}
       />
+      {memoryChip ? (
+        <ComposerActAsChip
+          value={actAs}
+          onChange={handleActAsChange}
+          conversationUser={conversationId ? (conversationResourceId ?? null) : undefined}
+          disabled={optionsDisabled}
+        />
+      ) : null}
       <RequestContextPopover
         agentId={selectedAgentId}
         versionRef={versionRef}
@@ -989,6 +1137,24 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
           />
         </div>
       </AgentChatPanes>
+      {memoryDirty ? <WorkingMemoryGuard /> : null}
+      {pendingDiscard ? (
+        <ConfirmDialog
+          title={WORKING_MEMORY_GUARD_COPY.title}
+          description={pendingDiscard.reason}
+          confirmLabel={WORKING_MEMORY_GUARD_COPY.confirmLabel}
+          cancelLabel="Stay"
+          destructive
+          onConfirm={() => {
+            const { proceed } = pendingDiscard;
+            setPendingDiscard(null);
+            setMemoryDraft(null);
+            memoryDirtyRef.current = false;
+            proceed();
+          }}
+          onCancel={() => setPendingDiscard(null)}
+        />
+      ) : null}
     </div>
   );
 }

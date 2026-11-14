@@ -29,6 +29,14 @@ export interface AgentPageValue {
   /** A user's open or close (the toggle, `{`, a drag). Opening while auto-collapsed closes Config. */
   setThreadsOpen: (open: boolean) => void;
   /**
+   * The same, for the user's explicit closes (the header toggle, `{`, the narrow Sheet's Escape or
+   * outside tap): a close asks the registered close guard first (RM.18: an unsaved working memory
+   * edit in the threads pane). A drag is not routed here: the wide pane stays mounted when collapsed.
+   */
+  requestThreadsOpen: (open: boolean) => void;
+  /** Registers (or, with null, removes) the guard a close asks; it calls `close` to go ahead. */
+  setThreadsCloseGuard: (guard: ThreadsCloseGuard | null) => void;
+  /**
    * The threads pane is collapsed automatically because Config is open and threads + chat do not
    * fit beside it (chatFit.ts). Not the user's layout: never saved.
    */
@@ -45,6 +53,9 @@ export interface AgentPageValue {
   chatHref: string | null;
   setChatHref: (href: string | null) => void;
 }
+
+/** Asked before the threads pane closes; calls `close` when the close may go ahead. */
+export type ThreadsCloseGuard = (close: () => void) => void;
 
 export const AgentPageContext = createContext<AgentPageValue | null>(null);
 

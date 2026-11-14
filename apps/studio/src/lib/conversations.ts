@@ -5,6 +5,8 @@ import type { Run } from "./runs";
 export interface Conversation {
   id: string;
   agent_id: string;
+  /** The user the conversation acts for (RM.9), set once at creation; null: resource memory off. */
+  resource_id?: string | null;
   title: string | null;
   turn_count: number;
   /** The latest turn's run, or null for a conversation without turns. */
@@ -52,16 +54,37 @@ async function send<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
-/** Create a conversation; `conversationId` (client-generated) makes a retry idempotent. */
+/**
+ * Create a conversation; `conversationId` (client-generated) makes a retry idempotent. `resourceId`
+ * ("Act as user", RM.18) is the user it acts for, fixed for its lifetime; omitted, the API uses the
+ * caller's user id.
+ */
 export function createConversation(
   agentId: string,
   title: string | null,
   conversationId?: string,
+  resourceId?: string | null,
 ): Promise<Conversation> {
   return send(`/api/v1/agents/${encodeURIComponent(agentId)}/conversations`, {
     method: "POST",
-    body: JSON.stringify({ title, ...(conversationId ? { conversation_id: conversationId } : {}) }),
+    body: JSON.stringify({
+      title,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(resourceId ? { resource_id: resourceId } : {}),
+    }),
   });
+}
+
+/**
+ * Delete a conversation (RM.9): its observations, conversation working memory and recall index go;
+ * its runs stay with their text removed. 204; 404 when it is already gone; 409 while a turn runs.
+ */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "DELETE",
+    headers: apiHeaders({}),
+  });
+  if (!response.ok) throw await apiErrorFromResponse(response);
 }
 
 export function getConversation(conversationId: string): Promise<ConversationDetail> {

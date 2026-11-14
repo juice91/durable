@@ -48,6 +48,16 @@ const AGENT = {
   },
 };
 
+/** RM.18: an agent with memory (per-user working memory), for the Memory tab. */
+const MEMORY_AGENT = {
+  id: "a2",
+  name: "Memory bot",
+  latest_version: 1,
+  draft_spec: { ...AGENT.draft_spec, name: "Memory bot", memory: { working: { scope: "resource" } } },
+};
+const MEMORY_VERSIONS = [{ agent_id: "a2", version: 1, spec: MEMORY_AGENT.draft_spec, spec_hash: "m1", created_at: T0, created_by: "dev", restored_from_version: null }];
+const MEMORY_NOTE = { agent_id: "a2", scope: "resource", scope_key: "alice", format: "markdown", content: "# User\n- Name: Alice", version: 2, updated_by_run_id: null, created_at: T0, updated_at: T1 };
+
 const VERSIONS = [1, 2].map((version) => ({
   agent_id: "a1",
   version,
@@ -153,7 +163,11 @@ function kbDocument(key: string, extra: Record<string, unknown> = {}) {
 /** The API with rows: one agent, two versions, runs, tools, an MCP server, a workflow, logs, metrics. */
 function respond(url: URL): unknown {
   const p = url.pathname.replace(/^\/api\/v1/, "");
-  if (p === "/agents") return [AGENT];
+  if (p === "/agents") return [AGENT, MEMORY_AGENT];
+  if (p === "/agents/a2") return MEMORY_AGENT;
+  if (p === "/agents/a2/versions") return MEMORY_VERSIONS;
+  if (p === "/agents/a2/memory/working") return { items: [MEMORY_NOTE] };
+  if (p === "/agents/a2/memory/resources/alice/working") return MEMORY_NOTE;
   if (p === "/agents/a1") return AGENT;
   if (p === "/agents/a1/versions") return VERSIONS;
   if (/^\/agents\/a1\/versions\/\d+$/.test(p)) return VERSIONS[Number(p.split("/").pop()) - 1] ?? VERSIONS[1];
@@ -235,6 +249,7 @@ const PAGES: PageCase[] = [
   { name: "agent conversation", path: "/agents/a1/chat/c1", params: { id: "a1", conversationId: "c1" }, load: () => inAgentLayout(import("@/app/agents/[id]/chat/[conversationId]/page")), h1: "Support bot", shows: "hello" },
   { name: "agent traces", path: "/agents/a1/traces", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/traces/page")), h1: "Support bot", shows: "#agent-trace-row" },
   { name: "agent editor", path: "/agents/a1/editor", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/editor/page")), h1: "Support bot", shows: "Identity" },
+  { name: "agent memory", path: "/agents/a2/memory", params: { id: "a2" }, load: () => inAgentLayout(import("@/app/agents/[id]/memory/page")), h1: "Memory bot", shows: "#memory-resource-option" },
   { name: "workflows", path: "/workflows", load: () => import("@/app/workflows/page"), h1: "Workflows", shows: "Triage" },
   { name: "workflow graph", path: "/workflows/w1", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/page"), h1: "Triage", shows: "classify" },
   { name: "workflow traces", path: "/workflows/w1/traces", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/traces/page"), h1: "Triage", shows: "#workflow-trace-row" },

@@ -43,6 +43,19 @@ export function leavesPage(href: string, pathname: string, origin: string): bool
   }
 }
 
+/** The guard dialog's words. */
+export interface UnsavedChangesCopy {
+  title: string;
+  description: string;
+  confirmLabel: string;
+}
+
+const EDITOR_COPY: UnsavedChangesCopy = {
+  title: "Leave without saving?",
+  description: "The editor has changes that are not saved. Leaving discards them; Save draft keeps them.",
+  confirmLabel: "Leave without saving",
+};
+
 /**
  * "Unsaved changes" guard for the editor. While `dirty`:
  * - closing or reloading the tab asks the browser's own question (`beforeunload`);
@@ -52,9 +65,10 @@ export function leavesPage(href: string, pathname: string, origin: string): bool
  * - navigation by code (the `g` shortcuts, the ⌘K palette, the breadcrumb switcher) asks the same
  *   dialog through the frame's navigation guard (`components/frame/navigationGuard.ts`).
  * Not covered: the browser's Back and Forward buttons (no cancellable app-router hook; deferred).
- * Returns the dialog to render.
+ * Returns the dialog to render. `copy` replaces the dialog's words (the memory inspector's working
+ * memory edit uses it, RM.18).
  */
-export function useUnsavedChangesGuard(dirty: boolean): React.ReactNode {
+export function useUnsavedChangesGuard(dirty: boolean, copy: UnsavedChangesCopy = EDITOR_COPY): React.ReactNode {
   const pathname = usePathname() ?? "";
   const router = useRouter();
   const [pending, setPending] = useState<{ href: string; resolve: (ok: boolean) => void; onLeave?: () => void } | null>(null);
@@ -117,9 +131,9 @@ export function useUnsavedChangesGuard(dirty: boolean): React.ReactNode {
   if (!pending) return null;
   return (
     <ConfirmDialog
-      title="Leave without saving?"
-      description="The editor has changes that are not saved. Leaving discards them; Save draft keeps them."
-      confirmLabel="Leave without saving"
+      title={copy.title}
+      description={copy.description}
+      confirmLabel={copy.confirmLabel}
       cancelLabel="Stay"
       destructive
       onConfirm={leave}

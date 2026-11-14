@@ -18,13 +18,14 @@ import { toast } from "@/components/ui/Toaster";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import type { VersionRef } from "@/components/chat/runOptions";
-import { AgentPageContext, type AgentPageValue } from "./AgentPageContext";
+import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
 import { THREADS_TITLE } from "./AgentChatPanes";
 import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
 import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
+import { agentHasMemory } from "@/components/memory/memoryModel";
 
 export const CONFIG_TITLE = "Config";
 
@@ -37,7 +38,17 @@ const TABS: { id: AgentTab; label: string; testId: string }[] = [
   { id: "chat", label: "Chat", testId: "agent-tab-chat" },
   { id: "traces", label: "Traces", testId: "agent-tab-traces" },
   { id: "editor", label: "Editor", testId: "agent-tab-editor" },
+  // RM.18: only for an agent with memory (its draft or latest version); see `visibleTabs`.
+  { id: "memory", label: "Memory", testId: "agent-tab-memory" },
 ];
+
+/**
+ * The header's tabs: Memory only when the agent has memory, or while its page is open (an agent
+ * without memory is sent from there to Chat by the Memory tab itself).
+ */
+export function visibleTabs(hasMemory: boolean, tab: AgentTab): typeof TABS {
+  return TABS.filter((item) => item.id !== "memory" || hasMemory || tab === "memory");
+}
 
 function loadErrorMessage(error: unknown): string {
   return error instanceof ApiError && error.status === 404 ? "Agent not found" : "Failed to load agent";
@@ -52,7 +63,7 @@ export interface AgentLayoutProps {
  * The agent page's shared frame (`app/agents/[id]/layout.tsx`): loads the agent once and keeps it
  * across tabs. Header: the agent crumb with a switcher (to the same tab of another agent), the
  * Conversations toggle (Chat tab), the Config toggle and Copy link, and the Chat · Traces · Editor
- * tabs. The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
+ * tabs (· Memory for an agent with memory, RM.18). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
  * screens) when threads and chat fit beside it, a Sheet below 1024 px. Keys: `]` toggles Config, `{`
  * the conversations pane. Where Config does not leave room for both panes, the threads pane
  * collapses automatically while Config is open (chatFit.ts).
@@ -213,6 +224,21 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
     [autoCollapsed, configOpenNow, isWide, setConfigOpen, threadsExpanded, threadsPaneExpanded],
   );
 
+  // The user's explicit closes ask the threads pane's close guard first (an unsaved working memory
+  // edit, RM.18); opens never ask.
+  const closeGuardRef = useRef<ThreadsCloseGuard | null>(null);
+  const setThreadsCloseGuard = useCallback((guard: ThreadsCloseGuard | null) => {
+    closeGuardRef.current = guard;
+  }, []);
+  const requestThreadsOpen = useCallback(
+    (open: boolean) => {
+      const guard = closeGuardRef.current;
+      if (!open && guard) guard(() => setThreadsOpen(false));
+      else setThreadsOpen(open);
+    },
+    [setThreadsOpen],
+  );
+
   // `]` toggles Config; `{` the conversations pane (Chat tab). Ignored while typing or under a modal.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -222,12 +248,12 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
         toggleConfig();
       } else if (event.key === "{" && tab === "chat") {
         event.preventDefault();
-        setThreadsOpen(!threadsPressed);
+        requestThreadsOpen(!threadsPressed);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsPressed]);
+  }, [configAvailable, toggleConfig, requestThreadsOpen, tab, threadsPressed]);
 
   const copyLink = async () => {
     if (await copyText(window.location.href)) {
@@ -249,13 +275,15 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       setConfigVersion,
       threadsOpen,
       setThreadsOpen,
+      requestThreadsOpen,
+      setThreadsCloseGuard,
       threadsAutoCollapsed: isWide && autoCollapsed,
       threadsPaneExpanded,
       reportThreadsPane,
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, requestThreadsOpen, setThreadsCloseGuard, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -286,7 +314,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
           shortcut="{"
           size="sm"
           aria-pressed={threadsPressed}
-          onClick={() => setThreadsOpen(!threadsPressed)}
+          onClick={() => requestThreadsOpen(!threadsPressed)}
           icon={icon(MessagesSquare)}
           data-testid="agent-threads-toggle"
         />
@@ -319,7 +347,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
             crumbs={crumbs}
             documentTitle={agent?.name}
             actions={actions}
-            tabs={TABS.map((item) => ({
+            tabs={visibleTabs(agentHasMemory(agent, versions), tab).map((item) => ({
               href: item.id === "chat" && chatHref ? chatHref : routes.agentTab(agentId, item.id),
               label: item.label,
               active: item.id === tab,

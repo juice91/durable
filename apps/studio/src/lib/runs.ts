@@ -215,13 +215,15 @@ export async function getRun(runId: string): Promise<Run> {
   return response.json();
 }
 
-export async function listEvents(runId: string, afterSeq?: number): Promise<RunEvent[]> {
+/** A run's stored events (after `afterSeq`); `signal` cancels the request (the memory poll, RM.18). */
+export async function listEvents(runId: string, afterSeq?: number, signal?: AbortSignal): Promise<RunEvent[]> {
   const url = afterSeq !== undefined
     ? `${BASE_URL}/api/v1/runs/${runId}/events?after_seq=${afterSeq}`
     : `${BASE_URL}/api/v1/runs/${runId}/events`;
 
   const response = await fetch(url, {
     headers: apiHeaders(),
+    ...(signal ? { signal } : {}),
   });
 
   if (!response.ok) {

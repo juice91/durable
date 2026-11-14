@@ -10,6 +10,7 @@ import {
   LAST_AGENT_KEY,
 } from "@/components/agentPage/agentPageModel";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
+import { MEMORY_CARD_KEY } from "@/components/memory/memoryModel";
 
 /**
  * What Studio keeps in this browser's localStorage, for the Settings "Data in this browser"
@@ -81,6 +82,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Workflow page layout",
     description: "The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height.",
     keys: [WORKFLOW_LAYOUT_STORAGE_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "memory-card",
+    label: "Memory card",
+    description: "Whether the chat's memory card is expanded into the memory inspector.",
+    keys: [MEMORY_CARD_KEY],
     prefixes: [],
     clearGroup: "layout",
   },
