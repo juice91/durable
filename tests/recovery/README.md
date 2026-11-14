@@ -147,3 +147,34 @@ SSE replay from -1, 0, the pre-crash seq, the midpoint, last-1 and last equals t
 | P1 | `input_processors` (PII + moderation input chain) | the chain re-runs on the same text: one result event per processor, one moderation usage row, the same redacted input and answer |
 | P2 | `moderation_request`, input and output phase | the moderation model is called again (2 calls: the crash log line proves the first, answered call; the recovered workflow holds exactly one checkpointed `eap-moderator__model.request` step), its usage row and result event are written once; with output processors no delta is published in either attempt |
 | O1 | `after_event_write` on `start` of a run and of a conversation turn with a model override and a request context; the row's model and context are rewritten while no worker runs | the replay answers with the model and context `eap.start_run` recorded; the usage row names that model |
+
+# RAG and memory milestone (task RM.20): ingestion and memory under kill -9
+
+`test_rm_crash_matrix.py` reuses the harness above. Everything goes through the API: knowledge
+bases, document uploads (`PUT .../documents/{key}`), reindex, agents with `memory`, conversations
+and turns. Workers get the test price file, `EAP_ALLOWED_EMBEDDING_MODELS=test:*` and
+`EAP_KB_EMBED_BATCH_CHUNKS=4` (a 10-section document is 3 batches). The crash points are the RM ones
+documented in `apps/worker/src/eap_worker/crash.py`. The worker-level crash tests in
+`apps/worker/worker_tests` (`test_kb_ingest_crash.py`, `test_kb_ingest_reindex_crash.py`,
+`test_working_memory.py`, `test_observational_memory.py`, `test_semantic_recall.py`) enqueue through
+`DBOSClient` directly; this file adds the API hand-off and the invariants below. About 60 s.
+
+Every scenario asserts: one DBOS workflow in SUCCESS, recovered by the second worker; contiguous
+`seq`, no duplicate `event_key`, the expected story, events written before the crash unchanged; one
+`run_model_requests` row per request key with the expected model and `operation` (`chat` or
+`embedding`, embedding rows with 0 output tokens), rows written before the crash unchanged; `runs`
+and `GET /runs/{id}` totals equal the sum of the rows (post-turn usage included); SSE replay equals
+the database. A replay from before `run_completed` ends there; post-turn events (`memory:observe:*`,
+`embed:index:*`) follow it in the table and come back only to a client resuming at or after it.
+
+| # | Kill | Proves |
+|---|------|--------|
+| K1 | `kb_chunk`; `kb_batch_before_commit` and `kb_batch_after_commit` on `embed:batch:1`; `kb_finalize`, while version 2 of an ingested document is uploaded | no duplicate chunk rows; one usage row per batch; version 1 is the active, fully embedded one at the kill unless the switch had committed, and gone after it; the API search tester after recovery returns version 2 only |
+| K2 | `kb_batch_before_commit` on `embed:batch:1` of a reindex to `test:hash768` | at the kill the old generation is still active and one batch of the new one is embedded, with no duplicate ordinals; after recovery only the new generation remains, at 768 dimensions, with one usage row per batch |
+| M1 | `after_tool_call` in `update_working_memory`; `load_memory` | one note version, one `memory_updated` event, one ledger row (`wm:{run}:{call}|{agent}`), one tool result, two chat usage rows |
+| O1 | `observer_request`; `after_observation_write` in turn 2's post-turn observation | the turn was `completed` before the kill; one observation covering turn 1, one `memory:observe:2` event and usage row |
+| S1 | `recall_embedding` (pre-turn); `after_memory_index` (post-turn) | one `embed:recall:1` and one `embed:index:1` event and usage row, one indexed row per role, the fact from another conversation of the same user recalled, and no text in `embedding` events |
+
+Not here: Studio checks (RM.16 to RM.19 are deferred until after the Studio redesign). The
+release note on draining in-flight runs before deploying this milestone is in
+`apps/worker/README.md` ("Upgrading").

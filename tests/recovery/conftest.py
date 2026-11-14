@@ -607,6 +607,14 @@ class Harness:
                         if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
                             conn.execute(text(f"DELETE FROM {table} WHERE idempotency_key LIKE :p"), {"p": f"{run_id}:%"})
                 conn.execute(text("DELETE FROM run_model_requests WHERE tenant_id = :t"), {"t": self.tenant})
+                # RAG and memory rows (RM.20): memory rows reference runs and conversations;
+                # knowledge bases cascade to their documents and chunks.
+                for table in (
+                    "memory_observations", "message_embeddings", "memory_forget_watermarks",
+                    "working_memories", "knowledge_bases",
+                ):
+                    if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
+                        conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": self.tenant})
                 conn.execute(text("DELETE FROM side_effects WHERE tenant_id = :t"), {"t": self.tenant})
