@@ -9,7 +9,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }));
-const data = vi.hoisted(() => ({ agents: vi.fn(), workflows: vi.fn(), tools: vi.fn(), mcp: vi.fn() }));
+const data = vi.hoisted(() => ({ agents: vi.fn(), workflows: vi.fn(), tools: vi.fn(), mcp: vi.fn(), knowledge: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return { ...actual, api: { ...actual.api, agents: { ...actual.api.agents, list: data.agents } } };
@@ -20,6 +20,7 @@ vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
   return { ...actual, mcpServers: { ...actual.mcpServers, list: data.mcp } };
 });
+vi.mock("@/lib/knowledge", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/knowledge")>()), listKnowledgeBases: data.knowledge }));
 
 import { mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
@@ -57,6 +58,7 @@ beforeEach(() => {
   data.workflows.mockResolvedValue([{ id: "wf-1", name: "nightly report", draft_spec: null, latest_version: 2 }]);
   data.tools.mockResolvedValue([{ id: "get_weather", title: "Get weather", description: SECRET, side_effect: false, external_idempotent: true, input_schema: {}, allowed: true }]);
   data.mcp.mockResolvedValue([{ id: "srv-1", name: "docs server", url: "https://mcp.example.test", transport: "streamable_http", enabled: true, header_names: ["X-Api-Key"], created_at: null, updated_at: null, last_checked_at: null, last_status: null, last_error_code: null }]);
+  data.knowledge.mockResolvedValue([{ id: "kb-1", tenant_id: "t", name: "product docs", description: null, embedding_model: "test:hash", dimensions: 1536, chunking: {}, active_generation: 1, last_generation: 1, pending_generation: null, pending_embedding_model: null, pending_dimensions: null, status: "ready", error: null, created_at: "2026-11-14T10:00:00Z", updated_at: "2026-11-14T10:00:00Z", document_count: 3, chunk_count: 12 }]);
 });
 afterEach(() => {
   media.restore();
@@ -81,25 +83,27 @@ const kinds = (dialog: HTMLElement) => ({
   workflows: dialog.querySelectorAll('[data-palette-entity^="workflows:"]').length,
   tools: dialog.querySelectorAll('[data-palette-entity^="tools:"]').length,
   mcp: dialog.querySelectorAll('[data-palette-entity^="mcp:"]').length,
+  knowledge: dialog.querySelectorAll('[data-palette-entity^="knowledge:"]').length,
   commands: dialog.querySelectorAll("[data-palette-command]").length,
 });
 
 describe("scopes", () => {
   const PAGES = allNavItems.length;
   const EXPECTED: Record<string, Partial<ReturnType<typeof kinds>>> = {
-    All: { pages: PAGES, agents: 2, workflows: 1, tools: 1, mcp: 1, commands: 7 },
+    All: { pages: PAGES, agents: 2, workflows: 1, tools: 1, mcp: 1, knowledge: 1, commands: 7 },
     Pages: { pages: PAGES },
     Agents: { agents: 2 },
     Workflows: { workflows: 1 },
     Tools: { tools: 1 },
     "MCP servers": { mcp: 1 },
+    Knowledge: { knowledge: 1 },
     Commands: { commands: 7 },
   };
   test.each(Object.entries(EXPECTED))("the %s scope shows only its own kind", async (name, expected) => {
     render(<KeyboardHarness />);
     const dialog = await openPalette();
     fireEvent.click(within(dialog).getByRole("radio", { name }));
-    expect(kinds(dialog)).toEqual({ pages: 0, agents: 0, workflows: 0, tools: 0, mcp: 0, commands: 0, ...expected });
+    expect(kinds(dialog)).toEqual({ pages: 0, agents: 0, workflows: 0, tools: 0, mcp: 0, knowledge: 0, commands: 0, ...expected });
   });
 
   test("a scope still filters by the query, and switching back restores the rest", async () => {
@@ -170,7 +174,7 @@ describe("fuzzy ranking", () => {
     render(<KeyboardHarness />);
     const dialog = await openPalette();
     const headings = Array.from(dialog.querySelectorAll("[cmdk-group-heading]")).map((node) => node.textContent);
-    expect(headings).toEqual(["Pages", "Agents", "Workflows", "Tools", "MCP servers", "Commands"]);
+    expect(headings).toEqual(["Pages", "Agents", "Workflows", "Tools", "MCP servers", "Knowledge", "Commands"]);
     const pages = Array.from(dialog.querySelectorAll("[data-palette-page]")).map((node) => node.getAttribute("data-palette-page"));
     expect(pages).toEqual(allNavItems.map((item) => item.id));
   });
@@ -253,6 +257,7 @@ describe("fetch errors", () => {
     ["workflows", "nightly report"],
     ["tools", "Get weather"],
     ["mcp", "docs server"],
+    ["knowledge", "product docs"],
   ] as const;
 
   test.each(SOURCES)("only the %s list failing leaves the others, the pages and the commands", async (failing) => {
@@ -274,7 +279,7 @@ describe("fetch errors", () => {
     Object.values(data).forEach((fn) => fn.mockRejectedValue(new Error("down")));
     render(<KeyboardHarness />);
     const dialog = await openPalette();
-    await waitFor(() => expect(dialog.querySelectorAll('[data-testid^="command-palette-error-"]')).toHaveLength(4));
+    await waitFor(() => expect(dialog.querySelectorAll('[data-testid^="command-palette-error-"]')).toHaveLength(5));
     type("settings");
     key("Enter");
     expect(nav.push).toHaveBeenCalledWith(routes.settings());
@@ -322,20 +327,20 @@ describe("the 60 s cache", () => {
     await closed();
     return openPalette();
   }
-  const calls = () => [data.agents, data.workflows, data.tools, data.mcp].map((fn) => fn.mock.calls.length);
+  const calls = () => [data.agents, data.workflows, data.tools, data.mcp, data.knowledge].map((fn) => fn.mock.calls.length);
 
   test("reopening within 60 s reuses every list; after 60 s it fetches again", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     render(<KeyboardHarness />);
     await openPalette();
-    expect(calls()).toEqual([1, 1, 1, 1]);
+    expect(calls()).toEqual([1, 1, 1, 1, 1]);
     vi.advanceTimersByTime(59_000);
     await reopen();
-    expect(calls()).toEqual([1, 1, 1, 1]);
+    expect(calls()).toEqual([1, 1, 1, 1, 1]);
     vi.advanceTimersByTime(2_000);
     const dialog = await reopen();
-    expect(calls()).toEqual([2, 2, 2, 2]);
-    expect(kinds(dialog)).toMatchObject({ agents: 2, workflows: 1, tools: 1, mcp: 1 });
+    expect(calls()).toEqual([2, 2, 2, 2, 2]);
+    expect(kinds(dialog)).toMatchObject({ agents: 2, workflows: 1, tools: 1, mcp: 1, knowledge: 1 });
   });
 
   test("cached lists show at once, with no Loading row, and new data replaces stale data after expiry", async () => {
@@ -358,7 +363,7 @@ describe("the 60 s cache", () => {
     const dialog = await openPalette();
     await within(dialog).findByTestId("command-palette-error-mcp");
     await reopen();
-    expect(calls()).toEqual([1, 1, 1, 2]);
+    expect(calls()).toEqual([1, 1, 1, 2, 1]);
   });
 });
 

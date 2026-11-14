@@ -4,6 +4,7 @@ import React, { useId } from "react";
 import { buildLogsLink, buildTraceLink } from "@/lib/grafana";
 import { Button } from "@/components/ui/Button";
 import { EventTimeline } from "./EventTimeline";
+import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
 import { RunSubject } from "./RunSubject";
 import { StatusPill } from "./StatusPill";
 import { runViewStatus, useRunEvents } from "./useRunEvents";
@@ -27,6 +28,7 @@ function EventsError({ message, onRetry, className = "" }: { message: string; on
  */
 export function RunEventsPanel({ runId }: { runId: string }) {
   const { run, events, loadError, partialText, reload } = useRunEvents(runId);
+  const knowledgeBaseNames = useKnowledgeBaseNames(run?.kind === "kb_ingest");
   const headingId = useId();
 
   if (loadError && !run) {
@@ -51,7 +53,7 @@ export function RunEventsPanel({ runId }: { runId: string }) {
     <div className="flex min-w-0 flex-col gap-4" data-testid="run-events-panel">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="min-w-0 text-sm text-muted-foreground">
-          <RunSubject run={run} showVersion />
+          <RunSubject run={run} showVersion knowledgeBaseNames={knowledgeBaseNames} />
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {traceId ? (

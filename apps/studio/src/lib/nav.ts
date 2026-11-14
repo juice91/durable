@@ -1,5 +1,6 @@
 import {
   AgentsIcon,
+  KnowledgeIcon,
   LogsIcon,
   McpIcon,
   MetricsIcon,
@@ -68,6 +69,8 @@ export const navItems: readonly NavItem[] = [
   { id: "tools", label: "Tools", href: routes.tools(), icon: ToolsIcon, group: "primitives", gKey: "o" },
   { id: "mcp", label: "MCP Servers", href: routes.mcp(), icon: McpIcon, group: "primitives", gKey: "m", keywords: ["mcp"] },
   { id: "processors", label: "Processors", href: routes.processors(), icon: ProcessorsIcon, group: "primitives", gKey: "p", keywords: ["guardrails"] },
+  // RM.16
+  { id: "knowledge", label: "Knowledge", href: routes.knowledge(), icon: KnowledgeIcon, group: "primitives", gKey: "k", keywords: ["knowledge bases", "rag", "documents", "retrieval"] },
   // Observability
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },

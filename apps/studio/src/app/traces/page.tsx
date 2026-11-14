@@ -9,6 +9,7 @@ import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 import { api } from "@/lib/api";
 import { listWorkflows } from "@/lib/workflows";
 import { RunSubject } from "@/components/runs/RunSubject";
+import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
 import { RUN_KIND_LABELS, type RunKind } from "@/lib/runs";
 import {
   EMPTY_FILTERS,
@@ -113,6 +114,9 @@ function TracesList() {
     };
   }, []);
 
+  // kb_ingest rows are labelled with their knowledge base's name (fetched only when one is listed).
+  const knowledgeBaseNames = useKnowledgeBaseNames(runs.some((run) => run.kind === "kb_ingest"));
+
   // The rows' ids as the list shows them, for the trace Sheet's prev / next.
   const [visibleIds, setVisibleIds] = useState<string[] | null>(null);
 
@@ -182,7 +186,7 @@ function TracesList() {
       header: "Agent / Tool / Workflow",
       cell: (run) => (
         <span className="font-medium">
-          <RunSubject run={run} agentNames={agentNames} workflowNames={workflowNames} />
+          <RunSubject run={run} agentNames={agentNames} workflowNames={workflowNames} knowledgeBaseNames={knowledgeBaseNames} />
         </span>
       ),
     },

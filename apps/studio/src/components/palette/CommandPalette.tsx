@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Command as CommandPrimitive, defaultFilter, useCommandState } from "cmdk";
 import { Check, Keyboard, ListTree, Monitor, Moon, PanelLeft, Plus, Settings, Sun } from "lucide-react";
-import { AgentsIcon, ICON_STROKE_WIDTH, McpIcon, ToolsIcon, WorkflowsIcon, type IconComponent } from "@/lib/icons";
+import { AgentsIcon, ICON_STROKE_WIDTH, KnowledgeIcon, McpIcon, ToolsIcon, WorkflowsIcon, type IconComponent } from "@/lib/icons";
 import { allNavItems } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { gKeyHint, isPaletteChord } from "@/lib/shortcuts";
@@ -43,6 +43,7 @@ const ENTITY_ICONS: Record<EntityKind, IconComponent> = {
   workflows: WorkflowsIcon,
   tools: ToolsIcon,
   mcp: McpIcon,
+  knowledge: KnowledgeIcon,
 };
 
 const THEME_COMMANDS: { value: ThemePreference; label: string; icon: typeof Sun }[] = [

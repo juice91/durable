@@ -22,13 +22,16 @@ interface RunSubjectProps {
   run: Run;
   agentNames?: Record<string, string>;
   workflowNames?: Record<string, string>;
+  /** Knowledge base id → name, for kb_ingest runs (the id's link works without it). */
+  knowledgeBaseNames?: Record<string, string>;
   /** Show the agent version (the run detail header); lists leave it out. */
   showVersion?: boolean;
 }
 
 /** What a run executed: an agent (and, for a workflow's agent step, the workflow run it belongs
- * to), a tool, or a workflow (linking to its execution view). */
-export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersion = false }: RunSubjectProps) {
+ * to), a tool, a workflow (linking to its execution view) or a knowledge base ingest (linking to the
+ * knowledge base). */
+export function RunSubject({ run, agentNames = {}, workflowNames = {}, knowledgeBaseNames = {}, showVersion = false }: RunSubjectProps) {
   const kind = runKind(run);
   if (kind === "workflow") {
     const workflowId = run.workflow_id ?? null;
@@ -49,8 +52,24 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
     return <span data-testid="run-subject" data-kind="tool">{`Tool: ${run.tool_id ?? "unknown"}`}</span>;
   }
   if (kind === "kb_ingest") {
-    // No knowledge-base page to link to yet (RM.16 adds it).
-    return <span data-testid="run-subject" data-kind="kb_ingest">{RUN_KIND_LABELS.kb_ingest}</span>;
+    // "Open knowledge base": its page on the Ingest runs tab. A row without the id (older API) stays text.
+    const kbId = run.knowledge_base_id ?? null;
+    const name = kbId ? knowledgeBaseNames[kbId] : undefined;
+    const label = name ? `${RUN_KIND_LABELS.kb_ingest}: ${name}` : RUN_KIND_LABELS.kb_ingest;
+    return (
+      <span data-testid="run-subject" data-kind="kb_ingest">
+        {kbId ? (
+          <a
+            href={routes.knowledgeBase(kbId, { tab: "runs" })}
+            data-testid="run-subject-knowledge-base"
+            title="Open knowledge base"
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            {label}
+          </a>
+        ) : label}
+      </span>
+    );
   }
   const named = run.agent_id ? agentNames[run.agent_id] : undefined;
   const agent = named ?? (run.agent_id ? (showVersion ? run.agent_id : short(run.agent_id)) : "unknown");

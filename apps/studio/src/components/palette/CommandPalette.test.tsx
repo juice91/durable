@@ -14,6 +14,7 @@ const data = vi.hoisted(() => ({
   workflows: vi.fn(),
   tools: vi.fn(),
   mcp: vi.fn(),
+  knowledge: vi.fn(),
 }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
@@ -25,6 +26,7 @@ vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
   return { ...actual, mcpServers: { ...actual.mcpServers, list: data.mcp } };
 });
+vi.mock("@/lib/knowledge", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/knowledge")>()), listKnowledgeBases: data.knowledge }));
 
 import { mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { KeyboardHarness, pressKey } from "@/components/shortcuts/shortcutsTesting";
@@ -51,6 +53,7 @@ beforeEach(() => {
   data.workflows.mockResolvedValue([{ id: "wf-1", name: "nightly report", draft_spec: null, latest_version: 2 }]);
   data.tools.mockResolvedValue([{ id: "get_weather", title: "Get weather", description: "", side_effect: false, external_idempotent: true, input_schema: {}, allowed: true }]);
   data.mcp.mockResolvedValue([{ id: "srv-1", name: "docs server", url: "https://mcp.example.test", transport: "streamable_http", enabled: true, header_names: [], created_at: null, updated_at: null, last_checked_at: null, last_status: null, last_error_code: null }]);
+  data.knowledge.mockResolvedValue([{ id: "kb-1", tenant_id: "t", name: "product docs", description: null, embedding_model: "test:hash", dimensions: 1536, chunking: {}, active_generation: 1, last_generation: 1, pending_generation: null, pending_embedding_model: null, pending_dimensions: null, status: "ready", error: null, created_at: "2026-11-14T10:00:00Z", updated_at: "2026-11-14T10:00:00Z", document_count: 3, chunk_count: 12 }]);
 });
 afterEach(() => media.restore());
 

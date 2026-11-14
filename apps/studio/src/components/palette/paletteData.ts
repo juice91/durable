@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { listKnowledgeBases } from "@/lib/knowledge";
 import { mcpServers } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
 import { listTools } from "@/lib/tools";
@@ -9,7 +10,7 @@ import { listWorkflows } from "@/lib/workflows";
  * endpoints Studio already calls, fetched when the palette opens and cached for 60 s.
  */
 
-export type EntityKind = "agents" | "workflows" | "tools" | "mcp";
+export type EntityKind = "agents" | "workflows" | "tools" | "mcp" | "knowledge";
 
 export interface PaletteEntity {
   kind: EntityKind;
@@ -40,6 +41,8 @@ export const entityHref = {
   tool: (id: string): string => routes.tool(id),
   // The server's detail page (SL.8).
   mcp: (id: string): string => routes.mcpServer(id),
+  // The knowledge base's page (RM.16).
+  knowledge: (id: string): string => routes.knowledgeBase(id),
 };
 
 export const ENTITY_SOURCES: readonly EntitySource[] = [
@@ -96,6 +99,20 @@ export const ENTITY_SOURCES: readonly EntitySource[] = [
         label: server.name,
         detail: server.url,
         href: entityHref.mcp(server.id),
+      })),
+  },
+  {
+    kind: "knowledge",
+    testId: "command-palette-error-knowledge",
+    title: "Knowledge",
+    noun: "knowledge bases",
+    load: async () =>
+      (await listKnowledgeBases()).map((kb) => ({
+        kind: "knowledge" as const,
+        id: kb.id,
+        label: kb.name,
+        detail: kb.description || kb.embedding_model,
+        href: entityHref.knowledge(kb.id),
       })),
   },
 ];
@@ -168,6 +185,7 @@ export const PALETTE_SCOPES: readonly { value: PaletteScope; label: string }[] =
   { value: "workflows", label: "Workflows" },
   { value: "tools", label: "Tools" },
   { value: "mcp", label: "MCP servers" },
+  { value: "knowledge", label: "Knowledge" },
   { value: "commands", label: "Commands" },
 ];
 

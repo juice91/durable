@@ -4,6 +4,7 @@
  * builder and the assertions that name it. One file per area; legacy redirects live in `legacy.ts`.
  */
 import { agentRoutes } from "./agents";
+import { knowledgeRoutes } from "./knowledge";
 import { mcpRoutes } from "./mcp";
 import { observabilityRoutes } from "./observability";
 import { processorRoutes } from "./processors";
@@ -19,6 +20,7 @@ export const ROUTE_AREAS = {
   tools: toolRoutes,
   mcp: mcpRoutes,
   processors: processorRoutes,
+  knowledge: knowledgeRoutes,
   observability: observabilityRoutes,
   settings: settingsRoutes,
 } as const;
@@ -29,6 +31,7 @@ export const routes = {
   ...toolRoutes,
   ...mcpRoutes,
   ...processorRoutes,
+  ...knowledgeRoutes,
   ...observabilityRoutes,
   ...settingsRoutes,
 } as const;
@@ -45,4 +48,5 @@ export type {
   RouteVersion,
 } from "./agents";
 export { agentChatPathState, agentTabOf } from "./agents";
+export type { KnowledgeBaseRouteOptions, KnowledgeTab } from "./knowledge";
 export { isSafeTarget, legacyTarget, LEGACY_RULES, type LegacyRule, type LegacySearchParams } from "./legacy";

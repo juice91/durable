@@ -35,7 +35,7 @@ export type RunStatus = "queued" | "running" | "recovering" | "completed" | "fai
 
 /**
  * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
- * `eap.kb_ingest` workflow): shown as "Knowledge ingest", with no subject page to link yet.
+ * `eap.kb_ingest` workflow): shown as "Knowledge ingest", linking to its knowledge base (RM.16).
  */
 export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest";
 
@@ -60,6 +60,8 @@ export interface Run {
   agent_id: string | null;
   version: number | null;
   tool_id?: string | null;
+  /** The knowledge base of a kb_ingest run, or of a search tester tool run (RM.16). */
+  knowledge_base_id?: string | null;
   status: string;
   display_status: RunStatus;
   input: string;

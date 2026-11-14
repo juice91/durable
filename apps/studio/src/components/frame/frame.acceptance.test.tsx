@@ -49,6 +49,9 @@ function respond(url: URL): unknown {
   if (p === "/api/v1/metrics/breakdown") return breakdownFixture(url.searchParams.get("by") === "agent" ? "agent" : "model", []);
   if (p === "/api/v1/processors") return { items: [], moderation_categories: [], limits: { max_processors_per_phase: 4, max_regex_patterns: 10, max_regex_pattern_length: 200, max_test_sample_bytes: 4096 } };
   if (p === "/api/v1/mcp-servers") return [];
+  if (p === "/api/v1/knowledge-bases") return { items: [] };
+  if (p === "/api/v1/knowledge-bases/kb1") return { id: "kb1", tenant_id: "t1", name: "Product docs", description: null, embedding_model: "test:hash", dimensions: 1536, chunking: {}, active_generation: 1, last_generation: 1, pending_generation: null, pending_embedding_model: null, pending_dimensions: null, status: "ready", error: null, created_at: "2026-11-14T10:00:00Z", updated_at: "2026-11-14T10:00:00Z", document_count: 0, chunk_count: 0, ingest_tokens: 0, ingest_cost_usd: "0.0000000000", ingest_requests: 0 };
+  if (p === "/api/v1/knowledge-bases/kb1/documents") return { items: [], next_after: null };
   if (p === "/api/v1/workflows" || p === "/api/v1/tools") return p.endsWith("tools") ? { items: [] } : [];
   if (/\/(versions|tools|processors|servers)$/.test(p)) return [];
   return { items: [], next_before: null, total: 0 };
@@ -130,6 +133,8 @@ const PAGES: PageCase[] = [
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", active: "tools" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", active: "mcp" },
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", active: "processors" },
+  { name: "knowledge", path: "/knowledge", load: () => import("@/app/knowledge/page"), h1: "Knowledge", active: "knowledge" },
+  { name: "knowledge base", path: "/knowledge/kb1", params: { id: "kb1" }, load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", active: "knowledge" },
   // SL.10: `/request-context` redirects to the chat with its request context popover open (`context=open`).
   {
     name: "request-context",

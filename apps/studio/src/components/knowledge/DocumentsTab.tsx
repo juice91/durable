@@ -1,0 +1,168 @@
+"use client";
+
+import React, { useState } from "react";
+import { DataList, type DataListColumn } from "@/components/shared/DataList";
+import { TraceLink } from "@/components/traces/TraceLink";
+import { Button } from "@/components/ui/Button";
+import { describeIngestError, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
+import { DocumentStatusBadge, formatWhen } from "./knowledgeUi";
+import type { KnowledgeDocumentsState } from "./useKnowledgeDocuments";
+
+// DataList renders this on each row as data-testid (named `testId` so the test-id inventory sees it).
+const DOCUMENT_ROW = { testId: "knowledge-document-row" } as const;
+
+export interface DocumentsTabProps {
+  kbId: string;
+  docs: KnowledgeDocumentsState;
+  /** Run id → its latest `ingest_progress` (useIngestProgress). */
+  progress: Record<string, IngestProgress>;
+  /** The open document Sheet's key. */
+  openDocument: string | null;
+  onOpenDocument: (documentKey: string) => void;
+  onUpload: () => void;
+}
+
+function versionLabel(doc: KnowledgeDocument): string {
+  if (doc.active_version === null) return `v${doc.latest_version} (not active yet)`;
+  return doc.active_version === doc.latest_version ? `v${doc.active_version}` : `v${doc.active_version} → v${doc.latest_version}`;
+}
+
+/** The Documents tab: status with live progress, sections, version, Retry for a failed ingest. */
+export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocument, onUpload }: DocumentsTabProps) {
+  const [retrying, setRetrying] = useState<Record<string, boolean>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const retry = async (doc: KnowledgeDocument) => {
+    setRetrying((current) => ({ ...current, [doc.document_key]: true }));
+    setActionError(null);
+    try {
+      const result = await reingestDocument(kbId, doc.document_key);
+      if (result.document) docs.upsert(result.document);
+      else docs.refresh(doc.document_key);
+    } catch (reason: unknown) {
+      setActionError(`${doc.title}: ${reason instanceof Error ? reason.message : "the retry failed"}`);
+      docs.refresh(doc.document_key);
+    } finally {
+      setRetrying((current) => ({ ...current, [doc.document_key]: false }));
+    }
+  };
+
+  const columns: DataListColumn<KnowledgeDocument>[] = [
+    {
+      id: "title",
+      header: "Document",
+      sortable: true,
+      sortValue: (doc) => doc.title,
+      cell: (doc) => (
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate font-medium">{doc.title}</span>
+          {doc.title !== doc.document_key ? <span className="truncate font-mono text-caption text-muted-foreground">{doc.document_key}</span> : null}
+        </span>
+      ),
+    },
+    {
+      id: "status",
+      header: "Status",
+      sortable: true,
+      sortValue: (doc) => doc.status,
+      className: "min-w-0 max-w-xs",
+      cell: (doc) => {
+        const live = doc.last_run_id ? progress[doc.last_run_id] : undefined;
+        return (
+          <span className="flex min-w-0 flex-col items-start gap-0.5">
+            <DocumentStatusBadge status={doc.status} />
+            {isIngestInFlight(doc) && live ? (
+              <span className="text-caption tabular-nums text-muted-foreground" data-testid="knowledge-document-progress" aria-live="polite">
+                {progressLabel(live)}
+              </span>
+            ) : null}
+            {doc.status === "failed" ? (
+              <span className="line-clamp-2 text-caption text-destructive-text" data-testid="knowledge-document-error" title={doc.error ?? undefined}>
+                {describeIngestError(doc.error)}
+              </span>
+            ) : null}
+          </span>
+        );
+      },
+    },
+    {
+      id: "sections",
+      header: "Sections",
+      align: "end",
+      sortable: true,
+      sortValue: (doc) => doc.chunk_count,
+      cell: (doc) => <span className="tabular-nums" data-testid="knowledge-document-sections">{doc.chunk_count}</span>,
+    },
+    {
+      id: "version",
+      header: "Version",
+      className: "hidden whitespace-nowrap md:table-cell",
+      cell: (doc) => <span className="text-caption text-muted-foreground">{versionLabel(doc)}</span>,
+    },
+    {
+      id: "updated",
+      header: "Updated",
+      sortable: true,
+      sortValue: (doc) => doc.updated_at,
+      className: "hidden whitespace-nowrap lg:table-cell",
+      cell: (doc) => <span className="text-caption text-muted-foreground">{formatWhen(doc.updated_at)}</span>,
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      align: "end",
+      className: "whitespace-nowrap",
+      cell: (doc) => (
+        <span className="flex items-center justify-end gap-2">
+          {doc.status === "failed" ? (
+            <Button size="sm" disabled={retrying[doc.document_key]} onClick={() => void retry(doc)} data-testid="knowledge-document-retry" aria-label={`Retry ingest of ${doc.title}`}>
+              {retrying[doc.document_key] ? "Retrying…" : "Retry"}
+            </Button>
+          ) : null}
+          {doc.last_run_id ? (
+            <TraceLink runId={doc.last_run_id} className="text-caption text-info-text hover:underline" data-testid="knowledge-document-trace" aria-label={`Ingest trace of ${doc.title}`}>
+              Trace
+            </TraceLink>
+          ) : null}
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <div className="flex min-w-0 flex-col gap-3" data-testid="knowledge-documents-tab">
+      {actionError ? <p role="alert" data-testid="knowledge-documents-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
+      <DataList
+        label="Documents"
+        testId="knowledge-documents"
+        rows={docs.documents}
+        columns={columns}
+        getRowId={(doc) => doc.document_key}
+        onRowOpen={(doc) => onOpenDocument(doc.document_key)}
+        getRowLabel={(doc) => `${doc.title}, ${doc.status}`}
+        getRowTestId={() => DOCUMENT_ROW.testId}
+        selectedRowId={openDocument}
+        searchPlaceholder={docs.hasMore ? "Search loaded documents by title or key" : "Search by title or key"}
+        filterRow={(doc, query) => {
+          const q = query.toLowerCase();
+          return doc.title.toLowerCase().includes(q) || doc.document_key.toLowerCase().includes(q);
+        }}
+        loading={docs.loading}
+        error={docs.error}
+        onRetry={docs.reload}
+        empty={{
+          title: "No documents yet",
+          description: "Upload Markdown, text or HTML files, or paste text. Each is split into sections and embedded.",
+          action: <Button variant="primary" onClick={onUpload}>Upload documents</Button>,
+        }}
+      />
+      {docs.hasMore && !docs.loading ? (
+        <div className="flex justify-center">
+          <Button variant="secondary" size="sm" onClick={docs.loadMore} disabled={docs.loadingMore} data-testid="knowledge-documents-more">
+            {docs.loadingMore ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}

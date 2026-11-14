@@ -121,6 +121,35 @@ const PROCESSOR_RESULTS = {
   next_before: null,
 };
 
+const KB = {
+  id: "kb1",
+  tenant_id: "t1",
+  name: "Product docs",
+  description: "Manuals and FAQs.",
+  embedding_model: "test:hash",
+  dimensions: 1536,
+  chunking: { max_tokens: 512, overlap_tokens: 64, min_tokens: 40, chunker_version: 1 },
+  active_generation: 1,
+  last_generation: 1,
+  pending_generation: null,
+  pending_embedding_model: null,
+  pending_dimensions: null,
+  status: "ready",
+  error: null,
+  created_at: T0,
+  updated_at: T1,
+  document_count: 2,
+  chunk_count: 9,
+};
+
+function kbDocument(key: string, extra: Record<string, unknown> = {}) {
+  return {
+    id: `doc-${key}`, tenant_id: "t1", kb_id: "kb1", document_key: key, title: key.replace(/\.\w+$/, ""), source_url: null,
+    mime_type: "text/markdown", metadata: {}, content_hash: "abc", active_version: 1, latest_version: 1, status: "ready",
+    error: null, chunk_count: 9, last_run_id: "r1", created_at: T0, updated_at: T1, ...extra,
+  };
+}
+
 /** The API with rows: one agent, two versions, runs, tools, an MCP server, a workflow, logs, metrics. */
 function respond(url: URL): unknown {
   const p = url.pathname.replace(/^\/api\/v1/, "");
@@ -138,6 +167,9 @@ function respond(url: URL): unknown {
   if (p.startsWith("/tools/")) return TOOLS.find((tool) => `/tools/${tool.id}` === p) ?? TOOLS[0];
   if (p === "/mcp-servers") return [MCP_SERVER];
   if (p === "/mcp-servers/m1") return MCP_SERVER;
+  if (p === "/knowledge-bases") return { items: [KB] };
+  if (p === "/knowledge-bases/kb1") return { ...KB, ingest_tokens: 4200, ingest_cost_usd: "0.0004", ingest_requests: 3 };
+  if (p === "/knowledge-bases/kb1/documents") return { items: [kbDocument("install.md"), kbDocument("billing.md", { status: "failed", error: "embedding_failed: provider down", chunk_count: 0, active_version: null })], next_after: null };
   if (p === "/workflows") return [{ id: "w1", name: demoSpec.name, draft_spec: demoSpec, latest_version: 1 }];
   if (p === "/workflows/w1") return { id: "w1", name: demoSpec.name, draft_spec: demoSpec, latest_version: 1 };
   if (p === "/workflows/w1/versions") return [{ workflow_id: "w1", version: 1, spec: demoSpec, spec_hash: "wh1", created_at: T0, created_by: "dev" }];
@@ -210,6 +242,8 @@ const PAGES: PageCase[] = [
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", shows: "Current time" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", shows: "Docs" },
   { name: "mcp detail", path: "/mcp/m1", params: { id: "m1" }, load: () => import("@/app/mcp/[id]/page"), h1: "Docs", shows: "https://docs.example.test/mcp" },
+  { name: "knowledge", path: "/knowledge", load: () => import("@/app/knowledge/page"), h1: "Knowledge", shows: "Product docs" },
+  { name: "knowledge base", path: "/knowledge/kb1", params: { id: "kb1" }, load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "#knowledge-document-row" },
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", shows: "#processor-row" },
   { name: "processor detail", path: "/processors/pii_redact", params: { type: "pii_redact" }, load: () => import("@/app/processors/[type]/page"), h1: "PII redaction", shows: "#result-row" },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },

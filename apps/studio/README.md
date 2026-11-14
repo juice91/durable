@@ -43,6 +43,8 @@ components never write paths by hand. Query parameters below are part of the URL
 | `/mcp/:id` | One MCP server (connection, tools, used by, delete). |
 | `/processors` | Processor catalog. |
 | `/processors/:type` | One processor type (overview, test console, recent outcomes, used by). |
+| `/knowledge` | Knowledge bases list. |
+| `/knowledge/:id[?tab=search\|runs][&doc=<document key>]` | One knowledge base: Documents tab (default), Search (`tab=search`, the search tester) or Ingest runs (`tab=runs`). `doc` opens that document's Sheet. Hosts the trace Sheet with `traceTab` as its tab parameter. |
 | `/metrics` | Metrics, with the Overview at the top. Parameters: `range` (default `7d`, left out), `from`/`to` (with `range=custom`), `interval`, `agent_id`, `model`, `provider`, `kind`. |
 | `/traces` | Traces list. Filters: `status` (comma-separated), `from`, `to`, `model`, `provider`, `agent_id`, `kind`. |
 | `/traces?trace=<runId>[&tab=events\|logs]` | The trace Sheet over the Traces list. `spans` is the default tab and is left out. `routes.run(id)` is the Sheet on `tab=events`. |
@@ -51,7 +53,8 @@ components never write paths by hand. Query parameters below are part of the URL
 
 The trace Sheet opens on any page that hosts it, with `?trace=<runId>`. Its tab parameter is `tab`
 everywhere except on workflow pages (`/workflows/:id`, `/workflows/:id/traces`,
-`/workflows/:id/runs/:runId`), where `tab` is the page's own, so the Sheet uses `traceTab` instead.
+`/workflows/:id/runs/:runId`) and knowledge base pages (`/knowledge/:id`), where `tab` is the page's
+own, so the Sheet uses `traceTab` instead.
 
 #### Retired URLs
 
@@ -92,6 +95,7 @@ for the second key.
 | `g` then `o` | Go to Tools |
 | `g` then `m` | Go to MCP Servers |
 | `g` then `p` | Go to Processors |
+| `g` then `k` | Go to Knowledge |
 | `g` then `n` | Go to Metrics |
 | `g` then `t` | Go to Traces |
 | `g` then `l` | Go to Logs |

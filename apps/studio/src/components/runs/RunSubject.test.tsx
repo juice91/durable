@@ -65,3 +65,18 @@ describe("kb_ingest runs (SL.15 review M16)", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 });
+
+describe("kb_ingest runs link to their knowledge base (RM.16)", () => {
+  const ingest: Run = { ...base, run_id: "kbrun-2", kind: "kb_ingest", agent_id: null, version: null, knowledge_base_id: "kb-1" };
+
+  it("links to the knowledge base's Ingest runs tab, named when the name is known", () => {
+    const { unmount } = render(<RunSubject run={ingest} knowledgeBaseNames={{ "kb-1": "Product docs" }} />);
+    const link = screen.getByTestId("run-subject-knowledge-base");
+    expect(link).toHaveAttribute("href", "/knowledge/kb-1?tab=runs");
+    expect(link).toHaveTextContent("Knowledge ingest: Product docs");
+    expect(link).toHaveAttribute("title", "Open knowledge base");
+    unmount();
+    render(<RunSubject run={ingest} />);
+    expect(screen.getByTestId("run-subject-knowledge-base")).toHaveTextContent(/^Knowledge ingest$/);
+  });
+});
