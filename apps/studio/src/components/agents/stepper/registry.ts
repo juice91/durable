@@ -15,12 +15,30 @@ import { processorsStep } from "./ProcessorsStep";
 import { knowledgeStep } from "./KnowledgeStep";
 import { memoryStep } from "./MemoryStep";
 
+/**
+ * The top-level spec keys each built-in step owns, for routing a 422 by its first `detail[].loc`
+ * (a step file may declare its own `specKeys`; these are attached here so the built-in steps keep
+ * their files). Together they are the form-owned keys, so a location in one of them is never
+ * claimed by a later step's message matcher.
+ */
+const CORE_SPEC_KEYS: Record<string, readonly string[]> = {
+  identity: ["name", "model", "model_settings"],
+  instructions: ["instructions"],
+  tools: ["tools", "mcp_tools"],
+  "request-context": ["context_fields"],
+  processors: ["input_processors", "output_processors"],
+};
+
+function withSpecKeys(step: EditorStepDefinition): EditorStepDefinition {
+  return step.specKeys || !CORE_SPEC_KEYS[step.id] ? step : { ...step, specKeys: CORE_SPEC_KEYS[step.id] };
+}
+
 export const EDITOR_STEPS: readonly EditorStepDefinition[] = [
-  identityStep,
-  instructionsStep,
-  toolsStep,
-  requestContextStep,
-  processorsStep,
+  withSpecKeys(identityStep),
+  withSpecKeys(instructionsStep),
+  withSpecKeys(toolsStep),
+  withSpecKeys(requestContextStep),
+  withSpecKeys(processorsStep),
   // RM.17: steps 6 and 7.
   knowledgeStep,
   memoryStep,
@@ -59,9 +77,10 @@ export function specKeyOfLocation(loc: readonly (string | number)[]): string | n
 }
 
 /**
- * The step a save or publish error belongs to, or null when no step claims it. With the 422's
- * locations, the first one inside a step's `specKeys` decides; otherwise the message text
- * (`ownsError`).
+ * The step a save or publish error belongs to, or null when no step claims it. A 422's first
+ * location decides when a step's `specKeys` owns its key (the message's first part is about that
+ * location, and later parts never pull it to another step); otherwise the message text
+ * (`ownsError`). `steps` without `specKeys` (a caller's own list) get the built-in keys.
  */
 export function stepForError(
   message: string | null | undefined,
@@ -69,9 +88,10 @@ export function stepForError(
   locations: readonly (readonly (string | number)[])[] = [],
 ): string | null {
   if (!message) return null;
-  for (const loc of locations) {
-    const key = specKeyOfLocation(loc);
-    const owner = key ? steps.find((step) => step.specKeys?.includes(key)) : undefined;
+  const first = locations[0];
+  const key = first ? specKeyOfLocation(first) : null;
+  if (key) {
+    const owner = steps.find((step) => (step.specKeys ?? CORE_SPEC_KEYS[step.id])?.includes(key));
     if (owner) return owner.id;
   }
   return steps.find((step) => step.ownsError(message))?.id ?? null;

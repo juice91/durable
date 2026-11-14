@@ -1,14 +1,16 @@
 // RM.17: the knowledge and memory spec helpers (shapes, client-side checks mirroring eap_schemas,
 // status lines, server error ownership, summaries).
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(), listEmbeddingModels: vi.fn() }));
 
 import type { AgentSpec } from "@/lib/api";
 import {
   embeddingModelIdProblem,
+  acceptedPiiKinds,
   piiKindsFromCatalog,
   PII_KINDS,
+  setAcceptedPiiKinds,
   filterProblem,
   inheritedRedactKinds,
   isKnowledgeError,
@@ -415,5 +417,57 @@ describe("the API dump shape (review fix: clean after save)", () => {
   it("typedNumber gives the field's default when cleared", () => {
     expect(typedNumber("", 8)).toBe(8);
     expect(typedNumber("", undefined)).toBeUndefined();
+  });
+});
+
+describe("follow-ups: first location decides, catalog kinds", () => {
+  afterEach(() => setAcceptedPiiKinds(null));
+
+  it("a location in a form-owned key goes to its built-in step, never to Memory by the text", () => {
+    // "duplicate PII kind" also matches Memory's text; at input_processors it is the Processors step's.
+    expect(stepForError("Value error, duplicate PII kind: email", undefined, [["body", "spec", "input_processors", 0, "config", "kinds"]])).toBe("processors");
+    expect(stepForError("Value error, duplicate PII kind: email", undefined, [["body", "spec", "output_processors", 1, "config", "kinds"]])).toBe("processors");
+    expect(stepForError("Value error, duplicate PII kind: email", undefined, [["body", "spec", "memory", "redact", "kinds"]])).toBe("memory");
+    expect(stepForError("Value error, duplicate PII kind: email")).toBe("memory");
+  });
+
+  it("a mixed 422 is routed by its first location (name first: Identity)", () => {
+    const message = "Value error, name cannot be empty, Input should be less than or equal to 10";
+    const name = ["body", "spec", "name"];
+    const recall = ["body", "spec", "memory", "semantic_recall", "top_k"];
+    expect(stepForError(message, undefined, [name, recall])).toBe("identity");
+    expect(stepForError(message, undefined, [recall, name])).toBe("memory");
+  });
+
+  it.each([
+    [["body", "spec", "model", "provider"], "identity"],
+    [["body", "spec", "model_settings", "temperature"], "identity"],
+    [["body", "spec", "instructions"], "instructions"],
+    [["body", "spec", "tools", 0], "tools"],
+    [["body", "spec", "mcp_tools", 0, "server"], "tools"],
+    [["body", "spec", "context_fields", 0, "name"], "request-context"],
+    [["body", "spec", "knowledge_bases", 0], "knowledge"],
+  ] as const)("the built-in keys: %j -> %s", (loc, step) => {
+    expect(stepForError("Input should be a valid string", undefined, [loc])).toBe(step);
+  });
+
+  it("a location no step owns falls back to the text", () => {
+    expect(stepForError("memory.semantic_recall: x", undefined, [["body", "spec", "spec_version"]])).toBe("memory");
+  });
+
+  it("kinds are checked against the catalog's list once it is read", () => {
+    const redact = (kinds: string[]) => memoryProblems(withSpec({ memory: { redact: { kinds, action: "redact" } } }))[0];
+    expect(redact(["passport"])).toMatchObject({ soft: true });
+    const catalog = structuredClone(processorCatalogFixture);
+    (catalog.items.find((i) => i.id === "pii_redact")!.config_schema.properties!.kinds.items as { enum: string[] }).enum.push("passport");
+    expect(piiKindsFromCatalog(catalog)).toContain("passport");
+    expect(acceptedPiiKinds()).toContain("passport");
+    expect(redact(["passport"])).toBeUndefined();
+    expect(redact(["iban"])).toBeUndefined();
+  });
+
+  it("duplicates are reported even beside an unknown kind (blocking, not soft)", () => {
+    const problem = memoryProblems(withSpec({ memory: { redact: { kinds: ["email", "nope", "email"], action: "redact" } } }))[0];
+    expect(problem).toEqual({ field: "redact-kinds", message: "Each kind of personal data may be listed once" });
   });
 });

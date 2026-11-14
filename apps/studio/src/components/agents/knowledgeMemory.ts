@@ -52,13 +52,36 @@ export const RECALL_MESSAGE_RANGE = [0, 3] as const;
 export const PII_KINDS = ["email", "phone", "credit_card", "iban", "ipv4", "us_ssn"] as const;
 export type PiiKind = (typeof PII_KINDS)[number];
 
-/** The PII kinds from the processor catalog (the pii_redact `kinds` items enum), else `PII_KINDS`. */
+/**
+ * The PII kinds the redaction checks accept: `PII_KINDS` until a processor catalog has been read
+ * (`piiKindsFromCatalog`), then the catalog's list, which is the server's.
+ */
+let knownPiiKinds: readonly string[] = PII_KINDS;
+
+export function acceptedPiiKinds(): readonly string[] {
+  return knownPiiKinds;
+}
+
+/** Sets the accepted kinds (tests; `piiKindsFromCatalog` calls it). Null restores `PII_KINDS`. */
+export function setAcceptedPiiKinds(kinds: readonly string[] | null): void {
+  knownPiiKinds = kinds && kinds.length > 0 ? [...kinds] : PII_KINDS;
+}
+
+/**
+ * The PII kinds from the processor catalog (the pii_redact `kinds` items enum), else `PII_KINDS`. A
+ * catalog that lists them also becomes the kinds the redaction checks accept (`acceptedPiiKinds`),
+ * so the Memory step, which loads the catalog, checks against the server's list.
+ */
 export function piiKindsFromCatalog(catalog: { items: { id: string; config_schema: unknown }[] } | null | undefined): string[] {
   const schema = catalog?.items.find((item) => item.id === "pii_redact")?.config_schema as
     | { properties?: { kinds?: { items?: { enum?: unknown } } } }
     | undefined;
   const values = schema?.properties?.kinds?.items?.enum;
-  return Array.isArray(values) && values.length > 0 && values.every((v) => typeof v === "string") ? (values as string[]) : [...PII_KINDS];
+  if (Array.isArray(values) && values.length > 0 && values.every((v) => typeof v === "string")) {
+    setAcceptedPiiKinds(values as string[]);
+    return [...(values as string[])];
+  }
+  return [...PII_KINDS];
 }
 
 /** The top-level spec keys of the Knowledge and Memory steps (422 `loc` routing). */
@@ -567,14 +590,16 @@ function scopeProblem(scope: unknown): string | null {
   return "Scope must be per user (resource) or per conversation";
 }
 
-/** `PiiRedactConfig` with action redact: kinds (default: all) known, unique, at least one. */
+/** `PiiRedactConfig` with action redact: kinds (default: all) at least one, unique, and known to the catalog. */
 function redactProblem(redact: unknown): string | null {
   const r = redact as { kinds?: unknown; action?: unknown };
   if (r.action !== undefined && r.action !== "redact") return "Memory redaction can only redact (memory writes are never blocked)";
   if (r.kinds === undefined) return null;
   if (!Array.isArray(r.kinds) || r.kinds.length === 0) return "Pick at least one kind of personal data";
-  if (r.kinds.some((k) => !(PII_KINDS as readonly unknown[]).includes(k))) return `Unknown kind of personal data (use ${PII_KINDS.join(", ")})`;
+  // Duplicates first: they block even beside an unknown kind (which is only a warning).
   if (new Set(r.kinds).size !== r.kinds.length) return "Each kind of personal data may be listed once";
+  const accepted = acceptedPiiKinds();
+  if (r.kinds.some((k) => !accepted.includes(k as string))) return `Unknown kind of personal data (use ${accepted.join(", ")})`;
   return null;
 }
 

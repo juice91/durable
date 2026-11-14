@@ -325,6 +325,11 @@ describe("server 422s open the step that owns them", () => {
     edit();
     fireEvent.click(saveButton());
     await waitFor(() => expect(region("Knowledge")).toBeVisible());
+    // The first save must have finished (Save enabled again) before the second click counts.
+    await waitFor(() => {
+      expect(api.agents.update).toHaveBeenCalledTimes(1);
+      expect(saveButton()).toBeEnabled();
+    });
     fireEvent.click(saveButton());
     await waitFor(() => expect(region("Memory")).toBeVisible());
     expect(within(stepNav()).getAllByText("Has an error")).toHaveLength(1);
