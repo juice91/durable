@@ -7,7 +7,7 @@ import McpServerDetailPage from "./[id]/page";
 import { api, ApiError, type Agent, type AgentSpec, type AgentVersion } from "@/lib/api";
 import { mcpServers, type McpServer, type McpTestResult } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { ShortcutsProvider } from "@/components/shortcuts/ShortcutsProvider";
 
 // SL.8 acceptance: the /mcp DataList and the /mcp/[id] detail page, beyond the re-pointed P0 tests.
@@ -285,7 +285,7 @@ describe("MCP list: rows and row actions", () => {
     const missing = render(<McpServerDetailPage />);
     await screen.findByTestId("mcp-server-not-found");
     await expectNoAxeViolations(missing.container);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("fits a phone: no fixed widths, secondary columns hidden below md, long URLs truncate or wrap", async () => {
     const width = window.innerWidth;

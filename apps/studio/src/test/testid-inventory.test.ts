@@ -5,6 +5,7 @@ import {
   collectQueries,
   collectRenderedIds,
   findDeadQueries,
+  isRenderedPrefix,
   type SourceFile,
 } from "./testidInventory";
 
@@ -46,7 +47,8 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "processors-": "ProcessorsEditor section per phase (input or output)",
   "field-error-": "Agent editor field errors keyed by the spec field path",
   "console-": "ProcessorTestConsole idPrefix={`console-${step.key}`}: one form per processor step",
-  "processor-": "ProcessorsEditor rows: processor-<input|output>-<index>, plus -error",
+  "processor-input-": "ProcessorsEditor input rows: processor-input-<index>, plus -error",
+  "processor-output-": "ProcessorsEditor output rows: processor-output-<index>, plus -error",
   "context-field-": "ContextFieldsEditor rows: context-field-<index>, plus -problems",
   "payload-": "PayloadBlock id from its label: payload-input, payload-output, plus -truncated",
 };
@@ -73,7 +75,7 @@ describe("test-id inventory", () => {
   });
 
   it("every allowlisted dynamic prefix is still rendered (no stale entries)", () => {
-    const stale = Object.keys(DYNAMIC_PREFIXES).filter((p) => !rendered.prefixes.has(p));
+    const stale = Object.keys(DYNAMIC_PREFIXES).filter((p) => !isRenderedPrefix(p, rendered));
     expect(stale).toEqual([]);
   });
 });
@@ -92,14 +94,22 @@ describe("test-id inventory fixtures", () => {
       "const id = `payload-${label}`;",
       "<div data-testid={id} />",
       "<p data-testid={`${id}-truncated`} />",
+      '<DataList getRowTestId={() => "list-row"} />',
     ].join("\n"),
   };
   const rendered = collectRenderedIds([source]);
   const test = (text: string): SourceFile => ({ path: "components/Fixture.test.tsx", text });
 
   it("collects literal, ternary, prop and key ids, and template heads as prefixes", () => {
-    expect([...rendered.exact].sort()).toEqual(["alive", "busy-a", "busy-b", "card-total", "link-run"]);
+    expect([...rendered.exact].sort()).toEqual(["alive", "busy-a", "busy-b", "card-total", "link-run", "list-row"]);
     expect([...rendered.prefixes.keys()].sort()).toEqual(["payload-", "row-"]);
+  });
+
+  it("a narrow allowlist entry under a broader rendered head matches only its own ids", () => {
+    const queries = collectQueries([test('screen.getByTestId("row-a-1"); screen.getByTestId("row-b-1");')]);
+    expect(isRenderedPrefix("row-a-", rendered)).toBe(true);
+    expect(isRenderedPrefix("other-", rendered)).toBe(false);
+    expect(findDeadQueries(queries, rendered, ["row-a-"]).map((d) => d.value)).toEqual(["row-b-1"]);
   });
 
   it("fails on a deliberately dead id", () => {

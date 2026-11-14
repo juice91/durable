@@ -5,8 +5,9 @@
  *
  * Rendered ids come from source files:
  * - every string literal inside a `data-testid=` attribute (`"x"`, `{"x"}`, `{a ? "x" : "y"}`);
- * - every string literal passed through a test-id prop (`testId`, `idPrefix`), as JSX
- *   attribute or object key, since the component renders it as `data-testid={testId}`;
+ * - every string literal passed through a test-id prop (`testId`, `idPrefix`, DataList's
+ *   `getRowTestId={() => "row"}`), as JSX attribute or object key, since the component renders it
+ *   as `data-testid={testId}`;
  * - template literals in either place: one with no `${…}` is an exact id; otherwise its static
  *   head (`workflow-row-` in `` `workflow-row-${id}` ``) is a dynamic prefix.
  * Dynamic prefixes only count when listed in an allowlist with a reason, so a loose prefix cannot
@@ -129,7 +130,7 @@ function literalsIn(expr: string): { exact: string[]; heads: string[] } {
   return { exact, heads };
 }
 
-const RENDER_SITES = /(?:\bdata-testid|\b(?:testId|idPrefix))\s*(?:=|:)\s*/g;
+const RENDER_SITES = /(?:\bdata-testid|\b(?:testId|idPrefix|getRowTestId))\s*(?:=|:)\s*/g;
 
 /** Ids rendered by these source files (see module comment). */
 export function collectRenderedIds(sources: SourceFile[]): RenderedIds {
@@ -215,6 +216,11 @@ export function collectQueries(tests: SourceFile[]): TestIdQuery[] {
 }
 
 /** Queries that no source renders. `allowedPrefixes` are the source's dynamic prefixes that may match. */
+/** True when a rendered template head covers `prefix` (equal to it, or a shorter head it extends). */
+export function isRenderedPrefix(prefix: string, rendered: RenderedIds): boolean {
+  return [...rendered.prefixes.keys()].some((head) => prefix.startsWith(head));
+}
+
 export function findDeadQueries(
   queries: TestIdQuery[],
   rendered: RenderedIds,
@@ -224,7 +230,9 @@ export function findDeadQueries(
   /** Ids a test file renders itself (harness markup), keyed by its path: valid only for that file's queries. */
   localIds: Map<string, RenderedIds> = new Map(),
 ): DeadQuery[] {
-  const allowed = [...[...allowedPrefixes].filter((p) => rendered.prefixes.has(p)), ...externalPrefixes];
+  // An allowlisted prefix counts while some rendered template head covers it; it may be narrower than
+  // the head (`processor-input-` under `` `processor-${phase}-…` ``), which keeps the allowlist tight.
+  const allowed = [...[...allowedPrefixes].filter((p) => isRenderedPrefix(p, rendered)), ...externalPrefixes];
   const dead: DeadQuery[] = [];
   for (const q of queries) {
     const local = localIds.get(q.file);

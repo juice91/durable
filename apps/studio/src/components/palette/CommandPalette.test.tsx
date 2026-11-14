@@ -31,7 +31,7 @@ import { KeyboardHarness, pressKey } from "@/components/shortcuts/shortcutsTesti
 import { routes } from "@/lib/routes";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { PALETTE_ENTITY_LIMIT, resetPaletteCache } from "./paletteData";
 
 const WEATHER_ID = "11111111-1111-4111-8111-111111111111";
@@ -222,7 +222,7 @@ test("axe: the open palette, with results and with none", async () => {
   await expectNoAxeViolations(document.body);
   type("zzzzqq");
   await expectNoAxeViolations(document.body);
-});
+}, AXE_TIMEOUT_MS);
 
 describe("review fixes", () => {
   test("Tab from the scopes wraps to the input; Shift+Tab from the input goes to the scopes", async () => {

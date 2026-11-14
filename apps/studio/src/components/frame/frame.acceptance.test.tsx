@@ -7,7 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import React from "react";
 import fs from "node:fs";
 import path from "node:path";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS, PAGE_RULES } from "@/test/a11y";
 import { routes } from "@/lib/routes";
 
 const nav = vi.hoisted(() => ({ path: "/agents", params: {} as Record<string, string> }));
@@ -190,8 +190,8 @@ describe.each(["light", "dark"] as const)("every page inside the frame (%s theme
     }
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(document.querySelectorAll("main, [role='main']")).toHaveLength(1);
-    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true } } });
-  });
+    await expectNoAxeViolations(document, { rules: PAGE_RULES });
+  }, AXE_TIMEOUT_MS);
 });
 
 function Body() {

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import React, { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS, PAGE_RULES } from "@/test/a11y";
 
 vi.mock("next/navigation", () => ({
   usePathname: vi.fn(),
@@ -157,15 +157,15 @@ describe("AppShell", () => {
     test("the shell has no violations, with the page-level rules on", async () => {
       media = mockMatchMedia(true);
       render(<FrameHarness><Page /></FrameHarness>);
-      await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true }, "page-has-heading-one": { enabled: true } } });
-    });
+      await expectNoAxeViolations(document, { rules: PAGE_RULES });
+    }, AXE_TIMEOUT_MS);
 
     test("the shell with the rail collapsed has no violations", async () => {
       media = mockMatchMedia(true);
       window.localStorage.setItem("studio.sidebar", "collapsed");
       render(<FrameHarness><Page /></FrameHarness>);
       await expectNoAxeViolations(document);
-    });
+    }, AXE_TIMEOUT_MS);
 
     test("the open navigation drawer has no violations", async () => {
       media = mockMatchMedia(false);
@@ -173,6 +173,6 @@ describe("AppShell", () => {
       fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
       await screen.findByRole("dialog");
       await expectNoAxeViolations(document.body);
-    });
+    }, AXE_TIMEOUT_MS);
   });
 });

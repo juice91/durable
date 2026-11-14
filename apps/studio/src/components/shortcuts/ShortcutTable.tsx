@@ -1,7 +1,10 @@
+"use client";
+
 import React from "react";
 import { cn } from "@/lib/cn";
 import { shortcutSections, type ShortcutRow, type ShortcutSection } from "@/lib/shortcuts";
 import { Kbd } from "@/components/ui/Kbd";
+import { usePaletteIsMac } from "./usePaletteChordLabel";
 
 function Keys({ row }: { row: ShortcutRow }) {
   return (
@@ -34,7 +37,10 @@ export interface ShortcutTableProps {
  * The keyboard shortcut list, one table per section (General, Go to). Shared by the help dialog
  * (`?`) and the Settings page, so both always show the same keys.
  */
-export function ShortcutTable({ sections = shortcutSections(), headingLevel = 3, className }: ShortcutTableProps) {
+export function ShortcutTable({ sections: given, headingLevel = 3, className }: ShortcutTableProps) {
+  // The palette chord row shows only the chord that works here (⌘K on macOS, Ctrl K elsewhere).
+  const mac = usePaletteIsMac();
+  const sections = given ?? shortcutSections(undefined, mac);
   const Heading = `h${headingLevel}` as "h3";
   return (
     <div data-testid="shortcut-table" className={cn("flex min-w-0 flex-col gap-4", className)}>
@@ -43,24 +49,26 @@ export function ShortcutTable({ sections = shortcutSections(), headingLevel = 3,
           <Heading id={`shortcuts-${section.id}`} className="pb-1 text-caption font-medium text-muted-foreground">
             {section.title}
           </Heading>
-          <table className="w-full text-label">
-            <thead className="sr-only">
-              <tr>
-                <th scope="col">Action</th>
-                <th scope="col">Keys</th>
-              </tr>
-            </thead>
-            <tbody>
-              {section.rows.map((row) => (
-                <tr key={row.id} data-shortcut-row={row.id} className="border-b border-border last:border-b-0">
-                  <td className="py-1.5 pr-3 text-foreground">{row.label}</td>
-                  <td className="py-1.5 text-right">
-                    <Keys row={row} />
-                  </td>
+          <div className="min-w-0 overflow-x-auto">
+            <table className="w-full text-label">
+              <thead className="sr-only">
+                <tr>
+                  <th scope="col">Action</th>
+                  <th scope="col">Keys</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {section.rows.map((row) => (
+                  <tr key={row.id} data-shortcut-row={row.id} className="border-b border-border last:border-b-0">
+                    <td className="py-1.5 pr-3 text-foreground">{row.label}</td>
+                    <td className="py-1.5 text-right">
+                      <Keys row={row} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       ))}
     </div>

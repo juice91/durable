@@ -221,7 +221,7 @@ function EventItem({ event }: EventItemProps) {
           {new Date(event.ts).toLocaleTimeString()}
         </div>
       </div>
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold text-card-foreground/60 mb-1 uppercase tracking-wide">
           {event.type}
         </div>

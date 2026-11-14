@@ -346,3 +346,94 @@ it("an expand after an auto-collapse restores the user's px width, never the kit
   await settle(panes);
   expect(pane.px).toBe(userPx);
 });
+
+it("a layout saved before px widths (percent only) migrates once: its width is saved in px and survives a collapse", async () => {
+  // A user who dragged threads to 40 % before px widths were kept; no `:threads-px` yet.
+  window.localStorage.setItem(agentLayoutKey("a1"), JSON.stringify({ threads: 40, chat: 60 }));
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.testid === "agent-chat-panes") return { width: 774, height: 600, x: 0, y: 0, top: 0, left: 0, right: 774, bottom: 600, toJSON: () => ({}) } as DOMRect;
+    return rect.call(this);
+  });
+  render(<Page />);
+  const toggle = await screen.findByRole("button", { name: "Conversations" });
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+  const migrated = Math.round(0.4 * 774);
+  await waitFor(() => expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBe(String(migrated)));
+
+  // `{` collapses (the percent layout becomes threads 0), `{` reopens at the migrated width.
+  fireEvent.keyDown(document.body, { key: "{" });
+  await waitFor(() => expect(JSON.parse(storedLayout() ?? "{}").threads).toBe(0));
+  pane.leftoverPx = 489;
+  fireEvent.keyDown(document.body, { key: "{" });
+  await waitFor(() => expect(pane.collapsed).toBe(false));
+  expect(pane.px).toBe(migrated);
+  expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBe(String(migrated));
+});
+
+function mockGroupWidth(width: number) {
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.testid === "agent-chat-panes") return { width, height: 600, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 600, toJSON: () => ({}) } as DOMRect;
+    return rect.call(this);
+  });
+}
+
+it("the migration never overwrites a px width the user already has", async () => {
+  window.localStorage.setItem(agentLayoutKey("a1"), JSON.stringify({ threads: 40, chat: 60 }));
+  window.localStorage.setItem(agentThreadsWidthKey("a1"), "333");
+  mockGroupWidth(774);
+  render(<Page />);
+  const toggle = await screen.findByRole("button", { name: "Conversations" });
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+  await settle();
+  expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBe("333");
+});
+
+it("a layout saved with the pane collapsed (threads 0) has no width to migrate: nothing is written", async () => {
+  window.localStorage.setItem(agentLayoutKey("a1"), JSON.stringify({ threads: 0, chat: 100 }));
+  mockGroupWidth(774);
+  render(<Page />);
+  await screen.findByRole("button", { name: "Conversations" });
+  await settle();
+  expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBeNull();
+});
+
+it("no saved layout: nothing is written until the user drags (the default is not a choice)", async () => {
+  render(<Page />);
+  const toggle = await screen.findByRole("button", { name: "Conversations" });
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+  await settle();
+  expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBeNull();
+});
+
+function sizedPanes(width: number) {
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.testid === "agent-chat-panes") return { width, height: 600, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 600, toJSON: () => ({}) } as DOMRect;
+    return rect.call(this);
+  });
+}
+
+it("the migrated width is clamped: never so wide that the chat drops under its minimum", async () => {
+  window.localStorage.setItem(agentLayoutKey("a1"), JSON.stringify({ threads: 90, chat: 10 }));
+  sizedPanes(774);
+  render(<Page />);
+  // 90 % of 774 px would leave the chat 77 px; the chat keeps its 360 px minimum.
+  await waitFor(() => expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBe(String(774 - 360)));
+});
+
+it("auto-collapsed on the first visit: the migration waits until threads are shown", async () => {
+  window.localStorage.setItem(agentLayoutKey("a1"), JSON.stringify({ threads: 40, chat: 60 }));
+  // Config left open at 1100 px crowds threads out (auto-collapsed, not the user's choice).
+  window.localStorage.setItem("studio.agent-config.v1.a1", "open");
+  sizedPanes(774);
+  render(<Page />);
+  await screen.findByRole("complementary", { name: "Config" });
+  await settle();
+  expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBeNull();
+  // `]` closes Config: threads come back, and the stored percent migrates then.
+  fireEvent.keyDown(document.body, { key: "]" });
+  await waitFor(() => expect(screen.queryByRole("complementary", { name: "Config" })).toBeNull());
+  await waitFor(() => expect(window.localStorage.getItem(agentThreadsWidthKey("a1"))).toBe(String(Math.round(0.4 * 774))));
+});

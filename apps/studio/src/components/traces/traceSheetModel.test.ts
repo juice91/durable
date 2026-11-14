@@ -106,3 +106,14 @@ describe("trace tabs and the SL.12 legacy rows", () => {
     expect(traceRedirectTarget(() => routes.legacyTracePath("."))).toBe(routes.traces());
   });
 });
+
+describe("frame geometry below 1024 px (shared with the editor fit)", () => {
+  it("the sidebar is a drawer there: it takes nothing from the Sheet's room", async () => {
+    const { frameLeftWidth, narrowMainWidth } = await import("@/components/frame/frameGeometry");
+    expect(frameLeftWidth({ viewport: 1023, sidebarCollapsed: false })).toBe(0);
+    expect(frameLeftWidth({ viewport: 1024, sidebarCollapsed: false })).toBe(240);
+    expect(frameLeftWidth({ viewport: 1024, sidebarCollapsed: true })).toBe(56);
+    expect(narrowMainWidth(900)).toBe(882);
+    expect(narrowMainWidth(767)).toBe(767);
+  });
+});

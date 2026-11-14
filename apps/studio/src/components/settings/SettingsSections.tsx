@@ -114,31 +114,33 @@ function BrowserDataSection() {
       title="Data in this browser"
       description="Studio keeps these in this browser's local storage, unencrypted, on this device only."
     >
-      <table className="w-full text-label" data-testid="browser-data-table">
-        <thead>
-          <tr className="border-b border-border text-left text-caption text-muted-foreground">
-            <th scope="col" className="py-1.5 pr-3 font-medium">Item</th>
-            <th scope="col" className="py-1.5 text-right font-medium">Stored</th>
-          </tr>
-        </thead>
-        <tbody>
-          {BROWSER_DATA.map((entry) => {
-            const count = counts?.[entry.id];
-            const prefixed = entry.prefixes.length > 0;
-            return (
-              <tr key={entry.id} data-browser-data={entry.id} className="border-b border-border last:border-b-0">
-                <td className="min-w-0 py-1.5 pr-3">
-                  <div className="text-foreground">{entry.label}</div>
-                  <div className="text-caption text-muted-foreground">{entry.description}</div>
-                </td>
-                <td className="whitespace-nowrap py-1.5 text-right tabular-nums text-muted-foreground">
-                  {count === undefined ? "…" : count === 0 ? "Not set" : prefixed ? `${count} saved` : "Saved"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      <div className="min-w-0 overflow-x-auto">
+        <table className="w-full text-label" data-testid="browser-data-table">
+          <thead>
+            <tr className="border-b border-border text-left text-caption text-muted-foreground">
+              <th scope="col" className="py-1.5 pr-3 font-medium">Item</th>
+              <th scope="col" className="py-1.5 text-right font-medium">Stored</th>
+            </tr>
+          </thead>
+          <tbody>
+            {BROWSER_DATA.map((entry) => {
+              const count = counts?.[entry.id];
+              const prefixed = entry.prefixes.length > 0;
+              return (
+                <tr key={entry.id} data-browser-data={entry.id} className="border-b border-border last:border-b-0">
+                  <td className="min-w-0 py-1.5 pr-3">
+                    <div className="text-foreground">{entry.label}</div>
+                    <div className="text-caption text-muted-foreground">{entry.description}</div>
+                  </td>
+                  <td className="whitespace-nowrap py-1.5 text-right tabular-nums text-muted-foreground">
+                    {count === undefined ? "…" : count === 0 ? "Not set" : prefixed ? `${count} saved` : "Saved"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       <div className="flex flex-wrap gap-2">
         {(Object.keys(CLEAR_COPY) as ClearGroup[]).map((group) => (
           <Button key={group} variant="secondary" size="sm" onClick={() => setConfirming(group)} data-testid={CLEAR_COPY[group].testId}>

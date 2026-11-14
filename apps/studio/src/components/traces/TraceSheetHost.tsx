@@ -34,6 +34,12 @@ export interface TraceSheetHostProps {
    * whose own tabs already use `tab` (a workflow's `?tab=runs`) passes another name.
    */
   tabParam?: string;
+  /**
+   * The page's latest intended query (its filters as last written, with the Sheet's parameters),
+   * or null when the URL is current. Opening, switching and closing the Sheet build on it, so a
+   * filter write still in flight (committed on blur by the click that opens the Sheet) is kept.
+   */
+  baseParams?: () => URLSearchParams | null;
   children?: React.ReactNode | ((sheet: TraceSheetApi) => React.ReactNode);
 }
 
@@ -78,9 +84,9 @@ interface ChildSheet {
   tab: TraceTab;
 }
 
-function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, children }: TraceSheetHostProps) {
-  const pushSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam], history: "push" });
-  const replaceSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam] });
+function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, baseParams, children }: TraceSheetHostProps) {
+  const pushSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam], history: "push", baseParams });
+  const replaceSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam], baseParams });
   const searchParams = useSearchParams();
   const tab = parseTraceTab(searchParams?.get(tabParam));
   const [registered, setRegistered] = useState<readonly string[]>([]);
@@ -111,8 +117,8 @@ function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, children }: TraceSheetHo
   /** Open (or switch to) a run from a list or a link: one history entry. */
   const open = useCallback(
     (runId: string, nextTab: TraceTab | null = null) => {
-      pushOpen(runId, tabExtra(nextTab));
-      pushed.current = true;
+      // Pushed unless the page had a filter write in flight (then it replaced: see useUrlSheet).
+      pushed.current = pushOpen(runId, tabExtra(nextTab));
       openedRunId.current = runId;
       openedByHost.current = true;
     },

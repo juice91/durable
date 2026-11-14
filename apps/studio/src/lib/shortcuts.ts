@@ -38,6 +38,11 @@ export interface KeySequence<B extends KeyBinding = KeyBinding> {
   reset: () => void;
   /** True while a sequence is half-typed and not yet expired at `now`. */
   isPending: (now: number) => boolean;
+  /**
+   * True when `key` at `now` would break a half-typed sequence (neither completing nor continuing
+   * it). Changes nothing.
+   */
+  wouldBreak: (key: string, now: number) => boolean;
 }
 
 /**
@@ -75,6 +80,11 @@ export function createKeySequence<B extends KeyBinding>(bindings: readonly B[], 
     },
     isPending(now) {
       return buffer.length > 0 && now - lastAt <= timeoutMs;
+    },
+    wouldBreak(key, now) {
+      if (!(buffer.length > 0 && now - lastAt <= timeoutMs)) return false;
+      const candidate = [...buffer, key];
+      return !bindings.some((binding) => binding.keys.length >= candidate.length && startsWith(binding.keys, candidate));
     },
   };
 }
@@ -122,7 +132,12 @@ export function isPaletteChord(event: PaletteChordEvent, mac: boolean = isMacPla
 
 /** How the palette chord is written for this platform: "⌘K" or "Ctrl K". */
 export function paletteChordLabel(mac: boolean = isMacPlatform()): string {
-  return mac ? "⌘K" : "Ctrl K";
+  return paletteChordKeys(mac).join(mac ? "" : " ");
+}
+
+/** The palette chord's keys as `<Kbd>`s on this platform: ⌘ K on macOS (Ctrl+K does not open it there), Ctrl K elsewhere. */
+export function paletteChordKeys(mac: boolean = isMacPlatform()): readonly string[] {
+  return mac ? ["⌘", "K"] : ["Ctrl", "K"];
 }
 
 export interface ShortcutRow {
@@ -145,19 +160,23 @@ export function displayKey(key: string): string {
   return key.length === 1 ? key.toUpperCase() : key;
 }
 
-/** The rows of the help dialog and the Settings table, in display order. */
-export function shortcutSections(items: readonly NavItem[] = allNavItems): ShortcutSection[] {
+/**
+ * The rows of the help dialog and the Settings table, in display order. `mac` picks the palette
+ * chord shown (only the one that works on this platform; components pass `usePaletteIsMac()`).
+ */
+export function shortcutSections(items: readonly NavItem[] = allNavItems, mac: boolean = isMacPlatform()): ShortcutSection[] {
   return [
     {
       id: "general",
       title: "General",
       rows: [
-        { id: "palette", label: "Open the command palette", keys: [["⌘", "K"], ["Ctrl", "K"]] },
+        { id: "palette", label: "Open the command palette", keys: [paletteChordKeys(mac)] },
         { id: "help", label: "Show keyboard shortcuts", keys: [["?"]] },
         { id: "sidebar", label: "Collapse or expand the sidebar", keys: [["["]] },
         { id: "search", label: "Focus the list search", keys: [["/"]] },
         { id: "create", label: "Create (the page's primary action)", keys: [["C"]] },
         { id: "rows", label: "Move through list rows, then open one", keys: [["↑"], ["↓"], ["Enter"]] },
+        { id: "rows-ends", label: "Jump to the first or last list row", keys: [["Home"], ["End"]] },
       ],
     },
     {

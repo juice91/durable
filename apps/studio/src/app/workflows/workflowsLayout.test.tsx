@@ -2,7 +2,7 @@ import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { demoSpec } from "@/test/workflowFixtures";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { setWindowWidth } from "@/components/frame/frameTesting";
 import { routes } from "@/lib/routes";
 import { workflowRunLedger } from "@/lib/workflows";
@@ -171,7 +171,7 @@ describe("workflow detail: Graph tab layout (SL.14)", () => {
     await renderGraphTab();
     // The page (the app layout sets <html lang>; this test renders the page alone).
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("the panel keeps its content mounted (SL.14 review)", () => {

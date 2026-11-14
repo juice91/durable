@@ -419,7 +419,7 @@ describe("rendered links are unchanged for ordinary ids", () => {
     expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", "/traces?trace=run-1");
     expect(await screen.findByRole("link", { name: "Workflow: Triage v3" })).toHaveAttribute("href", "/workflows/wf-1/runs/wfrun-1");
     fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "failed" } });
-    expect(nav.replace).toHaveBeenLastCalledWith("/traces?status=failed");
+    expect(nav.replace).toHaveBeenLastCalledWith("/traces?status=failed", { scroll: false });
   });
 
   it("logs: the trace link per record and the filter replace", async () => {

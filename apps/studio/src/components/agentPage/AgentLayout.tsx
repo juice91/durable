@@ -24,6 +24,7 @@ import { THREADS_TITLE } from "./AgentChatPanes";
 import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
 import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
+import { copyText } from "@/lib/clipboard";
 
 export const CONFIG_TITLE = "Config";
 
@@ -229,11 +230,10 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   }, [configAvailable, toggleConfig, setThreadsOpen, tab, threadsPressed]);
 
   const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
+    if (await copyText(window.location.href)) {
       setCopyStatus("Link copied");
       toast.success("Link copied");
-    } catch {
+    } else {
       setCopyStatus("Copying is not available here");
     }
   };

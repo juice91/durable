@@ -3,11 +3,12 @@
 import React, { useCallback, useState } from "react";
 import { Group, Panel, Separator, type Layout, type LayoutChangedMeta } from "react-resizable-panels";
 import { cn } from "@/lib/cn";
+import { readStorage, writeStorage } from "@/lib/safeStorage";
 
 /** Reads a saved layout (`{panelId: percent}`); null when absent, unreadable or malformed. */
 export function readStoredLayout(storageKey: string): Layout | null {
   try {
-    const raw = window.localStorage.getItem(storageKey);
+    const raw = readStorage(storageKey);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
@@ -21,11 +22,8 @@ export function readStoredLayout(storageKey: string): Layout | null {
 
 /** Saves a layout; storage errors (private mode, quota) are ignored. */
 export function writeStoredLayout(storageKey: string, layout: Layout): void {
-  try {
-    window.localStorage.setItem(storageKey, JSON.stringify(layout));
-  } catch {
-    // Not saved: the panes still work, they just reopen at their default sizes.
-  }
+  // Not saved when storage is unavailable or full: the panes still work, they reopen at their defaults.
+  writeStorage(storageKey, JSON.stringify(layout));
 }
 
 export interface ResizableGroupProps extends Omit<React.ComponentProps<typeof Group>, "defaultLayout"> {

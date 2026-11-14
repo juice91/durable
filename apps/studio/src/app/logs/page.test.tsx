@@ -15,10 +15,11 @@ const AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 let currentParams = new URLSearchParams();
 const replace = vi.fn();
+const push = vi.fn();
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/logs",
-  useRouter: () => ({ replace, push: vi.fn() }),
+  useRouter: () => ({ replace, push }),
   useSearchParams: () => currentParams,
 }));
 
@@ -54,6 +55,7 @@ describe("Logs page", () => {
   beforeEach(() => {
     currentParams = new URLSearchParams();
     replace.mockReset();
+    push.mockReset();
     vi.mocked(searchLogs).mockReset();
     vi.mocked(listTraceRuns).mockReset();
     vi.mocked(listTraceRuns).mockResolvedValue({ items: [], next_before: null });
@@ -187,6 +189,34 @@ describe("Logs page", () => {
     fireEvent.submit(screen.getByRole("search", { name: "Log filters" }));
     expect(replace).toHaveBeenCalledTimes(1);
     expect(replace).toHaveBeenCalledWith(routes.logs({ q: "boom", run_id: "1111" }), { scroll: false });
+  });
+
+  it("blur-then-click race: a run id committed on blur is kept when the click opens the trace Sheet", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([log("model call failed")]));
+    render(<LogsPage />);
+    const link = await screen.findByRole("link", { name: `Open trace of run ${RUN}` });
+    fireEvent.change(screen.getByLabelText("Run"), { target: { value: "1111" } });
+    // The click that opens the Sheet first blurs the field, which commits the partial id; the router
+    // has not put it in the URL yet (currentParams is still empty), so the Sheet must build on it,
+    // and REPLACE (Next drops a pending replace under a push: test/pendingFilterWrite.test.tsx).
+    fireEvent.blur(screen.getByLabelText("Run"));
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ run_id: "1111" }), { scroll: false });
+    fireEvent.click(link);
+    expect(push).not.toHaveBeenCalled();
+    const url = new URL(replace.mock.calls[replace.mock.calls.length - 1][0] as string, "http://x");
+    expect(url.pathname).toBe("/logs");
+    expect(url.searchParams.get("run_id")).toBe("1111");
+    expect(url.searchParams.get("trace")).toBe(RUN);
+  });
+
+  it("without a pending filter write, opening a trace builds on the URL as it is", async () => {
+    currentParams = new URLSearchParams({ level: "error" });
+    vi.mocked(searchLogs).mockResolvedValue(response([log("model call failed")]));
+    render(<LogsPage />);
+    fireEvent.click(await screen.findByRole("link", { name: `Open trace of run ${RUN}` }));
+    const url = new URL(push.mock.calls[0][0] as string, "http://x");
+    expect(url.searchParams.get("level")).toBe("error");
+    expect(url.searchParams.get("trace")).toBe(RUN);
   });
 
   it("searches a selected run over its lifetime, not up to now", async () => {

@@ -9,7 +9,7 @@
  * - "compact": a step select above the step, versions in the Sheet (phones, or no room for the nav).
  */
 import { CHAT_FIT_MARGIN_PX } from "@/components/agentPage/chatFit";
-import { mainCardWidth, type FrameSize } from "@/components/frame/frameGeometry";
+import { mainCardWidth, narrowMainWidth, type FrameSize } from "@/components/frame/frameGeometry";
 
 /** The step nav column. */
 export const STEP_NAV_PX = 220;
@@ -33,9 +33,13 @@ export interface EditorFitInput {
   panelWidth: number | null;
 }
 
-/** The main card's width: beside the sidebar and an open panel when wide, the window below that. */
+/**
+ * The main card's width: beside the sidebar and an open panel when wide; below that the window less
+ * the card's gutter and border (`narrowMainWidth`; taking the whole window chose "columns" at
+ * 916–933 px, where the card is 18 px narrower and the step was squeezed).
+ */
 export function editorMainWidth({ frame, isWide, panelWidth }: EditorFitInput): number {
-  return isWide ? mainCardWidth(frame, panelWidth) : frame.viewport;
+  return isWide ? mainCardWidth(frame, panelWidth) : narrowMainWidth(frame.viewport);
 }
 
 export function editorLayout(input: EditorFitInput): EditorLayout {

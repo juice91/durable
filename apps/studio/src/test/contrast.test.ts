@@ -136,6 +136,14 @@ describe.each(THEMES)("colour tokens in the %s theme", (_theme, selector) => {
     });
   });
 
+  // SL.15: the sidebar's labels, group titles and version line sit directly on the canvas.
+  it.each(["foreground", "muted-foreground", ...STATUS_TEXT.map(([text]) => text)])(
+    "--%s is at least 4.5:1 on --canvas (the sidebar)",
+    (text) => {
+      expect(contrast(rgb(text), rgb("canvas"))).toBeGreaterThanOrEqual(4.5);
+    },
+  );
+
   it.each(UI_SURFACES)("--ring and --border-strong are at least 3:1 against --%s", (surface) => {
     expect(contrast(rgb("ring"), rgb(surface))).toBeGreaterThanOrEqual(3);
     expect(contrast(rgb("border-strong"), rgb(surface))).toBeGreaterThanOrEqual(3);

@@ -95,13 +95,32 @@ describe("global bindings", () => {
   });
 });
 
+describe("createKeySequence.wouldBreak", () => {
+  test("true only for a key that neither completes nor continues a pending sequence; never changes state", () => {
+    const seq = createKeySequence([{ id: "gt", keys: ["g", "t"] }, { id: "c", keys: ["c"] }]);
+    expect(seq.wouldBreak("[", 0)).toBe(false);
+    seq.feed("g", 0);
+    expect(seq.wouldBreak("[", 10)).toBe(true);
+    expect(seq.wouldBreak("t", 10)).toBe(false);
+    expect(seq.wouldBreak("[", 5000)).toBe(false);
+    expect(seq.feed("t", 20).match?.id).toBe("gt");
+  });
+});
+
 describe("shortcut sections", () => {
   test("General lists the frame and list keys; Go to lists every g-key in registry order", () => {
     const [general, navigation] = shortcutSections();
-    expect(general.rows.map((row) => row.id)).toEqual(["palette", "help", "sidebar", "search", "create", "rows"]);
+    expect(general.rows.map((row) => row.id)).toEqual(["palette", "help", "sidebar", "search", "create", "rows", "rows-ends"]);
+    expect(general.rows.find((row) => row.id === "rows-ends")?.keys).toEqual([["Home"], ["End"]]);
     expect(navigation.rows.map((row) => row.label)).toEqual(allNavItems.filter((item) => item.gKey).map((item) => item.label));
     expect(navigation.rows.every((row) => row.sequence)).toBe(true);
     expect(navigation.rows.find((row) => row.id === "nav:traces")?.keys).toEqual([["G", "T"]]);
+  });
+
+  test("the palette row shows only the chord that works on this platform (⌘K on macOS, Ctrl K elsewhere)", () => {
+    const palette = (mac: boolean) => shortcutSections(undefined, mac)[0].rows.find((row) => row.id === "palette")?.keys;
+    expect(palette(true)).toEqual([["⌘", "K"]]);
+    expect(palette(false)).toEqual([["Ctrl", "K"]]);
   });
 
   test("Agent page lists `]` (Config) and `{` (conversations)", () => {

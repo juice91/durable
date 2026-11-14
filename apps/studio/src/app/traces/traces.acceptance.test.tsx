@@ -70,7 +70,7 @@ describe("TracesPage acceptance", () => {
     const model = await screen.findByLabelText(/model/i);
     fireEvent.change(model, { target: { value: "openai:gpt-4.1" } });
     fireEvent.blur(model);
-    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ model: "openai:gpt-4.1" }));
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ model: "openai:gpt-4.1" }), { scroll: false });
     fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-11-01T00:00" } });
     const url = nav.replace.mock.calls.at(-1)![0] as string;
     expect(new URLSearchParams(url.split("?")[1]).get("from")).toBeTruthy();
@@ -86,6 +86,6 @@ describe("TracesPage acceptance", () => {
     expect(params.get("status")).toBe("failed");
     expect(params.get("kind")).toBe("tool");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces());
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces(), { scroll: false });
   });
 });

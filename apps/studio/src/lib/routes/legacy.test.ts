@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { RouteIdError } from "./query";
 import { LEGACY_RULES, legacyTarget, matchPattern, toSearchParams, type LegacyRule } from "./legacy";
@@ -5,7 +7,9 @@ import { LEGACY_RULES, legacyTarget, matchPattern, toSearchParams, type LegacyRu
 /**
  * The legacy redirect table. Each task that retires a URL adds its rows to LEGACY_RULES and its
  * cases here: [old pathname, search params, expected target].
- * SL.3 ships the harness with no rules, so every URL is current.
+ * SL.3 shipped the harness with no rules; SL.6, SL.7, SL.10 and SL.12 added theirs. SL.15 checks the
+ * table is complete (below): every row has cases, every redirect page has a row, and every page
+ * that existed before the milestone is either still a page or has a row.
  */
 const CASES: Array<[string, Record<string, string | string[] | undefined>, string | null]> = [
   // SL.6: the agent page.
@@ -133,5 +137,72 @@ describe("legacyTarget: the harness", () => {
 
   it("rejects a malformed percent-encoding instead of throwing", () => {
     expect(matchPattern("/old/:id", "/old/%E0%A4%A")).toBeNull();
+  });
+});
+
+/**
+ * SL.15: the legacy table is complete. SL.8 (MCP), SL.9 (Processors), SL.11 (editor), SL.13 (Tools)
+ * and SL.14 (Workflows) kept their URLs (the route map's "Same page" rows), so only SL.6, SL.7,
+ * SL.10 and SL.12 retired any.
+ */
+describe("legacyTarget: the table is complete", () => {
+  const APP = path.resolve(__dirname, "..", "..", "app");
+
+  /** `app/agents/[id]/page.tsx` → `/agents/:id`. */
+  const patternOf = (file: string) => {
+    const dir = path.dirname(path.relative(APP, file)).split(path.sep).join("/");
+    return dir === "." ? "/" : `/${dir.replace(/\[(\w+)\]/g, ":$1")}`;
+  };
+
+  const pages: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name === "page.tsx") pages.push(full);
+    }
+  };
+  walk(APP);
+  const redirectPages = pages.filter((file) => /\bredirect\(/.test(fs.readFileSync(file, "utf8"))).map(patternOf).sort();
+  const livePages = pages.map(patternOf).filter((p) => !redirectPages.includes(p));
+  const patterns = LEGACY_RULES.map((rule) => rule.pattern);
+
+  it("every redirect page has a row, and every row has a redirect page", () => {
+    // `/traces/:runId` uses the same param name as its folder; the run page's folder is `[id]`.
+    expect(redirectPages).toEqual([...new Set(patterns)].sort());
+  });
+
+  it("every row has at least one case in CASES that resolves (and one that does not, for rows that can decline)", () => {
+    for (const rule of LEGACY_RULES) {
+      const own = CASES.filter(([pathname]) => matchPattern(rule.pattern, pathname));
+      expect(own.some(([, , expected]) => expected !== null), `${rule.task} ${rule.pattern}`).toBe(true);
+    }
+  });
+
+  /** The Studio pages before the milestone (milestone-rag-memory at 28d5ae1), as path patterns. */
+  const BEFORE = [
+    "/", "/agents", "/agents/:id", "/agents/new", "/logs", "/mcp", "/metrics", "/playground", "/processors",
+    "/request-context", "/runs/:id", "/settings", "/tools", "/traces", "/traces/:runId", "/workflows",
+    "/workflows/:id", "/workflows/:id/runs/:runId",
+  ];
+
+  it.each(BEFORE)("the pre-milestone page %s is still a page or has a legacy row", (pattern) => {
+    const live = livePages.includes(pattern);
+    const retired = patterns.includes(pattern);
+    expect(live || retired, pattern).toBe(true);
+    expect(live && retired, `${pattern} is both a live page and a legacy row`).toBe(false);
+  });
+
+  // The plan's "Old URLs" acceptance list: each lands on its new home with its state.
+  it.each([
+    ["/", {}, "/agents"],
+    ["/", { range: "7d" }, "/metrics?range=7d"],
+    ["/playground", { agent: "a1", conversation: "c1", model: "test:echo" }, "/agents/a1/chat/c1?model=test%3Aecho"],
+    ["/request-context", { agent: "a1" }, "/agents/a1/chat?context=open"],
+    ["/agents/a1", {}, "/agents/a1/chat"],
+    ["/traces/r1", {}, "/traces?trace=r1"],
+    ["/runs/r1", {}, "/traces?trace=r1&tab=events"],
+  ] as const)("acceptance: %s %o → %s", (pathname, search, expected) => {
+    expect(legacyTarget(pathname, search)).toBe(expected);
   });
 });

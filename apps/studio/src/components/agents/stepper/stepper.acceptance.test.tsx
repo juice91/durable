@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const nav = vi.hoisted(() => ({ search: "", path: "/agents/a1/editor", push: vi.fn(), replace: vi.fn() }));
+const nav = vi.hoisted(() => ({ search: "", path: "", push: vi.fn(), replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => nav.path,
@@ -42,7 +42,7 @@ import { SidePanel, SidePanelProvider } from "@/components/frame/SidePanel";
 import { chooseVersionAction, versionActions } from "@/components/agents/versionsTesting";
 import { ConfigPanel } from "@/components/agentPage/ConfigPanel";
 import { EditorTab } from "@/components/agentPage/EditorTab";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
 import { EDITOR_STEPS } from "./registry";
 import type { EditorStepDefinition, StepProps } from "./types";
@@ -72,7 +72,7 @@ let restoreWidth: () => void = () => undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   nav.search = "";
-  nav.path = "/agents/a1/editor";
+  nav.path = routes.agentEditor("a1");
   restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
   vi.mocked(api.agents.get).mockResolvedValue(agentWith(DRAFT));
   vi.mocked(api.agents.update).mockImplementation(async (_id, spec) => agentWith(spec));
@@ -97,6 +97,13 @@ async function renderEditor(ui: React.ReactElement = <EditorTab agentId="a1" />)
 }
 const lastReplace = () => {
   const url = vi.mocked(nav.replace).mock.calls.at(-1)?.[0] as string;
+  const [path, query = ""] = url.split("?");
+  return { path, params: new URLSearchParams(query) };
+};
+/** The latest URL written by push or replace (the compare Sheet opens with a push since SL.15 M9). */
+const lastWrite = () => {
+  const calls = [vi.mocked(nav.push), vi.mocked(nav.replace)].flatMap((fn) => fn.mock.calls.map((call, i) => ({ url: call[0] as string, order: fn.mock.invocationCallOrder[i] })));
+  const url = calls.sort((a, b) => a.order - b.order).at(-1)?.url ?? "";
   const [path, query = ""] = url.split("?");
   return { path, params: new URLSearchParams(query) };
 };
@@ -143,7 +150,7 @@ describe("deep links and reload", () => {
     await renderEditor();
     fireEvent.click(screen.getByTestId("stepper-next"));
     const { path, params } = lastReplace();
-    expect(path).toBe("/agents/a1/editor");
+    expect(path).toBe(routes.agentEditor("a1"));
     expect(params.get("step")).toBe("request-context");
     expect(params.get("foo")).toBe("1");
     expect(nav.push).not.toHaveBeenCalled();
@@ -382,7 +389,7 @@ describe("unsaved-changes guard", () => {
   it("a dirty click on the agent tabs or sidebar links asks first; Leave follows, Stay does not", async () => {
     await renderEditor();
     dirty();
-    const a = link("/agents/a1/traces", { "data-guard": "" });
+    const a = link(routes.agentTraces("a1"), { "data-guard": "" });
     fireEvent.click(a);
     const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Stay" }));
@@ -391,7 +398,7 @@ describe("unsaved-changes guard", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("Edited");
     fireEvent.click(a);
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave without saving" }));
-    expect(nav.push).toHaveBeenCalledWith("/agents/a1/traces");
+    expect(nav.push).toHaveBeenCalledWith(routes.agentTraces("a1"));
   });
 
   it("step changes, ?compare= links and same-page links never prompt, dirty or not", async () => {
@@ -408,11 +415,11 @@ describe("unsaved-changes guard", () => {
   it("modified clicks, new-tab links and downloads are not held", async () => {
     await renderEditor();
     dirty();
-    const plain = link("/agents", { "data-guard": "" });
+    const plain = link(routes.agents(), { "data-guard": "" });
     fireEvent.click(plain, { ctrlKey: true });
     fireEvent.click(plain, { metaKey: true });
     fireEvent.click(plain, { button: 1 });
-    fireEvent.click(link("/agents", { "data-guard": "", target: "_blank" }));
+    fireEvent.click(link(routes.agents(), { "data-guard": "", target: "_blank" }));
     expect(screen.queryByRole("dialog", { name: "Leave without saving?" })).toBeNull();
   });
 
@@ -423,7 +430,7 @@ describe("unsaved-changes guard", () => {
     expect(unload()).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
     await waitFor(() => expect(unload()).toBe(false));
-    fireEvent.click(link("/agents", { "data-guard": "" }));
+    fireEvent.click(link(routes.agents(), { "data-guard": "" }));
     expect(screen.queryByRole("dialog", { name: "Leave without saving?" })).toBeNull();
   });
 
@@ -454,7 +461,7 @@ describe("versions", () => {
   it("Compare with draft writes ?compare=1..draft and opens the Sheet with the diff", async () => {
     await renderEditor();
     await chooseVersionAction(1, "Compare with draft");
-    expect(lastReplace().params.get("compare")).toBe("1..draft");
+    expect(lastWrite().params.get("compare")).toBe("1..draft");
     const sheet = await screen.findByRole("dialog", { name: "Compare v1 with Draft" });
     expect(await within(sheet).findByText("model.name")).toBeInTheDocument();
   });
@@ -469,7 +476,7 @@ describe("versions", () => {
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((item) => item.textContent)).toEqual(expect.arrayContaining(["Draft", "v2"]));
     fireEvent.click(items.find((item) => item.textContent === "v2")!);
-    await waitFor(() => expect(lastReplace().params.get("compare")).toBe("1..2"));
+    await waitFor(() => expect(lastWrite().params.get("compare")).toBe("1..2"));
   });
 
   it("Test in chat links to the chat on that version, and on the draft", async () => {
@@ -562,7 +569,7 @@ describe("Config panel links open the right step", () => {
   it.each(LINKS)("%s links to ?step=%s and the editor opens %s", async (name, id, label) => {
     const config = render(<ConfigPanel agent={agent} versions={published} />);
     const href = screen.getByRole("link", { name }).getAttribute("href")!;
-    expect(href.split("?")[0]).toBe("/agents/a1/editor");
+    expect(href.split("?")[0]).toBe(routes.agentEditor("a1"));
     expect(stepOf(href)).toBe(id);
     expect(href).toBe(routes.agentEditor("a1", { step: id }));
     config.unmount();
@@ -574,7 +581,7 @@ describe("Config panel links open the right step", () => {
 
   it("the Version section links to the editor without a step", () => {
     render(<ConfigPanel agent={agent} versions={published} />);
-    expect(screen.getByRole("link", { name: "Edit version" })).toHaveAttribute("href", "/agents/a1/editor");
+    expect(screen.getByRole("link", { name: "Edit version" })).toHaveAttribute("href", routes.agentEditor("a1"));
   });
 
   it("the chat context popover's 'Fields are defined in the editor' link opens Request context", async () => {
@@ -772,7 +779,7 @@ describe("accessibility", () => {
     expect(tags.filter((tag) => tag === "H1")).toHaveLength(1);
     const levels = tags.map((tag) => Number(tag.slice(1)));
     expect(levels.every((level, index) => level <= (levels[index - 1] ?? 0) + 1)).toBe(true);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it.each(["light", "dark"])("the compare Sheet and the versions Sheet have no axe violations in the %s theme", async (theme) => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -792,5 +799,5 @@ describe("accessibility", () => {
     await within(await screen.findByTestId("versions-sheet")).findByTestId("agent-versions");
     await expectNoAxeViolations(document.body);
     media.restore();
-  });
+  }, AXE_TIMEOUT_MS);
 });

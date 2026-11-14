@@ -11,7 +11,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Run, RunEvent, SubscribeHandlers } from "@/lib/runs";
 import { demoSpec } from "@/test/workflowFixtures";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { FrameHarness, mockMatchMedia, setWindowWidth, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { routes } from "@/lib/routes";
 import { SIDEBAR_ATTRIBUTE, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
@@ -23,7 +23,7 @@ import {
 
 // A stateful router: push adds a history entry, replace rewrites it, back pops it.
 const nav = vi.hoisted(() => ({
-  path: "/workflows/wf-1", search: "", entries: [] as string[], params: {} as Record<string, string>,
+  path: "", search: "", entries: [] as string[], params: {} as Record<string, string>,
   listeners: new Set<() => void>(), push: vi.fn(), replace: vi.fn(), back: vi.fn(),
 }));
 function setUrl(url: string) {
@@ -146,7 +146,7 @@ beforeEach(() => {
   runsMock.subscribeRun.mockImplementation((_id: string, next: SubscribeHandlers) => { handlers = next; return () => undefined; });
   workflowRunLedger.reset();
   localStorage.clear();
-  go("/workflows/wf-1");
+  go(routes.workflow("wf-1"));
 });
 
 afterEach(() => {
@@ -174,7 +174,7 @@ async function graphTab() {
   await screen.findByTestId("workflow-graph");
   await screen.findByTestId("workflow-run-row-run-b");
 }
-async function runView(url = "/workflows/wf-1/runs/run-1") {
+async function runView(url = routes.workflowRun("wf-1", "run-1")) {
   go(url, { id: "wf-1", runId: "run-1" });
   render(<WorkflowRunPage />);
   // The graph node, not the panel's step list: the list is inside the Sheet at phone width.
@@ -183,7 +183,7 @@ async function runView(url = "/workflows/wf-1/runs/run-1") {
 
 describe("list, tabs and deep links", () => {
   it("the list has one h1 and its rows open the Graph tab", async () => {
-    go("/workflows", {});
+    go(routes.workflows(), {});
     render(<WorkflowsPage />);
     const list = await screen.findByTestId("workflows-list");
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
@@ -196,20 +196,20 @@ describe("list, tabs and deep links", () => {
     await graphTab();
     expect(screen.getByTestId("workflow-tab-graph")).toHaveAttribute("aria-current", "page");
     expect(screen.getByTestId("workflow-tab-runs")).not.toHaveAttribute("aria-current");
-    expect(screen.getByTestId("workflow-tab-runs")).toHaveAttribute("href", "/workflows/wf-1?tab=runs");
-    expect(screen.getByTestId("workflow-tab-traces")).toHaveAttribute("href", "/workflows/wf-1/traces");
+    expect(screen.getByTestId("workflow-tab-runs")).toHaveAttribute("href", routes.workflow("wf-1", { tab: "runs" }));
+    expect(screen.getByTestId("workflow-tab-traces")).toHaveAttribute("href", routes.workflowTraces("wf-1"));
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
   it("?tab=runs deep-links to the Runs tab, an unknown tab falls back to Graph", async () => {
-    go("/workflows/wf-1?tab=runs");
+    go(routes.workflow("wf-1", { tab: "runs" }));
     render(<WorkflowDetailPage />);
     await screen.findByTestId("workflow-run-history");
     expect(screen.getByTestId("workflow-tab-runs")).toHaveAttribute("aria-current", "page");
     expect(screen.queryByTestId("workflow-graph")).not.toBeInTheDocument();
     expect(screen.queryByTestId("workflow-panel")).not.toBeInTheDocument();
     cleanup();
-    go("/workflows/wf-1?tab=bogus");
+    go(`${routes.workflow("wf-1")}?tab=bogus`);
     render(<WorkflowDetailPage />);
     expect(await screen.findByTestId("workflow-graph")).toBeInTheDocument();
     expect(screen.getByTestId("workflow-tab-graph")).toHaveAttribute("aria-current", "page");
@@ -217,11 +217,11 @@ describe("list, tabs and deep links", () => {
 
   it("the All runs link switches from Graph to the Runs tab", async () => {
     await graphTab();
-    expect(screen.getByTestId("workflow-all-runs")).toHaveAttribute("href", "/workflows/wf-1?tab=runs");
+    expect(screen.getByTestId("workflow-all-runs")).toHaveAttribute("href", routes.workflow("wf-1", { tab: "runs" }));
   });
 
   it("/traces is the Traces tab with its runs listed", async () => {
-    go("/workflows/wf-1/traces");
+    go(routes.workflowTraces("wf-1"));
     render(<WorkflowTracesPage />);
     const list = await screen.findByTestId("workflow-traces-list");
     await waitFor(() => expect(within(list).getAllByTestId("workflow-trace-row")).toHaveLength(2));
@@ -231,8 +231,8 @@ describe("list, tabs and deep links", () => {
   });
 
   it.each([
-    ["Graph", "/workflows/wf-1", "/workflows/wf-2"],
-    ["Runs", "/workflows/wf-1?tab=runs", "/workflows/wf-2?tab=runs"],
+    ["Graph", routes.workflow("wf-1"), routes.workflow("wf-2")],
+    ["Runs", routes.workflow("wf-1", { tab: "runs" }), routes.workflow("wf-2", { tab: "runs" })],
   ])("the switcher keeps the %s tab", async (_name, url, target) => {
     go(url);
     render(<WorkflowDetailPage />);
@@ -243,11 +243,11 @@ describe("list, tabs and deep links", () => {
   });
 
   it("the switcher keeps the Traces tab", async () => {
-    go("/workflows/wf-1/traces");
+    go(routes.workflowTraces("wf-1"));
     render(<WorkflowTracesPage />);
     fireEvent.click(await screen.findByTestId("workflow-switcher"));
     fireEvent.click(await screen.findByRole("option", { name: "Other" }));
-    expect(nav.push).toHaveBeenCalledWith("/workflows/wf-2/traces");
+    expect(nav.push).toHaveBeenCalledWith(routes.workflowTraces("wf-2"));
   });
 });
 
@@ -369,7 +369,7 @@ describe("collapse, persistence and Settings", () => {
     media = mockMatchMedia(true);
     localStorage.setItem(WORKFLOW_LAYOUT_STORAGE_KEY, JSON.stringify({ panelWidth: 300, panelCollapsed: true, timelineOpen: true, timelineHeight: 400 }));
     localStorage.setItem("studio.theme", "light");
-    go("/settings", {});
+    go(routes.settings(), {});
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     fireEvent.click(await screen.findByTestId("settings-clear-layout"));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Clear" }));
@@ -386,7 +386,7 @@ describe("collapse, persistence and Settings", () => {
 
   it("Settings lists the workflow layout among the browser data it holds", async () => {
     media = mockMatchMedia(true);
-    go("/settings", {});
+    go(routes.settings(), {});
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     expect(await screen.findByText("Workflow page layout")).toBeInTheDocument();
     expect(screen.getByText(/run Timeline is open and its height/)).toBeInTheDocument();
@@ -533,7 +533,7 @@ describe("Timeline dock", () => {
     // Started order: classify (0 s), approve (1 s), lookup (3 s); then the steps that never started, in graph order.
     expect(rowIds()).toEqual(["classify", "approve", "lookup", "route", "summarize"]);
     const expected: Record<string, [string, string]> = {
-      classify: ["completed", "2.0s"], approve: ["waiting", "in progress"], lookup: ["failed", "2.0s"], route: ["pending", "—"], summarize: ["pending", "—"],
+      classify: ["completed", "2.00 s"], approve: ["waiting", "in progress"], lookup: ["failed", "2.00 s"], route: ["pending", "—"], summarize: ["pending", "—"],
     };
     for (const [id, [state, duration]] of Object.entries(expected)) {
       const row = timelineRow(id);
@@ -589,7 +589,7 @@ describe("approval overlay", () => {
     expect(posts.map((p) => p.path)).toEqual(["/api/v1/workflows/runs/run-1/steps/approve/approve"]);
     expect(screen.getByTestId("workflow-step-approve")).toHaveAttribute("data-state", "completed");
     expect(timelineRow("approve")).toHaveAttribute("data-state", "completed");
-    expect(within(timelineRow("approve")).getByTestId("workflow-timeline-duration")).toHaveTextContent("3.0s");
+    expect(within(timelineRow("approve")).getByTestId("workflow-timeline-duration")).toHaveTextContent("3.00 s");
     expect(screen.queryByTestId("workflow-right-column")).not.toBeInTheDocument();
   });
 
@@ -658,7 +658,7 @@ describe("step detail: right column or Sheet", () => {
   it("in the frame, a wider panel pushes the detail into a Sheet: 1280 px floats at 380 and sheets at 560", async () => {
     media = mockMatchMedia(true);
     restoreWidth = setWindowWidth(1280);
-    go("/workflows/wf-1/runs/run-1", { id: "wf-1", runId: "run-1" });
+    go(routes.workflowRun("wf-1", "run-1"), { id: "wf-1", runId: "run-1" });
     render(<FrameHarness><WorkflowRunPage /></FrameHarness>);
     await screen.findByTestId("workflow-node-classify");
     fireEvent.click(nodeButton("classify"));
@@ -681,7 +681,7 @@ describe("trace Sheets in place", () => {
     link.focus();
     fireEvent.click(link);
     const sheet = await traceSheet();
-    expect(nav.path).toBe("/workflows/wf-1/runs/run-1");
+    expect(nav.path).toBe(routes.workflowRun("wf-1", "run-1"));
     expect(params()).toEqual({ trace: "run-1", traceTab: "events" });
     expect(within(sheet).getByTestId("trace-sheet-run-id")).toHaveTextContent("Run run-1");
     expect(within(sheet).getByRole("tab", { name: /Events/ })).toHaveAttribute("aria-selected", "true");
@@ -690,7 +690,7 @@ describe("trace Sheets in place", () => {
 
     act(() => nav.back());
     await waitFor(() => expect(screen.queryByTestId("trace-sheet")).not.toBeInTheDocument());
-    expect(url()).toBe("/workflows/wf-1/runs/run-1");
+    expect(url()).toBe(routes.workflowRun("wf-1", "run-1"));
     await waitFor(() => expect(link).toHaveFocus());
   });
 
@@ -713,7 +713,7 @@ describe("trace Sheets in place", () => {
     const sheet = await traceSheet();
     expect(params()).toEqual({ trace: "child-9-abcdefgh", traceTab: "events" });
     expect(within(sheet).getByTestId("trace-sheet-run-id")).toHaveTextContent("child-9-abcdefgh");
-    expect(nav.path).toBe("/workflows/wf-1/runs/run-1");
+    expect(nav.path).toBe(routes.workflowRun("wf-1", "run-1"));
     // The step stays selected beneath the Sheet.
     expect(screen.getByTestId("step-io-panel")).toHaveAttribute("data-step-id", "classify");
     act(() => nav.back());
@@ -728,26 +728,26 @@ describe("trace Sheets in place", () => {
   });
 
   it("the Traces tab opens a row's trace in place, switches its tab on traceTab and Back closes", async () => {
-    go("/workflows/wf-1/traces");
+    go(routes.workflowTraces("wf-1"));
     render(<WorkflowTracesPage />);
     const list = await screen.findByTestId("workflow-traces-list");
     await waitFor(() => expect(within(list).getAllByTestId("workflow-trace-open")).toHaveLength(2));
     fireEvent.click(within(list).getAllByTestId("workflow-trace-open")[0]);
     const sheet = await traceSheet();
-    expect(url()).toBe("/workflows/wf-1/traces?trace=run-b");
+    expect(url()).toBe(`${routes.workflowTraces("wf-1")}?trace=run-b`);
     expect(within(sheet).getByTestId("trace-sheet-position")).toHaveTextContent("1");
     fireEvent.mouseDown(within(sheet).getByRole("tab", { name: /Events/ }));
     fireEvent.click(within(sheet).getByRole("tab", { name: /Events/ }));
     await waitFor(() => expect(params()).toEqual({ trace: "run-b", traceTab: "events" }));
-    expect(nav.path).toBe("/workflows/wf-1/traces");
+    expect(nav.path).toBe(routes.workflowTraces("wf-1"));
     expect(screen.getByTestId("workflow-tab-traces")).toHaveAttribute("aria-current", "page");
     act(() => nav.back());
     await waitFor(() => expect(screen.queryByTestId("trace-sheet")).not.toBeInTheDocument());
-    expect(url()).toBe("/workflows/wf-1/traces");
+    expect(url()).toBe(routes.workflowTraces("wf-1"));
   });
 
   it("?traceTab does not clash with ?tab=runs: both live in one URL and each keeps its meaning", async () => {
-    go("/workflows/wf-1?tab=runs&trace=run-a&traceTab=events");
+    go(`${routes.workflow("wf-1", { tab: "runs" })}&trace=run-a&traceTab=events`);
     render(<WorkflowDetailPage />);
     const sheet = await traceSheet();
     expect(within(sheet).getByTestId("trace-sheet-run-id")).toHaveTextContent("Run run-a");
@@ -762,7 +762,7 @@ describe("trace Sheets in place", () => {
   });
 
   it("a Sheet in the URL with the default Graph tab leaves the Graph, with its panel, in place", async () => {
-    go("/workflows/wf-1?trace=run-a");
+    go(`${routes.workflow("wf-1")}?trace=run-a`);
     render(<WorkflowDetailPage />);
     await traceSheet();
     expect(screen.getByTestId("workflow-tab-graph")).toHaveAttribute("aria-current", "page");
@@ -850,11 +850,11 @@ describe.each(["light", "dark"] as const)("axe and one h1 per page, inside the f
   }
 
   it("the list", async () => {
-    go("/workflows", {});
+    go(routes.workflows(), {});
     render(<FrameHarness><WorkflowsPage /></FrameHarness>);
     await screen.findByTestId("workflow-row-wf-1");
     await clean("Workflows");
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("the Graph tab, with the panel open", async () => {
     render(<FrameHarness><WorkflowDetailPage /></FrameHarness>);
@@ -872,7 +872,7 @@ describe.each(["light", "dark"] as const)("axe and one h1 per page, inside the f
 
   it("the run view with the approval overlay, a step open and the Timeline expanded", async () => {
     localStorage.setItem(WORKFLOW_LAYOUT_STORAGE_KEY, JSON.stringify({ timelineOpen: true }));
-    go("/workflows/wf-1/runs/run-1", { id: "wf-1", runId: "run-1" });
+    go(routes.workflowRun("wf-1", "run-1"), { id: "wf-1", runId: "run-1" });
     render(<FrameHarness><WorkflowRunPage /></FrameHarness>);
     await screen.findByTestId("workflow-step-classify");
     emit(ev("step_started", { step_id: "classify", step_type: "agent" }, 0), ev("step_completed", { step_id: "classify", output: "x" }, 1));
@@ -885,7 +885,7 @@ describe.each(["light", "dark"] as const)("axe and one h1 per page, inside the f
   });
 
   it("the Traces tab, then with a trace Sheet open", async () => {
-    go("/workflows/wf-1/traces");
+    go(routes.workflowTraces("wf-1"));
     render(<FrameHarness><WorkflowTracesPage /></FrameHarness>);
     const list = await screen.findByTestId("workflow-traces-list");
     await waitFor(() => expect(within(list).getAllByTestId("workflow-trace-open")).toHaveLength(2));
@@ -893,7 +893,7 @@ describe.each(["light", "dark"] as const)("axe and one h1 per page, inside the f
     fireEvent.click(within(list).getAllByTestId("workflow-trace-open")[0]);
     await traceSheet();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("the phone Sheet over the Graph tab", async () => {
     restoreWidth();
@@ -903,5 +903,5 @@ describe.each(["light", "dark"] as const)("axe and one h1 per page, inside the f
     fireEvent.click(await screen.findByTestId("workflow-panel-open"));
     await screen.findByTestId("workflow-panel-sheet");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

@@ -88,3 +88,12 @@ export function paneWidthFromLayout(percent: number, groupWidth: number, separat
   if (!Number.isFinite(percent) || !(available > 0)) return null;
   return Math.round((percent / 100) * available);
 }
+
+/**
+ * A threads width converted from a stored layout, kept usable: at least THREADS_MIN_PX, and never
+ * so wide that the chat drops under CHAT_MIN_PX in a group `groupWidth` px wide.
+ */
+export function clampThreadsWidth(width: number, groupWidth: number, separatorsWidth = 0): number {
+  const max = groupWidth - separatorsWidth - CHAT_MIN_PX;
+  return Math.round(Math.max(THREADS_MIN_PX, Math.min(width, max)));
+}

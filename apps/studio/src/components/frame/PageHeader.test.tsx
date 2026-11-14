@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import React, { createRef } from "react";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -136,5 +136,5 @@ describe("PageHeader", () => {
       <PageHeader crumbs={[{ label: "Workflows", href: routes.workflows() }, { label: "Triage" }]} actions={<button type="button">Run</button>} />,
     );
     await expectNoAxeViolations(container);
-  });
+  }, AXE_TIMEOUT_MS);
 });

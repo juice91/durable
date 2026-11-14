@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { cn } from "@/lib/cn";
 import { AgentsIcon, ICON_STROKE_WIDTH, WorkflowsIcon } from "@/lib/icons";
 import { routes } from "@/lib/routes";
@@ -20,41 +20,18 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 
-import {
-  Button,
-  Combobox,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  IconButton,
-  LinkTabs,
-  ResizableGroup,
-  ResizableHandle,
-  ResizablePanel,
-  SegmentedControl,
-  Sheet,
-  Tooltip,
-  TooltipProvider,
-  SheetBody,
-  SheetContent,
-  SheetHeader,
-  Switch,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  isLinkTabActive,
-  openSheetIds,
-  readStoredLayout,
-  useUrlSheet,
-  withSearchParams,
-  writeStoredLayout,
-} from "./index";
+import { Button } from "./Button";
+import { Combobox } from "./Combobox";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./Dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./DropdownMenu";
+import { IconButton } from "./IconButton";
+import { ResizableGroup, ResizableHandle, ResizablePanel, readStoredLayout, writeStoredLayout } from "./Resizable";
+import { SegmentedControl } from "./SegmentedControl";
+import { Sheet, SheetBody, SheetContent, SheetHeader, openSheetIds } from "./Sheet";
+import { Switch } from "./Switch";
+import { LinkTabs, Tabs, TabsContent, TabsList, TabsTrigger, isLinkTabActive } from "./Tabs";
+import { Tooltip, TooltipProvider } from "./Tooltip";
+import { useUrlSheet, withSearchParams } from "./useUrlSheet";
 
 beforeEach(() => {
   navigation.replace.mockReset();
@@ -105,7 +82,7 @@ describe("Button and IconButton", () => {
     expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute("type", "button");
     expect(screen.getByRole("button", { name: "Copy run id" })).toBeInTheDocument();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 function DialogHarness() {
@@ -137,7 +114,7 @@ describe("Dialog", () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(opener).toHaveFocus());
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 function SheetPair({ thirdOpen = false }: { thirdOpen?: boolean }) {
@@ -200,7 +177,7 @@ describe("Sheet", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(openLog).toHaveFocus());
     expect(openSheetIds()).toHaveLength(0);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("hands the auto-closed bottom Sheet's focus target up: closing C then B ends on A's opener", async () => {
     render(<SheetPair />);
@@ -380,7 +357,7 @@ describe("Tabs and LinkTabs", () => {
     expect(isLinkTabActive("/", "/agents")).toBe(false);
     expect(isLinkTabActive("/", "/")).toBe(true);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("SegmentedControl and Switch", () => {
@@ -409,7 +386,7 @@ describe("SegmentedControl and Switch", () => {
     fireEvent.click(within(group).getByRole("radio", { name: "Dark" }));
     expect(onValueChange).toHaveBeenCalledWith("dark");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("toggles a labelled switch", () => {
     const onCheckedChange = vi.fn();
@@ -442,7 +419,7 @@ describe("DropdownMenu", () => {
     expect(onSelect).toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("Combobox", () => {

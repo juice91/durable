@@ -19,6 +19,7 @@ import { useFrame } from "@/components/frame/FrameContext";
 import { useViewportWidth } from "@/components/frame/useMediaQuery";
 import { RunEventsPanel } from "@/components/runs/RunEventsPanel";
 import { runKind } from "@/components/runs/RunSubject";
+import type { RunKind } from "@/lib/runs";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
@@ -26,9 +27,10 @@ import { TraceSpans } from "./TraceSpans";
 import type { SpanTreeMode } from "./TraceWaterfall";
 import { renderedSheetWidth, spanDetailBeside, traceSheetWidth } from "./traceSheetModel";
 import { useNames, useTrace } from "./useTrace";
+import { copyText } from "@/lib/clipboard";
 
 const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", logs: "Logs" };
-const KIND_LABELS = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run" } as const;
+const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run" };
 const icon = (Icon: typeof Copy) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
 
 export interface TraceSheetNavigation {
@@ -145,12 +147,7 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
   const link = run ? subjectLink(run) : null;
 
   const copyId = () => {
-    void Promise.resolve()
-      .then(() => navigator.clipboard.writeText(runId))
-      .then(
-        () => toast("Run id copied"),
-        () => toast("Could not copy the run id"),
-      );
+    void copyText(runId).then((copied) => toast(copied ? "Run id copied" : "Could not copy the run id"));
   };
 
   return (

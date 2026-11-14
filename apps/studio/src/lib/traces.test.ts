@@ -90,7 +90,10 @@ describe("formatting", () => {
     expect(formatDuration(null)).toBe("-");
     expect(formatDuration(0)).toBe("0 ms");
     expect(formatDuration(1500)).toBe("1.50 s");
-    expect(formatDuration(125_000)).toBe("2m 5s");
+    expect(formatDuration(125_000)).toBe("2 min 5 s");
+    expect(formatDuration(120_000)).toBe("2 min");
+    expect(formatDuration(3_900_000)).toBe("1 h 5 min");
+    expect(formatDuration(-1)).toBe("-");
   });
 });
 
@@ -111,5 +114,19 @@ describe("URL filters", () => {
     expect(f.model).toBeNull();
     expect(traceFiltersToParams(f).toString()).toBe("status=failed%2Crunning");
     expect(traceFiltersToParams({ ...f, status: ["recovering"] }).toString()).toBe("status=recovering");
+  });
+});
+
+describe("kb_ingest runs (SL.15 review M16)", () => {
+  it("the Traces kind filter accepts kb_ingest and round-trips it", () => {
+    const filters = parseTraceFilters(new URLSearchParams("kind=kb_ingest"));
+    expect(filters.kind).toBe("kb_ingest");
+    expect(traceFiltersToParams(filters).get("kind")).toBe("kb_ingest");
+    expect(parseTraceFilters(new URLSearchParams("kind=bogus")).kind).toBeNull();
+  });
+
+  it("a kb_ingest run span is labelled Knowledge ingest", () => {
+    const span = { id: "root", parent_id: null, kind: "run", name: "run", start: null, end: null, status: "ok", attributes: { run_kind: "kb_ingest" }, input: null, output: null, truncated: {} } as unknown as Parameters<typeof spanLabel>[0];
+    expect(spanLabel(span)).toBe("Knowledge ingest");
   });
 });

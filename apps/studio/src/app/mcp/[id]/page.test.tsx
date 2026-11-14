@@ -6,7 +6,7 @@ import McpServerDetailPage from "./page";
 import { api, ApiError, type Agent, type AgentSpec, type AgentVersion } from "@/lib/api";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { MCP_USAGE_TIMEOUT_MS } from "@/components/mcp/mcpUsage";
 
 const push = vi.fn();
@@ -226,5 +226,5 @@ describe("MCP server detail page", () => {
     const { container } = render(<McpServerDetailPage />);
     await screen.findAllByTestId("mcp-used-by-agent");
     await expectNoAxeViolations(container);
-  });
+  }, AXE_TIMEOUT_MS);
 });

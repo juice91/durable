@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProcessorsPage from "./page";
 import { ProcessorDetail } from "@/components/processors/ProcessorDetail";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
@@ -381,5 +381,5 @@ describe("processor detail: unknown type, layout and a11y", () => {
     const missing = render(<Detail type="nope" />);
     await screen.findByTestId("processor-not-found");
     await expectNoAxeViolations(missing.container);
-  });
+  }, AXE_TIMEOUT_MS);
 });

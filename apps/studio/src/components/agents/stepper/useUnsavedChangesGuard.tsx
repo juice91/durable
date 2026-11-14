@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useRegisterNavigationGuard } from "@/components/frame/navigationGuard";
+import { isSafeTarget } from "@/lib/routes";
 
 /** Marks a link that calls the navigation guard itself; the document click guard leaves it alone. */
 export const GUARD_SELF_ATTRIBUTE = "data-guard-self";
@@ -27,7 +28,9 @@ export function guardedHref(event: Pick<MouseEvent, "button" | "metaKey" | "ctrl
     return null;
   }
   if (url.origin !== origin || url.pathname === pathname) return null;
-  return url.pathname + url.search + url.hash;
+  // What the guard would `router.push`: only a same-origin path (`//host/…` would leave the site).
+  const target = url.pathname + url.search + url.hash;
+  return isSafeTarget(target) ? target : null;
 }
 
 /** Whether `href` leaves the page at `pathname` (another path; `?step=` and `?compare=` stay). */

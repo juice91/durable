@@ -15,7 +15,7 @@ import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/component
 import { computeDelta, parsePageState, pageStateToFilters } from "@/lib/metrics";
 import { parseTraceFilters } from "@/lib/traces";
 import { legacyTarget, routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -474,7 +474,7 @@ describe("Accessibility of the loaded Metrics page", () => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     await loaded();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("the Overview is a named region and the page has exactly one h1 (the page header)", async () => {
     await loaded();
@@ -490,5 +490,5 @@ describe("Accessibility of the loaded Metrics page", () => {
     await screen.findByTestId("metrics-empty");
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

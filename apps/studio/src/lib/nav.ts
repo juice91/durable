@@ -71,8 +71,7 @@ export const navItems: readonly NavItem[] = [
   // Observability
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },
-  // Run pages belong to Traces until SL.12 folds them into the trace drawer.
-  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t", match: ["/runs"] },
+  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t" },
   { id: "logs", label: "Logs", href: routes.logs(), icon: LogsIcon, group: "observability", gKey: "l" },
   // Bottom
   { id: "settings", label: "Settings", href: routes.settings(), icon: SettingsIcon, group: "settings", gKey: "," },

@@ -13,7 +13,7 @@ import { findToolSheet, toolsNavigation } from "@/components/tools/toolsTesting"
 import { AGENT_SPECS_TIMEOUT_MS, useAgentLatestSpecs } from "@/lib/agentUsage";
 import { mcpUsageByServer, useMcpUsage } from "@/components/mcp/mcpUsage";
 import { loadAgentProcessorSpecs, processorUsage } from "@/lib/processors";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -500,5 +500,5 @@ describe.each([["light", false], ["dark", true]])("axe in the %s theme", (_name,
     act(() => { toolsNavigation.replace(routes.tool("gone")); });
     await screen.findByTestId("tool-not-found");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

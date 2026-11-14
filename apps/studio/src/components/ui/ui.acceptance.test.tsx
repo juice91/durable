@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 const nav = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), back: vi.fn(), pathname: "/traces", search: "", fromWindow: false }));
 // With `nav.fromWindow`, the path and query come from window.location and re-render on popstate,
@@ -28,13 +28,17 @@ vi.mock("next/navigation", async () => {
 });
 
 import { ConfirmDialog } from "../shared/ConfirmDialog";
-import {
-  Button, Combobox, Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-  Popover, PopoverContent, PopoverTrigger, ResizableGroup, ResizableHandle, ResizablePanel,
-  SegmentedControl, Sheet, SheetContent, SheetHeader, SheetTrigger, Switch, Tooltip, TooltipProvider,
-  openSheetIds, useUrlSheet,
-} from "./index";
+import { Button } from "./Button";
+import { Combobox } from "./Combobox";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "./Command";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./DropdownMenu";
+import { Popover, PopoverContent, PopoverTrigger } from "./Popover";
+import { ResizableGroup, ResizableHandle, ResizablePanel } from "./Resizable";
+import { SegmentedControl } from "./SegmentedControl";
+import { Sheet, SheetContent, SheetHeader, SheetTrigger, openSheetIds } from "./Sheet";
+import { Switch } from "./Switch";
+import { Tooltip, TooltipProvider } from "./Tooltip";
+import { useUrlSheet } from "./useUrlSheet";
 
 beforeEach(() => {
   nav.replace.mockReset();
@@ -141,7 +145,7 @@ describe("Sheet acceptance", () => {
   it("has no axe violations with a stack of two sheets open", async () => {
     await openChain();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 function Url({ history, clear }: { history?: "push" | "replace"; clear?: string[] }) {
@@ -243,7 +247,7 @@ describe("ConfirmDialog acceptance", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(ask).toHaveFocus();
     expect(container).not.toHaveAttribute("inert");
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("busy blocks Escape and disables both buttons without losing focus to the body", async () => {
     const { rerender } = render(<ConfirmHarness />);
@@ -275,7 +279,7 @@ describe("ConfirmDialog acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("Popover, DropdownMenu, Tooltip", () => {
@@ -296,7 +300,7 @@ describe("Popover, DropdownMenu, Tooltip", () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("DropdownMenu: Enter opens, arrows move over menuitems, Enter selects, Escape closes without selecting", async () => {
     const onA = vi.fn();
@@ -331,7 +335,7 @@ describe("Popover, DropdownMenu, Tooltip", () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Enter" });
     expect(onB).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Tooltip: wires aria-describedby on focus, closes on Escape, axe clean", async () => {
     render(<Tooltip content="Copy the run id"><button type="button">Copy</button></Tooltip>, { wrapper: TooltipProvider });
@@ -343,7 +347,7 @@ describe("Popover, DropdownMenu, Tooltip", () => {
     await expectNoAxeViolations(document.body);
     fireEvent.keyDown(button, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("Combobox and Command", () => {
@@ -386,7 +390,7 @@ describe("Combobox and Command", () => {
     fireEvent.click(screen.getByRole("combobox", { name: "Switch agent" }));
     await screen.findByRole("listbox");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Combobox: shows the empty text when nothing matches and marks the disabled option", async () => {
     render(<Combobox label="Pick" value={null} onValueChange={() => {}} options={options} emptyText="Nothing found" />);
@@ -420,7 +424,7 @@ describe("Combobox and Command", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onRun).toHaveBeenCalledWith("traces");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Command: the no-results state is axe clean too", async () => {
     render(
@@ -435,7 +439,7 @@ describe("Combobox and Command", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "qqq" } });
     expect(await screen.findByText("No results")).toBeInTheDocument();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 function Panes({ storageKey }: { storageKey?: string }) {
@@ -499,7 +503,7 @@ describe("Resizable acceptance", () => {
     fireEvent.keyDown(handle, { key: "End" });
     await waitFor(() => expect(Number(handle.getAttribute("aria-valuenow"))).toBeGreaterThan(50));
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("SegmentedControl and Switch acceptance", () => {
@@ -528,7 +532,7 @@ describe("SegmentedControl and Switch acceptance", () => {
     fireEvent.click(radios[2]);
     expect(radios[2]).toHaveAttribute("aria-checked", "true");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Switch: role=switch, aria-checked toggles with Space/click, disabled does not toggle; axe clean", async () => {
     const onChange = vi.fn();
@@ -546,7 +550,7 @@ describe("SegmentedControl and Switch acceptance", () => {
     fireEvent.click(locked);
     expect(locked).toHaveAttribute("aria-checked", "false");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("kit hygiene", () => {

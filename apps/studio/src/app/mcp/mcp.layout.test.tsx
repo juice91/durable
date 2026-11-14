@@ -6,7 +6,7 @@ import McpServersPage from "./page";
 import { api, type Agent } from "@/lib/api";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { ShortcutsProvider } from "@/components/shortcuts/ShortcutsProvider";
 
 // `c` is bound by the global provider, which reads the router.
@@ -115,5 +115,5 @@ describe("MCP servers list (layout)", () => {
     const { container } = render(<McpServersPage />);
     await screen.findByTestId("mcp-used-by-count");
     await expectNoAxeViolations(container);
-  });
+  }, AXE_TIMEOUT_MS);
 });

@@ -3,7 +3,7 @@
  * layout): prev / next within the hosting list, and the Sheets' widths from the frame geometry (the
  * pane fit rule shared with the agent page: `frameGeometry`), instead of fixed widths.
  */
-import { FRAME_GUTTER_PX, sidebarWidth, type FrameSize } from "@/components/frame/frameGeometry";
+import { FRAME_GUTTER_PX, frameLeftWidth, type FrameSize } from "@/components/frame/frameGeometry";
 
 /** Below this window width every Sheet is full width (the kit's `md` breakpoint). */
 export const SHEET_FULL_WIDTH_BELOW_PX = 768;
@@ -37,14 +37,15 @@ export const LOG_SHEET_MIN_PX = 360;
  */
 export function traceSheetWidth(frame: FrameSize, expanded = false): number | null {
   if (expanded || frame.viewport < SHEET_FULL_WIDTH_BELOW_PX) return null;
-  const room = frame.viewport - sidebarWidth(frame.sidebarCollapsed) - FRAME_GUTTER_PX - TRACE_LIST_PEEK_PX;
+  // The sidebar is a column only from 1024 px (frameGeometry); below that it is a drawer.
+  const room = frame.viewport - frameLeftWidth(frame) - FRAME_GUTTER_PX - TRACE_LIST_PEEK_PX;
   return Math.min(frame.viewport, Math.max(TRACE_SHEET_MIN_PX, Math.round(room)));
 }
 
 /** The log Sheet's width in px, or null for full width (a window below 768 px). */
 export function logSheetWidth(frame: FrameSize): number | null {
   if (frame.viewport < SHEET_FULL_WIDTH_BELOW_PX) return null;
-  const room = frame.viewport - sidebarWidth(frame.sidebarCollapsed) - FRAME_GUTTER_PX;
+  const room = frame.viewport - frameLeftWidth(frame) - FRAME_GUTTER_PX;
   return Math.min(frame.viewport, Math.max(LOG_SHEET_MIN_PX, Math.min(LOG_SHEET_PREFERRED_PX, Math.round(room))));
 }
 

@@ -1,0 +1,128 @@
+# Studio
+
+Studio (`apps/studio`, Next.js 15, React 19) is the platform's web UI: build and chat with agents,
+browse workflows, tools, MCP servers and processors, and inspect metrics, traces and logs. It is a
+client of the API and holds no data of its own beyond a few browser preferences (see
+[What is stored in this browser](#what-is-stored-in-this-browser)).
+
+The API base URL comes from `NEXT_PUBLIC_EAP_API_URL` (default `http://localhost:8000`); requests
+send `NEXT_PUBLIC_EAP_DEV_TOKEN` as the `Authorization` header (`src/lib/api.ts`).
+
+## Running and checking
+
+```sh
+pnpm -C apps/studio dev                 # dev server (next dev)
+pnpm -C apps/studio exec vitest run     # unit and component tests
+pnpm -C apps/studio lint                # next lint
+pnpm -C apps/studio exec tsc --noEmit   # type check
+```
+
+## Studio
+
+### Route map
+
+Every internal URL is built by `src/lib/routes/*` (`routes.trace(id)`, `routes.agentChat(id, …)`);
+components never write paths by hand. Query parameters below are part of the URL contract.
+
+| URL | Page |
+|---|---|
+| `/agents` | Agents list (List or Compact view). |
+| `/agents/new` | Create an agent. |
+| `/agents/:id` | Redirects to the agent's Chat tab. |
+| `/agents/:id/chat` | Agent page, Chat tab, new conversation. |
+| `/agents/:id/chat/:conversationId` | Agent page, Chat tab, one conversation. |
+| `…/chat[/:conversationId]?version=&model=&context=` | `version`: a version number or `draft` (absent: latest). `model`: model override. `context=preset` applies the newest saved request-context preset; `context=open` opens the request-context popover. `context` is read once and removed from the URL. |
+| `/agents/:id/traces` | Agent page, Traces tab (the agent's runs). Hosts the trace Sheet: `?trace=<runId>&tab=events\|logs`. |
+| `/agents/:id/editor?step=&compare=` | Agent page, Editor tab. `step`: `identity`, `instructions`, `tools`, `request-context` or `processors`. `compare=a..b`: a version compare, each side a version number or `draft` (`3..draft`, `1..3`). |
+| `/workflows` | Workflows list. |
+| `/workflows/:id[?tab=runs]` | Workflow page: Graph tab (default), or Runs with `tab=runs`. |
+| `/workflows/:id/traces` | Workflow page, Traces tab. |
+| `/workflows/:id/runs/:runId` | One workflow run. |
+| `/tools[?tool=<name>&server=<mcp server>&tab=run]` | Tools page; `tool` opens that tool's Sheet (`server` for an MCP tool; `tab=run` opens the Run tab, Overview is the default). |
+| `/mcp` | MCP servers list. |
+| `/mcp/:id` | One MCP server (connection, tools, used by, delete). |
+| `/processors` | Processor catalog. |
+| `/processors/:type` | One processor type (overview, test console, recent outcomes, used by). |
+| `/metrics` | Metrics, with the Overview at the top. Parameters: `range` (default `7d`, left out), `from`/`to` (with `range=custom`), `interval`, `agent_id`, `model`, `provider`, `kind`. |
+| `/traces` | Traces list. Filters: `status` (comma-separated), `from`, `to`, `model`, `provider`, `agent_id`, `kind`. |
+| `/traces?trace=<runId>[&tab=events\|logs]` | The trace Sheet over the Traces list. `spans` is the default tab and is left out. `routes.run(id)` is the Sheet on `tab=events`. |
+| `/logs` | Logs. Filters: `q`, `level`, `agent_id`, `run_id`, and `from`/`to` or `range`. Hosts the trace Sheet (`?trace=&tab=`). |
+| `/settings` | Settings (appearance, keyboard shortcuts, data in this browser). |
+
+The trace Sheet opens on any page that hosts it, with `?trace=<runId>`. Its tab parameter is `tab`
+everywhere except on workflow pages (`/workflows/:id`, `/workflows/:id/traces`,
+`/workflows/:id/runs/:runId`), where `tab` is the page's own, so the Sheet uses `traceTab` instead.
+
+#### Retired URLs
+
+Old URLs redirect on the server (`LEGACY_RULES` in `src/lib/routes/legacy.ts`, including
+`TRACE_LEGACY_RULES` from `src/lib/routes/observability.ts`). First matching row wins.
+
+| Old URL | Goes to | Since |
+|---|---|---|
+| `/agents/:id` (was the editor) | `/agents/:id/chat` | SL.6 |
+| `/playground?agent=<id>[&conversation=&version=&model=&context=]` | `/agents/<id>/chat[/<conversation>]?version=&model=&context=` (a `version` that is not `draft` or a positive integer is dropped) | SL.6 |
+| `/playground` without `agent` | Client redirect (`PlaygroundRedirect`): with `conversation`, that conversation's agent's chat; otherwise the last-used agent's chat, else the first agent's, else `/agents`. `version`, `model` and `context` are carried. | SL.6 |
+| `/?range=&from=&to=` (the old dashboard) | `/metrics` with the same `range`/`from`/`to` (other parameters dropped) | SL.7 |
+| `/` (no dashboard parameters) | `/agents` | SL.7 |
+| `/request-context?agent=<id>[&version=]` | `/agents/<id>/chat?version=&context=open` (chat with the request-context popover open) | SL.10 |
+| `/request-context` without `agent` | `/agents` | SL.10 |
+| `/traces/:runId` | `/traces?trace=<runId>` | SL.12 |
+| `/runs/:id` | `/traces?trace=<id>&tab=events` | SL.12 |
+
+An id that cannot be a path segment (`.` or `..`) sends an agent URL to `/agents` instead. Redirect
+targets are always same-origin paths.
+
+### Keyboard shortcuts
+
+Press `?` in Studio for the same table (also under Settings). Single-key shortcuts are ignored
+while focus is in a text field and while a dialog or menu is open; `g` sequences wait one second
+for the second key.
+
+| Keys | Action |
+|---|---|
+| `⌘K` (macOS) / `Ctrl+K` | Open the command palette |
+| `?` | Show keyboard shortcuts |
+| `[` | Collapse or expand the sidebar (wide windows) |
+| `/` | Focus the list search |
+| `c` | Create (the page's primary action) |
+| `↑` `↓` (also `Home` `End`), then `Enter` | Move through list rows, then open one |
+| `g` then `a` | Go to Agents |
+| `g` then `w` | Go to Workflows |
+| `g` then `o` | Go to Tools |
+| `g` then `m` | Go to MCP Servers |
+| `g` then `p` | Go to Processors |
+| `g` then `n` | Go to Metrics |
+| `g` then `t` | Go to Traces |
+| `g` then `l` | Go to Logs |
+| `g` then `,` | Go to Settings |
+| `]` | Agent page: show or hide the Config panel |
+| `{` | Agent page, Chat tab: show or hide the conversations pane |
+
+On macOS only `⌘K` opens the palette (`Ctrl+K` keeps its text-field meaning). The g-keys come from
+the nav registry (`src/lib/nav.ts`); the bindings and help table from `src/lib/shortcuts.ts`.
+
+### What is stored in this browser
+
+Studio keeps a few preferences in this browser's `localStorage`. Nothing is encrypted. Settings →
+"Data in this browser" lists them with a count and can clear them ("layout" and "presets" groups;
+the theme is changed under Appearance). The list is `BROWSER_DATA` in
+`src/components/settings/browserData.ts`; a new key is added there.
+
+| What | Keys | Holds | Cleared by |
+|---|---|---|---|
+| Theme | `studio.theme` | System, Light or Dark. | Appearance (not cleared) |
+| Sidebar | `studio.sidebar` | Whether the sidebar is collapsed to icons. | Layout |
+| Side panel width | `studio.sidepanel.v1` | The width of the right-hand panel. | Layout |
+| Agent page layout | `studio.agent-layout.v1.<agentId>…`, `studio.agent-config.v1.<agentId>` | Pane widths on each agent's page, and whether its Config panel was left open or closed. | Layout |
+| Agents list view | `studio.agents.view` | List or Compact. | Layout |
+| Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
+| Last agent | `studio.lastAgent` | The agent the playground reopens. | Layout |
+| Request-context presets | `studio.requestContextPresets.v1.<credential scope>:<agentId>`, `eap.requestContext.v1:…` | Named request-context presets for each agent (and the single saved value they were migrated from). | Presets |
+
+The agent layout prefix also covers `studio.agent-layout.v1.<agentId>:threads-px` (the conversations
+pane width last dragged to).
+
+Not listed in Settings: per-tab `sessionStorage`, gone when the tab closes — the chat's remembered
+request context (`eap.playground.context.v1:<credential scope>:<agentId>`) and the ledgers of tool
+and workflow runs started in this tab (`eap.studio.toolRuns.v1`, `eap.studio.workflowRuns.v1`).

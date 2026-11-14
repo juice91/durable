@@ -207,15 +207,18 @@ export function SidePanelSlot({ className }: { className?: string }) {
   if (!context || !context.active || !shown) return null;
   const clamp: SidePanelClampOptions = { sidebarCollapsed, mainMinWidth: context.active.mainMinWidth };
   const width = clampSidePanelWidth(context.width, viewport, clamp);
+  // The handle lives inside the panel's landmark (axe `region`: no content outside landmarks), drawn
+  // in the gap left of it as before; `ml-2` stands in for the gap the handle used to sit between, so
+  // the frame geometry (two gaps around the handle, `frameGeometry.ts`) is unchanged.
   return (
-    <>
+    <aside
+      aria-labelledby={titleId}
+      data-testid="side-panel"
+      style={{ width }}
+      className={cn("relative ml-2 flex min-h-0 shrink-0 flex-col rounded-lg border border-border bg-surface shadow-raised", className)}
+    >
       <SidePanelResizeHandle width={width} viewport={viewport} clamp={clamp} onResize={context.setWidth} />
-      <aside
-        aria-labelledby={titleId}
-        data-testid="side-panel"
-        style={{ width }}
-        className={cn("flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-raised", className)}
-      >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg">
         <div className="flex min-h-header shrink-0 items-center gap-2 border-b border-border px-3">
           <h2 id={titleId} className="min-w-0 flex-1 truncate text-label font-semibold text-foreground">
             {context.active.title}
@@ -230,8 +233,8 @@ export function SidePanelSlot({ className }: { className?: string }) {
           />
         </div>
         <div ref={context.setSlot} data-testid="side-panel-body" className="min-h-0 min-w-0 flex-1 overflow-y-auto" />
-      </aside>
-    </>
+      </div>
+    </aside>
   );
 }
 
@@ -295,7 +298,8 @@ function SidePanelResizeHandle({ width, viewport, clamp, onResize }: HandleProps
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      className="group relative -mx-1 flex w-2 shrink-0 cursor-col-resize touch-none items-stretch justify-center outline-none"
+      // In the 8 px gap left of the panel (its left border is at 0): centred 12 px out, 8 px wide.
+      className="group absolute inset-y-0 -left-3 flex w-2 cursor-col-resize touch-none items-stretch justify-center outline-none"
     >
       <span className="w-px rounded-full bg-transparent transition-colors group-hover:bg-border-strong group-focus-visible:bg-ring motion-reduce:transition-none" />
     </div>

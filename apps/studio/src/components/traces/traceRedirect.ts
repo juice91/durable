@@ -1,5 +1,4 @@
 import { legacyTarget, RouteIdError, routes } from "@/lib/routes";
-import { TRACE_LEGACY_RULES } from "@/lib/routes/observability";
 
 /**
  * Where a retired trace or run page (`/traces/:runId`, `/runs/:id`) goes: the legacy table's row
@@ -14,6 +13,6 @@ export function traceRedirectTarget(path: () => string, searchParams?: Record<st
     if (error instanceof RouteIdError) return routes.traces();
     throw error;
   }
-  // The shared table first (once its SL.12 rows land there), then SL.12's own rows.
-  return legacyTarget(pathname, searchParams) ?? legacyTarget(pathname, searchParams, TRACE_LEGACY_RULES) ?? routes.traces();
+  // SL.12's rows are in the shared table (LEGACY_RULES spreads TRACE_LEGACY_RULES).
+  return legacyTarget(pathname, searchParams) ?? routes.traces();
 }

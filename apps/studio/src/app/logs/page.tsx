@@ -1,14 +1,15 @@
 "use client";
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { getRun } from "@/lib/runs";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { EMPTY_FILTERS, listTraceRuns, type TraceRun } from "@/lib/traces";
 import { LogsList } from "@/components/logs/LogsList";
 import { LogSheet } from "@/components/logs/LogSheet";
-import { TraceSheetHost, withSheetParams } from "@/components/traces/TraceSheetHost";
+import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
+import { usePendingQuery } from "@/components/traces/usePendingQuery";
 import { TRACE_PARAM } from "@/lib/routes/observability";
 import { LogsUnavailable } from "@/components/logs/LogsUnavailable";
 import { useLogSearch } from "@/components/logs/useLogSearch";
@@ -131,27 +132,18 @@ function useSelectedRun(runId: string | null, nonce: number): { status: "none" |
 }
 
 function LogsSearch() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const urlKey = searchParams?.toString() ?? "";
   const filters = useMemo(() => parseLogFilters(new URLSearchParams(urlKey)), [urlKey]);
 
-  // The filters as last written. Reset from the URL whenever the URL changes, and merged into by
-  // every control, so a late write (the search debounce, Enter) never drops an earlier one whose
-  // URL update has not rendered yet.
-  const pendingRef = useRef<{ urlKey: string; filters: LogFilters }>({ urlKey, filters });
-  if (pendingRef.current.urlKey !== urlKey) pendingRef.current = { urlKey, filters };
-  // The latest URL: filter writes keep an open trace Sheet's `trace` and `tab`.
-  const latestParams = useRef(searchParams);
-  latestParams.current = searchParams;
-  const setFilters = useCallback(
-    (patch: Partial<LogFilters>) => {
-      const next = { ...pendingRef.current.filters, ...patch };
-      pendingRef.current = { ...pendingRef.current, filters: next };
-      router.replace(routes.logs(withSheetParams(logFiltersToParams(next), latestParams.current)), { scroll: false });
-    },
-    [router],
-  );
+  // The filters as last written, ahead of the URL while a write is in flight (usePendingQuery): a
+  // late write (the search debounce, Enter) never drops an earlier one, and the trace Sheet opens on
+  // top of a run filter committed on blur by the click that opens it.
+  const { setFilters, writeFilters, pendingFilters, pendingParams } = usePendingQuery<LogFilters>({
+    filters,
+    toParams: logFiltersToParams,
+    href: routes.logs,
+  });
 
   // --- search text: debounced into the URL ---------------------------------------------------
   const [text, setText] = useState(filters.q ?? "");
@@ -197,7 +189,7 @@ function LogsSearch() {
   useEffect(() => setRunDraft(filters.run_id ?? ""), [filters.run_id]);
   const runPatch = (value: string): Partial<LogFilters> | null => {
     const next = value.trim() || null;
-    return next !== pendingRef.current.filters.run_id ? { run_id: next } : null;
+    return next !== pendingFilters().run_id ? { run_id: next } : null;
   };
   const commitRun = (value: string) => {
     const patch = runPatch(value);
@@ -286,7 +278,7 @@ function LogsSearch() {
   return (
     <>
       <PageHeader crumbs={[navCrumb("logs", { current: true })]} />
-    <TraceSheetHost>
+    <TraceSheetHost baseParams={pendingParams}>
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
         <p className="mt-1 text-muted-foreground">Search your API and worker logs, and jump from a record to its run&apos;s trace</p>
@@ -415,9 +407,8 @@ function LogsSearch() {
               if (debounceRef.current) clearTimeout(debounceRef.current);
               debounceRef.current = null;
               committedRef.current = null;
-              pendingRef.current = { ...pendingRef.current, filters: EMPTY_LOG_FILTERS };
               setText("");
-              router.replace(routes.logs(withSheetParams(new URLSearchParams(), latestParams.current)), { scroll: false });
+              writeFilters(EMPTY_LOG_FILTERS);
             }}
           >
             Clear filters

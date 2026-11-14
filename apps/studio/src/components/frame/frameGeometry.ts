@@ -44,3 +44,22 @@ export function mainCardWidth(frame: FrameSize, panelWidth: number | null): numb
   if (panelWidth === null) return frame.viewport - sidebarWidth(frame.sidebarCollapsed) - FRAME_GUTTER_PX - MAIN_CARD_BORDER_PX;
   return mainAndPanelSpace(frame) - panelWidth;
 }
+
+/** From this window width the frame is wide: the sidebar is a column and the side panel can be one. */
+export const WIDE_FRAME_MIN_PX = 1024;
+/** From this window width the main card has its gutter and border (`md:p-2`, `md:border`). */
+export const CARD_FRAME_MIN_PX = 768;
+
+/**
+ * The main card's inner width below 1024 px, where the sidebar is a drawer and the side panel a
+ * Sheet: the window minus the card's gutter on both sides and its border from 768 px; the whole
+ * window below that.
+ */
+export function narrowMainWidth(viewport: number): number {
+  return viewport >= CARD_FRAME_MIN_PX ? viewport - 2 * FRAME_GUTTER_PX - MAIN_CARD_BORDER_PX : viewport;
+}
+
+/** What the frame shows left of the main card: the sidebar column at 1024 px and up, nothing below (a drawer). */
+export function frameLeftWidth(frame: FrameSize): number {
+  return frame.viewport >= WIDE_FRAME_MIN_PX ? sidebarWidth(frame.sidebarCollapsed) : 0;
+}

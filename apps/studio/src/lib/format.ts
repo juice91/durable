@@ -46,3 +46,30 @@ export function formatTokens(value: number | null | undefined): string {
   if (abs >= 1e6) return `${compact(value / 1e6)}M`;
   return Math.round(value).toLocaleString("en-US");
 }
+
+/**
+ * A duration as Studio shows it everywhere (traces, spans, tool calls, tool runs, workflow runs):
+ * "120 ms", "1.25 s" (two decimals under 10 s), "12.5 s", "2 min 5 s", "1 h 5 min"; "-" when there
+ * is none.
+ */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds ? `${minutes} min ${seconds} s` : `${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+/** Milliseconds from `startIso` to `endIso`, or null when either is missing or the span is negative. */
+export function durationBetween(startIso: string | null | undefined, endIso: string | null | undefined): number | null {
+  if (!startIso || !endIso) return null;
+  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}

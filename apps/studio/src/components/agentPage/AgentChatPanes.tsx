@@ -5,9 +5,10 @@ import { useGroupRef, usePanelRef, type Layout, type LayoutChangedMeta } from "r
 import { ResizableGroup, ResizableHandle, ResizablePanel, readStoredLayout, writeStoredLayout } from "@/components/ui/Resizable";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
 import { useIsWide } from "@/components/frame/useMediaQuery";
+import { removeStorage } from "@/lib/safeStorage";
 import { agentLayoutKey, readThreadsWidth, writeThreadsWidth } from "./agentPageModel";
 import { useAgentPage } from "./AgentPageContext";
-import { CHAT_MIN_PX, paneWidthFromLayout, THREADS_DEFAULT_PX, THREADS_MIN_PX, threadsShown } from "./chatFit";
+import { CHAT_MIN_PX, clampThreadsWidth, paneWidthFromLayout, THREADS_DEFAULT_PX, THREADS_MIN_PX, threadsShown } from "./chatFit";
 
 // The pane minimums live in chatFit.ts (one source for the panes and the fit decisions).
 export { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX };
@@ -15,11 +16,8 @@ export { CHAT_MIN_PX, THREADS_DEFAULT_PX, THREADS_MIN_PX };
 export const THREADS_TITLE = "Conversations";
 
 function clearStoredLayout(storageKey: string): void {
-  try {
-    window.localStorage.removeItem(storageKey);
-  } catch {
-    // Storage unavailable: nothing was saved either.
-  }
+  // Storage unavailable: nothing was saved either.
+  removeStorage(storageKey);
 }
 
 /** True after the first client render (resizable panes render client-only: their sizes come from
@@ -36,6 +34,12 @@ export interface AgentChatPanesProps {
   threads: React.ReactNode;
   /** The chat. */
   children: React.ReactNode;
+}
+
+/** The total width of the group's own resize handles (the part of the group no pane gets). */
+function separatorsWidth(element: HTMLElement | null | undefined): number {
+  if (!element) return 0;
+  return Array.from(element.querySelectorAll<HTMLElement>(":scope > [data-separator]")).reduce((sum, separator) => sum + separator.getBoundingClientRect().width, 0);
 }
 
 /**
@@ -164,6 +168,34 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     return () => reportRef.current?.(null);
   }, [isWide, mounted]);
 
+  /**
+   * A layout saved before px widths were kept (a drag's percent layout, no `:threads-px`): once the
+   * group has a size, its threads width becomes the user's width and is saved, so the next visit (at
+   * another window width) and a later collapse (which overwrites the percent layout) both keep it.
+   * Computed from the stored percent, as a drag's is, and clamped to a usable width (the threads
+   * minimum; room for the chat's minimum). Waits for the group element (it arrives one render after
+   * the panes adopt the saved layout) and, on a first visit with threads auto-collapsed (Config
+   * crowding them out), until the pane is shown: the group's width then is the one that counts.
+   */
+  const migratedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isWide || !mounted || !groupElement || !shown || migratedFor.current === agentId) return;
+    migratedFor.current = agentId;
+    if (readThreadsWidth(agentId) !== null) return;
+    const storedPercent = readStoredLayout(storageKey)?.threads;
+    if (typeof storedPercent !== "number" || storedPercent <= 0) return;
+    const groupWidth = groupElement.getBoundingClientRect().width;
+    const separators = separatorsWidth(groupElement);
+    const width = paneWidthFromLayout(storedPercent, groupWidth, separators);
+    if (width === null || width <= 0) {
+      migratedFor.current = null; // no size yet (before layout): tried again when an input changes
+      return;
+    }
+    const clamped = clampThreadsWidth(width, groupWidth, separators);
+    threadsWidth.current = clamped;
+    writeThreadsWidth(agentId, clamped);
+  }, [agentId, groupElement, isWide, mounted, shown, storageKey]);
+
   const lastUserOpen = useRef(threadsOpen);
   useEffect(() => {
     if (!isWide || !mounted) {
@@ -175,9 +207,7 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     if (!adopted.current) {
       adopted.current = true;
       const savedOpen = !panel.isCollapsed();
-      // A layout saved before px widths were kept: its measured width becomes the user's width.
-      const measured = savedOpen && !autoCollapsed && readThreadsWidth(agentId) === null ? panel.getSize().inPixels : 0;
-      if (measured > 0 && (groupElementRef.current?.getBoundingClientRect().width ?? 0) > 0) threadsWidth.current = measured;
+      // (A percent layout from before px widths is migrated by the effect above, once the group has a size.)
       lastUserOpen.current = savedOpen;
       if (savedOpen !== threadsOpen) {
         setThreadsOpen(savedOpen);
@@ -189,7 +219,7 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
     if (lastUserOpen.current !== threadsOpen) pendingSave.current = threadsOpen;
     lastUserOpen.current = threadsOpen;
     syncPane();
-    // autoCollapsed and agentId are read at adoption only.
+    // Read at adoption only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWide, mounted, panelRef, setThreadsOpen, shown, syncPane, threadsOpen]);
 
@@ -212,9 +242,7 @@ export function AgentChatPanes({ agentId, threads, children }: AgentChatPanesPro
       const percent = layout.threads;
       const element = groupElementRef.current;
       if (open && element && typeof percent === "number") {
-        const separators = Array.from(element.querySelectorAll<HTMLElement>(":scope > [data-separator]"));
-        const separatorsWidth = separators.reduce((sum, separator) => sum + separator.getBoundingClientRect().width, 0);
-        const width = paneWidthFromLayout(percent, element.getBoundingClientRect().width, separatorsWidth);
+        const width = paneWidthFromLayout(percent, element.getBoundingClientRect().width, separatorsWidth(element));
         if (width !== null && width > 0) {
           threadsWidth.current = width;
           writeThreadsWidth(agentId, width);

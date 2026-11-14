@@ -6,7 +6,7 @@ import { getTrace, listTraceRuns, type Trace, type TraceSpan } from "@/lib/trace
 import { getRun, listEvents, subscribeRun } from "@/lib/runs";
 import { routes } from "@/lib/routes";
 import { openSheetIds } from "@/components/ui/Sheet";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { TraceLink } from "./TraceLink";
 import { TraceSheetHost } from "./TraceSheetHost";
 import { TracesTab } from "@/components/agentPage/TracesTab";
@@ -149,6 +149,37 @@ describe("TraceSheetHost: the Sheet lives in the URL", () => {
     expect(await screen.findByTestId("trace-sheet")).toBeInTheDocument();
   });
 
+  it("opening builds on the page's pending write (baseParams), not the stale URL: a filter committed on blur is kept", async () => {
+    // The page has just asked for ?run_id=r2 (router.replace on blur); Next has not applied it yet.
+    nav.path = "/logs";
+    nav.search = "q=old";
+    nav.entries = ["/logs?q=old"];
+    const pending = new URLSearchParams("q=old&run_id=r2");
+    render(
+      <TraceSheetHost baseParams={() => pending}>
+        <TraceLink runId="r1" data-testid="link-r1">r1</TraceLink>
+      </TraceSheetHost>,
+    );
+    fireEvent.click(screen.getByTestId("link-r1"));
+    // Replaced, not pushed: Next would drop the pending write under a push (test/pendingFilterWrite.test.tsx).
+    expect(nav.replace).toHaveBeenLastCalledWith("/logs?q=old&run_id=r2&trace=r1", { scroll: false });
+    expect(nav.push).not.toHaveBeenCalled();
+    await screen.findByRole("dialog");
+    nav.path = "/traces";
+  });
+
+  it("with baseParams returning null, opening builds on the URL as before", () => {
+    nav.search = "q=x";
+    nav.entries = ["/traces?q=x"];
+    render(
+      <TraceSheetHost baseParams={() => null}>
+        <TraceLink runId="r1" data-testid="link-r1">r1</TraceLink>
+      </TraceSheetHost>,
+    );
+    fireEvent.click(screen.getByTestId("link-r1"));
+    expect(nav.push).toHaveBeenLastCalledWith("/traces?q=x&trace=r1", { scroll: false });
+  });
+
   it("a modified click (new tab) is left to the browser", () => {
     render(<Host />);
     const event = new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true });
@@ -278,7 +309,7 @@ describe("TraceSheet: chrome", () => {
     await act(async () => {
       await expectNoAxeViolations(document.body);
     });
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Tree / Timeline: the tree drops the time axis bars and keeps the rows", async () => {
     nav.search = "trace=r1";

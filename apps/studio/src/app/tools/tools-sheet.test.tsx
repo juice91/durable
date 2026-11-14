@@ -9,7 +9,7 @@ import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 import { routes } from "@/lib/routes";
 import { findToolSheet, toolsNavigation } from "@/components/tools/toolsTesting";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -231,5 +231,5 @@ describe("Tools page Sheet", () => {
     fireEvent.mouseDown(within(screen.getByTestId("tool-sheet")).getByTestId("tool-tab-run"));
     await screen.findByLabelText(/Subject \*/);
     await expectNoAxeViolations(screen.getByTestId("tool-sheet"));
-  });
+  }, AXE_TIMEOUT_MS);
 });

@@ -67,14 +67,8 @@ export function toolCallInfos(events: readonly RunEvent[], turnRunning: boolean)
   return infos;
 }
 
-/** "120 ms", "1.4 s", "2 min 5 s". */
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
-  return seconds ? `${minutes} min ${seconds} s` : `${minutes} min`;
-}
+/** The shared duration format (`lib/format.ts`). */
+export { formatDuration } from "@/lib/format";
 
 export const TOOL_STATUS_LABELS: Record<ToolCallStatus, string> = {
   running: "Running",

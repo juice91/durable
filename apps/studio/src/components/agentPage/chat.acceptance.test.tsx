@@ -91,7 +91,7 @@ import { CONTEXT_SHEET_QUERY } from "@/components/requestContext/RequestContextP
 import { FrameHarness, mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { routes } from "@/lib/routes";
 import { legacyTarget } from "@/lib/routes/legacy";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentLayout } from "./AgentLayout";
 import { ChatTab } from "./ChatTab";
 import { TracesTab } from "./TracesTab";
@@ -591,7 +591,7 @@ describe("tool-call cards", () => {
     const card = await show([result("k1", "tickets__create", "ok", {})]);
     expect(card).toHaveAttribute("data-status", "ok");
     expect(within(card).getByTestId("tool-call-status")).toHaveTextContent("Done");
-    expect(within(card).getByTestId("tool-call-duration")).toHaveTextContent("1.4 s");
+    expect(within(card).getByTestId("tool-call-duration")).toHaveTextContent("1.40 s");
   });
 
   it("marks a failed call as an error", async () => {
@@ -777,7 +777,7 @@ describe.each(["light", "dark"] as const)("axe on the chat page (%s theme)", (th
     await act(async () => {
       await expectNoAxeViolations(document.body);
     });
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("has no violations and one h1 with a transcript, a tool call card and a turn footer", async () => {
     mockConversation(["r1"], { r1: [ev(0, "run_started", { input: "go" }), ev(1, "tool_call", { tool_call_id: "k", tool_name: "tickets__create", args: { a: 1 } }), ev(2, "tool_result", { tool_call_id: "k", tool_name: "tickets__create", status: "ok", content: { id: 1 } }, "2026-11-14T10:00:01Z"), ev(3, "model_message", { model_request: 1, text: "done" })] });
@@ -786,5 +786,5 @@ describe.each(["light", "dark"] as const)("axe on the chat page (%s theme)", (th
     fireEvent.click(within(card).getByRole("button", { name: /tickets__create/ }));
     expect(document.querySelectorAll("h1")).toHaveLength(1);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

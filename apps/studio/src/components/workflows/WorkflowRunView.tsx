@@ -22,11 +22,12 @@ import { TraceLink } from "@/components/traces/TraceLink";
 import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
 import { ApprovalCard, formatDateTime } from "./ApprovalCard";
-import { formatDuration } from "./WorkflowRunHistory";
+import { formatRunDuration } from "./WorkflowRunHistory";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowFloatingPanel";
 import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
 import { timelineClock, timelineRows } from "./workflowTimeline";
+import { copyText } from "@/lib/clipboard";
 
 /** How often a live run's open timeline bars grow. */
 const TIMELINE_TICK_MS = 1000;
@@ -233,14 +234,9 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
     );
   }
 
-  const duration = isTerminal(view.status) && run ? formatDuration(run.created_at, run.updated_at) ?? "—" : run ? "in progress" : "—";
+  const duration = isTerminal(view.status) && run ? formatRunDuration(run.created_at, run.updated_at) : run ? "in progress" : "—";
   const copyId = () => {
-    void Promise.resolve()
-      .then(() => navigator.clipboard.writeText(runId))
-      .then(
-        () => toast("Run id copied"),
-        () => toast("Could not copy the run id"),
-      );
+    void copyText(runId).then((copied) => toast(copied ? "Run id copied" : "Could not copy the run id"));
   };
 
   const approvals = view.waiting.length > 0 ? (
@@ -276,28 +272,6 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
       {header}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="relative min-h-0 min-w-0 flex-1">
-          {spec ? (
-            <WorkflowCanvas spec={spec} states={states} deadEdges={view.deadEdges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" />
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
-              {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}
-            </div>
-          )}
-
-          {layout.panel === "sheet" && (view.status === "failed" || view.status === "needs_attention") ? (
-            // Below 768 px the run's alerts sit in the closed bottom Sheet: announce the outcome here.
-            <p
-              role="alert"
-              data-testid="workflow-run-status-alert"
-              data-status={view.status}
-              style={{ top: CANVAS_INSET_PX, left: CANVAS_INSET_PX, right: CANVAS_INSET_PX }}
-              className={`absolute z-10 truncate rounded-md border px-3 py-1.5 text-label shadow-raised ${view.status === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive-text" : "border-warning bg-warning/10 text-warning-text"}`}
-            >
-              {view.status === "failed"
-                ? `Failed${view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}: open the run details.`
-                : "Needs attention: open the run details before running again."}
-            </p>
-          ) : null}
           <WorkflowFloatingPanel control={control} title="Run details">
             <PanelCard title="Run" titleId="workflow-run-summary-heading" testId="workflow-run-summary">
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-label">
@@ -375,6 +349,28 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
               </details>
             </PanelCard>
           </WorkflowFloatingPanel>
+          {spec ? (
+            <WorkflowCanvas spec={spec} states={states} deadEdges={view.deadEdges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" />
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
+              {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}
+            </div>
+          )}
+
+          {layout.panel === "sheet" && (view.status === "failed" || view.status === "needs_attention") ? (
+            // Below 768 px the run's alerts sit in the closed bottom Sheet: announce the outcome here.
+            <p
+              role="alert"
+              data-testid="workflow-run-status-alert"
+              data-status={view.status}
+              style={{ top: CANVAS_INSET_PX, left: CANVAS_INSET_PX, right: CANVAS_INSET_PX }}
+              className={`absolute z-10 truncate rounded-md border px-3 py-1.5 text-label shadow-raised ${view.status === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive-text" : "border-warning bg-warning/10 text-warning-text"}`}
+            >
+              {view.status === "failed"
+                ? `Failed${view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}: open the run details.`
+                : "Needs attention: open the run details before running again."}
+            </p>
+          ) : null}
 
           {approvals || floatingDetail ? (
             <div

@@ -125,7 +125,7 @@
     --popover: 0 0% 100%;
     --popover-foreground: 0 0% 9%;
     --muted: 0 0% 95%;
-    --muted-foreground: 0 0% 37%;
+    --muted-foreground: 0 0% 35%;
     --secondary: 0 0% 95%;
     --secondary-foreground: 0 0% 9%;
     --accent: 0 0% 95%;
@@ -153,7 +153,7 @@
     --destructive-text: 0 72% 38%;
     --success: 142 72% 24%;
     --success-text: 142 72% 23%;
-    --warning: 30 92% 30%;
+    --warning: 30 92% 28%;
     --warning-text: 30 92% 28%;
     --info: 212 80% 42%;
     --info-text: 212 80% 36%;
@@ -193,8 +193,8 @@
 
     /* Borders and focus */
     --border: 0 0% 17%;
-    --border-strong: 0 0% 52%;
-    --input: 0 0% 52%;
+    --border-strong: 0 0% 55%;
+    --input: 0 0% 55%;
     --ring: 0 0% 56%;
 
     /* Status */
@@ -271,4 +271,25 @@ html[data-sidebar="collapsed"] [data-sidebar-root] [data-rail-item] {
   justify-content: center;
   padding-inline: 0;
   margin-inline: auto;
+}
+
+/*
+ * Reduced motion (WCAG 2.3.3, plan decision "Accessibility"): when the OS asks for less motion,
+ * every transition and animation finishes at once, in any component or library (Radix enter/exit,
+ * sonner toasts, react-resizable-panels, the composer dock, React Flow's fit view), and smooth
+ * scrolling becomes a jump. Durations become near zero rather than `none`, so `transitionend` and
+ * `animationend` still fire for code (Radix Presence, sonner) that waits for them. Components also
+ * keep their own `motion-reduce:` utilities; this is the global floor.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
 }

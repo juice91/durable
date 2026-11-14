@@ -17,8 +17,8 @@ import { DataList } from "@/components/shared/DataList";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/Dialog";
 import { allNavItems } from "@/lib/nav";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
-import { CREATE_ACTION_ATTRIBUTE, useCreateAction } from "./ShortcutsProvider";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { useCreateAction } from "./ShortcutsProvider";
 import { KeyboardHarness, pressKey, pressKeys } from "./shortcutsTesting";
 
 let media: MatchMediaControl;
@@ -42,6 +42,28 @@ describe("g-key navigation", () => {
     render(<KeyboardHarness />);
     pressKeys("g", "t");
     expect(nav.push).toHaveBeenCalledWith(routes.traces());
+  });
+
+  test("a half-typed g swallows the next character: g then [ / ] { reach no other handler; Tab, Escape and Space pass", () => {
+    render(<KeyboardHarness />);
+    const sidebar = screen.getByTestId("sidebar");
+    for (const key of ["[", "/", "]", "{", "c"]) {
+      pressKey("g");
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented, `g then ${key}`).toBe(true);
+    }
+    expect(sidebar).toHaveAttribute("data-collapsed", "false");
+    expect(nav.push).not.toHaveBeenCalled();
+    for (const key of ["Tab", "Escape", " "]) {
+      pressKey("g");
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented, `g then ${key}`).toBe(false);
+    }
+    // Alone, [ still works.
+    pressKey("[");
+    expect(sidebar).toHaveAttribute("data-collapsed", "true");
   });
 
   test("the letter must follow within 1 s", () => {
@@ -101,11 +123,14 @@ describe("help dialog", () => {
     for (const item of allNavItems.filter((candidate) => candidate.gKey)) {
       expect(dialog.querySelector(`[data-shortcut-row="nav:${item.id}"]`)).toHaveTextContent(item.label);
     }
-    expect(dialog.querySelector('[data-shortcut-row="palette"]')).toHaveTextContent("⌘");
+    // jsdom is not macOS: only Ctrl K (⌘K is shown only on a Mac, where Ctrl+K does not open it).
+    expect(dialog.querySelector('[data-shortcut-row="palette"]')).toHaveTextContent("Ctrl");
+    expect(dialog.querySelector('[data-shortcut-row="palette"]')).not.toHaveTextContent("⌘");
+    expect(dialog.querySelector('[data-shortcut-row="rows-ends"]')).toHaveTextContent("Home");
     await expectNoAxeViolations(document.body);
     pressKey("Escape", {}, dialog);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull());
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("c: the page's create action", () => {
@@ -136,16 +161,17 @@ describe("c: the page's create action", () => {
     expect(first).toHaveBeenCalledTimes(1);
   });
 
-  test("without a registered action, clicks the page's declared create button", () => {
+  test("without a registered action, c clicks nothing (no markup fallback) and is not prevented", () => {
     const onClick = vi.fn();
     render(
       <KeyboardHarness>
-        <button type="button" disabled {...{ [CREATE_ACTION_ATTRIBUTE]: "" }}>Disabled</button>
-        <button type="button" onClick={onClick} {...{ [CREATE_ACTION_ATTRIBUTE]: "" }}>New agent</button>
+        <button type="button" onClick={onClick} data-shortcut-create="">New agent</button>
       </KeyboardHarness>,
     );
-    pressKey("c");
-    expect(onClick).toHaveBeenCalledTimes(1);
+    const event = new KeyboardEvent("keydown", { key: "c", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    expect(onClick).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
   });
 
   test("does nothing when the page has no create action, and nothing outside the provider", () => {

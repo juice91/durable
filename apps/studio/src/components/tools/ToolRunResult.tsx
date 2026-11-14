@@ -10,6 +10,7 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { getRun, subscribeRun, type Run, type RunEvent, type RunStatus } from "@/lib/runs";
 import { describeToolRun } from "@/lib/toolRuns";
 import { routes } from "@/lib/routes";
+import { copyText } from "@/lib/clipboard";
 
 /** created_at → updated_at of a finished run, in ms; null while running or when a time is missing. */
 export function toolRunDurationMs(run: Pick<Run, "created_at" | "updated_at"> | null): number | null {
@@ -85,13 +86,9 @@ export function ToolRunResult({ runId, initialStatus }: ToolRunResultProps) {
 
   const copyOutput = async () => {
     if (view.result === null) return;
-    try {
-      await navigator.clipboard.writeText(view.result);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setCopied(false);
-    }
+    const copied = await copyText(view.result);
+    setCopied(copied);
+    if (copied) setTimeout(() => setCopied(false), 1500);
   };
   const toneClass = {
     pending: "border-border bg-muted/40",

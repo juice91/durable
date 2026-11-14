@@ -7,12 +7,6 @@ import { shouldHandleShortcut } from "@/components/frame/keyboard";
 import { createKeySequence, globalBindings, type GlobalBinding } from "@/lib/shortcuts";
 import { ShortcutHelpDialog } from "./ShortcutHelpDialog";
 
-/**
- * A page's create button can opt in to `c` without code: the first enabled element inside <main>
- * with this attribute is clicked when no `useCreateAction` handler is registered.
- */
-export const CREATE_ACTION_ATTRIBUTE = "data-shortcut-create";
-
 export interface ShortcutsContextValue {
   helpOpen: boolean;
   openHelp: () => void;
@@ -42,11 +36,6 @@ export function useCreateAction(action: (() => void) | null): void {
     if (!register || !enabled) return;
     return register(() => ref.current?.());
   }, [register, enabled]);
-}
-
-function declaredCreateTarget(): HTMLElement | null {
-  const candidates = Array.from(document.querySelectorAll<HTMLElement>(`main [${CREATE_ACTION_ATTRIBUTE}]`));
-  return candidates.find((element) => !element.matches(":disabled, [aria-disabled='true']")) ?? null;
 }
 
 /**
@@ -84,13 +73,10 @@ export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
         navigateGuarded(href, (target) => routerRef.current.push(target));
       }
       else {
+        // Only a registered action (useCreateAction); there is no markup fallback.
         const registered = createActions.current[createActions.current.length - 1];
-        if (registered) registered.run();
-        else {
-          const target = declaredCreateTarget();
-          if (!target) return false;
-          target.click();
-        }
+        if (!registered) return false;
+        registered.run();
       }
       return true;
     }
@@ -109,8 +95,25 @@ export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
         event.preventDefault();
       }
     }
+    /**
+     * Capture phase, before any page handler: a character that would break a half-typed `g`
+     * sequence is swallowed, whoever else listens for it, so `g` then `/`, `[`, `]` or `{` does
+     * nothing, as `g` then `c` does. Every single-key handler skips a prevented event
+     * (`shouldHandleShortcut`); the bubble listener above then resets the sequence. Tab, Escape and
+     * other named keys pass through. Actions still run in the bubble phase, so a component that
+     * prevents a key keeps it.
+     */
+    function onKeyDownCapture(event: KeyboardEvent) {
+      // Space activates the focused control; never swallow it.
+      if (event.key.length !== 1 || event.key === " " || !shouldHandleShortcut(event)) return;
+      if (sequence.wouldBreak(event.key, Date.now())) event.preventDefault();
+    }
+    window.addEventListener("keydown", onKeyDownCapture, true);
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDownCapture, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   const value = useMemo<ShortcutsContextValue>(() => ({ helpOpen, openHelp, setHelpOpen, registerCreateAction }), [helpOpen, openHelp, registerCreateAction]);

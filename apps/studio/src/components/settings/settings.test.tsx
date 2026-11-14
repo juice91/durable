@@ -18,7 +18,7 @@ import { BASE_URL } from "@/lib/api";
 import { SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
 import { SIDEBAR_ATTRIBUTE, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS, PAGE_RULES } from "@/test/a11y";
 import { AGENT_LAYOUT_PREFIX, BROWSER_DATA, clearBrowserData, keysFor, LAST_AGENT_KEY } from "./browserData";
 
 const LAYOUT_KEYS = [SIDEBAR_STORAGE_KEY, SIDE_PANEL_STORAGE_KEY, `${AGENT_LAYOUT_PREFIX}a1`, `${AGENT_LAYOUT_PREFIX}a2`, LAST_AGENT_KEY];
@@ -169,11 +169,11 @@ describe("Settings page", () => {
 
   test("axe: the page and the confirm dialog", async () => {
     render(<FrameHarness><SettingsPage /></FrameHarness>);
-    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true }, "page-has-heading-one": { enabled: true } } });
+    await expectNoAxeViolations(document, { rules: PAGE_RULES });
     fireEvent.click(screen.getByTestId("settings-clear-layout"));
     await screen.findByRole("dialog");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   test("hydrates without mismatches (storage is read after mount)", async () => {
     seed();

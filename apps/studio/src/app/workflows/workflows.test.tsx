@@ -85,7 +85,7 @@ describe("/workflows/[id]", () => {
     await waitFor(() => expect(screen.queryByTestId("workflow-step-route")).toBeNull());
     const row = await screen.findByTestId("workflow-run-row-aaaaaaaa-1");
     expect(within(row).getByRole("link")).toHaveAttribute("href", routes.workflowRun("wf-1", "aaaaaaaa-1"));
-    expect(row).toHaveTextContent("2.5s");
+    expect(row).toHaveTextContent("2.50 s");
   });
 
   it("maps 422 field errors onto the form", async () => {

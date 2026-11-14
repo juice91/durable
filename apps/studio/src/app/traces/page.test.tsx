@@ -226,7 +226,7 @@ describe("TracesPage", () => {
     expect(params.get("agent_id")).toBe("agent-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces());
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces(), { scroll: false });
   });
 
   it("sends the Recovering status filter as status=recovering, as-is", async () => {
@@ -252,7 +252,7 @@ describe("TracesPage", () => {
     const provider = await screen.findByLabelText(/provider/i);
     fireEvent.change(provider, { target: { value: "anthropic" } });
     fireEvent.keyDown(provider, { key: "Enter" });
-    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ provider: "anthropic" }));
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ provider: "anthropic" }), { scroll: false });
   });
 
   it("drops a slower response for old filters and a stale Load more page", async () => {

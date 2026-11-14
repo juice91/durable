@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunEvent, SubscribeHandlers } from "@/lib/runs";
 import { demoSpec } from "@/test/workflowFixtures";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { setWindowWidth } from "@/components/frame/frameTesting";
 import { routes } from "@/lib/routes";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "./workflowLayout";
@@ -101,7 +101,7 @@ describe("WorkflowRunView layout (SL.14)", () => {
       const id = row.getAttribute("data-testid")!.replace("workflow-timeline-row-", "");
       expect(row).toHaveAttribute("data-state", screen.getByTestId(`workflow-step-${id}`).getAttribute("data-state"));
     }
-    expect(within(rows[0]).getByTestId("workflow-timeline-duration")).toHaveTextContent("1.5s");
+    expect(within(rows[0]).getByTestId("workflow-timeline-duration")).toHaveTextContent("1.50 s");
     expect(within(rows[1]).getByTestId("workflow-timeline-duration")).toHaveTextContent("in progress");
     expect(screen.getByTestId("workflow-timeline-summary")).toHaveTextContent("1 of 5 steps done");
 
@@ -148,7 +148,7 @@ describe("WorkflowRunView layout (SL.14)", () => {
     emit(ev("step_waiting", { step_id: "approve", prompt: "Escalate?" }));
     fireEvent.click(screen.getByRole("button", { name: "Step classify, Agent, Pending" }));
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("WorkflowRunView after the SL.14 review", () => {

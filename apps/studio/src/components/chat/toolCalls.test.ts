@@ -53,8 +53,9 @@ describe("toolCallInfos", () => {
 describe("formatDuration", () => {
   it("formats ms, seconds and minutes", () => {
     expect(formatDuration(40)).toBe("40 ms");
-    expect(formatDuration(1250)).toBe("1.3 s");
-    expect(formatDuration(12_400)).toBe("12 s");
+    // The shared format (lib/format.ts, SL.15 review M15): two decimals under 10 s, one under a minute.
+    expect(formatDuration(1250)).toBe("1.25 s");
+    expect(formatDuration(12_400)).toBe("12.4 s");
     expect(formatDuration(125_000)).toBe("2 min 5 s");
     expect(formatDuration(120_000)).toBe("2 min");
   });

@@ -10,6 +10,7 @@ import { Button, focusRing } from "@/components/ui/Button";
 import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
+import { copyText } from "@/lib/clipboard";
 
 /** Editor steps the "Edit" links open (the stepper's `?step=` ids, `stepper/registry.ts`). */
 export type ConfigStep = CoreStepId | (string & {});
@@ -70,12 +71,7 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
   const edit = (step: ConfigStep) => routes.agentEditor(agent.id, { step });
 
   const copyInstructions = async () => {
-    try {
-      await navigator.clipboard.writeText(spec?.instructions ?? "");
-      setCopied("Instructions copied");
-    } catch {
-      setCopied("Copying is not available here");
-    }
+    setCopied((await copyText(spec?.instructions ?? "")) ? "Instructions copied" : "Copying is not available here");
   };
 
   return (

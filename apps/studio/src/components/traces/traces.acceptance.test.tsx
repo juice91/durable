@@ -14,7 +14,7 @@ import { ApiError as RunsApiError, getRun, listEvents, subscribeRun } from "@/li
 import { routes } from "@/lib/routes";
 import { TRACE_LEGACY_RULES } from "@/lib/routes/observability";
 import { openSheetIds } from "@/components/ui/Sheet";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import { Toaster } from "@/components/ui/Toaster";
 import { traceSheetWidth, TRACE_SHEET_MIN_PX } from "./traceSheetModel";
@@ -770,7 +770,7 @@ describe.each(["light", "dark"] as const)("axe with Sheets open (%s theme)", (th
     await settle();
     oneH1();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("Logs page: the log Sheet alone, and the trace Sheet over it", async () => {
     startAt("/logs");
@@ -785,7 +785,7 @@ describe.each(["light", "dark"] as const)("axe with Sheets open (%s theme)", (th
     oneH1();
     expect(openSheetIds()).toHaveLength(2);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("the Traces list itself with its filter bar", async () => {
     listed.mockResolvedValue({ items: [runOf("r1")], next_before: null });
@@ -795,7 +795,7 @@ describe.each(["light", "dark"] as const)("axe with Sheets open (%s theme)", (th
     expect(screen.getByTestId("traces-list")).toBeInTheDocument();
     oneH1();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("phone width (390 px)", () => {

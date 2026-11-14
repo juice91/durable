@@ -190,6 +190,11 @@ describe("unsaved-changes guard: which clicks it holds", () => {
     expect(guardedHref(click("/agents/a1/chat?version=draft"), "/agents/a1/editor", origin)).toBe("/agents/a1/chat?version=draft");
   });
 
+  it("never returns a target router.push would take off-site (a same-origin `//host` path)", () => {
+    expect(guardedHref(click(`${origin}//evil.example/x`), "/agents/a1/editor", origin)).toBeNull();
+    expect(guardedHref(click(`${origin}/agents/a2`), "/agents/a1/editor", origin)).toBe("/agents/a2");
+  });
+
   it("lets through links within the editor, modified clicks, new tabs and other origins", () => {
     expect(guardedHref(click("/agents/a1/editor?step=tools"), "/agents/a1/editor", origin)).toBeNull();
     expect(guardedHref(click("/agents"), "/agents/a1/editor", origin)).toBe("/agents");
@@ -197,5 +202,18 @@ describe("unsaved-changes guard: which clicks it holds", () => {
     expect(guardedHref(click("/agents", { targetAttr: "_blank" }), "/agents/a1/editor", origin)).toBeNull();
     expect(guardedHref(click("https://example.com/x"), "/agents/a1/editor", origin)).toBeNull();
     expect(guardedHref(click("/agents", { defaultPrevented: true }), "/agents/a1/editor", origin)).toBeNull();
+  });
+});
+
+describe("editor layout below 1024 px (the card's gutter and border, frameGeometry.narrowMainWidth)", () => {
+  const at = (viewport: number) => editorLayout({ frame: { viewport, sidebarCollapsed: false }, isWide: false, panelWidth: null });
+
+  it.each([916, 920, 933])("%i px: the card is 18 px narrower than the window, so no columns (was squeezed)", (viewport) => {
+    expect(at(viewport)).toBe("nav");
+  });
+
+  it("columns from the window width whose card fits them", () => {
+    expect(at(EDITOR_COLUMNS_FIT_PX + 18)).toBe("columns");
+    expect(at(EDITOR_COLUMNS_FIT_PX + 17)).toBe("nav");
   });
 });

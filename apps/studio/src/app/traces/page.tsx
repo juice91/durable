@@ -3,13 +3,15 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { formatCost, formatTokens } from "@/lib/format";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { buildTraceLink, buildLogsLink } from "@/lib/grafana";
 import { api } from "@/lib/api";
 import { listWorkflows } from "@/lib/workflows";
 import { RunSubject } from "@/components/runs/RunSubject";
+import { RUN_KIND_LABELS, type RunKind } from "@/lib/runs";
 import {
+  EMPTY_FILTERS,
   formatDuration,
   hasActiveFilters,
   listTraceRuns,
@@ -25,7 +27,8 @@ import { navCrumb } from "@/lib/nav";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Button } from "@/components/ui/Button";
 import { TraceLink } from "@/components/traces/TraceLink";
-import { TraceSheetHost, withSheetParams } from "@/components/traces/TraceSheetHost";
+import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
+import { usePendingQuery } from "@/components/traces/usePendingQuery";
 
 /** The list row's test id (kept from P0.13), as a `testId` key so the test-id inventory sees it rendered. */
 const TRACE_ROW = { testId: "trace-row" } as const;
@@ -75,7 +78,6 @@ function TextFilter({ id, label, value, placeholder, onCommit }: {
 }
 
 function TracesList() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   // Only the filters: opening, switching or closing the trace Sheet (`?trace=`, `&tab=`) must not
   // reload the list.
@@ -114,13 +116,14 @@ function TracesList() {
   // The rows' ids as the list shows them, for the trace Sheet's prev / next.
   const [visibleIds, setVisibleIds] = useState<string[] | null>(null);
 
-  // The latest URL, so a filter written while the trace Sheet opens (a text filter committing on
-  // blur as focus moves into the Sheet) keeps `trace` and `tab` instead of closing it.
-  const latestParams = useRef(searchParams);
-  latestParams.current = searchParams;
-  const setFilters = useCallback((patch: Partial<TraceFilters>) => {
-    router.replace(routes.traces(withSheetParams(traceFiltersToParams({ ...filters, ...patch }), latestParams.current)));
-  }, [filters, router]);
+  // Filter writes, kept ahead of the URL while in flight (usePendingQuery): a text filter committed on
+  // blur by the click that opens the trace Sheet is kept (the Sheet builds on it), and filter writes
+  // keep an open Sheet's `trace` and `tab`.
+  const { setFilters, writeFilters, pendingParams } = usePendingQuery<TraceFilters>({
+    filters,
+    toParams: traceFiltersToParams,
+    href: routes.traces,
+  });
 
   // Every request (first page or "Load more") takes a new generation; a response is applied only
   // while its generation is still the latest, so a slow page for old filters (or an old cursor)
@@ -275,7 +278,7 @@ function TracesList() {
   return (
     <>
       <PageHeader crumbs={[navCrumb("traces", { current: true })]} />
-      <TraceSheetHost runIds={visibleIds ?? runs.map((run) => run.run_id)}>
+      <TraceSheetHost runIds={visibleIds ?? runs.map((run) => run.run_id)} baseParams={pendingParams}>
         {(sheet) => (
           <div className="flex min-w-0 flex-col gap-4 p-4">
             <p className="text-label text-muted-foreground">Runs with their span tree, tokens and cost</p>
@@ -307,9 +310,9 @@ function TracesList() {
                   className={inputClass}
                 >
                   <option value="all">All</option>
-                  <option value="agent">Agent</option>
-                  <option value="workflow">Workflow</option>
-                  <option value="tool">Tool</option>
+                  {(Object.keys(RUN_KIND_LABELS) as RunKind[]).map((kind) => (
+                    <option key={kind} value={kind}>{RUN_KIND_LABELS[kind]}</option>
+                  ))}
                 </select>
               </div>
               <div className="flex min-w-0 flex-col gap-1">
@@ -352,7 +355,7 @@ function TracesList() {
                 />
               </div>
               {hasActiveFilters(filters) ? (
-                <Button variant="ghost" size="sm" onClick={() => router.replace(routes.traces(withSheetParams(new URLSearchParams(), latestParams.current)))}>
+                <Button variant="ghost" size="sm" onClick={() => writeFilters(EMPTY_FILTERS)}>
                   Clear filters
                 </Button>
               ) : null}

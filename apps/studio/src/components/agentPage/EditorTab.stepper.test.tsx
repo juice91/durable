@@ -1,11 +1,11 @@
 import React from "react";
 import "@testing-library/jest-dom";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const nav = vi.hoisted(() => ({ search: "", path: "/agents/a1/editor", push: vi.fn(), replace: vi.fn() }));
+const nav = vi.hoisted(() => ({ search: "", path: "", push: vi.fn(), replace: vi.fn(), back: vi.fn() }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: nav.push, replace: nav.replace, back: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: nav.push, replace: nav.replace, back: nav.back, prefetch: vi.fn() }),
   usePathname: () => nav.path,
   useSearchParams: () => new URLSearchParams(nav.search),
   useParams: () => ({ id: "a1" }),
@@ -35,7 +35,7 @@ import { fetchModels, fetchProcessorCatalog } from "@/components/agents/specSect
 import { modelsFixture, processorCatalogFixture } from "@/components/agents/specSections.fixtures";
 import { setWindowWidth, TEST_WIDE_WIDTH } from "@/components/frame/frameTesting";
 import { chooseVersionAction, versionActions } from "@/components/agents/versionsTesting";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { EditorTab } from "./EditorTab";
 
 const DRAFT: AgentSpec = {
@@ -53,6 +53,7 @@ let restoreWidth: () => void = () => undefined;
 beforeEach(() => {
   vi.clearAllMocks();
   nav.search = "";
+  nav.path = routes.agentEditor("a1");
   restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
   vi.mocked(api.agents.get).mockResolvedValue({ id: "a1", name: "Support bot", draft_spec: DRAFT, latest_version: 2 });
   // v2 equals the draft, v1 is older.
@@ -106,7 +107,7 @@ describe("stepped editor (SL.11)", () => {
     expect(next).toHaveAccessibleName("Next step: Instructions");
     fireEvent.click(next);
     expect(stepRegion("Instructions")).toBeVisible();
-    expect(nav.replace).toHaveBeenLastCalledWith("/agents/a1/editor?step=instructions", { scroll: false });
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1", { step: "instructions" }), { scroll: false });
     expect(screen.getByTestId("stepper-previous")).toHaveAccessibleName("Previous step: Identity and model");
     expect(screen.getByTestId("stepper-next")).toHaveAccessibleName("Next step: Tools");
     fireEvent.click(navButton(/^Processors/));
@@ -200,8 +201,29 @@ describe("versions column and compare Sheet", () => {
     vi.mocked(compareVersions).mockResolvedValue({ ...compareResult, target: { ...compareResult.target, version: 2 } } as never);
     await renderEditor();
     await chooseVersionAction(1, "Compare with latest");
-    expect(nav.replace).toHaveBeenLastCalledWith("/agents/a1/editor?compare=1..2", { scroll: false });
+    // Pushed (SL.15 review M9): Back closes the compare Sheet, as it does the tool and trace Sheets.
+    expect(nav.push).toHaveBeenLastCalledWith(routes.agentEditor("a1", { compare: "1..2" }), { scroll: false });
     expect(await screen.findByRole("dialog", { name: "Compare v1 with v2" })).toBeInTheDocument();
+  });
+
+  it("closing a compare Sheet it opened goes Back; one that came with the URL closes by replacing", async () => {
+    vi.mocked(compareVersions).mockResolvedValue({ ...compareResult, target: { ...compareResult.target, version: 2 } } as never);
+    await renderEditor();
+    await chooseVersionAction(1, "Compare with latest");
+    const opened = await screen.findByRole("dialog", { name: "Compare v1 with v2" });
+    fireEvent.keyDown(opened, { key: "Escape" });
+    await waitFor(() => expect(nav.back).toHaveBeenCalledTimes(1));
+    cleanup();
+
+    nav.back.mockClear();
+    nav.replace.mockClear();
+    nav.search = "compare=1..draft";
+    vi.mocked(compareVersions).mockResolvedValue(compareResult as never);
+    await renderEditor();
+    const fromUrl = await screen.findByRole("dialog");
+    fireEvent.keyDown(fromUrl, { key: "Escape" });
+    await waitFor(() => expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1"), { scroll: false }));
+    expect(nav.back).not.toHaveBeenCalled();
   });
 
   it("a malformed ?compare= opens nothing", async () => {
@@ -291,7 +313,7 @@ describe("create mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create agent" }));
     await waitFor(() => expect(api.agents.create).toHaveBeenCalled());
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith(routes.agentEditor("new1")));
-    nav.path = "/agents/a1/editor";
+    nav.path = routes.agentEditor("a1");
   });
 });
 
@@ -302,7 +324,7 @@ describe("accessibility", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });
 
 describe("SL.11 review fixes", () => {
@@ -438,7 +460,7 @@ describe("SL.11 review fixes", () => {
     fireEvent.click(within(discard).getByRole("button", { name: "Discard draft and restore" }));
     await waitFor(() => expect(restoreVersion).toHaveBeenLastCalledWith("a1", 1, { discardDraft: true }));
     expect(await screen.findByText("Version 3 published, restored from v1")).toBeInTheDocument();
-    expect(nav.replace).toHaveBeenLastCalledWith("/agents/a1/editor", { scroll: false });
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1"), { scroll: false });
   });
 
   it("M7: the dirty-draft 409 offers Discard draft and restore from a row in the stepper", async () => {

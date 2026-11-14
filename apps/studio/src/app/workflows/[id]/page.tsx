@@ -95,13 +95,6 @@ function WorkflowDetail() {
 
         {workflow && tab === "graph" ? (
           <div className="relative min-h-0 min-w-0 flex-1">
-            {graphSpec ? (
-              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" />
-            ) : (
-              <div className="absolute inset-0 flex items-center justify-center bg-background">
-                <p className="text-label text-muted-foreground">No definition to show.</p>
-              </div>
-            )}
             <WorkflowFloatingPanel control={control} title="Workflow">
               <div className="min-w-0 space-y-2 border-b border-border p-4 empty:hidden">
                 {graphSpec?.description ? <p className="text-label text-muted-foreground">{graphSpec.description}</p> : null}
@@ -135,6 +128,13 @@ function WorkflowDetail() {
                 </PanelCard>
               ) : null}
             </WorkflowFloatingPanel>
+            {graphSpec ? (
+              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-background">
+                <p className="text-label text-muted-foreground">No definition to show.</p>
+              </div>
+            )}
           </div>
         ) : null}
 

@@ -104,7 +104,7 @@ const RowItem = memo(function RowItem({
         )}
       </div>
       {timeline ? (
-      <div className="relative h-5 flex-1" aria-hidden="true">
+      <div className="relative h-5 min-w-0 flex-1" aria-hidden="true">
         <div className="absolute inset-y-2 left-0 right-0 rounded bg-muted/40" />
         {zeroLength ? (
           <div
@@ -121,7 +121,7 @@ const RowItem = memo(function RowItem({
         )}
       </div>
       ) : null}
-      <div className="w-20 shrink-0 pl-2 text-right font-mono text-xs text-muted-foreground">{duration}</div>
+      <div className="w-24 shrink-0 whitespace-nowrap pl-2 text-right font-mono text-xs text-muted-foreground">{duration}</div>
     </div>
   );
 });
@@ -204,7 +204,7 @@ export function TraceWaterfall({
         {mode === "timeline" ? (
           <>
             <div className="w-2/5 shrink-0">Span</div>
-            <div className="flex flex-1 justify-between">
+            <div className="flex min-w-0 flex-1 justify-between">
               <span>0 ms</span>
               <span>{formatDuration(window?.durationMs ?? null)}</span>
             </div>
@@ -212,7 +212,7 @@ export function TraceWaterfall({
         ) : (
           <>
             <div className="min-w-0 flex-1">Span</div>
-            <div className="w-20 shrink-0 text-right">{formatDuration(window?.durationMs ?? null)}</div>
+            <div className="w-24 shrink-0 whitespace-nowrap text-right">{formatDuration(window?.durationMs ?? null)}</div>
           </>
         )}
       </div>

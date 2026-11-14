@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/Popover";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DATALIST_SEARCH_DEBOUNCE_MS, DataList, compareSortValues, nextSort, type DataListColumn } from "./DataList";
@@ -72,7 +72,7 @@ describe("DataList", () => {
     fireEvent.click(within(toolsHeader).getByRole("button"));
     expect(names()).toEqual(["Archivist", "Support bot", "Billing helper"]);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("follows the row link when any part of the row is clicked, but not from the row's own controls", () => {
     const onLinkClick = vi.fn((event: MouseEvent) => event.preventDefault());
@@ -277,5 +277,5 @@ describe("DataList", () => {
     expect(within(emptyState).getByRole("button", { name: "New agent" })).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

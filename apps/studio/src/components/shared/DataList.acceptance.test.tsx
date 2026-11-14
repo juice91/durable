@@ -1,7 +1,7 @@
 import React from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { DATALIST_SEARCH_DEBOUNCE_MS, DataList, type DataListColumn } from "./DataList";
 import { routes } from "@/lib/routes";
 
@@ -204,7 +204,7 @@ describe("DataList states", () => {
       await expectNoAxeViolations(document.body);
       unmount();
     }
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("no-match (via initialQuery + filter) is reached after the debounce and Clear search restores rows", () => {
     vi.useFakeTimers();

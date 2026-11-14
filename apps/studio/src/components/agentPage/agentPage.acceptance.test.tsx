@@ -55,7 +55,7 @@ import { getConversation, listConversations } from "@/lib/conversations";
 import { getRequestContext } from "@/lib/requestContext";
 import { EMPTY_FILTERS, listTraceRuns, traceFiltersToParams, type TraceRun } from "@/lib/traces";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { FrameHarness, mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH, type MatchMediaControl } from "@/components/frame/frameTesting";
 import { AgentLayout } from "./AgentLayout";
 import { ChatTab } from "./ChatTab";
@@ -671,8 +671,8 @@ describe.each(["light", "dark"] as const)("accessibility (%s theme)", (theme) =>
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(document.querySelectorAll("main, [role='main']")).toHaveLength(1);
     expect(within(main()).getAllByRole("heading", { level: 1 })).toHaveLength(1);
-    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true } } });
-  });
+    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true }, region: { enabled: true } } });
+  }, AXE_TIMEOUT_MS);
 
   it("with the Config and threads Sheets open below 1024 px there are no axe violations either", async () => {
     openPage("a1", "chat", false);
@@ -685,5 +685,5 @@ describe.each(["light", "dark"] as const)("accessibility (%s theme)", (theme) =>
     fireEvent.click(screen.getByTestId("agent-threads-toggle"));
     await screen.findByRole("dialog", { name: "Conversations" });
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 });

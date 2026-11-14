@@ -22,7 +22,7 @@ vi.mock("@/lib/mcpServers", async (importOriginal) => {
 });
 
 import { mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
-import { CREATE_ACTION_ATTRIBUTE, useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
+import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 import { KeyboardHarness, pressKey, pressKeys } from "@/components/shortcuts/shortcutsTesting";
 import { globalBindings, G_PREFIX, SEQUENCE_TIMEOUT_MS, shortcutSections } from "@/lib/shortcuts";
 import SettingsPage from "@/app/settings/page";
@@ -34,7 +34,7 @@ import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { allNavItems } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { resetPaletteCache } from "./paletteData";
 
 const WEATHER_ID = "11111111-1111-4111-8111-111111111111";
@@ -416,7 +416,7 @@ describe("axe and leaks", () => {
     await expectNoAxeViolations(document.body);
     type(RUN_ID);
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   test("axe: the palette with a failed list and while loading", async () => {
     data.tools.mockRejectedValue(new Error("HTTP 500"));
@@ -425,7 +425,7 @@ describe("axe and leaks", () => {
     const dialog = await openPalette(false);
     await within(dialog).findByTestId("command-palette-error-tools");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   test("the DOM shows only names, models and URLs: no prompts, descriptions, header names or ids in text", async () => {
     render(<KeyboardHarness />);
@@ -569,12 +569,13 @@ describe("the ? dialog matches the registry", () => {
   });
 });
 
-describe("c: precedence and the fallback", () => {
+describe("c: precedence (registered actions only)", () => {
   const Registers = ({ action }: { action: (() => void) | null }) => {
     useCreateAction(action);
     return null;
   };
-  const declared = { [CREATE_ACTION_ATTRIBUTE]: "" };
+  // The retired markup fallback's attribute: a button carrying it must never be clicked by `c`.
+  const declared = { "data-shortcut-create": "" };
 
   test("the latest registration wins; a null registration registers nothing", () => {
     const first = vi.fn();
@@ -587,7 +588,7 @@ describe("c: precedence and the fallback", () => {
     expect([first.mock.calls.length, second.mock.calls.length]).toEqual([1, 1]);
   });
 
-  test("a registered action beats a declared create button", () => {
+  test("a registered action runs; a button with the old data-shortcut-create attribute is not clicked", () => {
     const action = vi.fn();
     const click = vi.fn();
     render(<KeyboardHarness><Registers action={action} /><button type="button" onClick={click} {...declared}>New</button></KeyboardHarness>);
@@ -596,26 +597,22 @@ describe("c: precedence and the fallback", () => {
     expect(click).not.toHaveBeenCalled();
   });
 
-  test("the fallback takes the first enabled declared element in <main>, skipping disabled and aria-disabled ones", () => {
+  test("with no registered action, c clicks no button in <main> (no markup fallback)", () => {
     const clicks: string[] = [];
-    const btn = (name: string, extra: object = {}) => (
-      <button type="button" onClick={() => clicks.push(name)} {...declared} {...extra}>{name}</button>
+    const btn = (name: string) => (
+      <button type="button" onClick={() => clicks.push(name)} {...declared}>{name}</button>
     );
-    render(<KeyboardHarness>{btn("one", { disabled: true })}{btn("two", { "aria-disabled": "true" })}{btn("three")}{btn("four")}</KeyboardHarness>);
+    render(<KeyboardHarness>{btn("one")}{btn("two")}</KeyboardHarness>);
     pressKey("c");
-    expect(clicks).toEqual(["three"]);
+    expect(clicks).toEqual([]);
   });
 
-  test("a declared element outside <main> is ignored", () => {
-    const outside = document.createElement("button");
-    outside.setAttribute(CREATE_ACTION_ATTRIBUTE, "");
-    const click = vi.fn();
-    outside.addEventListener("click", click);
-    document.body.appendChild(outside);
-    render(<KeyboardHarness />);
+  test("after the registering component unmounts, c does nothing again", () => {
+    const action = vi.fn();
+    const { rerender } = render(<KeyboardHarness><Registers action={action} /></KeyboardHarness>);
+    rerender(<KeyboardHarness />);
     pressKey("c");
-    expect(click).not.toHaveBeenCalled();
-    outside.remove();
+    expect(action).not.toHaveBeenCalled();
   });
 
   test("c is ignored in a field, with a modifier, and while a dialog is open", async () => {

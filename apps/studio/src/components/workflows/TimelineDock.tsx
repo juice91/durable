@@ -7,7 +7,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { NodeState } from "@/lib/workflowRunState";
 import { NODE_STATE_CLASSES, NODE_STATE_LABELS, STEP_TYPE_LABELS } from "./WorkflowGraph";
 import { DockResizeHandle } from "./WorkflowFloatingPanel";
-import { formatDuration } from "./WorkflowRunHistory";
+import { formatRunDuration } from "./WorkflowRunHistory";
 import { TIMELINE_BAR_HEIGHT } from "./workflowLayout";
 import { timelineSummary, type TimelineRow } from "./workflowTimeline";
 
@@ -101,7 +101,7 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
                       ) : null}
                     </span>
                     <span data-testid="workflow-timeline-duration" className="whitespace-nowrap font-mono text-caption tabular-nums text-muted-foreground">
-                      {row.durationMs !== null ? formatDuration(row.startedAt, row.endedAt) : row.state === "running" || row.state === "waiting" ? "in progress" : "—"}
+                      {row.durationMs !== null ? formatRunDuration(row.startedAt, row.endedAt) : row.state === "running" || row.state === "waiting" ? "in progress" : "—"}
                     </span>
                   </button>
                 </li>

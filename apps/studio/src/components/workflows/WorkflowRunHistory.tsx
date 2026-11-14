@@ -8,18 +8,14 @@ import type { Run } from "@/lib/runs";
 import { listWorkflowRuns } from "@/lib/workflows";
 import { isTerminal } from "@/lib/workflowRunState";
 import { routes } from "@/lib/routes";
+import { durationBetween, formatDuration } from "@/lib/format";
 
-/** "1.2s", "3m 04s", "2h 05m"; null when either end is missing. */
-export function formatDuration(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
-  if (!startIso || !endIso) return null;
-  const ms = new Date(endIso).getTime() - new Date(startIso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return null;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const totalSeconds = Math.round(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  if (minutes < 60) return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+/** A run's duration from its two timestamps in the shared format, or "—" when either is missing. */
+export function formatRunDuration(startIso: string | null | undefined, endIso: string | null | undefined): string {
+  const ms = durationBetween(startIso, endIso);
+  return ms === null ? "—" : formatDuration(ms);
 }
+
 
 export interface WorkflowRunHistoryProps {
   workflowId: string;
@@ -108,7 +104,7 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                   {panel ? null : <td className="py-2 pr-3">{run.workflow_version != null ? `v${run.workflow_version}` : "—"}</td>}
                   <td className="py-2 pr-3 text-muted-foreground">{formatDateTime(run.created_at)}</td>
                   <td className="whitespace-nowrap py-2 tabular-nums text-muted-foreground">
-                    {isTerminal(run.display_status) ? formatDuration(run.created_at, run.updated_at) ?? "—" : "in progress"}
+                    {isTerminal(run.display_status) ? formatRunDuration(run.created_at, run.updated_at) : "in progress"}
                   </td>
                 </tr>
               ))}

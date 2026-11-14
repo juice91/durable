@@ -1,9 +1,9 @@
 import React from "react";
-import type { Run } from "@/lib/runs";
+import { RUN_KIND_LABELS, type Run, type RunKind } from "@/lib/runs";
 import { routes } from "@/lib/routes";
 import { TraceLink } from "@/components/traces/TraceLink";
 
-export type RunKind = "agent" | "tool" | "workflow";
+export type { RunKind };
 
 /** The run's kind. Rows from before kinds existed are agent runs; a row without `kind` but with a
  * workflow or a tool (and no agent) is classified by those. */
@@ -47,6 +47,10 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
   }
   if (kind === "tool") {
     return <span data-testid="run-subject" data-kind="tool">{`Tool: ${run.tool_id ?? "unknown"}`}</span>;
+  }
+  if (kind === "kb_ingest") {
+    // No knowledge-base page to link to yet (RM.16 adds it).
+    return <span data-testid="run-subject" data-kind="kb_ingest">{RUN_KIND_LABELS.kb_ingest}</span>;
   }
   const named = run.agent_id ? agentNames[run.agent_id] : undefined;
   const agent = named ?? (run.agent_id ? (showVersion ? run.agent_id : short(run.agent_id)) : "unknown");

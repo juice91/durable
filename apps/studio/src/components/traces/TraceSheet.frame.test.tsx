@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import "@testing-library/jest-dom";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import React from "react";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { routes } from "@/lib/routes";
 import { FrameHarness, mockMatchMedia, type MatchMediaControl } from "@/components/frame/frameTesting";
 
@@ -112,6 +112,6 @@ describe.each(["light", "dark"] as const)("the trace Sheet inside the frame (%s 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true } } });
-  });
+    await expectNoAxeViolations(document, { rules: { "landmark-one-main": { enabled: true }, region: { enabled: true } } });
+  }, AXE_TIMEOUT_MS);
 });

@@ -11,7 +11,7 @@ import { RequestContextValidationError, getRequestContext, listPresets, savePres
 import { listEvents, subscribeRun, type RunEvent, type RunEventData } from "@/lib/runs";
 import { startTurnWithOptions } from "@/components/chat/turnApi";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { ChatTab } from "./ChatTab";
 import { footerMessageIds, turnStartMessageIds } from "./ChatPane";
 import { modelChipLabel } from "./ComposerModelChip";
@@ -194,7 +194,7 @@ describe("chat pane", () => {
     expect(within(cards[0]).getByTestId("tool-call-status")).toHaveTextContent("Done");
     expect(within(cards[0]).getByTestId("tool-call-duration")).toHaveTextContent("200 ms");
     expect(within(cards[1]).getByTestId("tool-call-status")).toHaveTextContent("Failed");
-    expect(within(cards[1]).getByTestId("tool-call-duration")).toHaveTextContent("3.0 s");
+    expect(within(cards[1]).getByTestId("tool-call-duration")).toHaveTextContent("3.00 s");
   });
 
   it("works out turn boundaries and footers from message ids", () => {
@@ -380,5 +380,5 @@ describe("request context popover", () => {
     await act(async () => {
       await expectNoAxeViolations(document.body);
     });
-  });
+  }, AXE_TIMEOUT_MS);
 });

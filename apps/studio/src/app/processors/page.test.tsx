@@ -9,7 +9,7 @@ import { consoleVerdict } from "@/components/processors/ProcessorTestConsole";
 import { api, ApiError, type Agent } from "@/lib/api";
 import { loadAgentProcessorSpecs, processors, type ProcessorCatalog, type ProcessorResultItem } from "@/lib/processors";
 import { routes } from "@/lib/routes";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 
 vi.mock("@/lib/processors", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/processors")>();
@@ -320,7 +320,7 @@ describe("Processors list and detail", () => {
     await screen.findByTestId("result-row");
     await screen.findByTestId("processor-usage");
     await expectNoAxeViolations(detail.container);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("shares the catalog and Used by scan across pages under the provider", async () => {
     const view = render(<ProcessorsDataProvider><ProcessorsPage /></ProcessorsDataProvider>);

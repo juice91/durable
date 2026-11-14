@@ -52,3 +52,16 @@ describe("RunSubject", () => {
     expect(runKind({ agent_id: null, tool_id: null, workflow_id: "w" })).toBe("workflow");
   });
 });
+
+describe("kb_ingest runs (SL.15 review M16)", () => {
+  const ingest: Run = { ...base, run_id: "kbrun-1", kind: "kb_ingest", agent_id: null, version: null };
+
+  it("are their own kind, labelled Knowledge ingest, with no subject link yet", () => {
+    expect(runKind(ingest)).toBe("kb_ingest");
+    render(<RunSubject run={ingest} />);
+    const subject = screen.getByTestId("run-subject");
+    expect(subject).toHaveAttribute("data-kind", "kb_ingest");
+    expect(subject).toHaveTextContent("Knowledge ingest");
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+});

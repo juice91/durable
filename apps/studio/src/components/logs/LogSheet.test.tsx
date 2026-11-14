@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { getTrace, listTraceRuns, type Trace } from "@/lib/traces";
 import { routes } from "@/lib/routes";
 import { openSheetIds } from "@/components/ui/Sheet";
-import { expectNoAxeViolations } from "@/test/a11y";
+import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { searchLogs, type LogItem } from "./logsQuery";
 import LogsPage from "@/app/logs/page";
 import TracesPage from "@/app/traces/page";
@@ -128,7 +128,7 @@ describe("Logs: a line opens its record, and Open trace stacks the trace", () =>
     expect(within(logSheet).queryByTestId("log-sheet-open-trace")).toBeNull();
     expect(logSheet).toHaveTextContent("Not logged inside a run");
     await expectNoAxeViolations(document.body);
-  });
+  }, AXE_TIMEOUT_MS);
 
   it("the Trace column opens the trace Sheet in place, and the logs search is not re-sent", async () => {
     render(<LogsPage />);
