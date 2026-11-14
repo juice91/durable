@@ -16,6 +16,9 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from eap_observability import dbos_trace_attributes
+# The DBOS topic an agent run's gated tool calls wait on, `tool_approval:{run_id}`: defined in
+# eap_run_store.approvals so the API's wake-up and the worker's wait (AC.6) share one builder.
+from eap_run_store.approvals import tool_approval_topic
 from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
@@ -42,6 +45,7 @@ KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 def approval_topic(step_id: str) -> str:
     """The DBOS message topic an approval step waits on (eap_worker.workflow_run.approval_topic)."""
     return f"approval:{step_id}"
+
 
 _DEFAULT_DBOS_URL = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
 
@@ -108,6 +112,10 @@ class RunLauncher(Protocol):
     ) -> None: ...
 
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None: ...
+
+    def notify_tool_approval(
+        self, *, run_id: str, tool_call_id: str, decision: str, workflow_id: str | None = None
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -193,6 +201,20 @@ class DBOSRunLauncher:
         """Wake the DBOS workflow waiting on approval step `step_id` (DBOS send on its topic). Only a
         wake-up: the decision itself is the run's `step:{step_id}:decision` event."""
         self._get_client().send(workflow_id, {"decision": decision}, approval_topic(step_id))
+
+    def notify_tool_approval(
+        self, *, run_id: str, tool_call_id: str, decision: str, workflow_id: str | None = None
+    ) -> None:
+        """Wake the agent run waiting on its gated tool calls: DBOS send of
+        `{"tool_call_id", "decision"}` on topic `tool_approval:{run_id}` to `workflow_id` (the
+        waiting DBOS workflow named in the tool_approval_waiting event; default the run's own,
+        workflow id = run id). Only a wake-up: the decision itself is the run's
+        `tool:{tool_call_id}:approval:decision` event."""
+        self._get_client().send(
+            workflow_id or str(run_id),
+            {"tool_call_id": tool_call_id, "decision": decision},
+            tool_approval_topic(str(run_id)),
+        )
 
     def _options(
         self, workflow_name: str, run_id: UUID, traceparent: str | None, *, queue_name: str = QUEUE_NAME

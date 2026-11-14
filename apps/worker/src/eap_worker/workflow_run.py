@@ -333,12 +333,16 @@ async def approval_begin_step(
     run_id: str, tenant_id: str, step_id: str, data: dict[str, Any], timeout_seconds: float
 ) -> float:
     """Compute the approval deadline ONCE (now + timeout_seconds, epoch seconds), record the
-    step_waiting event carrying it, and return it; a replay reuses the recorded deadline."""
+    step_waiting event carrying it, and return it; a replay reuses the recorded deadline.
+
+    The event and its open pending_approvals row (kind `step`, the approvals inbox) are written in
+    one transaction by EventLog.append_approval_waiting (0014_approvals); a repeated write returns
+    the first event and adds no row. Same event key, type and data as before the projection."""
     rt = get_runtime()
     deadline = time.time() + timeout_seconds
     key = f"step:{step_id}:waiting"
     event, _created = await asyncio.to_thread(
-        rt.event_log.append, tenant_id, uuid.UUID(run_id), key, "step_waiting",
+        rt.event_log.append_approval_waiting, tenant_id, run_id, "step", step_id,
         {**data, "deadline": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat()},
     )
     crash_point("after_event_write", event_key=key)

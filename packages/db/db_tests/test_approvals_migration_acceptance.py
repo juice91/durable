@@ -182,7 +182,7 @@ def test_backfill_on_realistic_0013_data_then_round_trip():
                 "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema()"
                 " AND tablename = 'pending_approvals'")).all()
             assert all("(tenant_id" in d for _, d in lead), lead
-        _check_clean(base, schema)
+        # The models are compared at head only (below): a later revision (0015_evals) changes them.
 
         # Decide one backfilled wait (event + row, as the store does), then downgrade.
         with engine.begin() as conn:

@@ -82,6 +82,13 @@ def decision_event_key(kind: ApprovalKind, approval_key: str) -> str:
     return f"tool:{approval_key}:approval:decision" if kind == "tool" else f"step:{approval_key}:decision"
 
 
+def tool_approval_topic(run_id: str) -> str:
+    """The DBOS message topic an agent run's gated tool calls wait on: `tool_approval:{run_id}`.
+    One topic per run (all the gated calls of one model response wait in one loop). Shared by the
+    API's wake-up (eap_api.launcher) and the worker's wait (AC.6), so both always agree."""
+    return f"tool_approval:{run_id}"
+
+
 def waiting_event_type(kind: ApprovalKind) -> str:
     return "tool_approval_waiting" if kind == "tool" else "step_waiting"
 
@@ -300,23 +307,27 @@ class ApprovalCursor:
     """A position in the inbox order, as an opaque token (URL-safe base64 JSON, like RunCursor).
 
     Pending rows are ordered (requested_at DESC, run_id DESC, kind DESC, approval_key DESC), decided
-    rows (decided_at DESC, ...): `at` is that timestamp. A token only names a position; every query
-    stays tenant-scoped, so a token never reveals another tenant's rows."""
+    rows (decided_at DESC, ...): `at` is that timestamp. `status` names the list the token belongs
+    to: a pending token's `at` is a request time and a decided token's a decision time, so a token
+    is only valid for its own list (ApprovalStore.list raises InvalidRunCursor on a mismatch). A
+    token only names a position; every query stays tenant-scoped, so a token never reveals another
+    tenant's rows."""
 
     at: datetime
     run_id: str
     kind: str
     approval_key: str
+    status: str = "pending"
 
     @classmethod
     def after(cls, row: dict[str, Any], status: ApprovalStatus) -> ApprovalCursor:
         """The cursor at `row` (an ApprovalStore.list row) for the list with that `status`."""
         at = row["requested_at"] if status == "pending" else row["decided_at"]
-        return cls(at, str(row["run_id"]), str(row["kind"]), str(row["approval_key"]))
+        return cls(at, str(row["run_id"]), str(row["kind"]), str(row["approval_key"]), status)
 
     def encode(self) -> str:
         raw = json.dumps(
-            {"t": self.at.isoformat(), "r": self.run_id, "k": self.kind, "a": self.approval_key},
+            {"t": self.at.isoformat(), "r": self.run_id, "k": self.kind, "a": self.approval_key, "s": self.status},
             separators=(",", ":"),
         )
         return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
@@ -330,9 +341,11 @@ class ApprovalCursor:
             data = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
         except (binascii.Error, ValueError) as exc:
             raise InvalidRunCursor("cursor is not valid") from exc
-        if not isinstance(data, dict) or set(data) != {"t", "r", "k", "a"}:
+        if not isinstance(data, dict) or set(data) != {"t", "r", "k", "a", "s"}:
             raise InvalidRunCursor("cursor is not valid")
-        if not all(isinstance(data[k], str) for k in ("t", "r", "k", "a")) or data["k"] not in APPROVAL_KINDS:
+        if not all(isinstance(data[k], str) for k in ("t", "r", "k", "a", "s")) or data["k"] not in APPROVAL_KINDS:
+            raise InvalidRunCursor("cursor is not valid")
+        if data["s"] not in ("pending", "decided"):
             raise InvalidRunCursor("cursor is not valid")
         try:
             at = datetime.fromisoformat(data["t"])
@@ -340,7 +353,7 @@ class ApprovalCursor:
             raise InvalidRunCursor("cursor is not valid") from exc
         if at.tzinfo is None:
             raise InvalidRunCursor("cursor is not valid")
-        return cls(at, data["r"], data["k"], data["a"])
+        return cls(at, data["r"], data["k"], data["a"], data["s"])
 
 
 def _approval_dict(row: PendingApprovalModel, run_status: str | None = None) -> dict[str, Any]:
@@ -397,6 +410,8 @@ class ApprovalStore:
             raise ValueError("kind must be 'tool' or 'step'")
         if isinstance(cursor, str):
             cursor = ApprovalCursor.decode(cursor)
+        if cursor is not None and cursor.status != status:
+            raise InvalidRunCursor(f"this cursor belongs to the {cursor.status} list, not the {status} list")
         limit = max(1, min(int(limit), self.MAX_LIMIT))
         pa = PendingApprovalModel
         order_at = pa.requested_at if status == "pending" else pa.decided_at
@@ -475,6 +490,7 @@ __all__ = [
     "open_approval_exists",
     "projection_args",
     "record_decision_in_session",
+    "tool_approval_topic",
     "waiting_event_key",
     "waiting_event_type",
 ]

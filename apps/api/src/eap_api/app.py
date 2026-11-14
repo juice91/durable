@@ -95,6 +95,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.workflow_runs import router as workflow_runs_router
 
     app.include_router(workflow_runs_router, prefix="/api/v1")
+    # Approvals inbox and tool-approval decisions (AC.8): GET /approvals, .../tool-approvals/....
+    from eap_api.routes.approvals import router as approvals_router
+
+    app.include_router(approvals_router, prefix="/api/v1")
     # Log search over Loki (EAP_LOKI_URL), tenant-scoped: GET /logs.
     from eap_api.routes.logs import router as logs_router
 

@@ -110,7 +110,7 @@ def test_approvals_revision_round_trip_on_a_populated_0013_schema():
                 "SELECT convalidated FROM pg_constraint WHERE conname = 'ck_runs_output_format'"
                 " AND conrelid = to_regclass('runs')"
             )).scalar_one() is False
-            assert schema_diff(conn) == []
+            # The models are compared at head only (below): a later revision changes them.
 
         # Checks.
         bad = [

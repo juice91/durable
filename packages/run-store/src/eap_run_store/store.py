@@ -61,7 +61,7 @@ class Base(DeclarativeBase):
 
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
-RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest")
+RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest", "eval")
 
 # runs.error of a run whose hand-off to the orchestrator failed (the API could not enqueue it).
 # Stable text: RunStore.requeue_after_enqueue_failure recognises the state by it.
@@ -72,8 +72,9 @@ ENQUEUE_FAILED_ERROR = (
 # An agent run names exactly one of its published agent version and a draft snapshot (a draft test
 # run), and no tool or workflow; a tool run names its tool only and is never a conversation turn
 # (it may name a knowledge base: the search tester); a workflow run names its published workflow
-# version only; a kb_ingest run names its knowledge base only. Same text as migration
-# 0011_knowledge_bases.
+# version only; a kb_ingest run names its knowledge base only; an eval run (0015_evals) names its
+# agent with exactly one of its version and a draft snapshot, and its test suite. Same text as
+# migration 0015_evals.
 RUN_KIND_TARGET_CHECK = (
     "(kind = 'agent' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
     " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL AND knowledge_base_id IS NULL)"
@@ -85,13 +86,16 @@ RUN_KIND_TARGET_CHECK = (
     " OR (kind = 'kb_ingest' AND knowledge_base_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
     " AND draft_spec IS NULL AND tool_id IS NULL AND conversation_id IS NULL AND workflow_id IS NULL"
     " AND workflow_version IS NULL)"
+    " OR (kind = 'eval' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
+    " AND eval_suite_id IS NOT NULL AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL"
+    " AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
 )
 # run_model_requests.operation (0011_knowledge_bases): a chat model request or an embedding call.
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
 # Invariant: runs nest at most two levels. Only an agent run can have a parent, and its parent is a
-# workflow run, which never has one; so a child's parent is its root run. pending_approvals.root_run_id
+# workflow run or an eval run (an eval case's child, 0015_evals), which never has one; so a child's parent is its root run. pending_approvals.root_run_id
 # (0014_approvals) relies on this, and takes the parent's own parent if deeper nesting is ever added.
 RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
@@ -221,6 +225,12 @@ class RunModel(Base):
     # The format of `output` (0014_approvals): 'json' for a structured output (canonical JSON text),
     # 'text' or NULL for text.
     output_format: Mapped[str | None] = mapped_column("output_format", String, nullable=True)
+    # The test suite an eval run executes (0015_evals; its snapshot is `input`). No FK: the run
+    # outlives a deleted suite as its audit and cost record.
+    eval_suite_id: Mapped[str | None] = mapped_column("eval_suite_id", PG_UUID(as_uuid=False), nullable=True)
+    # The snapshot's suite_hash (sha256 hex), recorded once at creation: compare uses it, never
+    # re-validating an old snapshot.
+    eval_suite_hash: Mapped[str | None] = mapped_column("eval_suite_hash", String, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -246,6 +256,14 @@ class RunModel(Base):
         Index("ix_runs_parent_run", "parent_run_id"),
         # A knowledge base's runs (ingest progress, summed cost), newest first.
         Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
+        # A test suite's eval runs, newest first (0015_evals).
+        Index(
+            "ix_runs_tenant_eval_suite_created",
+            "tenant_id",
+            "eval_suite_id",
+            "created_at",
+            postgresql_where=text("eval_suite_id IS NOT NULL"),
+        ),
     )
 
 
@@ -585,6 +603,8 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "draft_spec": run.draft_spec,
         "knowledge_base_id": run.knowledge_base_id,
         "output_format": run.output_format,
+        "eval_suite_id": run.eval_suite_id,
+        "eval_suite_hash": run.eval_suite_hash,
     }
 
 
@@ -807,6 +827,82 @@ class RunStore:
             traceparent=traceparent,
         )
 
+    def create_eval_run(
+        self,
+        tenant_id: str,
+        agent_id: UUID | str,
+        agent_version: int | None,
+        eval_suite_id: UUID | str,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+        *,
+        draft_spec: dict[str, Any] | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create an eval run (kind 'eval', 0015_evals): `input` = the suite snapshot's canonical JSON
+        (`EvalSuiteSnapshot.canonical_json()`, built by EvalStore.snapshot), against published version
+        `agent_version` of `agent_id` or, with `agent_version` None, the draft snapshot `draft_spec`
+        (exactly one: ck_runs_kind_target). The caller has checked that the agent and the suite belong
+        to `tenant_id`. `input` is validated once here (ValueError if it is not a snapshot of
+        `eval_suite_id`) and its `suite_hash()` is recorded in `eval_suite_hash`. Same idempotency
+        and tenant rules as create_run."""
+        from pydantic import ValidationError
+
+        from eap_schemas.evals import EvalSuiteSnapshot
+
+        try:
+            snapshot = EvalSuiteSnapshot.model_validate_json(input)
+        except ValidationError as exc:
+            raise ValueError(f"input is not a valid suite snapshot: {exc.errors()[0]['msg']}") from None
+        if str(snapshot.suite_id) != str(eval_suite_id):
+            raise ValueError("input is a snapshot of another suite")
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="eval",
+            agent_id=str(agent_id),
+            agent_version=agent_version,
+            eval_suite_id=str(eval_suite_id),
+            eval_suite_hash=snapshot.suite_hash(),
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+            draft_spec=null() if draft_spec is None else draft_spec,
+        )
+
+    def create_eval_child_run(
+        self,
+        tenant_id: str,
+        eval_run_id: UUID | str,
+        case_id: UUID | str,
+        agent_id: UUID | str,
+        agent_version: int | None,
+        input: str,
+        run_id: UUID,
+        *,
+        draft_spec: dict[str, Any] | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create the agent run that executes case `case_id` of eval run `eval_run_id` (same tenant:
+        fk_runs_tenant_parent_run): kind 'agent', no conversation, `parent_step_id = case:{case_id}`,
+        against published version `agent_version` or, with `agent_version` None, the draft snapshot
+        `draft_spec` (exactly one, else ValueError). Same idempotency rules as create_run."""
+        if (agent_version is None) == (draft_spec is None):
+            raise ValueError("exactly one of agent_version and draft_spec is required")
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="agent",
+            agent_id=str(agent_id),
+            agent_version=agent_version,
+            draft_spec=null() if draft_spec is None else draft_spec,
+            input=input,
+            parent_run_id=str(eval_run_id),
+            parent_step_id=f"case:{case_id}",
+            traceparent=traceparent,
+        )
+
     def create_child_agent_run(
         self,
         tenant_id: str,
@@ -868,8 +964,12 @@ class RunStore:
         output: str | None = None,
         error: str | None = None,
         messages: list[Any] | None = None,
+        output_format: str | None = None,
     ) -> None:
         """Update run status and optionally output, error or messages, only for a run owned by `tenant_id`.
+
+        `output_format` (AC.4) is `json` when `output` is a structured output's canonical JSON text
+        (None leaves the column unchanged: NULL means text).
 
         `messages` is written once: a repeated call (a re-executed finish step) keeps the first value,
         so the history later turns read never changes after it was first recorded.
@@ -884,6 +984,10 @@ class RunStore:
             values["error"] = error
         if messages is not None:
             values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+        if output_format is not None:
+            if output_format not in RUN_OUTPUT_FORMATS:
+                raise ValueError(f"output_format must be one of {RUN_OUTPUT_FORMATS}")
+            values["output_format"] = output_format
         if status in TERMINAL_RUN_STATUSES:
             values.update(_finish_values(tenant_id, str(run_id), status))
         self._update_owned(tenant_id, run_id, values)
@@ -1532,8 +1636,10 @@ class EventLog:
         (≤ 8 KiB canonical JSON, else {"truncated": true}), prompt and the deadline from the data,
         and the root run, agent and workflow from the run.
 
-        Returns (event, created). A repeated call (a replayed step) writes nothing and returns the
-        first event, whose deadline stands. Raises RunNotFound (writing nothing) for an unknown run
+        Returns (event, created). A repeated call (a replayed step) writes no event and returns the
+        first event, whose deadline stands; it only adds the open row when it is missing and the
+        approval is undecided (an event written by a worker without the projection, during a
+        rolling deploy), copied from that first event. Raises RunNotFound (writing nothing) for an unknown run
         or another tenant's; any failure of the row write rolls the event back.
         """
         from eap_run_store import approvals
@@ -1556,14 +1662,25 @@ class EventLog:
                 event, created = append_event_in_session(
                     session, tenant_id, run_id, event_key, approvals.waiting_event_type(kind), payload
                 )
-                if created:
+                # A replay also writes a missing row (ON CONFLICT DO NOTHING): during a rolling
+                # deploy a worker without the projection may have written the event alone. The
+                # row then copies the FIRST event (its deadline and time), and is never inserted
+                # once a decision exists, so a decided approval never reopens.
+                replayed = None if created else dict(event.data or {})
+                decided = replayed is not None and session.execute(
+                    select(ExecutionEventModel.seq).where(
+                        ExecutionEventModel.run_id == str(run_id),
+                        ExecutionEventModel.event_key == approvals.decision_event_key(kind, approval_key),
+                    )
+                ).first() is not None
+                if not decided and (replayed is None or replayed.get("deadline") is not None):
                     approvals.insert_waiting_in_session(
                         session,
                         tenant_id=tenant_id,
                         run_id=str(run_id),
                         kind=kind,
                         approval_key=approval_key,
-                        data=payload,
+                        data=payload if replayed is None else replayed,
                         requested_at=event.ts,
                     )
             except BaseException:

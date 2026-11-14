@@ -7,7 +7,8 @@ POST /tools/{tool_id}/runs, with compact 422s that never echo the input.
 
 `POST /workflows/runs/{run_id}/steps/{step_id}/approve|reject` records the decision of a waiting
 approval step as the run's `step:{step_id}:decision` event (atomically: only a step that is waiting
-gets 200, everything else 409), then wakes the waiting workflow with DBOS send. The decision is
+gets 200, everything else 409; the inbox row in pending_approvals is closed in the same
+transaction), through the shared helper eap_api.approvals.decide, then wakes the waiting workflow with DBOS send. The decision is
 durable before the wake-up is sent; if the send fails the answer is still 200 with
 `"notified": false`, and the worker picks the decision up at its next poll
 (EAP_APPROVAL_POLL_SECONDS, default one hour).
@@ -27,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from eap_api.approvals import decide
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
@@ -36,7 +38,7 @@ from eap_api.routes.workflows import reference_problems
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability import current_trace_context, log_failure
-from eap_run_store import ENQUEUE_FAILED_ERROR, RunIdConflict, RunNotFound
+from eap_run_store import ENQUEUE_FAILED_ERROR, RunIdConflict
 from eap_schemas.workflows import STEP_ID_PATTERN, WorkflowSpec
 
 log = logging.getLogger("eap_api")
@@ -317,26 +319,20 @@ def _decide(
     run = run_store.get_run(tenant_id, run_id)
     if run is None or run.get("kind") != "workflow":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    event_type = "step_approved" if decision == "approved" else "step_rejected"
-    data = {"step_id": step_id, "decided_by": principal.user_id, "comment": body.comment}
-    try:
-        outcome, _event = event_log.append_step_decision(tenant_id, run_id, step_id, event_type, data)
-    except RunNotFound:
+    # The shared decision helper (eap_api.approvals, AC.8): the decision event and its
+    # pending_approvals projection update in one transaction, then the wake-up.
+    result = decide(
+        event_log, launcher, tenant_id=tenant_id, run_id=run_id, kind="step", key=step_id,
+        decision=decision, decided_by=principal.user_id, comment=body.comment,
+    )
+    if result.outcome == "run_not_found":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    if outcome != "created":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=NOT_WAITING_DETAIL)
-    waiting = event_log.get_event(tenant_id, run_id, f"step:{step_id}:waiting")
-    target = str((waiting.data if waiting is not None else {}).get("workflow_id") or run_id)
-    notified = True
-    try:
-        launcher.notify_approval(workflow_id=target, step_id=step_id, decision=decision)
-    except Exception as exc:  # noqa: BLE001 - the decision is durable; the worker polls for it
-        notified = False
-        log_failure(
-            log, "approval wake-up failed", exc, code="approval_notify_failed", level=logging.ERROR,
-            run_id=str(run_id), tenant_id=tenant_id,
+    if result.outcome != "created":
+        # Same text as always; an earlier decision (a person's or the timeout's) is added.
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": NOT_WAITING_DETAIL, **(result.recorded_decision() or {})},
         )
-    log.info("workflow run %s step %s %s by %s", run_id, step_id, decision, principal.user_id)
     return JSONResponse(
         content={
             "run_id": str(run_id),
@@ -344,7 +340,7 @@ def _decide(
             "decision": decision,
             "decided_by": principal.user_id,
             "comment": body.comment,
-            "notified": notified,
+            "notified": result.notified,
         }
     )
 
