@@ -137,7 +137,10 @@ describe("Tools run acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     expect(await screen.findByTestId("tool-run-link")).toHaveAttribute("href", routes.run("run-ok"));
 
-    act(() => handlers.onEnd?.("run_completed"));
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-ok", expect.any(Object)));
+    await act(async () => { handlers.onEnd?.("run_completed"); });
     expect(await screen.findByTestId("tool-run-output")).toHaveTextContent('"ticket": "T-9"');
     expect(screen.getByTestId("tool-run-result")).toHaveAttribute("data-status", "completed");
     expect(screen.queryByTestId("tool-runs-started-elsewhere")).not.toBeInTheDocument();

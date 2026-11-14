@@ -21,6 +21,7 @@ import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
 import { THREADS_TITLE } from "./AgentChatPanes";
+import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
 import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 
@@ -334,7 +335,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
               tab === "chat" &&
               configOpenByDefault(readConfigOpen(agentId), currentFrameSize(sidebarCollapsed || sidebarAttributeCollapsed()))
             }
-            mainMinWidth={tab === "chat" ? CHAT_PANES_FIT_PX : undefined}
+            // The Chat tab keeps threads + chat beside Config; the Editor tab keeps the step nav + step.
+            mainMinWidth={tab === "chat" ? CHAT_PANES_FIT_PX : tab === "editor" ? EDITOR_NAV_FIT_PX : undefined}
           >
             {agent ? (
               <ConfigPanel

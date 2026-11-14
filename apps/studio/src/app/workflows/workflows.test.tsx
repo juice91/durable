@@ -5,7 +5,14 @@ import { demoSpec } from "@/test/workflowFixtures";
 import { routes } from "@/lib/routes";
 
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: "wf-1" }), useRouter: () => ({ push }) }));
+// SL.14: the detail page reads its tab (`?tab=runs`) and hosts the trace Sheet, so it also needs
+// the search parameters, the pathname and router.replace.
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ id: "wf-1" }),
+  useRouter: () => ({ push, replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workflows/wf-1",
+}));
 vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 
 import WorkflowsPage from "./page";

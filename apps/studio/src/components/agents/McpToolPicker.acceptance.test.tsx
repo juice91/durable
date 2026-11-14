@@ -14,9 +14,11 @@ import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  // SL.11: the stepper writes `?step=` / `?compare=` with replace and reads them back.
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useParams: () => ({ id: "a1" }),
-  usePathname: () => "/agents/a1",
+  usePathname: () => "/agents/a1/editor",
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -74,6 +76,12 @@ function renderAgent(draft: AgentSpec) {
   render(<AgentDetailPage />);
 }
 
+// SL.11: the MCP picker is on the stepped editor's Tools step.
+async function openToolsStep() {
+  const nav = await screen.findByRole("navigation", { name: "Editor steps" });
+  fireEvent.click(within(nav).getByRole("button", { name: /^Tools/ }));
+}
+
 describe("Agent MCP tool picker acceptance", () => {
   beforeEach(() => {
     toolRunLedger.reset();
@@ -101,6 +109,7 @@ describe("Agent MCP tool picker acceptance", () => {
     });
     renderAgent(spec());
     await screen.findByDisplayValue("Test Agent");
+    await openToolsStep();
     const picker = await screen.findByTestId("mcp-picker-server");
     fireEvent.click(within(picker).getByRole("button", { name: "Load tools" }));
     fireEvent.click(await screen.findByLabelText("docs/search"));
@@ -124,6 +133,7 @@ describe("Agent MCP tool picker acceptance", () => {
   it("drops mcp_tools from the saved draft when every tool is unpicked", async () => {
     renderAgent(spec([{ server: "docs", tool: "search" }, { server: "docs", tool: "fetch_page" }]));
     await screen.findByDisplayValue("Test Agent");
+    await openToolsStep();
     fireEvent.click(await screen.findByRole("button", { name: "Remove docs/search" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove docs/fetch_page" }));
     expect(screen.queryByTestId("mcp-selected-tool")).not.toBeInTheDocument();

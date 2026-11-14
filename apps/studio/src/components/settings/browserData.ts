@@ -9,6 +9,7 @@ import {
   AGENTS_VIEW_KEY,
   LAST_AGENT_KEY,
 } from "@/components/agentPage/agentPageModel";
+import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
 
 /**
  * What Studio keeps in this browser's localStorage, for the Settings "Data in this browser"
@@ -72,6 +73,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Agents list view",
     description: "List or Compact.",
     keys: [AGENTS_VIEW_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "workflow-layout",
+    label: "Workflow page layout",
+    description: "The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height.",
+    keys: [WORKFLOW_LAYOUT_STORAGE_KEY],
     prefixes: [],
     clearGroup: "layout",
   },

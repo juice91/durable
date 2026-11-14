@@ -359,8 +359,11 @@ describe("ToolsPage", () => {
     fireEvent.change(screen.getByLabelText(/Subject \*/), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await screen.findByTestId("tool-run-result");
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-1", expect.any(Object)));
 
-    act(() => {
+    await act(async () => {
       handlers.onEvent?.({ seq: 2, type: "run_failed", data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_outcome_unknown" }, ts: "" });
       handlers.onEnd?.("run_failed");
     });
@@ -384,7 +387,10 @@ describe("ToolsPage", () => {
     fireEvent.change(screen.getByLabelText(/Subject \*/), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await screen.findByTestId("tool-run-result");
-    act(() => handlers.onEnd?.("run_completed"));
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-2", expect.any(Object)));
+    await act(async () => { handlers.onEnd?.("run_completed"); });
 
     expect(await screen.findByTestId("tool-run-output")).toHaveTextContent('"ticket": "T-1"');
   });

@@ -62,6 +62,11 @@ function DiffCell({ line, side }: { line: InstructionsDiffLine | null; side: "ba
   );
 }
 
+/** "Compare v3 with Draft". */
+export function compareTitle(base: CompareRef, target: CompareRef): string {
+  return `Compare ${compareRefLabel(base)} with ${compareRefLabel(target)}`;
+}
+
 /** Renders a compare result: changed fields and a side-by-side instructions diff. */
 export function VersionCompareView({ result }: { result: VersionCompareResult }) {
   const baseLabel = compareRefLabel(result.base.version);
@@ -155,10 +160,12 @@ interface VersionCompareProps {
   base: CompareRef;
   target: CompareRef;
   onClose: () => void;
+  /** Inside the compare Sheet, which has its own title and Close: no heading or Close button here. */
+  embedded?: boolean;
 }
 
 /** Fetches and shows the compare of `base` and `target` (a version number or "draft"). */
-export function VersionCompare({ agentId, base, target, onClose }: VersionCompareProps) {
+export function VersionCompare({ agentId, base, target, onClose, embedded = false }: VersionCompareProps) {
   const [result, setResult] = useState<VersionCompareResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -179,10 +186,24 @@ export function VersionCompare({ agentId, base, target, onClose }: VersionCompar
     };
   }, [agentId, base, target]);
 
-  const title = `Compare ${compareRefLabel(base)} with ${compareRefLabel(target)}`;
+  const title = compareTitle(base, target);
+  const body = error ? (
+    <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p>
+  ) : result ? (
+    <VersionCompareView result={result} />
+  ) : (
+    <p role="status" className="text-sm text-muted-foreground">Loading compare…</p>
+  );
+  if (embedded) {
+    return (
+      <div data-testid="version-compare" className="min-w-0 space-y-4">
+        {body}
+      </div>
+    );
+  }
   return (
-    <section aria-label={title} data-testid="version-compare" className="space-y-4 rounded-md border border-border bg-card p-4">
-      <div className="flex items-center justify-between gap-2">
+    <section aria-label={title} data-testid="version-compare" className="min-w-0 space-y-4 rounded-md border border-border bg-card p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-card-foreground">{title}</h2>
         <button
           type="button"
@@ -192,13 +213,7 @@ export function VersionCompare({ agentId, base, target, onClose }: VersionCompar
           Close compare
         </button>
       </div>
-      {error ? (
-        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p>
-      ) : result ? (
-        <VersionCompareView result={result} />
-      ) : (
-        <p role="status" className="text-sm text-muted-foreground">Loading compare…</p>
-      )}
+      {body}
     </section>
   );
 }

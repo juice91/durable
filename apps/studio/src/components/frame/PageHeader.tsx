@@ -1,5 +1,6 @@
 "use client";
 
+import { navigateGuarded } from "./navigationGuard";
 import React, { useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -49,7 +50,11 @@ export function EntitySwitcher({ label, options, value, hrefFor, onValueChange, 
       className="size-7 shrink-0 justify-center px-0 text-muted-foreground"
       onValueChange={(next) => {
         onValueChange?.(next);
-        if (hrefFor && next !== value) router.push(hrefFor(next));
+        if (hrefFor && next !== value) {
+          // Through the navigation guard: the editor may hold unsaved edits (SL.11).
+          const href = hrefFor(next);
+          navigateGuarded(href, (target) => router.push(target));
+        }
       }}
     >
       <ChevronsUpDown className="size-icon-dense" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />

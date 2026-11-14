@@ -8,7 +8,14 @@ import { demoSpec, parallelSpec } from "@/test/workflowFixtures";
 import { routes } from "@/lib/routes";
 
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: "wf-1" }), useRouter: () => ({ push }) }));
+// SL.14: the detail page reads its tab (`?tab=runs`) and hosts the trace Sheet, so it also needs
+// the search parameters, the pathname and router.replace.
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ id: "wf-1" }),
+  useRouter: () => ({ push, replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workflows/wf-1",
+}));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -180,12 +187,13 @@ describe("Workflows list acceptance", () => {
     const draft = screen.getByTestId("workflow-row-wf-2");
 
     expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
-    expect(within(published).getByRole("link", { name: "Open Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
+    // SL.14: the name is the row's one link (the duplicate "Open" column is gone).
+    expect(within(published).getAllByRole("link")).toHaveLength(1);
     expect(published).toHaveTextContent("v2");
     expect(published).not.toHaveTextContent("Draft only");
 
     expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
-    expect(within(draft).getByRole("link", { name: "Open Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
+    expect(within(draft).getAllByRole("link")).toHaveLength(1);
     expect(draft).toHaveTextContent("Draft only");
     expect(draft).not.toHaveTextContent("vnull");
     expect(within(table).getAllByRole("row")).toHaveLength(3);

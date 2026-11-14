@@ -7,12 +7,12 @@ import { routes } from "@/lib/routes";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
 import { Button, focusRing } from "@/components/ui/Button";
-import { sectionsOf } from "@/components/agents/specSections";
+import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 
-/** Editor steps the "Edit" links open (SL.11's stepper reads `?step=`). */
-export type ConfigStep = "identity" | "instructions" | "tools" | "request-context" | "processors";
+/** Editor steps the "Edit" links open (the stepper's `?step=` ids, `stepper/registry.ts`). */
+export type ConfigStep = CoreStepId | (string & {});
 
 export interface ConfigPanelProps {
   agent: Agent;

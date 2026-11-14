@@ -1,13 +1,12 @@
 "use client";
 
 import React from "react";
-import Link from "next/link";
 import { formatValue } from "@/components/runs/EventTimeline";
 import { NODE_STATE_CLASSES, NODE_STATE_LABELS } from "./WorkflowGraph";
 import { formatDateTime } from "./ApprovalCard";
 import type { StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
-import { routes } from "@/lib/routes";
+import { TraceLink } from "@/components/traces/TraceLink";
 
 function Block({ label, value, testId }: { label: string; value: unknown; testId: string }) {
   return (
@@ -21,16 +20,16 @@ function Block({ label, value, testId }: { label: string; value: unknown; testId
 const DECISION_LABELS = { approved: "Approved", rejected: "Rejected", timed_out: "Timed out" } as const;
 
 /** Input, output or error of one step, from its step_* events. */
-export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | null; detail: StepDetail; onClose: () => void }) {
+export function StepIoPanel({ step, detail, onClose, className }: { step: WorkflowStep | null; detail: StepDetail; onClose: () => void; className?: string }) {
   const type = step?.type ?? detail.stepType;
   return (
-    <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className="space-y-3 rounded-lg border border-border bg-card p-4">
+    <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className={className ?? "min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4"}>
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-semibold text-card-foreground">
           <span className="font-mono">{detail.stepId}</span>
           {type ? <span className="ml-2 text-xs font-normal uppercase text-muted-foreground">{type}</span> : null}
         </h3>
-        <button type="button" onClick={onClose} aria-label="Close step details" className="text-xs text-muted-foreground hover:text-foreground">Close</button>
+        <button type="button" onClick={onClose} aria-label="Close step details" className="rounded-sm text-caption text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Close</button>
       </div>
       <p>
         <span data-testid="step-io-state" className={`inline-block rounded border px-2 py-0.5 text-xs ${NODE_STATE_CLASSES[detail.state]}`}>{NODE_STATE_LABELS[detail.state]}</span>
@@ -38,9 +37,10 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
       </p>
       {detail.childRunId ? (
         <p className="text-sm">
-          <Link data-testid="step-child-run-link" href={routes.run(detail.childRunId)} className="text-primary underline-offset-4 hover:underline">
+          {/* The child run's trace: in place, as the trace Sheet, on a page that hosts one (SL.12). */}
+          <TraceLink data-testid="step-child-run-link" runId={detail.childRunId} tab="events" className="text-info-text underline-offset-4 hover:underline">
             Open agent run {detail.childRunId.slice(0, 8)}
-          </Link>
+          </TraceLink>
         </p>
       ) : null}
       {detail.toolId ? <p className="text-xs text-muted-foreground">Tool <span className="font-mono">{detail.toolId}</span></p> : null}
@@ -53,7 +53,7 @@ export function StepIoPanel({ step, detail, onClose }: { step: WorkflowStep | nu
               <p className="font-medium text-foreground">{DECISION_LABELS[detail.decision.kind]}{detail.decision.decidedBy ? <> by <span data-testid="step-decided-by" className="font-mono">{detail.decision.decidedBy}</span></> : null}</p>
               {detail.decision.comment ? <p data-testid="step-decision-comment" className="mt-1 whitespace-pre-wrap text-muted-foreground">{detail.decision.comment}</p> : null}
             </div>
-          ) : detail.state === "waiting" ? <p className="text-xs text-muted-foreground">Decide above, in the approval panel.</p> : null}
+          ) : detail.state === "waiting" ? <p className="text-xs text-muted-foreground">Decide in the approval card (Needs input).</p> : null}
         </div>
       ) : null}
       {detail.input !== undefined ? <Block label="Input" value={detail.input} testId="step-io-input" /> : null}

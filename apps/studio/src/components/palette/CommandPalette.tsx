@@ -1,5 +1,6 @@
 "use client";
 
+import { navigateGuarded } from "@/components/frame/navigationGuard";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Command as CommandPrimitive, defaultFilter, useCommandState } from "cmdk";
@@ -182,7 +183,8 @@ export function CommandPalette() {
   const go = useCallback(
     (href: string) => {
       setOpen(false);
-      router.push(href);
+      // Through the navigation guard: the editor may hold unsaved edits (SL.11).
+      navigateGuarded(href, (target) => router.push(target));
     },
     [router],
   );

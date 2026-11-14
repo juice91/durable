@@ -1,5 +1,6 @@
 "use client";
 
+import { navigateGuarded } from "@/components/frame/navigationGuard";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { shouldHandleShortcut } from "@/components/frame/keyboard";
@@ -77,7 +78,11 @@ export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
     function run(binding: GlobalBinding): boolean {
       const action = binding.action;
       if (action.kind === "help") setHelpOpen(true);
-      else if (action.kind === "navigate") routerRef.current.push(action.item.href);
+      else if (action.kind === "navigate") {
+        // Through the navigation guard: the editor may hold unsaved edits (SL.11).
+        const href = action.item.href;
+        navigateGuarded(href, (target) => routerRef.current.push(target));
+      }
       else {
         const registered = createActions.current[createActions.current.length - 1];
         if (registered) registered.run();

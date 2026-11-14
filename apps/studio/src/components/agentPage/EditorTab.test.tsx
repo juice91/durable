@@ -1,4 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { setWindowWidth, TEST_WIDE_WIDTH } from "@/components/frame/frameTesting";
+import { chooseVersionAction, versionActions } from "@/components/agents/versionsTesting";
 import React from "react";
 import "@testing-library/jest-dom";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
@@ -18,9 +20,11 @@ vi.mock("@/lib/agentVersions", async (importOriginal) => {
 });
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  // SL.11: the stepper writes `?step=` / `?compare=` with replace and reads them back.
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useParams: () => ({ id: "a1" }),
-  usePathname: () => "/agents/a1",
+  usePathname: () => "/agents/a1/editor",
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -43,9 +47,13 @@ vi.mock("@/components/agents/specSections", async (importOriginal) => {
 });
 
 describe("AgentDetailPage", () => {
+  let restoreWidth: () => void = () => undefined;
   beforeEach(() => {
     vi.clearAllMocks();
+    // SL.11: a desktop window, so the versions list is a column beside the steps (not the Sheet).
+    restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
   });
+  afterEach(() => restoreWidth());
 
   it("Publish on 409 shows server detail", async () => {
     const mockAgent = {
@@ -323,8 +331,8 @@ describe("AgentDetailPage", () => {
     vi.mocked(restoreVersion).mockResolvedValueOnce({ ...version(3), restored_from: 1 });
 
     render(<AgentDetailPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "Restore version 1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(1, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
 
     expect(await screen.findByText("restored from v1")).toBeInTheDocument();
     expect(await screen.findByDisplayValue("Old Name")).toBeInTheDocument();

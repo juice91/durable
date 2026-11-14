@@ -1,17 +1,39 @@
 "use client";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
+import { MessageSquare } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { Agent, AgentVersion, AgentSpec } from "@/lib/api";
+import { routes } from "@/lib/routes";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { Button } from "@/components/ui/Button";
 import { AgentEditor } from "@/components/agents/AgentEditor";
-import { AgentVersionsPanel } from "@/components/agents/AgentVersionsPanel";
-import { VersionCompare } from "@/components/agents/VersionCompare";
-import { errorTarget } from "@/components/agents/specSections";
+import { AgentVersionsPanel, useVersionRestore } from "@/components/agents/AgentVersionsPanel";
+import { canonicalJson, errorTarget } from "@/components/agents/specSections";
+import { stepForError } from "@/components/agents/stepper/registry";
+import { CompareSheet } from "@/components/agents/stepper/CompareSheet";
+import { useEditorLayout } from "@/components/agents/stepper/useEditorLayout";
+import { useEditorQuery } from "@/components/agents/stepper/useEditorQuery";
+import { useUnsavedChangesGuard } from "@/components/agents/stepper/useUnsavedChangesGuard";
+import { navigateGuarded } from "@/components/frame/navigationGuard";
+import { useRouter } from "next/navigation";
 import { useAgentPage } from "./AgentPageContext";
 
+const notice = "rounded-md border p-3 text-label";
+
+/** The saved draft differs from the latest published version (the versions list's Draft row). */
+export function draftDiffersFromLatest(agent: Agent, versions: AgentVersion[]): boolean {
+  const latest = versions.reduce<AgentVersion | null>((best, v) => (best === null || v.version > best.version ? v : best), null);
+  if (!latest?.spec) return false;
+  return canonicalJson(agent.draft_spec) !== canonicalJson(latest.spec);
+}
+
 /**
- * The agent page's Editor tab (SL.6): today's editor, versions and compare, unchanged (SL.11 turns it
- * into the stepped editor). It loads the agent itself, as the editor page did, and refreshes the
- * agent page's header and Config panel after a save, publish or restore.
+ * The agent page's Editor tab (SL.11): the stepped editor (`?step=`), the versions column with row
+ * menus, and the compare Sheet (`?compare=a..b`) with restore inside. Header actions: Save draft,
+ * Compare with latest, Test draft (Chat with the draft) and Publish. Unsaved edits are guarded on
+ * navigation. It loads the agent itself and refreshes the agent page's header and Config panel after
+ * a save, publish or restore.
  */
 export function EditorTab({ agentId }: { agentId: string }) {
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -22,11 +44,14 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const [publishing, setPublishing] = useState(false);
   const [lastPublishResult, setLastPublishResult] = useState<{ type: "success"; version: number } | { type: "conflict"; message: string } | null>(null);
   const [isDirty, setIsDirty] = useState(false);
-  const [comparingDraft, setComparingDraft] = useState(false);
   // Bumped after a restore replaces the draft, so the editor re-reads it.
   const [editorKey, setEditorKey] = useState(0);
   const page = useAgentPage();
   const refreshPage = page?.reload;
+  const query = useEditorQuery();
+  const layout = useEditorLayout();
+  const guardDialog = useUnsavedChangesGuard(isDirty);
+  const router = useRouter();
 
   useEffect(() => {
     const loadAgent = async () => {
@@ -56,10 +81,9 @@ export function EditorTab({ agentId }: { agentId: string }) {
     setSaveError(null);
     try {
       const updated = await api.agents.update(agent.id, spec);
+      // The editor re-reports dirty against the saved spec (edits typed during the save stay dirty).
       setAgent(updated);
       setSaveError(null);
-      setIsDirty(false);
-      setComparingDraft(false);
       void refreshPage?.();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
@@ -76,10 +100,10 @@ export function EditorTab({ agentId }: { agentId: string }) {
     if (!agent || publishing) return;
     setPublishing(true);
     setLastPublishResult(null);
+    setSaveError(null);
     try {
       const version = await api.versions.create(agent.id);
       setLastPublishResult({ type: "success", version: version.version });
-      // Refresh versions
       const versionsData = await api.versions.list(agent.id);
       setVersions(versionsData);
       void refreshPage?.();
@@ -99,12 +123,11 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const handleRestored = async () => {
     if (!agent) return;
     setLastPublishResult(null);
-    setComparingDraft(false);
     try {
       const [updated, versionsData] = await Promise.all([api.agents.get(agent.id), api.versions.list(agent.id)]);
       setAgent(updated);
       setVersions(versionsData);
-      setIsDirty(false);
+      // The remounted editor reports its own (clean) state.
       setEditorKey((key) => key + 1);
       void refreshPage?.();
     } catch {
@@ -113,6 +136,17 @@ export function EditorTab({ agentId }: { agentId: string }) {
   };
 
   const latestVersion = versions.reduce((max, v) => Math.max(max, v.version), 0);
+  const draftChanged = useMemo(() => (agent ? draftDiffersFromLatest(agent, versions) : false), [agent, versions]);
+  // Restore from the compare Sheet: the same flow as a row's "Restore this version".
+  const compareRestore = useVersionRestore({
+    agentId: agent?.id,
+    latest: latestVersion,
+    hasUnsavedEdits: isDirty,
+    onRestored: () => {
+      query.closeCompare();
+      void handleRestored();
+    },
+  });
 
   if (loadError && !agent) {
     return (
@@ -125,79 +159,94 @@ export function EditorTab({ agentId }: { agentId: string }) {
   if (!agent) {
     return (
       <div className="flex items-center justify-center py-12">
-        <p className="text-card-foreground/60">Loading...</p>
+        <p className="text-muted-foreground">Loading...</p>
       </div>
     );
   }
 
+  const busy = publishing || submitting;
+  const actions = (
+    <>
+      {latestVersion > 0 ? (
+        <Button size="sm" variant="ghost" onClick={() => query.openCompare(latestVersion, "draft")} disabled={isDirty}>
+          {`Compare with latest (v${latestVersion})`}
+        </Button>
+      ) : null}
+      <Button size="sm" variant="ghost" asChild>
+        <Link href={routes.agentChat(agent.id, { version: "draft" })} data-testid="editor-test-draft">
+          <MessageSquare strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+          Test draft
+        </Link>
+      </Button>
+      <Button size="sm" variant="primary" onClick={handlePublish} disabled={busy || isDirty}>
+        {busy ? "Processing..." : "Publish"}
+      </Button>
+    </>
+  );
+
+  const notices = (
+    <>
+      <p className="text-caption text-muted-foreground">
+        ID: <span className="font-mono">{agent.id}</span>
+      </p>
+      {/* Errors a step owns show in that step instead (inline, or at the top of the step). */}
+      {saveError && !errorTarget(saveError) && !stepForError(saveError) ? (
+        <div role="alert" data-testid="agent-save-error" className={`${notice} border-destructive/40 bg-destructive/10 text-destructive-text`}>
+          {saveError}
+        </div>
+      ) : null}
+      {lastPublishResult?.type === "success" ? (
+        <div className={`${notice} border-success/40 bg-success/10 text-success-text`}>Version {lastPublishResult.version} published</div>
+      ) : null}
+      {lastPublishResult?.type === "conflict" ? (
+        <div className={`${notice} border-warning/40 bg-warning/10 text-warning-text`}>{lastPublishResult.message}</div>
+      ) : null}
+      {isDirty ? <div className={`${notice} border-warning/40 bg-warning/10 text-warning-text`}>Save the draft before publishing</div> : null}
+      {compareRestore.notice ? (
+        <p role="status" className={`${notice} border-border bg-muted text-foreground`}>
+          {compareRestore.notice}
+        </p>
+      ) : null}
+    </>
+  );
+
   return (
-    <div data-testid="agent-editor-tab" className="mx-auto w-full max-w-3xl min-w-0 px-4 py-6">
-        <div className="mb-6">
-          <p className="text-sm text-muted-foreground">ID: {agent.id}</p>
-        </div>
-
-        {/* Errors that name a part of the form (a processor, the instructions) show inline there instead. */}
-        {saveError && !errorTarget(saveError) && (
-          <div role="alert" data-testid="agent-save-error" className="mb-4 p-3 border rounded-md text-sm border-destructive/40 bg-destructive/10 text-destructive-text">
-            {saveError}
-          </div>
-        )}
-
-        <div className="mb-8">
-          <h2 className="text-lg font-semibold mb-3 text-card-foreground">Edit Agent</h2>
-          {lastPublishResult?.type === "success" && (
-            <div className="mb-3 p-3 border rounded-md text-sm border-success/40 bg-success/10 text-success-text">
-              Version {lastPublishResult.version} published
-            </div>
-          )}
-          {lastPublishResult?.type === "conflict" && (
-            <div className="mb-3 p-3 border rounded-md text-sm border-warning/40 bg-warning/10 text-warning-text">
-              {lastPublishResult.message}
-            </div>
-          )}
-          <AgentEditor
-            key={editorKey}
-            initialData={agent.draft_spec}
-            onSubmit={handleSaveDraft}
-            submitLabel="Save draft"
-            onDirtyChange={setIsDirty}
-            serverError={saveError}
-          />
-          <div className="mt-4">
-            {isDirty ? (
-              <div className="mb-3 p-3 border rounded-md text-sm border-warning/40 bg-warning/10 text-warning-text">
-                Save the draft before publishing
+    <div data-testid="agent-editor-tab" className="w-full min-w-0">
+      <AgentEditor
+        key={editorKey}
+        initialData={agent.draft_spec}
+        onSubmit={handleSaveDraft}
+        submitLabel="Save draft"
+        onDirtyChange={setIsDirty}
+        serverError={saveError}
+        stepper={{
+          activeStep: query.step,
+          onStepChange: query.setStep,
+          layout,
+          actions,
+          notices,
+          versions:
+            versions.length === 0 ? (
+              <div data-testid="agent-versions-empty">
+                <h2 className="mb-2 text-title font-semibold text-foreground">Versions</h2>
+                <p className="text-label text-muted-foreground">No published versions yet. Publish the draft to create v1.</p>
               </div>
-            ) : null}
-            {latestVersion > 0 ? (
-              <div className="mb-3">
-                <button
-                  type="button"
-                  onClick={() => setComparingDraft((open) => !open)}
-                  disabled={isDirty}
-                  aria-expanded={comparingDraft}
-                  className="w-full rounded-md border border-border px-4 py-2 text-sm text-foreground hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {comparingDraft ? "Hide compare" : `Compare with latest (v${latestVersion})`}
-                </button>
-                {comparingDraft && !isDirty ? (
-                  <div className="mt-3">
-                    <VersionCompare agentId={agent.id} base={latestVersion} target="draft" onClose={() => setComparingDraft(false)} />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            <button
-              onClick={handlePublish}
-              disabled={publishing || submitting || isDirty}
-              className="w-full px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {publishing || submitting ? "Processing..." : "Publish"}
-            </button>
-          </div>
-        </div>
-
-        <AgentVersionsPanel versions={versions} agentId={agent.id} hasUnsavedEdits={isDirty} onRestored={handleRestored} />
+            ) : (
+            <AgentVersionsPanel
+              versions={versions}
+              agentId={agent.id}
+              hasUnsavedEdits={isDirty}
+              onRestored={handleRestored}
+              onCompare={query.openCompare}
+              draftChanged={draftChanged}
+              onNavigate={(href) => navigateGuarded(href, (target) => router.push(target))}
+            />
+          ),
+        }}
+      />
+      <CompareSheet agentId={agent.id} compare={query.compare} latest={latestVersion} onClose={query.closeCompare} restore={compareRestore} />
+      {compareRestore.dialog}
+      {guardDialog}
     </div>
   );
 }

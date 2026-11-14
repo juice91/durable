@@ -75,3 +75,19 @@ export const toolsNavigationModule = {
   },
   useParams: () => ({}),
 };
+
+const SETTLED_SHEET = ["tool-tab-overview", "tool-not-found", "tool-load-error"].map((id) => `[data-testid="${id}"]`).join(",");
+
+/**
+ * The open tool Sheet once it shows its tool (tabs), not-found, or a load error. A `?tool=` link
+ * opens the Sheet before the catalog or the agents scan has loaded ("Loading tool…"); queries made
+ * right after the Sheet appears would race that load.
+ */
+export async function findToolSheet(): Promise<HTMLElement> {
+  const { screen, waitFor } = await import("@testing-library/react");
+  return waitFor(() => {
+    const sheet = screen.getByTestId("tool-sheet");
+    if (!sheet.querySelector(SETTLED_SHEET)) throw new Error("the tool Sheet is still loading");
+    return sheet;
+  });
+}

@@ -273,3 +273,78 @@ export function errorTarget(message: string): ErrorTarget {
   if (/context field|context_fields/.test(message)) return { kind: "context_fields" };
   return null;
 }
+
+/** Canonical JSON (keys sorted, undefined dropped): equal specs give equal strings. */
+export function canonicalJson(value: unknown): string {
+  return stableJson(value);
+}
+
+/**
+ * The stepped editor's built-in steps (SL.11), in order. Later steps (Knowledge, Memory, Output) add
+ * their own ids through the stepper registry (`components/agents/stepper/registry.ts`).
+ */
+export const CORE_STEP_IDS = ["identity", "instructions", "tools", "request-context", "processors"] as const;
+export type CoreStepId = (typeof CORE_STEP_IDS)[number];
+
+/** A step's status line in the step nav ("Required", "3 tools", "None") and whether it is valid. */
+export interface StepStatus {
+  text: string;
+  valid: boolean;
+}
+
+function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The status of a built-in step for `spec` (the spec the editor would save). Null for an id that is
+ * not a built-in step (a later step computes its own).
+ */
+export function stepStatus(stepId: string, spec: AgentSpec | null | undefined): StepStatus | null {
+  const sections = sectionsOf(spec ?? undefined);
+  switch (stepId) {
+    case "identity": {
+      const ok = Boolean(spec?.name?.trim() && spec.model?.provider?.trim() && spec.model?.name?.trim());
+      return ok ? { text: `${spec!.model.provider}:${spec!.model.name}`, valid: true } : { text: "Required", valid: false };
+    }
+    case "instructions": {
+      const text = spec?.instructions ?? "";
+      if (!text.trim()) return { text: "Required", valid: false };
+      const problems = placeholderErrors(text, sections.context_fields).length;
+      if (problems > 0) return { text: plural(problems, "problem"), valid: false };
+      return { text: plural(text.trim().split(/\s+/).length, "word"), valid: true };
+    }
+    case "tools": {
+      const count = (spec?.tools?.length ?? 0) + (spec?.mcp_tools?.length ?? 0);
+      return { text: count === 0 ? "None" : plural(count, "tool"), valid: true };
+    }
+    case "request-context": {
+      const fields = sections.context_fields;
+      const problems = fields.reduce((sum, field, index) => sum + contextFieldErrors(field, index, fields).length, 0);
+      if (problems > 0) return { text: plural(problems, "problem"), valid: false };
+      return { text: fields.length === 0 ? "None" : plural(fields.length, "field"), valid: true };
+    }
+    case "processors": {
+      const count = sections.input_processors.length + sections.output_processors.length;
+      return { text: count === 0 ? "None" : plural(count, "processor"), valid: true };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The built-in step a save or publish error belongs to, from `errorTarget` plus the message prefixes
+ * the API uses for the other parts of the spec; null when the message names no part of the form.
+ */
+export function stepForErrorMessage(message: string): CoreStepId | null {
+  const target = errorTarget(message);
+  if (target?.kind === "processor" || target?.kind === "processors") return "processors";
+  if (target?.kind === "instructions") return "instructions";
+  if (target?.kind === "context_fields") return "request-context";
+  // Anchored to the API's message prefixes for these keys only, so a message about another part of
+  // the spec that merely mentions a tool or a model (a later step's) is not claimed here.
+  if (/^(mcp_tools|tools)(\[\d+\])?[.:\s]/.test(message) || /^MCP server '[^']*'/.test(message)) return "tools";
+  if (/^(name|model|model_settings)(\.[a-z_]+)*[:\s]/.test(message) || /^Model [^\s]+ is not/.test(message)) return "identity";
+  return null;
+}

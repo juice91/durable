@@ -1,38 +1,57 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import Link from "next/link";
-import { EmptyState } from "@/components/shared/EmptyState";
+import React, { useCallback, useEffect, useState } from "react";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
-import { getWorkflowVersion, listWorkflows, type Workflow } from "@/lib/workflows";
+import { getWorkflowVersion, listWorkflows, type Workflow, type WorkflowSpec } from "@/lib/workflows";
 import { routes } from "@/lib/routes";
 import { PageHeader } from "@/components/frame/PageHeader";
+import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { navCrumb } from "@/lib/nav";
 
 interface Row extends Workflow {
   /** When the latest version was published (the API has no updated_at for a workflow). */
   updatedAt: string | null;
+  /** The latest published spec, once loaded (steps and description come from it, else the draft). */
+  latestSpec: WorkflowSpec | null;
 }
 
+/** The row's test id (kept from P0), through a `testId` binding so the test-id inventory sees it rendered. */
+function workflowRowTestId(id: string): string {
+  const testId = `workflow-row-${id}`;
+  return testId;
+}
+
+function shownSpec(row: Row): WorkflowSpec | null {
+  return row.latestSpec ?? row.draft_spec ?? null;
+}
+
+/**
+ * `/workflows` (SL.14): a DataList of Name, Description, Steps, Latest version and Updated. A row
+ * opens the workflow's Graph tab. Running and Waiting counts are not shown: no single existing call
+ * returns them (open question 3). Workflows are created through the API, so there is no create
+ * action.
+ */
 export default function WorkflowsPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     listWorkflows()
       .then(async (workflows) => {
         if (cancelled) return;
-        setRows(workflows.map((w) => ({ ...w, updatedAt: null })));
+        setRows(workflows.map((w) => ({ ...w, updatedAt: null, latestSpec: null })));
         const published = await Promise.all(workflows.map(async (w) => {
           if (w.latest_version == null) return null;
           try {
-            return (await getWorkflowVersion(w.id, w.latest_version)).created_at;
+            return await getWorkflowVersion(w.id, w.latest_version);
           } catch {
             return null;
           }
         }));
-        if (!cancelled) setRows(workflows.map((w, i) => ({ ...w, updatedAt: published[i] })));
+        if (!cancelled) setRows(workflows.map((w, i) => ({ ...w, updatedAt: published[i]?.created_at ?? null, latestSpec: published[i]?.spec ?? null })));
       })
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Failed to load workflows");
@@ -40,50 +59,72 @@ export default function WorkflowsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
+
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+
+  const columns: DataListColumn<Row>[] = [
+    { id: "name", header: "Name", sortable: true, sortValue: (row) => row.name.toLowerCase(), cell: (row) => row.name, className: "min-w-40" },
+    {
+      id: "description",
+      header: "Description",
+      cell: (row) => {
+        const description = shownSpec(row)?.description;
+        return description ? <span className="line-clamp-1 md:max-w-md text-muted-foreground">{description}</span> : <span className="text-muted-foreground">—</span>;
+      },
+    },
+    {
+      id: "steps",
+      header: "Steps",
+      align: "end",
+      sortable: true,
+      sortValue: (row) => shownSpec(row)?.steps.length ?? null,
+      cell: (row) => <span className="tabular-nums">{shownSpec(row)?.steps.length ?? "—"}</span>,
+    },
+    {
+      id: "version",
+      header: "Latest version",
+      sortable: true,
+      sortValue: (row) => row.latest_version ?? null,
+      cell: (row) => (row.latest_version != null ? `v${row.latest_version}` : <span className="text-muted-foreground">Draft only</span>),
+    },
+    {
+      id: "updated",
+      header: "Updated",
+      sortable: true,
+      sortValue: (row) => (row.updatedAt ? new Date(row.updatedAt).getTime() : null),
+      cell: (row) => <span className="whitespace-nowrap text-muted-foreground" title="When the latest version was published">{row.updatedAt ? formatDateTime(row.updatedAt) : "—"}</span>,
+    },
+  ];
 
   return (
     <>
       <PageHeader crumbs={[navCrumb("workflows", { current: true })]} />
-    <div className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-6">
-        <p className="mt-1 text-muted-foreground">Published workflow definitions: open one to see its execution graph, run it and follow its runs.</p>
+      <div className="flex min-w-0 flex-col gap-4 p-4">
+        <p className="text-label text-muted-foreground">Published workflow definitions: open one to see its execution graph, run it and follow its runs.</p>
+        <DataList<Row>
+          label="Workflows"
+          rows={rows ?? []}
+          columns={columns}
+          getRowId={(row) => row.id}
+          getRowHref={(row) => routes.workflow(row.id)}
+          getRowTestId={(row) => workflowRowTestId(row.id)}
+          searchPlaceholder="Search workflows"
+          filterRow={(row, query) => {
+            const q = query.toLowerCase();
+            return row.name.toLowerCase().includes(q) || (shownSpec(row)?.description ?? "").toLowerCase().includes(q);
+          }}
+          defaultSort={{ columnId: "name", direction: "asc" }}
+          loading={rows === null && !error}
+          error={error}
+          onRetry={retry}
+          empty={{
+            title: "No workflows yet",
+            description: "Create a workflow definition through the API (POST /api/v1/workflows) and publish a version to run it here.",
+          }}
+          testId="workflows-list"
+        />
       </div>
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
-      {!rows && !error ? <p className="text-muted-foreground">Loading workflows…</p> : null}
-      {rows && rows.length === 0 ? (
-        <EmptyState title="No workflows yet" description="Create a workflow definition through the API (POST /api/v1/workflows) and publish a version to run it here." />
-      ) : null}
-      {rows && rows.length > 0 ? (
-        <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="w-full text-left text-sm" aria-label="Workflows">
-            <thead className="border-b border-border text-xs uppercase text-muted-foreground">
-              <tr>
-                <th scope="col" className="px-4 py-3">Name</th>
-                <th scope="col" className="px-4 py-3">Latest version</th>
-                <th scope="col" className="px-4 py-3">Updated</th>
-                <th scope="col" className="px-4 py-3"><span className="sr-only">Open</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((w) => (
-                <tr key={w.id} data-testid={`workflow-row-${w.id}`} className="border-t border-border hover:bg-accent/40">
-                  <td className="px-4 py-3">
-                    <Link href={routes.workflow(w.id)} className="font-medium text-foreground underline-offset-4 hover:underline">{w.name}</Link>
-                    {w.draft_spec?.description ? <p className="line-clamp-1 text-xs text-muted-foreground">{w.draft_spec.description}</p> : null}
-                  </td>
-                  <td className="px-4 py-3">{w.latest_version != null ? `v${w.latest_version}` : <span className="text-muted-foreground">Draft only</span>}</td>
-                  <td className="px-4 py-3 text-muted-foreground" title="When the latest version was published">{w.updatedAt ? formatDateTime(w.updatedAt) : "—"}</td>
-                  <td className="px-4 py-3 text-right">
-                    <Link href={routes.workflow(w.id)} aria-label={`Open ${w.name}`} className="text-primary underline-offset-4 hover:underline">Open</Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-    </div>
     </>
   );
 }

@@ -41,6 +41,7 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "workflow-step-": "WorkflowGraph node per step id",
   "workflow-node-": "WorkflowRunView graph node per step id",
   "workflow-run-row-": "WorkflowRunHistory row per run id",
+  "workflow-timeline-row-": "TimelineDock row per step id (SL.14): workflow-timeline-row-<stepId>",
   "approval-": "ApprovalCard per step id: approval-, approval-prompt-, approval-error-, approval-deadline-<stepId>",
   "processors-": "ProcessorsEditor section per phase (input or output)",
   "field-error-": "Agent editor field errors keyed by the spec field path",

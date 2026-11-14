@@ -41,8 +41,15 @@ export const DropdownMenuItem = React.forwardRef<React.ElementRef<typeof MenuPri
 ) {
   return (
     <MenuPrimitive.Item ref={ref} className={cn(itemBase, destructive && "text-destructive-text", className)} {...props}>
-      {children}
-      {shortcut ? <Kbd className="ml-auto">{shortcut}</Kbd> : null}
+      {/* asChild (a link item) slots onto exactly one child, so no shortcut hint there. */}
+      {props.asChild ? (
+        children
+      ) : (
+        <>
+          {children}
+          {shortcut ? <Kbd className="ml-auto">{shortcut}</Kbd> : null}
+        </>
+      )}
     </MenuPrimitive.Item>
   );
 });

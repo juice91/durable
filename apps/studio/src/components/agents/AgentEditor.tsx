@@ -1,29 +1,27 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { listTools, type ToolDefinition } from "@/lib/tools";
-import type { AgentSpec, McpToolRef } from "@/lib/api";
-import { mcpToolKey, withMcpTools } from "@/lib/mcpServers";
-import { McpToolPicker } from "./McpToolPicker";
-import { ProcessorsEditor } from "./ProcessorsEditor";
-import { ContextFieldsEditor } from "./ContextFieldsEditor";
-import {
-  errorTarget,
-  fetchModels,
-  fetchProcessorCatalog,
-  placeholderErrors,
-  placeholders,
-  sectionsDiffer,
-  sectionsOf,
-  withClientIds,
-  withSpecSections,
-  type ContextField,
-  type EditableProcessor,
-  type ModelOption,
-  type ProcessorCatalog,
-} from "./specSections";
+"use client";
 
-function sameMcpTools(a: McpToolRef[], b: McpToolRef[] | undefined): boolean {
-  const other = b ?? [];
-  return a.length === other.length && a.every((ref) => other.some((item) => mcpToolKey(item) === mcpToolKey(ref)));
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AgentSpec } from "@/lib/api";
+import { Button } from "@/components/ui/Button";
+import { errorTarget, type StepStatus } from "./specSections";
+import { AgentStepper } from "./stepper/AgentStepper";
+import { checkExtraKeys, draftDiffers, draftFromSpec, draftToSpec, type EditorDraft } from "./stepper/editorDraft";
+import type { EditorLayout } from "./stepper/editorFit";
+import { EDITOR_STEPS, missingFields, stepForError } from "./stepper/registry";
+import type { EditorStepDefinition, StepProps, StepServices } from "./stepper/types";
+
+/** The stepped layout (SL.11): which step shows, and what goes around it. */
+export interface AgentEditorStepper {
+  activeStep: string;
+  onStepChange: (id: string) => void;
+  layout: EditorLayout;
+  /** Header actions after the submit button (Test draft, Publish). */
+  actions?: React.ReactNode;
+  notices?: React.ReactNode;
+  /** The versions column (edit mode). */
+  versions?: React.ReactNode;
+  /** The submit button's look: primary when it is the page's main action (Create agent). */
+  submitVariant?: "primary" | "secondary";
 }
 
 interface AgentEditorProps {
@@ -34,355 +32,184 @@ interface AgentEditorProps {
   /**
    * The last save or publish error from the API, if any. Messages that name a processor
    * (`input_processors[0]...`), the instructions (`instructions: ...`) or a processor model are
-   * shown next to that part of the form.
+   * shown next to that part of the form; in the stepper, the step holding it opens.
    */
   serverError?: string | null;
+  /** Show the steps one at a time in the stepper. Without it every step shows, in order, as one form. */
+  stepper?: AgentEditorStepper;
+  /** The steps (default: the registry's). */
+  steps?: readonly EditorStepDefinition[];
 }
 
-export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError }: AgentEditorProps) {
-  const [name, setName] = useState(initialData?.name || "");
-  const [instructions, setInstructions] = useState(initialData?.instructions || "");
-  const [provider, setProvider] = useState(initialData?.model.provider || "");
-  const [modelName, setModelName] = useState(initialData?.model.name || "");
-  const [selectedTools, setSelectedTools] = useState<string[]>(initialData?.tools || []);
-  const [mcpTools, setMcpTools] = useState<McpToolRef[]>(initialData?.mcp_tools || []);
-  const [temperature, setTemperature] = useState<string>(initialData?.model_settings?.temperature?.toString() || "");
-  const [maxTokens, setMaxTokens] = useState<string>(initialData?.model_settings?.max_tokens?.toString() || "");
-  const [inputProcessors, setInputProcessors] = useState<EditableProcessor[]>(() => withClientIds(sectionsOf(initialData).input_processors));
-  const [outputProcessors, setOutputProcessors] = useState<EditableProcessor[]>(() => withClientIds(sectionsOf(initialData).output_processors));
-  // A server error naming `<phase>_processors[i]` is pinned to that processor's clientId when it
-  // arrives, so it follows the processor through reordering and disappears when it is removed.
-  const [pinnedServerError, setPinnedServerError] = useState<{ phase: "input" | "output"; clientId: string; message: string } | null>(null);
-  const [contextFields, setContextFields] = useState<ContextField[]>(sectionsOf(initialData).context_fields);
-  const [catalog, setCatalog] = useState<ProcessorCatalog | null>(null);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [models, setModels] = useState<ModelOption[] | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const instructionsRef = useRef<HTMLTextAreaElement>(null);
+export const AGENT_EDITOR_FORM_ID = "agent-editor-form";
+
+/**
+ * The agent spec editor. It owns the form state (`EditorDraft`) and renders each registered step
+ * (`stepper/registry.ts`) with it. Every step stays mounted; under the stepper only the active one
+ * is shown, so a step's own state (loaded MCP tools, an open picker) survives switching steps.
+ */
+export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError = null, stepper, steps = EDITOR_STEPS }: AgentEditorProps) {
+  const [draft, setDraft] = useState<EditorDraft>(() => draftFromSpec(initialData));
   const [submitting, setSubmitting] = useState(false);
-  const [isDirty, setIsDirty] = useState(false);
-  const [tools, setTools] = useState<ToolDefinition[]>([]);
-  const [toolsError, setToolsError] = useState<string | null>(null);
+  const instructionsRef = useRef<HTMLTextAreaElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
+  const spec = useMemo(() => draftToSpec(draft, initialData), [draft, initialData]);
+  const dirty = useMemo(() => draftDiffers(draft, initialData), [draft, initialData]);
+
+  // The editor is the one source of the dirty state: reported on mount, whenever it changes, and
+  // again for every new stored spec (a save that returns while the user kept typing stays dirty).
   useEffect(() => {
-    listTools()
-      .then(setTools)
-      .catch((error: unknown) => setToolsError(error instanceof Error ? error.message : "Failed to load tools"));
+    onDirtyChange?.(dirty);
+  }, [dirty, initialData, onDirtyChange]);
+
+  const onChange = useCallback((patch: Partial<EditorDraft>) => setDraft((current) => ({ ...current, ...patch })), []);
+  const onSpecChange = useCallback(
+    (patch: Record<string, unknown>) => {
+      const allowed = checkExtraKeys(patch);
+      setDraft((current) => ({ ...current, extra: { ...current.extra, ...allowed } }));
+    },
+    [],
+  );
+
+  const insertPlaceholder = useCallback((fieldName: string) => {
+    const token = `{{context.${fieldName}}}`;
+    const element = instructionsRef.current;
+    setDraft((current) => {
+      const start = element?.selectionStart ?? current.instructions.length;
+      const end = element?.selectionEnd ?? current.instructions.length;
+      return { ...current, instructions: current.instructions.slice(0, start) + token + current.instructions.slice(end) };
+    });
   }, []);
+  const services = useMemo<StepServices>(() => ({ instructionsRef, insertPlaceholder }), [insertPlaceholder]);
 
+  const errors = useMemo(() => ({ serverError, target: serverError ? errorTarget(serverError) : null }), [serverError]);
+  const errorStep = stepForError(serverError, steps);
+
+  // A new save or publish error opens the step it belongs to.
+  const onStepChange = stepper?.onStepChange;
   useEffect(() => {
-    let cancelled = false;
-    fetchProcessorCatalog()
-      .then((value) => { if (!cancelled) setCatalog(value); })
-      .catch((error: unknown) => { if (!cancelled) setCatalogError(error instanceof Error ? error.message : "Failed to load processors"); });
-    fetchModels()
-      .then((value) => { if (!cancelled) setModels(value); })
-      .catch((error: unknown) => { if (!cancelled) setModelsError(error instanceof Error ? error.message : "Failed to load models"); });
-    return () => { cancelled = true; };
-  }, []);
-
-  const toggleTool = (tool: string) => {
-    setSelectedTools((prev) =>
-      prev.includes(tool) ? prev.filter((t) => t !== tool) : [...prev, tool]
-    );
-  };
-
-  const computeDirty = useCallback(() => (
-    name !== initialData?.name ||
-    instructions !== initialData?.instructions ||
-    provider !== initialData?.model.provider ||
-    modelName !== initialData?.model.name ||
-    selectedTools.length !== initialData?.tools.length ||
-    selectedTools.some((t) => !initialData?.tools.includes(t)) ||
-    !sameMcpTools(mcpTools, initialData?.mcp_tools) ||
-    temperature !== (initialData?.model_settings?.temperature?.toString() || "") ||
-    maxTokens !== (initialData?.model_settings?.max_tokens?.toString() || "") ||
-    sectionsDiffer(
-      { input_processors: inputProcessors, output_processors: outputProcessors, context_fields: contextFields },
-      sectionsOf(initialData),
-    )
-  ), [name, instructions, provider, modelName, selectedTools, mcpTools, temperature, maxTokens, inputProcessors, outputProcessors, contextFields, initialData]);
-
-  const updateDirtyState = useCallback(() => {
-    const isDirty = computeDirty();
-    setIsDirty(isDirty);
-    onDirtyChange?.(isDirty);
-  }, [computeDirty, onDirtyChange]);
-
-  // Track initial data changes
-  const prevDataRef = { current: initialData };
-  if (initialData !== prevDataRef.current) {
-    setName(initialData?.name || "");
-    setInstructions(initialData?.instructions || "");
-    setProvider(initialData?.model.provider || "");
-    setModelName(initialData?.model.name || "");
-    setSelectedTools(initialData?.tools || []);
-    setMcpTools(initialData?.mcp_tools || []);
-    setTemperature(initialData?.model_settings?.temperature?.toString() || "");
-    setMaxTokens(initialData?.model_settings?.max_tokens?.toString() || "");
-    setInputProcessors(withClientIds(sectionsOf(initialData).input_processors));
-    setOutputProcessors(withClientIds(sectionsOf(initialData).output_processors));
-    setContextFields(sectionsOf(initialData).context_fields);
-    prevDataRef.current = initialData;
-  }
-
-  // Report the dirty state on mount and after every change
-  useEffect(() => {
-    updateDirtyState();
-  }, [updateDirtyState]);
-
-  const usedPlaceholders = placeholders(instructions);
-  const instructionProblems = placeholderErrors(instructions, contextFields);
-  const target = serverError ? errorTarget(serverError) : null;
-
-  // Pin a processor error to the processor it named at the moment the error arrived. Only a new
-  // serverError re-pins; edits to the lists afterwards must not move the message.
-  useEffect(() => {
-    const t = serverError ? errorTarget(serverError) : null;
-    if (!serverError || t?.kind !== "processor") {
-      setPinnedServerError(null);
-      return;
-    }
-    const list = t.phase === "input" ? inputProcessors : outputProcessors;
-    const processor = list[t.index];
-    setPinnedServerError(processor ? { phase: t.phase, clientId: processor.clientId, message: serverError } : null);
+    if (errorStep && onStepChange) onStepChange(errorStep);
+    // Only when the error changes, not when the step does.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverError]);
 
-  const processorErrors = (phase: "input" | "output"): Record<string, string> =>
-    pinnedServerError && pinnedServerError.phase === phase ? { [pinnedServerError.clientId]: pinnedServerError.message } : {};
-
-  const insertPlaceholder = (fieldName: string) => {
-    const token = `{{context.${fieldName}}}`;
-    const element = instructionsRef.current;
-    const start = element?.selectionStart ?? instructions.length;
-    const end = element?.selectionEnd ?? instructions.length;
-    setInstructions(instructions.slice(0, start) + token + instructions.slice(end));
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (submitting) return;
-
-    // mcp_tools, the processor lists and context_fields are left out entirely when empty, so the
-    // spec hash stays stable for agents that do not use them.
-    const spec: AgentSpec = withSpecSections(withMcpTools({
-      spec_version: 1,
-      name,
-      instructions,
-      model: {
-        provider,
-        name: modelName,
-      },
-      tools: selectedTools,
-      model_settings: {
-        temperature: temperature ? parseFloat(temperature) : null,
-        max_tokens: maxTokens ? parseInt(maxTokens, 10) : null,
-      },
-    }, mcpTools), { input_processors: inputProcessors, output_processors: outputProcessors, context_fields: contextFields });
-
+    if (stepper) {
+      // Hidden steps' inputs cannot show the browser's own message: open the step first.
+      const missing = missingFields(draft, spec, steps)[0];
+      if (missing) {
+        if (missing.step !== stepper.activeStep) stepper.onStepChange(missing.step);
+        setTimeout(() => {
+          const element = document.getElementById(missing.fieldId);
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+            element.setCustomValidity(missing.message ?? "");
+            element.focus();
+            element.reportValidity();
+            element.setCustomValidity("");
+          }
+        }, 0);
+        return;
+      }
+    }
     setSubmitting(true);
     try {
-      await onSubmit(spec);
+      await onSubmit(draftToSpec(draft, initialData));
     } finally {
       setSubmitting(false);
     }
   };
 
-  return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <div>
-        <label htmlFor="name" className="block text-sm font-medium text-card-foreground mb-1">
-          Name
-        </label>
-        <input
-          id="name"
-          type="text"
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value);
-            updateDirtyState();
+  // A step change the user started (nav, select, Previous / Next) moves focus to the new step's
+  // heading; one opened for them (an error, a missing field) does not.
+  const userStepChange = useRef(false);
+  const headingRefs = useRef<Record<string, HTMLHeadingElement | null>>({});
+  const activeStep = stepper?.activeStep;
+  useEffect(() => {
+    if (!userStepChange.current || !activeStep) return;
+    userStepChange.current = false;
+    const heading = headingRefs.current[activeStep];
+    heading?.focus();
+    heading?.scrollIntoView?.({ block: "start" });
+  }, [activeStep]);
+  const onUserStepChange = useCallback(
+    (id: string) => {
+      userStepChange.current = true;
+      onStepChange?.(id);
+    },
+    [onStepChange],
+  );
+
+  // An error a step owns but places nowhere itself (no `errorTarget`: an MCP server, the model, a
+  // later step's key) is shown at the top of that step.
+  const stepAlert = serverError && errorStep && !errors.target ? serverError : null;
+
+  const stepProps: StepProps = { draft, spec, onChange, onSpecChange, errors, services };
+  const bodies = steps.map((step) => {
+    const shown = !stepper || step.id === stepper.activeStep;
+    const titleId = `editor-step-${step.id}-title`;
+    return (
+      <section key={step.id} aria-labelledby={titleId} hidden={!shown} data-step={step.id} className="min-w-0 space-y-4">
+        <h2
+          id={titleId}
+          ref={(node) => {
+            headingRefs.current[step.id] = node;
           }}
-          className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-          required
-        />
-      </div>
-
-      <div>
-        <label htmlFor="instructions" className="block text-sm font-medium text-card-foreground mb-1">
-          Instructions
-        </label>
-        <textarea
-          id="instructions"
-          ref={instructionsRef}
-          aria-invalid={instructionProblems.length > 0}
-          aria-describedby="placeholder-hints instructions-problems"
-          value={instructions}
-          onChange={(e) => {
-            setInstructions(e.target.value);
-            updateDirtyState();
-          }}
-          rows={6}
-          className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-          required
-        />
-        <p id="placeholder-hints" data-testid="placeholder-hints" className="mt-1 text-xs text-muted-foreground">
-          {contextFields.length > 0 ? (
-            <>
-              Context placeholders:{" "}
-              {contextFields.map((field, i) => (
-                <React.Fragment key={`${field.name}-${i}`}>
-                  {i > 0 ? ", " : null}
-                  <code className="font-mono">{`{{context.${field.name}}}`}</code>
-                </React.Fragment>
-              ))}
-            </>
-          ) : (
-            <>Add request context fields below to use <code className="font-mono">{"{{context.<name>}}"}</code> placeholders.</>
-          )}
-        </p>
-        {/* Polite and persistent: announced when the problems change, not on every keystroke. */}
-        <div id="instructions-problems" aria-live="polite">
-          {instructionProblems.map((problem) => (
-            <p key={problem} data-testid="placeholder-error" className="mt-1 text-xs text-destructive-text">{problem}</p>
-          ))}
-        </div>
-        {target?.kind === "instructions" && serverError && !instructionProblems.some((p) => serverError.endsWith(p)) ? (
-          <p role="alert" data-testid="instructions-server-error" className="mt-1 text-xs text-destructive-text">{serverError}</p>
-        ) : null}
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label htmlFor="provider" className="block text-sm font-medium text-card-foreground mb-1">
-            Model provider
-          </label>
-          <input
-            id="provider"
-            type="text"
-            value={provider}
-            onChange={(e) => {
-              setProvider(e.target.value);
-              updateDirtyState();
-            }}
-            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-            required
-          />
-        </div>
-        <div>
-          <label htmlFor="modelName" className="block text-sm font-medium text-card-foreground mb-1">
-            Model name
-          </label>
-          <input
-            id="modelName"
-            type="text"
-            value={modelName}
-            onChange={(e) => {
-              setModelName(e.target.value);
-              updateDirtyState();
-            }}
-            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-            required
-          />
-        </div>
-      </div>
-
-      <div>
-        <span className="block text-sm font-medium text-card-foreground mb-2">
-          Tools
-        </span>
-        <div className="flex flex-wrap gap-2">
-          {tools.map((tool) => (
-            <label key={tool.id} className={`inline-flex items-center px-3 py-2 border border-border rounded-md bg-card ${tool.allowed ? "hover:bg-accent cursor-pointer" : "cursor-not-allowed opacity-60"}`}>
-              <input
-                type="checkbox"
-                aria-label={`${tool.title} (${tool.id})`}
-                className="form-checkbox h-4 w-4 text-accent-foreground focus:ring-accent-foreground border-border rounded"
-                checked={selectedTools.includes(tool.id)}
-                disabled={!tool.allowed}
-                onChange={() => {
-                  toggleTool(tool.id);
-                  updateDirtyState();
-                }}
-              />
-              <span className="ml-2 text-sm text-card-foreground">{tool.title} ({tool.id})</span>
-              {!tool.allowed ? <span className="ml-2 text-xs text-muted-foreground">Disabled by platform policy</span> : null}
-            </label>
-          ))}
-        </div>
-        {toolsError ? <p role="alert" className="mt-2 text-xs text-destructive-text">{toolsError}</p> : null}
-      </div>
-
-      <McpToolPicker value={mcpTools} onChange={setMcpTools} />
-
-      <ProcessorsEditor
-        inputProcessors={inputProcessors}
-        outputProcessors={outputProcessors}
-        onInputChange={setInputProcessors}
-        onOutputChange={setOutputProcessors}
-        catalog={catalog}
-        catalogError={catalogError}
-        models={models}
-        modelsError={modelsError}
-        sectionError={target?.kind === "processors" ? serverError : null}
-        inputErrors={processorErrors("input")}
-        outputErrors={processorErrors("output")}
-      />
-
-      <ContextFieldsEditor
-        value={contextFields}
-        onChange={setContextFields}
-        usedNames={usedPlaceholders}
-        onInsertPlaceholder={insertPlaceholder}
-        sectionError={target?.kind === "context_fields" ? serverError : null}
-      />
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label htmlFor="temperature" className="block text-sm font-medium text-card-foreground mb-1">
-            Temperature (0–2)
-          </label>
-          <input
-            id="temperature"
-            type="number"
-            min={0}
-            max={2}
-            step={0.1}
-            value={temperature}
-            onChange={(e) => {
-              setTemperature(e.target.value);
-              updateDirtyState();
-            }}
-            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-          />
-        </div>
-        <div>
-          <label htmlFor="maxTokens" className="block text-sm font-medium text-card-foreground mb-1">
-            Max tokens (optional)
-          </label>
-          <input
-            id="maxTokens"
-            type="number"
-            min={1}
-            value={maxTokens}
-            onChange={(e) => {
-              setMaxTokens(e.target.value);
-              updateDirtyState();
-            }}
-            className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-accent-foreground bg-card text-card-foreground"
-          />
-        </div>
-      </div>
-
-      <div className="pt-4">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="w-full px-4 py-2 bg-accent text-accent-foreground rounded-md hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent-foreground focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          tabIndex={-1}
+          className="rounded-sm text-title font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          {submitting ? "Saving..." : submitLabel}
-        </button>
-      </div>
+          {step.label}
+        </h2>
+        {stepAlert && errorStep === step.id ? (
+          <div role="alert" data-testid="agent-save-error" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-label text-destructive-text">
+            {stepAlert}
+          </div>
+        ) : null}
+        <step.Component {...stepProps} />
+      </section>
+    );
+  });
+
+  const submitButton = (
+    <Button type="submit" disabled={submitting} variant={stepper ? (stepper.submitVariant ?? "secondary") : "primary"} size={stepper ? "sm" : "lg"} className={stepper ? undefined : "w-full"}>
+      {submitting ? "Saving..." : submitLabel}
+    </Button>
+  );
+
+  if (!stepper) {
+    return (
+      <form ref={formRef} id={AGENT_EDITOR_FORM_ID} onSubmit={handleSubmit} className="min-w-0 space-y-8">
+        {bodies}
+        <div className="pt-4">{submitButton}</div>
+      </form>
+    );
+  }
+
+  const statuses: Record<string, StepStatus> = {};
+  for (const step of steps) statuses[step.id] = step.status(spec);
+
+  return (
+    <form ref={formRef} id={AGENT_EDITOR_FORM_ID} onSubmit={handleSubmit} noValidate className="min-w-0">
+      <AgentStepper
+        steps={steps}
+        statuses={statuses}
+        errorSteps={errorStep ? [errorStep] : []}
+        activeStep={stepper.activeStep}
+        onStepChange={onUserStepChange}
+        layout={stepper.layout}
+        actions={
+          <>
+            {submitButton}
+            {stepper.actions}
+          </>
+        }
+        notices={stepper.notices}
+        versions={stepper.versions}
+      >
+        {bodies}
+      </AgentStepper>
     </form>
   );
 }

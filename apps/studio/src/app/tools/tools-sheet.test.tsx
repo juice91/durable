@@ -8,7 +8,7 @@ import { startToolRun } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 import { routes } from "@/lib/routes";
-import { toolsNavigation } from "@/components/tools/toolsTesting";
+import { findToolSheet, toolsNavigation } from "@/components/tools/toolsTesting";
 import { expectNoAxeViolations } from "@/test/a11y";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
@@ -98,7 +98,7 @@ describe("Tools page Sheet", () => {
     await screen.findByText("Create ticket");
     fireEvent.click(within(row("Create ticket")).getByRole("button"));
     expect(toolsNavigation.url()).toBe(routes.tool("tickets.create"));
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     expect(within(sheet).getByRole("heading", { name: "Create ticket" })).toBeInTheDocument();
     expect(within(sheet).getByTestId("tool-tab-overview")).toHaveAttribute("data-state", "active");
     expect(within(sheet).getByTestId("tool-input-schema")).toHaveTextContent('"subject"');
@@ -115,7 +115,7 @@ describe("Tools page Sheet", () => {
   it("deep links to the Run tab, keeps the input across tab switches, and reopens after a reload", async () => {
     toolsNavigation.reset(routes.tool("tickets.create", { tab: "run" }));
     const first = render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     expect(within(sheet).getByTestId("tool-tab-run")).toHaveAttribute("data-state", "active");
     fireEvent.change(within(sheet).getByLabelText(/Subject \*/), { target: { value: "Printer down" } });
 
@@ -128,7 +128,7 @@ describe("Tools page Sheet", () => {
 
     first.unmount();
     render(<ToolsPage />);
-    const reopened = await screen.findByTestId("tool-sheet");
+    const reopened = await findToolSheet();
     expect(within(reopened).getByRole("heading", { name: "Create ticket" })).toBeInTheDocument();
     expect(within(reopened).getByTestId("tool-tab-run")).toHaveAttribute("data-state", "active");
   });
@@ -146,10 +146,13 @@ describe("Tools page Sheet", () => {
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     fireEvent.click(within(sheet).getByRole("button", { name: "Run" }));
     await within(sheet).findByTestId("tool-run-result");
-    act(() => handlers.onEnd?.("run_completed"));
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-9", expect.any(Object)));
+    await act(async () => { handlers.onEnd?.("run_completed"); });
     expect(await within(sheet).findByTestId("tool-run-output")).toHaveTextContent('"now": "12:00"');
     expect(within(sheet).getByTestId("tool-run-result")).toHaveAttribute("data-status", "completed");
     expect(within(sheet).getByTestId("tool-run-duration")).toHaveTextContent("1.25 s");
@@ -161,7 +164,7 @@ describe("Tools page Sheet", () => {
   it("an MCP tool opens on Overview only, with &server= and no Run tab, even when the link asks for it", async () => {
     toolsNavigation.reset(`${routes.tool("search", { server: "docs" })}&tab=run`);
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     expect(await within(sheet).findByRole("heading", { name: "search" })).toBeInTheDocument();
     expect(within(sheet).queryByTestId("tool-tab-run")).toBeNull();
     expect(within(sheet).getByTestId("tool-tab-overview")).toHaveAttribute("data-state", "active");
@@ -172,7 +175,7 @@ describe("Tools page Sheet", () => {
   it("switching from a built-in tool's Run tab to an MCP tool drops the tab", async () => {
     toolsNavigation.reset(routes.tool("clock.now", { tab: "run" }));
     render(<ToolsPage />);
-    await screen.findByTestId("tool-sheet");
+    await findToolSheet();
     await waitFor(() => expect(screen.getAllByTestId("tool-row")).toHaveLength(3));
     fireEvent.click(within(row("search")).getByRole("button", { hidden: true }));
     expect(toolsNavigation.url()).toBe(routes.tool("search", { server: "docs" }));
@@ -182,7 +185,7 @@ describe("Tools page Sheet", () => {
     vi.mocked(listTools).mockRejectedValueOnce(new Error("Tools API is down"));
     toolsNavigation.reset(routes.tool("clock.now"));
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     const failure = await within(sheet).findByTestId("tool-load-error");
     expect(failure).toHaveTextContent("Couldn't load tools");
     expect(failure).toHaveTextContent("Tools API is down");
@@ -196,7 +199,7 @@ describe("Tools page Sheet", () => {
     vi.mocked(api.agents.list).mockRejectedValueOnce(new Error("down"));
     toolsNavigation.reset(routes.tool("search", { server: "docs" }));
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     const failure = await within(sheet).findByTestId("tool-load-error");
     expect(failure).toHaveTextContent("Couldn't load agents");
     expect(within(sheet).queryByTestId("tool-not-found")).toBeNull();
@@ -207,14 +210,14 @@ describe("Tools page Sheet", () => {
   it("says when ?tool= names no tool", async () => {
     toolsNavigation.reset(routes.tool("gone.tool"));
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     expect(await within(sheet).findByTestId("tool-not-found")).toHaveTextContent("gone.tool");
   });
 
   it("the Sheet is full width below 768 px (so below 640 px) and 480 px from md", async () => {
     toolsNavigation.reset(routes.tool("clock.now"));
     render(<ToolsPage />);
-    const sheet = await screen.findByTestId("tool-sheet");
+    const sheet = await findToolSheet();
     expect(sheet.className).toMatch(/(^|\s)w-full(\s|$)/);
     expect(sheet.className).toContain("md:w-[480px]");
   });
@@ -224,7 +227,7 @@ describe("Tools page Sheet", () => {
     await waitFor(() => expect(screen.getAllByTestId("tool-row")).toHaveLength(3));
     await expectNoAxeViolations(container);
     fireEvent.click(within(row("Create ticket")).getByRole("button"));
-    await expectNoAxeViolations(await screen.findByTestId("tool-sheet"));
+    await expectNoAxeViolations(await findToolSheet());
     fireEvent.mouseDown(within(screen.getByTestId("tool-sheet")).getByTestId("tool-tab-run"));
     await screen.findByLabelText(/Subject \*/);
     await expectNoAxeViolations(screen.getByTestId("tool-sheet"));

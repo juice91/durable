@@ -23,10 +23,34 @@ export interface AgentChatRouteOptions {
 }
 
 export interface AgentEditorRouteOptions {
-  /** The stepped editor's step (SL.11). */
+  /** The stepped editor's step id (SL.11: `identity`, `instructions`, `tools`, `request-context`, `processors`). */
   step?: string | null;
-  /** A version compare, `a..b` (SL.11). */
+  /** A version compare, `a..b` (SL.11): build it with `compareParam`. */
   compare?: string | null;
+}
+
+/** One side of a version compare in a URL: a published version number or "draft". */
+export type CompareRouteRef = number | "draft";
+
+/** The `?compare=` value for `base` against `target`: `3..draft`, `1..3`. */
+export function compareParam(base: CompareRouteRef, target: CompareRouteRef): string {
+  return `${base}..${target}`;
+}
+
+function parseCompareRef(value: string): CompareRouteRef | null {
+  if (value === "draft") return "draft";
+  if (!/^[1-9]\d{0,8}$/.test(value)) return null;
+  return Number(value);
+}
+
+/** Parses `?compare=a..b` (each side a version number or "draft", the two different); null when malformed. */
+export function parseCompareParam(value: string | null | undefined): { base: CompareRouteRef; target: CompareRouteRef } | null {
+  const match = /^([^.]+)\.\.([^.]+)$/.exec(value ?? "");
+  if (!match) return null;
+  const base = parseCompareRef(match[1]);
+  const target = parseCompareRef(match[2]);
+  if (base === null || target === null || base === target) return null;
+  return { base, target };
 }
 
 export interface RequestContextRouteOptions {
