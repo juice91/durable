@@ -74,7 +74,8 @@ def unchanged(world):
 def _assert_no_leak(w: World, r, method: str, url: str) -> None:
     body = r.text
     a = w.a
-    for marker in ("chunk", "faq", "upload", "note-c1", "note-r1", "obs-c1", "recall-c1", "retrieved-c1"):
+    turn_text = [f"{kind}-{c}" for kind in ("input", "output") for c in ("c1", "c2", "c3")]
+    for marker in ("chunk", "faq", "upload", "note-c1", "note-r1", "obs-c1", "recall-c1", "retrieved-c1", *turn_text):
         assert a.marker(marker) not in body, (method, url, marker)
     for ident in (a.c1, a.c2, a.c3, a.conv_agent, a.res_agent, a.kb["id"], a.ready_doc["id"]):
         assert ident not in body, (method, url, "echoed an id of A")

@@ -173,6 +173,9 @@ def test_forget_resource_tenant_wide_keeps_conversations_by_default(w):
                a=t.c1, b=t.c2) == 2
     assert w.n("SELECT count(*) FROM working_memories WHERE tenant_id = :t AND conversation_id = :c", c=t.c1) == 1
     assert w.n("SELECT count(*) FROM message_embeddings WHERE tenant_id = :t AND resource_id = 'r2'") == 2
+    # Kept: c2's transcript, with its retrieved text.
+    assert w.n("SELECT count(*) FROM runs x WHERE tenant_id = :t AND x::text LIKE :p",
+               p=f"%{t.marker('retrieved-c2')}%") == 1
     w.assert_rows_unchanged_except(t.marker("note-r1"), t.c1, t.c2)
     w.assert_other_tenant_untouched()
 

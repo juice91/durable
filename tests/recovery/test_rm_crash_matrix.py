@@ -260,6 +260,17 @@ def test_k1_crash_during_document_ingest(rm: Harness, report: Callable[[str], No
     assert h.run_row(run_id)["status"] == "running"
     before = h.events(run_id)
     usage_before = usage_rows(h, run_id)
+    # Which batches had committed at the kill (each batch's usage row rides on its commit).
+    committed = {
+        "kb_chunk": set(),
+        "kb_batch_before_commit": {"embed:batch:0"},
+        "kb_batch_after_commit": {"embed:batch:0", "embed:batch:1"},
+        "kb_finalize": {e.event_key for e in before if e.event_key.startswith("embed:batch:")},
+    }[crash_at]
+    assert set(usage_before) == committed, sorted(usage_before)
+    if crash_at == "kb_finalize":
+        # Every batch committed before the switch: 0..k-1, and >= 10 chunks make >= 3 batches.
+        assert committed == {f"embed:batch:{i}" for i in range(len(committed))} and len(committed) >= 3
 
     # At the kill: version 1 is the searchable one (fully embedded) unless the switch committed.
     doc = document(h, doc_id)
@@ -414,6 +425,7 @@ def test_o1_crash_in_the_post_turn_observation(rm: Harness, report: Callable[[st
     run1 = str(uuid.uuid4())
     assert h.post_turn(conv, run1, "Fact 1: " + "word " * 1000).status_code == 201
     h.wait_completed(run1)
+    wait_for(lambda: h.workflows(run1) and h.workflows(run1)[0][0] == "SUCCESS", timeout=60, what="turn 1 workflow")
     healthy.stop()
     assert h.sql("SELECT count(*) FROM memory_observations WHERE tenant_id = :t", t=h.tenant)[0][0] == 0
 
@@ -466,6 +478,14 @@ def test_s1_crash_in_semantic_recall(rm: Harness, report: Callable[[str], None],
     assert h.run_row(run_b)["status"] == ("running" if crash_at == "recall_embedding" else "completed")
     before = h.events(run_b)
     usage_before = usage_rows(h, run_b)
+    indexed_at_kill = h.sql(
+        "SELECT count(*) FROM message_embeddings WHERE tenant_id = :t AND conversation_id = :c", t=h.tenant, c=conv_b
+    )[0][0]
+    if crash_at == "after_memory_index":  # the index transaction committed; its checkpoint did not
+        assert before[-1].event_key == "embed:index:1", [e.event_key for e in before]
+        assert indexed_at_kill == 2
+    else:
+        assert indexed_at_kill == 0
 
     recover(h, run_b)
     run = h.run_row(run_b)

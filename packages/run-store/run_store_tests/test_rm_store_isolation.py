@@ -265,12 +265,69 @@ def _cross_tenant_calls(a: World, b: World, ks: KnowledgeStore, ms: MemoryStore)
         "delete_observations": lambda: ms.delete_observations(B, a.conv_id),
         "delete_working_memory_conversation": lambda: ms.delete_working_memory(B, AGENT, "conversation", a.conv_id),
         "delete_conversation": lambda: ms.delete_conversation(B, a.conv_id),
+        # KnowledgeStore: the ingest and reindex internals, the API's upload, the estimate, the plan
+        "put_document": lambda: ks.put_document(B, a.kb_id, document_key="d1", title="pwned", content="pwned",
+                                                mime_type="text/plain", run_id=str(uuid.uuid4())),
+        "attach_ingest_run": lambda: ks.attach_ingest_run(B, a.doc_id, str(uuid.uuid4()), doc_version=a.doc_version),
+        "embedding_progress": lambda: ks.embedding_progress(B, a.kb_id, a.generation, document_id=a.doc_id,
+                                                            doc_version=a.doc_version),
+        "fill_cached_embeddings": lambda: ks.fill_cached_embeddings(B, a.kb_id, a.generation, _chunk_ids(ks, a)),
+        "finalize_reindex": lambda: ks.finalize_reindex(B, a.kb_id, a.generation + 1, embedding_model="test:hash768"),
+        "estimate_reindex": lambda: ks.estimate_reindex(B, a.kb_id),
+        "explain_search": lambda: ks.explain_search(B, [a.kb_id], vec(1), embedding_model=MODEL, top_k=10),
+        # MemoryStore: lists, usage, the recall plan
+        "list_working_memories": lambda: ms.list_working_memories(B, AGENT),
+        "record_usage": lambda: ms.record_usage(B, a.run1, {
+            "request_key": "embed:pwned", "model_id": MODEL, "provider_model_name": "hash", "operation": "embedding",
+            "input_tokens": 1, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "usage_measured": True, "cost_usd": None, "price_source": None}),
+        "explain_search_recall": lambda: ms.explain_search_recall(B, AGENT, a.conv_id, vec(2), embedding_model=MODEL),
+        # Last: it deletes B's own resource memory (B owns a resource of the same name).
+        "forget_resource": lambda: ms.forget_resource(B, RESOURCE, include_conversations=True),
     }
+
+
+def _chunk_ids(ks: KnowledgeStore, a: World) -> list[str]:
+    """Tenant A's real chunk ids (B passes them as if they were its own)."""
+    with ks.engine.connect() as conn:
+        return [str(r[0]) for r in conn.execute(text("SELECT id FROM kb_chunks WHERE tenant_id = :t"), {"t": a.tenant})]
+
+
+# Public store methods not called with the other tenant's ids above, each with the reason.
+EXEMPT_FROM_CROSS_TENANT = {
+    "create_knowledge_base": "takes no foreign id; it creates in the caller's tenant (API test_rm_cross_tenant: "
+                             "the other tenant's name touches only the caller's tenant)",
+    "list_knowledge_bases": "takes only the caller's tenant (test_b_reads_of_its_own_ids_return_only_b_data)",
+    "retention_tenants": "the operator-only retention sweep enumerates tenants by design (no tenant argument)",
+    "message_embedding_tenants_before": "the operator-only retention sweep enumerates tenants by design",
+    "delete_retention_batch": "tenant and cutoff only, no foreign id (test_retention_batches_are_per_tenant)",
+    "delete_message_embeddings_before": "tenant and cutoff only, no foreign id (test_retention_batches_are_per_tenant)",
+}
 
 
 # Writes that B may legitimately perform in B's OWN namespace with A's id as a key string: they must
 # not touch A, but may create a row of B's (asserted separately below).
-WRITES_INTO_B = {"update_working_memory_conversation"}
+WRITES_INTO_B = {"update_working_memory_conversation", "forget_resource"}
+# Results that are B's own data or a query plan by design: they must not contain A's marker.
+RESULT_IS_BS_OWN = {"list_working_memories", "explain_search", "explain_search_recall"}
+
+
+def test_the_cross_tenant_calls_cover_every_public_store_method(engine, worlds):
+    """A new store method must be added to _cross_tenant_calls or exempted with a reason."""
+    import inspect
+    import re
+
+    a, b = worlds
+    source = inspect.getsource(_cross_tenant_calls)
+    called = set(re.findall(r"\b(?:ks|ms)\.([a-z_]+)\(", source))
+    public = {
+        name for cls in (KnowledgeStore, MemoryStore)
+        for name, member in inspect.getmembers(cls, callable) if not name.startswith("_")
+    }
+    assert called <= public, called - public
+    assert set(EXEMPT_FROM_CROSS_TENANT) <= public, set(EXEMPT_FROM_CROSS_TENANT) - public
+    assert called.isdisjoint(EXEMPT_FROM_CROSS_TENANT), called & set(EXEMPT_FROM_CROSS_TENANT)
+    assert public - set(EXEMPT_FROM_CROSS_TENANT) == called, sorted(public - set(EXEMPT_FROM_CROSS_TENANT) - called)
 
 
 def test_every_store_method_called_by_tenant_b_with_tenant_a_ids_changes_and_returns_nothing(engine, worlds):
@@ -290,6 +347,11 @@ def test_every_store_method_called_by_tenant_b_with_tenant_a_ids_changes_and_ret
         after = snapshot(engine, a.tenant, b.tenant)
         assert after[a.tenant] == before[a.tenant], f"{name}: tenant A's rows changed"
         if name in WRITES_INTO_B:
+            assert a.marker not in repr(_plain(result)), name
+            continue
+        if name in RESULT_IS_BS_OWN:
+            assert a.marker not in repr(_plain(result)) and a.kb_id not in repr(_plain(result)), name
+            assert after[b.tenant] == before[b.tenant], f"{name}: tenant B's rows changed"
             continue
         assert after[b.tenant] == before[b.tenant], f"{name}: tenant B's rows changed"
         if a.marker in repr(_plain(result)):
