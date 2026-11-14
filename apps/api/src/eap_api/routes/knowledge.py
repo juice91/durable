@@ -23,7 +23,8 @@ answers 409 with the agents (`draft: true` for a draft-only reference), unless `
 have no fixed order against an in-flight ingest (the RM.4 review).
 
 The reindex dry run prices its token estimate from the operator price override file
-(EAP_MODEL_PRICES_FILE, the file the worker prices `test:*` and `litellm:*` from). Other providers
+(EAP_MODEL_PRICES_FILE, the file the worker prices `test:*` and `litellm:*` from), through the
+worker's own loader and arithmetic (eap_pricing). Other providers
 are priced by genai-prices in the worker, which the API may not import: their estimate has tokens
 and a `cost_note` instead of a cost.
 """
@@ -41,8 +42,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from decimal import Decimal
 from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
@@ -78,6 +78,18 @@ from eap_api.schemas import (
 )
 from eap_knowledge import ExtractionFailed, UnsupportedMimeType, extract
 from eap_observability import current_trace_context, log_failure
+from eap_pricing import (
+    COST_QUANTUM,
+    OVERRIDE_ONLY_PROVIDERS,
+    PRICES_FILE_ENV,
+    SOURCE_OVERRIDE,
+    InvalidPriceFile,
+    Usage,
+    format_cost,
+    load_overrides,
+    override_cost,
+    override_period,
+)
 from eap_run_store import ENQUEUE_FAILED_ERROR, TERMINAL_RUN_STATUSES, RunIdConflict, RunStore
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
 from eap_run_store.knowledge import (
@@ -99,12 +111,6 @@ KB_MAX_DOCUMENT_BYTES_ENV = "EAP_KB_MAX_DOCUMENT_BYTES"
 DEFAULT_KB_MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 KB_MAX_INGEST_TOKENS_ENV = "EAP_KB_MAX_INGEST_TOKENS"
 DEFAULT_KB_MAX_INGEST_TOKENS = 2_000_000
-PRICES_FILE_ENV = "EAP_MODEL_PRICES_FILE"
-# apps/api/src/eap_api/routes/knowledge.py -> the repository root (as the worker's pricing.py).
-REPO_ROOT = Path(__file__).resolve().parents[5]
-DEFAULT_PRICES_FILE = REPO_ROOT / "config" / "model-prices.json"
-# Providers the worker prices from the override file only (eap_worker.pricing.OVERRIDE_ONLY_PROVIDERS).
-OVERRIDE_ONLY_PROVIDERS = frozenset({"test", "litellm"})
 DEADLOCK_SQLSTATE = "40P01"
 
 KB_NOT_FOUND = "Knowledge base not found"
@@ -277,7 +283,7 @@ def ingest_totals(store: KnowledgeStore, tenant_id: str, kb_id: str) -> dict[str
         ).mappings().one()
     cost = row["cost"]
     if cost is not None:
-        cost = format(Decimal(cost).quantize(Decimal("0.0000000001")), "f")
+        cost = format_cost(Decimal(cost).quantize(COST_QUANTUM))
     return {"ingest_requests": int(row["requests"]), "ingest_tokens": int(row["tokens"]), "ingest_cost_usd": cost}
 
 
@@ -554,48 +560,23 @@ def referencing_agents(store: KnowledgeStore, tenant_id: str, kb_id: str) -> lis
 # ------------------------------------------------------------------------------- price estimate
 
 
-def _prices_file() -> tuple[Path, bool]:
-    configured = os.environ.get(PRICES_FILE_ENV)
-    if not configured:
-        return DEFAULT_PRICES_FILE, False
-    path = Path(configured).expanduser()
-    return (path if path.is_absolute() else REPO_ROOT / path), True
-
-
 def estimate_embedding_cost(model_id: str, tokens: int, today: date | None = None) -> tuple[str | None, str | None, str | None]:
     """(cost_usd as a decimal string, price_source, note) for `tokens` input tokens of `model_id`.
 
-    Reads the operator override file with the worker's lookup rules (an exact `provider:name` key
-    wins over `provider:*`; the period with the latest `effective_from` not after today applies;
-    input_per_mtok). A provider the worker prices through genai-prices gets no API estimate."""
+    Reads the operator override file with the worker's own loader and lookup rules (eap_pricing: an
+    exact `provider:name` key wins over `provider:*`; the period with the latest `effective_from`
+    not after today applies; a file the worker rejects prices nothing here either). A provider the
+    worker prices through genai-prices gets no API estimate."""
     provider = model_id.partition(":")[0]
-    path, explicit = _prices_file()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        models = data["models"]
-        if not isinstance(models, dict):
-            raise ValueError("models is not an object")
-    except FileNotFoundError:
-        if explicit:
+    overrides = load_overrides()
+    if isinstance(overrides, InvalidPriceFile):
+        if overrides.reason.startswith("file not found"):
             return None, None, f"the price file named by {PRICES_FILE_ENV} does not exist"
-        models = {}
-    except (OSError, ValueError, KeyError, TypeError):
         return None, None, "the model price override file is unreadable or invalid"
-    day = today or datetime.now(timezone.utc).date()
-    for key in (model_id, f"{provider}:*"):
-        periods = []
-        for period in models.get(key) or []:
-            try:
-                start = date.fromisoformat(str(period["effective_from"]))
-                price = Decimal(str(period["input_per_mtok"]))
-            except (KeyError, TypeError, ValueError, InvalidOperation):
-                return None, None, "the model price override file is unreadable or invalid"
-            if start <= day:
-                periods.append((start, price))
-        if periods:
-            _, per_mtok = max(periods, key=lambda p: p[0])
-            cost = (Decimal(tokens) * per_mtok / Decimal(1_000_000)).quantize(Decimal("0.0000000001"))
-            return format(cost, "f"), "override", None
+    period = override_period(overrides, model_id, today or datetime.now(timezone.utc).date())
+    if period is not None:
+        cost = override_cost(period, Usage(input_tokens=tokens)).quantize(COST_QUANTUM)
+        return format_cost(cost), SOURCE_OVERRIDE, None
     if provider in OVERRIDE_ONLY_PROVIDERS:
         return None, None, f"no price for '{model_id}' in the model price override file"
     return None, None, (

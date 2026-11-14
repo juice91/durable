@@ -4,7 +4,8 @@ Lookup is by OUR model id (`provider:name`, the effective model of the run), nev
 provider-reported model name:
 
 1. The operator override file (`EAP_MODEL_PRICES_FILE`, a relative path resolved against the
-   repository root; default `config/model-prices.json` there), reviewed like code. An exact `provider:name` key wins over a `provider:*` key.
+   repository root; default `config/model-prices.json` there), reviewed like code. Its schema,
+   loading and cost arithmetic live in `eap_pricing` (shared with the API's reindex estimate). An exact `provider:name` key wins over a `provider:*` key.
    Each key holds price periods; the one with the latest `effective_from` not after the request time
    applies. Prices are USD per million tokens (input, output, cache read, cache write; a missing
    cache price falls back to the input price):
@@ -29,28 +30,36 @@ does not change when prices change.
 from __future__ import annotations
 
 import logging
-import os
-import threading
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+# The override file and its cost arithmetic are shared with the API's reindex estimate (eap_pricing);
+# re-exported here so existing imports keep working.
+from eap_pricing import (
+    COST_QUANTUM,
+    OVERRIDE_ONLY_PROVIDERS,
+    PRICES_FILE_ENV,
+    REPO_ROOT,
+    SOURCE_OVERRIDE,
+    InvalidPriceFile,
+    PriceFile,
+    PricePeriod,
+    Usage,
+    load_overrides,
+    override_cost,
+    override_period,
+    parse_price_file,
+)
+from eap_pricing import DEFAULT_PRICES_FILE as _SHARED_DEFAULT_PRICES_FILE
+from eap_pricing import prices_file_path as _shared_prices_file_path
 
 log = logging.getLogger("eap_worker")
 
-PRICES_FILE_ENV = "EAP_MODEL_PRICES_FILE"
-DEFAULT_PRICES_FILE = Path(__file__).resolve().parents[4] / "config" / "model-prices.json"
-# Providers that are never priced from genai-prices (override file only).
-OVERRIDE_ONLY_PROVIDERS = frozenset({"test", "litellm"})
+DEFAULT_PRICES_FILE = _SHARED_DEFAULT_PRICES_FILE
 # Our provider id -> genai-prices provider id, where they differ.
 _GENAI_PROVIDER_IDS = {"google-gla": "google", "google-vertex": "google"}
-COST_QUANTUM = Decimal("0.0000000001")  # Numeric(20, 10)
-_MTOK = Decimal(1_000_000)
-
-SOURCE_OVERRIDE = "override"
 
 
 def _genai_source() -> str:
@@ -62,145 +71,15 @@ def _genai_source() -> str:
         return "genai-prices"
 
 
-# ----------------------------------------------------------------------------- usage
-
-
-@dataclass(frozen=True)
-class Usage:
-    """One model request's token counts. `input_tokens` includes cache reads and writes (Pydantic AI
-    and genai-prices convention). `measured` is False when the provider reported no usage."""
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    measured: bool = True
-
-
-# ----------------------------------------------------------------------------- override file
-
-
-class PricePeriod(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    effective_from: date
-    input_per_mtok: Decimal = Field(ge=0)
-    output_per_mtok: Decimal = Field(ge=0)
-    cache_read_per_mtok: Decimal | None = Field(default=None, ge=0)
-    cache_write_per_mtok: Decimal | None = Field(default=None, ge=0)
-
-
-class PriceFile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    models: dict[str, list[PricePeriod]] = Field(default_factory=dict)
-
-
-class InvalidPriceFile(Exception):
-    def __init__(self, path: str, reason: str):
-        self.path = path
-        self.reason = reason
-        super().__init__(path, reason)  # pickle-safe
-
-    def __str__(self) -> str:
-        return f"invalid model price file {self.path}: {self.reason}"
-
-
-REPO_ROOT = DEFAULT_PRICES_FILE.parents[1]
-
-
 def prices_file_path() -> Path:
     """EAP_MODEL_PRICES_FILE (a relative path is resolved against the repository root, not the
     process's cwd), else the repo default config/model-prices.json."""
-    configured = os.environ.get(PRICES_FILE_ENV)
-    if not configured:
-        return DEFAULT_PRICES_FILE
-    path = Path(configured).expanduser()
-    return path if path.is_absolute() else REPO_ROOT / path
-
-
-def parse_price_file(text: str, path: str = "<string>") -> PriceFile:
-    try:
-        parsed = PriceFile.model_validate_json(text)
-    except ValidationError as exc:
-        raise InvalidPriceFile(path, f"{exc.error_count()} validation error(s)") from exc
-    for key in parsed.models:
-        provider, sep, name = key.partition(":")
-        if not sep or not provider or not name or "*" in provider or ("*" in name and name != "*"):
-            raise InvalidPriceFile(path, f"bad model key {key!r}: expected 'provider:name' or 'provider:*'")
-    return parsed
-
-
-_cache_lock = threading.Lock()
-_cache: dict[str, Any] = {"key": None, "value": None}
+    return _shared_prices_file_path(DEFAULT_PRICES_FILE)
 
 
 def _load_overrides() -> PriceFile | InvalidPriceFile:
-    """The override file, re-read when its path, size or mtime changes.
-
-    The repo default file missing = no overrides. A file named by EAP_MODEL_PRICES_FILE that does
-    not exist is invalid (prices nothing): an operator who configured overrides must never get
-    genai-prices prices instead because of a wrong path. Any other error reaching the file
-    (PermissionError, a directory component that is a file, ...) is invalid too, default or not."""
-    path = prices_file_path()
-    explicit = bool(os.environ.get(PRICES_FILE_ENV))
-    stat_error: str | None = None
-    try:
-        stat = path.stat()
-        key: tuple[Any, ...] = (str(path), explicit, stat.st_mtime_ns, stat.st_size, None)
-    except FileNotFoundError:
-        stat_error = "FileNotFoundError"
-    except OSError as exc:
-        stat_error = type(exc).__name__
-    if stat_error is not None:
-        key = (str(path), explicit, None, None, stat_error)
-    with _cache_lock:
-        if _cache["key"] == key:
-            return _cache["value"]
-        value: PriceFile | InvalidPriceFile
-        if stat_error == "FileNotFoundError" and not explicit:
-            value = PriceFile()
-        elif stat_error == "FileNotFoundError":
-            value = InvalidPriceFile(str(path), f"file not found ({PRICES_FILE_ENV} is set)")
-            log.error("%s; model requests are recorded without a price", value)
-        elif stat_error is not None:
-            value = InvalidPriceFile(str(path), f"cannot access the file ({stat_error})")
-            log.error("%s; model requests are recorded without a price", value)
-        else:
-            try:
-                value = parse_price_file(path.read_text(encoding="utf-8"), str(path))
-            except InvalidPriceFile as exc:
-                value = exc
-            except OSError as exc:
-                value = InvalidPriceFile(str(path), type(exc).__name__)
-            if isinstance(value, InvalidPriceFile):
-                log.error("%s; model requests are recorded without a price", value)
-        _cache["key"], _cache["value"] = key, value
-        return value
-
-
-def _override_period(prices: PriceFile, model_id: str, at: datetime) -> PricePeriod | None:
-    provider = model_id.partition(":")[0]
-    for key in (model_id, f"{provider}:*"):
-        periods = [p for p in prices.models.get(key, []) if p.effective_from <= at.date()]
-        if periods:
-            return max(periods, key=lambda p: p.effective_from)
-    return None
-
-
-def _override_cost(period: PricePeriod, usage: Usage) -> Decimal:
-    cache_read = usage.cache_read_tokens
-    cache_write = usage.cache_write_tokens
-    uncached = max(usage.input_tokens - cache_read - cache_write, 0)
-    read_price = period.cache_read_per_mtok if period.cache_read_per_mtok is not None else period.input_per_mtok
-    write_price = period.cache_write_per_mtok if period.cache_write_per_mtok is not None else period.input_per_mtok
-    total = (
-        uncached * period.input_per_mtok
-        + cache_read * read_price
-        + cache_write * write_price
-        + usage.output_tokens * period.output_per_mtok
-    )
-    return total / _MTOK
+    """The override file (eap_pricing.load_overrides), defaulting to this module's DEFAULT_PRICES_FILE."""
+    return load_overrides(DEFAULT_PRICES_FILE)
 
 
 def _genai_cost(model_id: str, usage: Usage, at: datetime) -> Decimal | None:
@@ -239,9 +118,9 @@ def price(model_id: str, usage: Usage, at: datetime | None = None) -> tuple[Deci
     overrides = _load_overrides()
     if isinstance(overrides, InvalidPriceFile):
         return None, None
-    period = _override_period(overrides, model_id, at)
+    period = override_period(overrides, model_id, at.date())
     if period is not None:
-        return _override_cost(period, usage).quantize(COST_QUANTUM), SOURCE_OVERRIDE
+        return override_cost(period, usage).quantize(COST_QUANTUM), SOURCE_OVERRIDE
     cost = _genai_cost(model_id, usage, at)
     if cost is None:
         return None, None

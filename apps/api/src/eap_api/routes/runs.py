@@ -21,6 +21,7 @@ from eap_observability import current_trace_context, log_failure
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.agent_archive import refuse_if_archived
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.run_options import (
@@ -70,14 +71,18 @@ router = APIRouter(
 )
 
 
-def _run_json(run: dict[str, Any]) -> dict[str, Any]:
+def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[str, Any]:
     """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings.
 
     `kind` is 'agent', 'tool', 'workflow' or 'kb_ingest' (a knowledge base ingest or reindex run:
     `knowledge_base_id` set, `input` its JSON mode, see eap_api.launcher). An agent run has `agent_id`/`version` and `tool_id`
     null; a tool run has `tool_id`, `agent_id`/`version` null, and `input`/`output` as JSON text; a
     workflow run has `workflow_id`/`workflow_version`, input/output as JSON text. A workflow's agent
-    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise)."""
+    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise).
+
+    `chat` is the run's entry of RunStore.chat_usage (the agent's chat model only, as the trace's
+    `chat_*` split); without one, `chat_input_tokens`, `chat_output_tokens` and `chat_cost_usd`
+    are null (no usage recorded)."""
     iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
     return {
         "run_id": str(run["id"]),
@@ -110,6 +115,11 @@ def _run_json(run: dict[str, Any]) -> dict[str, Any]:
         "input_tokens": run.get("input_tokens"),
         "output_tokens": run.get("output_tokens"),
         "cost_usd": _decimal_str(run.get("cost_usd")),
+        # The agent's chat model alone (follow-up 3): the totals above also count moderation,
+        # observer / reflector and embedding requests. Null when no usage was recorded.
+        "chat_input_tokens": (chat or {}).get("chat_input_tokens"),
+        "chat_output_tokens": (chat or {}).get("chat_output_tokens"),
+        "chat_cost_usd": (chat or {}).get("chat_cost_usd"),
         "started_at": iso(run.get("started_at")),
         "finished_at": iso(run.get("finished_at")),
         # Run options (P0.8): a draft test run has `version` null and `draft` true; the validated
@@ -246,8 +256,13 @@ def start_run(
     """
     run_store, _ = stores
     tenant_id = principal.tenant_id
+    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
+    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
     agent = (
-        db.query(AgentModel).filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id).first()
+        db.query(AgentModel)
+        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
+        .with_for_update(read=True)
+        .first()
     )
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
@@ -257,6 +272,7 @@ def start_run(
     run = run_store.get_run(tenant_id, body.run_id)
     created = False
     if run is None:
+        refuse_if_archived(agent)  # a new run only; a recorded one is replayed (eap_api.agent_archive)
         options = resolve_run_options(
             db, tenant_id, agent,
             version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
@@ -364,13 +380,18 @@ def list_runs(
         # Only with `model` / `provider`: that filter runs under the metrics statement timeout.
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
     next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
-    return JSONResponse(content={"items": [_run_json(r) for r in runs], "next_before": next_before})
+    chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
+    return JSONResponse(
+        content={"items": [_run_json(r, chat.get(str(r["id"]))) for r in runs], "next_before": next_before}
+    )
 
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep) -> JSONResponse:
     run_store, _ = stores
-    return JSONResponse(content=_run_json(_get_run_or_404(run_store, principal.tenant_id, run_id)))
+    run = _get_run_or_404(run_store, principal.tenant_id, run_id)
+    chat = run_store.chat_usage(principal.tenant_id, [run["id"]])
+    return JSONResponse(content=_run_json(run, chat.get(str(run["id"]))))
 
 
 @router.get("/runs/{run_id}/events")

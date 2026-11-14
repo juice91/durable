@@ -17,16 +17,19 @@ export interface LogSearchState {
   /** The first page for the current key is in flight (items shown, if any, are the previous ones). */
   loading: boolean;
   error: LogsError | null;
-  /** The last page was full, so older records may exist. */
+  /** The last page was full, or the agent filter left older runs out (`agent_runs_limited`: the
+   * next page's narrower window covers them), so older records may exist. */
   hasOlder: boolean;
   loadingOlder: boolean;
   olderError: string | null;
   /** The window the API searched for the current results. */
   window: { from: string; to: string } | null;
+  /** With an agent filter: the agent's runs the API searched (`agent_runs`, `agent_runs_limited`). */
+  agentRuns: { count: number; limited: boolean } | null;
 }
 
 const INITIAL: LogSearchState = {
-  items: [], loading: false, error: null, hasOlder: false, loadingOlder: false, olderError: null, window: null,
+  items: [], loading: false, error: null, hasOlder: false, loadingOlder: false, olderError: null, window: null, agentRuns: null,
 };
 
 export type LogSearch = LogSearchState & { loadOlder: () => void };
@@ -69,8 +72,9 @@ export function useLogSearch(key: string | null, params: () => LogsQueryParams):
         setState({
           ...INITIAL,
           items,
-          hasOlder: items.length >= limit,
+          hasOlder: items.length >= limit || (data.agent_runs_limited === true && items.length > 0),
           window: { from: data.from, to: data.to },
+          agentRuns: typeof data.agent_runs === "number" ? { count: data.agent_runs, limited: data.agent_runs_limited === true } : null,
         });
       },
       (error: unknown) => {
@@ -99,7 +103,8 @@ export function useLogSearch(key: string | null, params: () => LogsQueryParams):
         const older = Array.isArray(data.items) ? data.items : [];
         const { items, added } = appendOlder(itemsRef.current, older);
         // No new record means the remaining ones share one microsecond: stop instead of looping.
-        setState((s) => ({ ...s, items, loadingOlder: false, hasOlder: added > 0 && older.length >= page.limit }));
+        const more = older.length >= page.limit || data.agent_runs_limited === true;
+        setState((s) => ({ ...s, items, loadingOlder: false, hasOlder: added > 0 && more }));
       },
       (error: unknown) => {
         if (generation !== generationRef.current || controller.signal.aborted) return;

@@ -1,0 +1,324 @@
+[
+  {
+    "case": "empty name",
+    "status": 422,
+    "message": "Value error, name cannot be empty",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "name"
+      ]
+    ]
+  },
+  {
+    "case": "missing name",
+    "status": 422,
+    "message": "Field required",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "name"
+      ]
+    ]
+  },
+  {
+    "case": "long name",
+    "status": 422,
+    "message": "Value error, name must be at most 100 characters",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "name"
+      ]
+    ]
+  },
+  {
+    "case": "no model",
+    "status": 422,
+    "message": "Field required",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "model"
+      ]
+    ]
+  },
+  {
+    "case": "blank provider",
+    "status": 422,
+    "message": "Value error, provider cannot be empty",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "model",
+        "provider"
+      ]
+    ]
+  },
+  {
+    "case": "unknown processor type",
+    "status": 422,
+    "message": "Input tag 'nope' found using 'type' does not match any of the expected tags: 'pii_redact', 'regex_blocklist', 'max_length', 'moderation'",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "input_processors",
+        0
+      ]
+    ]
+  },
+  {
+    "case": "moderation without model",
+    "status": 422,
+    "message": "Field required",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "input_processors",
+        0,
+        "moderation",
+        "config",
+        "model"
+      ]
+    ]
+  },
+  {
+    "case": "moderation blank provider",
+    "status": 422,
+    "message": "Value error, provider cannot be empty",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "input_processors",
+        0,
+        "moderation",
+        "config",
+        "model",
+        "provider"
+      ]
+    ]
+  },
+  {
+    "case": "output moderation blank provider",
+    "status": 422,
+    "message": "Value error, provider cannot be empty",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "output_processors",
+        1,
+        "moderation",
+        "config",
+        "model",
+        "provider"
+      ]
+    ]
+  },
+  {
+    "case": "max_length zero",
+    "status": 422,
+    "message": "Input should be greater than or equal to 1",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "input_processors",
+        0,
+        "max_length",
+        "config",
+        "max_chars"
+      ]
+    ]
+  },
+  {
+    "case": "bad tool id",
+    "status": 422,
+    "message": "Value error, tool id must match ^[a-z][a-z0-9_.-]{0,63}$ (ASCII only, max 64 chars): Bad Tool",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "tools"
+      ]
+    ]
+  },
+  {
+    "case": "duplicate tool",
+    "status": 422,
+    "message": "Value error, duplicate tool id: a.b",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "tools"
+      ]
+    ]
+  },
+  {
+    "case": "unknown key",
+    "status": 422,
+    "message": "Extra inputs are not permitted",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "bogus"
+      ]
+    ]
+  },
+  {
+    "case": "bad memory scope",
+    "status": 422,
+    "message": "Input should be 'conversation' or 'resource'",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "memory",
+        "working",
+        "scope"
+      ]
+    ]
+  },
+  {
+    "case": "semantic recall needs a model",
+    "status": 422,
+    "message": "Field required, Input should be greater than or equal to 1",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "memory",
+        "semantic_recall",
+        "embedding_model"
+      ],
+      [
+        "body",
+        "spec",
+        "memory",
+        "semantic_recall",
+        "top_k"
+      ]
+    ]
+  },
+  {
+    "case": "context field",
+    "status": 422,
+    "message": "Value error, context field name must match ^[a-z][a-z0-9_]{0,31}$, Field required",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "context_fields",
+        0,
+        "name"
+      ],
+      [
+        "body",
+        "spec",
+        "context_fields",
+        0,
+        "type"
+      ]
+    ]
+  },
+  {
+    "case": "instructions type",
+    "status": 422,
+    "message": "Input should be a valid string",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "instructions"
+      ]
+    ]
+  },
+  {
+    "case": "model setting type",
+    "status": 422,
+    "message": "Input should be a valid number, unable to parse string as a number",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "model_settings",
+        "temperature"
+      ]
+    ]
+  },
+  {
+    "case": "model not allowed",
+    "status": 422,
+    "message": "model 'nope:x' is not allowed on this platform (not in the EAP_ALLOWED_MODELS allowlist)",
+    "loc": []
+  },
+  {
+    "case": "moderation model not allowed",
+    "status": 422,
+    "message": "processor model 'nope:m' is not allowed on this platform (not in the EAP_ALLOWED_MODELS allowlist)",
+    "loc": []
+  },
+  {
+    "case": "embedding model not allowed",
+    "status": 422,
+    "message": "memory.semantic_recall: embedding model 'nope:e' is not allowed on this platform (not in the EAP_ALLOWED_EMBEDDING_MODELS allowlist)",
+    "loc": []
+  },
+  {
+    "case": "observer model not allowed",
+    "status": 422,
+    "message": "observer model 'nope:o' is not allowed on this platform (not in the EAP_ALLOWED_MODELS allowlist)",
+    "loc": []
+  },
+  {
+    "case": "working memory schema",
+    "status": 422,
+    "message": "Value error, working memory is invalid at a: unsupported type 'date'",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "memory",
+        "working",
+        "json_schema"
+      ]
+    ]
+  },
+  {
+    "case": "template and schema",
+    "status": 422,
+    "message": "Value error, set either template or json_schema, not both",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "memory",
+        "working"
+      ]
+    ]
+  },
+  {
+    "case": "blank template",
+    "status": 422,
+    "message": "Value error, template cannot be blank",
+    "loc": [
+      [
+        "body",
+        "spec",
+        "memory",
+        "working",
+        "template"
+      ]
+    ]
+  }
+]

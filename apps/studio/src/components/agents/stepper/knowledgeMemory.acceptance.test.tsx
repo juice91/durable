@@ -398,7 +398,7 @@ describe("a stored model outside the allowlist", () => {
     fireEvent.click(publishButton());
     await waitFor(() => expect(region("Memory")).toBeVisible());
     expect(navButton(/^Memory/)).toHaveTextContent("Has an error");
-    expect(within(region("Memory")).getByTestId("agent-save-error")).toHaveTextContent("observer model 'test:gone' is not allowed");
+    expect(within(region("Memory")).getByTestId("agent-save-error")).toHaveTextContent("Observer model 'test:gone' is not allowed");
   });
 });
 

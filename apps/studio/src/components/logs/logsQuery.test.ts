@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
   EMPTY_LOG_FILTERS,
-  agentRunFilter,
   appendOlder,
   classifyLogsError,
   isoToMicros,
@@ -78,9 +77,9 @@ describe("logsRequestParams", () => {
     const p = logsRequestParams({ ...EMPTY_LOG_FILTERS, range: "15m", q: "boom", level: "error", run_id: RUN }, now);
     expect(p).toEqual({ limit: 100, run_id: RUN, q: "boom", level: "error", from: "2026-11-13T11:45:00.000Z" });
   });
-  it("passes a custom range through and never sends the agent", () => {
+  it("passes a custom range through, with the agent", () => {
     const p = logsRequestParams({ ...EMPTY_LOG_FILTERS, agent_id: AGENT, from: "2026-11-13T10:00:00Z", to: "2026-11-13T11:00:00Z" }, now);
-    expect(p).toEqual({ limit: 100, from: "2026-11-13T10:00:00Z", to: "2026-11-13T11:00:00Z" });
+    expect(p).toEqual({ limit: 100, agent_id: AGENT, from: "2026-11-13T10:00:00Z", to: "2026-11-13T11:00:00Z" });
   });
   it("sends no window for the default range", () => {
     expect(logsRequestParams(EMPTY_LOG_FILTERS, now)).toEqual({ limit: 100 });
@@ -121,16 +120,12 @@ describe("paging cursor", () => {
   });
 });
 
-describe("agentRunFilter", () => {
-  it("is off without an agent or with a run", () => {
-    expect(agentRunFilter(EMPTY_LOG_FILTERS, null)).toBeNull();
-    expect(agentRunFilter({ ...EMPTY_LOG_FILTERS, agent_id: AGENT, run_id: RUN }, new Set())).toBeNull();
-  });
-  it("keeps only records of the agent's runs", () => {
-    const keep = agentRunFilter({ ...EMPTY_LOG_FILTERS, agent_id: AGENT }, new Set([RUN]))!;
-    expect(keep(item("2026-11-13T10:00:00Z"))).toBe(true);
-    expect(keep(item("2026-11-13T10:00:00Z", "m", "other"))).toBe(false);
-    expect(keep(item("2026-11-13T10:00:00Z", "m", null))).toBe(false);
+describe("agent filter (follow-up 2: an API parameter)", () => {
+  it("sends agent_id with the other filters", () => {
+    const params = logsRequestParams({ ...EMPTY_LOG_FILTERS, agent_id: AGENT, level: "warn" }, Date.parse("2026-11-13T10:00:00Z"));
+    expect(params).toEqual({ limit: 100, agent_id: AGENT, level: "warn" });
+    expect(logsQueryString(params)).toBe(`agent_id=${AGENT}&level=warn&limit=100`);
+    expect(logsRequestParams(EMPTY_LOG_FILTERS)).not.toHaveProperty("agent_id");
   });
 });
 
@@ -248,5 +243,13 @@ describe("searchLogs", () => {
   it("throws the API's error detail", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Log search is unavailable" }), { status: 503 })));
     await expect(searchLogs({})).rejects.toMatchObject({ status: 503, message: "Log search is unavailable" });
+  });
+});
+
+describe("classifyLogsError 404s (follow-up 2)", () => {
+  it("tells an unknown agent from an unknown run by the API's detail", () => {
+    expect(classifyLogsError(new ApiError(404, "Agent not found"))).toEqual({ kind: "agent_not_found", message: "Agent not found" });
+    expect(classifyLogsError(new ApiError(404, "Run not found"))).toEqual({ kind: "not_found", message: "Run not found" });
+    expect(classifyLogsError(new ApiError(404, "HTTP 404"))).toEqual({ kind: "not_found", message: "Run not found" });
   });
 });

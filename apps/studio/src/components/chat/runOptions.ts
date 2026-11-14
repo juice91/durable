@@ -390,6 +390,11 @@ export interface RunUsageRow {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cost_usd?: string | null;
+  /** Follow-up 3 (absent from older APIs): the agent's chat model alone, without moderation,
+   * observer / reflector and embedding requests. Null when no usage was recorded. */
+  chat_input_tokens?: number | null;
+  chat_output_tokens?: number | null;
+  chat_cost_usd?: string | null;
   draft?: boolean;
   version?: number | null;
   request_context?: RequestContextValue | null;
@@ -411,11 +416,27 @@ function usageMeasured(events: readonly RunEvent[]): boolean {
   return !events.some((event) => isRecord(event.data.usage) && event.data.usage.measured === false);
 }
 
+function costNumber(value: string | null | undefined): number | null {
+  const cost = value === null || value === undefined ? null : Number(value);
+  return cost !== null && Number.isFinite(cost) ? cost : null;
+}
+
 /**
- * A turn's usage: the run's totals once recorded, else the sum over its events that carry usage
- * (each final `model_message`, and a moderation `processor_result`), which is what the totals sum.
+ * A turn's usage, shown next to the chat model, so the chat model's own (follow-up 3): the run's
+ * `chat_*` fields once recorded; from an older API without them, the run's totals; before the row
+ * has usage, the sum over the turn's final `model_message` events (the chat model's requests;
+ * moderation, observer and embedding usage is on other event types).
  */
 export function turnUsage(events: readonly RunEvent[], row?: RunUsageRow | null): TurnUsage {
+  if (row && typeof row.chat_input_tokens === "number" && typeof row.chat_output_tokens === "number") {
+    return {
+      recorded: true,
+      inputTokens: row.chat_input_tokens,
+      outputTokens: row.chat_output_tokens,
+      costUsd: costNumber(row.chat_cost_usd),
+      measured: usageMeasured(events),
+    };
+  }
   if (row && typeof row.input_tokens === "number" && typeof row.output_tokens === "number") {
     const cost = row.cost_usd === null || row.cost_usd === undefined ? null : Number(row.cost_usd);
     return {
@@ -433,7 +454,7 @@ export function turnUsage(events: readonly RunEvent[], row?: RunUsageRow | null)
   let cost = 0;
   for (const event of events) {
     const usage = event.data.usage;
-    if (!isRecord(usage)) continue;
+    if (event.type !== "model_message" || !isRecord(usage)) continue;
     requests += 1;
     inputTokens += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
     outputTokens += typeof usage.output_tokens === "number" ? usage.output_tokens : 0;

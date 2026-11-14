@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-pricing"
+version = "0.1.0"
+description = "Model price override file and cost arithmetic shared by the EAP API and worker"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_pricing"]

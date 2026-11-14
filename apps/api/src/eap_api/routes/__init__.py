@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 import uuid
 
+from eap_api.agent_archive import referencing_workflows, refuse_if_archived
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.mcp_servers.models import McpServerModel
@@ -43,6 +44,7 @@ def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
         "name": agent.name,
         "draft_spec": agent.draft_spec,
         "latest_version": latest_version,
+        "archived": bool(agent.archived),
     }
 
 
@@ -89,6 +91,7 @@ def create_agent(
             "name": agent.name,
             "draft_spec": agent.draft_spec,
             "latest_version": None,
+            "archived": False,
         },
         status_code=201,
     )
@@ -102,11 +105,13 @@ def create_agent(
 def list_agents(
     principal: Annotated[Principal, Depends(current_principal)],
     db: SessionDep,
+    archived: bool = False,
 ) -> list[dict]:
-    """List agents for the current tenant (non-archived)."""
+    """List the current tenant's agents: the active ones, or with `?archived=true` the archived
+    ones only (see eap_api.agent_archive)."""
     agents = (
         db.query(AgentModel)
-        .filter(AgentModel.tenant_id == principal.tenant_id, AgentModel.archived == False)
+        .filter(AgentModel.tenant_id == principal.tenant_id, AgentModel.archived.is_(archived))
         .all()
     )
 
@@ -198,6 +203,76 @@ def patch_agent(
     )
 
     return JSONResponse(content=_agent_to_response(agent, latest))
+
+
+def _set_archived(
+    agent_id: uuid.UUID, principal: Principal, db: Session, archived: bool, force: bool = False
+) -> JSONResponse:
+    # Locked like publish and restore: a publish that already holds the row finishes first, and one
+    # that starts after this commit sees the new flag.
+    agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    if archived and not agent.archived and not force:
+        workflows = referencing_workflows(db, principal.tenant_id, agent.id)
+        if workflows:
+            db.rollback()
+            names = ", ".join(w["workflow_name"] for w in workflows[:5]) + (" …" if len(workflows) > 5 else "")
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "detail": (
+                        f"agent is a step of {len(workflows)} published workflow(s) ({names}); their runs "
+                        "would be refused. Remove the step, or archive with force=true"
+                    ),
+                    "workflows": workflows,
+                },
+            )
+    if agent.archived != archived:
+        agent.archived = archived
+        db.commit()
+        db.refresh(agent)
+    else:
+        db.rollback()
+    latest = (
+        db.query(func.max(AgentVersionModel.version))
+        .filter(AgentVersionModel.agent_id == str(agent_id))
+        .scalar()
+    )
+    return JSONResponse(content=_agent_to_response(agent, latest))
+
+
+@router.post(
+    "/agents/{agent_id}/archive",
+    response_class=JSONResponse,
+    tags=["agents"],
+    responses={404: {"model": ErrorDetail}, 409: {"description": "Published workflows run this agent"}},
+)
+def archive_agent(
+    agent_id: uuid.UUID,
+    principal: Annotated[Principal, Depends(current_principal)],
+    db: SessionDep,
+    force: bool = False,
+) -> dict:
+    """Archive the agent (idempotent; 200 with the agent, `archived: true`). New runs,
+    conversations, turns and publishes are then refused with 409; existing data stays readable.
+    409 `{detail, workflows: [{workflow_id, workflow_name, versions, latest_version}]}` when a
+    published version of a workflow runs it as a step, unless `force=true` (those workflows' runs
+    are then refused). See eap_api.agent_archive."""
+    return _set_archived(agent_id, principal, db, True, force)
+
+
+@router.post(
+    "/agents/{agent_id}/unarchive",
+    response_class=JSONResponse,
+    tags=["agents"],
+    responses={404: {"model": ErrorDetail}},
+)
+def unarchive_agent(
+    agent_id: uuid.UUID,
+    principal: Annotated[Principal, Depends(current_principal)],
+    db: SessionDep,
+) -> dict:
+    """Unarchive the agent (idempotent; 200 with the agent, `archived: false`)."""
+    return _set_archived(agent_id, principal, db, False)
 
 
 def _check_mcp_servers(db: Session, tenant_id: str, spec: AgentSpec) -> None:
@@ -419,6 +494,7 @@ def publish_version(
     # restore discarded can never be published, and "no changes since latest" is judged on the state
     # the other request committed.
     agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    refuse_if_archived(agent)
 
     if agent.draft_spec is None:
         raise HTTPException(
@@ -605,6 +681,7 @@ def restore_version(
     # Lock the agent row: a concurrent draft edit cannot slip between the dirty-draft check and the
     # draft overwrite below.
     agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    refuse_if_archived(agent)
 
     source = (
         db.query(AgentVersionModel)

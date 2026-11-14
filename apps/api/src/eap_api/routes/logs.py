@@ -11,7 +11,14 @@ How the records are stored (verified against grafana/otel-lgtm): the OTLP log at
 label filters on the metadata:
 
     {service_name=~"eap-api|eap-worker"} | eap_tenant_id="<tenant>" [| eap_run_id="<run>"]
-        [| severity_number >= <n>] [|= "<text>"]
+        [| eap_run_id=~"(<run>|<run>...)"] [| severity_number >= <n>] [|= "<text>"]
+
+`agent_id` narrows to one agent of the tenant (404 if it is not theirs). Log records carry the run
+id, not the agent id, so the API looks up the agent's runs that may have logged in the window (created
+by its end, not finished before its start; child runs included) and filters on their ids: at most
+`MAX_AGENT_RUNS`, newest first. The response then says how many runs were searched (`agent_runs`)
+and whether older ones were left out (`agent_runs_limited`). An agent with no such run answers an
+empty page without querying Loki.
 
 No parser stage is used, so nothing in a log line can create or overwrite a label. A record without
 `eap_tenant_id` never matches (the tenant is never empty). Entries returned by Loki are filtered
@@ -49,7 +56,11 @@ from fastapi.responses import JSONResponse
 
 from eap_observability import log_failure
 
+from sqlalchemy.orm import Session
+
 from eap_api.auth import Principal, current_principal
+from eap_api.database import get_session
+from eap_api.models import AgentModel
 from eap_api.routes.runs import require_run_storage
 from eap_api.schemas import ErrorDetail
 from eap_run_store import EventLog, RunStore
@@ -67,6 +78,8 @@ DEFAULT_RANGE = timedelta(hours=1)
 # With a run id and no `from`, the window starts this long before the run was created.
 RUN_LOOKBACK = timedelta(minutes=1)
 DEFAULT_LIMIT = 100
+# GET /logs?agent_id=: how many of the agent's runs in the window the query covers.
+MAX_AGENT_RUNS = 200
 MAX_LIMIT = 500
 MAX_QUERY_TEXT = 500
 LOKI_TIMEOUT_ENV = "EAP_LOKI_TIMEOUT_SECONDS"
@@ -115,16 +128,26 @@ def logql_string(value: str) -> str:
 
 
 def build_logql(
-    *, tenant_id: str, run_id: str | None = None, q: str | None = None, level: str | None = None
+    *,
+    tenant_id: str,
+    run_id: str | None = None,
+    q: str | None = None,
+    level: str | None = None,
+    run_ids: list[str] | None = None,
 ) -> str:
-    """The LogQL for one tenant's log search (see the module docstring). Raises ValueError on an
-    empty tenant, an unknown level or text that cannot be escaped."""
+    """The LogQL for one tenant's log search (see the module docstring). `run_ids` (an agent's runs)
+    must be canonical UUIDs: they become a regex alternation. Raises ValueError on an empty tenant,
+    an empty or non-UUID `run_ids`, an unknown level or text that cannot be escaped."""
     if not tenant_id:
         raise ValueError("tenant_id is required")
     selector = "{service_name=~" + logql_string("|".join(LOG_SERVICES)) + "}"
     parts = [selector, f"| {TENANT_LABEL}={logql_string(tenant_id)}"]
     if run_id:
         parts.append(f"| {RUN_LABEL}={logql_string(run_id)}")
+    if run_ids is not None:
+        if not run_ids or any(str(uuid.UUID(r)) != r for r in run_ids):
+            raise ValueError("run_ids must be canonical UUIDs")
+        parts.append(f"| {RUN_LABEL}=~{logql_string('(' + '|'.join(run_ids) + ')')}")
     if level is not None:
         if level not in MIN_SEVERITY:
             raise ValueError("unknown level")
@@ -272,6 +295,7 @@ PrincipalDep = Annotated[Principal, Depends(current_principal)]
 StoresDep = Annotated[tuple[RunStore, EventLog], Depends(require_run_storage)]
 LogSourceDep = Annotated[LogSource | None, Depends(get_log_source)]
 QuerySlotsDep = Annotated[QuerySlots, Depends(get_query_slots)]
+SessionDep = Annotated[Session, Depends(get_session)]
 
 router = APIRouter(
     tags=["logs"],
@@ -345,7 +369,9 @@ def search_logs(
     stores: StoresDep,
     source: LogSourceDep,
     slots: QuerySlotsDep,
+    db: SessionDep,
     run_id: uuid.UUID | None = None,
+    agent_id: uuid.UUID | None = None,
     q: Annotated[str | None, Query(max_length=MAX_QUERY_TEXT)] = None,
     level: LogLevel | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
@@ -354,7 +380,9 @@ def search_logs(
 ) -> JSONResponse:
     """The tenant's log records, newest first.
 
-    `run_id` narrows to one run of the tenant (404 if it is not theirs). `q` is a case-sensitive
+    `run_id` narrows to one run of the tenant (404 if it is not theirs). `agent_id` narrows to one
+    agent's runs (404 if the agent is not theirs; archived agents included; see the module
+    docstring); with both, a run of another agent matches nothing. `q` is a case-sensitive
     substring of the message. `level` is a minimum level. `from`/`to` (ISO 8601; naive = UTC) default
     to the last hour, or, with `run_id`, to a window starting a minute before the run was created;
     the window may span at most 7 days: a longer window is 422 when both `from` and `to` are given,
@@ -368,6 +396,14 @@ def search_logs(
         run = run_store.get_run(tenant_id, run_id)
         if run is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if agent_id is not None:
+        agent = (
+            db.query(AgentModel.id)
+            .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
+            .first()
+        )
+        if agent is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     if _before_epoch(from_) or _before_epoch(to):
         raise _unprocessable("from and to must not be before 1970-01-01")
@@ -388,13 +424,37 @@ def search_logs(
         raise _unprocessable("the time range may span at most 7 days")
 
     run_text = str(run_id) if run_id is not None else None
-    try:
-        query = build_logql(tenant_id=tenant_id, run_id=run_text, q=q or None, level=level)
-    except ValueError:
-        raise _unprocessable("q contains characters that cannot be searched") from None
+    if q:
+        try:
+            logql_string(q)
+        except ValueError:
+            raise _unprocessable("q contains characters that cannot be searched") from None
 
     if source is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=NOT_CONFIGURED)
+
+    agent_runs: list[str] | None = None
+    agent_extra: dict[str, Any] = {}
+    if agent_id is not None:
+        if run is not None:
+            agent_runs = [run_text] if run.get("agent_id") == str(agent_id) else []
+            agent_extra = {"agent_runs": len(agent_runs), "agent_runs_limited": False}
+        else:
+            agent_runs, limited = run_store.agent_run_ids(
+                tenant_id, agent_id, start=start, end=end, limit=MAX_AGENT_RUNS
+            )
+            agent_extra = {"agent_runs": len(agent_runs), "agent_runs_limited": limited}
+        if not agent_runs:
+            return JSONResponse(
+                content={"items": [], "from": start.isoformat(), "to": end.isoformat(), "limit": limit, **agent_extra}
+            )
+    query = build_logql(
+        tenant_id=tenant_id,
+        run_id=run_text,
+        q=q or None,
+        level=level,
+        run_ids=agent_runs if run_text is None else None,
+    )
     if not slots.try_acquire():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=BUSY)
     try:
@@ -408,11 +468,14 @@ def search_logs(
     finally:
         slots.release()
 
-    # Defence in depth: whatever Loki returned, only this tenant's (and this run's) records leave.
+    # Defence in depth: whatever Loki returned, only this tenant's (and this run's or agent's) records leave.
+    allowed_runs = set(agent_runs) if agent_runs is not None else None
     entries = [
         e
         for e in entries
-        if e.labels.get(TENANT_LABEL) == tenant_id and (run_text is None or e.labels.get(RUN_LABEL) == run_text)
+        if e.labels.get(TENANT_LABEL) == tenant_id
+        and (run_text is None or e.labels.get(RUN_LABEL) == run_text)
+        and (allowed_runs is None or e.labels.get(RUN_LABEL) in allowed_runs)
     ]
     entries.sort(key=lambda e: e.ts_ns, reverse=True)
     return JSONResponse(
@@ -421,6 +484,7 @@ def search_logs(
             "from": start.isoformat(),
             "to": end.isoformat(),
             "limit": limit,
+            **agent_extra,
         }
     )
 

@@ -4,6 +4,7 @@ import { ROUTE_AREAS, RouteIdError, routes, withQuery } from "./index";
 describe("routes: today's URLs", () => {
   it.each([
     [routes.agents(), "/agents"],
+    [routes.agents({ archived: true }), "/agents?view=archived"],
     [routes.agentNew(), "/agents/new"],
     [routes.agentEditor("a1"), "/agents/a1/editor"],
     [routes.agentIndex("a1"), "/agents/a1"],

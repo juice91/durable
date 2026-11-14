@@ -77,5 +77,6 @@ def get_run_trace(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep,
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=TIMEOUT_DETAIL) from None
     if trace is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    trace["run"] = _run_json(trace["run"])
+    chat = run_store.chat_usage(tenant_id, [trace["run"]["id"]])
+    trace["run"] = _run_json(trace["run"], chat.get(str(trace["run"]["id"])))
     return JSONResponse(content=trace)

@@ -42,6 +42,7 @@ from fastapi.responses import JSONResponse
 from eap_observability import current_trace_context
 
 from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.agent_archive import refuse_if_archived
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import (
@@ -151,9 +152,21 @@ def create_conversation(
     and is immutable."""
     run_store, _ = stores
     tenant_id = principal.tenant_id
-    agent = db.query(AgentModel).filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id).first()
+    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
+    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
+    agent = (
+        db.query(AgentModel)
+        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
+        .with_for_update(read=True)
+        .first()
+    )
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    if agent.archived and (
+        body.conversation_id is None or run_store.get_conversation(tenant_id, body.conversation_id) is None
+    ):
+        # A new conversation only; a retry of an existing one still answers (eap_api.agent_archive).
+        refuse_if_archived(agent)
     resource_id = body.resource_id if body.resource_id is not None else default_resource_id(principal.user_id)
     try:
         conv, created = run_store.create_conversation(
@@ -212,7 +225,10 @@ def get_conversation(conversation_id: uuid.UUID, principal: PrincipalDep, stores
     run_store, _ = stores
     conv = _conversation_or_404(run_store, principal.tenant_id, conversation_id)
     runs = run_store.list_turns(principal.tenant_id, conversation_id)
-    return JSONResponse(content={**_conversation_json(conv), "runs": [_run_json(r) for r in runs]})
+    chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
+    return JSONResponse(
+        content={**_conversation_json(conv), "runs": [_run_json(r, chat.get(str(r["id"]))) for r in runs]}
+    )
 
 
 @router.patch("/conversations/{conversation_id}")
@@ -254,7 +270,14 @@ def start_turn(
     tenant_id = principal.tenant_id
     conv = _conversation_or_404(run_store, tenant_id, conversation_id)
     agent_id = conv["agent_id"]
-    agent = db.query(AgentModel).filter(AgentModel.id == agent_id, AgentModel.tenant_id == tenant_id).first()
+    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
+    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
+    agent = (
+        db.query(AgentModel)
+        .filter(AgentModel.id == agent_id, AgentModel.tenant_id == tenant_id)
+        .with_for_update(read=True)
+        .first()
+    )
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
@@ -263,6 +286,7 @@ def start_turn(
     run = run_store.get_run(tenant_id, body.run_id)
     created = False
     if run is None:
+        refuse_if_archived(agent)  # a new turn only; a recorded one is replayed (eap_api.agent_archive)
         options = resolve_run_options(
             db, tenant_id, agent,
             version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,

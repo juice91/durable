@@ -186,4 +186,4 @@ def test_unreadable_prices_file_prices_nothing(tmp_path, monkeypatch, caplog, ex
     with caplog.at_level("ERROR", logger="eap_worker"):
         assert price("openai:gpt-4o", Usage(1000, 100), AT) == (None, None)
     assert "cannot access the file (PermissionError)" in caplog.text
-    assert "recorded without a price" in caplog.text
+    assert "the price file prices nothing" in caplog.text

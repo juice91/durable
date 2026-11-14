@@ -2,11 +2,11 @@
 
 Working memory (one note per agent and scope key; see eap_run_store.memory):
 
-- GET    /conversations/{cid}/memory/working                    the conversation-scoped note of the
+- GET    /conversations/{cid}/memory/working[?missing=null]     the conversation-scoped note of the
 - PUT    /conversations/{cid}/memory/working                    conversation's agent
 - DELETE /conversations/{cid}/memory/working
 - GET    /agents/{aid}/memory/working?scope=&limit=             the agent's notes, newest first
-- GET    /agents/{aid}/memory/resources/{rid}/working           the agent's note for one resource
+- GET    /agents/{aid}/memory/resources/{rid}/working[?missing=null]  the agent's note for one resource
 - PUT    /agents/{aid}/memory/resources/{rid}/working           (scope `resource`, keyed by
 - DELETE /agents/{aid}/memory/resources/{rid}/working           agent + resource id)
 
@@ -63,6 +63,11 @@ Rules:
   HMAC-SHA256(key=EAP_AUDIT_HASH_SALT, msg=resource_id) when that per-deployment salt is set, else
   of plain SHA-256(resource_id). An operator who knows a resource id recomputes it to find the
   record; set the salt so the hash of a guessable id (an email) cannot be looked up offline.
+- A missing note: GET answers 404 (WORKING_MEMORY_NOT_FOUND) by default; with `?missing=null` it
+  answers 200 with the JSON body `null` and `ETag: "0"` (version 0: PUT with `If-Match: 0` creates
+  it). For clients that probe a note on every load (Studio's chat), so an absent note is not a
+  failed request in the browser's console. A missing conversation, agent or resource id is 404
+  either way.
 - Deletes are idempotent: deleting a missing note answers 204; a forget of a resource with nothing
   left answers 200 with zero counts; deleting an observation that is gone answers 404.
 """
@@ -240,9 +245,17 @@ def _version_conflict(exc: WorkingMemoryVersionConflict) -> HTTPException:
     )
 
 
-def _get_note(memory: MemoryStore, tenant_id: str, agent_id: str, scope: str, key: str) -> JSONResponse:
+# GET .../working?missing=null: an absent note is 200 `null` instead of 404 (see the module docstring).
+MissingNote = Annotated[Literal["404", "null"], Query(description="'null': answer 200 with a null body when there is no note")]
+
+
+def _get_note(
+    memory: MemoryStore, tenant_id: str, agent_id: str, scope: str, key: str, missing: str = "404"
+) -> JSONResponse:
     note = memory.get_working_memory(tenant_id, agent_id, scope, key)
     if note is None:
+        if missing == "null":
+            return JSONResponse(content=None, headers={"ETag": '"0"'})
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=WORKING_MEMORY_NOT_FOUND)
     return _note_response(note)
 
@@ -418,14 +431,17 @@ _BUSY_RESPONSES: dict[int | str, dict[str, Any]] = {
 # ---------------------------------------------------------------------- conversation-scoped notes
 
 
-@router.get("/conversations/{conversation_id}/memory/working", response_model=WorkingMemoryResponse, responses=_ETAG_200)
+# `| None`: with `?missing=null` an absent note is a 200 JSON `null` (OpenAPI shows the nullable body).
+@router.get(
+    "/conversations/{conversation_id}/memory/working", response_model=WorkingMemoryResponse | None, responses=_ETAG_200
+)
 def get_conversation_working_memory(
-    conversation_id: str, principal: PrincipalDep, stores: StoresDep, memory: MemoryDep
+    conversation_id: str, principal: PrincipalDep, stores: StoresDep, memory: MemoryDep, missing: MissingNote = "404"
 ) -> JSONResponse:
     """The conversation-scoped note of the conversation's agent. 404 when the conversation is not
-    the tenant's or has no note."""
+    the tenant's, or when it has no note (with `missing=null`: 200 `null`, ETag "0")."""
     conv = _conversation_or_404(stores, principal.tenant_id, conversation_id)
-    return _get_note(memory, principal.tenant_id, conv["agent_id"], "conversation", conv["id"])
+    return _get_note(memory, principal.tenant_id, conv["agent_id"], "conversation", conv["id"], missing)
 
 
 @router.put(
@@ -480,15 +496,22 @@ def list_agent_working_memories(
 
 
 @router.get(
-    "/agents/{agent_id}/memory/resources/{resource_id}/working", response_model=WorkingMemoryResponse, responses=_ETAG_200
+    "/agents/{agent_id}/memory/resources/{resource_id}/working",
+    response_model=WorkingMemoryResponse | None,
+    responses=_ETAG_200,
 )
 def get_resource_working_memory(
-    agent_id: str, resource_id: str, principal: PrincipalDep, db: SessionDep, memory: MemoryDep
+    agent_id: str,
+    resource_id: str,
+    principal: PrincipalDep,
+    db: SessionDep,
+    memory: MemoryDep,
+    missing: MissingNote = "404",
 ) -> JSONResponse:
-    """The agent's note for this resource. 404 for another tenant's agent, an invalid resource id,
-    or no note."""
+    """The agent's note for this resource. 404 for another tenant's agent or an invalid resource
+    id, and for no note (with `missing=null`: 200 `null`, ETag "0")."""
     agent = _agent_or_404(db, principal.tenant_id, agent_id)
-    return _get_note(memory, principal.tenant_id, agent.id, "resource", _resource_or_404(resource_id))
+    return _get_note(memory, principal.tenant_id, agent.id, "resource", _resource_or_404(resource_id), missing)
 
 
 @router.put(
