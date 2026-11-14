@@ -136,6 +136,74 @@ async function renderDetail() {
   await screen.findAllByTestId("knowledge-document-row");
 }
 
+describe("/knowledge/:id: a document whose ingest never started", () => {
+  const ENQUEUE_FAILED = "EnqueueFailed: the run could not be started (enqueue_failed); retry the same request with the same run_id";
+  const run = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+    run_id: id, kind: "kb_ingest", knowledge_base_id: "kb1", agent_id: null, version: null, status, display_status: status, input: "{}",
+    output: null, error: null, heartbeat_at: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...extra,
+  });
+
+  it("pending with an enqueue-failed run: says so and offers Retry, which reingests; the handed-off run then hides it", async () => {
+    let runStatus = "failed";
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => ({ body: { items: [doc("stuck.md", { status: "pending", active_version: null, chunk_count: 0, last_run_id: "rs" })], next_after: null } }));
+    on("GET", /^\/runs\/rs$/, () => ({ body: run("rs", runStatus, runStatus === "failed" ? { error: ENQUEUE_FAILED } : {}) }));
+    on("POST", /\/documents\/stuck\.md\/reingest$/, () => {
+      runStatus = "queued";
+      return { status: 202, body: { run_id: "rs", kind: "kb_ingest", knowledge_base_id: "kb1", status: "queued", document: doc("stuck.md", { status: "pending", active_version: null, chunk_count: 0, last_run_id: "rs" }) } };
+    });
+    await renderDetail();
+    expect(await screen.findByTestId("knowledge-document-stuck")).toHaveTextContent("The ingest did not start");
+    fireEvent.click(screen.getByTestId("knowledge-document-retry"));
+    await waitFor(() => expect(sent("POST", /reingest$/)).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByTestId("knowledge-document-retry")).toBeNull());
+    expect(screen.queryByTestId("knowledge-document-stuck")).toBeNull();
+    expect(sent("GET", /^\/runs\/rs$/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("pending with a run that is running, or a fresh queued one: no Retry", async () => {
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => ({ body: { items: [
+      doc("a.md", { status: "pending", last_run_id: "ra" }),
+      doc("b.md", { status: "pending", last_run_id: "rb" }),
+    ], next_after: null } }));
+    on("GET", /^\/runs\/ra$/, () => ({ body: run("ra", "running") }));
+    on("GET", /^\/runs\/rb$/, () => ({ body: run("rb", "queued") }));
+    await renderDetail();
+    await waitFor(() => expect(sent("GET", /^\/runs\/r[ab]$/)).toHaveLength(2));
+    expect(screen.queryByTestId("knowledge-document-retry")).toBeNull();
+    expect(screen.queryByTestId("knowledge-document-stuck")).toBeNull();
+  });
+
+  it("a run queued for over a minute: 'Still queued' and Retry; a 409 'already being ingested' is a quiet note, not an error", async () => {
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => ({ body: { items: [doc("q.md", { status: "pending", last_run_id: "rq", updated_at: "2026-01-01T00:00:00Z" })], next_after: null } }));
+    on("GET", /^\/runs\/rq$/, () => ({ body: run("rq", "queued", { created_at: "2026-01-01T00:00:00Z" }) }));
+    on("POST", /\/documents\/q\.md\/reingest$/, () => ({ status: 409, body: { detail: "the document is already being ingested (run rq is running)" } }));
+    await renderDetail();
+    expect(await screen.findByTestId("knowledge-document-stuck")).toHaveTextContent("Still queued after a minute. Retry re-queues it.");
+    fireEvent.click(screen.getByTestId("knowledge-document-retry"));
+    expect(await screen.findByTestId("knowledge-documents-info")).toHaveTextContent("q: the ingest is already running.");
+    expect(screen.getByTestId("knowledge-documents-info")).toHaveAttribute("role", "status");
+    expect(screen.queryByTestId("knowledge-documents-error")).toBeNull();
+  });
+
+  it("another 409 on Retry is still an error", async () => {
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => ({ body: { items: [doc("x.md", { status: "pending", last_run_id: "rx" })], next_after: null } }));
+    on("GET", /^\/runs\/rx$/, () => ({ body: run("rx", "failed") }));
+    on("POST", /\/documents\/x\.md\/reingest$/, () => ({ status: 409, body: { detail: "another ingest run of the document was started concurrently" } }));
+    await renderDetail();
+    expect(await screen.findByTestId("knowledge-document-stuck")).toHaveTextContent("The ingest did not start.");
+    fireEvent.click(screen.getByTestId("knowledge-document-retry"));
+    expect(await screen.findByTestId("knowledge-documents-error")).toHaveTextContent("started concurrently");
+    expect(screen.queryByTestId("knowledge-documents-info")).toBeNull();
+  });
+
+  it("pending for over a minute with no run recorded (404): Retry", async () => {
+    on("GET", /^\/knowledge-bases\/kb1\/documents$/, () => ({ body: { items: [doc("gone.md", { status: "pending", last_run_id: "rg", updated_at: "2026-01-01T00:00:00Z" })], next_after: null } }));
+    on("GET", /^\/runs\/rg$/, () => ({ status: 404, body: { detail: "Run not found" } }));
+    await renderDetail();
+    expect(await screen.findByTestId("knowledge-document-retry")).toHaveAccessibleName("Retry ingest of gone");
+  });
+});
+
 describe("/knowledge/:id", () => {
   it("header shows the name, totals and ingest cost; tabs are links; failed documents show the reason and Retry", async () => {
     on("POST", /\/documents\/billing\.md\/reingest$/, () => ({ status: 202, body: { run_id: "r2", kind: "kb_ingest", knowledge_base_id: "kb1", document: doc("billing.md", { status: "pending", last_run_id: "r2", error: null }) } }));

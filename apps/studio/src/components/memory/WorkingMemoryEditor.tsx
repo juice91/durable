@@ -48,7 +48,11 @@ export interface WorkingMemoryEditorProps {
   /** The note to show; null with `unavailable` explaining why there is none to show. */
   target: WorkingMemoryTarget | null;
   unavailable?: string | null;
-  /** The shape a new note takes (the agent's `memory.working`): Markdown template or JSON schema. */
+  /**
+   * The shape the API validates a PUT against (the latest published `memory.working`): Markdown
+   * template or JSON schema. Edits use it, never the stored note's format: a note stored before a
+   * template ↔ schema switch is shown read-only (`memory-working-format-mismatch`).
+   */
   format: "markdown" | "json";
   /** What "Create" starts from: the agent's template (Markdown) or `{}` (JSON). */
   starter: string;
@@ -74,6 +78,17 @@ function messageOf(error: unknown, fallback: string): string {
 function formatDateTime(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+const FORMAT_NAME = { markdown: "Markdown (template)", json: "JSON (schema)" } as const;
+
+/** Why a stored note cannot be edited under the published format, or null when they match. */
+export function formatMismatchReason(noteFormat: "markdown" | "json", format: "markdown" | "json"): string | null {
+  if (noteFormat === format) return null;
+  return (
+    `This note is stored as ${FORMAT_NAME[noteFormat]}, but the latest published version's working memory is ` +
+    `${FORMAT_NAME[format]}, so a save would be refused. It is shown read-only: clear it to start a new note in the published format.`
+  );
 }
 
 function updatedLine(note: WorkingMemoryNote): string {
@@ -113,11 +128,15 @@ export function WorkingMemoryEditor({
   const errorId = useId();
   const requestRef = useRef(0);
   const targetKey = targetKeyOf(target);
-  const noteFormat = note?.format ?? format;
+  // What a save is validated against: the published format (the stored note may predate a switch).
+  const noteFormat = format;
+  // A note in the other format is read-only (only when edits are otherwise allowed: a blocked edit
+  // already says why).
+  const mismatch = note && !editBlocked ? formatMismatchReason(note.format, format) : null;
   const rawEdit = draftStore ? draftStore.draft : localEdit;
   const setEdit = draftStore ? draftStore.setDraft : setLocalEdit;
-  // A draft of another note does not apply here.
-  const edit = rawEdit && targetKey !== null && rawEdit.key === targetKey ? rawEdit : null;
+  // A draft of another note does not apply here, nor one of a note that cannot be edited.
+  const edit = rawEdit && targetKey !== null && rawEdit.key === targetKey && !mismatch ? rawEdit : null;
   const editing = edit !== null;
   const draft = edit?.text ?? "";
   const original = edit?.original ?? "";
@@ -220,6 +239,13 @@ export function WorkingMemoryEditor({
   const reloadLatest = async () => {
     const latest = await load();
     if (latest === undefined) return;
+    if (latest && formatMismatchReason(latest.format, format)) {
+      // The newer note is in the other format: nothing to edit (the read-only view explains).
+      endEdit();
+      setConflict(null);
+      setSaveError(null);
+      return;
+    }
     const text = latest ? noteText(latest.content) : starter;
     begin(text, latest ? text : "", latest?.version ?? 0);
     setConflict(null);
@@ -254,7 +280,7 @@ export function WorkingMemoryEditor({
         <Heading className={headingClass}>Working memory</Heading>
         {target && !editing && !loading && !loadError ? (
           <div className="flex shrink-0 gap-1">
-            <Button size="sm" onClick={startEdit} disabled={Boolean(editBlocked)} data-testid={note ? "memory-working-edit" : "memory-working-create"}>
+            <Button size="sm" onClick={startEdit} disabled={Boolean(editBlocked) || Boolean(mismatch)} data-testid={note ? "memory-working-edit" : "memory-working-create"}>
               {note ? "Edit" : "Create"}
             </Button>
             {note ? (
@@ -266,6 +292,11 @@ export function WorkingMemoryEditor({
         ) : null}
       </div>
       {hint ? <p className="text-caption text-muted-foreground">{hint}</p> : null}
+      {mismatch && target && !loadError ? (
+        <p data-testid="memory-working-format-mismatch" className="text-caption text-warning-text">
+          {mismatch}
+        </p>
+      ) : null}
       {editBlocked && target && !editing ? (
         <p data-testid="memory-working-blocked" className="text-caption text-muted-foreground">
           {editBlocked}

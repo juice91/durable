@@ -79,7 +79,7 @@ import { ComposerVersionChip, VERSION_ERROR_ID } from "./ComposerVersionChip";
 import { ThreadsPanel } from "./ThreadsPanel";
 import { ComposerActAsChip } from "./ComposerActAsChip";
 import { chatUrlFor, effectiveConfig, writeLastAgent, type ChatUrlState } from "./agentPageModel";
-import { memoryOf } from "@/components/agents/knowledgeMemory";
+import { memoryOf, OBSERVATIONAL_DEFAULTS } from "@/components/agents/knowledgeMemory";
 import { agentHasMemory, latestPublishedSpec, readActAs, writeActAs } from "@/components/memory/memoryModel";
 import { useMemoryActivity, type LatestTurn } from "@/components/memory/useMemoryActivity";
 import { draftDirty, targetKeyOf, type WorkingMemoryDraft, type WorkingMemoryDraftStore } from "@/components/memory/WorkingMemoryEditor";
@@ -929,10 +929,25 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     () => (latest ? { runId: latest.runId, status: latest.displayStatus, events: latest.events } : null),
     [latest],
   );
-  const memoryActivity = useMemoryActivity(latestTurn, {
-    observational: Boolean(memoryConfig?.observational),
-    semanticRecall: Boolean(memoryConfig?.semantic_recall),
-  });
+  // The reflection threshold of the spec the watched turn ran: its published version when the
+  // versions are loaded, else (a draft turn, or versions not loaded) the spec the chat runs now.
+  // Best-effort: a draft edited since the turn started reads the edited draft's threshold.
+  const turnSpec = (latest && !latest.draft && latest.version !== null ? versions?.find((v) => v.version === latest.version)?.spec : null) ?? memorySpec;
+  const reflectAfter = memoryOf(turnSpec)?.observational?.reflect_after_tokens;
+  const memoryActivity = useMemoryActivity(
+    latestTurn,
+    {
+      observational: Boolean(memoryConfig?.observational),
+      semanticRecall: Boolean(memoryConfig?.semantic_recall),
+      // The published threshold (the API's default when unset): a reflection can follow an observe.
+      reflectAfterTokens: memoryConfig?.observational
+        ? typeof reflectAfter === "number"
+          ? reflectAfter
+          : OBSERVATIONAL_DEFAULTS.reflect_after_tokens
+        : null,
+    },
+    { conversationId: conversationId ?? null },
+  );
   const handleConversationDeleted = useCallback(
     (id: string) => {
       if (pendingConversationRef.current?.id === id) pendingConversationRef.current = null;

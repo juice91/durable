@@ -180,8 +180,8 @@ export async function listAgentWorkingMemories(agentId: string, scope: WorkingMe
   return Array.isArray(data.items) ? data.items : [];
 }
 
-export async function listObservations(conversationId: string): Promise<ObservationList> {
-  const response = await call(`/api/v1/conversations/${enc(conversationId)}/memory/observations`);
+export async function listObservations(conversationId: string, signal?: AbortSignal): Promise<ObservationList> {
+  const response = await call(`/api/v1/conversations/${enc(conversationId)}/memory/observations`, signal ? { signal } : {});
   const data = (await response.json()) as Partial<ObservationList>;
   return { items: Array.isArray(data.items) ? data.items : [], covered_to_turn: Number(data.covered_to_turn ?? 0) };
 }
@@ -305,6 +305,12 @@ export function memoryWrites(events: readonly LooseRunEvent[]): number {
 export interface PostTurnFeatures {
   observational: boolean;
   semanticRecall: boolean;
+  /**
+   * The published `observational.reflect_after_tokens` (default 8000), or null/absent when no
+   * reflection is to be waited for. With a conversation to read, the inspector keeps polling past a
+   * successful observe while a reflection can follow it (`reflectionDue`).
+   */
+  reflectAfterTokens?: number | null;
 }
 
 /** Whether a turn with these features has post-turn memory steps (the SSE ends before them). */
@@ -312,19 +318,47 @@ export function hasPostTurnSteps(features: PostTurnFeatures): boolean {
   return features.observational || features.semanticRecall;
 }
 
+const isReflectEvent = (item: LooseRunEvent) =>
+  (item.type === "memory_updated" || item.type === "memory_observe_failed") && item.data?.stage === "reflect";
+
+/**
+ * Where the observer is in a finished turn's events: `pending` (nothing yet), `observed` (the
+ * observation was written: a reflection may follow in the same workflow), or `done` (a reflection
+ * reported, or the observe step failed, which ends the post-turn steps).
+ */
+export function observerProgress(events: readonly LooseRunEvent[]): "pending" | "observed" | "done" {
+  if (events.some(isReflectEvent)) return "done";
+  if (events.some((item) => item.type === "memory_observe_failed")) return "done";
+  if (events.some((item) => item.type === "memory_updated" && item.data?.stage === "observe")) return "observed";
+  return "pending";
+}
+
+/**
+ * Whether the worker reflects after this observe (eap_worker.observational `_reflect_plan`): at
+ * least two active rows with text (superseded rows and expired retention markers left out) holding
+ * more than `reflectAfterTokens`.
+ */
+export function reflectionDue(items: readonly Observation[], reflectAfterTokens: number): boolean {
+  const active = items.filter((item) => item.superseded_by === null && !item.expired && item.content !== "");
+  return active.length >= 2 && active.reduce((sum, item) => sum + num(item.approx_tokens), 0) > reflectAfterTokens;
+}
+
 /**
  * Whether the post-turn steps have reported: the observer's `memory_updated` (stage observe or
  * reflect) or `memory_observe_failed` with observational memory on, else the recall index
- * `embedding` event (stage index). The observer writes nothing when there was not enough to
- * observe, so the caller also stops after a timeout.
+ * `embedding` event (stage index). With `awaitReflection` (the observe left enough to reflect over,
+ * see `reflectionDue`), a successful observe is not the end: the reflect stage's event is. The
+ * observer writes nothing when there was not enough to observe, so the caller also stops after a
+ * timeout.
  */
-export function postTurnReported(events: readonly LooseRunEvent[], features: PostTurnFeatures): boolean {
+export function postTurnReported(
+  events: readonly LooseRunEvent[],
+  features: PostTurnFeatures,
+  { awaitReflection = false }: { awaitReflection?: boolean } = {},
+): boolean {
   if (features.observational) {
-    return events.some(
-      (item) =>
-        item.type === "memory_observe_failed" ||
-        (item.type === "memory_updated" && (item.data?.stage === "observe" || item.data?.stage === "reflect")),
-    );
+    const progress = observerProgress(events);
+    return progress === "done" || (progress === "observed" && !awaitReflection);
   }
   if (features.semanticRecall) return events.some((item) => item.type === "embedding" && item.data?.stage === "index");
   return true;

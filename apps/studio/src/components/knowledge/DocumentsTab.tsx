@@ -4,9 +4,10 @@ import React, { useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { Button } from "@/components/ui/Button";
-import { describeIngestError, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
+import { STUCK_INGEST_TEXT, describeIngestError, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
 import { DocumentStatusBadge, formatWhen } from "./knowledgeUi";
 import type { KnowledgeDocumentsState } from "./useKnowledgeDocuments";
+import { useStuckIngests } from "./useStuckIngests";
 
 // DataList renders this on each row as data-testid (named `testId` so the test-id inventory sees it).
 const DOCUMENT_ROW = { testId: "knowledge-document-row" } as const;
@@ -31,16 +32,30 @@ function versionLabel(doc: KnowledgeDocument): string {
 export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocument, onUpload }: DocumentsTabProps) {
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [actionError, setActionError] = useState<string | null>(null);
+  // A Retry the API answered 409 "already being ingested": the run is going, not an error.
+  const [actionInfo, setActionInfo] = useState<string | null>(null);
+  // Pending documents whose ingest never started (its hand-off failed): they get Retry too.
+  const { stuck, recheck } = useStuckIngests(docs.documents);
 
   const retry = async (doc: KnowledgeDocument) => {
     setRetrying((current) => ({ ...current, [doc.document_key]: true }));
     setActionError(null);
+    setActionInfo(null);
     try {
       const result = await reingestDocument(kbId, doc.document_key);
+      // A handed-off-again run keeps its id: read its status afresh.
+      if (doc.last_run_id) recheck(doc.last_run_id);
+      if (result.run_id) recheck(result.run_id);
       if (result.document) docs.upsert(result.document);
       else docs.refresh(doc.document_key);
     } catch (reason: unknown) {
-      setActionError(`${doc.title}: ${reason instanceof Error ? reason.message : "the retry failed"}`);
+      const message = reason instanceof Error ? reason.message : "the retry failed";
+      if ((reason as { status?: unknown } | null)?.status === 409 && /already being ingested/i.test(message)) {
+        setActionInfo(`${doc.title}: the ingest is already running.`);
+        if (doc.last_run_id) recheck(doc.last_run_id);
+      } else {
+        setActionError(`${doc.title}: ${message}`);
+      }
       docs.refresh(doc.document_key);
     } finally {
       setRetrying((current) => ({ ...current, [doc.document_key]: false }));
@@ -71,7 +86,11 @@ export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocumen
         return (
           <span className="flex min-w-0 flex-col items-start gap-0.5">
             <DocumentStatusBadge status={doc.status} />
-            {isIngestInFlight(doc) && live ? (
+            {stuck.has(doc.document_key) ? (
+              <span className="line-clamp-2 text-caption text-warning-text" data-testid="knowledge-document-stuck">
+                {STUCK_INGEST_TEXT[stuck.get(doc.document_key)!]}
+              </span>
+            ) : isIngestInFlight(doc) && live ? (
               <span className="text-caption tabular-nums text-muted-foreground" data-testid="knowledge-document-progress" aria-live="polite">
                 {progressLabel(live)}
               </span>
@@ -114,7 +133,7 @@ export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocumen
       className: "whitespace-nowrap",
       cell: (doc) => (
         <span className="flex items-center justify-end gap-2">
-          {doc.status === "failed" ? (
+          {doc.status === "failed" || stuck.has(doc.document_key) ? (
             <Button size="sm" disabled={retrying[doc.document_key]} onClick={() => void retry(doc)} data-testid="knowledge-document-retry" aria-label={`Retry ingest of ${doc.title}`}>
               {retrying[doc.document_key] ? "Retrying…" : "Retry"}
             </Button>
@@ -131,6 +150,7 @@ export function DocumentsTab({ kbId, docs, progress, openDocument, onOpenDocumen
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-testid="knowledge-documents-tab">
+      {actionInfo ? <p role="status" data-testid="knowledge-documents-info" className="rounded-md border border-border bg-fill-hover p-3 text-body text-muted-foreground">{actionInfo}</p> : null}
       {actionError ? <p role="alert" data-testid="knowledge-documents-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
       <DataList
         label="Documents"

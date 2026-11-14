@@ -139,6 +139,42 @@ describe("WorkingMemoryEditor", () => {
     expect(screen.getByTestId("memory-working-blocked")).toHaveTextContent("Publish a version");
   });
 
+  it("after a template → schema switch, a Markdown note is read-only with the reason; Clear still works, no PUT is sent", async () => {
+    answer = (_url, method) => (method === "DELETE" ? json(null, 204) : json(note("# User\n- Name: Ada", 4, "markdown")));
+    render(<WorkingMemoryEditor target={target} format="json" starter="{}" />);
+    expect(await screen.findByTestId("memory-working-content")).toHaveTextContent("Name: Ada");
+    expect(screen.getByTestId("memory-working-edit")).toBeDisabled();
+    expect(screen.getByTestId("memory-working-format-mismatch")).toHaveTextContent(
+      "stored as Markdown (template), but the latest published version's working memory is JSON (schema)",
+    );
+    expect(screen.queryByTestId("memory-working-textarea")).toBeNull();
+    fireEvent.click(screen.getByTestId("memory-working-clear"));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "Clear working memory?" })).getByRole("button", { name: "Clear" }));
+    await screen.findByTestId("memory-working-empty");
+    expect(screen.queryByTestId("memory-working-format-mismatch")).toBeNull();
+    // Create now starts in the published format.
+    fireEvent.click(screen.getByTestId("memory-working-create"));
+    expect(screen.getByTestId("memory-working-textarea")).toHaveValue("{}");
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+  });
+
+  it("after a schema → template switch, a JSON note is read-only too", async () => {
+    answer = () => json(note({ name: "Ada" }, 2, "json"));
+    render(<WorkingMemoryEditor target={target} format="markdown" starter="# User" />);
+    expect(await screen.findByTestId("memory-working-format-mismatch")).toHaveTextContent("stored as JSON (schema)");
+    expect(screen.getByTestId("memory-working-edit")).toBeDisabled();
+  });
+
+  it("a lifted draft of a note in the other format is not offered for editing", async () => {
+    answer = () => json(note("old text", 2, "markdown"));
+    const key = JSON.stringify(target);
+    const store = { draft: { key, text: "edited", original: "old text", baseVersion: 2 }, setDraft: vi.fn() };
+    render(<WorkingMemoryEditor target={target} format="json" starter="{}" draftStore={store} />);
+    await screen.findByTestId("memory-working-format-mismatch");
+    expect(screen.queryByTestId("memory-working-textarea")).toBeNull();
+    expect(screen.getByTestId("memory-working-content")).toHaveTextContent("old text");
+  });
+
   it("reports dirty while the edit differs", async () => {
     answer = () => json(note("x"));
     const onDirty = vi.fn();
@@ -353,6 +389,76 @@ describe("useMemoryActivity", () => {
     });
     expect(result.current.updating).toBe(false);
     expect(result.current.revision).toBe(1);
+  });
+
+  const obsRow = (id: string, tokens: number, extra: Record<string, unknown> = {}) => ({
+    id, agent_id: "a1", conversation_id: "c1", kind: "observation", covers_from_turn: 1, covers_to_turn: 2,
+    content: "note", approx_tokens: tokens, run_id: "r1", superseded_by: null, created_at: "2026-11-14T00:00:00Z", ...extra,
+  });
+
+  it("after an observe that leaves a reflection due, keeps polling until the reflect event", async () => {
+    vi.useFakeTimers();
+    let served: unknown[] = [];
+    answer = (url) => (url.pathname.endsWith("/memory/observations") ? json({ items: [obsRow("o1", 5000), obsRow("o2", 4000)], covered_to_turn: 4 }) : json(served));
+    const features = { observational: true, semanticRecall: false, reflectAfterTokens: 8000 };
+    const { result, rerender } = renderHook(({ t }) => useMemoryActivity(t, features, { pollMs: 100, timeoutMs: 5000, conversationId: "c1" }), {
+      initialProps: { t: turn("running") },
+    });
+    rerender({ t: turn("completed", [{ seq: 3, type: "run_completed", data: {} }]) });
+    served = [{ seq: 4, type: "memory_updated", data: { stage: "observe", notes: 2 } }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.revision).toBe(1);
+    // 9000 tokens over two rows > 8000: the reflector runs next, so the poll goes on.
+    expect(calls.filter((c) => c.url.pathname === "/api/v1/conversations/c1/memory/observations")).toHaveLength(1);
+    expect(result.current.updating).toBe(true);
+    served = [{ seq: 5, type: "memory_updated", data: { stage: "reflect", notes: 1 } }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.updating).toBe(false);
+    expect(result.current.revision).toBe(2);
+    // The observations are read once per poll, not at every tick.
+    expect(calls.filter((c) => c.url.pathname.endsWith("/memory/observations"))).toHaveLength(1);
+  });
+
+  it("stops at the observe when no reflection can follow it (under the threshold, or one row)", async () => {
+    for (const items of [[obsRow("o1", 3000), obsRow("o2", 4000)], [obsRow("o1", 9000)], [obsRow("o1", 6000), obsRow("o2", 6000, { expired: true, content: "" })]]) {
+      vi.useFakeTimers();
+      calls = [];
+      answer = (url) => (url.pathname.endsWith("/memory/observations") ? json({ items, covered_to_turn: 4 }) : json([{ seq: 4, type: "memory_updated", data: { stage: "observe" } }]));
+      const features = { observational: true, semanticRecall: false, reflectAfterTokens: 8000 };
+      const hook = renderHook(({ t }) => useMemoryActivity(t, features, { pollMs: 100, timeoutMs: 5000, conversationId: "c1" }), { initialProps: { t: turn("running") } });
+      hook.rerender({ t: turn("completed") });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+      expect(hook.result.current.updating).toBe(false);
+      hook.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("waiting for a reflection that never comes ends at the same deadline; a failed observe never waits", async () => {
+    vi.useFakeTimers();
+    answer = (url) => (url.pathname.endsWith("/memory/observations") ? json({ items: [obsRow("o1", 5000), obsRow("o2", 5000)], covered_to_turn: 4 }) : json([{ seq: 4, type: "memory_updated", data: { stage: "observe" } }]));
+    const features = { observational: true, semanticRecall: false, reflectAfterTokens: 8000 };
+    const { result, rerender } = renderHook(({ t }) => useMemoryActivity(t, features, { pollMs: 100, timeoutMs: 450, conversationId: "c1" }), { initialProps: { t: turn("running") } });
+    rerender({ t: turn("completed") });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(result.current.updating).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(result.current.updating).toBe(false);
+    const reads = calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(calls.length).toBe(reads);
   });
 
   it("stops at the timeout when the observer had nothing to do; an old completed turn is never polled", async () => {

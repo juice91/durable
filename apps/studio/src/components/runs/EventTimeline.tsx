@@ -1,6 +1,5 @@
 import React from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { SafeMarkdown } from "@/components/markdown/SafeMarkdown";
 import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
 import { TraceLink } from "@/components/traces/TraceLink";
@@ -37,9 +36,8 @@ function JsonBlock({ value, label }: { value: unknown; label?: string }) {
 function MarkdownContent({ text }: { text: string }) {
   return (
     <div className="prose dark:prose-invert max-w-none text-sm text-card-foreground/80">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-        {text}
-      </ReactMarkdown>
+      {/* Model text can carry tenant knowledge: images as alt text only, no raw HTML, safe links. */}
+      <SafeMarkdown>{text}</SafeMarkdown>
     </div>
   );
 }

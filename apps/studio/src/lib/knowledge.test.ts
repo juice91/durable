@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ingestStuck,
+  ingestStuckReason,
+  STUCK_INGEST_TEXT,
+  STUCK_PENDING_AFTER_MS,
   checkUploadFile,
   decodeUtf8,
   NotUtf8Error,
@@ -208,3 +212,39 @@ describe("strict UTF-8 and aborts", () => {
   });
 });
 
+
+describe("ingestStuck", () => {
+  const now = Date.parse("2026-11-14T10:05:00Z");
+  const fresh = "2026-11-14T10:04:30Z";
+  const old = "2026-11-14T10:00:00Z";
+  const pending = (updated_at = fresh) => ({ status: "pending" as const, updated_at });
+
+  it("a pending document whose run ended (an enqueue failure is 'failed') is stuck at once", () => {
+    expect(ingestStuck(pending(), { status: "failed", created_at: fresh }, now)).toBe(true);
+    expect(ingestStuck(pending(), { status: "completed", created_at: fresh }, now)).toBe(true);
+  });
+
+  it("a queued run is stuck only past STUCK_PENDING_AFTER_MS; a running one never", () => {
+    expect(STUCK_PENDING_AFTER_MS).toBe(60_000);
+    expect(ingestStuck(pending(), { status: "queued", created_at: fresh }, now)).toBe(false);
+    expect(ingestStuck(pending(), { status: "queued", created_at: old }, now)).toBe(true);
+    expect(ingestStuck(pending(old), { status: "running", created_at: old }, now)).toBe(false);
+  });
+
+  it("says why: an ended or missing run did not start, an old queued run is still queued", () => {
+    expect(ingestStuckReason(pending(), { status: "failed", created_at: fresh }, now)).toBe("not_started");
+    expect(ingestStuckReason(pending(old), null, now)).toBe("not_started");
+    expect(ingestStuckReason(pending(), { status: "queued", created_at: old }, now)).toBe("queued");
+    expect(ingestStuckReason(pending(), { status: "running", created_at: old }, now)).toBeNull();
+    expect(STUCK_INGEST_TEXT.queued).toBe("Still queued after a minute. Retry re-queues it.");
+    expect(STUCK_INGEST_TEXT.not_started).toMatch(/^The ingest did not start\./);
+  });
+
+  it("no run: stuck once the document is old enough; unknown run or another status: never", () => {
+    expect(ingestStuck(pending(), null, now)).toBe(false);
+    expect(ingestStuck(pending(old), null, now)).toBe(true);
+    expect(ingestStuck(pending(old), undefined, now)).toBe(false);
+    expect(ingestStuck({ status: "ingesting", updated_at: old }, { status: "failed", created_at: old }, now)).toBe(false);
+    expect(ingestStuck({ status: "failed", updated_at: old }, null, now)).toBe(false);
+  });
+});

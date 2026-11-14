@@ -643,6 +643,60 @@ export function isIngestInFlight(document: Pick<KnowledgeDocument, "status">): b
   return document.status === "pending" || document.status === "ingesting";
 }
 
+/**
+ * How long a document may stay `pending` with no usable run before Studio offers Retry: the API's
+ * ORPHAN_AFTER_SECONDS (eap_api.routes.knowledge), after which POST …/reingest hands the run off
+ * again (a stale `queued` run) or starts a new one (no run recorded).
+ */
+export const STUCK_PENDING_AFTER_MS = 60_000;
+
+/** What `ingestStuck` needs of the document's `last_run_id` run: null when there is none (no
+ * `last_run_id`, or GET /runs/{id} answered 404); undefined when it is not known yet. */
+export type IngestRunState = { status: string; created_at: string } | null | undefined;
+
+const RUN_TERMINAL = new Set(["completed", "failed", "needs_attention"]);
+
+function olderThan(iso: string, ms: number, now: number): boolean {
+  const at = Date.parse(iso);
+  return Number.isFinite(at) && now - at > ms;
+}
+
+/**
+ * Whether a `pending` document's ingest never started, so Retry (reingest) is the way out. The
+ * document stays `pending` when its run's hand-off failed: the run is `failed` (error
+ * "EnqueueFailed…") or otherwise ended while the document still waits, or it sat `queued` past
+ * STUCK_PENDING_AFTER_MS (never enqueued). With no run at all, the document itself must be that
+ * old (a younger one belongs to a request still starting it). The reingest route accepts each case.
+ */
+export function ingestStuck(
+  document: Pick<KnowledgeDocument, "status" | "updated_at">,
+  run: IngestRunState,
+  now: number = Date.now(),
+): boolean {
+  return ingestStuckReason(document, run, now) !== null;
+}
+
+/** Why a pending document is stuck (see `ingestStuck`): `not_started` (its run ended, or there is
+ * none), `queued` (its run has waited past STUCK_PENDING_AFTER_MS), or null when it is not. */
+export type IngestStuckReason = "not_started" | "queued";
+
+export function ingestStuckReason(
+  document: Pick<KnowledgeDocument, "status" | "updated_at">,
+  run: IngestRunState,
+  now: number = Date.now(),
+): IngestStuckReason | null {
+  if (document.status !== "pending" || run === undefined) return null;
+  if (run === null) return olderThan(document.updated_at, STUCK_PENDING_AFTER_MS, now) ? "not_started" : null;
+  if (RUN_TERMINAL.has(run.status)) return "not_started";
+  return run.status === "queued" && olderThan(run.created_at, STUCK_PENDING_AFTER_MS, now) ? "queued" : null;
+}
+
+/** The Documents tab's line for a stuck document. */
+export const STUCK_INGEST_TEXT: Record<IngestStuckReason, string> = {
+  not_started: "The ingest did not start. Retry starts it again.",
+  queued: "Still queued after a minute. Retry re-queues it.",
+};
+
 // ---------------------------------------------------------------------------------------------
 // Links and references
 

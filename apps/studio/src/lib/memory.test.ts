@@ -12,10 +12,12 @@ import {
   memoryWrites,
   newestObservation,
   noteText,
+  observerProgress,
   parseNoteText,
   postTurnReported,
   putWorkingMemory,
   recallSummary,
+  reflectionDue,
   resourceIdProblem,
   type Observation,
 } from "./memory";
@@ -235,5 +237,29 @@ describe("what a turn's events say about memory", () => {
     expect(postTurnReported([ev(3, "memory_updated", { tool_call_id: "t" })], both)).toBe(false);
     expect(postTurnReported([ev(5, "embedding", { stage: "index" })], { observational: false, semanticRecall: true })).toBe(true);
     expect(postTurnReported([], { observational: false, semanticRecall: false })).toBe(true);
+  });
+
+  it("with a reflection due, a successful observe is not the end; the reflect stage (done or failed) is", () => {
+    const f = { observational: true, semanticRecall: false };
+    const observed = [ev(6, "memory_updated", { stage: "observe" })];
+    expect(observerProgress(observed)).toBe("observed");
+    expect(postTurnReported(observed, f, { awaitReflection: true })).toBe(false);
+    expect(postTurnReported([...observed, ev(7, "memory_updated", { stage: "reflect" })], f, { awaitReflection: true })).toBe(true);
+    expect(postTurnReported([...observed, ev(7, "memory_observe_failed", { stage: "reflect" })], f, { awaitReflection: true })).toBe(true);
+    // A failed observe ends the post-turn steps: no reflection follows it.
+    expect(postTurnReported([ev(6, "memory_observe_failed", { stage: "observe" })], f, { awaitReflection: true })).toBe(true);
+    expect(observerProgress([])).toBe("pending");
+  });
+
+  it("reflectionDue mirrors the worker: two or more active text rows over the threshold", () => {
+    const row = (tokens: number, extra: Partial<Observation> = {}): Observation => ({
+      id: String(tokens), agent_id: "a", conversation_id: "c", kind: "observation", covers_from_turn: 1, covers_to_turn: 1,
+      content: "x", approx_tokens: tokens, run_id: null, superseded_by: null, created_at: "", ...extra,
+    });
+    expect(reflectionDue([row(5000), row(4000)], 8000)).toBe(true);
+    expect(reflectionDue([row(4000), row(4000)], 8000)).toBe(false); // not more than
+    expect(reflectionDue([row(9000)], 8000)).toBe(false);
+    expect(reflectionDue([row(5000), row(4000, { superseded_by: "z" })], 8000)).toBe(false);
+    expect(reflectionDue([row(5000), row(4000, { expired: true, content: "" })], 8000)).toBe(false);
   });
 });

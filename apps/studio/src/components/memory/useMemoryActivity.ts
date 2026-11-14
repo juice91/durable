@@ -6,9 +6,12 @@ import {
   POST_TURN_POLL_MS,
   POST_TURN_TIMEOUT_MS,
   hasPostTurnSteps,
+  listObservations,
   memoryWrites,
+  observerProgress,
   postTurnReported,
   recallSummary,
+  reflectionDue,
   type LooseRunEvent,
   type PostTurnFeatures,
   type RecallSummary,
@@ -42,11 +45,20 @@ const TERMINAL = new Set(["completed", "failed", "needs_attention"]);
  * finish and the spec has those steps, the turn's events are read again every `pollMs` until they
  * report (`postTurnReported`) or `timeoutMs` passes. The observer writes nothing when there is not
  * enough to observe, so the timeout is the normal end of a quiet turn.
+ *
+ * A reflection runs in the same workflow right after an observe when the active observations then
+ * exceed `reflectAfterTokens`: after the observe event, the conversation's observations are read
+ * once (`reflectionDue`), and when a reflection is due the poll goes on until its event too, within
+ * the same deadline. Without `conversationId` or `reflectAfterTokens` the observe event ends it.
  */
 export function useMemoryActivity(
   turn: LatestTurn | null,
   features: PostTurnFeatures,
-  { pollMs = POST_TURN_POLL_MS, timeoutMs = POST_TURN_TIMEOUT_MS }: { pollMs?: number; timeoutMs?: number } = {},
+  {
+    pollMs = POST_TURN_POLL_MS,
+    timeoutMs = POST_TURN_TIMEOUT_MS,
+    conversationId = null,
+  }: { pollMs?: number; timeoutMs?: number; conversationId?: string | null } = {},
 ): MemoryActivity {
   const [extra, setExtra] = useState<{ runId: string; events: LooseRunEvent[] } | null>(null);
   const [polling, setPolling] = useState<string | null>(null);
@@ -55,11 +67,13 @@ export function useMemoryActivity(
   const seenRef = useRef<{ runId: string; status: string } | null>(null);
   const runId = turn?.runId ?? null;
   const status = turn?.status ?? null;
-  const { observational, semanticRecall } = features;
+  const { observational, semanticRecall, reflectAfterTokens = null } = features;
   // Read by the poller at each read: a feature toggled mid-poll changes what "reported" means, but
   // never restarts the poll or its deadline.
-  const featuresRef = useRef<PostTurnFeatures>({ observational, semanticRecall });
-  featuresRef.current = { observational, semanticRecall };
+  const featuresRef = useRef<PostTurnFeatures>({ observational, semanticRecall, reflectAfterTokens });
+  featuresRef.current = { observational, semanticRecall, reflectAfterTokens };
+  const conversationRef = useRef<string | null>(conversationId);
+  conversationRef.current = conversationId;
   // The poll's deadline, fixed when the turn is seen to complete (one per run).
   const deadlineRef = useRef<{ runId: string; at: number } | null>(null);
 
@@ -110,11 +124,33 @@ export function useMemoryActivity(
     };
     // The read is cancelled the moment the poll stops (unmount, another turn, the end): the request
     // is aborted, and the race below also drops an answer that arrives anyway.
-    const read = (lastSeq: number) =>
-      new Promise<LooseRunEvent[]>((resolve, reject) => {
+    const race = <T,>(request: Promise<T>) =>
+      new Promise<T>((resolve, reject) => {
         controller.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-        (listEvents(pollRun, lastSeq, controller.signal) as unknown as Promise<LooseRunEvent[]>).then(resolve, reject);
+        request.then(resolve, reject);
       });
+    const read = (lastSeq: number) => race(listEvents(pollRun, lastSeq, controller.signal) as unknown as Promise<LooseRunEvent[]>);
+    // After a successful observe: whether a reflection follows (null until the observations are read;
+    // a failed read is tried again at the next tick).
+    let awaitReflection: boolean | null = null;
+    const reported = async (events: readonly LooseRunEvent[]): Promise<boolean> => {
+      const features = featuresRef.current;
+      const threshold = features.reflectAfterTokens;
+      const conversation = conversationRef.current;
+      if (!features.observational || observerProgress(events) !== "observed" || threshold == null || !conversation) {
+        return postTurnReported(events, features);
+      }
+      if (awaitReflection === null) {
+        // No read starts after the deadline: the observe event is the end then.
+        if (Date.now() >= deadline) return true;
+        try {
+          awaitReflection = reflectionDue((await race(listObservations(conversation, controller.signal))).items, threshold);
+        } catch {
+          return false;
+        }
+      }
+      return postTurnReported(events, features, { awaitReflection });
+    };
     const schedule = () => {
       const left = deadline - Date.now();
       if (left <= 0) return finish();
@@ -123,7 +159,8 @@ export function useMemoryActivity(
     const tick = async () => {
       if (stopped()) return;
       const known = mergedRef.current;
-      if (postTurnReported(known, featuresRef.current)) return finish();
+      if (await reported(known)) return finish();
+      if (stopped()) return;
       // No read starts after the deadline: the last one is the read already in flight.
       if (Date.now() >= deadline) return finish();
       const lastSeq = known.reduce((max, item) => Math.max(max, item.seq), -1);
@@ -136,7 +173,9 @@ export function useMemoryActivity(
             const seen = new Set(events.map((item) => item.seq));
             return { runId: pollRun, events: [...events, ...fresh.filter((item) => !seen.has(item.seq))] };
           });
-          if (postTurnReported([...known, ...fresh], featuresRef.current)) return finish();
+          const done = await reported([...known, ...fresh]);
+          if (stopped()) return;
+          if (done) return finish();
         }
       } catch {
         if (stopped()) return;
