@@ -9,6 +9,9 @@ export type JsonSchema = {
   required?: string[];
   items?: JsonSchema;
   default?: unknown;
+  /** Numeric bounds (inclusive), when the schema states them. */
+  minimum?: number;
+  maximum?: number;
 };
 
 export interface ToolDefinition {

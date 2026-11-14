@@ -7,6 +7,7 @@ import { listTraceRuns } from "@/lib/traces";
 import { getRun } from "@/lib/runs";
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import LogsPage from "./page";
+import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const OTHER_RUN = "99999999-2222-3333-4444-555555555555";
@@ -14,9 +15,11 @@ const AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 let currentParams = new URLSearchParams();
 const replace = vi.fn();
+const push = vi.fn();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace, push: vi.fn() }),
+  usePathname: () => "/logs",
+  useRouter: () => ({ replace, push }),
   useSearchParams: () => currentParams,
 }));
 
@@ -52,6 +55,7 @@ describe("Logs page", () => {
   beforeEach(() => {
     currentParams = new URLSearchParams();
     replace.mockReset();
+    push.mockReset();
     vi.mocked(searchLogs).mockReset();
     vi.mocked(listTraceRuns).mockReset();
     vi.mocked(listTraceRuns).mockResolvedValue({ items: [], next_before: null });
@@ -69,7 +73,7 @@ describe("Logs page", () => {
     expect(rows[0]).toHaveTextContent("error");
     expect(rows[0]).toHaveTextContent("eap-worker");
     expect(rows[0].querySelector("time")).toHaveAttribute("dateTime", "2026-11-13T10:00:00.123456+00:00");
-    expect(screen.getByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", `/traces/${RUN}`);
+    expect(screen.getByRole("link", { name: `Open trace of run ${RUN}` })).toHaveAttribute("href", routes.trace(RUN));
     expect(screen.getAllByRole("link", { name: /Open trace/ })).toHaveLength(1);
   });
 
@@ -95,17 +99,17 @@ describe("Logs page", () => {
     expect(replace).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(60));
     expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace).toHaveBeenCalledWith("/logs?q=time", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.logs({ q: "time" }), { scroll: false });
   });
 
   it("writes the level and time range to the URL", async () => {
     vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
     fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error" }), { scroll: false });
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "24h" } });
     // The level chosen first is kept although the URL has not re-rendered yet.
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error&range=24h", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error", range: "24h" }), { scroll: false });
   });
 
   it("shows the Loki-unavailable state with a retry", async () => {
@@ -160,9 +164,9 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "timeout" } });
     act(() => vi.advanceTimersByTime(100));
     fireEvent.change(screen.getByLabelText("Level"), { target: { value: "error" } });
-    expect(replace).toHaveBeenLastCalledWith("/logs?level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error" }), { scroll: false });
     act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS));
-    expect(replace).toHaveBeenLastCalledWith("/logs?q=timeout&level=error", { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ q: "timeout", level: "error" }), { scroll: false });
   });
 
   it("keeps the agent and range when the debounced text lands", async () => {
@@ -174,7 +178,7 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: AGENT } });
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "6h" } });
     act(() => vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS + 10));
-    expect(replace).toHaveBeenLastCalledWith(`/logs?q=x&agent_id=${AGENT}&range=6h`, { scroll: false });
+    expect(replace).toHaveBeenLastCalledWith(`${routes.logs()}?q=x&agent_id=${AGENT}&range=6h`, { scroll: false });
   });
 
   it("Enter with search text and a partial run id writes both in one URL change", async () => {
@@ -184,7 +188,35 @@ describe("Logs page", () => {
     fireEvent.change(screen.getByLabelText("Run"), { target: { value: "1111" } });
     fireEvent.submit(screen.getByRole("search", { name: "Log filters" }));
     expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace).toHaveBeenCalledWith("/logs?q=boom&run_id=1111", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.logs({ q: "boom", run_id: "1111" }), { scroll: false });
+  });
+
+  it("blur-then-click race: a run id committed on blur is kept when the click opens the trace Sheet", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(response([log("model call failed")]));
+    render(<LogsPage />);
+    const link = await screen.findByRole("link", { name: `Open trace of run ${RUN}` });
+    fireEvent.change(screen.getByLabelText("Run"), { target: { value: "1111" } });
+    // The click that opens the Sheet first blurs the field, which commits the partial id; the router
+    // has not put it in the URL yet (currentParams is still empty), so the Sheet must build on it,
+    // and REPLACE (Next drops a pending replace under a push: test/pendingFilterWrite.test.tsx).
+    fireEvent.blur(screen.getByLabelText("Run"));
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ run_id: "1111" }), { scroll: false });
+    fireEvent.click(link);
+    expect(push).not.toHaveBeenCalled();
+    const url = new URL(replace.mock.calls[replace.mock.calls.length - 1][0] as string, "http://x");
+    expect(url.pathname).toBe("/logs");
+    expect(url.searchParams.get("run_id")).toBe("1111");
+    expect(url.searchParams.get("trace")).toBe(RUN);
+  });
+
+  it("without a pending filter write, opening a trace builds on the URL as it is", async () => {
+    currentParams = new URLSearchParams({ level: "error" });
+    vi.mocked(searchLogs).mockResolvedValue(response([log("model call failed")]));
+    render(<LogsPage />);
+    fireEvent.click(await screen.findByRole("link", { name: `Open trace of run ${RUN}` }));
+    const url = new URL(push.mock.calls[0][0] as string, "http://x");
+    expect(url.searchParams.get("level")).toBe("error");
+    expect(url.searchParams.get("trace")).toBe(RUN);
   });
 
   it("searches a selected run over its lifetime, not up to now", async () => {

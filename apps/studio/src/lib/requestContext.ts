@@ -1,11 +1,12 @@
-// Request context of an agent (P0.16): its typed fields, server validation, and a saved value per
-// agent in browser storage that the playground (P0.19) preselects.
+// Request context of an agent (P0.16): its typed fields, server validation, and named presets per
+// agent in browser storage that the chat's request context popover (SL.10) saves and applies.
 //
 // - GET  /api/v1/agents/{id}/request-context?version=<n|draft>  fields and JSON schema
 // - POST /api/v1/agents/{id}/request-context/validate           {version?, request_context?}
 //   200 {valid: true, request_context} or 422 {detail: [{loc: ["body", "request_context", field], msg, type}]}
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
 import type { JsonSchema } from "@/lib/tools";
+import { safeLocalStorage } from "@/lib/safeStorage";
 
 export type ContextFieldType = "string" | "integer" | "number" | "boolean" | "enum";
 
@@ -155,7 +156,7 @@ export function formatContextJson(value: RequestContextValue): string {
   return JSON.stringify(value, null, 2);
 }
 
-// --- Saved value per agent (browser storage) -------------------------------------------------
+// --- The old single saved value per agent (P0.16; read only to migrate it into presets) -------
 
 export const SAVED_CONTEXT_PREFIX = "eap.requestContext.v1:";
 
@@ -192,18 +193,10 @@ export function savedContextKey(agentId: string): string {
   return `${SAVED_CONTEXT_PREFIX}${credentialScope()}:${agentId}`;
 }
 
-function storage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 /** The saved context of this agent, or null (none, unreadable, or storage unavailable). */
 export function loadSavedContext(agentId: string): SavedRequestContext | null {
   try {
-    const raw = storage()?.getItem(savedContextKey(agentId));
+    const raw = safeLocalStorage()?.getItem(savedContextKey(agentId));
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || !isRecord(parsed.value)) return null;
@@ -223,7 +216,7 @@ export function loadSavedContext(agentId: string): SavedRequestContext | null {
 export function saveContext(agentId: string, value: RequestContextValue, version: ContextVersionRef): SavedRequestContext | null {
   const saved: SavedRequestContext = { value, version, saved_at: new Date().toISOString() };
   try {
-    const store = storage();
+    const store = safeLocalStorage();
     if (!store) return null;
     store.setItem(savedContextKey(agentId), JSON.stringify(saved));
     return saved;
@@ -235,7 +228,7 @@ export function saveContext(agentId: string, value: RequestContextValue, version
 /** Removes this agent's saved context; false when storage is unavailable. */
 export function clearSavedContext(agentId: string): boolean {
   try {
-    const store = storage();
+    const store = safeLocalStorage();
     if (!store) return false;
     store.removeItem(savedContextKey(agentId));
     return true;
@@ -244,19 +237,152 @@ export function clearSavedContext(agentId: string): boolean {
   }
 }
 
-/** The playground query flag that makes the saved preset win over the tab's remembered context. */
+/** The chat query flag (`context=…`): `preset` applies the newest preset over the tab's remembered
+ * context; `open` opens the request context popover. Both are read once and removed from the URL. */
 export const PRESET_CONTEXT_PARAM = "context";
 export const PRESET_CONTEXT_VALUE = "preset";
+export const OPEN_CONTEXT_VALUE = "open";
+
+// --- Named presets per agent (SL.10) --------------------------------------------------------
+//
+// `localStorage["studio.requestContextPresets.v1.<credential scope>:<agentId>"]` holds
+// `{presets: ContextPreset[], migrated: true}`. The first read of an agent imports its old single
+// saved value (`eap.requestContext.v1:…`, the P0.16 Request Context page) as a preset named "Saved"
+// and marks the record migrated, so a later read never imports it again, even after "Saved" is
+// deleted. The old key is left in place for one milestone.
+
+export const PRESETS_PREFIX = "studio.requestContextPresets.v1.";
+/** The name the old saved value gets when it is imported. */
+export const MIGRATED_PRESET_NAME = "Saved";
+export const PRESET_NAME_MAX_LENGTH = 60;
+
+export interface ContextPreset {
+  name: string;
+  /** The context as the server accepted it. */
+  value: RequestContextValue;
+  /** The version it was validated against (null: the latest at the time). */
+  version: ContextVersionRef;
+  saved_at: string;
+}
+
+interface PresetRecord {
+  presets: ContextPreset[];
+  migrated: boolean;
+}
+
+/** `studio.requestContextPresets.v1.<credential scope>:<agentId>`. */
+export function presetsKey(agentId: string): string {
+  return `${PRESETS_PREFIX}${credentialScope()}:${agentId}`;
+}
+
+function validVersion(version: unknown): ContextVersionRef {
+  return version === "draft" || (typeof version === "number" && Number.isInteger(version) && version > 0) ? version : null;
+}
+
+function parsePreset(raw: unknown): ContextPreset | null {
+  if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name.trim() || !isRecord(raw.value)) return null;
+  return {
+    name: raw.name,
+    value: raw.value,
+    version: validVersion(raw.version),
+    saved_at: typeof raw.saved_at === "string" ? raw.saved_at : "",
+  };
+}
+
+/** The stored record; null when there is none, it is unreadable, or storage is unavailable. */
+function readPresetRecord(agentId: string): PresetRecord | null {
+  try {
+    const raw = safeLocalStorage()?.getItem(presetsKey(agentId));
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || !Array.isArray(parsed.presets)) return null;
+    const presets: ContextPreset[] = [];
+    for (const item of parsed.presets) {
+      const preset = parsePreset(item);
+      if (preset && !presets.some((other) => other.name === preset.name)) presets.push(preset);
+    }
+    return { presets, migrated: parsed.migrated === true };
+  } catch {
+    return null;
+  }
+}
+
+function writePresetRecord(agentId: string, presets: ContextPreset[]): boolean {
+  try {
+    const store = safeLocalStorage();
+    if (!store) return false;
+    const record: PresetRecord = { presets, migrated: true };
+    store.setItem(presetsKey(agentId), JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
- * The playground URL that opens with this agent selected (P0.19 reads `agent`, `version` and the
- * saved context). `version` (a number or "draft"; null: latest) is the version the preset was
- * checked against; `preferPreset` adds `context=preset` so the saved preset replaces the context
- * the playground remembered for this agent in the tab.
+ * The agent's presets with the old saved value imported (once). Writes the record only when there
+ * is something to import, so reading an agent with no presets stores nothing.
  */
-export function playgroundHref(agentId: string, version: ContextVersionRef = null, preferPreset = false): string {
-  const params = new URLSearchParams({ agent: agentId });
-  if (version !== null) params.set("version", String(version));
-  if (preferPreset) params.set(PRESET_CONTEXT_PARAM, PRESET_CONTEXT_VALUE);
-  return `/playground?${params.toString()}`;
+function migratedPresets(agentId: string): ContextPreset[] {
+  const record = readPresetRecord(agentId);
+  if (record?.migrated) return record.presets;
+  const presets = record?.presets ?? [];
+  const old = loadSavedContext(agentId);
+  if (old === null) return presets;
+  const merged = presets.some((preset) => preset.name === MIGRATED_PRESET_NAME)
+    ? presets
+    : [...presets, { name: MIGRATED_PRESET_NAME, value: old.value, version: old.version, saved_at: old.saved_at }];
+  // A failed write leaves the record unmarked: the import is tried again on the next read.
+  writePresetRecord(agentId, merged);
+  return merged;
+}
+
+/** Sorts presets by name, case-insensitively. */
+function byName(a: ContextPreset, b: ContextPreset): number {
+  return a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name);
+}
+
+/** This agent's presets, by name (empty when none or storage is unavailable). Migrates the old key. */
+export function listPresets(agentId: string): ContextPreset[] {
+  return [...migratedPresets(agentId)].sort(byName);
+}
+
+/** The most recently saved preset, or null. */
+export function latestPreset(agentId: string): ContextPreset | null {
+  const presets = migratedPresets(agentId);
+  let latest: ContextPreset | null = null;
+  for (const preset of presets) if (latest === null || preset.saved_at > latest.saved_at) latest = preset;
+  return latest;
+}
+
+/** A preset name problem, or null: 1 to 60 characters after trimming. */
+export function presetNameError(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "Enter a name";
+  if (trimmed.length > PRESET_NAME_MAX_LENGTH) return `A name is at most ${PRESET_NAME_MAX_LENGTH} characters`;
+  return null;
+}
+
+/**
+ * Saves `value` as the preset `name` (trimmed), replacing a preset of the same name. Null when the
+ * name is invalid or browser storage is unavailable or full.
+ */
+export function savePreset(
+  agentId: string,
+  name: string,
+  value: RequestContextValue,
+  version: ContextVersionRef,
+): ContextPreset | null {
+  if (presetNameError(name) !== null) return null;
+  const preset: ContextPreset = { name: name.trim(), value, version, saved_at: new Date().toISOString() };
+  const presets = migratedPresets(agentId);
+  const index = presets.findIndex((item) => item.name === preset.name);
+  const next = index === -1 ? [...presets, preset] : presets.map((item, i) => (i === index ? preset : item));
+  return writePresetRecord(agentId, next) ? preset : null;
+}
+
+/** Deletes the preset `name`; false when browser storage is unavailable. Deleting a missing name succeeds. */
+export function deletePreset(agentId: string, name: string): boolean {
+  const presets = migratedPresets(agentId);
+  return writePresetRecord(agentId, presets.filter((item) => item.name !== name));
 }

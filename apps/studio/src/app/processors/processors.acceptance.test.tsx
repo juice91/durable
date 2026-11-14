@@ -3,6 +3,8 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProcessorsPage from "./page";
+import { ProcessorDetail } from "@/components/processors/ProcessorDetail";
+import { routes } from "@/lib/routes";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
@@ -55,6 +57,8 @@ const agent = (n: number) => ({
   draft_spec: { spec_version: 1, name: `Agent ${n}`, instructions: "", model: { provider: "test", name: "m" }, tools: [] },
 });
 
+const Detail = ({ type = "pii_redact" }: { type?: string }) => <ProcessorDetail type={type} />;
+
 describe("Processors page acceptance", () => {
   beforeEach(() => {
     vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "Bearer test");
@@ -67,12 +71,12 @@ describe("Processors page acceptance", () => {
     vi.unstubAllEnvs();
   });
 
-  it("never shows matched text, even if the API sent some", async () => {
+  it("does not render matched-text fields even if a response carried them (server non-leak: P0.9 API tests)", async () => {
     handlers["/processor-results"] = () => ({
       status: 200,
       body: { items: [row({ matched_text: "alice@example.com", match: "alice@example.com", categories: ["hate"], processor_type: "moderation", match_counts: {} })], next_before: null },
     });
-    render(<ProcessorsPage />);
+    render(<Detail />);
     const r = await screen.findByTestId("result-row");
     expect(r).toHaveTextContent("Categories: hate");
     expect(document.body.textContent).not.toContain("alice@example.com");
@@ -81,33 +85,32 @@ describe("Processors page acceptance", () => {
 
   it("the test console refuses moderation: the option is disabled and the API 422 is mapped", async () => {
     handlers["/processors/test"] = () => ({ status: 422, body: { detail: "moderation calls a model and cannot run in the test console; test it in the playground" } });
-    render(<ProcessorsPage />);
-    const option = await screen.findByRole("option", { name: "Moderation (test in the playground)" });
+    render(<Detail />);
+    const option = await screen.findByRole("option", { name: "Moderation (test in the chat)" });
     expect(option).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
-    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in the playground");
+    expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in an agent's chat");
   });
 
-  it("outcome filters reach the API and Reset clears them", async () => {
-    render(<ProcessorsPage />);
+  it("outcome filters reach the API, always narrowed to the page's type, and Reset keeps the type", async () => {
+    render(<Detail />);
     await screen.findByRole("option", { name: "Agent 1" });
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
-    fireEvent.change(filters.getByLabelText("Processor"), { target: { value: "pii_redact" } });
     fireEvent.change(filters.getByLabelText("Action"), { target: { value: "redact" } });
     fireEvent.click(filters.getByRole("button", { name: "Apply" }));
     await waitFor(() => {
       const last = calls.filter((c) => c.url.pathname.endsWith("/processor-results")).at(-1)!.url.searchParams;
-      expect(Object.fromEntries(last)).toEqual({ type: "pii_redact", action: "redact", limit: "50" });
+      expect(Object.fromEntries(last)).toEqual({ type: "pii_redact", action: "redact", limit: "50", from: expect.any(String) });
     });
     fireEvent.click(filters.getByRole("button", { name: "Reset" }));
     await waitFor(() => {
       const last = calls.filter((c) => c.url.pathname.endsWith("/processor-results")).at(-1)!.url.searchParams;
-      expect(Object.fromEntries(last)).toEqual({ limit: "50" });
+      expect(Object.fromEntries(last)).toEqual({ type: "pii_redact", limit: "50", from: expect.any(String) });
     });
   });
 
   it("refuses From after To without calling the API", async () => {
-    render(<ProcessorsPage />);
+    render(<Detail />);
     await screen.findByRole("option", { name: "Agent 1" });
     const before = calls.length;
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
@@ -125,7 +128,7 @@ describe("Processors page acceptance", () => {
       if (url.searchParams.get("before") === "c1") return { status: 200, body: { items: [row({ seq: 1 })], next_before: null } };
       return { status: 200, body: { items: [row({ seq: 2 })], next_before: "c1" } };
     };
-    render(<ProcessorsPage />);
+    render(<Detail />);
     fireEvent.click(await screen.findByRole("button", { name: "Load older outcomes" }));
     await waitFor(() => expect(screen.getAllByTestId("result-row")).toHaveLength(2));
     expect(n).toBe(2);
@@ -144,7 +147,7 @@ describe("Processors page acceptance", () => {
       }
       return { status: 200, body: { items: [row({ action: "block" })], next_before: null } };
     };
-    render(<ProcessorsPage />);
+    render(<Detail />);
     await screen.findByRole("option", { name: "Agent 1" });
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
     fireEvent.change(filters.getByLabelText("Action"), { target: { value: "block" } });
@@ -169,7 +172,7 @@ describe("Processors page acceptance", () => {
         return { status: 200, body: { spec: { input_processors: [{ type: "pii_redact", config: {} }] } } };
       };
     }
-    render(<ProcessorsPage />);
+    render(<Detail />);
     await waitFor(() => expect(calls.filter((c) => /\/versions\/1$/.test(c.url.pathname))).toHaveLength(10));
     await screen.findByTestId("processor-usage");
     expect(peak).toBeGreaterThan(1);
@@ -178,11 +181,31 @@ describe("Processors page acceptance", () => {
 
   it("an unreadable version is 'unknown', not 'unused'", async () => {
     handlers["/agents/agent-1/versions/1"] = () => ({ status: 500, body: { detail: "boom" } });
+    render(<Detail />);
+    expect(await screen.findByTestId("processor-usage-unknown")).toBeInTheDocument();
+    expect(screen.queryByTestId("processor-usage-empty")).toBeNull();
+  });
+
+  it("the list counts each type's outcomes of the last 24 h with one call per type", async () => {
+    handlers["/processor-results"] = (url) => ({
+      status: 200,
+      body: url.searchParams.get("type") === "pii_redact"
+        ? { items: [row({ seq: 1 }), row({ seq: 2 })], next_before: null }
+        : { items: [], next_before: null },
+    });
     render(<ProcessorsPage />);
-    const cards = await screen.findAllByTestId("processor-card");
-    const pii = cards.find((c) => c.dataset.processorType === "pii_redact")!;
-    expect(await within(pii).findByTestId("processor-usage-unknown")).toBeInTheDocument();
-    expect(within(pii).queryByTestId("processor-usage-empty")).toBeNull();
+    const rows = await screen.findAllByTestId("processor-row");
+    const pii = rows.find((r) => r.dataset.rowId === "pii_redact")!;
+    await waitFor(() => expect(within(pii).getByTestId("processor-row-outcomes")).toHaveTextContent("2"));
+    expect(within(pii).getByRole("link", { name: "PII redaction" })).toHaveAttribute("href", routes.processor("pii_redact"));
+    const countCalls = calls.filter((c) => c.url.pathname.endsWith("/processor-results"));
+    expect(countCalls.map((c) => c.url.searchParams.get("type")).sort()).toEqual(["moderation", "pii_redact"]);
+    for (const call of countCalls) {
+      expect(call.url.searchParams.get("limit")).toBe("200");
+      const from = Date.parse(call.url.searchParams.get("from")!);
+      expect(Date.now() - from).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000 - 60_000);
+      expect(Date.now() - from).toBeLessThan(24 * 60 * 60 * 1000 + 60_000);
+    }
   });
 
   it("the test console keeps the loc of a 422 detail list", async () => {
@@ -190,7 +213,7 @@ describe("Processors page acceptance", () => {
       status: 422,
       body: { detail: [{ loc: ["body", "processors", 0, "config", "max_chars"], msg: "Input should be greater than or equal to 1", type: "greater_than_equal" }] },
     });
-    render(<ProcessorsPage />);
+    render(<Detail />);
     fireEvent.click(await screen.findByRole("button", { name: "Run test" }));
     expect(await screen.findByTestId("console-error")).toHaveTextContent("processors.0.config.max_chars: Input should be greater than or equal to 1");
   });

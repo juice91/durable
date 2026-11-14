@@ -7,13 +7,14 @@ import {
   KIND_LABELS,
   formatDuration,
   spanLabel,
-  tracePath,
   type NameMaps,
   type SpanUsage,
   type TraceSpan,
 } from "@/lib/traces";
 import { PayloadBlock, payloadText } from "./PayloadBlock";
 import { STATUS_LABELS, STATUS_TEXT } from "./spanStyles";
+import type { TraceTab } from "@/lib/routes/observability";
+import { TraceLink } from "./TraceLink";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -87,32 +88,35 @@ function RunUsageSection({ span }: { span: TraceSpan }) {
 
 function Links({ span }: { span: TraceSpan }) {
   const a = span.attributes;
-  const links: Array<{ href: string; label: string; external?: boolean; testId: string }> = [];
+  // In-Studio links are TraceLinks: on a page hosting the trace Sheet a child run stacks a second
+  // Sheet, and "Run details" opens the Events tab; elsewhere they go to `/traces?trace=`.
+  const links: Array<{ runId?: string; tab?: TraceTab; href?: string; label: string; testId: string }> = [];
   const runId = str(a.run_id);
   if ((span.kind === "run" || span.kind === "child_run") && runId) {
-    if (span.kind === "child_run") links.push({ href: tracePath(runId), label: "Open child run trace", testId: "span-link-child-trace" });
-    links.push({ href: `/runs/${encodeURIComponent(runId)}`, label: "Run details", testId: "span-link-run" });
+    if (span.kind === "child_run") links.push({ runId, label: "Open child run trace", testId: "span-link-child-trace" });
+    links.push({ runId, tab: "events", label: "Run details", testId: "span-link-run" });
   }
   const childRun = str(a.child_run_id);
   if (span.kind === "workflow_step" && childRun) {
-    links.push({ href: tracePath(childRun), label: "Open child run trace", testId: "span-link-child-trace" });
+    links.push({ runId: childRun, label: "Open child run trace", testId: "span-link-child-trace" });
   }
   const traceId = str(a.trace_id);
-  if (traceId) links.push({ href: buildTraceLink(traceId), label: "Open in Grafana", external: true, testId: "span-link-grafana" });
+  if (traceId) links.push({ href: buildTraceLink(traceId), label: "Open in Grafana", testId: "span-link-grafana" });
   if (!links.length) return null;
+  const linkClass = "text-primary underline-offset-4 hover:underline";
   return (
     <div className="flex flex-wrap gap-3 text-sm">
-      {links.map((l) => (
-        <a
-          key={l.testId}
-          href={l.href}
-          data-testid={l.testId}
-          {...(l.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-          className="text-primary underline-offset-4 hover:underline"
-        >
-          {l.label}
-        </a>
-      ))}
+      {links.map((l) =>
+        l.runId ? (
+          <TraceLink key={l.testId} runId={l.runId} tab={l.tab ?? null} data-testid={l.testId} className={linkClass}>
+            {l.label}
+          </TraceLink>
+        ) : (
+          <a key={l.testId} href={l.href} data-testid={l.testId} target="_blank" rel="noopener noreferrer" className={linkClass}>
+            {l.label}
+          </a>
+        ),
+      )}
     </div>
   );
 }

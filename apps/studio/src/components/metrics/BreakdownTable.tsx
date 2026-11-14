@@ -29,8 +29,12 @@ export interface BreakdownTableProps {
   emptyMessage?: string;
   note?: string;
   /** Where a row's name (and a click on the row) leads, with the link's accessible name; default:
-   * the Traces list filtered to the row (`breakdownHref`). The Overview Dashboard opens Metrics. */
+   * the Traces list filtered to the row (`breakdownHref`). The Overview's Top agents narrows Metrics. */
   rowLink?: (item: BreakdownItem, name: string) => { href: string; label: string };
+  /** The title's heading level: 2 on its own, 3 inside a titled section (the Metrics Overview). */
+  headingLevel?: 2 | 3;
+  /** Extra header controls, after the sort control (e.g. the Overview's "Show 10" toggle). */
+  actions?: React.ReactNode;
 }
 
 export const SORT_OPTIONS: { value: BreakdownSort; label: string }[] = [
@@ -80,13 +84,17 @@ export function BreakdownTable({
   emptyMessage = "No data in this period",
   note,
   rowLink,
+  headingLevel = 2,
+  actions,
 }: BreakdownTableProps) {
+  const Heading = headingLevel === 3 ? "h3" : "h2";
   const sortId = `breakdown-sort-${by}`;
   const th = "px-3 py-2 font-medium text-muted-foreground whitespace-nowrap";
   return (
-    <section className="rounded-lg border border-border bg-card text-card-foreground" aria-labelledby={`breakdown-title-${by}`} aria-busy={loading || undefined}>
+    <section className="min-w-0 rounded-lg border border-border bg-card text-card-foreground" aria-labelledby={`breakdown-title-${by}`} aria-busy={loading || undefined}>
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-4 pb-2">
-        <h2 id={`breakdown-title-${by}`} className="text-sm font-semibold text-foreground">{title}</h2>
+        <Heading id={`breakdown-title-${by}`} className="text-sm font-semibold text-foreground">{title}</Heading>
+        <div className="flex flex-wrap items-center gap-2">
         {onSortChange && (
           <label htmlFor={sortId} className="flex items-center gap-2 text-xs text-muted-foreground">
             Top by
@@ -102,6 +110,8 @@ export function BreakdownTable({
             </select>
           </label>
         )}
+        {actions}
+        </div>
       </div>
       {note && <p className="px-4 pb-2 text-xs text-muted-foreground">{note}</p>}
       {error ? (

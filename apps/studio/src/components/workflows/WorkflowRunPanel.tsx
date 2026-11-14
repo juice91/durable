@@ -6,7 +6,8 @@ import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import { ApiError } from "@/lib/api";
 import { canonicalInputKey, type PendingRun } from "@/lib/toolRunLedger";
 import { ToolRunError } from "@/lib/toolRuns";
-import { startWorkflowRun, workflowRunLedger, workflowRunPath, type WorkflowSpec } from "@/lib/workflows";
+import { startWorkflowRun, workflowRunLedger, type WorkflowSpec } from "@/lib/workflows";
+import { routes } from "@/lib/routes";
 
 export const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
 
@@ -26,6 +27,8 @@ interface WorkflowRunPanelProps {
   spec: WorkflowSpec | null;
   /** Called with the accepted run id while this panel is still showing the same workflow. */
   onStarted: (runId: string) => void;
+  /** `card`: a bordered card; `panel` (default): borderless, a card of the floating panel. */
+  variant?: "card" | "panel";
 }
 
 /**
@@ -34,7 +37,7 @@ interface WorkflowRunPanelProps {
  * lost or 5xx answer keeps it, so running again attaches to the run the server may already have.
  * Nothing is ever retried automatically.
  */
-export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onStarted }: WorkflowRunPanelProps) {
+export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onStarted, variant = "panel" }: WorkflowRunPanelProps) {
   const [mode, setMode] = useState<InputMode>("form");
   const [input, setInput] = useState<Record<string, unknown>>({});
   const [rawInput, setRawInput] = useState("{}");
@@ -130,14 +133,19 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
   };
 
   return (
-    <section aria-labelledby="workflow-run-heading" data-testid="workflow-run-panel" className="rounded-lg border border-border bg-card p-5">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
-        <h2 id="workflow-run-heading" className="font-semibold text-card-foreground">
-          Run{version != null ? <span className="ml-2 text-sm font-normal text-muted-foreground"><span className="sr-only">, </span>version {version}</span> : null}
+    <section
+      aria-labelledby="workflow-run-heading"
+      data-testid="workflow-run-panel"
+      className={variant === "panel" ? "min-w-0 border-b border-border p-4 last:border-b-0" : "min-w-0 rounded-lg border border-border bg-surface p-4"}
+    >
+      <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <h2 id="workflow-run-heading" className="text-label font-semibold text-foreground">
+          {/* A plain space, not a hidden ", " glued after "Run": the name read "Run , version 1". */}
+          Run{version != null ? <>{" "}<span className="ml-1 text-caption font-normal text-muted-foreground">(version {version})</span></> : null}
         </h2>
-        <div role="group" aria-label="Input mode" className="flex rounded-md border border-border p-1">
+        <div role="group" aria-label="Input mode" className="flex rounded-md border border-border p-0.5">
           {(["form", "json"] as const).map((item) => (
-            <button key={item} type="button" aria-pressed={mode === item} onClick={() => setMode(item)} className={`rounded px-3 py-1 text-sm ${mode === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>
+            <button key={item} type="button" aria-pressed={mode === item} onClick={() => setMode(item)} className={`rounded-sm px-2.5 py-0.5 text-label outline-none focus-visible:ring-2 focus-visible:ring-ring ${mode === item ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-fill-hover"}`}>
               {item === "form" ? "Form" : "JSON"}
             </button>
           ))}
@@ -148,7 +156,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
           {notes.map((item) => (
             <li key={item.runId} role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">
               <span>A run of {item.toolTitle} was started:</span>
-              <Link href={workflowRunPath(workflowId, item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
+              <Link href={routes.workflowRun(workflowId, item.runId)} className="text-primary underline-offset-4 hover:underline">Open run</Link>
               <button type="button" aria-label={`Dismiss note for run ${item.runId}`} onClick={() => workflowRunLedger.dismissNote(item.runId)} className="ml-auto text-xs text-muted-foreground hover:text-foreground">Dismiss</button>
             </li>
           ))}
@@ -165,7 +173,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
           </div>
         )
       ) : null}
-      <div className="mt-5 space-y-3 border-t border-border pt-4">
+      <div className="mt-4 space-y-3 border-t border-border pt-3">
         {banner ? <p role="alert" data-testid="workflow-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{banner}</p> : null}
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -173,7 +181,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
             onClick={run}
             disabled={version == null || submitting || (mode === "json" && Boolean(jsonError))}
             aria-busy={submitting}
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md bg-primary px-3 py-1.5 text-label font-medium text-primary-foreground outline-none hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50"
           >
             Run workflow
           </button>

@@ -1,13 +1,22 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { McpServerForm } from "@/components/mcp/McpServerForm";
-import { McpTestResult } from "@/components/mcp/McpTestResult";
-import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
+import { Plus } from "lucide-react";
+import { McpDeleteConfirm } from "@/components/mcp/McpDeleteConfirm";
+import { McpLastTest } from "@/components/mcp/McpLastTest";
+import { McpServerDialog } from "@/components/mcp/McpServerDialog";
+import { describeUsage, usageCountLabel, useMcpUsage } from "@/components/mcp/mcpUsage";
+import { DataList, type DataListColumn } from "@/components/shared/DataList";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Kbd } from "@/components/ui/Kbd";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 import { ApiError } from "@/lib/api";
-import { describeMcpApiMessage, describeMcpError, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
-
-const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { describeMcpApiMessage, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
+import { navCrumb } from "@/lib/nav";
+import { routes } from "@/lib/routes";
 
 type FormState = { mode: "create" } | { mode: "edit"; server: McpServer } | null;
 
@@ -16,19 +25,15 @@ function errorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
 }
 
-function LastTest({ server }: { server: McpServer }) {
-  if (!server.last_status) return <span className="text-muted-foreground">Not tested</span>;
-  const when = server.last_checked_at ? new Date(server.last_checked_at).toLocaleString() : null;
-  return (
-    <span className="flex flex-col">
-      {server.last_status === "ok"
-        ? <span className="text-primary">Connected</span>
-        : <span className="text-destructive-text" title={server.last_error_code ?? undefined}>{describeMcpError(server.last_error_code)}</span>}
-      {when ? <span className="text-xs text-muted-foreground">{when}</span> : null}
-    </span>
-  );
-}
+// DataList renders this on each row as data-testid (named `testId` so the test-id inventory sees it).
+const SERVER_ROW = { testId: "mcp-server-row" } as const;
 
+const TRANSPORT_LABEL: Record<McpServer["transport"], string> = { streamable_http: "Streamable HTTP" };
+
+/**
+ * MCP Servers: the remote servers Studio's agents CONNECT to (client registrations), not servers we
+ * serve. A DataList with row actions; a row opens `/mcp/{id}`; "Add server" (`c`) opens a Dialog.
+ */
 export default function McpServersPage() {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,18 +41,21 @@ export default function McpServersPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Connection tests run on this page: the Tools column shows their counts (the API keeps no tool list).
   const [tests, setTests] = useState<Record<string, TestResult>>({});
   const [confirmDelete, setConfirmDelete] = useState<McpServer | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const usage = useMcpUsage();
   // The server whose delete dialog is open right now (state is stale inside async callbacks).
   const openDeleteId = useRef<string | null>(null);
   // After a delete the button that opened the dialog is gone; focus lands on the page heading.
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setServers(await mcpServers.list());
+      setServers((await mcpServers.list()).slice().sort((a, b) => a.name.localeCompare(b.name)));
       setError(null);
     } catch (reason: unknown) {
       setError(errorMessage(reason, "Failed to load MCP servers"));
@@ -60,11 +68,23 @@ export default function McpServersPage() {
     void load();
   }, [load]);
 
+  const openCreate = useCallback(() => setForm({ mode: "create" }), []);
+  // `c` goes through the global shortcut provider (one listener, one guard), only while no dialog is open.
+  useCreateAction(form === null && confirmDelete === null ? openCreate : null);
+
   const replaceServer = (server: McpServer) =>
     setServers((current) => {
       const exists = current.some((item) => item.id === server.id);
       const next = exists ? current.map((item) => (item.id === server.id ? server : item)) : [...current, server];
       return next.sort((a, b) => a.name.localeCompare(b.name));
+    });
+
+  const dropTest = (id: string) =>
+    setTests((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
     });
 
   const withBusy = async (id: string, action: () => Promise<void>) => {
@@ -94,17 +114,15 @@ export default function McpServersPage() {
     openDeleteId.current = server?.id ?? null;
     setDeleteError(null);
     setConfirmDelete(server);
+    // Always re-check: an agent may have started using it since the page loaded. Delete waits for it.
+    if (server) usage.recheck();
   };
 
   const forgetServer = (id: string) => {
     // A deleted server's edit form has nothing left to save.
     setForm((current) => (current?.mode === "edit" && current.server.id === id ? null : current));
     setServers((current) => current.filter((item) => item.id !== id));
-    setTests((current) => {
-      const next = { ...current };
-      delete next[id];
-      return next;
-    });
+    dropTest(id);
   };
 
   const closeDeleteDialogAfter = (server: McpServer) => {
@@ -144,14 +162,8 @@ export default function McpServersPage() {
     const editing = form?.mode === "edit" ? form.server : null;
     setForm(null);
     if (!server) return; // unchanged edit: keep the row as the list has it now
-    // Changing the URL or headers clears the stored test result; drop the stale tool list too.
-    if (editing && (editing.url !== server.url || server.last_status === null)) {
-      setTests((current) => {
-        const next = { ...current };
-        delete next[server.id];
-        return next;
-      });
-    }
+    // Changing the URL or headers clears the stored test result; drop the stale tool count too.
+    if (editing && (editing.url !== server.url || server.last_status === null)) dropTest(server.id);
     if (editing) {
       // An edit never re-adds a row that was deleted meanwhile.
       setServers((current) => current.map((item) => (item.id === server.id ? server : item)));
@@ -160,79 +172,163 @@ export default function McpServersPage() {
     }
   };
 
-  return (
-    <div className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-bold text-foreground focus:outline-none">MCP Servers</h1>
-          <p className="mt-1 text-muted-foreground">Register remote MCP servers, test them and see the tools they offer to agents.</p>
+  // Rebuilt each render: the row actions read the latest busy, test and usage state.
+  const columns: DataListColumn<McpServer>[] = [
+    {
+      id: "name",
+      header: "Name",
+      sortable: true,
+      sortValue: (server) => server.name,
+      cell: (server) => (
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <span className="truncate">{server.name}</span>
+          <Badge variant={server.enabled ? "success" : "neutral"}>{server.enabled ? "Enabled" : "Disabled"}</Badge>
+        </span>
+      ),
+    },
+    {
+      id: "transport",
+      header: "Transport",
+      className: "hidden whitespace-nowrap md:table-cell",
+      cell: (server) => <span className="text-muted-foreground">{TRANSPORT_LABEL[server.transport] ?? server.transport}</span>,
+    },
+    {
+      id: "url",
+      header: "URL",
+      sortable: true,
+      sortValue: (server) => server.url,
+      className: "max-w-xs",
+      cell: (server) => <span className="block truncate font-mono text-caption text-muted-foreground" title={server.url}>{server.url}</span>,
+    },
+    {
+      id: "last-test",
+      header: "Last test",
+      sortable: true,
+      sortValue: (server) => server.last_status ?? "",
+      cell: (server) => <div data-testid="mcp-last-test"><McpLastTest server={server} showTime={false} /></div>,
+    },
+    {
+      id: "tools",
+      header: "Tools",
+      align: "end",
+      cell: (server) => {
+        const result = tests[server.id];
+        if (!result || result.status !== "ok") return <span className="text-muted-foreground" title="Test the connection to list its tools">—</span>;
+        return <span data-testid="mcp-tool-count">{result.tools.length}</span>;
+      },
+    },
+    {
+      id: "used-by",
+      header: "Used by",
+      align: "end",
+      sortable: usage.status === "ready",
+      sortValue: (server) => usage.usageFor(server.name).length,
+      cell: (server) => {
+        if (usage.status !== "ready") return <span className="text-muted-foreground" title={usage.status === "error" ? "Could not load agents" : undefined}>—</span>;
+        const list = usage.usageFor(server.name);
+        const partialNote = usage.partial ? "Some published versions could not be read; other agents may also use it." : null;
+        if (list.length === 0) {
+          return (
+            <span className="text-muted-foreground" title={partialNote ?? undefined}>
+              {usageCountLabel(0, usage.partial)}
+              {partialNote ? <span className="sr-only"> ({partialNote})</span> : null}
+            </span>
+          );
+        }
+        const names = list.map((item) => `${item.agentName} (${describeUsage(item)})`).join("\n");
+        return (
+          <span data-testid="mcp-used-by-count" data-partial={usage.partial || undefined} title={partialNote ? `${names}\n${partialNote}` : names}>
+            {usageCountLabel(list.length, usage.partial)}
+            {partialNote ? <span className="sr-only"> ({partialNote})</span> : null}
+          </span>
+        );
+      },
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      align: "end",
+      className: "whitespace-nowrap",
+      cell: (server) => (
+        <div className="flex items-center justify-end gap-1" data-testid="mcp-row-actions">
+          {busy[server.id] ? <span className="text-caption text-muted-foreground" aria-live="polite">Working…</span> : null}
+          <Button size="sm" disabled={busy[server.id]} onClick={() => void testServer(server)}>Test connection</Button>
+          <Button size="sm" variant="ghost" disabled={busy[server.id]} onClick={() => void toggleEnabled(server)}>{server.enabled ? "Disable" : "Enable"}</Button>
+          <Button size="sm" variant="ghost" disabled={busy[server.id]} onClick={() => setForm({ mode: "edit", server })}>Edit</Button>
+          <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy[server.id]} onClick={() => openDeleteDialog(server)}>Delete</Button>
         </div>
-        {form === null ? <button type="button" onClick={() => setForm({ mode: "create" })} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">Register server</button> : null}
+      ),
+    },
+  ];
+
+  return (
+    <>
+      <PageHeader
+        crumbs={[navCrumb("mcp", { current: true })]}
+        titleRef={headingRef}
+        titleProps={{ tabIndex: -1, className: "focus:outline-none" }}
+        actions={
+          <Button variant="primary" onClick={openCreate} aria-keyshortcuts="c" data-testid="mcp-add-server">
+            <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+            Add server
+            <Kbd className="hidden md:inline-flex">C</Kbd>
+          </Button>
+        }
+      />
+      <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
+        <p className="text-body text-muted-foreground">Remote MCP servers that agents connect to. Register one, test it and see the tools it offers.</p>
+
+        {notice ? <p role="status" data-testid="mcp-notice" className="rounded-md border border-border bg-muted/40 p-3 text-body text-foreground">{notice}</p> : null}
+        {actionError ? <p role="alert" data-testid="mcp-action-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
+
+        <DataList
+          label="MCP servers"
+          testId="mcp-server-list"
+          rows={servers}
+          columns={columns}
+          getRowId={(server) => server.id}
+          getRowHref={(server) => routes.mcpServer(server.id)}
+          getRowLabel={(server) => `${server.name}, ${server.enabled ? "enabled" : "disabled"}`}
+          getRowTestId={() => SERVER_ROW.testId}
+          searchPlaceholder="Search by name or URL"
+          filterRow={(server, query) => {
+            const q = query.toLowerCase();
+            return server.name.toLowerCase().includes(q) || server.url.toLowerCase().includes(q);
+          }}
+          loading={loading}
+          error={error}
+          onRetry={() => void load()}
+          empty={{
+            title: "No MCP servers yet",
+            description: "Register a remote server over Streamable HTTP to make its tools available to agents.",
+            action: <Button variant="primary" onClick={openCreate}>Add server</Button>,
+          }}
+        />
       </div>
 
       {form ? (
-        <div className="mb-6">
-          <McpServerForm
-            key={form.mode === "edit" ? form.server.id : "create"}
-            server={form.mode === "edit" ? form.server : undefined}
-            onSaved={onSaved}
-            onCancel={() => setForm(null)}
-          />
-        </div>
-      ) : null}
-
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
-      {notice ? <p role="status" data-testid="mcp-notice" className="mb-4 rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">{notice}</p> : null}
-      {actionError ? <p role="alert" data-testid="mcp-action-error" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{actionError}</p> : null}
-      {loading ? <p className="text-muted-foreground">Loading MCP servers…</p> : null}
-
-      {!loading && !error && servers.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-10 text-center">
-          <p className="font-medium text-foreground">No MCP servers yet</p>
-          <p className="mt-1 text-sm text-muted-foreground">Register a remote server over Streamable HTTP to make its tools available to agents.</p>
-        </div>
-      ) : null}
-
-      {!loading && servers.length > 0 ? (
-        <ul aria-label="MCP servers" className="space-y-3">
-          {servers.map((server) => (
-            <li key={server.id} data-testid="mcp-server-row" data-server-name={server.name} className="rounded-lg border border-border bg-card p-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <h2 className="font-semibold text-card-foreground">{server.name}</h2>
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${server.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}>{server.enabled ? "Enabled" : "Disabled"}</span>
-                  </div>
-                  <p className="break-all font-mono text-xs text-muted-foreground">{server.url}</p>
-                  {server.header_names.length > 0 ? <p className="text-xs text-muted-foreground">Headers: {server.header_names.map((name) => `${name} (set)`).join(", ")}</p> : null}
-                  <div className="text-sm" data-testid="mcp-last-test"><LastTest server={server} /></div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => void testServer(server)}>Test connection</button>
-                  <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => void toggleEnabled(server)}>{server.enabled ? "Disable" : "Enable"}</button>
-                  <button type="button" className={secondaryButton} disabled={busy[server.id]} onClick={() => setForm({ mode: "edit", server })}>Edit</button>
-                  <button type="button" className={`${secondaryButton} text-destructive-text`} disabled={busy[server.id]} onClick={() => openDeleteDialog(server)}>Delete</button>
-                </div>
-              </div>
-              {busy[server.id] ? <p className="mt-2 text-xs text-muted-foreground" aria-live="polite">Working…</p> : null}
-              {tests[server.id] ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={tests[server.id]} /></div> : null}
-            </li>
-          ))}
-        </ul>
+        <McpServerDialog
+          server={form.mode === "edit" ? form.server : undefined}
+          onSaved={onSaved}
+          onClose={() => setForm(null)}
+        />
       ) : null}
 
       {confirmDelete ? (
-        <ConfirmDialog
-          title={`Delete ${confirmDelete.name}?`}
-          description="Its stored header secrets are deleted too. Agents that use its tools will fail to publish or run until they are changed."
-          confirmLabel="Delete server"
-          destructive
+        <McpDeleteConfirm
+          server={confirmDelete}
+          usageStatus={usage.status}
+          usageRefreshing={usage.refreshing}
+          usagePartial={usage.partial}
+          usage={usage.usageFor(confirmDelete.name)}
           busy={busy[confirmDelete.id]}
-          onConfirm={() => void deleteServer(confirmDelete)}
           error={deleteError}
+          onConfirm={() => void deleteServer(confirmDelete)}
           onCancel={() => openDeleteDialog(null)}
+          // The deleted server's row (whose menu opened this) is gone: focus goes to the page title.
+          fallbackFocus={() => headingRef.current}
         />
       ) : null}
-    </div>
+    </>
   );
 }

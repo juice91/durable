@@ -1,0 +1,114 @@
+"use client";
+
+import React, { createContext, useContext, useState } from "react";
+import { useAuiState, type TextMessagePartProps, type ToolCallMessagePartProps } from "@assistant-ui/react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { ChevronRight, Wrench } from "lucide-react";
+import { cn } from "@/lib/cn";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { Badge, type BadgeProps } from "@/components/ui/Badge";
+import { focusRing } from "@/components/ui/Button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/Collapsible";
+import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
+
+/**
+ * `toolCallInfoKey(runId, toolCallId)` → its status and duration (see toolCalls.ts); the chat
+ * provides it per thread. Keyed by run as well: a tool call id is unique only within its run (a
+ * scripted model reuses ids per tool name across turns).
+ */
+export const ToolCallInfoContext = createContext<ReadonlyMap<string, ToolCallInfo>>(new Map());
+
+const STATUS_VARIANT: Record<ToolCallStatus, BadgeProps["variant"]> = {
+  running: "info",
+  ok: "success",
+  error: "destructive",
+  no_result: "neutral",
+};
+
+function json(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+const monoBlock = "max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 font-mono text-caption text-foreground";
+
+/**
+ * One tool call as a collapsible card: the tool name, its status and duration in the header;
+ * arguments and result in mono inside. Collapsed by default.
+ */
+export function ToolCallCard({ toolCallId, toolName, args, result }: ToolCallMessagePartProps) {
+  const messageId = useAuiState((s) => s.message.id);
+  const runId = messageRunId(messageId);
+  const infos = useContext(ToolCallInfoContext);
+  const info = runId === null ? undefined : infos.get(toolCallInfoKey(runId, toolCallId));
+  const status: ToolCallStatus = info?.status ?? (result !== undefined ? "ok" : "running");
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} asChild>
+      <div data-testid="tool-call-card" data-status={status} className="my-2 min-w-0 rounded-md border border-border bg-surface text-foreground">
+        <CollapsibleTrigger
+          className={cn("flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left text-label hover:bg-fill-hover", focusRing)}
+        >
+          <ChevronRight
+            strokeWidth={ICON_STROKE_WIDTH}
+            aria-hidden="true"
+            className={cn("size-icon shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none", open && "rotate-90")}
+          />
+          <Wrench strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" className="size-icon shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate font-mono font-medium">{toolName}</span>
+          <Badge variant={STATUS_VARIANT[status]} data-testid="tool-call-status">
+            {TOOL_STATUS_LABELS[status]}
+          </Badge>
+          {info?.durationMs !== null && info?.durationMs !== undefined ? (
+            <span data-testid="tool-call-duration" className="shrink-0 text-caption tabular-nums text-muted-foreground">
+              {formatDuration(info.durationMs)}
+            </span>
+          ) : null}
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-2 border-t border-border px-3 py-2">
+          <div>
+            <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
+            <pre data-testid="tool-call-args" className={monoBlock}>
+              {json(args)}
+            </pre>
+          </div>
+          {result !== undefined ? (
+            <div>
+              <p className="mb-1 text-caption font-medium text-muted-foreground">Result</p>
+              <pre data-testid="tool-call-result" className={monoBlock}>
+                {json(result)}
+              </pre>
+            </div>
+          ) : null}
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
+  );
+}
+
+/** Assistant text as Markdown (GFM, no raw HTML), styled with theme tokens. */
+export function MarkdownText({ text }: TextMessagePartProps) {
+  return (
+    <div
+      className={cn(
+        "min-w-0 space-y-2 break-words text-body leading-relaxed",
+        "[&_a]:text-info-text [&_a]:underline [&_a]:underline-offset-2",
+        "[&_code]:rounded-sm [&_code]:bg-fill-hover [&_code]:px-1 [&_code]:font-mono [&_code]:text-caption",
+        "[&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-border [&_pre]:bg-fill-hover [&_pre]:p-3",
+        "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
+        "[&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5",
+        "[&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
+        "[&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_th]:border [&_th]:border-border [&_th]:px-2",
+      )}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}

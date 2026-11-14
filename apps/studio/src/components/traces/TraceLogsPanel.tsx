@@ -7,7 +7,17 @@ import { LogsTable } from "@/components/logs/LogsTable";
 import { LogsUnavailable } from "@/components/logs/LogsUnavailable";
 import { logsPath, MAX_LOG_LIMIT, traceLogsParams, type RunTimes } from "@/components/logs/logsQuery";
 import { useLogSearch } from "@/components/logs/useLogSearch";
-import type { TraceLogsSlotProps } from "./TraceView";
+import type { TraceRun, TraceSpan } from "@/lib/traces";
+
+/** What the logs panel (P0.20) gets: the run, its OpenTelemetry trace id, the selected span and
+ * that span's time window (ISO; `end` null while the span is open). */
+export interface TraceLogsSlotProps {
+  runId: string;
+  run: TraceRun;
+  traceId: string | null;
+  selectedSpan: TraceSpan | null;
+  window: { start: string | null; end: string | null };
+}
 
 /** The trace view's logs panel (P0.20): the run's logs from GET /logs, narrowed to the selected
  * span's time window, or all of the run's logs. Oldest first, like the waterfall. */
@@ -104,9 +114,4 @@ export function TraceLogsPanel({
       )}
     </div>
   );
-}
-
-/** The default `renderLogsPanel` of TraceView. */
-export function renderTraceLogsPanel(props: TraceLogsSlotProps): React.ReactNode {
-  return <TraceLogsPanel runId={props.runId} run={props.run} selectedSpan={props.selectedSpan} window={props.window} />;
 }

@@ -5,9 +5,17 @@ import { buildWorkflowGraph } from "@/lib/workflowGraph";
 import { canonicalInputKey } from "@/lib/toolRunLedger";
 import { workflowRunLedger, type WorkflowSpec } from "@/lib/workflows";
 import { demoSpec, parallelSpec } from "@/test/workflowFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: "wf-1" }), useRouter: () => ({ push }) }));
+// SL.14: the detail page reads its tab (`?tab=runs`) and hosts the trace Sheet, so it also needs
+// the search parameters, the pathname and router.replace.
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ id: "wf-1" }),
+  useRouter: () => ({ push, replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workflows/wf-1",
+}));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -178,13 +186,14 @@ describe("Workflows list acceptance", () => {
     const published = await screen.findByTestId("workflow-row-wf-1");
     const draft = screen.getByTestId("workflow-row-wf-2");
 
-    expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", "/workflows/wf-1");
-    expect(within(published).getByRole("link", { name: "Open Triage" })).toHaveAttribute("href", "/workflows/wf-1");
+    expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
+    // SL.14: the name is the row's one link (the duplicate "Open" column is gone).
+    expect(within(published).getAllByRole("link")).toHaveLength(1);
     expect(published).toHaveTextContent("v2");
     expect(published).not.toHaveTextContent("Draft only");
 
-    expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", "/workflows/wf-2");
-    expect(within(draft).getByRole("link", { name: "Open Draft" })).toHaveAttribute("href", "/workflows/wf-2");
+    expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
+    expect(within(draft).getAllByRole("link")).toHaveLength(1);
     expect(draft).toHaveTextContent("Draft only");
     expect(draft).not.toHaveTextContent("vnull");
     expect(within(table).getAllByRole("row")).toHaveLength(3);
@@ -197,7 +206,13 @@ describe("Workflow graph acceptance", () => {
     const { unmount } = render(<WorkflowDetailPage />);
     await screen.findByTestId("workflow-graph");
 
-    expect(screen.getByTestId("workflow-graph")).toHaveAttribute("role", "img");
+    // The drawing is the image (labelled); React Flow's own credit link is visible beside it, outside
+    // the image, instead of hidden with a licence-only option that warns (browser check).
+    const graphElement = screen.getByTestId("workflow-graph");
+    expect(graphElement).toHaveAttribute("role", "group");
+    expect(await within(graphElement).findByRole("img", { name: /^Execution graph of .+ with 5 steps$/ })).toBeInTheDocument();
+    const credit = within(graphElement).getByRole("link", { name: "React Flow attribution" });
+    expect(credit.closest('[role="img"]')).toBeNull();
     expect(screen.getByTestId("workflow-node-classify")).toHaveAttribute("data-step-type", "agent");
     expect(screen.getByTestId("workflow-node-lookup")).toHaveAttribute("data-step-type", "tool");
     expect(screen.getByTestId("workflow-node-route")).toHaveAttribute("data-step-type", "branch");
@@ -317,7 +332,7 @@ describe("Workflow run panel acceptance", () => {
     expect(sent.input).toEqual({ text: "from-json", urgent: true });
     expect(sent.version).toBe(2);
     expect(sent.run_id).toEqual(expect.any(String));
-    await waitFor(() => expect(push).toHaveBeenCalledWith(`/workflows/wf-1/runs/${sent.run_id}`));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.workflowRun("wf-1", String(sent.run_id))));
   });
 
   it("maps a 422 list onto fields and leaves string request errors in the banner", async () => {
@@ -439,6 +454,6 @@ describe("Workflow run panel acceptance", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run workflow" }));
     await waitFor(() => expect(postBodies()).toHaveLength(2));
     expect(postBodies()[1]).toEqual({ input: { text: "hello" }, version: 2, run_id: first.run_id });
-    await waitFor(() => expect(push).toHaveBeenCalledWith(`/workflows/wf-1/runs/${first.run_id}`));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(routes.workflowRun("wf-1", String(first.run_id))));
   });
 });

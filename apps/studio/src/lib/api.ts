@@ -89,13 +89,17 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   agents: {
-    list: () => request<Agent[]>("/api/v1/agents"),
+    /** `init` passes a `signal` (say, a timeout) through to fetch. */
+    list: (init?: RequestInit) => request<Agent[]>("/api/v1/agents", init),
     create: (spec: AgentSpec) => request<Agent>("/api/v1/agents", { method: "POST", body: JSON.stringify({ spec }) }),
     get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
     update: (id: string, spec: AgentSpec) => request<Agent>(`/api/v1/agents/${id}`, { method: "PATCH", body: JSON.stringify({ spec }) }),
   },
   versions: {
     list: (agentId: string) => request<AgentVersion[]>(`/api/v1/agents/${agentId}/versions`),
+    /** One published version (`GET /agents/{id}/versions/{n}`). */
+    get: (agentId: string, version: number, init?: RequestInit) =>
+      request<AgentVersion>(`/api/v1/agents/${encodeURIComponent(agentId)}/versions/${encodeURIComponent(String(version))}`, init),
     create: (agentId: string) => request<AgentVersion>(`/api/v1/agents/${agentId}/versions`, { method: "POST" }),
   },
 };

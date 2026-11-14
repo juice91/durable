@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MetricsPage from "./page";
 import { breakdownFixture, metricValues, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -25,6 +26,9 @@ const MODELS = { items: [{ id: "test:echo", provider: "test", name: "echo", wild
 
 const okResponder: Responder = (url) => {
   if (url.pathname === "/api/v1/models") return { status: 200, body: MODELS };
+  // The Overview's Needs attention list and its run names (SL.7).
+  if (url.pathname === "/api/v1/runs") return { status: 200, body: { items: [], next_before: null } };
+  if (url.pathname === "/api/v1/workflows") return { status: 200, body: [] };
   if (url.pathname.endsWith("/summary")) {
     return {
       status: 200,
@@ -91,11 +95,11 @@ describe("MetricsPage acceptance", () => {
       render(<MetricsPage />);
       await screen.findByTestId("kpi-runs-value");
       fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "workflow" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?kind=workflow", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ kind: "workflow" }), { scroll: false });
       fireEvent.change(screen.getByLabelText("Interval"), { target: { value: "day" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?interval=day", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ interval: "day" }), { scroll: false });
       fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "24h" } });
-      expect(replace).toHaveBeenLastCalledWith("/metrics?range=24h", { scroll: false });
+      expect(replace).toHaveBeenLastCalledWith(routes.metrics({ range: "24h" }), { scroll: false });
     });
 
     it("a custom range in the URL is queried as given", async () => {
@@ -121,13 +125,15 @@ describe("MetricsPage acceptance", () => {
       expect(runs.from).toBeTruthy();
       expect(runs.to).toBeTruthy();
       expect(q(screen.getByTestId("kpi-error_rate").getAttribute("href")!)).toMatchObject({ status: "failed", agent_id: "a-1" });
-      expect(new URL(screen.getByTestId("kpi-runs").getAttribute("href")!, "http://x").pathname).toBe("/traces");
+      expect(new URL(screen.getByTestId("kpi-runs").getAttribute("href")!, "http://x").pathname).toBe(routes.traces());
     });
 
     it("breakdown rows link to the agent or model, and failed counts to failed runs", async () => {
       mockFetch(okResponder);
       render(<MetricsPage />);
-      const agent = await screen.findByRole("link", { name: "Support bot: open matching runs" });
+      // Top agents (SL.7) narrows Metrics to the agent; its failed count still opens Traces.
+      const agent = await screen.findByRole("link", { name: "Support bot: show this agent's metrics" });
+      expect(new URL(agent.getAttribute("href")!, "http://x").pathname).toBe(routes.metrics());
       expect(q(agent.getAttribute("href")!)).toMatchObject({ agent_id: "a-1" });
       expect(q(screen.getByRole("link", { name: "Support bot: open 3 failed runs" }).getAttribute("href")!)).toMatchObject({ status: "failed", agent_id: "a-1" });
       const model = await screen.findByRole("link", { name: "test:echo: open matching runs" });
@@ -156,7 +162,7 @@ describe("MetricsPage acceptance", () => {
       expect(screen.getAllByTestId("active-bucket")[0]).toHaveAttribute("data-bucket", "2");
       fireEvent.keyDown(plot, { key: "Enter" });
       expect(push).toHaveBeenCalledTimes(1);
-      expect(new URL(push.mock.calls[0][0], "http://x").pathname).toBe("/traces");
+      expect(new URL(push.mock.calls[0][0], "http://x").pathname).toBe(routes.traces());
     });
   });
 
@@ -224,7 +230,9 @@ describe("MetricsPage acceptance", () => {
         return { status: 200, body: breakdownFixture("agent", []) };
       });
       render(<MetricsPage />);
-      expect(await screen.findByTestId("metrics-empty")).toHaveTextContent("No runs or model requests match these filters");
+      // No filters set: the message suggests widening the range or starting a run (SL.7 merged the
+      // dashboard's empty state); with a filter it suggests clearing it (see overview.test.tsx).
+      expect(await screen.findByTestId("metrics-empty")).toHaveTextContent("No runs or model requests in this period");
       expect(within(document.body).getAllByText("No data in this period").length).toBeGreaterThan(0);
     });
 

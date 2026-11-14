@@ -3,6 +3,7 @@ import React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import MetricsPage from "./page";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
+import { routes } from "@/lib/routes";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -30,6 +31,9 @@ const MODELS = {
 
 const okResponder: Responder = (url) => {
   if (url.pathname === "/api/v1/models") return { status: 200, body: MODELS };
+  // The Overview's Needs attention list and its run names (SL.7).
+  if (url.pathname === "/api/v1/runs") return { status: 200, body: { items: [], next_before: null } };
+  if (url.pathname === "/api/v1/workflows") return { status: 200, body: [] };
   if (url.pathname.endsWith("/summary")) {
     return { status: 200, body: summaryFixture({ runs: 6, completed: 3, failed: 3, error_rate: 0.5, requests: 2, cost_usd: "0.0100000000" }, { runs: 3 }) };
   }
@@ -133,7 +137,8 @@ describe("MetricsPage", () => {
     expect(await screen.findByTestId("kpi-runs-value")).toHaveTextContent("6");
     expect(screen.getByTestId("kpi-runs-delta")).toHaveTextContent("up 100% from 3");
     expect(screen.getByTestId("kpi-error_rate-value")).toHaveTextContent("50%");
-    expect(await screen.findByRole("link", { name: "Support bot: open matching runs" })).toBeInTheDocument();
+    // The agent breakdown is the Overview's Top agents (SL.7): a row narrows Metrics to the agent.
+    expect(await screen.findByRole("link", { name: "Support bot: show this agent's metrics" })).toHaveAttribute("href", routes.metrics({ agent_id: "a-1" }));
     expect(await screen.findByRole("link", { name: "anthropic:legacy: open matching runs" })).toBeInTheDocument();
     const paths = metricCalls().map((u) => u.pathname + (u.searchParams.get("by") ? `?by=${u.searchParams.get("by")}` : ""));
     expect(paths.sort()).toEqual([
@@ -168,7 +173,7 @@ describe("MetricsPage", () => {
     render(<MetricsPage />);
     await screen.findByRole("option", { name: "Support bot" });
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "a-1" } });
-    expect(replace).toHaveBeenCalledWith("/metrics?agent_id=a-1", { scroll: false });
+    expect(replace).toHaveBeenCalledWith(routes.metrics({ agent_id: "a-1" }), { scroll: false });
   });
 
   it("Enter on the focused runs chart opens the selected bucket's failed runs", async () => {
@@ -194,7 +199,7 @@ describe("MetricsPage", () => {
     fireEvent.click(bar);
     expect(push).toHaveBeenCalledTimes(1);
     const target = new URL(push.mock.calls[0][0], "http://x");
-    expect(target.pathname).toBe("/traces");
+    expect(target.pathname).toBe(routes.traces());
     expect(Object.fromEntries(target.searchParams)).toEqual({
       status: "failed", from: "2026-11-12T00:00:00.000Z", to: "2026-11-13T00:00:00.000Z", agent_id: "a-1",
     });

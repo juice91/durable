@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import React from "react";
+import React, { useState } from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import RunDetailPage from "./page";
+import RunDetailRedirect from "./page";
+import TraceDetailRedirect from "@/app/traces/[runId]/page";
+import { TraceSheet } from "@/components/traces/TraceSheet";
+import { getTrace, type Trace } from "@/lib/traces";
+import type { TraceTab } from "@/lib/routes/observability";
 import {
   ApiError,
   getRun,
@@ -13,11 +17,33 @@ import {
   type SubscribeHandlers,
 } from "@/lib/runs";
 import * as grafanaLib from "@/lib/grafana";
+import { routes } from "@/lib/routes";
+
+const redirect = vi.hoisted(() => vi.fn((url: string) => {
+  throw Object.assign(new Error("NEXT_REDIRECT"), { redirectTo: url });
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
   useParams: () => ({ id: "r1" }),
-  usePathname: () => "/runs/r1",
+  usePathname: () => "/traces",
+  redirect,
+}));
+
+// SL.12: the run page is the trace Sheet's Events tab. The Sheet's own trace load stays pending
+// unless a test resolves it (the old page did not load the trace until its Trace tab was opened).
+vi.mock("@/lib/traces", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/traces")>()),
+  getTrace: vi.fn(() => new Promise(() => undefined)),
+}));
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  api: { agents: { list: vi.fn(async () => []) } },
+}));
+vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal<object>()), listWorkflows: vi.fn(async () => []) }));
+vi.mock("@/components/logs/logsQuery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/logs/logsQuery")>()),
+  searchLogs: vi.fn(async () => ({ items: [], from: "2026-11-11T17:00:00Z", to: "2026-11-11T18:00:00Z", limit: 500 })),
 }));
 
 vi.mock("@/lib/runs", async (importOriginal) => {
@@ -35,12 +61,6 @@ vi.mock("@/lib/grafana", () => ({
   buildTraceLink: vi.fn((traceId) => `http://grafana/explore?trace=${traceId}`),
   buildLogsLink: vi.fn((traceId) => `http://grafana/explore?logs=${traceId}`),
 }))
-
-vi.mock("@/components/traces/TraceView", () => ({
-  TraceView: ({ runId, embedded }: { runId: string; embedded?: boolean }) => (
-    <div data-testid="trace-view-stub">{`trace ${runId} ${embedded ? "embedded" : "page"}`}</div>
-  ),
-}));
 
 vi.mock("@/lib/sse", () => ({
   parseSSE: vi.fn(),
@@ -93,7 +113,54 @@ const ticketEvents = [
   },
 ] satisfies RunEvent[];
 
-describe("RunDetailPage", () => {
+/** The former run page: the trace Sheet of run "r1" on its Events tab, tabs switchable. */
+function RunDetailPage({ initialTab = "events" as TraceTab }: { initialTab?: TraceTab }) {
+  const [tab, setTab] = useState<TraceTab>(initialTab);
+  return <TraceSheet runId={ticketRun.run_id} open onOpenChange={() => undefined} tab={tab} onTabChange={setTab} />;
+}
+
+function traceFixture(): Trace {
+  return {
+    run: { ...ticketRun, kind: "agent", tool_id: null, workflow_id: null, workflow_version: null } as Trace["run"],
+    spans: [
+      { id: "run", parent_id: null, kind: "run", name: "agent run", start: ticketRun.created_at, end: ticketRun.updated_at, status: "ok", attributes: { run_kind: "agent", run_id: ticketRun.run_id, agent_id: ticketRun.agent_id, agent_version: 1 }, input: null, output: null, truncated: {} },
+    ],
+    totals: {
+      runs: 1, model_requests: 0, tool_calls: 0, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null,
+      cost_usd: null, unpriced_requests: 0, unrecorded_requests: 0, duration_ms: 13_000, status: "completed",
+    },
+    truncated: { spans: false, events: false, child_runs: false, payload_fields: 0 },
+    limits: { max_spans: 2000, max_events_per_run: 10_000, max_child_runs: 500, field_max_bytes: 8192, payload_budget_bytes: 2097152 },
+  };
+}
+
+describe("the retired run and trace pages redirect to the trace Sheet (SL.12)", () => {
+  beforeEach(() => {
+    redirect.mockClear();
+  });
+
+  async function target(run: () => Promise<unknown>): Promise<string> {
+    await expect(run()).rejects.toThrow("NEXT_REDIRECT");
+    return redirect.mock.calls.at(-1)![0];
+  }
+
+  it("/runs/:id goes to the Sheet's Events tab, /traces/:runId to its Spans tab", async () => {
+    expect(await target(() => RunDetailRedirect({ params: Promise.resolve({ id: "r1" }), searchParams: Promise.resolve({}) }))).toBe(routes.run("r1"));
+    expect(routes.run("r1")).toBe(routes.trace("r1", { tab: "events" }));
+    expect(await target(() => TraceDetailRedirect({ params: Promise.resolve({ runId: "r1" }), searchParams: Promise.resolve({ x: "1" }) }))).toBe(routes.trace("r1"));
+  });
+
+  it("keeps an id with reserved characters in one parameter, and sends a dot-only id to the list", async () => {
+    const id = "run:1/x?y#z";
+    const url = new URL(await target(() => RunDetailRedirect({ params: Promise.resolve({ id }), searchParams: Promise.resolve({}) })), "http://studio.test");
+    expect(url.pathname).toBe(routes.traces());
+    expect(url.searchParams.get("trace")).toBe(id);
+    expect(url.searchParams.get("tab")).toBe("events");
+    expect(await target(() => TraceDetailRedirect({ params: Promise.resolve({ runId: ".." }), searchParams: Promise.resolve({}) }))).toBe(routes.traces());
+  });
+});
+
+describe("RunDetailPage (the trace Sheet's Events tab)", () => {
   let handlers: SubscribeHandlers;
 
   beforeEach(() => {
@@ -127,7 +194,7 @@ describe("RunDetailPage", () => {
     (listEvents as any).mockResolvedValueOnce([]);
     render(<RunDetailPage />);
     const link = await screen.findByRole("link", { name: "Workflow: wf-abcde... v3" });
-    expect(link).toHaveAttribute("href", `/workflows/wf-abcdef123456/runs/${ticketRun.run_id}`);
+    expect(link).toHaveAttribute("href", routes.workflowRun("wf-abcdef123456", ticketRun.run_id));
     expect(screen.queryByText(/Agent: null|Version: latest/)).toBeNull();
   });
 
@@ -135,7 +202,7 @@ describe("RunDetailPage", () => {
     (getRun as any).mockResolvedValueOnce({ ...ticketRun, kind: "agent", parent_run_id: "parent-run-0001", parent_step_id: "classify" });
     (listEvents as any).mockResolvedValueOnce([]);
     render(<RunDetailPage />);
-    expect(await screen.findByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
+    expect(await screen.findByTestId("run-parent-link")).toHaveAttribute("href", routes.run("parent-run-0001"));
     expect(screen.getByText(/version: 1/i)).toBeInTheDocument();
   });
 
@@ -339,18 +406,22 @@ describe("RunDetailPage", () => {
     expect(grafanaLib.buildLogsLink).not.toHaveBeenCalled();
   });
 
-  it("switches to the Trace tab, which embeds the trace view and links the full view", async () => {
+  it("switches to the Spans tab, which shows the run's span tree", async () => {
     vi.mocked(getRun).mockResolvedValue(ticketRun);
     vi.mocked(listEvents).mockResolvedValue([]);
     vi.mocked(subscribeRun).mockReturnValue(() => undefined);
+    vi.mocked(getTrace).mockResolvedValue(traceFixture());
     render(<RunDetailPage />);
-    const tab = await screen.findByRole("tab", { name: "Trace" });
+    const tab = await screen.findByRole("tab", { name: "Spans" });
     expect(screen.getByRole("tab", { name: "Events" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByTestId("trace-view-stub")).toBeNull();
+    expect(screen.queryByTestId("trace-span-row")).toBeNull();
+    fireEvent.mouseDown(tab);
     fireEvent.click(tab);
     expect(tab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("trace-view-stub")).toHaveTextContent(`trace ${ticketRun.run_id} embedded`);
-    expect(screen.getByRole("link", { name: "Open full trace view" })).toHaveAttribute("href", `/traces/${ticketRun.run_id}`);
+    expect(await screen.findByTestId("trace-span-row")).toBeInTheDocument();
+    // The full view is the Sheet itself: its run id and "Run details" (the Events tab) link.
+    expect(screen.getByTestId("trace-sheet-run-id")).toHaveTextContent(`Run ${ticketRun.run_id}`);
+    expect(screen.getByTestId("span-link-run")).toHaveAttribute("href", routes.run(ticketRun.run_id));
   });
 
   it("follows the ARIA tabs pattern: roving tabIndex and arrow, Home and End keys", async () => {
@@ -359,21 +430,27 @@ describe("RunDetailPage", () => {
     vi.mocked(subscribeRun).mockReturnValue(() => undefined);
     render(<RunDetailPage />);
     const events = await screen.findByRole("tab", { name: "Events" });
-    const trace = screen.getByRole("tab", { name: "Trace" });
+    const spans = screen.getByRole("tab", { name: "Spans" });
+    const logs = screen.getByRole("tab", { name: "Logs" });
+    // Radix tabs: the tab list is the one tab stop and hands focus to the selected tab, which then
+    // holds tabIndex 0 while the others hold -1.
+    expect(screen.getByRole("tablist", { name: "Trace views" })).toHaveAttribute("tabindex", "0");
+    act(() => events.focus());
     expect(events).toHaveAttribute("tabindex", "0");
-    expect(trace).toHaveAttribute("tabindex", "-1");
+    expect(spans).toHaveAttribute("tabindex", "-1");
+    // Radix moves focus on the next tick; focusing a tab selects it (automatic activation).
     fireEvent.keyDown(events, { key: "ArrowRight" });
-    expect(trace).toHaveAttribute("aria-selected", "true");
-    expect(trace).toHaveAttribute("tabindex", "0");
-    expect(document.activeElement).toBe(trace);
-    fireEvent.keyDown(trace, { key: "ArrowRight" }); // wraps
-    expect(events).toHaveAttribute("aria-selected", "true");
-    expect(document.activeElement).toBe(events);
-    fireEvent.keyDown(events, { key: "End" });
-    expect(trace).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(trace, { key: "Home" });
-    expect(events).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(events, { key: "ArrowLeft" }); // wraps backwards
-    expect(trace).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(logs).toHaveAttribute("aria-selected", "true"));
+    expect(logs).toHaveAttribute("tabindex", "0");
+    expect(document.activeElement).toBe(logs);
+    fireEvent.keyDown(logs, { key: "ArrowRight" }); // wraps
+    await waitFor(() => expect(spans).toHaveAttribute("aria-selected", "true"));
+    expect(document.activeElement).toBe(spans);
+    fireEvent.keyDown(spans, { key: "End" });
+    await waitFor(() => expect(logs).toHaveAttribute("aria-selected", "true"));
+    fireEvent.keyDown(logs, { key: "Home" });
+    await waitFor(() => expect(spans).toHaveAttribute("aria-selected", "true"));
+    fireEvent.keyDown(spans, { key: "ArrowLeft" }); // wraps backwards
+    await waitFor(() => expect(logs).toHaveAttribute("aria-selected", "true"));
   });
 });

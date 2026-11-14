@@ -1,26 +1,31 @@
 import React from "react";
+import { Info } from "lucide-react";
+import { cn } from "@/lib/cn";
+import { ICON_STROKE_WIDTH } from "@/lib/icons";
 
-export function EmptyState({ title, description }: { title: string; description?: string }) {
+export interface EmptyStateProps {
+  title: string;
+  description?: React.ReactNode;
+  /** Decorative icon; defaults to an info mark. */
+  icon?: React.ReactNode;
+  /** A primary action ("New agent"). */
+  action?: React.ReactNode;
+  /** Tighter padding, for empty states inside cards, sheets and lists. */
+  compact?: boolean;
+  className?: string;
+  testId?: string;
+}
+
+/** A centred "nothing here yet" block: icon, heading (h2), optional description and action. */
+export function EmptyState({ title, description, icon, action, compact = false, className, testId }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
-      <div className="w-16 h-16 mb-4 rounded-full bg-accent flex items-center justify-center">
-        <svg
-          className="w-8 h-8 text-accent-foreground"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-          />
-        </svg>
+    <div data-testid={testId} className={cn("flex min-w-0 flex-col items-center justify-center px-4 text-center", compact ? "py-8" : "py-16", className)}>
+      <div aria-hidden="true" className="mb-3 flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground [&_svg]:size-5">
+        {icon ?? <Info strokeWidth={ICON_STROKE_WIDTH} />}
       </div>
-      <h2 className="text-xl font-semibold text-foreground mb-2">{title}</h2>
-      {description && <p className="text-muted-foreground max-w-md">{description}</p>}
+      <h2 className="mb-1 text-title font-semibold text-foreground">{title}</h2>
+      {description ? <p className="max-w-md text-body text-muted-foreground">{description}</p> : null}
+      {action ? <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div> : null}
     </div>
   );
 }

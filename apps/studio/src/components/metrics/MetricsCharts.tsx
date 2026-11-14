@@ -37,7 +37,7 @@ export interface ChartSpec {
 export const USAGE_DRILL_LABEL = "Open runs created in this window";
 const USAGE_NOTE = "Counted by request time";
 
-/** Map a timeseries response to chart specs (pure; tested directly and reused by the dashboard). */
+/** Map a timeseries response to chart specs (pure; tested directly). */
 export function chartSpecs(ts: MetricsTimeseries, filters: MetricsFilters, ids: readonly ChartId[] = ALL_CHARTS): ChartSpec[] {
   const b = ts.buckets;
   const range = { from: ts.from, to: ts.to };
@@ -155,6 +155,7 @@ export function MetricsCharts({ timeseries, filters, ids = ALL_CHARTS, onNavigat
             onNavigate={onNavigate}
             loading={loading}
             error={error}
+            className="min-w-0"
           />
         );
       })}

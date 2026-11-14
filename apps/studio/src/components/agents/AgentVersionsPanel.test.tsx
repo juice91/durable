@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { chooseVersionAction, versionActions } from "@/components/agents/versionsTesting";
 import React from "react";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom";
@@ -56,11 +57,11 @@ describe("AgentVersionsPanel compare and restore", () => {
 
   beforeEach(() => vi.clearAllMocks());
 
-  it("shows restored from and hides Restore on the latest version", () => {
+  it("shows restored from and hides Restore on the latest version", async () => {
     render(<AgentVersionsPanel versions={versions} agentId="a1" />);
     expect(screen.getByText("restored from v1")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Restore version 4" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restore version 1" })).toBeInTheDocument();
+    expect(await versionActions(4)).not.toContain("Restore this version");
+    expect(await versionActions(1)).toContain("Restore this version");
   });
 
   it("read-only without agentId", () => {
@@ -94,8 +95,8 @@ describe("AgentVersionsPanel compare and restore", () => {
     vi.mocked(restoreVersion).mockResolvedValueOnce(created as never);
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" hasUnsavedEdits onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 1" }));
-    const dialog = screen.getByRole("dialog", { name: "Restore version 1?" });
+    await chooseVersionAction(1, "Restore this version");
+    const dialog = await screen.findByRole("dialog", { name: "Restore version 1?" });
     expect(dialog).toHaveTextContent("publishes a new version, 5, with the spec of version 1");
     expect(dialog).toHaveTextContent("unsaved edits in the editor will be lost");
     expect(restoreVersion).not.toHaveBeenCalled();
@@ -106,14 +107,69 @@ describe("AgentVersionsPanel compare and restore", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Version 5 published, restored from v1");
   });
 
+  it("after Restore and publish, focus moves to the published notice, not the page body (browser check)", async () => {
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...v(5, 1), spec: {}, created_by: "alice" } as never);
+    render(<AgentVersionsPanel versions={versions} agentId="a1" />);
+    await chooseVersionAction(1, "Restore this version");
+    const dialog = await screen.findByRole("dialog", { name: "Restore version 1?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent("Version 5 published, restored from v1");
+    expect(notice).toHaveFocus();
+  });
+
+  it("after a successful restore the confirm never returns focus to its opener, even one still on screen (browser re-check)", async () => {
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...v(5, 1), spec: {}, created_by: "alice" } as never);
+    const { useVersionRestore } = await import("./AgentVersionsPanel");
+    function SheetLike() {
+      const restore = useVersionRestore({ agentId: "a1", latest: 4 });
+      return (
+        <>
+          <button type="button" onClick={() => restore.start(1)}>Restore v1</button>
+          {restore.notice ? <p role="status" data-restore-notice="" tabIndex={-1}>{restore.notice}</p> : null}
+          {restore.dialog}
+        </>
+      );
+    }
+    render(<SheetLike />);
+    const opener = screen.getByRole("button", { name: "Restore v1" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Restore and publish" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveFocus();
+  });
+
+  it("a cancelled confirm still returns focus to its opener", async () => {
+    const { useVersionRestore } = await import("./AgentVersionsPanel");
+    function SheetLike() {
+      const restore = useVersionRestore({ agentId: "a1", latest: 4 });
+      return (
+        <>
+          <button type="button" onClick={() => restore.start(1)}>Restore v1</button>
+          {restore.dialog}
+        </>
+      );
+    }
+    render(<SheetLike />);
+    const opener = screen.getByRole("button", { name: "Restore v1" });
+    opener.focus();
+    fireEvent.click(opener);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
+  });
+
   it("dirty-draft 409 offers discard draft and restore", async () => {
     vi.mocked(restoreVersion)
       .mockRejectedValueOnce(new ApiError(409, "the draft has unpublished changes since version 4; publish them, or restore with discard_draft: true to replace the draft"))
       .mockResolvedValueOnce({ ...v(5, 2), spec: {}, created_by: "alice" } as never);
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 2" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(2, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
     const dialog = await screen.findByRole("dialog", { name: "Discard draft and restore version 2?" });
     expect(dialog).toHaveTextContent("unpublished changes since version 4");
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard draft and restore" }));
@@ -129,16 +185,16 @@ describe("AgentVersionsPanel compare and restore", () => {
     vi.mocked(restoreVersion).mockRejectedValueOnce(new ApiError(status, message));
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 3" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(3, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
     expect(await screen.findByTestId("confirm-dialog-error")).toHaveTextContent(message);
     expect(screen.getByRole("dialog", { name: "Restore version 3?" })).toBeInTheDocument();
     expect(onRestored).not.toHaveBeenCalled();
   });
 
-  it("Cancel closes the dialog without restoring", () => {
+  it("Cancel closes the dialog without restoring", async () => {
     render(<AgentVersionsPanel versions={versions} agentId="a1" />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 1" }));
+    await chooseVersionAction(1, "Restore this version");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(restoreVersion).not.toHaveBeenCalled();

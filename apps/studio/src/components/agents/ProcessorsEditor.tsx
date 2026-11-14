@@ -254,7 +254,7 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
   return (
     <section aria-label={title} data-testid={`processors-${phase}`} className="space-y-3">
       <div className="flex items-baseline justify-between">
-        <h4 className="text-sm font-medium text-card-foreground">{title}</h4>
+        <h2 className="text-sm font-medium text-card-foreground">{title}</h2>
         <span className="text-xs text-muted-foreground">{value.length} of {max}, run in order</span>
       </div>
       {phase === "output" ? (

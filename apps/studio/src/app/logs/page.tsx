@@ -1,12 +1,16 @@
 "use client";
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { getRun } from "@/lib/runs";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { EMPTY_FILTERS, listTraceRuns, type TraceRun } from "@/lib/traces";
-import { LogsTable } from "@/components/logs/LogsTable";
+import { LogsList } from "@/components/logs/LogsList";
+import { LogSheet } from "@/components/logs/LogSheet";
+import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
+import { usePendingQuery } from "@/components/traces/usePendingQuery";
+import { TRACE_PARAM } from "@/lib/routes/observability";
 import { LogsUnavailable } from "@/components/logs/LogsUnavailable";
 import { useLogSearch } from "@/components/logs/useLogSearch";
 import {
@@ -23,10 +27,14 @@ import {
   logsRequestParams,
   parseLogFilters,
   type LogFilters,
+  type LogItem,
   type LogLevel,
   type RangePreset,
   type RunTimes,
 } from "@/components/logs/logsQuery";
+import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
@@ -124,25 +132,18 @@ function useSelectedRun(runId: string | null, nonce: number): { status: "none" |
 }
 
 function LogsSearch() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const urlKey = searchParams?.toString() ?? "";
   const filters = useMemo(() => parseLogFilters(new URLSearchParams(urlKey)), [urlKey]);
 
-  // The filters as last written. Reset from the URL whenever the URL changes, and merged into by
-  // every control, so a late write (the search debounce, Enter) never drops an earlier one whose
-  // URL update has not rendered yet.
-  const pendingRef = useRef<{ urlKey: string; filters: LogFilters }>({ urlKey, filters });
-  if (pendingRef.current.urlKey !== urlKey) pendingRef.current = { urlKey, filters };
-  const setFilters = useCallback(
-    (patch: Partial<LogFilters>) => {
-      const next = { ...pendingRef.current.filters, ...patch };
-      pendingRef.current = { ...pendingRef.current, filters: next };
-      const query = logFiltersToParams(next).toString();
-      router.replace(query ? `/logs?${query}` : "/logs", { scroll: false });
-    },
-    [router],
-  );
+  // The filters as last written, ahead of the URL while a write is in flight (usePendingQuery): a
+  // late write (the search debounce, Enter) never drops an earlier one, and the trace Sheet opens on
+  // top of a run filter committed on blur by the click that opens it.
+  const { setFilters, writeFilters, pendingFilters, pendingParams } = usePendingQuery<LogFilters>({
+    filters,
+    toParams: logFiltersToParams,
+    href: routes.logs,
+  });
 
   // --- search text: debounced into the URL ---------------------------------------------------
   const [text, setText] = useState(filters.q ?? "");
@@ -188,7 +189,7 @@ function LogsSearch() {
   useEffect(() => setRunDraft(filters.run_id ?? ""), [filters.run_id]);
   const runPatch = (value: string): Partial<LogFilters> | null => {
     const next = value.trim() || null;
-    return next !== pendingRef.current.filters.run_id ? { run_id: next } : null;
+    return next !== pendingFilters().run_id ? { run_id: next } : null;
   };
   const commitRun = (value: string) => {
     const patch = runPatch(value);
@@ -212,6 +213,25 @@ function LogsSearch() {
     };
   }, []);
   const [nonce, setNonce] = useState(0);
+  // The record whose log Sheet is open (no URL state: records have no stable id).
+  const [openLog, setOpenLog] = useState<{ item: LogItem; key: string } | null>(null);
+  // Opening a Sheet (a record, or a trace: `?trace=`) cancels a pending search debounce: its late
+  // URL write must not land under the Sheet. The typed text stays in the box; Enter applies it.
+  const cancelSearchDebounce = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = null;
+  }, []);
+  const traceOpen = searchParams?.get(TRACE_PARAM) ?? null;
+  useEffect(() => {
+    if (traceOpen) cancelSearchDebounce();
+  }, [traceOpen, cancelSearchDebounce]);
+  const onOpenLog = useCallback(
+    (item: LogItem, key: string) => {
+      cancelSearchDebounce();
+      setOpenLog({ item, key });
+    },
+    [cancelSearchDebounce],
+  );
   const runOptions = useRunOptions(filters.agent_id, nonce);
 
   // --- the query --------------------------------------------------------------------------------
@@ -256,9 +276,11 @@ function LogsSearch() {
         : `${items.length} log record${items.length === 1 ? "" : "s"}${search.hasOlder ? ", older records available" : ""}`;
 
   return (
+    <>
+      <PageHeader crumbs={[navCrumb("logs", { current: true })]} />
+    <TraceSheetHost baseParams={pendingParams}>
     <div className="mx-auto max-w-7xl px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-card-foreground">Logs</h1>
         <p className="mt-1 text-muted-foreground">Search your API and worker logs, and jump from a record to its run&apos;s trace</p>
       </div>
 
@@ -385,9 +407,8 @@ function LogsSearch() {
               if (debounceRef.current) clearTimeout(debounceRef.current);
               debounceRef.current = null;
               committedRef.current = null;
-              pendingRef.current = { ...pendingRef.current, filters: EMPTY_LOG_FILTERS };
               setText("");
-              router.replace("/logs", { scroll: false });
+              writeFilters(EMPTY_LOG_FILTERS);
             }}
           >
             Clear filters
@@ -435,7 +456,7 @@ function LogsSearch() {
           </p>
         </div>
       ) : (
-        <LogsTable items={items} caption="Log records, newest first" busy={busy} />
+        <LogsList items={items} caption="Log records, newest first" busy={busy} selectedKey={openLog?.key ?? null} onOpen={onOpenLog} />
       )}
 
       {!problem && !search.error && search.hasOlder ? (
@@ -448,13 +469,16 @@ function LogsSearch() {
       {search.olderError ? (
         <p role="alert" className="mt-2 text-center text-sm text-muted-foreground">{search.olderError}</p>
       ) : null}
+      <LogSheet item={openLog?.item ?? null} onClose={() => setOpenLog(null)} />
     </div>
+    </TraceSheetHost>
+    </>
   );
 }
 
 export default function LogsPage() {
   return (
-    <Suspense fallback={<p className="py-8 text-center text-sm text-muted-foreground">Loading...</p>}>
+    <Suspense fallback={<><PageHeader crumbs={[navCrumb("logs", { current: true })]} /><p className="py-8 text-center text-sm text-muted-foreground">Loading...</p></>}>
       <LogsSearch />
     </Suspense>
   );

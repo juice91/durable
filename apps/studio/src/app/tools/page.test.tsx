@@ -7,6 +7,8 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import { startToolRun, ToolRunError, mapToolRunError } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type SubscribeHandlers } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
+import { routes } from "@/lib/routes";
+import { toolsNavigation } from "@/components/tools/toolsTesting";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -14,6 +16,12 @@ vi.mock("@/lib/toolRuns", async (importOriginal) => {
   return { ...actual, startToolRun: vi.fn() };
 });
 vi.mock("@/lib/runs", () => ({ getRun: vi.fn(), subscribeRun: vi.fn() }));
+vi.mock("next/navigation", async () => (await import("@/components/tools/toolsTesting")).toolsNavigationModule);
+// "Used by" scans the agents; these tests are about running tools, so there are none.
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, agents: { ...actual.api.agents, list: vi.fn(async () => []) }, versions: { ...actual.api.versions, get: vi.fn() } } };
+});
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -47,6 +55,8 @@ describe("ToolsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     toolRunLedger.reset();
+    // The old page opened on the first tool's form; the Sheet now opens from ?tool=…&tab=run.
+    toolsNavigation.reset(routes.tool("tickets.create", { tab: "run" }));
     vi.mocked(listTools).mockResolvedValue(tools);
     vi.mocked(subscribeRun).mockReturnValue(() => undefined);
   });
@@ -59,7 +69,8 @@ describe("ToolsPage", () => {
     expect(screen.getByText("Disallowed")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Search tools"), { target: { value: "clock" } });
     const catalog = screen.getByLabelText("Tool catalog");
-    expect(within(catalog).queryByText("Create ticket")).not.toBeInTheDocument();
+    // The DataList search is debounced.
+    await waitFor(() => expect(within(catalog).queryByText("Create ticket")).not.toBeInTheDocument());
     expect(within(catalog).getByText("Current time")).toBeInTheDocument();
   });
 
@@ -120,7 +131,7 @@ describe("ToolsPage", () => {
     // ...but announced, with a link, and it stays after switching tools again.
     const notes = screen.getByTestId("tool-runs-started-elsewhere");
     expect(notes).toHaveTextContent("Run started for Create ticket");
-    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/stale-run");
+    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("stale-run"));
     fireEvent.click(within(screen.getByLabelText("Tool catalog")).getByText("Create ticket"));
     expect(screen.getByTestId("tool-runs-started-elsewhere")).toHaveTextContent("Run started for Create ticket");
   });
@@ -149,7 +160,7 @@ describe("ToolsPage", () => {
     expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     expect(screen.getByLabelText(/Subject \*/)).toHaveValue("keep me");
     await act(async () => resolve({ run_id: "run-same", kind: "tool", tool_id: "tickets.create", status: "queued", display_status: "queued", trace_id: null }));
-    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", "/runs/run-same");
+    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", routes.run("run-same"));
     expect(screen.queryByTestId("tool-runs-started-elsewhere")).not.toBeInTheDocument();
   });
 
@@ -253,7 +264,7 @@ describe("ToolsPage", () => {
       render(<ToolsPage />);
       const notes = await screen.findByTestId("tool-runs-started-elsewhere");
       expect(notes).toHaveTextContent("Run started for Create ticket");
-      expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/r-late");
+      expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("r-late"));
       await fillSubject("x");
       expect(screen.queryByTestId("tool-run-reuse-hint")).not.toBeInTheDocument();
     });
@@ -307,7 +318,7 @@ describe("ToolsPage", () => {
 
     await act(async () => resolve({ run_id: "11111111-2222-3333-4444-555555555555", kind: "tool", tool_id: "tickets.create", status: "queued", display_status: "queued", trace_id: null }));
     expect(run).not.toBeDisabled();
-    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", "/runs/11111111-2222-3333-4444-555555555555");
+    expect(screen.getByTestId("tool-run-link")).toHaveAttribute("href", routes.run("11111111-2222-3333-4444-555555555555"));
   });
 
   it("maps 422 validation errors onto the form fields", async () => {
@@ -348,8 +359,11 @@ describe("ToolsPage", () => {
     fireEvent.change(screen.getByLabelText(/Subject \*/), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await screen.findByTestId("tool-run-result");
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-1", expect.any(Object)));
 
-    act(() => {
+    await act(async () => {
       handlers.onEvent?.({ seq: 2, type: "run_failed", data: { status: "needs_attention", error: "side effect outcome unknown", error_code: "side_effect_outcome_unknown" }, ts: "" });
       handlers.onEnd?.("run_failed");
     });
@@ -373,7 +387,10 @@ describe("ToolsPage", () => {
     fireEvent.change(screen.getByLabelText(/Subject \*/), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await screen.findByTestId("tool-run-result");
-    act(() => handlers.onEnd?.("run_completed"));
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-2", expect.any(Object)));
+    await act(async () => { handlers.onEnd?.("run_completed"); });
 
     expect(await screen.findByTestId("tool-run-output")).toHaveTextContent('"ticket": "T-1"');
   });

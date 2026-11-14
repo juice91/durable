@@ -1,8 +1,9 @@
 import React from "react";
-import type { Run } from "@/lib/runs";
-import { workflowRunPath } from "@/lib/workflows";
+import { RUN_KIND_LABELS, type Run, type RunKind } from "@/lib/runs";
+import { routes } from "@/lib/routes";
+import { TraceLink } from "@/components/traces/TraceLink";
 
-export type RunKind = "agent" | "tool" | "workflow";
+export type { RunKind };
 
 /** The run's kind. Rows from before kinds existed are agent runs; a row without `kind` but with a
  * workflow or a tool (and no agent) is classified by those. */
@@ -37,7 +38,7 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
     return (
       <span data-testid="run-subject" data-kind="workflow">
         {workflowId ? (
-          <a href={workflowRunPath(workflowId, run.run_id)} className="text-primary underline-offset-4 hover:underline">
+          <a href={routes.workflowRun(workflowId, run.run_id)} className="text-primary underline-offset-4 hover:underline">
             {label}
           </a>
         ) : label}
@@ -47,6 +48,10 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
   if (kind === "tool") {
     return <span data-testid="run-subject" data-kind="tool">{`Tool: ${run.tool_id ?? "unknown"}`}</span>;
   }
+  if (kind === "kb_ingest") {
+    // No knowledge-base page to link to yet (RM.16 adds it).
+    return <span data-testid="run-subject" data-kind="kb_ingest">{RUN_KIND_LABELS.kb_ingest}</span>;
+  }
   const named = run.agent_id ? agentNames[run.agent_id] : undefined;
   const agent = named ?? (run.agent_id ? (showVersion ? run.agent_id : short(run.agent_id)) : "unknown");
   return (
@@ -55,13 +60,14 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, showVersi
       {run.parent_run_id ? (
         <span className="block text-xs font-normal text-muted-foreground">
           Part of workflow run{" "}
-          <a
+          <TraceLink
             data-testid="run-parent-link"
-            href={`/runs/${encodeURIComponent(run.parent_run_id)}`}
+            runId={run.parent_run_id}
+            tab="events"
             className="font-mono text-primary underline-offset-4 hover:underline"
           >
             {short(run.parent_run_id)}
-          </a>
+          </TraceLink>
           {run.parent_step_id ? <> (step <span className="font-mono">{run.parent_step_id}</span>)</> : null}
         </span>
       ) : null}

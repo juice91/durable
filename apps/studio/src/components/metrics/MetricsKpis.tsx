@@ -24,7 +24,7 @@ export const ALL_KPIS: KpiId[] = ["runs", "error_rate", "latency_p50", "latency_
 
 type CardSpec = Omit<KpiCardProps, "loading"> & { id: KpiId };
 
-/** The KPI cards for a summary (pure; the Overview Dashboard reuses it with a subset of ids). */
+/** The KPI cards for a summary (pure; `ids` picks and orders a subset). */
 export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: readonly KpiId[] = ALL_KPIS): CardSpec[] {
   const cur = summary.current;
   const prev: MetricValues | null = summary.previous;
@@ -112,9 +112,12 @@ export function comparisonCaption(summary: MetricsSummary | null): string | null
   return `Changes compare with the previous period, ${formatRange(summary.previous_from, summary.previous_to)}.`;
 }
 
-/** A responsive row of KPI cards with deltas against the previous period. */
+/** Auto-fit KPI grid (layout rule 3): as many 11rem+ columns as fit, one column on a phone. */
+export const KPI_GRID = "grid gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))]";
+
+/** A responsive row of KPI cards with deltas against the previous period (the Metrics Overview's KPI row). */
 export function MetricsKpis({ summary, filters, ids = ALL_KPIS, loading = false, className = "" }: MetricsKpisProps) {
-  const grid = `grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6 ${className}`;
+  const grid = `${KPI_GRID} ${className}`;
   if (!summary) {
     return (
       <div className={grid} aria-busy={loading || undefined}>

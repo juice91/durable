@@ -33,10 +33,24 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
 
 export type RunStatus = "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
 
+/**
+ * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
+ * `eap.kb_ingest` workflow): shown as "Knowledge ingest", with no subject page to link yet.
+ */
+export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest";
+
+/** Run kinds for labels and the Traces kind filter, in filter order. */
+export const RUN_KIND_LABELS: Record<RunKind, string> = {
+  agent: "Agent",
+  workflow: "Workflow",
+  tool: "Tool",
+  kb_ingest: "Knowledge ingest",
+};
+
 export interface Run {
   run_id: string;
   /** "tool" for a tool test run (POST /tools/{id}/runs): agent_id and version are null, tool_id is set. */
-  kind?: "agent" | "tool" | "workflow";
+  kind?: RunKind;
   /** Workflow runs: the workflow and its version. A workflow's agent step runs as an agent run
    * with parent_run_id / parent_step_id set. */
   workflow_id?: string | null;

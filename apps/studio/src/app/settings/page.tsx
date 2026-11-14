@@ -1,10 +1,12 @@
-import { EmptyState } from "@/components/shared/EmptyState";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { SettingsSections } from "@/components/settings/SettingsSections";
+import { navCrumb } from "@/lib/nav";
 
 export default function SettingsPage() {
   return (
-    <EmptyState
-      title="Settings"
-      description="Configure application settings. Coming in a later milestone."
-    />
+    <>
+      <PageHeader crumbs={[navCrumb("settings", { current: true })]} />
+      <SettingsSections />
+    </>
   );
 }

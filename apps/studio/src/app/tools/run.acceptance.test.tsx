@@ -7,6 +7,8 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import { mapToolRunError, startToolRun } from "@/lib/toolRuns";
 import { getRun, subscribeRun, type Run, type RunEvent, type RunStatus, type SubscribeHandlers } from "@/lib/runs";
 import { canonicalInputKey, MAX_NOTES, toolRunLedger } from "@/lib/toolRunLedger";
+import { routes } from "@/lib/routes";
+import { toolsNavigation } from "@/components/tools/toolsTesting";
 
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn() }));
 vi.mock("@/lib/toolRuns", async (importOriginal) => {
@@ -14,6 +16,12 @@ vi.mock("@/lib/toolRuns", async (importOriginal) => {
   return { ...actual, startToolRun: vi.fn() };
 });
 vi.mock("@/lib/runs", () => ({ getRun: vi.fn(), subscribeRun: vi.fn() }));
+vi.mock("next/navigation", async () => (await import("@/components/tools/toolsTesting")).toolsNavigationModule);
+// "Used by" scans the agents; these tests are about running tools, so there are none.
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return { ...actual, api: { ...actual.api, agents: { ...actual.api.agents, list: vi.fn(async () => []) }, versions: { ...actual.api.versions, get: vi.fn() } } };
+});
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -91,6 +99,8 @@ async function renderTools() {
 describe("Tools run acceptance", () => {
   beforeEach(() => {
     toolRunLedger.reset();
+    // The old page opened on the first tool's form; the Sheet now opens from ?tool=…&tab=run.
+    toolsNavigation.reset(routes.tool("tickets.create", { tab: "run" }));
     vi.mocked(startToolRun).mockReset();
     vi.mocked(subscribeRun).mockReset();
     vi.mocked(getRun).mockReset();
@@ -125,9 +135,12 @@ describe("Tools run acceptance", () => {
     vi.mocked(getRun).mockResolvedValue(runRow("run-ok", "completed", { output: '{"ticket":"T-9"}' }));
     await renderTools();
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
-    expect(await screen.findByTestId("tool-run-link")).toHaveAttribute("href", "/runs/run-ok");
+    expect(await screen.findByTestId("tool-run-link")).toHaveAttribute("href", routes.run("run-ok"));
 
-    act(() => handlers.onEnd?.("run_completed"));
+    // The result subscribes in an effect, which can run after the element is in the DOM: wait for it,
+    // or `handlers` is still empty and ending the stream does nothing (a race under load).
+    await waitFor(() => expect(subscribeRun).toHaveBeenCalledWith("run-ok", expect.any(Object)));
+    await act(async () => { handlers.onEnd?.("run_completed"); });
     expect(await screen.findByTestId("tool-run-output")).toHaveTextContent('"ticket": "T-9"');
     expect(screen.getByTestId("tool-run-result")).toHaveAttribute("data-status", "completed");
     expect(screen.queryByTestId("tool-runs-started-elsewhere")).not.toBeInTheDocument();
@@ -248,7 +261,7 @@ describe("Tools run acceptance", () => {
     await act(async () => resolve(accepted("stale-run")));
     const notes = screen.getByTestId("tool-runs-started-elsewhere");
     expect(notes).toHaveTextContent("Run started for Create ticket");
-    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", "/runs/stale-run");
+    expect(within(notes).getByRole("link", { name: "Open run" })).toHaveAttribute("href", routes.run("stale-run"));
     expect(screen.queryByTestId("tool-run-result")).not.toBeInTheDocument();
     expect(subscribeRun).not.toHaveBeenCalled();
 

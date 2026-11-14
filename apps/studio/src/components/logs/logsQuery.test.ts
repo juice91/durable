@@ -17,8 +17,10 @@ import {
   runLogsWindow,
   searchLogs,
   traceLogsParams,
+  ZERO_SPAN_PAD_MS,
   type LogItem,
 } from "./logsQuery";
+import { routes } from "@/lib/routes";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const AGENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -50,8 +52,10 @@ describe("URL filters", () => {
   });
 
   it("builds Logs page links", () => {
-    expect(logsPath({})).toBe("/logs");
-    expect(logsPath({ run_id: RUN })).toBe(`/logs?run_id=${RUN}`);
+    expect(logsPath({})).toBe(routes.logs());
+    expect(logsPath({ run_id: RUN })).toBe(`${routes.logs()}?run_id=${RUN}`);
+    // One literal URL per helper, so a builder bug is caught.
+    expect(logsPath({ q: "a b", level: "error" })).toBe("/logs?q=a+b&level=error");
   });
 });
 
@@ -139,10 +143,15 @@ describe("traceLogsParams", () => {
       to: "2026-11-13T10:00:01.501000Z",
     });
   });
-  it("gives a zero-length span a non-empty window", () => {
+  it("gives a zero-length span a window padded both ways, so its own log lines show (browser check)", () => {
+    // Was [start, start + 1 ms): a blocking log line a few ms off the span's instant was missed.
     const p = traceLogsParams(RUN, { start: "2026-11-13T10:00:00Z", end: "2026-11-13T10:00:00Z" }, true);
-    expect(p.from).toBe("2026-11-13T10:00:00.000000Z");
-    expect(p.to).toBe("2026-11-13T10:00:00.001000Z");
+    expect(ZERO_SPAN_PAD_MS).toBe(250);
+    expect(p.from).toBe("2026-11-13T09:59:59.750000Z");
+    expect(p.to).toBe("2026-11-13T10:00:00.251000Z");
+    // An end before the start (clock skew) is treated as zero length too.
+    const skew = traceLogsParams(RUN, { start: "2026-11-13T10:00:00Z", end: "2026-11-13T09:59:59.990Z" }, true);
+    expect([skew.from, skew.to]).toEqual([p.from, p.to]);
   });
   it("runs an open span to now, and falls back to the whole run without a start or when not narrowed", () => {
     expect(traceLogsParams(RUN, { start: "2026-11-13T10:00:00Z", end: null }, true)).toEqual({ run_id: RUN, limit: 500, from: "2026-11-13T10:00:00.000000Z" });

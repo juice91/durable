@@ -26,6 +26,7 @@ import {
   validateRange,
   DEFAULT_PAGE_STATE,
 } from "./metrics";
+import { routes } from "@/lib/routes";
 
 const F = { from: "2026-11-06T00:00:00.000Z", to: "2026-11-13T00:00:00.000Z" };
 
@@ -60,10 +61,16 @@ describe("drill-down links", () => {
   it("links to /traces with the same filters and a comma-joined status", () => {
     const href = tracesHref({ ...F, agent_id: "a1", model: "test:ticket", kind: "agent" }, { status: ["failed"] });
     const url = new URL(href, "http://x");
-    expect(url.pathname).toBe("/traces");
+    expect(url.pathname).toBe(routes.traces());
     expect(Object.fromEntries(url.searchParams)).toEqual({
       status: "failed", from: F.from, to: F.to, agent_id: "a1", model: "test:ticket", kind: "agent",
     });
+  });
+
+  it("builds the literal Traces URL (one literal per helper, so a builder bug is caught)", () => {
+    expect(tracesHref({ from: "f", to: "t", agent_id: null, model: null, provider: null, kind: null }, { status: ["failed", "needs_attention"] })).toBe(
+      "/traces?status=failed%2Cneeds_attention&from=f&to=t",
+    );
   });
 
   it("overrides narrow the filters (a breakdown row)", () => {

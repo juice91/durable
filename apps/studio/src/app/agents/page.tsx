@@ -1,68 +1,54 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import type { Agent } from "@/lib/api";
 import { AgentsListUI } from "@/components/agents/AgentsList";
+import { routes } from "@/lib/routes";
+import { PageHeader } from "@/components/frame/PageHeader";
+import { navCrumb } from "@/lib/nav";
+import { Button } from "@/components/ui/Button";
+import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 
 export default function AgentsPage() {
+  const router = useRouter();
+  // `c` is "New agent" (decision "Keyboard shortcuts").
+  useCreateAction(() => router.push(routes.agentNew()));
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const router = useRouter();
 
-  useEffect(() => {
-    const loadAgents = async () => {
-      try {
-        setLoading(true);
-        const data = await api.agents.list();
-        setAgents(data);
-        setError(null);
-      } catch (err) {
-        setError("Failed to load agents");
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadAgents();
+  const loadAgents = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await api.agents.list();
+      setAgents(data);
+      setError(null);
+    } catch {
+      setError("Failed to load agents");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const handleNewAgent = () => {
-    router.push("/agents/new");
-  };
-
-  const handleAgentSelect = (id: string) => {
-    router.push(`/agents/${id}`);
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-card-foreground/60">Loading agents...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <p className="text-red-500">{error}</p>
-      </div>
-    );
-  }
+  useEffect(() => {
+    void loadAgents();
+  }, [loadAgents]);
 
   return (
     <>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-card-foreground">Agents</h1>
-        <button
-          onClick={handleNewAgent}
-          className="inline-flex items-center px-4 py-2 bg-accent text-accent-foreground rounded-md hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent-foreground focus:ring-offset-2"
-        >
-          New agent
-        </button>
+      <PageHeader
+        crumbs={[navCrumb("agents", { current: true })]}
+        actions={
+          <Button asChild variant="primary" size="sm">
+            <Link href={routes.agentNew()} aria-keyshortcuts="c">New agent</Link>
+          </Button>
+        }
+      />
+      <div className="min-w-0 px-4 py-6 md:px-6">
+        <AgentsListUI agents={agents} loading={loading} error={error} onRetry={() => void loadAgents()} />
       </div>
-      <AgentsListUI agents={agents} onSelect={handleAgentSelect} />
     </>
   );
 }

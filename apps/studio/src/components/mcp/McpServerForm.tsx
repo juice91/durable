@@ -22,10 +22,12 @@ interface McpServerFormProps {
   /** The saved server as the API returned it, or null when an edit changed nothing (no request). */
   onSaved: (server: McpServer | null) => void;
   onCancel: () => void;
+  /** Inside a Dialog that already shows the title: no card frame and no heading of its own. */
+  embedded?: boolean;
 }
 
 /** Register or edit an MCP server. Header values are write-only and never prefilled. */
-export function McpServerForm({ server, onSaved, onCancel }: McpServerFormProps) {
+export function McpServerForm({ server, onSaved, onCancel, embedded = false }: McpServerFormProps) {
   const isCreate = !server;
   const [name, setName] = useState(server?.name ?? "");
   const [url, setUrl] = useState(server?.url ?? "");
@@ -77,8 +79,8 @@ export function McpServerForm({ server, onSaved, onCancel }: McpServerFormProps)
   };
 
   return (
-    <form onSubmit={submit} aria-label={isCreate ? "Register MCP server" : `Edit MCP server ${server.name}`} data-testid="mcp-server-form" className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <h2 className="text-lg font-semibold text-card-foreground">{isCreate ? "Register MCP server" : `Edit ${server.name}`}</h2>
+    <form onSubmit={submit} aria-label={isCreate ? "Register MCP server" : `Edit MCP server ${server.name}`} data-testid="mcp-server-form" className={embedded ? "min-w-0 space-y-4" : "min-w-0 space-y-4 rounded-lg border border-border bg-card p-5"}>
+      {embedded ? null : <h2 className="text-lg font-semibold text-card-foreground">{isCreate ? "Register MCP server" : `Edit ${server.name}`}</h2>}
       {error ? <p role="alert" data-testid="mcp-form-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-1">

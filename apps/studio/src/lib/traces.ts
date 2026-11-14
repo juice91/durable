@@ -1,7 +1,7 @@
 // Built-in trace view (P0.13): the GET /runs/{id}/trace client, span tree and waterfall geometry,
 // span labels, number formatting, and the Traces list URL filters (the Metrics drill-down contract).
 import { BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
-import type { Run } from "./runs";
+import type { Run, RunKind } from "./runs";
 
 export type SpanKind = "run" | "child_run" | "model_request" | "tool_call" | "processor" | "workflow_step";
 export type SpanStatus = "ok" | "error" | "running" | "waiting" | "incomplete";
@@ -211,6 +211,7 @@ export function spanLabel(span: TraceSpan, { agentNames = {}, workflowNames = {}
   if (span.kind === "run" || span.kind === "child_run") {
     const kind = str(a.run_kind);
     if (kind === "tool") return `Tool: ${str(a.tool_id) ?? "unknown"}`;
+    if (kind === "kb_ingest") return "Knowledge ingest";
     if (kind === "workflow") {
       const id = str(a.workflow_id);
       const name = id ? (workflowNames[id] ?? short(id)) : "unknown";
@@ -243,14 +244,8 @@ export const KIND_LABELS: Record<SpanKind, string> = {
 
 // ---------------------------------------------------------------------------- formatting
 
-export function formatDuration(durationMs: number | null | undefined): string {
-  if (durationMs === null || durationMs === undefined || !Number.isFinite(durationMs)) return "-";
-  if (durationMs < 1000) return `${Math.round(durationMs)} ms`;
-  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 2 : 1)} s`;
-  const minutes = Math.floor(durationMs / 60_000);
-  const seconds = Math.round((durationMs % 60_000) / 1000);
-  return `${minutes}m ${seconds}s`;
-}
+/** The shared duration format (`lib/format.ts`), re-exported for the trace modules. */
+export { formatDuration } from "./format";
 
 /** Run duration: started_at → finished_at when recorded, else created_at → updated_at for a finished run. */
 export function runDurationMs(run: TraceRun): number | null {
@@ -259,10 +254,6 @@ export function runDurationMs(run: TraceRun): number | null {
   const end = ms(run.finished_at) ?? (terminal ? ms(run.updated_at) : null);
   if (start === null || end === null) return null;
   return Math.max(0, end - start);
-}
-
-export function tracePath(runId: string): string {
-  return `/traces/${encodeURIComponent(runId)}`;
 }
 
 // ---------------------------------------------------------------------------- list filters
@@ -276,14 +267,14 @@ export interface TraceFilters {
   model: string | null;
   provider: string | null;
   agent_id: string | null;
-  kind: "agent" | "tool" | "workflow" | null;
+  kind: RunKind | null;
 }
 
 export const EMPTY_FILTERS: TraceFilters = {
   status: [], from: null, to: null, model: null, provider: null, agent_id: null, kind: null,
 };
 
-const KINDS = new Set(["agent", "tool", "workflow"]);
+const KINDS: ReadonlySet<string> = new Set<RunKind>(["agent", "tool", "workflow", "kb_ingest"]);
 
 export function parseTraceFilters(params: URLSearchParams | { get(name: string): string | null; getAll?(name: string): string[] }): TraceFilters {
   const one = (name: string) => {

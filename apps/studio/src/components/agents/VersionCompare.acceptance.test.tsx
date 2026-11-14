@@ -1,4 +1,5 @@
 import React from "react";
+import { chooseVersionAction, versionActions } from "@/components/agents/versionsTesting";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,8 +33,8 @@ describe("AgentVersionsPanel restore flow", () => {
     vi.mocked(restoreVersion).mockResolvedValueOnce(created as never);
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" hasUnsavedEdits onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 1" }));
-    const dialog = screen.getByRole("dialog", { name: "Restore version 1?" });
+    await chooseVersionAction(1, "Restore this version");
+    const dialog = await screen.findByRole("dialog", { name: "Restore version 1?" });
     expect(dialog).toHaveTextContent("publishes a new version, 5, with the spec of version 1");
     expect(restoreVersion).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Restore and publish" }));
@@ -47,8 +48,8 @@ describe("AgentVersionsPanel restore flow", () => {
       .mockResolvedValueOnce({ ...v(5, 2), spec, created_by: "alice" } as never);
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 2" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(2, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
     const dialog = await screen.findByRole("dialog", { name: "Discard draft and restore version 2?" });
     expect(dialog).toHaveTextContent("unpublished changes since version 4");
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard draft and restore" }));
@@ -60,8 +61,8 @@ describe("AgentVersionsPanel restore flow", () => {
     vi.mocked(restoreVersion).mockRejectedValueOnce(new ApiError(409, "version 3 has the same spec as the latest version 4"));
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 3" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(3, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
     expect(await screen.findByTestId("confirm-dialog-error")).toHaveTextContent("version 3 has the same spec as the latest version 4");
     expect(screen.getByRole("dialog", { name: "Restore version 3?" })).toBeInTheDocument();
     expect(onRestored).not.toHaveBeenCalled();
@@ -71,14 +72,14 @@ describe("AgentVersionsPanel restore flow", () => {
     vi.mocked(restoreVersion).mockRejectedValueOnce(new ApiError(422, "Model test:gone is not in the allowlist"));
     const onRestored = vi.fn();
     render(<AgentVersionsPanel versions={versions} agentId="a1" onRestored={onRestored} />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 3" }));
-    fireEvent.click(screen.getByRole("button", { name: "Restore and publish" }));
+    await chooseVersionAction(3, "Restore this version");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore and publish" }));
     expect(await screen.findByTestId("confirm-dialog-error")).toHaveTextContent("Model test:gone is not in the allowlist");
   });
 
-  it("Cancel closes the dialog without restoring", () => {
+  it("Cancel closes the dialog without restoring", async () => {
     render(<AgentVersionsPanel versions={versions} agentId="a1" />);
-    fireEvent.click(screen.getByRole("button", { name: "Restore version 1" }));
+    await chooseVersionAction(1, "Restore this version");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(restoreVersion).not.toHaveBeenCalled();
@@ -89,10 +90,10 @@ describe("AgentVersionsPanel restore flow", () => {
     expect(screen.getByText("restored from v1")).toBeInTheDocument();
   });
 
-  it("hides Restore button on the latest version", () => {
+  it("hides Restore button on the latest version", async () => {
     render(<AgentVersionsPanel versions={versions} agentId="a1" />);
-    expect(screen.queryByRole("button", { name: "Restore version 4" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restore version 1" })).toBeInTheDocument();
+    expect(await versionActions(4)).not.toContain("Restore this version");
+    expect(await versionActions(1)).toContain("Restore this version");
   });
 });
 

@@ -5,10 +5,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import TracesPage from "./page";
 import { EMPTY_FILTERS, listTraceRuns as listRuns } from "@/lib/traces";
 import { api } from "@/lib/api";
+import { routes } from "@/lib/routes";
 
 const nav = vi.hoisted(() => ({ query: "", replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/traces",
   useRouter: () => ({ push: vi.fn(), replace: nav.replace }),
   useSearchParams: () => new URLSearchParams(nav.query),
 }));
@@ -83,7 +85,7 @@ describe("TracesPage", () => {
     }], next_before: null });
     render(<TracesPage />);
     const link = await screen.findByRole("link", { name: "Workflow: Triage v3" });
-    expect(link).toHaveAttribute("href", "/workflows/wf-abcdef123456/runs/wfrun-1");
+    expect(link).toHaveAttribute("href", routes.workflowRun("wf-abcdef123456", "wfrun-1"));
     expect(screen.queryByText(/Tool: unknown/)).toBeNull();
   });
 
@@ -171,7 +173,7 @@ describe("TracesPage", () => {
     expect(subjects.find((node) => node.getAttribute("data-kind") === "tool")).toHaveTextContent("Tool: clock.now");
 
     const workflow = await screen.findByRole("link", { name: "Workflow: Triage v3" });
-    expect(workflow).toHaveAttribute("href", "/workflows/wf-abcdef123456/runs/wfrun-rows");
+    expect(workflow).toHaveAttribute("href", routes.workflowRun("wf-abcdef123456", "wfrun-rows"));
     expect(workflow.closest("[data-testid='run-subject']")).toHaveAttribute("data-kind", "workflow");
 
     const child = subjects.find((node) => node.textContent?.includes("Part of workflow run"));
@@ -179,7 +181,7 @@ describe("TracesPage", () => {
     expect(child).toHaveAttribute("data-kind", "agent");
     expect(child).toHaveTextContent("Support assistant");
     expect(child).toHaveTextContent("Part of workflow run parent-r... (step classify)");
-    expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", "/runs/parent-run-0001");
+    expect(screen.getByTestId("run-parent-link")).toHaveAttribute("href", routes.run("parent-run-0001"));
     expect(screen.queryByText(/Tool: unknown/)).toBeNull();
   });
   it("shows model, tokens, cost and duration columns, and 'not recorded' for a run without usage", async () => {
@@ -198,7 +200,7 @@ describe("TracesPage", () => {
     expect(rows[0].querySelector("[data-testid='trace-row-tokens']")).toHaveTextContent("1,200 / 34");
     expect(rows[0].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("$0.0012");
     expect(rows[0].querySelector("[data-testid='trace-row-duration']")).toHaveTextContent("2.50 s");
-    expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", "/traces/run-usage");
+    expect(rows[0].querySelector("[data-testid='trace-row-open']")).toHaveAttribute("href", routes.trace("run-usage"));
     expect(rows[1].querySelector("[data-testid='trace-row-tokens']")).toHaveTextContent("not recorded");
     expect(rows[1].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("not recorded");
     expect(rows[2].querySelector("[data-testid='trace-row-cost']")).toHaveTextContent("no price");
@@ -218,13 +220,13 @@ describe("TracesPage", () => {
     fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "completed" } });
     const url = nav.replace.mock.calls.at(-1)![0] as string;
     const params = new URLSearchParams(url.split("?")[1]);
-    expect(url.startsWith("/traces?")).toBe(true);
+    expect(url.startsWith(`${routes.traces()}?`)).toBe(true);
     expect(params.get("status")).toBe("completed");
     expect(params.get("model")).toBe("openai:gpt-4.1");
     expect(params.get("agent_id")).toBe("agent-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(nav.replace).toHaveBeenLastCalledWith("/traces");
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces(), { scroll: false });
   });
 
   it("sends the Recovering status filter as status=recovering, as-is", async () => {
@@ -250,7 +252,7 @@ describe("TracesPage", () => {
     const provider = await screen.findByLabelText(/provider/i);
     fireEvent.change(provider, { target: { value: "anthropic" } });
     fireEvent.keyDown(provider, { key: "Enter" });
-    expect(nav.replace).toHaveBeenLastCalledWith("/traces?provider=anthropic");
+    expect(nav.replace).toHaveBeenLastCalledWith(routes.traces({ provider: "anthropic" }), { scroll: false });
   });
 
   it("drops a slower response for old filters and a stale Load more page", async () => {
@@ -274,7 +276,7 @@ describe("TracesPage", () => {
     await act(async () => second.resolve({ items: [row("run-new", "2026-11-12T10:00:00Z")], next_before: "cursor-new" }));
     await act(async () => first.resolve({ items: [row("run-old", "2026-11-12T11:00:00Z")], next_before: "cursor-old" }));
     let ids = screen.getAllByTestId("trace-row").map((r) => r.querySelector("[data-testid='trace-row-open']")!.getAttribute("href"));
-    expect(ids).toEqual(["/traces/run-new"]);
+    expect(ids).toEqual([routes.trace("run-new")]);
 
     // Load more for "failed", then the filter changes again before that page arrives.
     const more = deferred();
@@ -289,7 +291,7 @@ describe("TracesPage", () => {
     await act(async () => third.resolve({ items: [row("run-completed", "2026-11-12T09:00:00Z")], next_before: null }));
     await act(async () => more.resolve({ items: [row("run-stale-page", "2026-11-12T08:00:00Z")], next_before: null }));
     ids = screen.getAllByTestId("trace-row").map((r) => r.querySelector("[data-testid='trace-row-open']")!.getAttribute("href"));
-    expect(ids).toEqual(["/traces/run-completed"]);
+    expect(ids).toEqual([routes.trace("run-completed")]);
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
@@ -322,7 +324,7 @@ describe("TracesPage", () => {
     expect(screen.getByTestId("traces-table").className).toContain("opacity-50");
     await act(async () => resolve({ items: [{ ...mockRuns[0], run_id: "run-tool" }], next_before: null }));
     expect(screen.getByTestId("traces-table")).toHaveAttribute("aria-busy", "false");
-    expect(screen.getByTestId("trace-row-open")).toHaveAttribute("href", "/traces/run-tool");
+    expect(screen.getByTestId("trace-row-open")).toHaveAttribute("href", routes.trace("run-tool"));
   });
 
   it("clears the old error as soon as the next first page starts", async () => {

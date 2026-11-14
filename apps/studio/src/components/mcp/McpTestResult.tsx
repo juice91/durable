@@ -4,7 +4,7 @@ import React from "react";
 import { describeMcpError, isOutboundPolicyCode, type McpTestResult as Result } from "@/lib/mcpServers";
 
 /** The outcome of a connection test: the discovered tools, or the error in words. */
-export function McpTestResult({ result }: { result: Result }) {
+export function McpTestResult({ result, showTools = true }: { result: Result; /** List the tools here (false when the page lists them itself). */ showTools?: boolean }) {
   if (result.status === "error") {
     return (
       <div role="alert" data-testid="mcp-test-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">
@@ -17,7 +17,7 @@ export function McpTestResult({ result }: { result: Result }) {
   return (
     <div data-testid="mcp-test-tools" className="space-y-2">
       <p className="text-sm text-foreground">Connected. {result.tools.length} tool{result.tools.length === 1 ? "" : "s"} discovered.</p>
-      <ul className="space-y-2">
+      {showTools ? <ul className="space-y-2">
         {result.tools.map((tool) => (
           <li key={tool.name} data-testid="mcp-tool" className="rounded-md border border-border bg-background p-3">
             <p className="font-mono text-sm font-medium text-foreground">{tool.name}</p>
@@ -28,7 +28,7 @@ export function McpTestResult({ result }: { result: Result }) {
             </details>
           </li>
         ))}
-      </ul>
+      </ul> : null}
     </div>
   );
 }

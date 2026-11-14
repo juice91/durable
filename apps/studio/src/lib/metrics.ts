@@ -1,8 +1,11 @@
-// Metrics API client (P0.6's GET /api/v1/metrics/*) and the pure helpers the Metrics page and the
-// Overview Dashboard share: filters <-> query strings, date-range presets, period deltas, number
-// formatting, chart summaries and the drill-down links to the Traces list.
+// Metrics API client (P0.6's GET /api/v1/metrics/*) and the pure helpers of the Metrics page and its
+// Overview header (the former P0.18 dashboard, folded in by SL.7): filters <-> query strings,
+// date-range presets, period deltas, number formatting, chart summaries and the drill-down links to
+// the Traces list.
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
 import { formatCost } from "./format";
+import { routes } from "@/lib/routes";
+import type { TraceFilters } from "./traces";
 
 // ------------------------------------------------------------------------------------- types
 
@@ -325,7 +328,7 @@ export function tracesHref(
     const v = merged[key];
     if (v) params.set(key, v);
   }
-  return `/traces?${params.toString()}`;
+  return routes.traces(params);
 }
 
 /** Statuses a "failed" drill-down shows (the error rate counts `failed`). */
@@ -506,4 +509,67 @@ export function modelFilterOptions(
     new Set([...listed.map((m) => m.provider), ...providersOf(models)].filter(Boolean)),
   ).sort();
   return { models, providers };
+}
+
+// ------------------------------------------------------------------- overview (former dashboard)
+//
+// SL.7 folded the P0.18 Overview Dashboard into the Metrics page: one page, one filter state, one
+// set of metrics queries, so the Overview's numbers are the Metrics numbers by construction. The
+// helpers below were `lib/dashboard.ts`; their names stay exported for one milestone.
+
+/** The Metrics page narrowed to one agent, keeping every other filter (the Top agents drill-down). */
+export function metricsAgentHref(state: MetricsPageState, agentId: string): string {
+  return routes.metrics(pageStateToParams({ ...state, agent_id: agentId }));
+}
+
+/** Run statuses the "Needs attention" panel lists: failed runs and runs that need attention. */
+export const ATTENTION_STATUSES = ["failed", "needs_attention"] as const;
+
+/** The Traces list filters of the "Needs attention" panel (same range and filters, both statuses). */
+export function recentFailuresFilters(filters: MetricsFilters): TraceFilters {
+  return {
+    status: [...ATTENTION_STATUSES],
+    from: filters.from,
+    to: filters.to,
+    model: filters.model ?? null,
+    provider: filters.provider ?? null,
+    agent_id: filters.agent_id ?? null,
+    kind: filters.kind ?? null,
+  };
+}
+
+/** "View all" for the panel: the Traces list with the same range, filters and statuses. */
+export function recentFailuresHref(filters: MetricsFilters): string {
+  return tracesHref(filters, { status: [...ATTENTION_STATUSES] });
+}
+
+/** Failed plus needs-attention top-level runs of the period (from the summary, so it matches the KPIs). */
+export function attentionCount(values: Pick<MetricValues, "failed" | "needs_attention">): number {
+  return values.failed + values.needs_attention;
+}
+
+/** @deprecated The dashboard's URL state: the page state restricted to the date range. Kept for one
+ * milestone after SL.7; the Metrics page parses its full state with `parsePageState`. */
+export function parseDashboardState(params: ParamReader | null | undefined): MetricsPageState {
+  const parsed = parsePageState(params);
+  return { ...DEFAULT_PAGE_STATE, range: parsed.range, from: parsed.from, to: parsed.to };
+}
+
+/** @deprecated The range-only query string (`range=30d`, or `range=custom&from=…&to=…`; empty for 7 days). */
+export function dashboardParams(state: MetricsPageState): URLSearchParams {
+  return pageStateToParams({ ...DEFAULT_PAGE_STATE, range: state.range, from: state.from, to: state.to });
+}
+
+/** @deprecated The Overview now lives on Metrics: the Metrics page for the state's date range. */
+export function dashboardPath(state: MetricsPageState): string {
+  return routes.metrics(dashboardParams(state));
+}
+
+/** @deprecated The Metrics page for the state's date range, optionally narrowed (e.g. to one agent);
+ * other filters are dropped. Use `metricsAgentHref` to narrow while keeping the page's filters. */
+export function metricsPageHref(
+  state: MetricsPageState,
+  narrow: Partial<Pick<MetricsPageState, "agent_id" | "model" | "provider" | "kind">> = {},
+): string {
+  return routes.metrics(pageStateToParams({ ...DEFAULT_PAGE_STATE, range: state.range, from: state.from, to: state.to, ...narrow }));
 }
