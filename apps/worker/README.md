@@ -170,3 +170,9 @@ Deploy the API and the worker together, in this order:
    `EAP_EMBEDDING_QUERY_INSTRUCTIONS`, `EAP_KB_*`, the `EAP_LITELLM_EMBEDDING_*` pair, and
    `EAP_AUDIT_HASH_SALT` (set it per deployment so the forget audit log's resource hash cannot be
    looked up offline).
+
+### Agent capabilities milestone (AC, 2026-11)
+
+- **Drain before deploying.** Structured output (AC.4), limits and fallback (AC.5) and tool approvals (AC.6) add durable steps to the agent loop for specs that use them, so let in-flight agent runs finish first. A run recorded under the old worker and replayed under the new one could hit DBOS nondeterminism. Agent specs that use none of these features keep their step layout, which the golden test pins. AC.4 and AC.9 ship in one deploy.
+- **Migrations:** run `0014_approvals` and `0015_evals` before starting the new API or worker.
+- **Approvals:** the tool approval wait defaults to a 3600 s timeout unless the agent's approval policy sets one. Decisions are woken through `tool_approval:{run_id}` and polled every `EAP_APPROVAL_POLL_SECONDS` as a backstop.

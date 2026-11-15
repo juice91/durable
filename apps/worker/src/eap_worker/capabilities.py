@@ -19,22 +19,74 @@ only for structured output, never for plain text.
 
 The per-run inputs are built here too: `output_type_for(spec)` and `retries_for(spec)`. They are
 passed to `agent.iter` only when `spec.output` is set, so a spec without it runs exactly as before.
+
+AC.6 (tool approval): `prepare_tools` marks the spec's approval-required tools (`approvals.tools`,
+as their model-facing names) `kind="unapproved"`, so Pydantic AI never runs such a call unresolved:
+it first runs the response's UNGATED tool calls as usual, then collects the gated ones and hands
+them to `handle_deferred_tool_calls`; no gated call runs before every call of the batch is decided. That hook performs the durable wait inside
+the run (the DBOS workflow waits; the run is never ended and resumed):
+
+    eap.tool_approval_begin            per gated call, in response order: the batch's one deadline
+                                       (computed by the first call's step; a replay reuses it), the `tool_approval_waiting` event
+                                       (`tool:{id}:approval:waiting`, data {tool_call_id, tool_name,
+                                       args, deadline, workflow_id, batch}) and its pending_approvals
+                                       row in one transaction (EventLog.append_approval_waiting)
+    eap.tool_approval_decisions        one loop for the whole batch: the decision events
+    eap.workflow_clock                 the clock
+    DBOS.recv                          the wake-up on `tool_approval:{run_id}` (only a nudge), at most
+                                       min(remaining, EAP_APPROVAL_POLL_SECONDS)
+    ...                                until every call is decided or the deadline passes, then
+    eap.tool_approval_decisions        (timed_out) `tool_approval_timed_out` for every undecided call
+                                       under its decision key (first writer wins; no decided_by)
+
+and returns `DeferredToolResults(approvals={id: ToolApproved() | ToolDenied(message)})`. The
+decision EVENTS are the source of truth: a lost wake-up only delays a decision until the next poll.
+An approved call then runs through the ordinary call_tool step (reserve -> call -> complete, key
+`{run_id}:{tool_call_id}`), so nothing is reserved before approval; a denied or timed-out one never
+reaches the toolset and the model reads a `ToolReturnPart` with `outcome="denied"`.
+
+Without the wait (one `eap.tool_approval_deny` step per call, no inbox row, a `tool_denied` event at
+the decision key):
+- `approval_mode == "deny"` (a child run of an eval run, from eap.start_run): denied at once with
+  EVAL_DENIED_MESSAGE, `decided_by: "eval"`;
+- a tool call id the decide route could never address (not 1-256 printable ASCII without spaces,
+  AC.8's rule): denied at once with INVALID_ID_MESSAGE, `decided_by: "system"`, reason
+  `invalid_tool_call_id`, so it never sits undecidable in the inbox.
+
+The run's approval settings (mode, hour and poll seconds, all recorded by eap.start_run) reach the
+hook through a context variable `_drive_agent` sets around the agent run (set_approval_settings)
+(Pydantic AI capabilities get only `ctx.deps`, and WorkerDeps carries no run options).
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import math
+import re
+import time
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
+from uuid import UUID
 
+from dbos import DBOS
 from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.output import NativeOutput, PromptedOutput, StructuredDict, ToolOutput
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved, ToolDefinition, ToolDenied
+from pydantic_core import to_jsonable_python
 
-from eap_schemas import AgentSpec
+from eap_run_store.approvals import decision_event_key, tool_approval_topic
+from eap_schemas import AgentSpec, approval_required_tool_names
+from eap_schemas.approvals import EVAL_DENIED_MESSAGE, TIMED_OUT_MESSAGE, denial_message
 from eap_schemas.output import MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_ERRORS, OUTPUT_TOOL_NAME
+from eap_worker.crash import crash_point
+from eap_worker.runtime import get_runtime
 
 # The first line of the retry message the model gets for a schema-invalid candidate.
 RETRY_HEADING = "The output does not match the required JSON schema. Fix these errors and answer again:"
@@ -215,11 +267,278 @@ def error_paths(content: Any) -> list[str]:
     return paths[:MAX_OUTPUT_ERRORS]
 
 
+# --------------------------------------------------------------------------- tool approval (AC.6)
+
+APPROVAL_MODES = ("interactive", "deny")
+# AC.8's decide route: a tool call id of 1-256 printable ASCII characters, no spaces.
+MAX_TOOL_CALL_ID_CHARS = 256
+_TOOL_CALL_ID = re.compile(r"[\x21-\x7e]+")
+INVALID_ID_MESSAGE = (
+    "This tool call could not be offered for approval (its tool call id is not 1-256 printable "
+    "characters without spaces); it was not run."
+)
+INVALID_ID_REASON = "invalid_tool_call_id"
+EVAL_DECIDER = "eval"
+SYSTEM_DECIDER = "system"
+
+
+def approvable_tool_call_id(tool_call_id: Any) -> bool:
+    """Whether the API's decide route can address this id (AC.8: 1-256 printable ASCII, no spaces)."""
+    return (
+        isinstance(tool_call_id, str)
+        and 1 <= len(tool_call_id) <= MAX_TOOL_CALL_ID_CHARS
+        and _TOOL_CALL_ID.fullmatch(tool_call_id) is not None
+    )
+
+
+def _env_seconds(name: str, default: float) -> float:
+    import os
+
+    try:
+        return max(0.1, float(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+def read_approval_timing() -> dict[str, float]:
+    """The approval knobs, read ONCE inside eap.start_run and recorded with it: seconds per
+    `timeout_hours` hour (EAP_WORKFLOW_HOUR_SECONDS, default 3600, as for workflow approval steps)
+    and the longest single wait for a wake-up (EAP_APPROVAL_POLL_SECONDS, default 3600)."""
+    return {
+        "hour_seconds": _env_seconds("EAP_WORKFLOW_HOUR_SECONDS", 3600.0),
+        "poll_seconds": _env_seconds("EAP_APPROVAL_POLL_SECONDS", 3600.0),
+    }
+
+
+@dataclass(frozen=True)
+class ApprovalSettings:
+    """A run's approval options, from eap.start_run's recorded output."""
+
+    mode: str = "interactive"
+    hour_seconds: float = 3600.0
+    poll_seconds: float = 3600.0
+
+    @classmethod
+    def from_link(cls, link: dict[str, Any]) -> ApprovalSettings:
+        """From eap.start_run's recorded output. A checkpoint recorded before AC.6 has no keys:
+        interactive with the production defaults (3600 s per hour and per poll). The environment is
+        never read here: this is workflow code, so a replay must not depend on the process's env."""
+        mode = link.get("approval_mode")
+        timing = link.get("approval_timing")
+        if not isinstance(timing, dict):
+            timing = {}
+        return cls(
+            mode=mode if mode in APPROVAL_MODES else "interactive",
+            hour_seconds=float(timing.get("hour_seconds") or 3600.0),
+            poll_seconds=float(timing.get("poll_seconds") or 3600.0),
+        )
+
+
+_APPROVAL_SETTINGS: ContextVar[ApprovalSettings | None] = ContextVar("eap_approval_settings", default=None)
+
+
+def set_approval_settings(settings: ApprovalSettings) -> Token[ApprovalSettings | None]:
+    """Make `settings` the current run's approval options for SpecCapability's hooks (a context
+    variable: each workflow runs in its own asyncio task, so concurrent runs never share it).
+    Returns the token for reset_approval_settings."""
+    return _APPROVAL_SETTINGS.set(settings)
+
+
+def reset_approval_settings(token: Token[ApprovalSettings | None]) -> None:
+    _APPROVAL_SETTINGS.reset(token)
+
+
+def current_approval_settings() -> ApprovalSettings:
+    """The current run's settings; outside a run (never in practice) the defaults, never the env."""
+    return _APPROVAL_SETTINGS.get() or ApprovalSettings()
+
+
+def _call_args(call: ToolCallPart) -> Any:
+    try:
+        return to_jsonable_python(call.args_as_dict(), fallback=str)
+    except (ValueError, AssertionError):  # cannot happen: deferred calls are validated first
+        return {}
+
+
+@DBOS.step(name="eap.tool_approval_begin")
+async def tool_approval_begin_step(
+    run_id: str,
+    tenant_id: str,
+    tool_call_id: str,
+    data: dict[str, Any],
+    timeout_seconds: float,
+    batch_deadline: float | None = None,
+) -> float:
+    """Compute the deadline ONCE (now + timeout_seconds, epoch seconds; or `batch_deadline`, the
+    batch's deadline recorded by its first call's step, so every call of a batch shows and times out
+    at the same instant), write the `tool_approval_waiting` event carrying it and its open
+    pending_approvals row in one transaction (EventLog.append_approval_waiting), and return it. A
+    re-executed step finds the first event and returns ITS deadline (a repeated write adds nothing)."""
+    rt = get_runtime()
+    deadline = batch_deadline if batch_deadline is not None else time.time() + timeout_seconds
+    payload = {**data, "deadline": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat()}
+    event, _created = await asyncio.to_thread(
+        rt.event_log.append_approval_waiting, tenant_id, run_id, "tool", tool_call_id, payload
+    )
+    crash_point("after_event_write", event_key=f"tool:{tool_call_id}:approval:waiting")
+    stored = event.data.get("deadline") if isinstance(event.data, dict) else None
+    if isinstance(stored, str):
+        deadline = datetime.fromisoformat(stored).timestamp()
+    return deadline
+
+
+@DBOS.step(name="eap.tool_approval_decisions")
+async def tool_approval_decisions_step(
+    run_id: str, tenant_id: str, tool_call_ids: list[str], timed_out: bool
+) -> dict[str, dict[str, Any]]:
+    """The recorded decisions `{tool_call_id: {"type", "data"}}` of the batch's calls (only the
+    decided ones). With `timed_out`, every undecided call first gets `tool_approval_timed_out`
+    (append_tool_decision: a person's decision that got there first wins), so all are decided."""
+    rt = get_runtime()
+
+    def work() -> dict[str, dict[str, Any]]:
+        found: dict[str, dict[str, Any]] = {}
+        for call_id in tool_call_ids:
+            event = rt.event_log.get_event(tenant_id, run_id, decision_event_key("tool", call_id))
+            if event is None and timed_out:
+                _outcome, event = rt.event_log.append_tool_decision(
+                    tenant_id, run_id, call_id, "tool_approval_timed_out", {"tool_call_id": call_id}
+                )
+                if event is None:  # not waiting any more (cannot happen while this run waits)
+                    found[call_id] = {"type": "tool_approval_timed_out", "data": {"tool_call_id": call_id}}
+                    continue
+            if event is not None:
+                found[call_id] = {"type": event.type, "data": dict(event.data or {})}
+        return found
+
+    return await asyncio.to_thread(work)
+
+
+@DBOS.step(name="eap.tool_approval_deny")
+async def tool_approval_deny_step(run_id: str, tenant_id: str, tool_call_id: str, data: dict[str, Any]) -> None:
+    """Deny a gated call at once, with no wait and no inbox row: the `tool_denied` event at its
+    decision key (idempotent per key). Eval runs (`decided_by: "eval"`) and tool call ids the API
+    could never address (`decided_by: "system"`)."""
+    rt = get_runtime()
+    key = decision_event_key("tool", tool_call_id)
+    await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), key, "tool_denied", data)
+    crash_point("after_event_write", event_key=key)
+
+
+def _result_for(decision: dict[str, Any] | None) -> ToolApproved | ToolDenied:
+    kind = (decision or {}).get("type")
+    data = (decision or {}).get("data") or {}
+    if kind == "tool_approved":
+        return ToolApproved()
+    if kind == "tool_denied":
+        if data.get("decided_by") == EVAL_DECIDER:
+            return ToolDenied(EVAL_DENIED_MESSAGE)
+        if data.get("reason") == INVALID_ID_REASON:
+            return ToolDenied(INVALID_ID_MESSAGE)
+        comment = data.get("comment")
+        return ToolDenied(denial_message(comment if isinstance(comment, str) else None))
+    return ToolDenied(TIMED_OUT_MESSAGE)
+
+
+async def wait_for_tool_approvals(
+    run_id: str,
+    tenant_id: str,
+    calls: list[ToolCallPart],
+    timeout_hours: int,
+    settings: ApprovalSettings,
+) -> DeferredToolResults:
+    """The durable wait for one batch of gated calls (see the module docstring). Workflow code:
+    every read is a step and `recv` is recorded, so a replay takes the same path."""
+    from eap_worker.workflow_run import clock_step  # `eap.workflow_clock`; workflow_run imports workflow
+
+    decisions: dict[str, dict[str, Any]] = {}
+    waiting: list[ToolCallPart] = []
+    for call in calls:
+        if settings.mode == "deny":
+            data = {"tool_call_id": call.tool_call_id, "decided_by": EVAL_DECIDER, "comment": None}
+        elif not approvable_tool_call_id(call.tool_call_id):
+            data = {
+                "tool_call_id": call.tool_call_id, "decided_by": SYSTEM_DECIDER, "comment": None,
+                "reason": INVALID_ID_REASON,
+            }
+        else:
+            waiting.append(call)
+            continue
+        await tool_approval_deny_step(run_id, tenant_id, call.tool_call_id, data)
+        decisions[call.tool_call_id] = {"type": "tool_denied", "data": data}
+
+    if waiting:
+        timeout_seconds = timeout_hours * settings.hour_seconds
+        batch = [c.tool_call_id for c in waiting]
+        deadline: float | None = None
+        for call in waiting:
+            recorded = await tool_approval_begin_step(
+                run_id, tenant_id, call.tool_call_id,
+                {
+                    "tool_call_id": call.tool_call_id,
+                    "tool_name": call.tool_name,
+                    "args": _call_args(call),
+                    # The DBOS workflow that waits: the API sends the wake-up here.
+                    "workflow_id": DBOS.workflow_id,
+                    # AG-UI (Q7): every waiting call of this deferred batch, for one interrupt per batch.
+                    "batch": batch,
+                },
+                timeout_seconds,
+                deadline,  # None for the first call; then the batch's recorded deadline
+            )
+            # Equal for every call of the batch; min() only guards an event written before this rule.
+            deadline = recorded if deadline is None else min(deadline, recorded)
+            crash_point("tool_approval_waiting", event_key=f"tool:{call.tool_call_id}:approval:waiting")
+        assert deadline is not None
+        topic = tool_approval_topic(run_id)
+        while True:
+            found = await tool_approval_decisions_step(run_id, tenant_id, batch, False)
+            if len(found) == len(batch):
+                break
+            remaining = deadline - await clock_step()
+            if remaining <= 0:
+                found = await tool_approval_decisions_step(run_id, tenant_id, batch, True)
+                break
+            # Only a nudge: the next round reads the decision events, whatever the message says.
+            await DBOS.recv_async(topic, timeout_seconds=min(remaining, settings.poll_seconds))
+        decisions.update(found)
+
+    return DeferredToolResults(approvals={c.tool_call_id: _result_for(decisions.get(c.tool_call_id)) for c in calls})
+
+
 # --------------------------------------------------------------------------- the capability
 
 
 class SpecCapability(AbstractCapability[Any]):
-    """The run spec's behaviour (see the module docstring). Workflow-side and pure: no step."""
+    """The run spec's behaviour (see the module docstring). Workflow-side and pure (no step), except
+    the approval wait, which runs only when the model calls a gated tool."""
+
+    async def prepare_tools(self, ctx: RunContext[Any], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+        spec = getattr(ctx.deps, "spec", None)
+        if getattr(spec, "approvals", None) is None:
+            return tool_defs
+        gated = approval_required_tool_names(spec)
+        return [
+            replace(td, kind="unapproved") if td.name in gated and td.kind == "function" else td
+            for td in tool_defs
+        ]
+
+    async def handle_deferred_tool_calls(
+        self, ctx: RunContext[Any], *, requests: DeferredToolRequests
+    ) -> DeferredToolResults | None:
+        spec = getattr(ctx.deps, "spec", None)
+        if getattr(spec, "approvals", None) is None or not requests.approvals:
+            return None  # external calls (`requests.calls`) are never produced by our specs
+        gated = approval_required_tool_names(spec)
+        calls = [c for c in requests.approvals if c.tool_name in gated]
+        if not calls:
+            return None
+        results = await wait_for_tool_approvals(
+            str(ctx.deps.run_id), ctx.deps.tenant_id, calls, spec.approvals.effective_timeout_hours(),
+            current_approval_settings(),
+        )
+        check_approved_tool_calls(ctx, results)
+        return results
 
     async def after_output_validate(
         self, ctx: RunContext[Any], *, output_context: Any, output: Any
@@ -238,9 +557,46 @@ class SpecCapability(AbstractCapability[Any]):
         return None
 
 
+def check_approved_tool_calls(ctx: RunContext[Any], results: DeferredToolResults) -> None:
+    """Approved calls count against the tool-call limit exactly like ordinary calls.
+
+    Pydantic AI checks `tool_calls_limit` once per response, up front, for its function-kind
+    calls only, so a deferred (`unapproved`) call that is approved and then run would bypass it.
+    The same check, with the run's own UsageLimits and live usage, runs here for the approved calls
+    before any of them runs: the same UsageLimitExceeded (message, `limit` / `value` via
+    errors.describe_usage_limit) at the same point (before the batch's approved calls run; ungated calls of the response have
+    already run and are counted in the live usage, as Pydantic AI counts them). Denied and timed-out
+    calls never run, so they do not count, as Pydantic AI counts calls (plan: "native limits count
+    ... tool calls, as Pydantic AI counts them"). Pure: the decisions are recorded, the usage is
+    replayed, so a replay raises identically."""
+    limits = getattr(ctx, "usage_limits", None)
+    if limits is None or getattr(limits, "tool_calls_limit", None) is None:
+        return
+    approved = sum(1 for result in results.approvals.values() if isinstance(result, ToolApproved))
+    if not approved:
+        return
+    projected = copy.deepcopy(ctx.usage)
+    projected.tool_calls += approved
+    limits.check_before_tool_call(projected)
+
+
 __all__ = [
+    "APPROVAL_MODES",
+    "ApprovalSettings",
+    "INVALID_ID_MESSAGE",
+    "INVALID_ID_REASON",
     "RETRY_HEADING",
     "SpecCapability",
+    "approvable_tool_call_id",
+    "check_approved_tool_calls",
+    "current_approval_settings",
+    "read_approval_timing",
+    "reset_approval_settings",
+    "set_approval_settings",
+    "tool_approval_begin_step",
+    "tool_approval_decisions_step",
+    "tool_approval_deny_step",
+    "wait_for_tool_approvals",
     "error_paths",
     "output_type_for",
     "retries_for",
