@@ -24,17 +24,25 @@ back to genai-prices prices for models it was meant to price.
 
 The cost is stored on the request's row and in its event and never recomputed, so historical cost
 does not change when prices change.
+
+Fallback models (AC.5; `fallback_usage`): a request answered through a FallbackModel is priced as
+the model that ANSWERED, `chain[len(response.failed_attempts)]`, cross-checked against the
+provider-reported model name where it names one of the chain's models; on a mismatch the row keeps
+the chain's id and is marked `price_source = "fallback_unverified"`. Failed attempts that reported
+usage get their own rows (`model:{n}:failed:{k}`), priced as `chain[k]`.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -293,6 +301,8 @@ def usage_record(request_key: str, usage_input: dict[str, Any], at: datetime | N
         measured=usage_input["usage_measured"],
     )
     cost, source = price(usage_input["model_id"], u, at)
+    if usage_input.get("price_source_override"):
+        source = str(usage_input["price_source_override"])  # AC.5: fallback_unverified
     row = {
         "request_key": request_key,
         "model_id": usage_input["model_id"],
@@ -320,6 +330,125 @@ def usage_record(request_key: str, usage_input: dict[str, Any], at: datetime | N
         "cost_usd": None if cost is None else format(cost, "f"),
     }
     return row, event_fields
+
+
+# ----------------------------------------------------------------------------- fallback (AC.5)
+
+PRICE_SOURCE_FALLBACK_UNVERIFIED = "fallback_unverified"
+_MAX_ERROR_TYPE = 200
+
+
+def _names_model(chain_id: str, reported: str | None) -> bool:
+    return bool(reported) and reported in (chain_id, chain_id.partition(":")[2])
+
+
+def answering_index(chain: Sequence[str], reported_model_name: str | None, failed: int) -> tuple[int, bool]:
+    """(index of the answering model in `chain`, verified). The answering model is the one after the
+    `failed` attempts; it is unverified when the provider-reported name names ANOTHER chain member
+    (or the count runs past the chain, then the last member is used). A reported name that names no
+    member (e.g. a scripted model's own name) does not contradict the count."""
+    index = min(failed, len(chain) - 1)
+    if failed >= len(chain):
+        return index, False
+    named = [k for k, member in enumerate(chain) if _names_model(member, reported_model_name)]
+    return index, not named or index in named
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+# ModelHTTPError's own text starts "status_code: <n>, model_name: ..., body: ...".
+_STATUS_RE = re.compile(r"\bstatus_code: (\d{3})\b")
+
+
+def attempt_model_id(chain: Sequence[str], k: int, reported_model_name: str | None) -> str:
+    """The chain member failed attempt k was sent to: the member its reported model name names when
+    exactly one does (robust to an extra attempt shifting positions, e.g. a pinned continuation that
+    FallbackModel retried), else the member at position k (bounded to the chain)."""
+    named = [member for member in chain if _names_model(member, reported_model_name)]
+    if len(named) == 1:
+        return named[0]
+    return chain[min(k, len(chain) - 1)]
+
+
+def _error_type(error: str | None) -> str | None:
+    """`ModelRequestAttempt.error` is `"ExceptionType: message"`: only the type is kept (a plain
+    identifier, bounded; anything else is "Exception")."""
+    if not error:
+        return None
+    name = error.partition(":")[0].strip()[:_MAX_ERROR_TYPE]
+    return name if _IDENTIFIER_RE.match(name) else "Exception"
+
+
+def _http_status(error: str | None) -> int | None:
+    """The HTTP status of a ModelHTTPError attempt, from its fixed `status_code: <n>` prefix."""
+    if not error:
+        return None
+    match = _STATUS_RE.search(error.partition(":")[2])
+    return int(match.group(1)) if match else None
+
+
+def safe_attempt_error(error: str | None) -> str | None:
+    """A failed attempt's `error` without the exception text (which can quote the provider's
+    body, the request or the output): `"<ExceptionType>"`, or `"<ExceptionType>: HTTP <status>"`."""
+    name = _error_type(error)
+    if name is None:
+        return None
+    status = _http_status(error)
+    return f"{name}: HTTP {status}" if status is not None else name
+
+
+def scrub_failed_attempts(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Messages as JSON with every response's `failed_attempts[].error` reduced to
+    `safe_attempt_error` (AC.5: stored messages, events and history never carry provider error
+    text). Pure; other fields (model, outcome, timing, usage) are kept."""
+    return [scrub_failed_attempts_message(m) for m in messages]
+
+
+def scrub_failed_attempts_message(message: dict[str, Any]) -> dict[str, Any]:
+    attempts = message.get("failed_attempts") if isinstance(message, dict) else None
+    if not attempts:
+        return message
+    cleaned = [
+        {**a, "error": safe_attempt_error(a.get("error"))} if isinstance(a, dict) else a for a in attempts
+    ]
+    return {**message, "failed_attempts": cleaned}
+
+
+def fallback_usage(chain: Sequence[str], response: Any) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """For a response of a request that tried `chain` (len > 1): (the answering model's
+    `request_usage_input`, the extra `model_message` data `{requested_model_id, fallback_index,
+    failed_attempts: [{model_id, outcome, error_type}]}` (no error text), the failed attempts'
+    usage inputs that reported usage, each with its index `k`). Pure: from the checkpointed response."""
+    attempts = list(getattr(response, "failed_attempts", None) or [])
+    index, verified = answering_index(chain, getattr(response, "model_name", None), len(attempts))
+    usage = request_usage_input(chain[index], getattr(response, "model_name", None), response.usage)
+    if not verified:
+        usage["price_source_override"] = PRICE_SOURCE_FALLBACK_UNVERIFIED
+    failed_data: list[dict[str, Any]] = []
+    failed_usage: list[dict[str, Any]] = []
+    for k, attempt in enumerate(attempts):
+        model_id = attempt_model_id(chain, k, getattr(attempt, "model_name", None))
+        entry: dict[str, Any] = {
+            "model_id": model_id, "outcome": getattr(attempt, "outcome", "error"), "error_type": _error_type(attempt.error)
+        }
+        status = _http_status(attempt.error)
+        if status is not None:
+            entry["http_status"] = status
+        failed_data.append(entry)
+        if attempt.usage is not None:
+            failed_usage.append({"k": k, **request_usage_input(model_id, attempt.model_name, attempt.usage)})
+    extra = {"requested_model_id": chain[0], "fallback_index": index, "failed_attempts": failed_data}
+    return usage, extra, failed_usage
+
+
+def failed_attempt_rows(request_key: str, failed_usage: Sequence[dict[str, Any]], at: datetime | None = None) -> list[dict[str, Any]]:
+    """The `run_model_requests` rows of failed attempts (`{request_key}:failed:{k}`), priced as their
+    own model; operation `chat`."""
+    rows = []
+    for item in failed_usage:
+        u = {key: value for key, value in item.items() if key != "k"}
+        row, _fields = usage_record(f"{request_key}:failed:{item['k']}", u, at)
+        rows.append(row)
+    return rows
 
 
 # ----------------------------------------------------------------------------- embeddings (RM.6)
@@ -379,6 +508,14 @@ __all__ = [
     "DEFAULT_PRICES_FILE",
     "OPERATION_CHAT",
     "OPERATION_EMBEDDING",
+    "PRICE_SOURCE_FALLBACK_UNVERIFIED",
+    "answering_index",
+    "attempt_model_id",
+    "failed_attempt_rows",
+    "fallback_usage",
+    "safe_attempt_error",
+    "scrub_failed_attempts",
+    "scrub_failed_attempts_message",
     "embedding_usage_record",
     "InvalidPriceFile",
     "PRICES_FILE_ENV",

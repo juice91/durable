@@ -44,6 +44,10 @@
   (`eap-moderator__model.request`), right after the moderation model answered and before the step
   checkpoint. Recovery calls the moderation model again; its usage row is still written once, with
   the `processor_result` event that follows the step.
+- `after_check_budget` (AC.5): in the agent workflow, right after `eap.check_budget` for model
+  request n was checkpointed and before that model request starts. Filtered by
+  `EAP_CRASH_EVENT_KEY` against `budget:{n}`. Recovery replays the recorded decision (the step is
+  not re-run), so the run decides identically.
 - `after_event_write`: inside the `eap.append_event` DBOS step, right after the durable event
   committed to `eap_app` and before the step's checkpoint reaches `eap_dbos`. Only fires for
   events whose `event_key` matches the glob `EAP_CRASH_EVENT_KEY` (default `*`, i.e. the first

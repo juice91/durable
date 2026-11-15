@@ -1146,6 +1146,20 @@ class RunStore:
                 raise RunNotFound(tenant_id, run_id)
             session.commit()
 
+    def recorded_cost_usd(self, tenant_id: str, run_id: UUID | str) -> Decimal:
+        """The sum of `cost_usd` over the run's own `run_model_requests` rows recorded so far
+        (AC.5 `eap.check_budget`): chat requests, failed fallback attempts that billed, moderation
+        and embedding rows alike; an unpriced row counts as 0. Another tenant's run, or a run
+        without rows, gives 0. Never the child runs' rows (a cap is per run)."""
+        with self.Session() as session:
+            total = session.execute(
+                select(func.coalesce(func.sum(RunModelRequestModel.cost_usd), 0)).where(
+                    RunModelRequestModel.tenant_id == tenant_id,
+                    RunModelRequestModel.run_id == str(run_id),
+                )
+            ).scalar_one()
+            return Decimal(total)
+
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
         """Get a run by ID. Returns None if not found or belongs to another tenant.
 
@@ -1516,11 +1530,13 @@ def append_event_in_session(
     event_key: str,
     type: RunEventType | str,
     data: dict | None = None,
-    usage: dict[str, Any] | None = None,
+    usage: dict[str, Any] | list[dict[str, Any]] | None = None,
 ) -> tuple[RunEvent, bool]:
     """EventLog.append's work inside the caller's open ORM session, which commits it: a store that
     must write its own rows, an event and a usage row in one transaction (KnowledgeStore) uses this.
     Same rules as EventLog.append (seq under the runs row lock, repeated key = no write).
+    `usage` is one row or a list of rows (AC.5: a model request answered by a fallback model plus
+    its failed attempts that reported usage), all written in the event's transaction.
     A usage row inserted on a FINISHED run also refreshes the run's totals (insert_usage_in_session).
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
     if not tenant_id:
@@ -1559,10 +1575,19 @@ def append_event_in_session(
     )
     session.add(event_model)
     session.flush()
-    if usage is not None:
+    for row in usage_rows(usage):
         # A usage row on a finished run (post-turn steps) also refreshes the run's totals.
-        insert_usage_in_session(session, tenant_id, run_id, usage, event_model.ts)
+        insert_usage_in_session(session, tenant_id, run_id, row, event_model.ts)
     return _run_event_from_model(event_model), True
+
+
+def usage_rows(usage: dict[str, Any] | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """`EventLog.append`'s `usage` argument as a list of rows: None -> [], one row -> [row]."""
+    if usage is None:
+        return []
+    if isinstance(usage, dict):
+        return [usage]
+    return list(usage)
 
 
 class EventLog:
@@ -1579,7 +1604,7 @@ class EventLog:
         event_key: str,
         type: RunEventType,
         data: dict | None = None,
-        usage: dict[str, Any] | None = None,
+        usage: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> tuple[RunEvent, bool]:
         """Append an event to a run owned by `tenant_id`. Seq is assigned atomically.
 
@@ -1591,7 +1616,9 @@ class EventLog:
         optionally operation ('chat' by default, 'embedding' for an embedding call) and
         created_at), inserted in the event's transaction with ON CONFLICT DO NOTHING. A
         repeated key writes no row: the first event's row stands, so usage and cost are recorded
-        exactly once per request and never recomputed.
+        exactly once per request and never recomputed. `usage` may also be a list of such rows
+        (AC.5: the answering model's row plus `model:{n}:failed:{k}` rows of failed fallback
+        attempts that reported usage), all in the event's transaction; a single row still works.
         Raises RunNotFound (and writes nothing) if the run does not exist or belongs to another tenant.
         """
         if not tenant_id:
