@@ -42,8 +42,10 @@ def test_the_judge_output_type_is_a_closed_tool_output():
     output_type = eval_run.judge.output_type
     assert isinstance(output_type, ToolOutput) and output_type.output is JudgeVerdict
     assert output_type.name == "final_result"
-    # (Pydantic's lax mode reads "yes"/"true" as True; anything that is not a boolean is refused.)
-    for forged in ({"pass": "maybe", "score": 1.0, "reason": "r"}, {"pass": True, "score": 7, "reason": "r"},
+    # `pass` is a strict boolean: no "yes", "true", 1 or "maybe" is coerced into a verdict.
+    for forged in ({"pass": "yes", "score": 1.0, "reason": "r"}, {"pass": "true", "score": 1.0, "reason": "r"},
+                   {"pass": 1, "score": 1.0, "reason": "r"}, {"pass": "maybe", "score": 1.0, "reason": "r"},
+                   {"pass": True, "score": 7, "reason": "r"},
                    {"pass": True, "score": 1.0, "reason": "r", "override": True}, {"pass": True, "score": 1.0}):
         with pytest.raises(ValidationError):
             JudgeVerdict.model_validate(forged)

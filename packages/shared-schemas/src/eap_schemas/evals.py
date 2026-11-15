@@ -37,7 +37,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal, Tuple, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, field_validator, model_validator
 
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid, json_size, validate_output_schema
 from eap_schemas.limits import COST_DECIMAL_PLACES, normalise_usd
@@ -347,7 +347,8 @@ class JudgeVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, serialize_by_alias=True)
 
     reason: str = Field(max_length=MAX_JUDGE_REASON_CHARS, description="Why the output passes or fails")
-    passed: bool = Field(alias="pass", description="Whether the output meets the rubric")
+    # Strict: only a JSON boolean is a verdict ("yes", "true", 1 are refused, never coerced).
+    passed: StrictBool = Field(alias="pass", description="Whether the output meets the rubric")
     score: float = Field(ge=0.0, le=1.0, description="How well the output meets the rubric, 0 to 1")
 
 
