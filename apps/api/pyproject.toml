@@ -28,6 +28,8 @@ dependencies = [
     # referencing.Registry (no remote $ref is ever retrieved).
     "jsonschema>=4.20",
     "referencing>=0.30",
+    # Test suite import and export (the pydantic_evals dataset file): yaml.safe_load only.
+    "pyyaml==6.0.3",
     # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
     "fastmcp-slim[client]>=3.3.0,<5",
 ]

@@ -49,9 +49,11 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
+    literal,
     null,
     select,
     text,
+    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, insert as pg_insert
@@ -69,6 +71,7 @@ from eap_schemas.evals import (
     EvalSuiteSnapshot,
     EvaluatorSpec,
 )
+from eap_run_store.cursor import RunCursor
 from eap_run_store.store import (
     Base,
     RunModel,
@@ -83,6 +86,7 @@ CaseStatus = Literal["passed", "failed", "error"]
 CASE_STATUSES = ("passed", "failed", "error")
 MAX_SUITE_DESCRIPTION_CHARS = 2000
 MAX_LIST_RUNS = 100
+MAX_LIST_RESULTS = 500
 EVAL_CASE_RESULT_EVENT = "eval_case_result"
 
 # Same texts as migration 0015_evals.
@@ -431,8 +435,25 @@ def _first_error(exc: ValidationError) -> str:
     return f"{loc}: {err['msg']}" if loc else err["msg"]
 
 
-def _dump_evaluators(evaluators: Sequence[Any]) -> list[dict[str, Any]]:
-    return [e.model_dump(mode="json", exclude_none=True) for e in evaluators]
+def _dump_evaluator(evaluator: Any) -> dict[str, Any]:
+    """An evaluator as stored: optional fields left out while None (the stored shape every suite
+    without nulls already has), but a REQUIRED field is always kept, even when it is null
+    (`field_equals.value: null` compares with null). `exclude_unset` is not used: it would drop
+    the defaulted `kind` discriminator."""
+    out = evaluator.model_dump(mode="json", exclude_none=True)
+    full = evaluator.model_dump(mode="json")
+    for name, info in type(evaluator).model_fields.items():
+        if info.is_required() and name not in out:
+            out[name] = full[name]
+    return out
+
+
+def dump_evaluators(evaluators: Sequence[Any]) -> list[dict[str, Any]]:
+    """Evaluator models as stored and as the API returns them (see `_dump_evaluator`)."""
+    return [_dump_evaluator(e) for e in evaluators]
+
+
+_dump_evaluators = dump_evaluators
 
 
 def _validate_case(case: EvalCase | Mapping[str, Any]) -> EvalCase:
@@ -1094,13 +1115,39 @@ class EvalStore:
             return _result_record(row), True
 
     def list_case_results(
-        self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None
+        self,
+        tenant_id: str,
+        run_id: UUID | str,
+        *,
+        agent_id: UUID | str | None = None,
+        after: tuple[int, str] | None = None,
+        limit: int | None = None,
     ) -> list[EvalCaseResult]:
-        """The eval run's results by position, then case id. EvalRunNotFound if not the tenant's
-        (or the agent's) eval run."""
+        """The eval run's results by position, then case id; with `after` = (position, case_id)
+        only those past it, and at most `limit` (1..MAX_LIST_RESULTS) when given. EvalRunNotFound
+        if not the tenant's (or the agent's) eval run."""
         with self.Session() as session:
             self._eval_run(session, tenant_id, run_id, agent_id)
-            return [_result_record(r) for r in self._results(session, tenant_id, str(run_id))]
+            return [
+                _result_record(r) for r in self._results(session, tenant_id, str(run_id), after=after, limit=limit)
+            ]
+
+    def aggregates_for_runs(self, tenant_id: str, run_ids: Sequence[UUID | str]) -> dict[str, dict[str, Any]]:
+        """`aggregate_results` of each of `run_ids` (the tenant's only), in ONE query: run id ->
+        aggregates (a run without results has the empty aggregates)."""
+        ids = [str(r) for r in run_ids]
+        if not ids:
+            return {}
+        by_run: dict[str, list[EvalCaseResult]] = {i: [] for i in ids}
+        with self.Session() as session:
+            rows = session.execute(
+                select(EvalCaseResultModel)
+                .where(EvalCaseResultModel.tenant_id == tenant_id, EvalCaseResultModel.run_id.in_(ids))
+                .order_by(EvalCaseResultModel.run_id, EvalCaseResultModel.position, EvalCaseResultModel.case_id)
+            ).scalars()
+            for row in rows:
+                by_run[row.run_id].append(_result_record(row))
+        return {run_id: aggregate_results(results) for run_id, results in by_run.items()}
 
     def aggregates(self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None) -> dict[str, Any]:
         """See `aggregate_results`. EvalRunNotFound if not the tenant's (or the agent's) eval run."""
@@ -1113,8 +1160,11 @@ class EvalStore:
         *,
         suite_id: UUID | str | None = None,
         limit: int = 50,
+        before: RunCursor | None = None,
     ) -> list[dict[str, Any]]:
-        """The agent's eval runs (optionally one suite's), newest first, as RunStore run dicts."""
+        """The agent's eval runs (optionally one suite's), newest first by (created_at, id), as
+        RunStore run dicts; with `before` (RunCursor.after(last row of the previous page)) only the
+        runs past it."""
         limit = max(1, min(int(limit), MAX_LIST_RUNS))
         stmt = (
             select(RunModel)
@@ -1122,6 +1172,8 @@ class EvalStore:
             .order_by(RunModel.created_at.desc(), RunModel.id.desc())
             .limit(limit)
         )
+        if before is not None:
+            stmt = stmt.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
         if suite_id is not None:
             stmt = stmt.where(RunModel.eval_suite_id == str(suite_id))
         with self.Session() as session:
@@ -1388,14 +1440,23 @@ class EvalStore:
         ).scalar_one_or_none()
 
     @staticmethod
-    def _results(session, tenant_id: str, run_id: str) -> list[EvalCaseResultModel]:
-        return list(
-            session.execute(
-                select(EvalCaseResultModel)
-                .where(EvalCaseResultModel.tenant_id == tenant_id, EvalCaseResultModel.run_id == run_id)
-                .order_by(EvalCaseResultModel.position, EvalCaseResultModel.case_id)
-            ).scalars()
+    def _results(
+        session, tenant_id: str, run_id: str, *, after: tuple[int, str] | None = None, limit: int | None = None
+    ) -> list[EvalCaseResultModel]:
+        stmt = (
+            select(EvalCaseResultModel)
+            .where(EvalCaseResultModel.tenant_id == tenant_id, EvalCaseResultModel.run_id == run_id)
+            .order_by(EvalCaseResultModel.position, EvalCaseResultModel.case_id)
         )
+        if after is not None:
+            position, case_id = after
+            stmt = stmt.where(
+                tuple_(EvalCaseResultModel.position, EvalCaseResultModel.case_id)
+                > tuple_(literal(int(position)), literal(str(case_id), type_=EvalCaseResultModel.__table__.c.case_id.type))
+            )
+        if limit is not None:
+            stmt = stmt.limit(max(1, min(int(limit), MAX_LIST_RESULTS)))
+        return list(session.execute(stmt).scalars())
 
     @staticmethod
     def _case_cost(session, tenant_id: str, run_id: str, child_run_id: str | None, judge_prefix: str) -> Decimal | None:
@@ -1435,7 +1496,10 @@ __all__ = [
     "EvalSuiteNotFound",
     "EvalSuiteRecord",
     "ImportResult",
+    "MAX_LIST_RESULTS",
+    "MAX_LIST_RUNS",
     "aggregate_results",
     "case_event_key",
+    "dump_evaluators",
     "judge_request_key",
 ]

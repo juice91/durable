@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from eap_schemas import AgentSpec, ModelRef
+from eap_schemas.evals import DEFAULT_MAX_CONCURRENCY, MAX_MAX_CONCURRENCY, EvaluatorSpec
 from eap_schemas.knowledge import ChunkingConfig, validate_metadata as validate_kb_metadata
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -584,3 +585,75 @@ class UnprocessableDetail(BaseModel):
     path, never a value) or the request validation problems."""
 
     detail: str | list[ValidationIssue]
+
+
+# ---------------------------------------------------------------------------- evals (AC.12)
+# Bodies of the test suite routes (routes/evals.py). Evaluators and cases are validated with the
+# eap_schemas.evals contracts: the field types here give FastAPI's 422 list for a malformed body;
+# the store re-checks the rules that span fields (evaluator names unique across a suite's and a
+# case's evaluators, the 500-case cap) and answers a 422 with a message.
+
+
+class EvalSuiteCreate(BaseModel):
+    """Body of POST /agents/{agent_id}/eval-suites. `suite_id` lets a client choose the id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    suite_id: UUID | None = None
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    evaluators: list[EvaluatorSpec] = Field(default_factory=list, max_length=10)
+
+
+class EvalSuiteUpdate(BaseModel):
+    """Body of PATCH /eval-suites/{suite_id}: only the fields present change. `archived` true
+    archives the suite (it can then not be edited or run), false restores it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    evaluators: list[EvaluatorSpec] | None = Field(default=None, max_length=10)
+    archived: bool | None = None
+
+
+class EvalCaseCreate(BaseModel):
+    """Body of POST /eval-suites/{suite_id}/cases (an EvalCase, plus an optional id and position;
+    the default position is after the last case)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: UUID | None = None
+    name: str
+    input: str
+    expected_output: Any = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    evaluators: list[EvaluatorSpec] = Field(default_factory=list, max_length=5)
+    position: int | None = Field(default=None, ge=0)
+
+
+class EvalCaseUpdate(BaseModel):
+    """Body of PATCH /eval-suites/{suite_id}/cases/{case_id}: only the fields present change
+    (`expected_output: null` clears it); the merged case is validated as a whole."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    input: str | None = None
+    expected_output: Any = None
+    metadata: dict[str, Any] | None = None
+    evaluators: list[EvaluatorSpec] | None = Field(default=None, max_length=5)
+    position: int | None = Field(default=None, ge=0)
+
+
+class EvalRunCreate(BaseModel):
+    """Body of POST /agents/{agent_id}/evals/runs. `run_id` is client-generated: a retry with the
+    same body is idempotent. `version`: a published version, "draft", or null for the latest
+    version. `max_concurrency` (1..8, default 4) is frozen into the run's suite snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    suite_id: UUID
+    version: RunVersion = None
+    max_concurrency: int = Field(default=DEFAULT_MAX_CONCURRENCY, ge=1, le=MAX_MAX_CONCURRENCY)
