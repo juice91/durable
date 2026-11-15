@@ -161,12 +161,22 @@ function agentKey(target: ConnectTarget): string {
 }
 
 /**
+ * The install line of the CopilotKit snippet. `@ag-ui/client` must be the copy the runtime depends
+ * on (1.0.2 for runtime 1.83.0); another one makes two `AbstractAgent` classes and `agents` fails
+ * to typecheck (checked by AGUI.16 against examples/copilotkit-agui/).
+ */
+export const COPILOTKIT_INSTALL = "pnpm add @copilotkit/runtime@1.83.0 @copilotkit/react-core@1.83.0 @ag-ui/client@1.0.2";
+
+/**
  * The CopilotKit runtime route (Next.js app router) that proxies to our endpoint with the key from
- * the server's environment, so the key never reaches the browser.
+ * the server's environment, so the key never reaches the browser. Verified as written against
+ * @copilotkit/runtime and @copilotkit/react-core 1.83.0 (AGUI.16; docs/ag-ui.md).
  */
 export function copilotKitSnippet(target: ConnectTarget, baseUrl: string = BASE_URL): string {
   const name = agentKey(target);
   return [
+    `// ${COPILOTKIT_INSTALL}`,
+    "// (@ag-ui/client must be the version @copilotkit/runtime depends on.)",
     "// app/api/copilotkit/route.ts: the key stays on the server.",
     'import { HttpAgent } from "@ag-ui/client";',
     "import {",
@@ -195,7 +205,7 @@ export function copilotKitSnippet(target: ConnectTarget, baseUrl: string = BASE_
     "};",
     "",
     "// In the page:",
-    `// <CopilotKit runtimeUrl="/api/copilotkit" agent=${jsString(name)}>…</CopilotKit>`,
+    `// <CopilotKit runtimeUrl="/api/copilotkit" useSingleEndpoint agent=${jsString(name)}>…</CopilotKit>`,
   ].join("\n");
 }
 

@@ -53,6 +53,7 @@ Every AG-UI call uses that key.
 | `previous_turn` | `HttpAgent` | The stream drops after `RUN_STARTED` while a 5 s MCP call runs. The next message gets `RUN_STARTED`, `CUSTOM pydanticos.waiting`, a `MESSAGES_SNAPSHOT` with the missed answer (in the server's order), then its own turn. The slow tool ran once |
 | `structured` | `HttpAgent` | `RUN_FINISHED.result` is the object, also returned by `runAgent()`. One text message holds its JSON. There is no `final_result` tool call |
 | `tool_approval` | `HttpAgent` | `RUN_FINISHED` interrupt (`reason: tool_call`, `toolCallId`, id `approval:{run}:tool:{call}`) and `CUSTOM pydanticos.approval_required`. The resume (approve) gives `pydanticos.approval_decided`, then the tool result in the same durable run. One `tool_result` event in the native log |
+| `tool_approval_copilotkit` | `HttpAgent` | The resume body CopilotKit 1.83 sends: the resume entry plus a `tool` message answering the gated call with the payload. The server drops that echo: no 422, one decision, the tool runs once |
 | `workflow_approval` | `HttpAgent` | Steps, `STATE_SNAPSHOT/DELTA`, and an interrupt for the approval step (`reason: confirmation`, `expiresAt`). The resume finishes the same workflow run |
 
 For every scenario:

@@ -11,6 +11,7 @@
  *   previous_turn        a plain `HttpAgent` drops its stream; the next message waits, heals, then runs
  *   structured           a structured-output agent: `RUN_FINISHED.result` plus one JSON text message
  *   tool_approval        a gated agent tool: interrupt, resume (approve), the tool runs once on the server
+ *   tool_approval_copilotkit  the same, with the tool message CopilotKit 1.83 adds to its resume body
  *   workflow_approval    workflow steps and state, an approval step as an interrupt, resume
  *
  * Every request body and every received event is validated with the `@ag-ui/core` schemas, and
@@ -419,6 +420,37 @@ async function toolApproval(): Promise<void> {
   assert.equal(agent.pendingInterrupts.length, 0);
 }
 
+/**
+ * The resume body CopilotKit 1.83 sends (`useInterrupt` resolving a `tool_call` interrupt, found by
+ * AGUI.16): the resume entry AND a `tool` message answering the gated server call with the
+ * payload. The server drops that echo (the resume entry alone decides) instead of a 422.
+ */
+async function toolApprovalCopilotKit(): Promise<void> {
+  const wire = new Wire();
+  const threadId = `approval-ck-${randomUUID()}`;
+  const agent = plain(api.agentUrl(setup.gated), wire, threadId);
+  agent.addMessage(user(JSON.stringify({ tool: "tickets.create", args: { title: "CopilotKit ticket", body: "Echoed resume." } })));
+  await agent.runAgent({ runId: randomUUID() });
+  const first = only(wire.streams(), "stream");
+  const call = only(events(first, "TOOL_CALL_START"), "TOOL_CALL_START");
+  const interrupt = only(outcome(first).interrupts as Array<Record<string, unknown>>, "interrupt");
+  const nativeRun = runIdOf(first);
+  const payload = { approved: true };
+  agent.addMessage({ id: `t-${randomUUID()}`, role: "tool", toolCallId: String(call.toolCallId), content: JSON.stringify(payload) });
+  await agent.runAgent({ runId: randomUUID(), resume: [{ interruptId: String(interrupt.id), status: "resolved", payload }] });
+  await conformant(wire);
+  const second = wire.streams()[1];
+  assert.ok(second, "the resume run streamed (no 422 for the echoed tool message)");
+  const decided = only(custom(second, "pydanticos.approval_decided"), "approval_decided");
+  assert.equal((decided.value as Record<string, unknown>).decision, "approved");
+  assert.equal(only(events(second, "TOOL_CALL_RESULT"), "TOOL_CALL_RESULT").toolCallId, call.toolCallId);
+  assert.equal(outcome(second).type, "success");
+  assert.equal(runIdOf(second), nativeRun, "the resume continues the same durable run");
+  const native = await api.runEvents(nativeRun);
+  assert.equal(native.filter((e) => e.type === "tool_result" && e.data?.tool_call_id === call.toolCallId).length, 1, "the gated tool ran exactly once");
+  assert.equal(native.filter((e) => e.type === "tool_approved").length, 1, "one decision");
+}
+
 async function workflowApproval(): Promise<void> {
   const wire = new Wire();
   const threadId = `wf-${randomUUID()}`;
@@ -503,6 +535,7 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
   previous_turn: previousTurn,
   structured,
   tool_approval: toolApproval,
+  tool_approval_copilotkit: toolApprovalCopilotKit,
   workflow_approval: workflowApproval,
 };
 

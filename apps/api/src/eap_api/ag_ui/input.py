@@ -24,6 +24,14 @@ What it does, in order (`parse_run_agent_input`):
   other `forwardedProps` key is ignored.
 - `resume`: entries `{interruptId, status: resolved|cancelled, payload?}`, unique ids. Their
   meaning (decide, payload schema) is AGUI.8's (`resume_entries.py`).
+- **Resume echoes (AGUI.16, CopilotKit):** a tail `tool` message whose `toolCallId` is the call of
+  a gated **server** tool-call interrupt that a resume entry of the same request answers
+  (`approval:{run_id}:tool:{toolCallId}`) is dropped and counted (`resume_echoes`, logged by count
+  only). CopilotKit 1.83 (`useInterrupt`) appends such a message, holding the resume payload, to
+  every `tool_call` interrupt it resolves. The decision is the resume entry's alone; the echo is
+  never a tool result, never reaches `check_tool_results` or `resume_with_input`, and is not in
+  the fingerprint, so a body with and without it is the same run. A tool message for any other
+  call id is read as before (and is 422 when it answers no pending client call).
 - `state`, `context`, `parentRunId`, `protocolVersion` and unknown fields: accepted and ignored.
 - No user text, no tool result and no resume entry: 422 `no_new_input`.
 
@@ -104,6 +112,11 @@ EMPTY_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _TOOL_CALL_ID = re.compile(TOOL_CALL_ID_PATTERN)
 _INTERRUPT_ID = re.compile(r"^[\x21-\x7e]{1,%d}$" % MAX_INTERRUPT_ID_CHARS)
+# A gated server tool-call interrupt (`resume_entries`'s tool form, built by `translate`): the call
+# id is the part after `:tool:`.
+_TOOL_INTERRUPT_ID = re.compile(
+    r"^approval:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:tool:(.+)$"
+)
 
 # Error codes (the `type` of the single detail item).
 NO_NEW_INPUT = "no_new_input"
@@ -233,6 +246,7 @@ class IgnoredInput:
     tail_by_role: dict[str, int] = field(default_factory=dict)
     context_entries: int = 0
     state_present: bool = False
+    resume_echoes: int = 0
 
     def log_fields(self) -> dict[str, Any]:
         return {
@@ -240,6 +254,7 @@ class IgnoredInput:
             "agui_ignored_tail_roles": dict(sorted(self.tail_by_role.items())),
             "agui_ignored_context": self.context_entries,
             "agui_state_present": self.state_present,
+            "agui_resume_echoes": self.resume_echoes,
         }
 
 
@@ -522,6 +537,18 @@ def _parse_resume(resume: Any) -> tuple[ResumeEntry, ...]:
     return tuple(entries)
 
 
+def _without_resume_echoes(
+    results: list[ClientToolResult], indexes: list[int], resume: Sequence[ResumeEntry]
+) -> tuple[list[ClientToolResult], list[int], int]:
+    """The tool results without the echoes of this request's tool-call resume entries (see the
+    module docstring), their message indexes, and how many were dropped."""
+    answered = {m.group(1) for entry in resume if (m := _TOOL_INTERRUPT_ID.match(entry.interrupt_id))}
+    if not answered:
+        return results, indexes, 0
+    kept = [(r, i) for r, i in zip(results, indexes, strict=True) if r.tool_call_id not in answered]
+    return [r for r, _ in kept], [i for _, i in kept], len(results) - len(kept)
+
+
 def parse_run_agent_input(body: Any) -> AgUiInput:
     """Map a RunAgentInput body (parsed JSON) onto AgUiInput. See the module docstring for the
     rules; any violation is an AgUiInputError (422) before the stream."""
@@ -533,6 +560,7 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
     client_tools = _parse_tools(body.get("tools"))
     options = _parse_options(body.get("forwardedProps"))
     resume = _parse_resume(body.get("resume"))
+    results, result_indexes, echoes = _without_resume_echoes(results, result_indexes, resume)
 
     kept = [(message_id, text) for message_id, text in users if text.strip()]
     texts = [text for _, text in kept]
@@ -555,6 +583,7 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
         tail_by_role=ignored_roles,
         context_entries=len(context) if isinstance(context, list) else 0,
         state_present=body.get("state") is not None,
+        resume_echoes=echoes,
     )
     mapped = AgUiInput(
         thread_id=thread_key(thread_id),

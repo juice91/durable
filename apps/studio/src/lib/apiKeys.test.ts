@@ -6,6 +6,7 @@ import {
   API_KEY_ENV_VAR,
   apiKeys,
   buildApiKeyCreate,
+  COPILOTKIT_INSTALL,
   copilotKitSnippet,
   curlSnippet,
   describeAccess,
@@ -140,6 +141,10 @@ describe("connect snippets", () => {
       }
     }
     expect(copilotKitSnippet(agent, BASE)).toContain("new HttpAgent(");
+    // AGUI.16: the install line pins the @ag-ui/client copy @copilotkit/runtime 1.83.0 depends on.
+    expect(copilotKitSnippet(agent, BASE).split("\n")[0]).toBe(`// ${COPILOTKIT_INSTALL}`);
+    expect(COPILOTKIT_INSTALL).toContain("@ag-ui/client@1.0.2");
+    expect(copilotKitSnippet(agent, BASE)).toContain("useSingleEndpoint");
     expect(curlSnippet(workflow, BASE)).toContain('"pydanticos":{"input":{}}');
   });
 });
