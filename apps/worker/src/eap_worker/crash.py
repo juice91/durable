@@ -63,6 +63,17 @@
 - `kb_batch_after_commit` (RM.10): inside `eap.kb_embed_batch`, right after that transaction
   committed and before the step checkpoint. Recovery finds the batch's event and returns its counts
   without a provider call. Filtered like `kb_batch_before_commit`.
+- `kb_embed_after_call` (P1.C5): inside `eap.kb_embed_call`, after the provider answered and before
+  the step's checkpoint: recovery calls the provider once more (the call step re-executes). In the
+  split layout `kb_batch_before_commit` / `kb_batch_after_commit` are inside `eap.kb_embed_write`
+  (before / right after its transaction): recovery re-executes only the write, from the
+  checkpointed vectors, without a provider call. Filtered like `kb_batch_before_commit`.
+- `kb_extract_sandbox` (P1.A3): inside `eap.kb_extract_chunk`, right after the sandbox child
+  returned a document and before the chunk rows are written. Recovery parses again (one more
+  sandbox run) and writes the rows and the `extracted` event once.
+- `kb_extract_chunk` (P1.A3): inside `eap.kb_extract_chunk`, right after the chunk rows and the
+  `extracted` event (`extract:{doc_version}`) committed and before the step checkpoint. Recovery
+  finds both and returns the same counts without parsing.
 - `kb_before_finalize` / `kb_finalize` (RM.10): inside `eap.kb_finalize`, right before / right after
   the atomic version (or generation) switch transaction. Recovery re-runs the switch, which answers
   'already_active' when it had committed.
@@ -131,6 +142,9 @@ CRASH_POINTS = frozenset(
         "kb_chunk",
         "kb_batch_before_commit",
         "kb_batch_after_commit",
+        "kb_embed_after_call",
+        "kb_extract_sandbox",
+        "kb_extract_chunk",
         "kb_before_finalize",
         "kb_finalize",
         "load_memory",

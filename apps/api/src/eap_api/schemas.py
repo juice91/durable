@@ -6,8 +6,13 @@ from uuid import UUID
 
 from eap_schemas import AgentSpec, ModelRef
 from eap_schemas.evals import DEFAULT_MAX_CONCURRENCY, MAX_MAX_CONCURRENCY, EvaluatorSpec
-from eap_schemas.knowledge import ChunkingConfig, validate_metadata as validate_kb_metadata
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from eap_schemas.knowledge import (
+    ChunkingConfig,
+    ExtractConfig,
+    new_knowledge_base_chunking,
+    validate_metadata as validate_kb_metadata,
+)
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictInt, ValidationError, field_validator, model_validator
 
 
 class AgentCreate(BaseModel):
@@ -256,22 +261,61 @@ def source_url_value(value: str | None) -> str | None:
     return url
 
 
+class ChunkingCreate(BaseModel):
+    """The `chunking` of POST /knowledge-bases: every field optional, JSON integers only. The
+    knowledge base's config is `new_knowledge_base_chunking(**the fields given)` (RAG P1): chunker
+    v2 unless `chunker_version` says otherwise, `min_tokens` 64 for v2 (40 for v1) unless given."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: StrictInt | None = None
+    overlap_tokens: StrictInt | None = None
+    min_tokens: StrictInt | None = None
+    chunker_version: StrictInt | None = None
+    extract: ExtractConfig | None = None
+
+
 class KnowledgeBaseCreate(BaseModel):
     """Body of POST /knowledge-bases. The embedding model must be in EAP_ALLOWED_EMBEDDING_MODELS with
     known dimensions; it is fixed for the knowledge base until a reindex. `chunking` defaults to
-    {max_tokens: 512, overlap_tokens: 64, min_tokens: 40}."""
+    {max_tokens: 512, overlap_tokens: 64, min_tokens: 64, chunker_version: 2} (RAG P1: new knowledge
+    bases use chunker v2; `chunker_version: 1` keeps v1 and its min_tokens default of 40)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(max_length=1000)
     description: str | None = Field(default=None, max_length=MAX_KB_DESCRIPTION_LENGTH)
     embedding_model: str = Field(max_length=300)
-    chunking: ChunkingConfig | None = None
+    chunking: ChunkingCreate | None = None
+    _config: ChunkingConfig = PrivateAttr()
 
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
         return kb_name(value)
+
+    @model_validator(mode="after")
+    def _build_chunking(self) -> "KnowledgeBaseCreate":
+        given: dict[str, object] = {}
+        if self.chunking is not None:
+            # Validated values only (StrictInt, ExtractConfig), never the raw request JSON.
+            given = {
+                k: getattr(self.chunking, k)
+                for k in self.chunking.model_fields_set
+                if getattr(self.chunking, k) is not None
+            }
+        try:
+            self._config = new_knowledge_base_chunking(**given)
+        except ValidationError as exc:
+            first = exc.errors()[0] if exc.errors() else {"loc": (), "msg": "invalid"}
+            where = ".".join(str(p) for p in first.get("loc", ()))
+            msg = str(first.get("msg", "invalid")).removeprefix("Value error, ")
+            raise ValueError(f"chunking{'.' + where if where else ''}: {msg}") from None
+        return self
+
+    def chunking_config(self) -> ChunkingConfig:
+        """The new knowledge base's chunking config (`new_knowledge_base_chunking`)."""
+        return self._config
 
 
 class KnowledgeBaseUpdate(BaseModel):
@@ -292,18 +336,23 @@ class KnowledgeBaseUpdate(BaseModel):
 
 
 class DocumentPut(BaseModel):
-    """Body of PUT /knowledge-bases/{id}/documents/{document_key}: the document as UTF-8 text.
+    """Body of PUT /knowledge-bases/{id}/documents/{document_key}.
 
+    Exactly one of `content` (UTF-8 text: Markdown, HTML, plain text, reStructuredText, YAML, JSON)
+    and `content_base64` (standard base64 with padding: binary types, i.e. application/pdf).
     `document_key` in the body is optional and must equal the path's. `title` defaults to the key.
-    `mime_type` is text/markdown, text/html or text/plain (parameters such as charset are ignored).
-    `metadata`: a flat map of at most 16 string, number or boolean values (agents filter on it).
+    `mime_type`: a type or alias of the format registry (`eap_knowledge.formats`; parameters such as
+    charset and case are ignored); it is stored as the canonical type.
+    `metadata`: a flat map of at most 16 string, number or boolean values (agents filter on it); the
+    key `eap` is reserved.
     `run_id` (optional, client-generated) makes the ingest run creation idempotent on a retry."""
 
     model_config = ConfigDict(extra="forbid")
 
     document_key: str | None = None
     title: str | None = Field(default=None, max_length=MAX_DOCUMENT_TITLE_LENGTH)
-    content: str
+    content: str | None = None
+    content_base64: str | None = None
     mime_type: str = Field(max_length=MAX_MIME_TYPE_LENGTH)
     source_url: str | None = None
     metadata: dict[str, Any] | None = None
@@ -318,6 +367,12 @@ class DocumentPut(BaseModel):
     @classmethod
     def validate_metadata_map(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         return None if value is None else validate_kb_metadata(value)
+
+    @model_validator(mode="after")
+    def _one_content(self) -> "DocumentPut":
+        if (self.content is None) == (self.content_base64 is None):
+            raise ValueError("exactly one of content and content_base64 is required")
+        return self
 
 
 class IngestRunCreate(BaseModel):
@@ -336,6 +391,39 @@ class ReindexCreate(BaseModel):
     embedding_model: str = Field(max_length=300)
     dry_run: bool = False
     run_id: UUID | None = None
+
+
+class ReextractCreate(BaseModel):
+    """Body of POST /knowledge-bases/{id}/reextract (RAG P1).
+
+    - `formats`: registry format names (`markdown`, `html`, `text`, `rst`, `pdf`, `yaml`, `json`) to
+      limit the selection to; omitted means every format.
+    - `only_outdated` (default true): only documents whose recorded extraction is not the current
+      one: a worker-extracted type whose active chunks do not record its current extractor at its
+      current version (`metadata.eap`), or an API-extracted type whose active chunks still record a
+      worker extractor (e.g. Markdown extracted as Doxygen, after `markdown_flavor` went back to
+      plain). Other API-extracted documents are never outdated: re-extract them with
+      `only_outdated: false`. A document whose re-extract from an earlier call is still pending or
+      ingesting is not selected, so repeating the call before those runs end starts nothing
+      (`only_outdated: false` and `chunker_version` select regardless; a repeated chunker switch
+      is itself a no-op).
+    - `chunker_version: 2`: move the knowledge base to chunker v2 and re-extract EVERY document
+      (`formats` must be omitted; `only_outdated` is ignored). On a knowledge base already on v2
+      it changes nothing and the call selects as without it.
+    - `dry_run`: answer the selection (200) and start nothing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    formats: list[str] | None = Field(default=None, min_length=1, max_length=16)
+    only_outdated: bool = True
+    chunker_version: Literal[2] | None = None
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _chunker_takes_all(self) -> "ReextractCreate":
+        if self.chunker_version is not None and self.formats is not None:
+            raise ValueError("chunker_version re-extracts every document; leave formats out")
+        return self
 
 
 class KnowledgeBaseResponse(BaseModel):
@@ -396,6 +484,39 @@ class KnowledgeDocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     content: str | None = None
+    # RAG P1. "base64" for a binary document (a PDF): it is stored as base64, and `content` is
+    # always null in responses (the bytes are never returned). Null for text documents.
+    content_encoding: Literal["base64"] | None = None
+    # From `error` ("<code>: <message>"): the ingest failure code (INGEST_FAILURE_CODES) and, for an
+    # extraction failure with a fixed message, its extraction code (e.g. "document_encrypted").
+    error_code: str | None = None
+    error_reason: str | None = None
+    # GET of one document only: the worker extraction of its active version (null for API-extracted
+    # documents, or while no version is active).
+    extraction: "DocumentExtraction | None" = None
+
+
+class DocumentExtraction(BaseModel):
+    """The `extracted` event of the document's active version (counts only, never text), plus `doc_version`,
+    `run_id` and `current_version` (the extractor's current version; lower `extractor_version`
+    means a re-extract would use a newer extractor)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    extractor: str
+    extractor_version: int
+    current_version: int | None = None
+    doc_version: int | None = None
+    run_id: str | None = None
+    sections: int | None = None
+    chars: int | None = None
+    pages: int | None = None
+    image_only_pages: list[int] | None = None
+    conditions: int | None = None
+    warnings: int | None = None
+
+
+KnowledgeDocumentResponse.model_rebuild()
 
 
 class KnowledgeDocumentListResponse(BaseModel):
@@ -431,6 +552,37 @@ class IngestRunResponse(BaseModel):
     trace_id: str | None = None
     unchanged: bool = False
     document: KnowledgeDocumentResponse | None = None
+    knowledge_base: KnowledgeBaseResponse | None = None
+
+
+class ReextractDocumentRef(BaseModel):
+    """A document selected by a bulk re-extract, with the ingest run of its new version (null in a
+    dry run, or when the run could not be started: see `detail`)."""
+
+    document_id: str
+    document_key: str
+    mime_type: str
+    doc_version: int
+    run_id: str | None = None
+    status: str | None = None
+    detail: str | None = None
+
+
+class ReextractResponse(BaseModel):
+    """POST /knowledge-bases/{id}/reextract. 202 when runs were started, 200 for a dry run or when
+    nothing was selected. `selected` documents matched; `started` got a queued run; `failed` lists
+    those whose run could not be enqueued (each is `pending` with its run marked failed: retry it
+    with POST …/documents/{key}/reingest). `chunker_version_changed`: the call moved the knowledge
+    base to chunker v2."""
+
+    knowledge_base_id: str
+    dry_run: bool = False
+    chunker_version: int
+    chunker_version_changed: bool = False
+    selected: int
+    started: int
+    failed: int
+    documents: list[ReextractDocumentRef]
     knowledge_base: KnowledgeBaseResponse | None = None
 
 

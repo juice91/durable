@@ -311,6 +311,25 @@ def world(previous_build: Path, tmp_path: Path) -> Iterator[World]:
 _ID = re.compile(r"^(tool|embed:retrieve|memory:wm):[^:]+(:|$)")
 
 
+# main's P1.C1 (merged into this branch): a completed conversation turn of a spec with
+# `memory.semantic_recall` and/or `memory.observational` ends with ONE more event, appended after the
+# recorded prefix (`memory:post_turn:{turn}`, `post_turn_done`): its eap.append_event step and the
+# event are the only difference from the previous build's layout and story.
+POST_TURN_STEP = "eap.append_event"
+
+
+def post_turn_marker(agent_spec: dict[str, Any], turn: bool) -> bool:
+    memory = agent_spec.get("memory") or {}
+    return turn and ("semantic_recall" in memory or "observational" in memory)
+
+
+def with_post_turn(steps: list[str], events: list[tuple[str, str]], marker: bool) -> tuple[list[str], list[tuple[str, str]]]:
+    """The previous build's steps and story as this build records them (see POST_TURN_STEP)."""
+    if not marker:
+        return steps, events
+    return [*steps, POST_TURN_STEP], [*events, ("memory:post_turn:1", "post_turn_done")]
+
+
 def story(events: list[tuple[int, str, str, dict[str, Any]]]) -> list[tuple[str, str]]:
     """(event_key with tool call ids normalised, type), in seq order."""
     return [(_ID.sub(lambda m: f"{m.group(1)}:<id>{m.group(2)}", key), typ) for _seq, key, typ, _ in events]
@@ -406,13 +425,14 @@ def test_g1_every_pre_milestone_spec_shape_keeps_its_steps_story_and_hash(world:
             conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": w.tenant})
     w.start_api()
     w.start_worker("worker")
-    for name, (_s, input_text, turn) in shapes(kb_id).items():
+    for name, (agent_spec, input_text, turn) in shapes(kb_id).items():
         new = run_shape(w, agents[name], input_text, turn)
         before = old[name]
         assert new["row"]["status"] == "completed", (name, new["row"], w.logs())
-        assert new["steps"] == before["steps"], (name, before["steps"], new["steps"])
+        steps, events = with_post_turn(before["steps"], before["story"], post_turn_marker(agent_spec, turn))
+        assert new["steps"] == steps, (name, steps, new["steps"])
         assert new["observer_steps"] == before["observer_steps"], name
-        assert new["story"] == before["story"], (name, before["story"], new["story"])
+        assert new["story"] == events, (name, events, new["story"])
         assert ticketless(new["row"]["output"]) == ticketless(before["row"]["output"]), name
         # The old run reads back through this build's API, as text (no output_json).
         body = w.get(f"/runs/{before['run_id']}")
@@ -501,8 +521,10 @@ def test_in_flight_run_of_the_previous_build_recovers_on_this_build(world: World
     events = w.events(run_id)
     assert_gap_free(events)
     assert events[: len(before)] == before, "an event the previous build stored changed on recovery"
-    assert story(events) == reference["story"], (story(events), reference["story"])
-    assert w.steps(run_id) == reference["steps"], (w.steps(run_id), reference["steps"])
+    # The recovering (this) build appends the post-turn marker the previous build never wrote.
+    ref_steps, ref_story = with_post_turn(reference["steps"], reference["story"], post_turn_marker(agent_spec, turn))
+    assert story(events) == ref_story, (story(events), ref_story)
+    assert w.steps(run_id) == ref_steps, (w.steps(run_id), ref_steps)
     assert w.steps(observer) == reference["observer_steps"]
     assert w.workflow_status(run_id) == ["SUCCESS"]
     row = w.run_row(run_id)

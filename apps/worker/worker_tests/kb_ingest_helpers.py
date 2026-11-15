@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 
 from eap_run_store import KnowledgeStore
+from eap_schemas.knowledge import kb_ingest_partition_key
 
 
 def markdown_doc(sections: int, *, tag: str = "alpha") -> str:
@@ -48,17 +49,22 @@ def reindex_input(generation: int) -> str:
 
 
 def enqueue_kb_ingest(client, run_store, *, tenant_id: str, kb_id: str, input_json: str, app_version: str,
-                      run_id: uuid.UUID | None = None) -> uuid.UUID:
-    """The API's hand-off (apps/api launcher.launch_kb_ingest): insert the run row, then enqueue."""
+                      run_id: uuid.UUID | None = None, legacy_queue: bool = False) -> uuid.UUID:
+    """The API's hand-off (apps/api launcher.launch_kb_ingest): insert the run row, then enqueue on
+    the partitioned `eap-kb-ingest-fair` keyed by tenant and knowledge base. `legacy_queue` enqueues
+    as the API did before the partitioning: on the unpartitioned `eap-kb-ingest`, with no key."""
     run_id = run_id or uuid.uuid4()
     run_store.create_kb_ingest_run(tenant_id, kb_id, input_json, run_id)
+    options: dict[str, Any] = {
+        "queue_name": "eap-kb-ingest" if legacy_queue else "eap-kb-ingest-fair",
+        "workflow_name": "eap.kb_ingest",
+        "workflow_id": str(run_id),
+        "app_version": app_version,
+    }
+    if not legacy_queue:
+        options["queue_partition_key"] = kb_ingest_partition_key(tenant_id, str(kb_id))
     client.enqueue(
-        {
-            "queue_name": "eap-kb-ingest",
-            "workflow_name": "eap.kb_ingest",
-            "workflow_id": str(run_id),
-            "app_version": app_version,
-        },
+        options,
         str(run_id),
         tenant_id,
         str(kb_id),

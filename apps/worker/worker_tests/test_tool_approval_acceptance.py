@@ -512,7 +512,8 @@ def test_denied_turn_still_completes_and_runs_the_post_turn_steps(worker, client
     wait_workflow(schema, run_id)
     names = step_names(schema, run_id)
     post = names[names.index("eap.finish_run") + 1:]
-    assert post == (["eap.memory_index"] if shape == "recall" else ["eap.memory_observe_run", "DBOS.getResult"])
+    # main's P1.C1: `post_turn_done` (one eap.append_event) ends a memory turn's post-turn steps.
+    assert post == (["eap.memory_index"] if shape == "recall" else ["eap.memory_observe_run", "DBOS.getResult"]) + ["eap.append_event"]
     if shape == "recall":
         assert len(embeddings(worker.engine, conv["id"])) == 2  # the turn's user and assistant messages
     assert side_effects(worker, mem_tenant) == []
@@ -732,7 +733,9 @@ def test_crash_while_waiting_with_memory_gives_one_index_row_and_one_observer_ch
         assert decide(worker, client, tenant, run_id, call_id) == "created"
         row = wait_terminal(worker.run_store, tenant, run_id, timeout=90)
         assert row["status"] == "completed", (row["error"], (tmp_path / "w2.log").read_text()[-3000:])
-        wait_for(lambda: step_names(schema, run_id)[-1:] in (["eap.memory_index"], ["DBOS.getResult"]) or None,
+        # The post-turn steps end with main's P1.C1 `post_turn_done` event.
+        wait_for(lambda: step_names(schema, run_id)[-2:] in (["eap.memory_index", "eap.append_event"],
+                                                             ["DBOS.getResult", "eap.append_event"]) or None,
                  timeout=60, what="the post-turn steps")
         names = step_names(schema, run_id)
         assert names.count("eap.finish_run") == 1

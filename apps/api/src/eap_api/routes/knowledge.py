@@ -9,7 +9,7 @@ the request guard's UTF-8, NUL and depth checks. The API extracts the document o
 to reject an unsupported MIME type or unsafe HTML early; chunking and embedding happen in the
 worker. An upload with the same content, metadata, title, source URL and MIME type is a no-op
 (200, `unchanged: true`, no run). A changed one bumps `latest_version` and starts a `kb_ingest` run
-(202), enqueued as `eap.kb_ingest` on the `eap-kb-ingest` queue (eap_api.launcher.KB_INGEST_WORKFLOW_NAME
+(202), enqueued as `eap.kb_ingest` on the partitioned `eap-kb-ingest-fair` queue, keyed by tenant and knowledge base (eap_api.launcher.KB_INGEST_WORKFLOW_NAME
 documents the arguments). Run creation is idempotent by the optional client `run_id`, like tool runs, and a failed
 hand-off answers 503 with the run marked failed so a retry with the same `run_id` re-queues it.
 
@@ -35,13 +35,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar
@@ -55,7 +58,7 @@ from sqlalchemy.exc import DBAPIError
 
 from eap_api.auth import Principal, current_principal
 from eap_api.launcher import RunLauncher, get_run_launcher
-from eap_api.request_guard import GuardedJsonRoute, guarded_json_route
+from eap_api.request_guard import GuardedJsonRoute, guarded_json_route, too_large_detail
 from eap_api.routes.runs import StoresDep
 from eap_api.schemas import (
     DocumentPut,
@@ -73,11 +76,24 @@ from eap_api.schemas import (
     KnowledgeBaseUpdate,
     KnowledgeDocumentListResponse,
     KnowledgeDocumentResponse,
+    ReextractCreate,
+    ReextractResponse,
     ReindexCreate,
     ReindexEstimateResponse,
     document_key_problem,
 )
-from eap_knowledge import ExtractionFailed, UnsupportedMimeType, extract
+from eap_knowledge import ExtractionFailed, ExtractLimits, UnsupportedMimeType, extract
+from eap_knowledge.formats import (
+    EXTRACTOR_VERSIONS,
+    FORMAT_SPECS,
+    PDF_SIGNATURE_WINDOW,
+    FormatSpec,
+    detect_binary_type,
+    extractor_for,
+    format_by_name,
+    format_for_mime,
+    has_pdf_signature,
+)
 from eap_observability import current_trace_context, log_failure
 from eap_pricing import (
     COST_QUANTUM,
@@ -103,6 +119,12 @@ from eap_run_store.knowledge import (
     ReindexInProgress,
 )
 from eap_schemas import KnowledgeBaseNotFound
+from eap_schemas.knowledge import (
+    EXTRACTION_ERROR_MESSAGES,
+    INGEST_FAILURE_CODES,
+    ChunkingConfig,
+    ExtractConfig,
+)
 from eap_schemas.embedding_policy import EmbeddingModel, EmbeddingModelNotAllowed, EmbeddingModelPolicy
 from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchInput
 
@@ -141,20 +163,119 @@ def max_ingest_tokens() -> int:
     return _env_int(KB_MAX_INGEST_TOKENS_ENV, DEFAULT_KB_MAX_INGEST_TOKENS)
 
 
+BINARY_UPLOAD_CONCURRENCY_ENV = "EAP_KB_BINARY_UPLOAD_CONCURRENCY"
+DEFAULT_BINARY_UPLOAD_CONCURRENCY = 4
+MAX_BINARY_UPLOAD_CONCURRENCY = 64
+# How long a binary upload waits for a slot before answering 503.
+BINARY_UPLOAD_WAIT_SECONDS = 30.0
+
+
+def binary_upload_concurrency() -> int:
+    """EAP_KB_BINARY_UPLOAD_CONCURRENCY: binary (base64) uploads this API process decodes and
+    stores at once (default 4, 1..64). Each holds its decoded bytes (up to EAP_KB_MAX_BINARY_BYTES)
+    while it is checked and hashed, so this bounds that memory per process."""
+    value = _env_int(BINARY_UPLOAD_CONCURRENCY_ENV, DEFAULT_BINARY_UPLOAD_CONCURRENCY)
+    if value > MAX_BINARY_UPLOAD_CONCURRENCY:
+        raise ValueError(
+            f"{BINARY_UPLOAD_CONCURRENCY_ENV} must be an integer from 1 to {MAX_BINARY_UPLOAD_CONCURRENCY}, got {value}"
+        )
+    return value
+
+
+_binary_slots_lock = threading.Lock()
+_binary_slots: tuple[int, threading.BoundedSemaphore] | None = None
+
+
+def _binary_upload_slots() -> threading.BoundedSemaphore:
+    """The process-wide semaphore for binary uploads, rebuilt when the configured size changes."""
+    global _binary_slots
+    try:
+        size = binary_upload_concurrency()
+    except ValueError:  # checked at startup; the environment changed under the process
+        size = DEFAULT_BINARY_UPLOAD_CONCURRENCY
+    with _binary_slots_lock:
+        if _binary_slots is None or _binary_slots[0] != size:
+            _binary_slots = (size, threading.BoundedSemaphore(size))
+        return _binary_slots[1]
+
+
+@contextmanager
+def binary_upload_slot(spec: FormatSpec | None) -> Iterator[None]:
+    """Hold one binary-upload slot for a binary format (no-op otherwise). 503 after
+    BINARY_UPLOAD_WAIT_SECONDS without one."""
+    if spec is None or not spec.binary:
+        yield
+        return
+    slots = _binary_upload_slots()
+    if not slots.acquire(timeout=BINARY_UPLOAD_WAIT_SECONDS):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="too many binary uploads in progress; retry shortly",
+        )
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+def extract_limits() -> ExtractLimits:
+    """The RAG P1 upload caps (EAP_KB_MAX_BINARY_BYTES, EAP_KB_MAX_STRUCTURED_BYTES, ...), read per
+    request like EAP_KB_MAX_DOCUMENT_BYTES. ValueError for a malformed value (checked at startup)."""
+    return ExtractLimits.from_env(os.environ)
+
+
+def upload_guard_bytes() -> int:
+    """The upload route's request-body guard: `max(text cap, ceil(binary cap × 4/3) + 64 KiB)`, so a
+    base64 PDF at the binary cap fits. Only a body with `content_base64` may stream past the text
+    cap (EAP_KB_MAX_DOCUMENT_BYTES, `_is_base64_upload`); any other is refused there, before it is
+    buffered further, and the route checks the text cap on the body again. Every format's
+    decoded-size cap is checked after decoding."""
+    try:
+        limits = extract_limits()
+    except ValueError:  # checked at startup; the environment changed under the process
+        limits = ExtractLimits()
+    return limits.upload_guard_bytes(max_document_bytes())
+
+
 def check_knowledge_configuration() -> None:
     """Fail startup on a malformed EAP_ALLOWED_EMBEDDING_MODELS, EAP_EMBEDDING_QUERY_INSTRUCTIONS,
-    EAP_KB_MAX_DOCUMENT_BYTES, EAP_KB_MAX_INGEST_TOKENS or EAP_KB_EXACT_SEARCH_MAX_CHUNKS
-    (ValueError), not at the first request."""
+    EAP_KB_MAX_DOCUMENT_BYTES, EAP_KB_MAX_INGEST_TOKENS, EAP_KB_EXACT_SEARCH_MAX_CHUNKS or the RAG P1
+    extraction limits (EAP_KB_MAX_BINARY_BYTES and the others of ExtractLimits) (ValueError), not
+    at the first request."""
     from eap_run_store.knowledge import check_exact_search_max_chunks
 
     EmbeddingModelPolicy.from_env()
     max_document_bytes()
     max_ingest_tokens()
     check_exact_search_max_chunks()
+    extract_limits()
+    binary_upload_concurrency()
 
 
-# The document upload's guard: the same checks as every JSON write route, with its own body cap.
-DocumentUploadRoute = guarded_json_route(max_body_bytes=max_document_bytes)
+def _guard_text_cap() -> int:
+    """The upload guard's soft cap: the text cap (EAP_KB_MAX_DOCUMENT_BYTES) on the request body."""
+    try:
+        return max_document_bytes()
+    except ValueError:  # checked at startup; the environment changed under the process
+        return DEFAULT_KB_MAX_DOCUMENT_BYTES
+
+
+_BASE64_KEY = b'"content_base64"'
+
+
+def _is_base64_upload(prefix: bytes) -> bool:
+    """Whether a body that streamed past the text cap may grow to the binary guard: its first
+    text-cap bytes hold the `content_base64` key (every other field is far below the text cap, so
+    a binary upload always names it by then). A text body (`content`) is refused at the text cap
+    before it is buffered further, as before RAG P1."""
+    return _BASE64_KEY in prefix
+
+
+# The document upload's guard: the same checks as every JSON write route, with its own body cap:
+# the text cap for a body without `content_base64`, the binary guard for a base64 one.
+DocumentUploadRoute = guarded_json_route(
+    max_body_bytes=upload_guard_bytes, soft_body_bytes=_guard_text_cap, allow_beyond_soft=_is_base64_upload
+)
 
 router = APIRouter(tags=["knowledge"])
 _kb = APIRouter(
@@ -182,6 +303,14 @@ def get_knowledge_store(request: Request) -> KnowledgeStore:
 
 KnowledgeDep = Annotated[KnowledgeStore, Depends(get_knowledge_store)]
 LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
+
+
+async def _request_body_size(request: Request) -> int:
+    """The request body's size in bytes (the guard has read and cached it)."""
+    return len(await request.body())
+
+
+BodySizeDep = Annotated[int, Depends(_request_body_size)]
 
 
 # ----------------------------------------------------------------------------------- helpers
@@ -236,14 +365,245 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+# P1.C5: new kb_ingest runs embed with the split steps (eap.kb_embed_call, then eap.kb_embed_write),
+# so a database retry of the write never calls the provider again. Runs enqueued before (no flag)
+# keep eap.kb_embed_batch, so in-flight workflows recover unchanged.
+EMBED_SPLIT_KEY = "embed_split"
+
+
 def ingest_input(document_id: str, doc_version: int) -> str:
     """The `input` of a document ingest run (and the enqueued `input_json`)."""
-    return _canonical_json({"document_id": str(document_id), "doc_version": int(doc_version)})
+    return _canonical_json({"document_id": str(document_id), "doc_version": int(doc_version), EMBED_SPLIT_KEY: True})
 
 
 def reindex_input(generation: int) -> str:
     """The `input` of a reindex run (and the enqueued `input_json`)."""
-    return _canonical_json({"reindex": int(generation)})
+    return _canonical_json({"reindex": int(generation), EMBED_SPLIT_KEY: True})
+
+
+def _same_ingest_input(stored: Any, input_json: str) -> bool:
+    """Whether a stored kb_ingest run input names the same work as `input_json`, ignoring the
+    `embed_split` flag (a run created before P1.C5 has none and is still that version's run)."""
+    if stored == input_json:
+        return True
+    try:
+        a, b = json.loads(stored), json.loads(input_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    a.pop(EMBED_SPLIT_KEY, None)
+    b.pop(EMBED_SPLIT_KEY, None)
+    return a == b
+
+
+# ------------------------------------------------------------------ formats and uploads (RAG P1.A4)
+
+
+class UploadRejected(Exception):
+    """An upload refused before anything is written: the route answers `status_code` with `body`."""
+
+    def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.body = body
+        super().__init__(status_code, body)
+
+    def response(self) -> JSONResponse:
+        return _json(self.status_code, self.body)
+
+
+def _reject(status_code: int, detail: str, **extra: Any) -> UploadRejected:
+    return UploadRejected(status_code, {"detail": detail, **extra})
+
+
+def _unsupported_content(declared: str, detected: str | None, reason: str | None = None) -> UploadRejected:
+    """415 `unsupported_content`: the bytes are not what `declared` says. `detected_type` names the
+    binary signature found, when one was."""
+    base = EXTRACTION_ERROR_MESSAGES["unsupported_content"]
+    if detected is not None:
+        detail = f"{base} It looks like {detected}, not {declared}."
+    else:
+        detail = f"{base} {reason or ''}".strip()
+    return _reject(
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail, code="unsupported_content", detected_type=detected
+    )
+
+
+def _text_signature(content: str) -> str | None:
+    """The binary type a TEXT upload really is (signatures at offset 0), or None. The prefix is
+    checked as UTF-8 and, when every character is below U+0100, as the bytes those code points name
+    (a file read as Latin-1 keeps its signature bytes that way)."""
+    head = content[:16]
+    detected = detect_binary_type(head.encode("utf-8"))
+    if detected is None and all(ord(ch) < 256 for ch in head):
+        detected = detect_binary_type(head.encode("latin-1"))
+    return detected
+
+
+def _decode_base64(value: str) -> bytes:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise _reject(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "content_base64 is not valid base64 (the standard alphabet with padding, no line breaks)",
+        ) from None
+
+
+def _format_or_422(mime_type: str) -> FormatSpec:
+    try:
+        return format_for_mime(mime_type)
+    except UnsupportedMimeType as exc:
+        raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+
+
+def _limits_or_503() -> ExtractLimits:
+    try:
+        return extract_limits()
+    except ValueError as exc:
+        log_failure(log, "extraction limits invalid", exc, code="extract_limits_invalid", level=logging.ERROR)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="the knowledge base upload limits (EAP_KB_MAX_*) are misconfigured",
+        ) from None
+
+
+class PreparedUpload:
+    """What the upload stores: `content` (UTF-8 text, or canonical base64 for a binary type), the
+    canonical `mime_type`, and `digest` (sha256 of the decoded bytes for a binary type, else None:
+    the store hashes the text)."""
+
+    __slots__ = ("content", "digest", "mime_type", "spec")
+
+    def __init__(self, spec: FormatSpec, content: str, digest: str | None) -> None:
+        self.spec = spec
+        self.mime_type = spec.mime_type
+        self.content = content
+        self.digest = digest
+
+    @property
+    def content_hash(self) -> str:
+        return self.digest if self.digest is not None else content_hash(self.content)
+
+
+def prepare_upload(body: DocumentPut, body_size: int) -> PreparedUpload:
+    """Check an upload against the format registry, its caps and its magic bytes, before anything is
+    written. Raises UploadRejected:
+
+    - 422: an unsupported MIME type; `content` for a binary type, or `content_base64` for a text
+      type (unless its bytes are a known binary type: then 415); invalid or empty base64; empty text.
+    - 413: a text upload whose request body is over EAP_KB_MAX_DOCUMENT_BYTES (the guard's own
+      message); YAML or JSON over EAP_KB_MAX_STRUCTURED_BYTES; a decoded binary over
+      EAP_KB_MAX_BINARY_BYTES.
+    - 415 (`code: unsupported_content`, `detected_type`): a PDF without `%PDF-` in its first 1,024
+      bytes, or text that starts with a known binary signature."""
+    spec = _format_or_422(body.mime_type)
+    limits = _limits_or_503()
+    text_cap = max_document_bytes()
+    declared = spec.mime_type
+    if spec.binary:
+        if body.content_base64 is None:
+            raise _reject(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"unsupported document mime type {body.mime_type!r} for text content: {declared} documents are"
+                " uploaded as content_base64",
+            )
+        data = _decode_base64(body.content_base64)
+        if not data:
+            raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, "content_base64 is empty")
+        cap = limits.max_bytes_for(spec.cap_class, text_cap)
+        if len(data) > cap:
+            raise _reject(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"the document is too large ({len(data)} bytes; max {cap} bytes for {declared})",
+            )
+        if spec.format == "pdf" and not has_pdf_signature(data):
+            detected = detect_binary_type(data)
+            raise _unsupported_content(
+                declared,
+                detected,
+                f"It has no %PDF- signature in its first {PDF_SIGNATURE_WINDOW:,} bytes, so it is not a PDF.",
+            )
+        # Stored as sent (validated strictly above, so it decodes to exactly `data`): no second
+        # encoded copy of up to ~33 MiB.
+        digest = hashlib.sha256(data).hexdigest()
+        del data
+        return PreparedUpload(spec, body.content_base64, digest)
+
+    if body_size > text_cap:  # text keeps its cap on the request body, as before RAG P1
+        raise _reject(status.HTTP_413_CONTENT_TOO_LARGE, too_large_detail(text_cap))
+    if body.content_base64 is not None:
+        data = _decode_base64(body.content_base64)
+        detected = detect_binary_type(data[:16])
+        if detected is not None:
+            raise _unsupported_content(declared, detected)
+        raise _reject(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{declared} documents are uploaded as content (UTF-8 text), not content_base64",
+        )
+    content = body.content or ""
+    if not content.strip():
+        raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, "content is empty")
+    cap = limits.max_bytes_for(spec.cap_class, text_cap)
+    size = len(content.encode("utf-8"))
+    if size > cap:
+        raise _reject(
+            status.HTTP_413_CONTENT_TOO_LARGE, f"the document is too large ({size} bytes; max {cap} bytes for {declared})"
+        )
+    detected = _text_signature(content)
+    if detected is not None:
+        raise _unsupported_content(declared, detected)
+    return PreparedUpload(spec, content, None)
+
+
+def kb_extract_config(kb: dict[str, Any]) -> ExtractConfig | None:
+    """The knowledge base's `chunking.extract` (None when unset or unreadable)."""
+    raw = kb.get("chunking")
+    if not isinstance(raw, dict) or not raw.get("extract"):
+        return None
+    try:
+        return ChunkingConfig.model_validate(raw).extract
+    except ValidationError:
+        return None
+
+
+def _spec_or_none(mime_type: str | None) -> FormatSpec | None:
+    try:
+        return format_for_mime(mime_type or "")
+    except UnsupportedMimeType:
+        return None
+
+
+_EXTRACTION_CODE_BY_MESSAGE = {message: code for code, message in EXTRACTION_ERROR_MESSAGES.items()}
+
+
+def document_error_codes(error: str | None) -> tuple[str | None, str | None]:
+    """(error_code, error_reason) of a document's `error` ("<code>: <message>"): the ingest failure
+    code when it is one of INGEST_FAILURE_CODES, and the extraction code whose fixed message the
+    rest is (the worker writes "extraction_failed: <EXTRACTION_ERROR_MESSAGES[code]>")."""
+    if not error:
+        return None, None
+    code, sep, rest = error.partition(":")
+    code = code.strip()
+    if not sep or code not in INGEST_FAILURE_CODES:
+        return None, None
+    return code, _EXTRACTION_CODE_BY_MESSAGE.get(rest.strip())
+
+
+def document_view(document: dict[str, Any], extraction: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A document as the API returns it (RAG P1): `content_encoding` "base64" and `content` null
+    for a binary document (the stored bytes never leave), `error_code` and `error_reason` from the
+    error, and `extraction` when given."""
+    out = dict(document)
+    spec = _spec_or_none(out.get("mime_type"))
+    binary = spec is not None and spec.binary
+    out["content_encoding"] = "base64" if binary else None
+    if binary:
+        out["content"] = None
+    out["error_code"], out["error_reason"] = document_error_codes(out.get("error"))
+    if extraction is not None:
+        out["extraction"] = {**extraction, "current_version": EXTRACTOR_VERSIONS.get(str(extraction.get("extractor")))}
+    return out
 
 
 class InvalidDocumentCursor(ValueError):
@@ -359,7 +719,7 @@ def _is_run_of(run: dict[str, Any] | None, kb_id: str, input_json: str) -> bool:
         run is not None
         and run.get("kind") == "kb_ingest"
         and str(run.get("knowledge_base_id")) == str(kb_id)
-        and run.get("input") == input_json
+        and _same_ingest_input(run.get("input"), input_json)
     )
 
 
@@ -623,8 +983,9 @@ def list_knowledge_bases(principal: PrincipalDep, store: KnowledgeDep) -> dict[s
     responses={409: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
 def create_knowledge_base(body: KnowledgeBaseCreate, principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
-    """Create a knowledge base. 422 embedding model not allowed (or its dimensions unknown); 409
-    the tenant already has a knowledge base of that name."""
+    """Create a knowledge base. 422 embedding model not allowed (or its dimensions unknown), or an
+    invalid `chunking`; 409 the tenant already has a knowledge base of that name. A new knowledge
+    base uses chunker v2 unless `chunking.chunker_version` is 1 (RAG P1)."""
     model = _resolve_model(body.embedding_model)
     try:
         kb = store.create_knowledge_base(
@@ -633,7 +994,7 @@ def create_knowledge_base(body: KnowledgeBaseCreate, principal: PrincipalDep, st
             description=body.description,
             embedding_model=model.id,
             dimensions=model.dimensions,
-            chunking=body.chunking,
+            chunking=body.chunking_config(),  # new_knowledge_base_chunking: chunker v2 by default
         )
     except KnowledgeBaseNameConflict as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
@@ -733,7 +1094,7 @@ def list_documents(
             )
     items = store.list_documents(principal.tenant_id, kb["id"], limit=limit, after=after_key)
     next_after = encode_document_cursor(items[-1]["document_key"]) if len(items) == limit else None
-    return {"items": items, "next_after": next_after}
+    return {"items": [document_view(d) for d in items], "next_after": next_after}
 
 
 @_kb.get("/{kb_id}/documents/{document_key}", response_model=KnowledgeDocumentResponse)
@@ -744,11 +1105,25 @@ def get_document(
     store: KnowledgeDep,
     include_content: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
-    kb = _kb_or_404(store, principal.tenant_id, kb_id)
-    document = store.get_document(principal.tenant_id, kb["id"], document_key, include_content=include_content)
+    """The document, with `extraction` (the worker extraction of its ACTIVE version: extractor, versions, pages,
+    image-only pages, sections, warnings; null for API-extracted documents). `include_content=true`
+    adds `content`, except for a binary document (`content_encoding` "base64"): its `content` is
+    always null, and the stored bytes are never returned."""
+    tenant_id = principal.tenant_id
+    kb = _kb_or_404(store, tenant_id, kb_id)
+    document = store.get_document(tenant_id, kb["id"], document_key)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-    return document
+    spec = _spec_or_none(document["mime_type"])
+    if include_content:
+        if spec is not None and spec.binary:
+            document["content"] = None
+        else:
+            document = store.get_document(tenant_id, kb["id"], document_key, include_content=True) or document
+    extraction = None
+    if spec is not None and extractor_for(spec.mime_type, kb_extract_config(kb)) is not None:
+        extraction = store.latest_extraction(tenant_id, kb["id"], document["id"])
+    return document_view(document, extraction)
 
 
 @_upload.put(
@@ -767,12 +1142,22 @@ def put_document(
     document_key: str,
     principal: PrincipalDep,
     body: DocumentPut,
+    body_size: BodySizeDep,
     store: KnowledgeDep,
     stores: StoresDep,
     launcher: LauncherDep,
 ) -> JSONResponse:
-    """Upload a document as UTF-8 text. A sync route: FastAPI runs it (and its extraction) in the
-    threadpool, off the event loop.
+    """Upload a document: UTF-8 text as `content`, or a binary type (application/pdf) as
+    `content_base64`. A sync route: FastAPI runs it (and its extraction) in the threadpool, off the
+    event loop.
+
+    RAG P1. The MIME type comes from the format registry (aliases are stored as the canonical type).
+    Text formats the API extracts (Markdown, HTML, plain text; Markdown only while the knowledge
+    base's `chunking.extract.markdown_flavor` is not `doxygen`) are extracted here as before; the
+    worker-extracted ones (reStructuredText, PDF, YAML, JSON, Doxygen Markdown) are never parsed by
+    the API, only size-checked and sniffed (see prepare_upload for the 413/415/422 rules). A PDF is
+    stored as base64 and its `content_hash` is the sha256 of its bytes, so re-uploading the same
+    bytes is `unchanged`.
 
     200 `{unchanged: true, run_id: null}`: same content, metadata, title, source URL and MIME type,
     nothing written and no run. Exception: when the version's recorded run is still `queued` more
@@ -796,19 +1181,44 @@ def put_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="document_key in the body must match the path"
         )
-    if not body.content.strip():
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="content is empty")
+    with binary_upload_slot(_spec_or_none(body.mime_type)):
+        return _put_document(kb_id, document_key, tenant_id, body, body_size, store, stores, launcher)
+
+
+def _put_document(
+    kb_id: str,
+    document_key: str,
+    tenant_id: str,
+    body: DocumentPut,
+    body_size: int,
+    store: KnowledgeStore,
+    stores: Any,
+    launcher: RunLauncher,
+) -> JSONResponse:
+    """put_document's body, run while holding a binary-upload slot for binary formats."""
+    try:
+        upload = prepare_upload(body, body_size)
+    except UploadRejected as rejected:
+        return rejected.response()
     kb = _kb_or_404(store, tenant_id, kb_id)  # before extraction: no CPU for a missing or foreign KB
     title = (body.title or "").strip() or document_key
-    try:
-        extracted = extract(body.content, body.mime_type, title=title, source_url=body.source_url)
-    except (UnsupportedMimeType, ExtractionFailed) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-    if not _has_text(extracted):
-        # Only dropped markup (script, style, nav, comments): nothing to chunk, so nothing is stored.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the document has no extractable text"
-        )
+    if extractor_for(upload.mime_type, kb_extract_config(kb)) is None:
+        # API-extracted (unchanged path): reject unsafe HTML or a document with no text early.
+        try:
+            extracted = extract(upload.content, upload.mime_type, title=title, source_url=body.source_url)
+        except UnsupportedMimeType as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+        except ExtractionFailed as exc:
+            # The fixed message only: the exception's detail may name parser internals.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{exc.user_message} ({exc.code}: {exc.reason})",
+            )
+        if not _has_text(extracted):
+            # Only dropped markup (script, style, nav, comments): nothing to chunk, so nothing is stored.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the document has no extractable text"
+            )
     run_store, _ = stores
     try:
         existing = _resolve_client_run_id(store, run_store, tenant_id, body.run_id)
@@ -818,7 +1228,7 @@ def put_document(
                 document is None
                 or not _is_document_run(existing, kb["id"], document["id"])
                 or _run_input(existing).get("doc_version") != document["latest_version"]
-                or document["content_hash"] != content_hash(body.content)
+                or document["content_hash"] != upload.content_hash
             ):
                 # Not a retry of the request that stored the current version: refuse, write nothing.
                 raise HTTPException(
@@ -827,7 +1237,8 @@ def put_document(
             run = _replay(run_store, launcher, tenant_id, existing)
             created = _run_input(existing).get("doc_version") == 1
             return _json(
-                status.HTTP_202_ACCEPTED, {"unchanged": False, "created": created, "document": document, **run}
+                status.HTTP_202_ACCEPTED,
+                {"unchanged": False, "created": created, "document": document_view(document), **run},
             )
 
         new_run_id = body.run_id or uuid.uuid4()
@@ -837,11 +1248,12 @@ def put_document(
                 kb["id"],
                 document_key=document_key,
                 title=title,
-                content=body.content,
-                mime_type=body.mime_type,
+                content=upload.content,
+                mime_type=upload.mime_type,
                 source_url=body.source_url,
                 metadata=body.metadata,
                 run_id=str(new_run_id),  # last_run_id, in the same transaction as the new version
+                content_sha256=upload.digest,
             )
         except KnowledgeBaseNotFound:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
@@ -858,7 +1270,7 @@ def put_document(
                 current = store.get_document(tenant_id, kb["id"], document_key) or document
                 return _json(
                     status.HTTP_202_ACCEPTED,
-                    {"unchanged": False, "created": result.created, "document": current,
+                    {"unchanged": False, "created": result.created, "document": document_view(current),
                      "run_id": current["last_run_id"]},
                 )
             input_json = ingest_input(document["id"], document["latest_version"])
@@ -866,7 +1278,7 @@ def put_document(
             view = _hand_off(run_store, launcher, tenant_id, run, created)
             return _json(
                 status.HTTP_202_ACCEPTED,
-                {"unchanged": False, "created": result.created, "document": document, **view},
+                {"unchanged": False, "created": result.created, "document": document_view(document), **view},
             )
 
         latest = _latest_run(run_store, tenant_id, document)
@@ -890,14 +1302,14 @@ def put_document(
         else:
             return _json(
                 status.HTTP_200_OK,
-                {"unchanged": True, "created": False, "document": document, "run_id": None},
+                {"unchanged": True, "created": False, "document": document_view(document), "run_id": None},
             )
     except HandOffFailed as exc:
         return exc.response()
     document = store.get_document(tenant_id, kb["id"], document_key) or document
     return _json(
         status.HTTP_202_ACCEPTED,
-        {"unchanged": False, "created": document["latest_version"] == 1, "document": document, **view},
+        {"unchanged": False, "created": document["latest_version"] == 1, "document": document_view(document), **view},
     )
 
 
@@ -956,7 +1368,7 @@ def reingest_document(
         elif document["status"] == "ready" and document["active_version"] == document["latest_version"]:
             return _json(
                 status.HTTP_200_OK,
-                {"run_id": None, "unchanged": True, "knowledge_base_id": kb["id"], "document": document},
+                {"run_id": None, "unchanged": True, "knowledge_base_id": kb["id"], "document": document_view(document)},
             )
         else:
             latest = _latest_run(run_store, tenant_id, document)
@@ -1000,7 +1412,266 @@ def reingest_document(
     except HandOffFailed as exc:
         return exc.response()
     document = store.get_document(tenant_id, kb["id"], document_key) or document
-    return _json(status.HTTP_202_ACCEPTED, {**view, "unchanged": False, "document": document})
+    return _json(status.HTTP_202_ACCEPTED, {**view, "unchanged": False, "document": document_view(document)})
+
+
+# --------------------------------------------------------------------------- re-extract (RAG P1.A4)
+
+REEXTRACT_ENQUEUE_FAILED_DETAIL = (
+    "the ingest run was recorded but could not be started; retry it with POST "
+    "/knowledge-bases/{id}/documents/{key}/reingest"
+)
+
+
+@_kb.post(
+    "/{kb_id}/documents/{document_key}/reextract",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=IngestRunResponse,
+    responses={409: {"model": ErrorDetail}, 503: {"model": EnqueueFailedResponse}},
+)
+def reextract_document(
+    kb_id: str,
+    document_key: str,
+    principal: PrincipalDep,
+    store: KnowledgeDep,
+    stores: StoresDep,
+    launcher: LauncherDep,
+    body: Annotated[IngestRunCreate | None, Body()] = None,
+) -> JSONResponse:
+    """Re-extract the document: a new version with the SAME content (`latest_version` + 1) and an
+    ingest run of it, so the current extractor and the knowledge base's current chunker produce its
+    chunks (chunk texts that did not change reuse their embeddings). Any format: an API-extracted
+    document is re-chunked.
+
+    202 {run_id, status, …, document}. Idempotent by the optional `run_id`, resolved before any
+    write: the run of this document's latest version is a replay (handed off again if its enqueue
+    failed); any other run is 409, and another tenant's is 409 too. 404 unknown knowledge base or
+    document (another tenant's included). 503 {detail, run_id}: retry with the same run_id.
+
+    Concurrency: the new version is a compare-and-set on the version this request read, so of
+    concurrent submits only those whose bump applied answer 202, each with its own run; a request
+    that lost answers 409 and wrote nothing. Concurrent submits with ONE `run_id` make one version
+    and one run: a loser that finds the document's `last_run_id` already equal to its `run_id`
+    answers that run (202), created or found idempotently by the run id."""
+    tenant_id = principal.tenant_id
+    run_store, _ = stores
+    run_id = body.run_id if body is not None else None
+    kb = _kb_or_404(store, tenant_id, kb_id)
+    document = store.get_document(tenant_id, kb["id"], document_key)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
+    try:
+        existing = _resolve_client_run_id(store, run_store, tenant_id, run_id)
+        if existing is not None and _is_document_run(existing, kb["id"], document["id"]):
+            # The document read above can predate the version this run_id made (a concurrent
+            # duplicate of the same request): compare against the document as it is now.
+            document = store.get_document(tenant_id, kb["id"], document_key) or document
+        if existing is not None:
+            if not _is_run_of(existing, kb["id"], ingest_input(document["id"], document["latest_version"])):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
+                )
+            view = _reextract_replay(run_store, launcher, tenant_id, existing, created=False)
+        else:
+            new_run_id = run_id or uuid.uuid4()
+            try:
+                document = store.new_document_version(
+                    tenant_id, kb["id"], document_key, run_id=str(new_run_id),
+                    expected_latest_version=document["latest_version"],
+                )
+            except DocumentNotFound:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
+            except IngestRunConflict:
+                current = store.get_document(tenant_id, kb["id"], document_key)
+                if current is None:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
+                if current["last_run_id"] != str(new_run_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="another upload or re-extract of the document was started concurrently",
+                    )
+                # A concurrent duplicate with this run_id already made the version: answer its run.
+                document = current
+            # No _renew_claim here: the bump itself was the compare-and-set and recorded the run id,
+            # so the run of the version this request made is always created (a later version
+            # supersedes it in the worker); a crash before that is the 60 s orphan rule's case.
+            input_json = ingest_input(document["id"], document["latest_version"])
+            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id)
+            view = _reextract_replay(run_store, launcher, tenant_id, run, created=created)
+    except HandOffFailed as exc:
+        return exc.response()
+    document = store.get_document(tenant_id, kb["id"], document_key) or document
+    return _json(status.HTTP_202_ACCEPTED, {**view, "unchanged": False, "document": document_view(document)})
+
+
+def _reextract_replay(
+    run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any], *, created: bool
+) -> dict[str, Any]:
+    """Hand off a re-extract run this request created. A run it found (a retry or a concurrent
+    duplicate with the same run_id) is answered as recorded, with no second dispatch, unless its
+    enqueue failed or it is still `queued` past ORPHAN_AFTER_SECONDS (its request may have died
+    before enqueuing): then it is handed off again (idempotent in DBOS)."""
+    if created or _enqueue_failed(run) or _stale_queued(run):
+        return _hand_off(run_store, launcher, tenant_id, run, created)
+    return _run_view(run)
+
+
+def outdated_extractor_map(
+    kb: dict[str, Any], formats: set[str] | None = None
+) -> dict[str, tuple[str | None, int]]:
+    """Base MIME type (every alias too) -> (the worker extractor that handles it in this knowledge
+    base, its current version), for KnowledgeStore.outdated_extraction_documents. An API-extracted
+    type maps to (None, 0): its document is outdated only when its active chunks still carry a
+    worker extractor's record (a flavour or extractor change, e.g. Markdown back from Doxygen)."""
+    extract_config = kb_extract_config(kb)
+    out: dict[str, tuple[str | None, int]] = {}
+    for spec in FORMAT_SPECS:
+        if formats is not None and spec.format not in formats:
+            continue
+        extractor = extractor_for(spec.mime_type, extract_config)
+        for mime in spec.mime_types:
+            out[mime.lower()] = (extractor, EXTRACTOR_VERSIONS[extractor]) if extractor is not None else (None, 0)
+    return out
+
+
+def _document_ref(document: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        "document_id": document["id"],
+        "document_key": document["document_key"],
+        "mime_type": document["mime_type"],
+        "doc_version": document["latest_version"],
+        **extra,
+    }
+
+
+@_kb.post(
+    "/{kb_id}/reextract",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ReextractResponse,
+    responses={
+        200: {"model": ReextractResponse, "description": "dry_run, or nothing selected: no run started"},
+        422: {"model": ErrorDetail},
+    },
+)
+def reextract_knowledge_base(
+    kb_id: str,
+    body: ReextractCreate,
+    principal: PrincipalDep,
+    store: KnowledgeDep,
+    stores: StoresDep,
+    launcher: LauncherDep,
+) -> JSONResponse:
+    """Re-extract many documents (see ReextractCreate): each selected document gets a new version
+    with the same content and its own ingest run on the `eap-kb-ingest-fair` queue (this knowledge base's partition), which runs at most
+    EAP_KB_INGEST_CONCURRENCY of them at a time. Embeddings of unchanged chunk texts are reused, so
+    the cost is the changed chunks only.
+
+    With `chunker_version: 2` on a v1 knowledge base, the chunking config's `chunker_version` is
+    rewritten and EVERY document gets its new version in the same transaction (all or nothing).
+
+    202 when at least one run started, else 200 (also for `dry_run`). A run whose enqueue failed is
+    listed with `status` "failed" and a `detail` (its document stays `pending`; POST …/reingest
+    starts it again), and the call goes on with the others. 422 unknown format names. 404 unknown
+    knowledge base (another tenant's included)."""
+    tenant_id = principal.tenant_id
+    run_store, _ = stores
+    kb = _kb_or_404(store, tenant_id, kb_id)
+    formats: set[str] | None = None
+    if body.formats is not None:
+        formats = set()
+        for name in body.formats:
+            try:
+                formats.add(format_by_name(name).format)
+            except KeyError:
+                expected = ", ".join(spec.format for spec in FORMAT_SPECS)
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"unknown format {name!r}: expected one of {expected}",
+                )
+    current_chunker = int((kb.get("chunking") or {}).get("chunker_version", 1))
+    change_chunker = body.chunker_version is not None and body.chunker_version != current_chunker
+
+    if change_chunker:
+        selected = store.list_documents(tenant_id, kb["id"])
+    elif body.only_outdated:
+        selected = store.outdated_extraction_documents(
+            tenant_id, kb["id"], outdated_extractor_map(kb, formats), orphan_after_seconds=ORPHAN_AFTER_SECONDS
+        )
+    else:
+        selected = [
+            d for d in store.list_documents(tenant_id, kb["id"])
+            if formats is None or ((spec := _spec_or_none(d["mime_type"])) is not None and spec.format in formats)
+        ]
+
+    def answer(code: int, refs: list[dict[str, Any]], *, chunker: int, changed: bool, started: int, failed: int,
+               dry_run: bool = False) -> JSONResponse:
+        return _json(
+            code,
+            {
+                "knowledge_base_id": kb["id"],
+                "dry_run": dry_run,
+                "chunker_version": chunker,
+                "chunker_version_changed": changed,
+                "selected": len(refs),
+                "started": started,
+                "failed": failed,
+                "documents": refs,
+                "knowledge_base": _kb_or_404(store, tenant_id, kb["id"]),
+            },
+        )
+
+    if body.dry_run or (not selected and not change_chunker):
+        return answer(
+            status.HTTP_200_OK, [_document_ref(d) for d in selected],
+            chunker=body.chunker_version or current_chunker if body.dry_run else current_chunker,
+            changed=False, started=0, failed=0, dry_run=body.dry_run,
+        )
+
+    try:
+        updated_kb, bumped, changed = store.start_reextract(
+            tenant_id,
+            kb["id"],
+            document_ids=None if change_chunker else [d["id"] for d in selected],
+            chunker_version=body.chunker_version if change_chunker else None,
+        )
+    except KnowledgeBaseNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
+    except ValidationError as exc:  # the stored config cannot take chunker v2 (it always can today)
+        msg = exc.errors()[0]["msg"] if exc.errors() else "invalid"
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"the knowledge base cannot move to chunker v{body.chunker_version}: {msg}",
+        )
+
+    refs: list[dict[str, Any]] = []
+    started = failed = 0
+    for document in bumped:
+        run_id = document["last_run_id"]
+        input_json = ingest_input(document["id"], document["latest_version"])
+        try:
+            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, run_id)
+            view = _hand_off(run_store, launcher, tenant_id, run, created)
+        except Exception as exc:  # noqa: BLE001 - one document's failure must not strand the others
+            # Its new version is stored with last_run_id = run_id: a reingest of the document starts
+            # (or re-queues) that run, also when the run row was never written (the orphan rule).
+            if not isinstance(exc, (HandOffFailed, HTTPException)):
+                log_failure(
+                    log, "re-extract run start failed", exc, code="reextract_start_failed", level=logging.ERROR,
+                    tenant_id=tenant_id, run_id=str(run_id),
+                )
+            failed += 1
+            refs.append(_document_ref(
+                document, run_id=str(run_id), status="failed",
+                detail=str(exc.detail) if isinstance(exc, HTTPException) else REEXTRACT_ENQUEUE_FAILED_DETAIL,
+            ))
+            continue
+        started += 1
+        refs.append(_document_ref(document, run_id=view["run_id"], status=view["status"]))
+    chunker = int((updated_kb.get("chunking") or {}).get("chunker_version", 1))
+    return answer(
+        status.HTTP_202_ACCEPTED if started else status.HTTP_200_OK, refs,
+        chunker=chunker, changed=changed, started=started, failed=failed,
+    )
 
 
 # -------------------------------------------------------------------------------------- reindex

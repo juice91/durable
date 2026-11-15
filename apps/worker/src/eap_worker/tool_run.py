@@ -18,6 +18,11 @@ Step layout (each line is a DBOS step, so recovery replays recorded results):
     eap.append_event   end              run_completed {output, result} | run_failed {status, error, error_code}
     eap.finish_run                      status -> completed | failed | needs_attention
 
+The search tester (`knowledge.search`, P1.C4): the same steps; its result event, its end event and
+its finish each lock the knowledge base and the hits' documents FOR SHARE and leave out deleted
+documents' hits, or fail the run with `knowledge_base_deleted` when the knowledge base is gone
+(eap_worker.search_guard), so a delete racing the run never leaves deleted text behind.
+
 A tool the check rejects is never called: the run goes straight from run_started to run_failed.
 
 Side effects (durability contract rule 5, stricter for the console): a side-effecting tool's call
@@ -56,6 +61,8 @@ from eap_worker.config import TOOL_WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import ToolInputInvalid, classify
 from eap_worker.platform_tools import HIDDEN_TOOL_IDS
+from eap_worker.search_guard import search_guard_for
+from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID
 from eap_worker.runtime import get_runtime
 from eap_worker.workflow import _heartbeat, _is_side_effect_unknown, append_event_step, finish_run_step
 
@@ -271,12 +278,21 @@ async def _tool_run_body(run_id: str, tenant_id: str, tool_id: str, input_json: 
     finally:
         heartbeat.cancel()
     output = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    # The search tester's writes are serialised with knowledge base / document deletes (P1.C4,
+    # eap_worker.search_guard): same steps, with a guard argument.
+    guard = search_guard_for(content, raw_args.get("knowledge_base_id")) if tool_id == KNOWLEDGE_SEARCH_TOOL_ID else None
     await append_event_step(
-        run_id, tenant_id, RESULT_EVENT_KEY, "tool_result", {**call_data, "status": "ok", "content": content}
+        run_id, tenant_id, RESULT_EVENT_KEY, "tool_result", {**call_data, "status": "ok", "content": content},
+        search_guard=guard,
     )
     # End event before the terminal status, as in agent runs.
-    await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output, "result": content})
-    await finish_run_step(run_id, tenant_id, "completed", output, None)
+    await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output, "result": content},
+                            search_guard=guard)
+    status = await finish_run_step(run_id, tenant_id, "completed", output, None, search_guard=guard) or "completed"
+    if status != "completed":
+        from eap_worker.search_guard import KB_DELETED_CODE, KB_DELETED_ERROR
+
+        return {"status": status, "error": KB_DELETED_ERROR, "error_code": KB_DELETED_CODE}
     return {"status": "completed", "output": output}
 
 

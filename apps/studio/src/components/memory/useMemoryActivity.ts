@@ -9,6 +9,7 @@ import {
   listObservations,
   memoryWrites,
   observerProgress,
+  postTurnDone,
   postTurnReported,
   recallSummary,
   reflectionDue,
@@ -43,8 +44,9 @@ const TERMINAL = new Set(["completed", "failed", "needs_attention"]);
  * What the latest turn says about memory. The run stream ends at `run_completed`, but observational
  * memory and the recall index run after it (the RM.13 hand-off): when this page watched the turn
  * finish and the spec has those steps, the turn's events are read again every `pollMs` until they
- * report (`postTurnReported`) or `timeoutMs` passes. The observer writes nothing when there is not
- * enough to observe, so the timeout is the normal end of a quiet turn.
+ * report (`postTurnReported`) or `timeoutMs` passes. A worker with P1.C1 ends every such turn with
+ * a `post_turn_done` event, which stops the poll at once (quiet turns included); for older workers,
+ * which write nothing when there is not enough to observe, the timeout ends a quiet turn.
  *
  * A reflection runs in the same workflow right after an observe when the active observations then
  * exceed `reflectAfterTokens`: after the observe event, the conversation's observations are read
@@ -134,6 +136,8 @@ export function useMemoryActivity(
     // a failed read is tried again at the next tick).
     let awaitReflection: boolean | null = null;
     const reported = async (events: readonly LooseRunEvent[]): Promise<boolean> => {
+      // The worker's own end marker (P1.C1): no observations read, no further poll.
+      if (postTurnDone(events)) return true;
       const features = featuresRef.current;
       const threshold = features.reflectAfterTokens;
       const conversation = conversationRef.current;

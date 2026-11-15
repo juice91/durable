@@ -22,6 +22,7 @@ from eap_knowledge import (
     MAX_HEADING_CHARS,
     MAX_HTML_ATTRIBUTES,
     MAX_SECTIONS,
+    SUPPORTED_CHUNKER_VERSIONS,
     ExtractionFailed,
     Chunk,
     ChunkingConfig,
@@ -93,7 +94,7 @@ def test_unsupported_mime_type_is_pickle_safe() -> None:
         ({"overlap_tokens": 512}, "overlap_tokens"),
         ({"overlap_tokens": -1}, "overlap_tokens"),
         ({"min_tokens": 513}, "min_tokens"),
-        ({"chunker_version": 2}, "chunker_version"),
+        ({"chunker_version": 3}, "chunker_version"),
         ({"max_tokens": True}, "max_tokens"),
     ],
 )
@@ -114,10 +115,14 @@ def test_chunking_config_is_the_rm2_contract_type() -> None:
     assert DEFAULT_CHUNKING.chunker_version == 1
 
 
-def test_valid_rm2_config_with_unsupported_version_is_rejected() -> None:
-    with pytest.raises(InvalidChunkingConfig) as info:
-        chunk(extract("hello", "text/plain"), ChunkingConfig(chunker_version=2))
-    assert info.value.field == "chunker_version"
+def test_the_chunker_supports_exactly_the_schema_versions() -> None:
+    # RAG P1: every version the schema accepts (1 and 2) is implemented, and nothing else.
+    from eap_schemas.knowledge import CHUNKER_VERSIONS
+
+    assert SUPPORTED_CHUNKER_VERSIONS == frozenset(CHUNKER_VERSIONS) == frozenset({1, 2})
+    doc = extract("hello", "text/plain")
+    for version in CHUNKER_VERSIONS:
+        assert [c.text for c in chunk(doc, ChunkingConfig(chunker_version=version))] == ["hello"]
 
 
 def test_accepts_any_object_with_the_config_attributes() -> None:
@@ -814,10 +819,16 @@ def test_anchor_fragments_are_percent_encoded_but_keep_unicode_letters() -> None
 # --- layering ------------------------------------------------------------------------------------
 
 
+# RAG P1: the worker-side extractors (formats/*.py except the registry) may also import their
+# parsers; the rest of the package, which the API imports, may not.
+WORKER_PARSERS = {"docutils", "yaml", "pypdf"}  # pypdf: formats/pdf.py (P1.A3)
+
+
 def test_package_imports_only_stdlib_eap_schemas_and_markdown_it() -> None:
     allowed = {"eap_schemas", "eap_knowledge", "markdown_it", "__future__"}
     package = Path(__file__).resolve().parents[1] / "src" / "eap_knowledge"
     for path in package.rglob("*.py"):
+        worker_side = path.parent.name == "formats" and path.name != "__init__.py"
         for node in ast.walk(ast.parse(path.read_text())):
             names: list[str] = []
             if isinstance(node, ast.Import):
@@ -826,6 +837,13 @@ def test_package_imports_only_stdlib_eap_schemas_and_markdown_it() -> None:
                 names = [node.module]
             for name in names:
                 top = name.split(".")[0]
-                assert top in allowed or top in sys.stdlib_module_names, f"{path.name} imports {name}"
-                assert top not in ("socket", "http", "subprocess", "importlib"), f"{path.name} imports {name}"
+                ok = top in allowed or top in sys.stdlib_module_names or (worker_side and top in WORKER_PARSERS)
+                assert ok, f"{path.name} imports {name}"
+                # sandbox.py's probe test hooks import socket, subprocess and importlib (a fresh load
+                # of _posixsubprocess) only to prove that its audit hook refuses them (P1.A3);
+                # nothing else may.
+                probes = ("socket", "subprocess", "importlib") if path.name == "sandbox.py" else ()
+                assert top in probes or top not in ("socket", "http", "subprocess", "importlib"), (
+                    f"{path.name} imports {name}"
+                )
                 assert top != "urllib" or name == "urllib.parse", f"{path.name} imports {name}"

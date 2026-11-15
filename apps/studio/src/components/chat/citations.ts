@@ -12,6 +12,10 @@
 // `[[1]](https://evil)` in the answer are rewritten to the real source (or to plain `[n]` when no
 // source has that number). A source URL is linked only when it is an absolute http(s) URL; a source
 // without one links to its document in Studio.
+//
+// Pages (RAG P1): a PDF section's anchor is `source_url#page=N` (its first page), and its chunk's
+// `metadata.eap` records `page`/`page_end`. A source shows "p. N" (or "pp. N–M") from `page`/`page_end`
+// when the source carries them, else from the URL's `#page=N`; the link opens the PDF at that page.
 import { isSafeHttpUrl } from "@/lib/safeUrl";
 import { routes } from "@/lib/routes";
 import type { ToolCallInfo } from "./toolCalls";
@@ -32,6 +36,46 @@ export interface CitationSource {
   chunk_id?: string;
   doc_version?: number;
   score?: number;
+  /** The section's first and last page (PDF); from the source, or else its URL's `#page=N`. */
+  page?: number;
+  page_end?: number;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : undefined;
+}
+
+/** N of a `#page=N` fragment (the PDF open parameter; other parameters after `&` ignored), or undefined. */
+export function pageFromUrl(url: unknown): number | undefined {
+  if (typeof url !== "string" || !url) return undefined;
+  const hash = url.indexOf("#");
+  if (hash < 0) return undefined;
+  const match = /(?:^|&)page=(\d{1,6})(?:&|$)/.exec(url.slice(hash + 1));
+  return match ? positiveInt(Number(match[1])) : undefined;
+}
+
+/**
+ * The page of a source or hit: `page`/`page_end` when given (a chunk's `metadata.eap`, or the
+ * source itself), else the URL's `#page=N`. `page_end` is kept only when it is after `page`.
+ */
+export function sourcePages(item: { page?: unknown; page_end?: unknown; url?: unknown; metadata?: unknown }): { page?: number; page_end?: number } {
+  const eap = isRecord(item.metadata) && isRecord(item.metadata.eap) ? item.metadata.eap : null;
+  const page = positiveInt(item.page) ?? positiveInt(eap?.page) ?? pageFromUrl(item.url);
+  if (page === undefined) return {};
+  const end = positiveInt(item.page_end) ?? positiveInt(eap?.page_end);
+  return end !== undefined && end > page ? { page, page_end: end } : { page };
+}
+
+/** "p. 212", "pp. 212–214", or null when the source has no page. */
+export function pageLabel(pages: { page?: number; page_end?: number }): string | null {
+  if (!pages.page) return null;
+  return pages.page_end && pages.page_end > pages.page ? `pp. ${pages.page}–${pages.page_end}` : `p. ${pages.page}`;
+}
+
+/** The citation's accessible name and tooltip: "Manual, p. 212". */
+export function citationTitle(source: Pick<CitationSource, "title" | "page" | "page_end">): string {
+  const page = pageLabel(source);
+  return page ? `${source.title}, ${page}` : source.title;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,6 +102,7 @@ export function parseSources(raw: unknown): CitationSource[] {
       chunk_id: typeof item.chunk_id === "string" ? item.chunk_id : undefined,
       doc_version: typeof item.doc_version === "number" ? item.doc_version : undefined,
       score: typeof item.score === "number" ? item.score : undefined,
+      ...sourcePages({ page: item.page, page_end: item.page_end, url: typeof item.url === "string" ? item.url : null }),
     });
   }
   return out;
@@ -98,7 +143,10 @@ export function citationSourcesForRun(infos: ReadonlyMap<string, ToolCallInfo>, 
  * with the document Sheet open), else nowhere (null: the marker stays text).
  */
 export function citationHref(source: CitationSource): string | null {
-  if (isSafeHttpUrl(source.url)) return source.url;
+  if (isSafeHttpUrl(source.url)) {
+    // A source with a known page whose URL has no fragment yet opens at that page.
+    return source.page && !source.url.includes("#") ? `${source.url}#page=${source.page}` : source.url;
+  }
   if (source.kb_id && source.document_key) return routes.knowledgeBase(source.kb_id, { document: source.document_key });
   return null;
 }

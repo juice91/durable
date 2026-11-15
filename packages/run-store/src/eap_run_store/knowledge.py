@@ -44,8 +44,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -70,6 +71,7 @@ from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from eap_schemas import EmbeddingDimensionMismatch, KnowledgeBaseNotFound
 from eap_schemas.embedding_policy import ALLOWED_EMBEDDING_DIMENSIONS, parse_embedding_model_id
+from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID
 from eap_schemas.knowledge import (
     MAX_CHUNKS_PER_KNOWLEDGE_BASE,
     MAX_DOCUMENTS_PER_KNOWLEDGE_BASE,
@@ -78,7 +80,7 @@ from eap_schemas.knowledge import (
     validate_metadata,
 )
 
-from eap_run_store.store import Base, append_event_in_session
+from eap_run_store.store import Base, append_event_in_session, set_status_in_session
 
 # Same texts as migration 0011_knowledge_bases.
 KB_DIMENSIONS_CHECK = "dimensions IN (768, 1024, 1536)"
@@ -539,6 +541,9 @@ _UNSET: Any = object()
 # --------------------------------------------------------------------------------------- helpers
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
 def content_hash(content: str) -> str:
     """sha256 hex of the UTF-8 content (kb_documents.content_hash)."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -658,6 +663,41 @@ def _scope_clause(document_id: str | None, doc_version: int | None, alias: str =
 
 
 # ------------------------------------------------------------------------------------------ store
+
+
+def _scrub_search_tester_runs(conn: Any, tenant_id: str, kb_id: str, *, document_id: str | None = None) -> list[str]:
+    """Scrub the knowledge base's search-tester runs (P1.C4), in the caller's transaction: tool runs
+    of `knowledge.search` with `runs.knowledge_base_id` = `kb_id`, and with `document_id` only those
+    whose `tool_result` hits name that document. Like DELETE /conversations/{id} for a turn
+    (eap_run_store.memory `_scrub_runs`): `input` and `output` NULL, every event of the run through
+    scrub_event_data (no chunk text, query or result survives), every side_effects row of the run
+    deleted. run_model_requests rows and run totals are untouched. Returns the run ids.
+
+    Lock order: called after the knowledge base or document DELETE (its rows are locked); the run
+    rows are then locked FOR UPDATE, then their events (`_scrub_runs`)."""
+    from eap_run_store.memory import _scrub_runs  # eap_run_store.memory imports this module
+
+    sql = (
+        "SELECT r.id FROM runs r WHERE r.tenant_id = :t AND r.kind = 'tool' AND r.tool_id = :tool"
+        " AND r.knowledge_base_id = :kb"
+    )
+    params: dict[str, Any] = {"t": tenant_id, "tool": KNOWLEDGE_SEARCH_TOOL_ID, "kb": str(kb_id)}
+    if document_id is not None:
+        sql += (
+            " AND EXISTS (SELECT 1 FROM execution_events e WHERE e.tenant_id = r.tenant_id AND e.run_id = r.id"
+            " AND e.type = 'tool_result'"
+            " AND e.data -> 'content' -> 'hits' @> CAST(:hit AS jsonb))"
+        )
+        params["hit"] = json.dumps([{"document_id": str(document_id)}])
+    run_ids = [str(r.id) for r in conn.execute(text(sql + " ORDER BY r.id FOR UPDATE OF r"), params)]
+    if not run_ids:
+        return []
+    conn.execute(
+        text("UPDATE runs SET input = NULL, output = NULL WHERE tenant_id = :t AND id = ANY(:ids)"),
+        {"t": tenant_id, "ids": run_ids},
+    )
+    _scrub_runs(conn, tenant_id, run_ids, all_side_effects=True)
+    return run_ids
 
 
 class KnowledgeStore:
@@ -794,17 +834,26 @@ class KnowledgeStore:
     def delete_knowledge_base(self, tenant_id: str, kb_id: str) -> bool:
         """Delete the knowledge base; its documents and chunks cascade in the same statement.
         Runs stay (audit and cost). False when it does not exist in this tenant (idempotent).
-        The agent-reference 409 is the API's check (agents live in its metadata)."""
+        The agent-reference 409 is the API's check (agents live in its metadata).
+
+        In the same transaction (P1.C4), every search-tester run of the knowledge base (`kind`
+        'tool', `tool_id` 'knowledge.search', `runs.knowledge_base_id`) is scrubbed like a deleted
+        conversation's turn: `input` and `output` NULL, every event's data through
+        scrub_event_data, its side_effects rows deleted (_scrub_search_tester_runs). Usage rows
+        and run totals stay."""
         kid = _canonical_uuid(kb_id)
         if kid is None:
             return False
         with self.engine.begin() as conn:
-            return (
+            deleted = (
                 conn.execute(
                     text("DELETE FROM knowledge_bases WHERE tenant_id = :t AND id = :id"), {"t": tenant_id, "id": kid}
                 ).rowcount
                 > 0
             )
+            if deleted:
+                _scrub_search_tester_runs(conn, tenant_id, kid)
+            return deleted
 
     # ------------------------------------------------------------------ documents (RM.7)
 
@@ -820,6 +869,7 @@ class KnowledgeStore:
         source_url: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         run_id: str | None = None,
+        content_sha256: str | None = None,
     ) -> PutDocumentResult:
         """Upload a document. Unchanged (same content hash, metadata, title, source URL and MIME
         type) is a no-op with `unchanged=True`. Otherwise the content is stored, `latest_version`
@@ -829,7 +879,11 @@ class KnowledgeStore:
 
         `run_id` (the API generates it before the write): recorded as `last_run_id` in the same
         transaction as a changing upload, so a concurrent unchanged upload always finds the run that
-        owns the new version. Not written when the upload is unchanged."""
+        owns the new version. Not written when the upload is unchanged.
+
+        `content_sha256` (RAG P1): the `content_hash` to store instead of `content_hash(content)`. A
+        binary document (a PDF) is stored as base64 text, and its hash is the sha256 of the decoded
+        bytes (lower-case hex), so the same file always hashes the same."""
         _require_tenant(tenant_id)
         kid = _canonical_uuid(kb_id)
         if kid is None:
@@ -837,7 +891,9 @@ class KnowledgeStore:
         if not document_key:
             raise ValueError("document_key is required")
         meta = validate_metadata(dict(metadata) if metadata is not None else None)
-        digest = content_hash(content)
+        if content_sha256 is not None and not _SHA256_HEX.fullmatch(content_sha256):
+            raise ValueError("content_sha256 must be 64 lower-case hex characters")
+        digest = content_sha256 if content_sha256 is not None else content_hash(content)
         select_doc = text(
             f"SELECT {_DOC_COLUMNS} FROM kb_documents"
             " WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key FOR NO KEY UPDATE"
@@ -963,20 +1019,73 @@ class KnowledgeStore:
             rows = conn.execute(text(sql), params).mappings().all()
         return [_doc_dict(r) for r in rows]
 
+    def write_search_result(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        document_ids: Iterable[str],
+        write: Callable[[Any, frozenset[str] | None], Any],
+    ) -> Any:
+        """One write of a `knowledge.search` tester run's result (its `tool_result` event, its `end`
+        event, or its finish), serialised with the knowledge base and document deletes (P1.C4): in
+        ONE transaction the knowledge base row and the rows of `document_ids` (the hits' documents)
+        are locked FOR SHARE, then `write(session, live)` runs with `live` = the ids among
+        `document_ids` that still exist, or None when the knowledge base is gone, and the
+        transaction commits. A delete (FOR UPDATE / DELETE of those rows) therefore runs either
+        before this write, which then sees the rows gone and leaves their hits out, or after it, and
+        then scrubs what it wrote (_scrub_search_tester_runs). `write` uses append_event_in_session
+        and set_status_in_session with the session it is given."""
+        _require_tenant(tenant_id)
+        kid = _canonical_uuid(kb_id)
+        ids = sorted({d for d in (_canonical_uuid(str(i)) for i in document_ids) if d is not None})
+        with self.Session() as session:
+            try:
+                live: frozenset[str] | None = None
+                kb = None
+                if kid is not None:
+                    kb = session.execute(
+                        text("SELECT id FROM knowledge_bases WHERE tenant_id = :t AND id = :id FOR SHARE"),
+                        {"t": tenant_id, "id": kid},
+                    ).first()
+                if kb is not None:
+                    live = frozenset()
+                    if ids:
+                        rows = session.execute(
+                            text(
+                                "SELECT id FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb"
+                                " AND id = ANY(CAST(:ids AS uuid[])) ORDER BY id FOR SHARE"
+                            ),
+                            {"t": tenant_id, "kb": kid, "ids": ids},
+                        ).all()
+                        live = frozenset(str(r.id) for r in rows)
+                result = write(session, live)
+            except Exception:
+                session.rollback()
+                raise
+            session.commit()
+            return result
+
     def delete_document(self, tenant_id: str, kb_id: str, document_key: str) -> bool:
         """Delete the document in one statement; its chunks cascade. An in-flight ingest then finds
-        it missing (DocumentNotFound, FinalizeResult 'missing'). False when absent (idempotent)."""
+        it missing (DocumentNotFound, FinalizeResult 'missing'). False when absent (idempotent).
+
+        In the same transaction (P1.C4), the knowledge base's search-tester runs whose
+        `tool_result` hits name the document's id are scrubbed (_scrub_search_tester_runs)."""
         kid = _canonical_uuid(kb_id)
         if kid is None:
             return False
         with self.engine.begin() as conn:
-            return (
-                conn.execute(
-                    text("DELETE FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key"),
-                    {"t": tenant_id, "kb": kid, "key": document_key},
-                ).rowcount
-                > 0
-            )
+            row = conn.execute(
+                text(
+                    "DELETE FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key"
+                    " RETURNING id"
+                ),
+                {"t": tenant_id, "kb": kid, "key": document_key},
+            ).first()
+            if row is None:
+                return False
+            _scrub_search_tester_runs(conn, tenant_id, kid, document_id=str(row.id))
+            return True
 
     def request_reingest(
         self,
@@ -1066,6 +1175,238 @@ class KnowledgeStore:
                 ).rowcount
                 > 0
             )
+
+    # ------------------------------------------------------------ re-extraction (RAG P1.A4)
+
+    def new_document_version(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        document_key: str,
+        *,
+        run_id: str,
+        expected_latest_version: int | None = None,
+    ) -> dict[str, Any]:
+        """A new version of the document with the SAME content (re-extraction): `latest_version`
+        + 1, status 'pending', error cleared and `last_run_id` = `run_id`, in one statement.
+        Content, hash, title, metadata, source URL and MIME type are untouched; start an ingest run
+        of the returned `latest_version`. Raises DocumentNotFound.
+
+        Compare-and-set, so of concurrent callers only the winner bumps: with
+        `expected_latest_version` it applies only while that is still the latest version, and it
+        never applies when `last_run_id` is already `run_id` (that run id has claimed a version:
+        a retry or a concurrent duplicate of the same request must not bump again). Otherwise it
+        raises IngestRunConflict and writes nothing; the caller re-reads the document (its
+        `last_run_id` equal to `run_id` means "replay that run")."""
+        kid = _canonical_uuid(kb_id)
+        params: dict[str, Any] = {"t": tenant_id, "kb": kid, "key": document_key, "run": str(run_id)}
+        condition = " AND last_run_id IS DISTINCT FROM CAST(:run AS varchar)"
+        if expected_latest_version is not None:
+            condition += " AND latest_version = :v"
+            params["v"] = int(expected_latest_version)
+        with self.engine.begin() as conn:
+            row = None
+            if kid is not None:
+                row = conn.execute(
+                    text(
+                        "UPDATE kb_documents SET latest_version = latest_version + 1, status = 'pending',"
+                        " error = NULL, updated_at = now(), last_run_id = :run"
+                        f" WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key{condition}"
+                        f" RETURNING {_DOC_COLUMNS}"
+                    ),
+                    params,
+                ).mappings().first()
+                if row is None:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM kb_documents WHERE tenant_id = :t AND kb_id = :kb AND document_key = :key"),
+                        params,
+                    ).first()
+                    if exists is not None:
+                        raise IngestRunConflict(document_key)
+        if row is None:
+            raise DocumentNotFound(document_key)
+        return _doc_dict(row)
+
+    def start_reextract(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        *,
+        document_ids: Sequence[str] | None,
+        chunker_version: int | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+        """Bulk re-extraction, in ONE transaction: lock the knowledge base `FOR UPDATE` (the lock
+        order: knowledge base, then documents), optionally move it to `chunker_version` (only the
+        `chunking.chunker_version` key changes; the result must be a valid ChunkingConfig), then
+        give each document a new version with the same content (as `new_document_version`) and a
+        fresh `last_run_id` (a random UUID: the id of the ingest run the caller creates next).
+
+        `document_ids` None means every document of the knowledge base (a new key cannot be added
+        meanwhile: its upload locks the knowledge base too); ids that are gone are skipped.
+
+        With `chunker_version`, the bump is part of the switch: when the knowledge base is already
+        on that version once the lock is held (a concurrent duplicate request switched it first),
+        nothing is written and no document is returned, so duplicates make one version each.
+
+        Returns (the knowledge base, the bumped documents by key, whether the chunker version
+        changed). Raises KnowledgeBaseNotFound."""
+        _require_tenant(tenant_id)
+        kid = _canonical_uuid(kb_id)
+        if kid is None:
+            raise KnowledgeBaseNotFound(str(kb_id))
+        ids: list[str] | None = None
+        if document_ids is not None:
+            ids = [d for d in (_canonical_uuid(x) for x in document_ids) if d is not None]
+        with self.engine.begin() as conn:
+            kb = conn.execute(
+                text("SELECT * FROM knowledge_bases WHERE tenant_id = :t AND id = :id FOR UPDATE"),
+                {"t": tenant_id, "id": kid},
+            ).mappings().first()
+            if kb is None:
+                raise KnowledgeBaseNotFound(kid)
+            changed = False
+            if chunker_version is not None and (kb["chunking"] or {}).get("chunker_version") != int(chunker_version):
+                ChunkingConfig(**{**dict(kb["chunking"] or {}), "chunker_version": int(chunker_version)})
+                kb = conn.execute(
+                    text(
+                        "UPDATE knowledge_bases SET chunking = jsonb_set(chunking, '{chunker_version}', to_jsonb(:v)),"
+                        " updated_at = now() WHERE tenant_id = :t AND id = :id RETURNING *"
+                    ),
+                    {"t": tenant_id, "id": kid, "v": int(chunker_version)},
+                ).mappings().one()
+                changed = True
+            rows: list[Any] = []
+            if chunker_version is not None and not changed:
+                pass  # the switch already happened: its own request bumped the documents
+            elif ids is None or ids:
+                scope = "" if ids is None else " AND id = ANY(CAST(:ids AS uuid[]))"
+                rows = conn.execute(
+                    text(
+                        "UPDATE kb_documents SET latest_version = latest_version + 1, status = 'pending',"
+                        " error = NULL, updated_at = now(), last_run_id = CAST(gen_random_uuid() AS varchar)"
+                        f" WHERE tenant_id = :t AND kb_id = :kb{scope} RETURNING {_DOC_COLUMNS}"
+                    ),
+                    {"t": tenant_id, "kb": kid, **({} if ids is None else {"ids": ids})},
+                ).mappings().all()
+        docs = sorted((_doc_dict(r) for r in rows), key=lambda d: d["document_key"])
+        return _kb_dict(kb), docs, changed
+
+    def outdated_extraction_documents(
+        self,
+        tenant_id: str,
+        kb_id: str,
+        current: Mapping[str, tuple[str | None, int]],
+        *,
+        orphan_after_seconds: float = 60.0,
+    ) -> list[dict[str, Any]]:
+        """The documents (without content, by key) whose extraction is outdated.
+
+        `current` maps a base MIME type (lower-case, no parameters; aliases listed separately) to
+        the worker extractor that handles it in this knowledge base and that extractor's current
+        version (`eap_knowledge.EXTRACTOR_VERSIONS`); the caller builds it from the format
+        registry, since this store imports no eap_knowledge. A document of one of those types is
+        outdated when its active version has no chunk, at the active generation, whose
+        `metadata.eap` records that extractor at that version or later: an older extractor version,
+        a different extractor (the knowledge base's Markdown flavour changed), the API path (no
+        record), or no active version at all (never ingested, or every ingest failed).
+
+        An extractor of None means the API extracts that type in this knowledge base (its version
+        is ignored): such a document is outdated when its active chunks DO carry a worker
+        extractor record (`metadata.eap.extractor`), e.g. Markdown extracted as Doxygen before the
+        knowledge base's flavour went back to plain. One with no active version is not selected
+        (an upload or reingest starts its run; there is no stale extraction to replace).
+
+        A document whose latest version is in flight is not selected: status `pending` or
+        `ingesting` with that version not active (never ingested, or a newer version over the
+        active one) AND a live run. That covers a re-extract started by an earlier call (so a double
+        click or a CLI retry starts nothing instead of superseding those runs) and a first ingest
+        still queued, e.g. behind a bulk import (it extracts with the current extractor anyway;
+        browser check finding A). Once its run ends the document is judged on its active chunks
+        again; a never-ingested document whose every ingest failed is selectable.
+
+        The run is its `last_run_id` row. It is live while it is not terminal (`queued`, however
+        long it has waited: a long queue is not a lost run, and DBOS still holds it). It is dead,
+        and the pending document selectable (so bulk re-extract can revive it), when the row is
+        terminal (an enqueue that failed: `failed` / `enqueue_failed`; or a run that ended without
+        moving the document), or when there is no row and the document has been pending longer than
+        `orphan_after_seconds` (the API's ORPHAN_AFTER_SECONDS: its request died between the version
+        write and the run insert). A younger document with no row is a request still in progress."""
+        kid = _canonical_uuid(kb_id)
+        if kid is None or not current:
+            return []
+        mimes = sorted(current)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"SELECT {', '.join('d.' + c.strip() for c in _DOC_COLUMNS.split(','))}"
+                    " FROM kb_documents d"
+                    " JOIN knowledge_bases kb ON kb.tenant_id = d.tenant_id AND kb.id = d.kb_id"
+                    " JOIN unnest(CAST(:mimes AS text[]), CAST(:exts AS text[]), CAST(:vers AS int[]))"
+                    "   AS cur(mime, extractor, version)"
+                    "   ON cur.mime = lower(btrim(split_part(d.mime_type, ';', 1)))"
+                    " WHERE d.tenant_id = :t AND d.kb_id = :kb"
+                    " AND NOT (d.status IN ('pending', 'ingesting')"
+                    "   AND (d.active_version IS NULL OR d.latest_version > d.active_version)"
+                    "   AND (EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id"
+                    "       AND r.status NOT IN ('completed', 'failed', 'needs_attention'))"
+                    "     OR (NOT EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id)"
+                    "       AND d.updated_at > now() - make_interval(secs => :orphan))))"
+                    " AND CASE WHEN cur.extractor IS NULL THEN EXISTS (SELECT 1 FROM kb_chunks c"
+                    "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
+                    "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
+                    "   AND c.metadata -> 'eap' ->> 'extractor' IS NOT NULL)"
+                    " ELSE NOT EXISTS (SELECT 1 FROM kb_chunks c"
+                    "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
+                    "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
+                    "   AND c.metadata -> 'eap' ->> 'extractor' = cur.extractor"
+                    "   AND CASE WHEN jsonb_typeof(c.metadata -> 'eap' -> 'extractor_version') = 'number'"
+                    "     THEN CAST(c.metadata -> 'eap' ->> 'extractor_version' AS numeric) >= cur.version"
+                    "     ELSE false END) END"
+                    " ORDER BY d.document_key"
+                ),
+                {
+                    "t": tenant_id,
+                    "kb": kid,
+                    "mimes": mimes,
+                    "exts": [current[m][0] for m in mimes],
+                    "vers": [int(current[m][1]) for m in mimes],
+                    "orphan": float(orphan_after_seconds),
+                },
+            ).mappings().all()
+        return [_doc_dict(r) for r in rows]
+
+    def latest_extraction(self, tenant_id: str, kb_id: str, document_id: str) -> dict[str, Any] | None:
+        """The extraction of the document's ACTIVE version (what retrieval serves): the newest
+        `extracted` event (RAG P1, written by eap.kb_extract_chunk, key `extract:{doc_version}`)
+        among its kb_ingest runs of that version, as `{**data, "doc_version", "run_id"}`. A newer
+        version that is pending or failed does not replace it. None when there is no active
+        version, or no worker extraction of it (an API-extracted document). Counts only: the event
+        never holds document text."""
+        kid, did = _canonical_uuid(kb_id), _canonical_uuid(document_id)
+        if kid is None or did is None:
+            return None
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT e.run_id, e.event_key, e.data FROM kb_documents d"
+                    " JOIN runs r ON r.tenant_id = d.tenant_id AND r.knowledge_base_id = d.kb_id"
+                    " JOIN execution_events e ON e.tenant_id = r.tenant_id AND e.run_id = r.id"
+                    " WHERE d.tenant_id = :t AND d.kb_id = :kb AND d.id = CAST(:doc_id AS uuid) AND d.active_version IS NOT NULL"
+                    " AND r.kind = 'kb_ingest' AND r.input LIKE :like"
+                    " AND CAST(r.input AS jsonb) ->> 'document_id' = :doc"
+                    " AND e.type = 'extracted' AND e.event_key = 'extract:' || d.active_version"
+                    " ORDER BY e.ts DESC, e.seq DESC LIMIT 1"
+                ),
+                {"t": tenant_id, "kb": kid, "doc": did, "doc_id": did, "like": f'%"{did}"%'},
+            ).mappings().first()
+        if row is None or not isinstance(row["data"], dict):
+            return None
+        _, _, version = str(row["event_key"]).partition(":")
+        return {
+            **row["data"],
+            "doc_version": int(version) if version.isdigit() else None,
+            "run_id": str(row["run_id"]),
+        }
 
     # ------------------------------------------------------------------ ingestion (RM.10)
 
@@ -1174,11 +1515,23 @@ class KnowledgeStore:
         chunks: Sequence[ChunkLike],
         *,
         metadata: Mapping[str, Any],
+        extract_metadata: Sequence[Mapping[str, Any] | None] | None = None,
     ) -> UpsertResult:
         """Insert the version's chunk rows without embeddings, idempotent by `(document_id,
         doc_version, generation, ordinal)` (ON CONFLICT DO NOTHING: a re-executed step inserts 0).
         `metadata` is the document metadata of the version being ingested (the `get_ingest_source`
         snapshot), copied onto every chunk for the retrieval filter.
+        `extract_metadata` (RAG P1, eap.kb_extract_chunk): one platform extraction record per chunk
+        (`eap_schemas.knowledge.ChunkExtractMetadata` as JSON, or None), stored under the reserved
+        key `eap` AFTER the user metadata is validated (validate_metadata rejects that key). In the
+        same transaction, before the insert, the version's rows in this generation recorded with
+        another extractor, an OLDER extractor version, or no `eap` record are deleted, so a retry
+        after an extractor upgrade (or a Markdown flavour switch) never leaves rows mixed. Rows of
+        the same extractor with a NEWER version are never deleted: during a rolling deploy an old
+        worker's insert then finds them and inserts nothing (ON CONFLICT DO NOTHING).
+        Without `extract_metadata` (eap.kb_chunk), the version's rows in this generation that DO
+        carry an `eap` record (a worker extraction, e.g. Doxygen Markdown before its knowledge base
+        went back to plain) are deleted first, for the same reason.
         Raises DocumentNotFound (deleted), KnowledgeBaseNotFound, GenerationNotWritable, and
         KnowledgeBaseLimitExceeded at the 200,000 chunk cap of the generation. The cap is soft:
         it is checked under a shared lock, so concurrent ingests of one knowledge base can pass it
@@ -1186,6 +1539,8 @@ class KnowledgeStore:
         _require_tenant(tenant_id)
         did = _require_uuid(document_id, "document_id")
         meta = validate_metadata(dict(metadata))
+        if extract_metadata is not None and len(extract_metadata) != len(chunks):
+            raise ValueError("extract_metadata must have one entry per chunk")
         with self.Session() as session:
             try:
                 # Lock order: the knowledge base FOR SHARE, then the document, then re-check.
@@ -1200,6 +1555,25 @@ class KnowledgeStore:
             except Exception:
                 session.rollback()
                 raise
+            slot = {"t": tenant_id, "id": did, "v": int(doc_version), "g": int(generation)}
+            slot_sql = (
+                "DELETE FROM kb_chunks WHERE tenant_id = :t AND document_id = :id AND doc_version = :v"
+                " AND generation = :g"
+            )
+            stamps = {(str(r["extractor"]), int(r["extractor_version"])) for r in extract_metadata or () if r}
+            if len(stamps) == 1:
+                ((extractor, version),) = stamps
+                session.execute(
+                    text(
+                        slot_sql
+                        + " AND (metadata -> 'eap' ->> 'extractor' IS DISTINCT FROM :ex"
+                        " OR jsonb_typeof(metadata -> 'eap' -> 'extractor_version') IS DISTINCT FROM 'number'"
+                        " OR (metadata -> 'eap' ->> 'extractor_version')::numeric < :ver)"
+                    ),
+                    {**slot, "ex": extractor, "ver": version},
+                )
+            elif extract_metadata is None:
+                session.execute(text(slot_sql + " AND metadata ? 'eap'"), slot)
             others = session.execute(
                 text(
                     "SELECT count(*) FROM kb_chunks WHERE tenant_id = :t AND kb_id = :kb AND generation = :g"
@@ -1230,6 +1604,12 @@ class KnowledgeStore:
                 }
                 for c in chunks
             ]
+            if extract_metadata is not None:
+                from eap_schemas.knowledge import RESERVED_METADATA_KEY
+
+                for row, record in zip(rows, extract_metadata, strict=True):
+                    if record:
+                        row["metadata"] = {**meta, RESERVED_METADATA_KEY: dict(record)}
             inserted = 0
             for start in range(0, len(rows), _INSERT_BATCH):
                 result = session.execute(

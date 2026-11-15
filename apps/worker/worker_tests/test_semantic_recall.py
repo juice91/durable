@@ -37,7 +37,7 @@ from eap_schemas.processors import PiiRedactConfig
 from worker_tests.conftest import DBOS_DB_URL, enqueue_run, event_rows
 from worker_tests.test_conversation import step_names
 from worker_tests.test_crash_recovery import APP_VERSION, WorkerProcess, _env, crash_schema  # noqa: F401 - fixture
-from worker_tests.test_observational_memory import assert_totals_match, by_key, usage_keys, wait_workflow
+from worker_tests.test_observational_memory import POST_TURN_DONE, assert_totals_match, by_key, usage_keys, wait_workflow
 from worker_tests.test_working_memory import MEMORY_TURN, conversation, memory_spec, turn
 
 RECALL = {"embedding_model": "test:hash"}
@@ -135,7 +135,7 @@ def test_a_fact_from_one_conversation_is_recalled_in_another_of_the_same_user_on
     run_a, row = rturn(worker, client, worker_settings, tenant, a, "my favourite colour is turquoise",
                        recall_spec(model="echo"))
     assert row["status"] == "completed"
-    assert step_names(schema, run_a) == RECALL_TURN
+    assert step_names(schema, run_a) == RECALL_TURN + POST_TURN_DONE
     rows = embeddings(worker.engine, a["id"])
     assert [(r["turn"], r["role"], r["resource_id"]) for r in rows] == [(1, "assistant", "user-1"), (1, "user", "user-1")]
     assert rows[1]["text"] == "my favourite colour is turquoise" and rows[0]["dimensions"] == 1536
@@ -218,7 +218,7 @@ def test_a_disallowed_embedding_model_never_fails_the_turn(worker, client, worke
     spec = recall_spec(recall={"embedding_model": model})
     run_id, row = rturn(worker, client, worker_settings, tenant, conv, "hello", spec)
     assert row["status"] == "completed" and RECALL_BLOCK_HEADING not in row["output"]
-    assert step_names(worker_settings.dbos_system_schema, run_id) == RECALL_TURN
+    assert step_names(worker_settings.dbos_system_schema, run_id) == RECALL_TURN + POST_TURN_DONE
     events = event_rows(worker.engine, run_id)
     for stage in ("recall", "index"):
         [(etype, data)] = by_key(events, f"embed:{stage}:1:failed")

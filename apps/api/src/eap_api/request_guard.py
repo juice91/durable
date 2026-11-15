@@ -5,6 +5,9 @@ for each POST/PUT/PATCH request, before FastAPI parses the body:
 
 - more than ``max_body_bytes`` -> 413 {"detail": "request body too large (max N bytes)"}; the
   declared Content-Length is checked first, then the stream, so an oversized body is never buffered;
+  with ``soft_body_bytes`` and ``allow_beyond_soft``, a body that streams past the soft cap is
+  refused there (413 naming the soft cap) unless ``allow_beyond_soft(prefix)`` accepts the bytes
+  read so far (the knowledge base upload: only a base64 body may grow to the binary guard);
 - not strict UTF-8 (an optional BOM), or any NUL byte -> 415
   {"detail": "request body must be UTF-8 encoded JSON (no NUL bytes)"};
 - objects/arrays nested deeper than ``max_depth`` -> 422 {"detail": "<depth_detail>"} (a string);
@@ -97,12 +100,24 @@ def json_depth_exceeds(text: str, limit: int) -> bool:
     return False
 
 
-async def read_capped_body(request: Request, limit: int) -> bytes | None:
+async def read_capped_body(
+    request: Request,
+    limit: int,
+    *,
+    soft_limit: int | None = None,
+    allow_beyond_soft: Callable[[bytes], bool] | None = None,
+) -> bytes | int | None:
     """The request body, or None as soon as it is known to exceed ``limit`` bytes (declared
-    Content-Length first, then while streaming): an oversized body is never buffered whole."""
+    Content-Length first, then while streaming): an oversized body is never buffered whole.
+
+    With ``soft_limit`` (below ``limit``) and ``allow_beyond_soft``: once the stream passes the
+    soft limit, ``allow_beyond_soft`` sees the bytes read so far (once); when it refuses, the soft
+    limit (an int) is returned instead of the body, so at most ``soft_limit`` plus one chunk is
+    buffered."""
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > limit:
         return None
+    checked = soft_limit is None or allow_beyond_soft is None or soft_limit >= limit
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
@@ -110,6 +125,12 @@ async def read_capped_body(request: Request, limit: int) -> bytes | None:
         if size > limit:
             return None
         chunks.append(chunk)
+        if not checked and size > soft_limit:  # type: ignore[operator]
+            checked = True
+            prefix = b"".join(chunks)
+            chunks = [prefix]
+            if not allow_beyond_soft(prefix):  # type: ignore[misc]
+                return soft_limit
     return b"".join(chunks)
 
 
@@ -213,11 +234,15 @@ def guarded_json_route(
     max_depth: int = DEFAULT_MAX_BODY_DEPTH,
     depth_detail: str | None = None,
     check_storable: bool = True,
+    soft_body_bytes: Callable[[], int] | None = None,
+    allow_beyond_soft: Callable[[bytes], bool] | None = None,
 ) -> type[APIRoute]:
     """An APIRoute class with the guards described in this module's docstring.
 
     `max_body_bytes` may be a callable, read on every write request (a cap set by an environment
-    variable, e.g. EAP_KB_MAX_DOCUMENT_BYTES for the knowledge base document upload)."""
+    variable, e.g. EAP_KB_MAX_DOCUMENT_BYTES for the knowledge base document upload).
+    `soft_body_bytes` (a callable, read per request) and `allow_beyond_soft` set a lower cap that
+    only bodies the predicate accepts may pass (see read_capped_body)."""
     nested_detail = depth_detail or f"request body is nested more than {max_depth} levels deep"
     body_limit: Callable[[], int] = max_body_bytes if callable(max_body_bytes) else (lambda: max_body_bytes)
 
@@ -257,9 +282,12 @@ def guarded_json_route(
                     errors = unstorable_params(request)
                 if request.method in WRITE_METHODS:
                     limit = body_limit()
-                    body = await read_capped_body(request, limit)
+                    soft = soft_body_bytes() if soft_body_bytes is not None else None
+                    body = await read_capped_body(request, limit, soft_limit=soft, allow_beyond_soft=allow_beyond_soft)
                     if body is None:
                         return JSONResponse(status_code=413, content={"detail": too_large_detail(limit)})
+                    if isinstance(body, int):  # past the soft cap, and the predicate refused
+                        return JSONResponse(status_code=413, content={"detail": too_large_detail(body)})
                     request._body = body  # FastAPI's request.body() returns these bytes; no second read
                     if len(body) > INLINE_SCAN_MAX_BYTES:
                         # Large bodies (the knowledge base upload): scan in the threadpool, not on the loop.

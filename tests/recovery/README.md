@@ -229,3 +229,18 @@ The schemas are dropped afterwards. The suite takes about 2.5 minutes.
 | G1 | plain, tool, processors, knowledge and the memory shapes (history, working, recall, observational with its observer workflow), each run on the old build, then the same published version run on this one | identical DBOS step names and order (the golden list is the one the old build recorded), event story and output; stored specs and hashes unchanged and read back with no new keys |
 | C1 to C5 | the old worker is killed at `after_tool_call`, at `model_request`, or at `after_event_write`, on `model:0:final` of a processors run and on `end` of a recall turn and an observational turn | the new worker replays the old checkpoints: steps and story equal those of a clean old run, one ticket, and the post-turn `eap.memory_index` or observer workflow runs once on the new build |
 | C6 | the old worker is killed at `workflow_waiting` | 0014's backfill puts the open approval in the new inbox; deciding it on this build resumes the old workflow, which completes once (wait-poll rounds aside, the steps equal those of a clean old run) |
+
+# RAG P1 part 1 (task P1.A7): hostile files, extraction and the embed split, whole-system
+
+`test_p1_part1_suite.py` reuses the harness, `test_rm_crash_matrix.assert_recovered_once` (the RM.20
+invariants) and `test_mcp_safety.OtlpCollector` / `assert_no_secret`. Documents are uploaded over the
+API, which picks the extraction site and sets `embed_split`; the worker extracts in the real sandbox
+child. The worker-level tests of the same steps are in `apps/worker/worker_tests`
+(`test_extract_sandbox*.py`, `test_kb_extract_chunk*.py`, `test_kb_embed_split.py`,
+`test_p1c_recovery_acceptance.py`).
+
+| # | Kill / input | Proves |
+|---|------|--------|
+| H1 | No kill. Eleven hostile documents, among good ones: PDF (corrupt, encrypted, image-only, nested arrays, flate bomb), rst (deep nesting, a huge line), YAML (billion laughs, a python tag), JSON (deep nesting, malformed). Also an rst file with `include` / `raw :file:` / `csv-table :url:`, and PNG bytes as a PDF and a PDF as rst. OTLP export is on | each hostile document fails with its extraction code (run, `run_failed`, the document's `error_code` / `error_reason`) and stores no chunks; the directive file ingests without `/etc/passwd`; the type mismatches are 415 `unsupported_content`; the worker and the API stay up and the good documents are searchable; the search tester keeps the tool-run step list; another tenant gets 404 on every route of the knowledge base; no document text in any encoding in either process log, any OTLP export, or the runs' events and errors |
+| X1 | `kb_extract_sandbox`, `kb_extract_chunk` (PDF), `kb_extract_chunk` (rst) | one `extracted` event; the rows committed before the kill are kept, never duplicated; split embed steps; page citations on the API search |
+| E1 | `kb_embed_after_call`, `kb_batch_before_commit`, `kb_batch_after_commit` on `embed:batch:1` | a kill inside the call re-calls the provider once for that batch, and a kill inside the write never re-calls it. The workers' `embedding call ... key=` lines are counted per batch; one usage row per batch |
