@@ -24,9 +24,10 @@ have no fixed order against an in-flight ingest (the RM.4 review).
 
 The reindex dry run prices its token estimate from the operator price override file
 (EAP_MODEL_PRICES_FILE, the file the worker prices `test:*` and `litellm:*` from), through the
-worker's own loader and arithmetic (eap_pricing). Other providers
-are priced by genai-prices in the worker, which the API may not import: their estimate has tokens
-and a `cost_note` instead of a cost.
+worker's own loader and arithmetic (eap_pricing). Providers the worker prices from genai-prices
+are not estimated here yet: their estimate has tokens and a `cost_note` instead of a cost. (The API
+may use eap_pricing's genai-prices lookup, `price_request` / `price_known`; switching this estimate
+to it is left to the agent-capabilities branch.)
 """
 
 from __future__ import annotations
@@ -566,7 +567,8 @@ def estimate_embedding_cost(model_id: str, tokens: int, today: date | None = Non
     Reads the operator override file with the worker's own loader and lookup rules (eap_pricing: an
     exact `provider:name` key wins over `provider:*`; the period with the latest `effective_from`
     not after today applies; a file the worker rejects prices nothing here either). A provider the
-    worker prices through genai-prices gets no API estimate."""
+    worker prices through genai-prices gets no estimate here yet (eap_pricing.price_request could
+    give one; not switched in this batch)."""
     provider = model_id.partition(":")[0]
     overrides = load_overrides()
     if isinstance(overrides, InvalidPriceFile):
@@ -580,7 +582,7 @@ def estimate_embedding_cost(model_id: str, tokens: int, today: date | None = Non
     if provider in OVERRIDE_ONLY_PROVIDERS:
         return None, None, f"no price for '{model_id}' in the model price override file"
     return None, None, (
-        f"'{provider}' models are priced by genai-prices in the worker, which the API cannot consult; "
+        f"'{provider}' models are priced by genai-prices in the worker and are not estimated here; "
         "the cost is recorded on the reindex run"
     )
 

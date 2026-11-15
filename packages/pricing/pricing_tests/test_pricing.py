@@ -124,3 +124,90 @@ def test_api_estimate_rejects_a_file_the_worker_rejects(prices_file):
     cost, source, note = estimate_embedding_cost("test:hash", 10, DAY)
     assert (cost, source) == (None, None) and "unreadable or invalid" in note
     assert price("test:hash", Usage(input_tokens=10)) == (None, None)
+
+
+# ----------------------------------------------------------------------------- price_known
+
+
+def _period(inp: str, out: str, start: str = "2026-01-01", **extra: str) -> dict:
+    return {"effective_from": start, "input_per_mtok": inp, "output_per_mtok": out, **extra}
+
+
+def test_price_known_exact_key_beats_wildcard(prices_file):
+    prices_file({"litellm:*": [_period("0", "0")], "litellm:big": [_period("1", "2")]})
+    assert eap_pricing.price_known("litellm:big", DAY) == "priced"
+    assert eap_pricing.price_known("litellm:other", DAY) == "zero"
+    # And the reverse: a zero exact key beats a priced wildcard.
+    prices_file({"test:*": [_period("1", "1")], "test:free": [_period("0", "0")]})
+    assert eap_pricing.price_known("test:free", DAY) == "zero"
+    assert eap_pricing.price_known("test:x", DAY) == "priced"
+
+
+def test_price_known_zero_prices_and_cache_only_price(prices_file):
+    prices_file({"test:*": [_period("0", "0")], "test:cache": [_period("0", "0", cache_read_per_mtok="0.1")]})
+    assert eap_pricing.price_known("test:x", DAY) == "zero"
+    # Any token kind with a price makes it "priced".
+    assert eap_pricing.price_known("test:cache", DAY) == "priced"
+    # An override of 0 also wins over genai-prices for a direct provider.
+    prices_file({"openai:gpt-4o": [_period("0", "0")]})
+    assert eap_pricing.price_known("openai:gpt-4o", DAY) == "zero"
+
+
+def test_price_known_future_period(prices_file):
+    prices_file({"test:*": [_period("0", "0"), _period("5", "5", start="2027-01-01")]})
+    assert eap_pricing.price_known("test:x", DAY) == "zero"
+    assert eap_pricing.price_known("test:x", date(2027, 1, 1)) == "priced"
+    # Only a future period: no price yet (test:* is never priced from genai-prices).
+    prices_file({"test:*": [_period("5", "5", start="2027-01-01")]})
+    assert eap_pricing.price_known("test:x", DAY) == "unpriced"
+
+
+def test_price_known_genai_prices_model(prices_file):
+    from datetime import datetime, timezone
+
+    prices_file({})
+    assert eap_pricing.price_known("openai:gpt-4o", DAY) == "priced"
+    assert eap_pricing.price_known("openai:gpt-4o", datetime(2026, 11, 13, 12, tzinfo=timezone.utc)) == "priced"
+    # A proxied name is never priced as the OpenAI model of that name.
+    assert eap_pricing.price_known("litellm:gpt-4o", DAY) == "unpriced"
+
+
+def test_price_known_unknown_model(prices_file):
+    prices_file({"litellm:*": [_period("0", "0")]})
+    assert eap_pricing.price_known("openai:no-such-model-xyz", DAY) == "unpriced"
+    assert eap_pricing.price_known("no-such-provider:x", DAY) == "unpriced"
+    assert eap_pricing.price_known("test:x", DAY) == "unpriced"
+
+
+def test_price_known_unreadable_override_file(tmp_path, monkeypatch):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    monkeypatch.setenv(eap_pricing.PRICES_FILE_ENV, str(bad))
+    # The worker prices nothing then, not even from genai-prices: so nothing is known.
+    assert eap_pricing.price_known("openai:gpt-4o", DAY) == "unpriced"
+    assert eap_pricing.price_known("litellm:x", DAY) == "unpriced"
+    monkeypatch.setenv(eap_pricing.PRICES_FILE_ENV, str(tmp_path))  # a directory: unreadable
+    assert eap_pricing.price_known("openai:gpt-4o", DAY) == "unpriced"
+    # An explicitly passed invalid file behaves the same.
+    assert eap_pricing.price_known("openai:gpt-4o", DAY, overrides=InvalidPriceFile("x", "y")) == "unpriced"
+
+
+def test_price_known_explicit_overrides_argument(monkeypatch, tmp_path):
+    monkeypatch.setenv(eap_pricing.PRICES_FILE_ENV, str(tmp_path / "missing.json"))  # would be invalid
+    overrides = PriceFile.model_validate({"models": {"test:*": [_period("1", "1")]}})
+    assert eap_pricing.price_known("test:x", DAY, overrides=overrides) == "priced"
+    assert eap_pricing.price_known("openai:gpt-4o", DAY, overrides=PriceFile()) == "priced"
+
+
+def test_price_known_agrees_with_price_request(prices_file):
+    """The worker's lookup (price_request) and price_known never disagree."""
+    from datetime import datetime, timezone
+
+    at = datetime(2026, 11, 13, tzinfo=timezone.utc)
+    prices_file({"litellm:*": [_period("0", "0")], "litellm:big": [_period("1", "2")],
+                 "test:later": [_period("1", "1", start="2027-01-01")]})
+    for model in ("litellm:big", "litellm:x", "test:later", "openai:gpt-4o", "openai:no-such-model-xyz", "test:x"):
+        cost, source = eap_pricing.price_request(model, Usage(1000, 1000), at)
+        expected = "unpriced" if cost is None else ("zero" if cost == 0 else "priced")
+        assert eap_pricing.price_known(model, at) == expected, model
+        assert (cost is None) == (source is None)

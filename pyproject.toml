@@ -92,15 +92,16 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Pricing imports only the standard library, eap_schemas and pydantic"
+name = "Pricing imports only the standard library, eap_schemas, pydantic and genai_prices"
 type = "forbidden"
 source_modules = ["eap_pricing"]
-# Shared by the API (reindex estimate) and the worker (request costs): no platform package, no I/O
-# library, and no genai-prices (the API may not consult it; that lookup stays in eap_worker.pricing).
+# Shared by the API (reindex estimate, price_known) and the worker (request costs): no platform
+# package and no I/O library. genai-prices (a bundled price snapshot; eap_pricing never calls its
+# network updater) is allowed so the API's price_known and the worker's pricing are one lookup.
 forbidden_modules = [
     "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
     "eap_processors", "eap_knowledge", "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai",
-    "fastmcp", "mcp", "dbos", "httpx", "opentelemetry", "genai_prices", "anthropic", "openai",
+    "fastmcp", "mcp", "dbos", "httpx", "opentelemetry", "anthropic", "openai",
 ]
 
 [[tool.importlinter.contracts]]

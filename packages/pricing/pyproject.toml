@@ -5,10 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "eap-pricing"
 version = "0.1.0"
-description = "Model price override file and cost arithmetic shared by the EAP API and worker"
+description = "Model price lookup (override file, genai-prices) and cost arithmetic shared by the EAP API and worker"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "genai-prices>=0.2.3",
     "pydantic>=2",
 ]
 

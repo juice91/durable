@@ -1,7 +1,8 @@
 """The operator model price override file and the cost arithmetic on it, shared by the worker
 (`eap_worker.pricing`, which prices every model request when it is recorded) and the API (the
-reindex dry run's embedding cost estimate). Standard library and pydantic only: genai-prices lookups
-stay in the worker, which the API may not consult.
+reindex dry run's embedding cost estimate), plus the genai-prices fallback both use (`genai_cost`,
+`price_request`, `price_known`): the worker prices with exactly the lookup `price_known` reports on,
+so the two can never disagree. Standard library, pydantic and genai-prices only.
 
 The file is `EAP_MODEL_PRICES_FILE` (a relative path resolved against the repository root; default
 `config/model-prices.json` there), reviewed like code. An exact `provider:name` key wins over a
@@ -26,10 +27,10 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -188,6 +189,120 @@ def override_cost(period: PricePeriod, usage: Usage) -> Decimal:
     return total / MTOK
 
 
+# ----------------------------------------------------------------------------- genai-prices
+
+# Our provider id -> genai-prices provider id, where they differ.
+GENAI_PROVIDER_IDS = {"google-gla": "google", "google-vertex": "google"}
+
+
+def genai_source() -> str:
+    """The price source label of a genai-prices price, e.g. "genai-prices/0.2.3"."""
+    try:
+        from importlib.metadata import version
+
+        return f"genai-prices/{version('genai-prices')}"
+    except Exception:  # noqa: BLE001 - only a label
+        return "genai-prices"
+
+
+def genai_cost(model_id: str, usage: Usage, at: datetime) -> Decimal | None:
+    """The unquantized genai-prices (bundled snapshot, no network) cost of `usage` for `model_id`
+    at `at`, or None when it has no price. `test:*` and `litellm:*` are never priced from it: a
+    model behind the LiteLLM proxy would otherwise be priced as the OpenAI model of that name."""
+    provider, _, name = model_id.partition(":")
+    if provider in OVERRIDE_ONLY_PROVIDERS or not name:
+        return None
+    try:
+        from genai_prices import Usage as GenaiUsage, calc_price
+
+        result = calc_price(
+            GenaiUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens or None,
+                cache_write_tokens=usage.cache_write_tokens or None,
+            ),
+            name,
+            provider_id=GENAI_PROVIDER_IDS.get(provider, provider),
+            genai_request_timestamp=at,
+        )
+    except LookupError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - a price lookup must never fail the run
+        log.warning("genai-prices lookup failed for %s: %s", model_id, type(exc).__name__)
+        return None
+    return Decimal(result.total_price)
+
+
+# ----------------------------------------------------------------------------- one lookup
+
+
+def _resolve(
+    model_id: str, usage: Usage, at: datetime, overrides: PriceFile | InvalidPriceFile | None
+) -> tuple[Decimal | None, str | None]:
+    """(unquantized cost, source) by the one lookup order: an invalid override file prices
+    nothing; else the override period in force on `at`'s date (exact key over `provider:*`); else
+    genai-prices; else (None, None)."""
+    if overrides is None:
+        overrides = load_overrides()
+    if isinstance(overrides, InvalidPriceFile):
+        return None, None
+    period = override_period(overrides, model_id, at.date())
+    if period is not None:
+        return override_cost(period, usage), SOURCE_OVERRIDE
+    cost = genai_cost(model_id, usage, at)
+    if cost is None:
+        return None, None
+    return cost, genai_source()
+
+
+def price_request(
+    model_id: str, usage: Usage, at: datetime, overrides: PriceFile | InvalidPriceFile | None = None
+) -> tuple[Decimal | None, str | None]:
+    """(cost in USD quantized to COST_QUANTUM, price source) of one model request, or (None, None)
+    when no price is known or the request is unmeasured. `overrides` defaults to `load_overrides()`
+    (the repo default file); pass a loaded file to use another default path."""
+    if not usage.measured:
+        return None, None
+    cost, source = _resolve(model_id, usage, at, overrides)
+    return (None, None) if cost is None else (cost.quantize(COST_QUANTUM), source)
+
+
+PriceStatus = Literal["priced", "zero", "unpriced"]
+PRICE_PRICED: PriceStatus = "priced"
+PRICE_ZERO: PriceStatus = "zero"
+PRICE_UNPRICED: PriceStatus = "unpriced"
+# A probe with every token kind: "zero" means none of them costs anything.
+_PROBE_OVERRIDE = Usage(input_tokens=3 * 1_000_000, output_tokens=1_000_000,
+                        cache_read_tokens=1_000_000, cache_write_tokens=1_000_000)
+_PROBE_GENAI = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+
+
+def price_known(
+    model_id: str, day: date | datetime, overrides: PriceFile | InvalidPriceFile | None = None
+) -> PriceStatus:
+    """Whether the worker would price a request of `model_id` on `day`: "priced" (a non-zero
+    price), "zero" (a price of 0, e.g. `litellm:*` in the repo file) or "unpriced" (no price: the
+    cost is recorded as None). Same lookup as `price_request`; an unreadable or invalid override
+    file is "unpriced" for every model, as the worker prices nothing then.
+
+    `day` is a date (genai-prices is asked at 00:00 UTC of it) or an aware datetime. `overrides`
+    defaults to `load_overrides()`."""
+    if isinstance(day, datetime):
+        at = day if day.tzinfo is not None else day.replace(tzinfo=timezone.utc)
+    else:
+        at = datetime.combine(day, time.min, tzinfo=timezone.utc)
+    if overrides is None:
+        overrides = load_overrides()
+    probe = _PROBE_OVERRIDE
+    if not isinstance(overrides, InvalidPriceFile) and override_period(overrides, model_id, at.date()) is None:
+        probe = _PROBE_GENAI  # genai-prices: input and output only (not every model has cache prices)
+    cost, _source = _resolve(model_id, probe, at, overrides)
+    if cost is None:
+        return PRICE_UNPRICED
+    return PRICE_ZERO if cost == 0 else PRICE_PRICED
+
+
 def format_cost(cost: Decimal | None) -> str | None:
     """A cost as the decimal string events and API responses carry (e.g. "0.0000123000")."""
     return None if cost is None else format(cost, "f")
@@ -196,19 +311,28 @@ def format_cost(cost: Decimal | None) -> str | None:
 __all__ = [
     "COST_QUANTUM",
     "DEFAULT_PRICES_FILE",
+    "GENAI_PROVIDER_IDS",
     "InvalidPriceFile",
     "MTOK",
     "OVERRIDE_ONLY_PROVIDERS",
     "PRICES_FILE_ENV",
+    "PRICE_PRICED",
+    "PRICE_UNPRICED",
+    "PRICE_ZERO",
     "PriceFile",
     "PricePeriod",
+    "PriceStatus",
     "REPO_ROOT",
     "SOURCE_OVERRIDE",
     "Usage",
     "format_cost",
+    "genai_cost",
+    "genai_source",
     "load_overrides",
     "override_cost",
     "override_period",
     "parse_price_file",
+    "price_known",
+    "price_request",
     "prices_file_path",
 ]

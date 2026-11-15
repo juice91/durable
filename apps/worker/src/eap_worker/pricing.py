@@ -13,7 +13,8 @@ provider-reported model name:
        {"models": {"litellm:*": [{"effective_from": "2026-01-01", "input_per_mtok": "0",
                                   "output_per_mtok": "0"}]}}
 
-2. `genai-prices` (Pydantic's price data, bundled snapshot, no network) for direct providers only.
+2. `genai-prices` (Pydantic's price data, bundled snapshot, no network; looked up in `eap_pricing`,
+   so `eap_pricing.price_known` and this module can never disagree) for direct providers only.
    `test:*` and `litellm:*` are never priced from it: a model behind the LiteLLM proxy (an
    OpenAI-compatible endpoint) would otherwise be priced as if it were the OpenAI model of that name.
 
@@ -35,10 +36,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from eap_schemas.knowledge import approx_tokens
+
 # The override file and its cost arithmetic are shared with the API's reindex estimate (eap_pricing);
 # re-exported here so existing imports keep working.
 from eap_pricing import (
     COST_QUANTUM,
+    GENAI_PROVIDER_IDS,
     OVERRIDE_ONLY_PROVIDERS,
     PRICES_FILE_ENV,
     REPO_ROOT,
@@ -51,6 +55,7 @@ from eap_pricing import (
     override_cost,
     override_period,
     parse_price_file,
+    price_request,
 )
 from eap_pricing import DEFAULT_PRICES_FILE as _SHARED_DEFAULT_PRICES_FILE
 from eap_pricing import prices_file_path as _shared_prices_file_path
@@ -58,17 +63,6 @@ from eap_pricing import prices_file_path as _shared_prices_file_path
 log = logging.getLogger("eap_worker")
 
 DEFAULT_PRICES_FILE = _SHARED_DEFAULT_PRICES_FILE
-# Our provider id -> genai-prices provider id, where they differ.
-_GENAI_PROVIDER_IDS = {"google-gla": "google", "google-vertex": "google"}
-
-
-def _genai_source() -> str:
-    try:
-        from importlib.metadata import version
-
-        return f"genai-prices/{version('genai-prices')}"
-    except Exception:  # noqa: BLE001 - only a label
-        return "genai-prices"
 
 
 def prices_file_path() -> Path:
@@ -82,49 +76,12 @@ def _load_overrides() -> PriceFile | InvalidPriceFile:
     return load_overrides(DEFAULT_PRICES_FILE)
 
 
-def _genai_cost(model_id: str, usage: Usage, at: datetime) -> Decimal | None:
-    provider, _, name = model_id.partition(":")
-    if provider in OVERRIDE_ONLY_PROVIDERS or not name:
-        return None
-    try:
-        from genai_prices import Usage as GenaiUsage, calc_price
-
-        result = calc_price(
-            GenaiUsage(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_tokens=usage.cache_read_tokens or None,
-                cache_write_tokens=usage.cache_write_tokens or None,
-            ),
-            name,
-            provider_id=_GENAI_PROVIDER_IDS.get(provider, provider),
-            genai_request_timestamp=at,
-        )
-    except LookupError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - a price lookup must never fail the run
-        log.warning("genai-prices lookup failed for %s: %s", model_id, type(exc).__name__)
-        return None
-    return Decimal(result.total_price)
-
-
 def price(model_id: str, usage: Usage, at: datetime | None = None) -> tuple[Decimal | None, str | None]:
     """(cost in USD quantized to 10 decimals, price source) for one model request of `model_id`,
     or (None, None) when no price is known. An unmeasured request (the provider reported no usage)
-    has no cost: (None, None)."""
-    if not usage.measured:
-        return None, None
-    at = at or datetime.now(timezone.utc)
-    overrides = _load_overrides()
-    if isinstance(overrides, InvalidPriceFile):
-        return None, None
-    period = override_period(overrides, model_id, at.date())
-    if period is not None:
-        return override_cost(period, usage).quantize(COST_QUANTUM), SOURCE_OVERRIDE
-    cost = _genai_cost(model_id, usage, at)
-    if cost is None:
-        return None, None
-    return cost.quantize(COST_QUANTUM), _genai_source()
+    has no cost: (None, None). The lookup is `eap_pricing.price_request`, the same one
+    `eap_pricing.price_known` reports on."""
+    return price_request(model_id, usage, at or datetime.now(timezone.utc), _load_overrides())
 
 
 # ----------------------------------------------------------------------------- recording
@@ -143,11 +100,57 @@ def usage_from_response(usage: Any) -> Usage:
     )
 
 
-def request_usage_input(model_id: str, provider_model_name: str | None, usage: Any) -> dict[str, Any]:
+USAGE_OUTPUT_BELOW_REASONING = "usage_output_below_reasoning"
+
+# Providers (our model id prefix) whose output count INCLUDES reasoning: an OpenAI-compatible
+# Chat Completions / Responses endpoint, mapped by pydantic_ai.models.openai (`completion_tokens`
+# -> output_tokens, `completion_tokens_details.reasoning_tokens` -> details). There
+# output_tokens < reasoning_tokens is impossible, so it is a gateway bug the guard corrects.
+# Every other provider is left exactly as reported: xAI (pydantic_ai.models.xai) reports
+# `completion_tokens` EXCLUDING reasoning (total = prompt + completion + reasoning), so a short
+# answer after long reasoning is a correct count there, and others may follow either convention.
+REASONING_INCLUSIVE_PROVIDERS = frozenset({"litellm", "openai", "azure"})
+
+
+def reasoning_tokens(usage: Any) -> int:
+    """The reasoning tokens a `RequestUsage` reports: `output_reasoning_tokens`, or the OpenAI
+    `completion_tokens_details.reasoning_tokens` Pydantic AI keeps in `details`."""
+    details = getattr(usage, "details", None) or {}
+    from_details = details.get("reasoning_tokens", 0) if isinstance(details, dict) else 0
+    return max(int(getattr(usage, "output_reasoning_tokens", 0) or 0), int(from_details or 0))
+
+
+def response_output_approx_tokens(response: Any) -> int:
+    """approx_tokens of a ModelResponse's text and tool-call arguments (thinking excluded: the
+    provider's reasoning count covers it)."""
+    total = 0
+    for part in getattr(response, "parts", ()) or ():
+        kind = getattr(part, "part_kind", None)
+        if kind == "text":
+            total += approx_tokens(part.content or "")
+        elif kind in ("tool-call", "builtin-tool-call"):
+            try:
+                total += approx_tokens(part.args_as_json_str())
+            except Exception:  # noqa: BLE001 - an estimate only
+                total += approx_tokens(str(part.args or ""))
+    return total
+
+
+def request_usage_input(
+    model_id: str, provider_model_name: str | None, usage: Any, *, streamed_response: Any = None
+) -> dict[str, Any]:
     """What the workflow passes to `eap.append_event` for a model request: plain JSON, built from
-    the checkpointed response only (no pricing, no I/O)."""
+    the checkpointed response only (no pricing, no I/O).
+
+    `streamed_response` is the ModelResponse `usage` came from, given only for a streamed request.
+    Some OpenAI-compatible gateways (the Studio LiteLLM proxy) then report `completion_tokens`
+    below `completion_tokens_details.reasoning_tokens`, which is impossible (completion includes
+    reasoning). Such a usage is corrected to an estimate, reasoning tokens + approx_tokens of the
+    response's text and tool-call arguments, logged (`usage_output_below_reasoning`, counts only)
+    and marked `usage_estimated: True`; the corrected count is what is recorded, priced and summed
+    into the run totals. A non-streamed request (no `streamed_response`) is never changed."""
     u = usage_from_response(usage)
-    return {
+    out: dict[str, Any] = {
         "model_id": model_id,
         "provider_model_name": provider_model_name,
         "input_tokens": u.input_tokens,
@@ -156,6 +159,25 @@ def request_usage_input(model_id: str, provider_model_name: str | None, usage: A
         "cache_write_tokens": u.cache_write_tokens,
         "usage_measured": u.measured,
     }
+    # Streamed only, by design: the gateway misreport was seen on streamed responses (the usage
+    # chunk at the end of the stream), and the estimate needs the whole response the usage belongs
+    # to, which only the streamed call site (workflow.py, model.request_stream) passes. Non-streamed
+    # callers (processors, the observer, moderation) record the provider's count unchanged.
+    provider = model_id.partition(":")[0]
+    if streamed_response is not None and u.measured and provider in REASONING_INCLUSIVE_PROVIDERS:
+        reasoning = reasoning_tokens(usage)
+        if u.output_tokens < reasoning:
+            estimate = reasoning + response_output_approx_tokens(streamed_response)
+            log.warning(
+                "%s: model %s reported output_tokens=%d below reasoning_tokens=%d; recording %d (estimated)",
+                USAGE_OUTPUT_BELOW_REASONING, model_id, u.output_tokens, reasoning, estimate,
+                extra={"code": USAGE_OUTPUT_BELOW_REASONING, "model_id": model_id,
+                       "reported_output_tokens": u.output_tokens, "reasoning_tokens": reasoning,
+                       "estimated_output_tokens": estimate},
+            )
+            out["output_tokens"] = estimate
+            out["usage_estimated"] = True
+    return out
 
 
 def usage_record(request_key: str, usage_input: dict[str, Any], at: datetime | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -198,6 +220,9 @@ def usage_record(request_key: str, usage_input: dict[str, Any], at: datetime | N
         },
         "cost_usd": None if cost is None else format(cost, "f"),
     }
+    if usage_input.get("usage_estimated"):
+        # Additive: output_tokens is our estimate (request_usage_input), not the provider's count.
+        event_fields["usage"]["estimated"] = True
     return row, event_fields
 
 
@@ -256,16 +281,21 @@ def embedding_usage_record(
 
 __all__ = [
     "DEFAULT_PRICES_FILE",
+    "GENAI_PROVIDER_IDS",
     "OPERATION_CHAT",
     "OPERATION_EMBEDDING",
     "embedding_usage_record",
     "InvalidPriceFile",
     "PRICES_FILE_ENV",
+    "REASONING_INCLUSIVE_PROVIDERS",
+    "USAGE_OUTPUT_BELOW_REASONING",
     "Usage",
     "parse_price_file",
     "price",
     "prices_file_path",
+    "reasoning_tokens",
     "request_usage_input",
+    "response_output_approx_tokens",
     "usage_from_response",
     "usage_record",
 ]
