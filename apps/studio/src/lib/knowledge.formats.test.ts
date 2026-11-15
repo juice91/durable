@@ -90,13 +90,13 @@ describe("per-type caps (EAP_KB_MAX_DOCUMENT_BYTES, _STRUCTURED_BYTES, _BINARY_B
 
   it("checkUploadFile applies each format's cap and says how it is sent", () => {
     expect(checkUploadFile({ name: "m.pdf", size: 25 * MiB })).toEqual({ ok: true, mimeType: "application/pdf", key: "m.pdf", title: "m", binary: true, maxBytes: 25 * MiB });
-    expect(checkUploadFile({ name: "m.pdf", size: 25 * MiB + 1 })).toEqual({ ok: false, reason: "The file is larger than 25 MiB." });
+    expect(checkUploadFile({ name: "m.pdf", size: 25 * MiB + 1 })).toEqual({ ok: false, code: "too_large", reason: "The file is larger than 25 MiB." });
     expect(checkUploadFile({ name: "b.yaml", size: 2 * MiB }).ok).toBe(true);
-    expect(checkUploadFile({ name: "b.yml", size: 2 * MiB + 1 })).toEqual({ ok: false, reason: "The file is larger than 2 MiB." });
-    expect(checkUploadFile({ name: "c.json", size: 3 * MiB })).toEqual({ ok: false, reason: "The file is larger than 2 MiB." });
+    expect(checkUploadFile({ name: "b.yml", size: 2 * MiB + 1 })).toEqual({ ok: false, code: "too_large", reason: "The file is larger than 2 MiB." });
+    expect(checkUploadFile({ name: "c.json", size: 3 * MiB })).toEqual({ ok: false, code: "too_large", reason: "The file is larger than 2 MiB." });
     expect(checkUploadFile({ name: "d.rst", size: 5 * MiB })).toMatchObject({ ok: true, mimeType: "text/x-rst", binary: false });
-    expect(checkUploadFile({ name: "d.rst", size: 5 * MiB + 1 })).toEqual({ ok: false, reason: "The file is larger than 5 MiB." });
-    expect(checkUploadFile({ name: "x.docx", size: 10 })).toEqual({ ok: false, reason: "Unsupported file type: upload .md, .txt, .html, .rst, .pdf, .yaml, .yml or .json files." });
+    expect(checkUploadFile({ name: "d.rst", size: 5 * MiB + 1 })).toEqual({ ok: false, code: "too_large", reason: "The file is larger than 5 MiB." });
+    expect(checkUploadFile({ name: "x.docx", size: 10 })).toEqual({ ok: false, code: "unsupported_type", reason: "Unsupported file type: upload .md, .txt, .html, .rst, .pdf, .yaml, .yml or .json files." });
   });
 
   it("documentPutProblem: text keeps the JSON body cap; YAML/JSON content its 2 MiB; base64 the guard and the decoded binary cap", () => {

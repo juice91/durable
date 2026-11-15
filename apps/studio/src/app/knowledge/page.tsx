@@ -155,7 +155,7 @@ export default function KnowledgePage() {
         }
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
-        <p className="text-body text-muted-foreground">Documents agents can search and cite. Upload Markdown, text or HTML; each is split into sections and embedded.</p>
+        <p className="text-body text-muted-foreground">Documents agents can search and cite. Upload Markdown, text, HTML, reStructuredText, PDF, YAML or JSON; each is split into sections and embedded.</p>
         <DataList
           label="Knowledge bases"
           testId="knowledge-list"

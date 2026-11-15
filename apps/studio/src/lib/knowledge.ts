@@ -703,7 +703,6 @@ export function titleFromFileName(fileName: string): string {
   return base.trim() || fileName;
 }
 
-/** Reads `file` as UTF-8 text (FileReader). */
 /** Thrown by `readFileAsText` for bytes that are not valid UTF-8. */
 export class NotUtf8Error extends Error {
   constructor() {
@@ -733,9 +732,87 @@ function readFileBytes(file: Blob): Promise<ArrayBuffer> {
   });
 }
 
-/** Reads `file` (FileReader) and decodes it as strict UTF-8 (see decodeUtf8). */
-export async function readFileAsText(file: Blob): Promise<string> {
-  return decodeUtf8(await readFileBytes(file));
+/**
+ * The MIME type of a known binary signature at offset 0 of `bytes`, or null: the mirror of the API's
+ * `eap_knowledge.formats.detect_binary_type` (PDF, PNG, JPEG, WebP). Offset 0 only, so text that
+ * merely mentions "%PDF-1.7" is never misread.
+ */
+export function detectBinaryType(bytes: ArrayBuffer | Uint8Array): string | null {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const startsWith = (signature: readonly number[], offset = 0) => signature.every((byte, i) => view[offset + i] === byte);
+  if (startsWith([0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"; // %PDF-
+  if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWith([0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (view.length >= 12 && startsWith([0x52, 0x49, 0x46, 0x46]) && startsWith([0x57, 0x45, 0x42, 0x50], 8)) return "image/webp"; // RIFF....WEBP
+  return null;
+}
+
+/** The API's PDF_SIGNATURE_WINDOW (eap_knowledge.formats): `%PDF-` must start in the first 1 KiB of a PDF upload. */
+export const PDF_SIGNATURE_WINDOW = 1024;
+
+/**
+ * The mirror of the API's `has_pdf_signature`: `%PDF-` starts before byte PDF_SIGNATURE_WINDOW (it
+ * may end past it; junk before the header is legal). Only for files uploaded AS PDF: a text
+ * upload's check is `detectBinaryType` at offset 0, as on the server, so prose that mentions
+ * "%PDF-" is never refused.
+ */
+export function hasPdfSignature(bytes: ArrayBuffer | Uint8Array): boolean {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const signature = [0x25, 0x50, 0x44, 0x46, 0x2d];
+  const last = Math.min(PDF_SIGNATURE_WINDOW - 1, view.length - signature.length);
+  for (let start = 0; start <= last; start += 1) {
+    if (signature.every((byte, i) => view[start + i] === byte)) return true;
+  }
+  return false;
+}
+
+const UNSUPPORTED_CONTENT = "The file's content does not match its declared type.";
+
+/**
+ * Thrown when a file's bytes are not its declared type, with the API's 415 `unsupported_content`
+ * message: a text upload that is really a binary file ("It looks like application/pdf, not
+ * text/plain."), or a PDF upload with no `%PDF-` in its first 1 KiB.
+ */
+export class ContentMismatchError extends Error {
+  readonly detected: string | null;
+  readonly declared: string;
+  constructor(detected: string | null, declared: string, reason?: string) {
+    super(detected ? `${UNSUPPORTED_CONTENT} It looks like ${detected}, not ${declared}.` : `${UNSUPPORTED_CONTENT} ${reason ?? ""}`.trim());
+    this.name = "ContentMismatchError";
+    this.detected = detected;
+    this.declared = declared;
+  }
+}
+
+/** Refuses a PDF upload whose first bytes have no `%PDF-` in the window (the API's 415, same message). */
+async function checkPdfSignature(file: Blob, declaredType: string): Promise<void> {
+  const head = await readFileBytes(file.slice(0, PDF_SIGNATURE_WINDOW + 4));
+  if (hasPdfSignature(head)) return;
+  throw new ContentMismatchError(
+    detectBinaryType(head),
+    declaredType,
+    `It has no %PDF- signature in its first ${PDF_SIGNATURE_WINDOW.toLocaleString("en-US")} bytes, so it is not a PDF.`,
+  );
+}
+
+/**
+ * Reads `file` (FileReader) and decodes it as strict UTF-8 (see decodeUtf8). With `declaredType`
+ * (the MIME type it will be uploaded as), a file that starts with a binary signature is refused
+ * first with ContentMismatchError, which names what it looks like, instead of "not valid UTF-8".
+ */
+export async function readFileAsText(file: Blob, declaredType?: string): Promise<string> {
+  const bytes = await readFileBytes(file);
+  if (declaredType) {
+    const detected = detectBinaryType(bytes);
+    if (detected) throw new ContentMismatchError(detected, declaredType);
+  }
+  return decodeUtf8(bytes);
+}
+
+/** A file the browser cannot send as its declared type (not UTF-8, or a binary file under a text
+ * name): retrying cannot change the outcome, unlike a failed request. */
+export function isUnreadableFileError(reason: unknown): reason is NotUtf8Error | ContentMismatchError {
+  return reason instanceof NotUtf8Error || reason instanceof ContentMismatchError;
 }
 
 /**
@@ -779,9 +856,16 @@ export function base64DecodedLength(value: string): number {
   return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
 }
 
-/** The upload body for a file of `format`: `content_base64` for a binary format, else UTF-8 `content`. */
-export async function readUploadContent(file: Blob, format: Pick<UploadFormat, "binary">): Promise<Pick<DocumentPut, "content" | "content_base64">> {
-  return format.binary ? { content_base64: await readFileAsBase64(file) } : { content: await readFileAsText(file) };
+/** The upload body for a file of `format`: `content_base64` for a binary format, else UTF-8 `content`.
+ * With `format.mimeType`, refused with ContentMismatchError as the API would: a text file whose
+ * bytes start with a binary signature, or a PDF with no `%PDF-` in its first 1 KiB. */
+export async function readUploadContent(
+  file: Blob,
+  format: Pick<UploadFormat, "binary"> & { mimeType?: string },
+): Promise<Pick<DocumentPut, "content" | "content_base64">> {
+  if (!format.binary) return { content: await readFileAsText(file, format.mimeType) };
+  if (format.mimeType && uploadFormatForMime(format.mimeType)?.format === "pdf") await checkPdfSignature(file, format.mimeType);
+  return { content_base64: await readFileAsBase64(file) };
 }
 
 /** "Text up to 5 MiB, YAML and JSON up to 2 MiB, PDF up to 25 MiB." (the upload Sheet's hint). */
@@ -790,9 +874,12 @@ export function uploadCapsText(caps: UploadCaps = DEFAULT_UPLOAD_CAPS): string {
   return `Text up to ${mibLabel(caps.text)} MiB, YAML and JSON up to ${mibLabel(structured)} MiB, PDF up to ${mibLabel(caps.binary)} MiB.`;
 }
 
+/** Why a file is refused before it is read: its chip in the upload list says which. */
+export type UploadRefusal = "unsupported_type" | "empty" | "too_large" | "bad_key";
+
 export type UploadCheck =
   | { ok: true; mimeType: string; key: string; title: string; binary: boolean; maxBytes: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; code: UploadRefusal };
 
 function mib(bytes: number): number {
   return Math.round(bytes / (1024 * 1024));
@@ -812,12 +899,12 @@ function mibLabel(bytes: number): string {
  */
 export function checkUploadFile(file: { name: string; size: number }, maxBytes: number = DEFAULT_MAX_DOCUMENT_BYTES, caps: UploadCaps = DEFAULT_UPLOAD_CAPS): UploadCheck {
   const format = uploadFormatForFile(file.name);
-  if (!format) return { ok: false, reason: `Unsupported file type: upload ${UPLOAD_EXTENSIONS_TEXT} files.` };
-  if (file.size === 0) return { ok: false, reason: "The file is empty." };
+  if (!format) return { ok: false, code: "unsupported_type", reason: `Unsupported file type: upload ${UPLOAD_EXTENSIONS_TEXT} files.` };
+  if (file.size === 0) return { ok: false, code: "empty", reason: "The file is empty." };
   const cap = capFor(format, { ...caps, text: maxBytes });
-  if (file.size > cap) return { ok: false, reason: `The file is larger than ${mibLabel(cap)} MiB.` };
+  if (file.size > cap) return { ok: false, code: "too_large", reason: `The file is larger than ${mibLabel(cap)} MiB.` };
   const key = documentKeyFrom(file.name);
-  if (!key) return { ok: false, reason: "The file name cannot be used as a document key." };
+  if (!key) return { ok: false, code: "bad_key", reason: "The file name cannot be used as a document key." };
   return { ok: true, mimeType: format.mimeType, key, title: titleFromFileName(file.name), binary: format.binary, maxBytes: cap };
 }
 

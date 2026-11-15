@@ -295,13 +295,13 @@ describe("upload: size and type refusals follow the API's caps", () => {
     expect(documentPutBytes(key, bodyOf("é"))).toBe(overhead + 2);
     // The file-size test is only a pre-check: content alone over the cap can never fit.
     expect(checkUploadFile({ name: "a.md", size: DEFAULT_MAX_DOCUMENT_BYTES }).ok).toBe(true);
-    expect(checkUploadFile({ name: "a.md", size: DEFAULT_MAX_DOCUMENT_BYTES + 1 })).toEqual({ ok: false, reason: "The file is larger than 5 MiB." });
+    expect(checkUploadFile({ name: "a.md", size: DEFAULT_MAX_DOCUMENT_BYTES + 1 })).toEqual({ ok: false, code: "too_large", reason: "The file is larger than 5 MiB." });
   });
 
   it("accepts .md .markdown .txt .text .html .htm .pdf in any case (their MIME types); refuses the rest by name", async () => {
     on("PUT", /\/documents\/[^/]+$/, (url) => accepted(decodeURIComponent(url.pathname.split("/").pop()!)));
     const sheet = await openUpload();
-    drop(sheet, [fileOf("A.MD"), fileOf("b.markdown"), fileOf("c.txt"), fileOf("d.text"), fileOf("e.HTML"), fileOf("f.htm"), fileOf("g.pdf"), fileOf("h.docx"), fileOf("noext"), fileOf("i.png")]);
+    drop(sheet, [fileOf("A.MD"), fileOf("b.markdown"), fileOf("c.txt"), fileOf("d.text"), fileOf("e.HTML"), fileOf("f.htm"), fileOf("g.pdf", "%PDF-1.7 hello"), fileOf("h.docx"), fileOf("noext"), fileOf("i.png")]);
     expect(statuses(sheet)).toEqual(["ready", "ready", "ready", "ready", "ready", "ready", "ready", "refused", "refused", "refused"]);
     expect(within(sheet).getAllByTestId("knowledge-upload-refused")).toHaveLength(3);
     expect(within(sheet).getByTestId("knowledge-upload-submit")).toHaveTextContent("Upload 7 files");

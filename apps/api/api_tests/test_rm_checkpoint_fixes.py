@@ -9,7 +9,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from eap_api.launcher import KB_INGEST_QUEUE_NAME, QUEUE_NAME
+from eap_api.launcher import KB_INGEST_QUEUE_NAME, LEGACY_KB_INGEST_QUEUE_NAME, QUEUE_NAME
 from eap_api.routes.knowledge import decode_document_cursor, encode_document_cursor
 from eap_api.schemas import document_key_problem
 
@@ -65,15 +65,20 @@ def test_dot_keys_never_reach_the_knowledge_base(pg, tenant_of, fake_dbos, kb_cl
 
 @requires_pg
 def test_kb_ingest_is_enqueued_on_its_own_queue(pg, tenant_of, fake_dbos, kb_cleanup):
-    assert KB_INGEST_QUEUE_NAME == "eap-kb-ingest" and QUEUE_NAME == "eap-agent-runs"
+    assert KB_INGEST_QUEUE_NAME == "eap-kb-ingest-fair" and QUEUE_NAME == "eap-agent-runs"
+    assert LEGACY_KB_INGEST_QUEUE_NAME == "eap-kb-ingest"
     client, _ = pg
-    _, h = tenant_of()
+    tenant, h = tenant_of()
     kb = _create_kb(client, h)
     run_id = str(uuid.uuid4())
     assert _put(client, h, kb["id"], run_id=run_id).status_code == 202
     (options, _args), = fake_dbos.calls
-    assert options["queue_name"] == "eap-kb-ingest" and options["workflow_id"] == run_id
+    assert options["queue_name"] == "eap-kb-ingest-fair" and options["workflow_id"] == run_id
     assert options["workflow_name"] == "eap.kb_ingest"
+    # Partitioned by tenant and knowledge base (RAG P1 follow-up), no deduplication id (DBOS
+    # refuses one on a partitioned queue).
+    assert options["queue_partition_key"] == f"{tenant}:{kb['id']}"
+    assert "deduplication_id" not in options
 
 
 # ------------------------------------------------------------------------ memory specs (helpers)

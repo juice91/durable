@@ -2,9 +2,10 @@
 
 Hand-off (apps/api/src/eap_api/launcher.py, KB_INGEST_WORKFLOW_NAME): the API inserts a `runs` row of
 kind 'kb_ingest' and enqueues `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on
-its own queue `eap-kb-ingest` (eap_worker.config.KB_INGEST_QUEUE_NAME; at most
-EAP_KB_INGEST_CONCURRENCY, default 2, running per worker) with workflow_id = run_id. Runs enqueued
-on `eap-agent-runs` before that split still run there. `input_json` is the run's canonical input:
+its own queue `eap-kb-ingest-fair` (eap_worker.config.KB_INGEST_QUEUE_NAME, partitioned by tenant
+and knowledge base; at most EAP_KB_INGEST_CONCURRENCY, default 2, running per worker) with
+workflow_id = run_id. Runs enqueued on the unpartitioned `eap-kb-ingest` or on `eap-agent-runs`
+before those changes still run there. `input_json` is the run's canonical input:
 
     ingest:  {"doc_version": N, "document_id": "<uuid>"}   chunk and embed that version, then switch
     reindex: {"reindex": G}                                 embed the pending generation G, then switch

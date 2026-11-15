@@ -92,7 +92,7 @@ value stops the worker instead of failing each run.
 | `EAP_EMBEDDING_MAX_BATCH_INPUTS`, `EAP_EMBEDDING_MAX_BATCH_TOKENS` | 32, 16384 | Caps per provider request; a larger call is split |
 | `EAP_EMBEDDING_TIMEOUT_S` | 120 | Per provider request (transport retries off; the step retries) |
 | `EAP_RECALL_TIMEOUT_S` | 8 | Deadline of each pre-turn recall query attempt |
-| `EAP_KB_INGEST_CONCURRENCY` | 2 | `eap.kb_ingest` runs at once per worker, on the `eap-kb-ingest` queue |
+| `EAP_KB_INGEST_CONCURRENCY` | 2 | `eap.kb_ingest` runs at once per worker, on the `eap-kb-ingest-fair` queue (partitioned by knowledge base; the same cap on the legacy `eap-kb-ingest`) |
 | `EAP_KB_MAX_INGEST_TOKENS` | 2000000 | Per-run budget of un-cached approximate embedding tokens (`ingest_budget_exceeded` before any provider call) |
 | `EAP_KB_MAX_PDF_PAGES` | 2000 (1 to 20000) | Pages a PDF may have; more fails the ingest `extraction_failed` (`extract_limit`) |
 | `EAP_KB_EXTRACT_CPU_SECONDS` | 60 (1 to 3600) | `RLIMIT_CPU` of the extraction sandbox child; its wall timeout is twice this (`extract_timeout`) |
@@ -283,3 +283,44 @@ step layouts:
   knowledge base and the hits' documents in their own transaction and leave out deleted documents'
   hits; a deleted knowledge base ends the run `failed` (`knowledge_base_deleted`, no content).
   Ordinary tool runs are unchanged.
+
+### Fair ingest queue (RAG P1 follow-up, deploy note)
+
+- **New queue `eap-kb-ingest-fair`, partitioned by tenant and knowledge base.** The API now
+  enqueues every `eap.kb_ingest` (ingest, re-extract, reindex) there with the partition key
+  `{tenant_id}:{knowledge_base_id}` (`eap_schemas.knowledge.kb_ingest_partition_key`). The worker
+  registers it with `worker_concurrency` and `partition_worker_concurrency` both set to
+  `EAP_KB_INGEST_CONCURRENCY`: one knowledge base alone still uses every slot, but each poll visits
+  the partitions with queued runs in random order, so an upload into one knowledge base gets the
+  next free slot about half the time even behind a bulk import of hundreds into another (before,
+  one FIFO line made it wait for the whole import).
+- **Why a new name.** A DBOS queue is either partitioned or not, and a partitioned queue never
+  dequeues a workflow without a partition key. Runs the old API enqueued on `eap-kb-ingest` carry
+  none, so the old queue stays registered, unpartitioned, with the same per-worker cap, and its runs
+  still run. Nothing new is enqueued there.
+- **Every worker polls every queue in the database.** DBOS 3.5 queues are rows in the system
+  database (`register_queue` upserts one), and each worker's queue thread starts a poller for
+  every queue row of the application, registered by it or not (the worker never calls
+  `listen_queues`). So once one new worker has registered `eap-kb-ingest-fair`, an OLD worker
+  (main's code) dequeues from it too, with the partition limits read from the row, as long as it
+  has the same `EAP_APP_VERSION` (dequeue matches the workflow's application version). Workers keep
+  polling `eap-kb-ingest` for as long as its row exists, even after the code stops registering it.
+- **Mixed versions.** Because of the above, an old worker can pick up a new API's run from the fair
+  queue. Its `eap.kb_ingest` lacks P1 extraction, so rst/PDF/YAML/JSON documents would fail there
+  (`extraction_failed`) and its step records could not be replayed by a new worker: the same rule
+  as the P1.A3 note above, **do not mix worker versions**. Deploy order: stop the old workers,
+  start the new ones (they register both queues), then switch the API. While old runs drain, a
+  worker can run up to `EAP_KB_INGEST_CONCURRENCY` from each of the two queues (twice the cap on
+  the embedding provider); drain `eap-kb-ingest` first (no `eap.kb_ingest` ENQUEUED or PENDING on
+  it) if the provider cannot take that. Nothing new is enqueued on it, so once empty it stays empty.
+- **Removing the legacy queue later.** Deleting the `register_queue` call is not enough: the row
+  stays and every worker keeps polling it. Remove it only when ALL of these hold: no API older
+  than this release is running (none can enqueue there); no `eap.kb_ingest` workflow on
+  `eap-kb-ingest` is ENQUEUED or PENDING (`DBOS.list_workflows(queue_name="eap-kb-ingest",
+  status=["ENQUEUED", "PENDING"])` is empty; delete_queue makes such workflows unrecoverable);
+  and every running worker is a release that no longer calls `register_queue("eap-kb-ingest")`
+  (otherwise its next start re-creates the row). Then delete the row once, from any process
+  against the system database: `DBOSClient(system_database_url=..., dbos_system_schema=...).delete_queue("eap-kb-ingest")`
+  (or `DBOS.delete_queue("eap-kb-ingest")` inside a launched worker). Pollers stop within about a
+  second (a queue thread exits when its row is gone).
+- No step, input or event changes: replay of any run is unaffected.

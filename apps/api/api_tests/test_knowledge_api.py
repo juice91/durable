@@ -129,8 +129,8 @@ def test_upload_creates_a_kb_ingest_run_and_unchanged_is_a_noop(pg, tenant_of, f
     assert doc["title"] == "guide.md" and doc["metadata"] == {"team": "it"} and "content" not in doc
 
     (options, args), = fake_dbos.calls
-    assert options["workflow_name"] == "eap.kb_ingest" and options["queue_name"] == "eap-kb-ingest"
-    assert options["workflow_id"] == run_id
+    assert options["workflow_name"] == "eap.kb_ingest" and options["queue_name"] == "eap-kb-ingest-fair"
+    assert options["workflow_id"] == run_id and options["queue_partition_key"] == f"{tenant}:{kb['id']}"
     expected_input = json.dumps({"doc_version": 1, "document_id": doc["id"], "embed_split": True}, separators=(",", ":"))  # P1.C5
     assert args == (run_id, tenant, kb["id"], expected_input)
 

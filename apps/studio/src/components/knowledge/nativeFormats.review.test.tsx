@@ -96,7 +96,7 @@ describe("PDF reading off the main thread (review MAJOR 1)", () => {
   it("a file shows Reading file… while it is read, then Uploading…", async () => {
     let finishRead: () => void = () => undefined;
     const original = FileReader.prototype.readAsDataURL;
-    vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader, blob: Blob) {
+    const dataUrl = vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader, blob: Blob) {
       finishRead = () => original.call(this, blob);
     });
     let answer: (value: { status: number; body: unknown }) => void = () => undefined;
@@ -108,6 +108,8 @@ describe("PDF reading off the main thread (review MAJOR 1)", () => {
     const row = within(sheet).getByTestId("knowledge-upload-file");
     await waitFor(() => expect(row).toHaveAttribute("data-status", "reading"));
     expect(row).toHaveTextContent("Reading file…");
+    // The 1 KiB %PDF- check reads first; the base64 read starts after it.
+    await waitFor(() => expect(dataUrl).toHaveBeenCalled());
     act(() => finishRead());
     await waitFor(() => expect(row).toHaveAttribute("data-status", "uploading"));
     expect(sent("PUT", /\/documents\//)).toHaveLength(1);

@@ -6,8 +6,14 @@ import {
   STUCK_PENDING_AFTER_MS,
   checkUploadFile,
   decodeUtf8,
+  ContentMismatchError,
+  detectBinaryType,
+  hasPdfSignature,
+  PDF_SIGNATURE_WINDOW,
+  isUnreadableFileError,
   NotUtf8Error,
   readFileAsText,
+  readUploadContent,
   deleteKnowledgeBase,
   describeIngestError,
   documentKeyFrom,
@@ -197,6 +203,52 @@ describe("requests", () => {
 });
 
 describe("strict UTF-8 and aborts", () => {
+  it("detectBinaryType mirrors the API's offset-0 signatures; a text read with a declared type names what the file looks like", async () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+    expect(detectBinaryType(enc("%PDF-1.7\n"))).toBe("application/pdf");
+    expect(detectBinaryType(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("image/png");
+    expect(detectBinaryType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe("image/jpeg");
+    expect(detectBinaryType(enc("RIFF\u0000\u0000\u0000\u0000WEBPVP8 "))).toBe("image/webp");
+    expect(detectBinaryType(enc("RIFF....WAVE"))).toBeNull();
+    expect(detectBinaryType(enc("see %PDF-1.7 in prose"))).toBeNull(); // offset 0 only
+    expect(detectBinaryType(new Uint8Array([]))).toBeNull();
+
+    const pdf = new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0xe2, 0xe3])]);
+    const mismatch = readFileAsText(pdf, "text/plain");
+    await expect(mismatch).rejects.toBeInstanceOf(ContentMismatchError);
+    await expect(readFileAsText(pdf, "text/plain")).rejects.toThrow(
+      "The file's content does not match its declared type. It looks like application/pdf, not text/plain.",
+    );
+    // Without a declared type the strict UTF-8 read is unchanged.
+    await expect(readFileAsText(pdf)).rejects.toBeInstanceOf(NotUtf8Error);
+    // An ASCII "%PDF-" file under a text name is refused as the API would (415), not sent.
+    await expect(readUploadContent(new Blob(["%PDF-ascii only"]), { binary: false, mimeType: "text/plain" })).rejects.toBeInstanceOf(ContentMismatchError);
+    await expect(readUploadContent(new Blob(["title: x\n"]), { binary: false, mimeType: "application/yaml" })).resolves.toEqual({ content: "title: x\n" });
+    expect(isUnreadableFileError(new NotUtf8Error())).toBe(true);
+    expect(isUnreadableFileError(new ContentMismatchError("image/png", "text/markdown"))).toBe(true);
+    expect(isUnreadableFileError(new Error("network"))).toBe(false);
+  });
+
+  it("a PDF upload needs %PDF- in its first 1 KiB, as the API's has_pdf_signature; text keeps the offset-0 check", async () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+    expect(PDF_SIGNATURE_WINDOW).toBe(1024);
+    expect(hasPdfSignature(enc("%PDF-1.7"))).toBe(true);
+    expect(hasPdfSignature(enc("junk\n%PDF-1.7"))).toBe(true); // junk before the header is legal
+    expect(hasPdfSignature(enc("x".repeat(1023) + "%PDF-"))).toBe(true); // starts at byte 1023: may end past the window
+    expect(hasPdfSignature(enc("x".repeat(1024) + "%PDF-"))).toBe(false);
+    expect(hasPdfSignature(enc("%PDF"))).toBe(false);
+    const pdf = { binary: true, mimeType: "application/pdf" };
+    await expect(readUploadContent(new Blob(["junk\n%PDF-1.7\n"]), pdf)).resolves.toHaveProperty("content_base64");
+    await expect(readUploadContent(new Blob(["x".repeat(2000) + "%PDF-1.7"]), pdf)).rejects.toThrow(
+      "The file's content does not match its declared type. It has no %PDF- signature in its first 1,024 bytes, so it is not a PDF.",
+    );
+    await expect(readUploadContent(new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0])]), pdf)).rejects.toThrow(
+      "It looks like image/png, not application/pdf.",
+    );
+    // A text upload is judged at offset 0 only (the API's _text_signature), so junk before "%PDF-" passes.
+    await expect(readUploadContent(new Blob(["junk %PDF-1.7 in prose"]), { binary: false, mimeType: "text/plain" })).resolves.toEqual({ content: "junk %PDF-1.7 in prose" });
+  });
+
   it("decodeUtf8 refuses invalid UTF-8 instead of producing U+FFFD; readFileAsText rejects such a file", async () => {
     expect(decodeUtf8(new TextEncoder().encode("héllo ✓"))).toBe("héllo ✓");
     expect(() => decodeUtf8(new Uint8Array([0x68, 0xff, 0xfe, 0x69]))).toThrow(NotUtf8Error);

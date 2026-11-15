@@ -1296,6 +1296,8 @@ class KnowledgeStore:
         tenant_id: str,
         kb_id: str,
         current: Mapping[str, tuple[str | None, int]],
+        *,
+        orphan_after_seconds: float = 60.0,
     ) -> list[dict[str, Any]]:
         """The documents (without content, by key) whose extraction is outdated.
 
@@ -1314,11 +1316,21 @@ class KnowledgeStore:
         knowledge base's flavour went back to plain. One with no active version is not selected
         (an upload or reingest starts its run; there is no stale extraction to replace).
 
-        A document whose newer version is in flight (`latest_version` above an active version,
-        status `pending` or `ingesting`: a re-extract started by an earlier call is queued or
-        running) is not selected, so repeating the same bulk re-extract (a double click, a CLI
-        retry) before those runs finish starts nothing instead of superseding them. Once its run
-        ends (ready or failed) the document is judged on its active chunks again."""
+        A document whose latest version is in flight is not selected: status `pending` or
+        `ingesting` with that version not active (never ingested, or a newer version over the
+        active one) AND a live run. That covers a re-extract started by an earlier call (so a double
+        click or a CLI retry starts nothing instead of superseding those runs) and a first ingest
+        still queued, e.g. behind a bulk import (it extracts with the current extractor anyway;
+        browser check finding A). Once its run ends the document is judged on its active chunks
+        again; a never-ingested document whose every ingest failed is selectable.
+
+        The run is its `last_run_id` row. It is live while it is not terminal (`queued`, however
+        long it has waited: a long queue is not a lost run, and DBOS still holds it). It is dead,
+        and the pending document selectable (so bulk re-extract can revive it), when the row is
+        terminal (an enqueue that failed: `failed` / `enqueue_failed`; or a run that ended without
+        moving the document), or when there is no row and the document has been pending longer than
+        `orphan_after_seconds` (the API's ORPHAN_AFTER_SECONDS: its request died between the version
+        write and the run insert). A younger document with no row is a request still in progress."""
         kid = _canonical_uuid(kb_id)
         if kid is None or not current:
             return []
@@ -1333,8 +1345,12 @@ class KnowledgeStore:
                     "   AS cur(mime, extractor, version)"
                     "   ON cur.mime = lower(btrim(split_part(d.mime_type, ';', 1)))"
                     " WHERE d.tenant_id = :t AND d.kb_id = :kb"
-                    " AND NOT (d.active_version IS NOT NULL AND d.latest_version > d.active_version"
-                    "   AND d.status IN ('pending', 'ingesting'))"
+                    " AND NOT (d.status IN ('pending', 'ingesting')"
+                    "   AND (d.active_version IS NULL OR d.latest_version > d.active_version)"
+                    "   AND (EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id"
+                    "       AND r.status NOT IN ('completed', 'failed', 'needs_attention'))"
+                    "     OR (NOT EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id)"
+                    "       AND d.updated_at > now() - make_interval(secs => :orphan))))"
                     " AND CASE WHEN cur.extractor IS NULL THEN EXISTS (SELECT 1 FROM kb_chunks c"
                     "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
                     "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
@@ -1354,6 +1370,7 @@ class KnowledgeStore:
                     "mimes": mimes,
                     "exts": [current[m][0] for m in mimes],
                     "vers": [int(current[m][1]) for m in mimes],
+                    "orphan": float(orphan_after_seconds),
                 },
             ).mappings().all()
         return [_doc_dict(r) for r in rows]

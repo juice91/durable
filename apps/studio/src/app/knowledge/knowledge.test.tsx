@@ -101,6 +101,8 @@ describe("/knowledge", () => {
     expect(within(product).getByTestId("knowledge-base-sections")).toHaveTextContent("9");
     await waitFor(() => expect(within(product).getByTestId("knowledge-base-cost")).toHaveTextContent("$0.0042"));
     await waitFor(() => expect(within(handbook).getByTestId("knowledge-base-cost")).toHaveTextContent("No price"));
+    // The subtitle names every upload format (browser check E).
+    expect(screen.getByText(/Upload Markdown, text, HTML, reStructuredText, PDF, YAML or JSON;/)).toBeInTheDocument();
   });
 
   it("shows the empty state", async () => {
@@ -377,8 +379,50 @@ describe("/knowledge/:id", () => {
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), { dataTransfer: { files: [new File([new Uint8Array([0x23, 0x20, 0xff, 0xfe])], "latin.md")] } });
     fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));
     const row = await within(sheet).findByText(/not valid UTF-8/);
-    expect(row.closest("[data-testid='knowledge-upload-file']")).toHaveAttribute("data-status", "failed");
+    const item = row.closest("[data-testid='knowledge-upload-file']") as HTMLElement;
+    // Refused (it cannot be sent as it is), not failed: never re-sent, and it can be removed.
+    expect(item).toHaveAttribute("data-status", "refused");
+    expect(within(item).getByText("Can't read")).toBeInTheDocument();
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toBeDisabled();
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toHaveTextContent("Upload files");
+    fireEvent.click(within(item).getByRole("button", { name: "Remove latin.md" }));
+    expect(within(sheet).queryByTestId("knowledge-upload-file")).toBeNull();
     expect(sent("PUT", /\/documents\//)).toHaveLength(0);
+  });
+
+  it("a binary file under a text name is refused client-side with what it looks like, as the API says it", async () => {
+    await renderDetail();
+    fireEvent.click(screen.getByTestId("knowledge-upload"));
+    const sheet = await screen.findByTestId("knowledge-upload-sheet");
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0xe2, 0xe3, 0xcf, 0xd3]);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+    fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), {
+      dataTransfer: { files: [new File([pdf], "report.txt"), new File([png], "logo.yaml")] },
+    });
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toHaveTextContent("Upload 2 files");
+    fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));
+    expect(await within(sheet).findByText("The file's content does not match its declared type. It looks like application/pdf, not text/plain.")).toBeInTheDocument();
+    expect(await within(sheet).findByText("The file's content does not match its declared type. It looks like image/png, not application/yaml.")).toBeInTheDocument();
+    const items = within(sheet).getAllByTestId("knowledge-upload-file");
+    expect(items.map((i) => i.getAttribute("data-status"))).toEqual(["refused", "refused"]);
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toBeDisabled();
+    expect(sent("PUT", /\/documents\//)).toHaveLength(0);
+  });
+
+  it("an oversize file's chip says Too large, an unsupported one's Not supported", async () => {
+    await renderDetail();
+    fireEvent.click(screen.getByTestId("knowledge-upload"));
+    const sheet = await screen.findByTestId("knowledge-upload-sheet");
+    const big = new File(["x"], "big.yaml");
+    Object.defineProperty(big, "size", { value: 3 * 1024 * 1024 });
+    fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), {
+      dataTransfer: { files: [big, new File(["x"], "a.docx")] },
+    });
+    const [tooBig, unsupported] = within(sheet).getAllByTestId("knowledge-upload-file");
+    expect(within(tooBig).getByText("Too large")).toBeInTheDocument();
+    expect(within(tooBig).getByText("The file is larger than 2 MiB.")).toBeInTheDocument();
+    expect(within(tooBig).queryByText("Not supported")).toBeNull();
+    expect(within(unsupported).getByText("Not supported")).toBeInTheDocument();
   });
 
   it("a pasted document whose JSON body is over the cap is refused before any request", async () => {

@@ -52,6 +52,15 @@ CHUNKER_V2_MIN_TOKENS = 64
 # filter on it (validate_metadata / validate_filter reject it).
 RESERVED_METADATA_KEY = "eap"
 
+
+def kb_ingest_partition_key(tenant_id: str, knowledge_base_id: str) -> str:
+    """The DBOS queue partition key of an `eap.kb_ingest` run (RAG P1 follow-up): its tenant and
+    knowledge base, `{tenant_id}:{knowledge_base_id}`. The API enqueues on the partitioned
+    `eap-kb-ingest-fair` queue with this key, so a bulk import into one knowledge base no longer
+    holds every slot ahead of an upload into another: each knowledge base is its own partition and
+    the worker draws from the partitions in random order on every poll."""
+    return f"{tenant_id}:{knowledge_base_id}"
+
 _METADATA_KEY_RE = re.compile(METADATA_KEY_PATTERN)
 
 # Extraction error codes (RAG P1) -> fixed, user-safe messages. The worker's sandbox and extractors

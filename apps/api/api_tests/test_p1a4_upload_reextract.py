@@ -264,6 +264,14 @@ def _activate(pg, doc_id: str, extractor: str | None, version: int = 1) -> None:
         )
 
 
+def _fail_first_ingest(pg, *doc_ids: str) -> None:
+    """What a first ingest that failed leaves: no active version, status failed. (A document whose
+    first ingest is still pending is not outdated: browser check finding A.)"""
+    with _engine(pg).begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET status = 'failed', error = 'embedding_failed: x'"
+                          " WHERE id = ANY(CAST(:ids AS uuid[]))"), {"ids": list(doc_ids)})
+
+
 def _kb_runs(pg, kb_id: str) -> int:
     with _engine(pg).connect() as conn:
         return conn.execute(
@@ -313,12 +321,16 @@ def test_bulk_reextract_selects_outdated_documents_and_respects_formats(pg, tena
         "b.yaml": {"content": YAML, "mime_type": "application/yaml"},
         "c.md": {"content": "# C\n\nx\n", "mime_type": "text/markdown"},
         "d.json": {"content": '{"a": 1}', "mime_type": "application/json"},
+        "e.json": {"content": '{"e": 1}', "mime_type": "application/json"},
     }.items():
         docs[key] = _put(client, h, kb["id"], key, **body).json()["document"]
     _activate(pg, docs["a.rst"]["id"], "rst")
     _activate(pg, docs["b.yaml"]["id"], "yaml")
     _activate(pg, docs["c.md"]["id"], None)
-    # d.json never finished an ingest: no active version, so it is outdated.
+    # d.json's only ingest failed: no active version, so it is outdated. e.json's first ingest is
+    # still queued (pending, no active version): it will extract with the current extractor, so it
+    # is not selected (browser check finding A).
+    _fail_first_ingest(pg, docs["d.json"]["id"])
     url = f"{API}/knowledge-bases/{kb['id']}/reextract"
     calls = len(fake_dbos.calls)
 
@@ -377,8 +389,9 @@ def test_bulk_reextract_reports_a_failed_enqueue_and_goes_on(pg, tenant_of, fake
     client, _ = pg
     _, h = tenant_of()
     kb = _kb(client, h)
-    for key in ("a.rst", "b.rst"):
-        _put(client, h, kb["id"], key, content=RST, mime_type="text/x-rst")
+    ids = [_put(client, h, kb["id"], key, content=RST, mime_type="text/x-rst").json()["document"]["id"]
+           for key in ("a.rst", "b.rst")]
+    _fail_first_ingest(pg, *ids)
     fake_dbos.fail_times = 1
     r = client.post(f"{API}/knowledge-bases/{kb['id']}/reextract", json={}, headers=h)
     assert r.status_code == 202, r.text
@@ -391,14 +404,39 @@ def test_bulk_reextract_reports_a_failed_enqueue_and_goes_on(pg, tenant_of, fake
     assert retry.status_code == 202 and retry.json()["run_id"] == failed["run_id"]
 
 
+def test_bulk_reextract_revives_a_pending_document_whose_first_enqueue_failed(pg, tenant_of, fake_dbos, kb_cleanup):
+    """Review MINOR 6: the upload's hand-off failed (503), so the document is pending with a dead
+    run; "Re-extract outdated" selects and restarts it. A document whose first ingest is queued is
+    still not selected."""
+    client, _ = pg
+    _, h = tenant_of()
+    kb = _kb(client, h)
+    fake_dbos.fail_times = 1
+    lost = _put(client, h, kb["id"], "lost.rst", content=RST, mime_type="text/x-rst")
+    assert lost.status_code == 503, lost.text
+    queued = _put(client, h, kb["id"], "queued.rst", content=RST, mime_type="text/x-rst")
+    assert queued.status_code == 202, queued.text
+    url = f"{API}/knowledge-bases/{kb['id']}/reextract"
+    dry = client.post(url, json={"dry_run": True}, headers=h).json()
+    assert [d["document_key"] for d in dry["documents"]] == ["lost.rst"]
+    started = client.post(url, json={}, headers=h)
+    assert started.status_code == 202, started.text
+    body = started.json()
+    assert body["selected"] == body["started"] == 1 and body["documents"][0]["document_key"] == "lost.rst"
+    assert body["documents"][0]["doc_version"] == 2 and body["documents"][0]["status"] == "queued"
+    # Its new run is live: repeating the bulk re-extract selects nothing.
+    assert client.post(url, json={"dry_run": True}, headers=h).json()["documents"] == []
+
+
 def test_bulk_reextract_survives_an_unexpected_error_for_one_document(pg, tenant_of, fake_dbos, kb_cleanup, monkeypatch):
     import eap_api.routes.knowledge as routes
 
     client, _ = pg
     _, h = tenant_of()
     kb = _kb(client, h)
-    for key in ("a.rst", "b.rst", "c.rst"):
-        _put(client, h, kb["id"], key, content=RST, mime_type="text/x-rst")
+    ids = [_put(client, h, kb["id"], key, content=RST, mime_type="text/x-rst").json()["document"]["id"]
+           for key in ("a.rst", "b.rst", "c.rst")]
+    _fail_first_ingest(pg, *ids)
     real, calls = routes._create_ingest_run, []
 
     def flaky(*args, **kwargs):

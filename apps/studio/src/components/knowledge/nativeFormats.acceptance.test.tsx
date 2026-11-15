@@ -108,7 +108,9 @@ describe("UploadSheet: the API's refusals show on the row", () => {
     [415, "unsupported media type: application/octet-stream", "x.json"],
     [422, "the PDF is encrypted with a password", "locked.pdf"],
   ])("%i shows the API's message", async (status, detail, name) => {
-    const row = await failWith(status, detail, new File(["%PDF-1.7"], name));
+    // A text file with a binary signature is now refused before sending (browser check C), so the
+    // JSON case sends real JSON to reach the API's 415.
+    const row = await failWith(status, detail, new File([name.endsWith(".pdf") ? "%PDF-1.7" : "{}"], name));
     expect(row).toHaveTextContent(detail);
   });
 });

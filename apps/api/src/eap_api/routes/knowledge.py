@@ -9,7 +9,7 @@ the request guard's UTF-8, NUL and depth checks. The API extracts the document o
 to reject an unsupported MIME type or unsafe HTML early; chunking and embedding happen in the
 worker. An upload with the same content, metadata, title, source URL and MIME type is a no-op
 (200, `unchanged: true`, no run). A changed one bumps `latest_version` and starts a `kb_ingest` run
-(202), enqueued as `eap.kb_ingest` on the `eap-kb-ingest` queue (eap_api.launcher.KB_INGEST_WORKFLOW_NAME
+(202), enqueued as `eap.kb_ingest` on the partitioned `eap-kb-ingest-fair` queue, keyed by tenant and knowledge base (eap_api.launcher.KB_INGEST_WORKFLOW_NAME
 documents the arguments). Run creation is idempotent by the optional client `run_id`, like tool runs, and a failed
 hand-off answers 503 with the run marked failed so a retry with the same `run_id` re-queues it.
 
@@ -1562,7 +1562,7 @@ def reextract_knowledge_base(
     launcher: LauncherDep,
 ) -> JSONResponse:
     """Re-extract many documents (see ReextractCreate): each selected document gets a new version
-    with the same content and its own ingest run on the `eap-kb-ingest` queue, which runs at most
+    with the same content and its own ingest run on the `eap-kb-ingest-fair` queue (this knowledge base's partition), which runs at most
     EAP_KB_INGEST_CONCURRENCY of them at a time. Embeddings of unchanged chunk texts are reused, so
     the cost is the changed chunks only.
 
@@ -1594,7 +1594,9 @@ def reextract_knowledge_base(
     if change_chunker:
         selected = store.list_documents(tenant_id, kb["id"])
     elif body.only_outdated:
-        selected = store.outdated_extraction_documents(tenant_id, kb["id"], outdated_extractor_map(kb, formats))
+        selected = store.outdated_extraction_documents(
+            tenant_id, kb["id"], outdated_extractor_map(kb, formats), orphan_after_seconds=ORPHAN_AFTER_SECONDS
+        )
     else:
         selected = [
             d for d in store.list_documents(tenant_id, kb["id"])

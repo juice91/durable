@@ -123,13 +123,89 @@ def test_outdated_extraction_documents(store, engine, tenant, other_tenant):
     _record(engine, stringy["id"], {"extractor": "rst", "extractor_version": "1"})  # not a number: outdated
     _record(engine, newer["id"], {"extractor": "rst", "extractor_version": 7})
     _record(engine, other["id"], {"extractor": "markdown-doxygen", "extractor_version": 1})
-    never = _put(store, tenant, kb, "never.rst")  # no active version
+    never = _put(store, tenant, kb, "never.rst")  # no active version: every ingest failed
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET status = 'failed', error = 'embedding_failed: x' WHERE id = :id"),
+                     {"id": never["id"]})
     md = _put(store, tenant, kb, "plain.md", mime="text/markdown")  # API path: not in the map
     keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP)]
     assert keys == ["never.rst", "old.yaml", "other.rst", "stringy.rst"]
     assert store.outdated_extraction_documents(other_tenant, kb["id"], RST_MAP) == []
     assert store.outdated_extraction_documents(tenant, kb["id"], {}) == []
     del never, md
+
+
+def test_outdated_extraction_skips_a_first_ingest_still_in_flight(store, engine, tenant):
+    """Browser-check finding A: a document never ingested whose first version is still queued or
+    running is not outdated (that ingest extracts with the current extractor); one whose every ingest
+    failed is. An ingested document with a newer version in flight stays skipped, as before."""
+    kb = make_kb(store, tenant)
+    queued = _put(store, tenant, kb, "queued.rst")  # put_document leaves it 'pending'
+    running = _put(store, tenant, kb, "running.yaml", mime="application/yaml")
+    failed = _put(store, tenant, kb, "failed.rst")
+    stale, _ = ingest(store, tenant, kb, "stale.rst", ["body six"], hot=[6])
+    in_flight, _ = ingest(store, tenant, kb, "in-flight.rst", ["body seven"], hot=[7])
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET mime_type = 'text/x-rst' WHERE id IN (:a, :b)"),
+                     {"a": stale["id"], "b": in_flight["id"]})
+        conn.execute(text("UPDATE kb_documents SET status = 'ingesting' WHERE id = :id"), {"id": running["id"]})
+        conn.execute(text("UPDATE kb_documents SET status = 'failed', error = 'extraction_failed: x' WHERE id = :id"),
+                     {"id": failed["id"]})
+    _record(engine, stale["id"], {"extractor": "rst", "extractor_version": 0})
+    _record(engine, in_flight["id"], {"extractor": "rst", "extractor_version": 0})
+    store.new_document_version(tenant, kb["id"], "in-flight.rst", run_id=str(uuid.uuid4()))  # v2 pending
+    assert store.get_document(tenant, kb["id"], "queued.rst")["status"] == "pending"
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP)]
+    assert keys == ["failed.rst", "stale.rst"]
+    # Once the first ingest ends without an active version (failed), the document is selectable.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET status = 'failed', error = 'embedding_failed: x' WHERE id IN (:a, :b)"),
+                     {"a": queued["id"], "b": running["id"]})
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP)]
+    assert keys == ["failed.rst", "queued.rst", "running.yaml", "stale.rst"]
+
+
+def test_outdated_extraction_revives_a_pending_document_with_no_live_run(store, engine, tenant):
+    """Review MINOR 6: a pending document whose run is dead (its enqueue failed, or the run ended
+    without moving it) or missing past the orphan window is selectable, so bulk re-extract can
+    revive it; a queued run, however old, and a young document with no run row are live."""
+    from eap_run_store import RunStore
+
+    runs = RunStore(engine)
+    kb = make_kb(store, tenant)
+
+    def pending(key: str, *, run: str | None) -> dict:
+        run_id = str(uuid.uuid4())
+        doc = _put(store, tenant, kb, key, run_id=run_id)
+        if run is not None:
+            runs.create_kb_ingest_run(tenant, kb["id"], json.dumps({"document_id": doc["id"], "doc_version": 1}), uuid.UUID(run_id))
+            if run == "enqueue_failed":
+                assert runs.mark_enqueue_failed(tenant, uuid.UUID(run_id))
+            elif run == "old_queued":
+                with engine.begin() as conn:
+                    conn.execute(text("UPDATE runs SET created_at = now() - interval '1 hour' WHERE id = :r"), {"r": run_id})
+        return doc
+
+    pending("enqueue-failed.rst", run="enqueue_failed")
+    pending("queued-long.rst", run="old_queued")
+    pending("queued.rst", run="queued")
+    orphan = pending("orphan.rst", run=None)
+    pending("young.rst", run=None)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET updated_at = now() - interval '5 minutes' WHERE id = :id"),
+                     {"id": orphan["id"]})
+    assert store.get_document(tenant, kb["id"], "enqueue-failed.rst")["status"] == "pending"
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP)]
+    assert keys == ["enqueue-failed.rst", "orphan.rst"]
+    # The window is the caller's (the API passes ORPHAN_AFTER_SECONDS).
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP, orphan_after_seconds=3600)]
+    assert keys == ["enqueue-failed.rst"]
+    # A run that ended without moving the document (it stayed pending) is dead too.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET status = 'completed' WHERE id = (SELECT last_run_id FROM kb_documents"
+                          " WHERE tenant_id = :t AND document_key = 'queued.rst')"), {"t": tenant})
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], RST_MAP)]
+    assert keys == ["enqueue-failed.rst", "orphan.rst", "queued.rst"]
 
 
 def test_latest_extraction_is_the_active_versions(store, engine, tenant):

@@ -21,7 +21,15 @@ DELTA_CHANNEL = "eap_run_deltas"
 # holds agent-run slots and never sends more than EAP_KB_INGEST_CONCURRENCY embedding workloads at
 # once from one worker. The API (apps/api launcher.KB_INGEST_QUEUE_NAME) enqueues on exactly this
 # name. Runs enqueued on QUEUE_NAME before the split still run there.
-KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
+#
+# RAG P1 follow-up: the queue is partitioned by tenant and knowledge base
+# (`eap_schemas.knowledge.kb_ingest_partition_key`), so one knowledge base's bulk import cannot
+# starve another's uploads: the worker visits the partitions with queued runs in random order on
+# every poll, still at most EAP_KB_INGEST_CONCURRENCY running per worker in total. A DBOS queue is
+# partitioned or not, so it has a new name; LEGACY_KB_INGEST_QUEUE_NAME is the old unpartitioned
+# queue, still registered (same concurrency; every worker polls it) so runs enqueued before the upgrade drain.
+KB_INGEST_QUEUE_NAME = "eap-kb-ingest-fair"
+LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 KB_INGEST_CONCURRENCY_ENV = "EAP_KB_INGEST_CONCURRENCY"
 # Post-turn observational memory (RM.13) runs as its own workflow, eap.memory_observe_run, enqueued by
 # the turn's eap.agent_run on this partitioned queue with the conversation id as partition key and at

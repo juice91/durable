@@ -13,6 +13,7 @@ import {
   documentKeyFrom,
   documentKeyProblem,
   documentPutProblem,
+  isUnreadableFileError,
   parseMetadata,
   putDocument,
   readUploadContent,
@@ -21,6 +22,7 @@ import {
   uploadCapsText,
   type DocumentPutResult,
   type MetadataValue,
+  type UploadRefusal,
 } from "@/lib/knowledge";
 import { alertClass, fieldClass, hintClass, labelClass } from "./knowledgeUi";
 
@@ -37,6 +39,9 @@ interface UploadItem {
   binary: boolean;
   status: ItemStatus;
   message: string | null;
+  /** Why a `refused` file is refused (its chip): before reading (checkUploadFile), or `unreadable`
+   * once read (not UTF-8, or a binary file under a text name). Never re-sent; only Remove. */
+  refusal: UploadRefusal | "unreadable" | null;
 }
 
 const STATUS_LABEL: Record<ItemStatus, string> = {
@@ -47,6 +52,15 @@ const STATUS_LABEL: Record<ItemStatus, string> = {
   started: "Ingest started",
   unchanged: "Unchanged",
   failed: "Failed",
+};
+
+// A refused file's chip says why, so an oversized file is not called "Not supported".
+const REFUSAL_LABEL: Record<UploadRefusal | "unreadable", string> = {
+  unsupported_type: "Not supported",
+  empty: "Empty",
+  too_large: "Too large",
+  bad_key: "Invalid name",
+  unreadable: "Can't read",
 };
 
 const STATUS_VARIANT: Record<ItemStatus, BadgeProps["variant"]> = {
@@ -140,8 +154,8 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
       const check = checkUploadFile(file);
       itemCounter += 1;
       return check.ok
-        ? { id: itemCounter, name: file.name, file, key: check.key, title: check.title, mimeType: check.mimeType, binary: check.binary, status: "ready", message: null }
-        : { id: itemCounter, name: file.name, file: null, key: null, title: file.name, mimeType: null, binary: false, status: "refused", message: check.reason };
+        ? { id: itemCounter, name: file.name, file, key: check.key, title: check.title, mimeType: check.mimeType, binary: check.binary, status: "ready", message: null, refusal: null }
+        : { id: itemCounter, name: file.name, file: null, key: null, title: file.name, mimeType: null, binary: false, status: "refused", message: check.reason, refusal: check.code };
     });
     setItems((current) => [...current, ...added]);
   };
@@ -175,7 +189,16 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
         // "Reading file…" while the browser reads (and, for a PDF, base64-encodes) it, then "Uploading…".
         update(item.id, { status: "reading", message: null });
         try {
-          const content = await readUploadContent(item.file, { binary: item.binary });
+          let content: Awaited<ReturnType<typeof readUploadContent>>;
+          try {
+            content = await readUploadContent(item.file, { binary: item.binary, mimeType: item.mimeType });
+          } catch (reason: unknown) {
+            if (!isUnreadableFileError(reason)) throw reason;
+            // Not UTF-8, or a binary file under a text name: refused, not failed, so the next
+            // "Upload" does not read and refuse it again (and does not count it).
+            update(item.id, { status: "refused", message: reason.message, refusal: "unreadable" });
+            continue;
+          }
           if (signal.aborted) return;
           update(item.id, { status: "uploading" });
           const result = await send(item.key, { title: item.title, ...content, mime_type: item.mimeType, metadata: metadata.value }, signal);
@@ -289,8 +312,8 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
                       <li key={item.id} data-testid="knowledge-upload-file" data-status={item.status} className="flex min-w-0 flex-col gap-1 px-3 py-2">
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="min-w-0 flex-1 truncate font-mono text-label" title={item.name}>{item.name}</span>
-                          <Badge variant={STATUS_VARIANT[item.status]}>{STATUS_LABEL[item.status]}</Badge>
-                          {item.status === "ready" || item.status === "refused" ? (
+                          <Badge variant={STATUS_VARIANT[item.status]}>{item.status === "refused" && item.refusal ? REFUSAL_LABEL[item.refusal] : STATUS_LABEL[item.status]}</Badge>
+                          {item.status === "ready" || item.status === "refused" || item.status === "failed" ? (
                             <button
                               type="button"
                               className="rounded-sm text-caption text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
