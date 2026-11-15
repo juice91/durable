@@ -65,7 +65,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --frozen
+      - run: uv sync --all-packages --frozen
       - run: uv run lint-imports
       - name: DB-free unit tests
         run: >-
@@ -118,7 +118,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --frozen
+      - run: uv sync --all-packages --frozen
       - name: Install manifest and workflow linters
         run: |
           go install github.com/yannh/kubeconform/cmd/kubeconform@"${KUBECONFORM_VERSION}"
