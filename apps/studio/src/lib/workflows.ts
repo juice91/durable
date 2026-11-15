@@ -4,6 +4,7 @@
 // Runs: POST /api/v1/workflows/{id}/runs (202, same idempotent run_id semantics as tool runs),
 // then GET /runs/{run_id}, /events and /stream like any run. Approval: POST
 // /api/v1/workflows/runs/{run_id}/steps/{step_id}/approve|reject with {"comment"?}.
+// Cancel (loops D12, LP.12): POST /api/v1/runs/{run_id}/cancel, no body.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
 import type { Run, RunStatus } from "./runs";
 import type { JsonSchema } from "./tools";
@@ -276,6 +277,34 @@ export async function decideApproval(
       body: JSON.stringify(trimmed ? { comment: trimmed } : {}),
     },
   );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** 202 answer of POST /runs/{run_id}/cancel (RunCancelResponse). */
+export interface RunCancelResult {
+  run_id: string;
+  kind: "workflow";
+  /** The run's status after the cancel, as its `end` event fixes it. */
+  status: string;
+  display_status: RunStatus;
+  error_code: string | null;
+  /** True when the run's `end` is the cancel's (`run_cancelled`); false when it ended by itself first. */
+  cancelled: boolean;
+  requested_by: string | null;
+  approvals_closed: number;
+}
+
+/**
+ * Cancel a workflow run and its whole tree (idempotent: a retry answers 202 again). Throws ApiError
+ * with the server's detail: 404 unknown run, 409 already ended or not a workflow run, 503 recorded
+ * but not finished (it completes automatically; retrying finishes it at once).
+ */
+export async function cancelRun(runId: string): Promise<RunCancelResult> {
+  const response = await fetch(`${BASE_URL}/api/v1/runs/${enc(runId)}/cancel`, {
+    method: "POST",
+    headers: apiHeaders(),
+  });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
 }

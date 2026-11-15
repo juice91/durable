@@ -38,6 +38,57 @@ export function collapsedParam(ids: ReadonlySet<string> | readonly string[] | nu
   return list.length > 0 ? list.join(",") : null;
 }
 
+/**
+ * The run view's iteration pagers (LP.12): `?iter=each.41,outer.1/inner.2`, one iteration scope
+ * string per loop instance whose pager the user moved (the last frame names the loop and the index;
+ * the prefix is the enclosing iteration). Sorted, so one choice has one URL. Pagers not listed
+ * follow their latest iteration.
+ */
+export const WORKFLOW_ITERATION_PARAM = "iter";
+/** Loop instances (`each`, `outer.1/inner`) whose pager steps through failed iterations only. */
+export const WORKFLOW_FAILED_ONLY_PARAM = "failedOnly";
+const FRAME = "[a-z][a-z0-9_]{0,63}\\.(?:0|[1-9][0-9]{0,5})";
+const ITERATION_SCOPE = new RegExp(`^(?:${FRAME}/){0,3}${FRAME}$`);
+const LOOP_INSTANCE = new RegExp(`^(?:${FRAME}/){0,3}[a-z][a-z0-9_]{0,63}$`);
+const MAX_ITERATION_ENTRIES = 50;
+
+function listParam(raw: string | null | undefined, pattern: RegExp): string[] {
+  if (!raw) return [];
+  return raw.split(",").map((part) => part.trim()).filter((part) => pattern.test(part)).slice(0, MAX_ITERATION_ENTRIES);
+}
+
+/** `?iter=` as {loop instance key: index}; malformed entries are dropped. */
+export function parseIterationParam(raw: string | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const scope of listParam(raw, ITERATION_SCOPE)) {
+    const dot = scope.lastIndexOf(".");
+    out[scope.slice(0, dot)] = Number(scope.slice(dot + 1));
+  }
+  return out;
+}
+
+/** The `?iter=` value for a selection (sorted), or null when empty. */
+export function iterationParam(selection: Readonly<Record<string, number>> | null | undefined): string | null {
+  if (!selection) return null;
+  const list = Object.entries(selection)
+    .filter(([key, index]) => Number.isInteger(index) && index >= 0 && ITERATION_SCOPE.test(`${key}.${index}`))
+    .map(([key, index]) => `${key}.${index}`)
+    .sort();
+  return list.length > 0 ? list.join(",") : null;
+}
+
+/** `?failedOnly=` as a set of loop instance keys. */
+export function parseFailedOnlyParam(raw: string | null | undefined): Set<string> {
+  return new Set(listParam(raw, LOOP_INSTANCE));
+}
+
+/** The `?failedOnly=` value (sorted), or null when empty. */
+export function failedOnlyParam(keys: ReadonlySet<string> | null | undefined): string | null {
+  if (!keys) return null;
+  const list = [...keys].filter((key) => LOOP_INSTANCE.test(key)).sort();
+  return list.length > 0 ? list.join(",") : null;
+}
+
 export interface WorkflowRouteOptions {
   /** `graph` (default, left out) or `runs`. The Traces tab is `workflowTraces`. */
   tab?: Exclude<WorkflowTab, "traces"> | null;

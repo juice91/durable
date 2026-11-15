@@ -6,7 +6,7 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { EventTimeline, formatValue } from "@/components/runs/EventTimeline";
 import { ApiError } from "@/lib/api";
 import { getRun, listEvents, subscribeRun, type Run, type RunEvent, type RunStatus } from "@/lib/runs";
-import { deriveRunView, isTerminal, mergeEvents, type NodeState } from "@/lib/workflowRunState";
+import { deriveRunView, findStep, isTerminal, mergeEvents, resolveRunStates, type IterationSelection } from "@/lib/workflowRunState";
 import { getWorkflowVersion, type WorkflowSpec } from "@/lib/workflows";
 import { Copy } from "lucide-react";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
@@ -27,6 +27,8 @@ import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowF
 import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
 import { timelineClock, timelineRows } from "./workflowTimeline";
+import { CancelRunButton } from "./CancelRunButton";
+import { IterationPager, LoopIterationTable } from "./LoopIterations";
 import { copyText } from "@/lib/clipboard";
 
 /** How often a live run's open timeline bars grow. */
@@ -36,6 +38,17 @@ const TIMELINE_TICK_MS = 1000;
 const APPROVAL_OVERLAY_MAX_WIDTH = 416;
 
 type StreamState = "connecting" | "live" | "reconnecting" | "ended";
+
+/** "each iteration 4 › inner iteration 1" for the scope string `each.3/inner.0`. */
+export function iterationScopeLabel(scope: string): string {
+  return scope
+    .split("/")
+    .map((frame) => {
+      const dot = frame.lastIndexOf(".");
+      return `${frame.slice(0, dot)} iteration ${Number(frame.slice(dot + 1)) + 1}`;
+    })
+    .join(" › ");
+}
 
 const STREAM_LABELS: Record<StreamState, string> = {
   connecting: "Connecting…",
@@ -53,6 +66,22 @@ interface WorkflowRunViewProps {
   /** The graph's collapsed loops (the page's `?collapsed=` state), shared by the canvas and the step list. */
   collapsedLoops?: ReadonlySet<string>;
   onCollapsedLoopsChange?: (next: Set<string>) => void;
+  /** The iteration pagers' choices by loop instance key (the page's `?iter=` state); omitted, kept here. */
+  iterationSelection?: IterationSelection;
+  onIterationSelectionChange?: (next: IterationSelection) => void;
+  /** Loop instances whose pager steps through failed iterations only (`?failedOnly=`). */
+  failedOnlyLoops?: ReadonlySet<string>;
+  onFailedOnlyLoopsChange?: (next: Set<string>) => void;
+}
+
+/** The "Cancelled" label of a run that ended with `run_cancelled` and status `failed`. (A cancel that
+ * ended `needs_attention`, a side effect still reserved, keeps the Needs attention pill instead.) */
+function CancelledPill() {
+  return (
+    <span data-testid="workflow-run-cancelled" className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-label font-medium text-foreground">
+      Cancelled
+    </span>
+  );
 }
 
 /**
@@ -63,7 +92,17 @@ interface WorkflowRunViewProps {
  * (backfill and refresh) and the SSE stream; both are merged by seq, so duplicates and replays are
  * harmless.
  */
-export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCollapsedLoopsChange }: WorkflowRunViewProps) {
+export function WorkflowRunView({
+  runId,
+  workflowId,
+  tabs,
+  collapsedLoops,
+  onCollapsedLoopsChange,
+  iterationSelection,
+  onIterationSelectionChange,
+  failedOnlyLoops,
+  onFailedOnlyLoopsChange,
+}: WorkflowRunViewProps) {
   // One collapsed set for the canvas and the step list: the page's URL state, else kept here.
   const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const collapsed = collapsedLoops ?? ownCollapsed;
@@ -77,6 +116,14 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
   const [notFound, setNotFound] = useState(false);
   const [stream, setStream] = useState<StreamState>("connecting");
   const [selected, setSelected] = useState<string | null>(null);
+  // The iteration pager's choice per loop id (absent: the latest), and its "Failed only" toggles.
+  // Controlled by the page's URL state when given (`?iter=`, `?failedOnly=`), else kept here.
+  const [ownChoice, setOwnChoice] = useState<IterationSelection>({});
+  const [ownFailedOnly, setOwnFailedOnly] = useState<ReadonlySet<string>>(() => new Set());
+  const iterationChoice = iterationSelection ?? ownChoice;
+  const setIterationChoice = onIterationSelectionChange ?? setOwnChoice;
+  const failedOnly = failedOnlyLoops ?? ownFailedOnly;
+  const setFailedOnly = onFailedOnlyLoopsChange ?? setOwnFailedOnly;
   const alive = useRef(true);
 
   const addEvents = useCallback((incoming: RunEvent[]) => {
@@ -110,6 +157,8 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
     setNotFound(false);
     setStream("connecting");
     setSelected(null);
+    setOwnChoice({});
+    setOwnFailedOnly(new Set());
 
     getRun(runId)
       .then(async (row) => {
@@ -170,11 +219,28 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
   }, [runId, addEvents, refresh]);
 
   const view = useMemo(() => deriveRunView(spec, events, status), [spec, events, status]);
-  const states = useMemo(() => {
-    const out: Record<string, NodeState> = {};
-    for (const [id, d] of Object.entries(view.steps)) out[id] = d.state;
-    return out;
-  }, [view]);
+  // Body steps show their loop's chosen iteration (else the latest): one resolution for the graph,
+  // the step list, the Timeline and the step detail.
+  const resolved = useMemo(() => resolveRunStates(spec, view, iterationChoice), [spec, view, iterationChoice]);
+  const states = resolved.states;
+  const selectIteration = useCallback(
+    (key: string, index: number | null) => {
+      const next = { ...iterationChoice };
+      if (index === null) delete next[key];
+      else next[key] = index;
+      setIterationChoice(next);
+    },
+    [iterationChoice, setIterationChoice],
+  );
+  const setLoopFailedOnly = useCallback(
+    (key: string, on: boolean) => {
+      const next = new Set(failedOnly);
+      if (on) next.add(key);
+      else next.delete(key);
+      setFailedOnly(next);
+    },
+    [failedOnly, setFailedOnly],
+  );
   // The live clock that grows open bars: ticks once a second only while the run is live and a step
   // is open; an ended run's bars close at the run's end instead (`timelineClock`).
   const [now, setNow] = useState(() => Date.now());
@@ -186,10 +252,21 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
     return () => clearInterval(timer);
   }, [live]);
   const clock = timelineClock(view, run?.updated_at, now);
-  const rows = useMemo(() => timelineRows(spec, view, clock), [spec, view, clock]);
+  const rows = useMemo(() => timelineRows(spec, view, clock, resolved), [spec, view, clock, resolved]);
   const stepEventCount = events.filter((e) => e.type.startsWith("step_")).length;
-  const selectedDetail = selected ? view.steps[selected] ?? null : null;
-  const selectedStep = selected && spec ? spec.steps.find((s) => s.id === selected) ?? null : null;
+  const selectedDetail = selected ? resolved.details[selected] ?? view.steps[selected] ?? null : null;
+  const selectedStep = selected ? findStep(spec, selected) : null;
+  const selectedScope = selected ? resolved.scopes[selected] ?? null : null;
+  const iterationLabel = selectedScope ? `From ${iterationScopeLabel(selectedScope)}` : null;
+  const selectedPager = selected ? resolved.pagers.find((p) => p.loopId === selected) ?? null : null;
+  const loopExtras = selectedPager ? <LoopIterationTable pager={selectedPager} onSelect={selectIteration} /> : null;
+  const canCancel = run?.kind === "workflow" && !isTerminal(view.status);
+  // A cancel that ended needs_attention (a side effect still reserved) keeps the warning first.
+  const cancelledAttention = view.cancelled && view.status === "needs_attention";
+  const cancelledPlain = view.cancelled && !cancelledAttention;
+  const cancelledSecondary = cancelledAttention ? (
+    <span data-testid="workflow-run-cancelled-secondary" className="text-caption text-muted-foreground">cancelled</span>
+  ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
   const control = useWorkflowLayout();
   const { layout, prefs, update } = control;
@@ -222,7 +299,15 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
       actions={
         <>
           <span data-testid="workflow-run-stream" data-state={stream} aria-live="polite" className="text-caption text-muted-foreground">{STREAM_LABELS[stream]}</span>
-          <span ref={statusRef} tabIndex={-1} data-testid="workflow-run-status" data-status={view.status} className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"><StatusPill status={view.status} showRecoveringNotice /></span>
+          <span ref={statusRef} tabIndex={-1} data-testid="workflow-run-status" data-status={view.status} data-cancelled={view.cancelled} className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            {cancelledPlain ? <CancelledPill /> : (
+              <span className="inline-flex items-center gap-2">
+                <StatusPill status={view.status} showRecoveringNotice />
+                {cancelledSecondary}
+              </span>
+            )}
+          </span>
+          {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
         </>
       }
     />
@@ -267,7 +352,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
     </section>
   ) : null;
   const floatingDetail = selectedDetail && layout.stepDetail === "floating" ? (
-    <StepIoPanel step={selectedStep} detail={selectedDetail} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay" />
+    <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
   ) : null;
   const rightLeft = layout.leftOccupied > 0 ? layout.leftOccupied + 2 * CANVAS_INSET_PX : CANVAS_INSET_PX;
 
@@ -280,7 +365,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
             <PanelCard title="Run" titleId="workflow-run-summary-heading" testId="workflow-run-summary">
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-label">
                 <dt className="text-muted-foreground">Status</dt>
-                <dd className="min-w-0"><StatusPill status={view.status} /></dd>
+                <dd className="flex min-w-0 flex-wrap items-center gap-2">{cancelledPlain ? <CancelledPill /> : <><StatusPill status={view.status} />{cancelledSecondary}</>}</dd>
                 <dt className="text-muted-foreground">Run id</dt>
                 <dd className="flex min-w-0 items-center gap-1">
                   <span data-testid="workflow-run-id" className="truncate font-mono text-caption">{runId}</span>
@@ -315,10 +400,21 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
                   <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-warning bg-warning/10 p-2 text-label text-foreground">
                     <p className="font-semibold">Needs attention: a step may have had side effects whose outcome is unknown.</p>
                     <p className="mt-1 text-caption">It was not retried automatically. Check the target system before running the workflow again.</p>
+                    {cancelledAttention ? (
+                      <p data-testid="workflow-run-needs-attention-cancelled" className="mt-1 text-caption">
+                        The run was cancelled{view.cancelRequestedBy ? <> by <span className="font-mono">{view.cancelRequestedBy}</span></> : null} while that side effect was still in progress.
+                      </p>
+                    ) : null}
                     {view.runError?.error ? <p className="mt-1 whitespace-pre-wrap text-caption">{view.runError.error}</p> : null}
                   </div>
                 ) : null}
-                {view.status === "failed" ? (
+                {cancelledPlain ? (
+                  <div role="status" data-testid="workflow-run-cancelled-notice" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">
+                    <p className="font-semibold">Cancelled{view.cancelRequestedBy ? <> by <span className="font-mono">{view.cancelRequestedBy}</span></> : null}</p>
+                    <p className="mt-1 text-caption text-muted-foreground">Steps that were still running stopped. Finished steps keep their results.</p>
+                  </div>
+                ) : null}
+                {view.status === "failed" && !view.cancelled ? (
                   <div role="alert" data-testid="workflow-run-failed" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">
                     <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
                     {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
@@ -339,6 +435,17 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
               </div>
             </PanelCard>
 
+            {resolved.pagers.length > 0 ? (
+              <PanelCard title="Loops" titleId="workflow-run-loops-heading" testId="workflow-run-loops">
+                <p className="mb-2 text-caption text-muted-foreground">The graph, the step list and the Timeline show the selected iteration of each loop.</p>
+                <div className="space-y-2">
+                  {resolved.pagers.map((pager) => (
+                    <IterationPager key={pager.key} pager={pager} failedOnly={failedOnly.has(pager.key)} onFailedOnlyChange={setLoopFailedOnly} onSelect={selectIteration} />
+                  ))}
+                </div>
+              </PanelCard>
+            ) : null}
+
             {spec ? (
               <PanelCard title="Steps" titleId="workflow-run-steps-heading">
                 <p className="mb-2 text-caption text-muted-foreground">Select a step to see its input and output.</p>
@@ -354,7 +461,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
             </PanelCard>
           </WorkflowFloatingPanel>
           {spec ? (
-            <WorkflowCanvas spec={spec} states={states} deadEdges={view.deadEdges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+            <WorkflowCanvas spec={spec} states={states} deadEdges={resolved.deadEdges} loopBadges={resolved.badges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
               {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}
@@ -368,9 +475,14 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
               data-testid="workflow-run-status-alert"
               data-status={view.status}
               style={{ top: CANVAS_INSET_PX, left: CANVAS_INSET_PX, right: CANVAS_INSET_PX }}
-              className={`absolute z-10 truncate rounded-md border px-3 py-1.5 text-label shadow-raised ${view.status === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive-text" : "border-warning bg-warning/10 text-warning-text"}`}
+              data-cancelled={view.cancelled}
+              className={`absolute z-10 truncate rounded-md border px-3 py-1.5 text-label shadow-raised ${cancelledPlain ? "border-border bg-surface-raised text-foreground" : view.status === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive-text" : "border-warning bg-warning/10 text-warning-text"}`}
             >
-              {view.status === "failed"
+              {cancelledPlain
+                ? "Cancelled: open the run details."
+                : cancelledAttention
+                ? "Needs attention (cancelled): open the run details before running again."
+                : view.status === "failed"
                 ? `Failed${view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}: open the run details.`
                 : "Needs attention: open the run details before running again."}
             </p>
@@ -399,6 +511,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
             onHeightChange={(height, persist) => update({ timelineHeight: height }, persist)}
             selectedStepId={selected}
             onSelectStep={toggleStep}
+            onSelectIteration={selectIteration}
           />
         ) : null}
       </div>
@@ -408,7 +521,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
           <SheetContent size="md" aria-describedby={undefined} data-testid="workflow-step-sheet">
             <SheetHeader title={`Step ${selectedDetail.stepId}`} />
             <SheetBody>
-              <StepIoPanel step={selectedStep} detail={selectedDetail} onClose={() => setSelected(null)} className="min-w-0 space-y-3" />
+              <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
             </SheetBody>
           </SheetContent>
         </Sheet>

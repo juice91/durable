@@ -24,8 +24,19 @@ export function isStructuredAgentOutput(type: string | null | undefined, output:
 
 const DECISION_LABELS = { approved: "Approved", rejected: "Rejected", timed_out: "Timed out" } as const;
 
-/** Input, output or error of one step, from its step_* events. */
-export function StepIoPanel({ step, detail, onClose, className }: { step: WorkflowStep | null; detail: StepDetail; onClose: () => void; className?: string }) {
+export interface StepIoPanelProps {
+  step: WorkflowStep | null;
+  detail: StepDetail;
+  onClose: () => void;
+  className?: string;
+  /** A loop body step: which iteration this detail is from ("Iteration 3 of each"). */
+  iterationLabel?: string | null;
+  /** Extra sections after the step's own (a loop step's iteration table, LP.12). */
+  children?: React.ReactNode;
+}
+
+/** Input, output or error of one step, from its step_* events (a body step: of one iteration). */
+export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children }: StepIoPanelProps) {
   const type = step?.type ?? detail.stepType;
   return (
     <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className={className ?? "min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4"}>
@@ -40,6 +51,7 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
         <span data-testid="step-io-state" className={`inline-block rounded border px-2 py-0.5 text-xs ${NODE_STATE_CLASSES[detail.state]}`}>{NODE_STATE_LABELS[detail.state]}</span>
         {detail.startedAt ? <span className="ml-2 text-xs text-muted-foreground">started {formatDateTime(detail.startedAt)}</span> : null}
       </p>
+      {iterationLabel ? <p data-testid="step-io-iteration" className="text-caption text-muted-foreground">{iterationLabel}</p> : null}
       {detail.childRunId ? (
         <p className="text-sm">
           {/* The child run's trace: in place, as the trace Sheet, on a page that hosts one (SL.12). */}
@@ -98,9 +110,14 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
       {!detail.started && detail.state === "pending" ? <p className="text-sm text-muted-foreground">This step has not started.</p> : null}
       {detail.state === "skipped" ? (
         <p data-testid="step-io-skip-reason" data-skip-reason={detail.skipReason ?? undefined} className="text-sm text-muted-foreground">
-          {detail.skipReason === "run_ended" ? "Not reached: the run ended before this step." : "Skipped: this branch arm was not taken."}
+          {detail.skipReason === "run_ended"
+            ? "Not reached: the run ended before this step."
+            : detail.skipReason === "iteration_ended"
+              ? "Not run in this iteration."
+              : "Skipped: this branch arm was not taken."}
         </p>
       ) : null}
+      {children}
     </section>
   );
 }
