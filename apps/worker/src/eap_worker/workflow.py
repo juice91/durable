@@ -152,6 +152,33 @@ A recall or index failure (embedding model no longer allowed, provider error, re
 text-free `embedding` event `embed:{recall|index}:{turn}:failed` and never fails the turn. Without
 `memory.semantic_recall` the layout is the RM.12 / RM.13 one exactly.
 
+Structured output (agent capabilities milestone, AC.4; eap_worker.capabilities): only for a spec with
+`output`. `_drive_agent` passes a per-run `output_type` (`final_result` tool, native or prompted
+`StructuredDict`) and `retries={"output": max_retries}`; the construction-time SpecCapability checks
+every candidate against the JSON Schema workflow-side (no step) and asks the model again with
+value-free errors. A spec without `output` passes neither and keeps its exact step layout. Inside
+`_drive_agent` only:
+
+    eap-agent__model.request_stream     the candidate (no live deltas for a structured spec)
+    eap.output_processors_structured    only with output processors: string leaves of the candidate
+    eap.append_event   processor:output:{i}:model:{n}
+    eap.append_event   model:{n}:final  model_message with "output_candidate": true
+    eap-agent__event_stream_handler     (tool mode) the output tool's call and result events
+    eap.append_event   output:{n}:retry output_retry {model_request, errors: [json paths], cause},
+                                        per rejected candidate (no `tool:{id}` events for final_result)
+    ... (next model request) ...
+    eap.output_processors_structured | eap-moderator__model.request   only with output processors:
+                                        the final pass over the validated object (list order;
+                                        moderation once, on its canonical JSON), then re-validation
+    eap.append_event   processor:output:{i}:final   (moderation outcomes, or a block)
+    eap.append_event   end              run_completed {output: canonical JSON, output_json: object}
+    eap.finish_run                      runs.output = canonical JSON, runs.output_format = json
+
+Retries exhausted end the run `output_invalid`; native mode on a model without JSON-schema output
+ends it `output_mode_unsupported`; a processed object that breaks the schema ends it
+`output_blocked` with reason `schema_invalid_after_processing`. Memory consumes the canonical JSON
+text (eap.memory_index) and the observer renders the object as the answer (observational.turn_text).
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -170,6 +197,7 @@ from dbos import DBOS
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import ResolveModelId
 from pydantic_ai.durable_exec.dbos import DBOSDurability
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -177,6 +205,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     PartDeltaEvent,
     PartStartEvent,
+    RetryFeedbackPart,
     RetryPromptPart,
     TextPart,
     TextPartDelta,
@@ -192,11 +221,21 @@ from eap_observability import log_context, log_failure, run_span, set_run_outcom
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
 from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
 from eap_schemas import AgentSpec
+from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
+from eap_worker.capabilities import SpecCapability, error_paths, output_type_for, retries_for, schema_errors
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
-from eap_worker.errors import InputBlocked, OutputBlocked, RequestContextInvalid, classify
+from eap_worker.errors import (
+    SCHEMA_INVALID_AFTER_PROCESSING,
+    InputBlocked,
+    OutputBlocked,
+    OutputModeUnsupported,
+    RequestContextInvalid,
+    classify,
+    native_output_unsupported,
+)
 from eap_worker.mcp import RunToolset, mcp_toolset_for_run
 from eap_worker.memory import (
     instructions_with_memory,
@@ -218,10 +257,15 @@ from eap_worker.processors import (
     describe,
     processed_message,
     processed_messages,
+    processed_output_call,
+    replace_responses,
     run_chain,
+    run_structured_chain,
+    scrub_retry_inputs,
     strip_thinking,
 )
 from eap_worker.runtime import WorkerDeps, declared_context, get_runtime
+from eap_worker.workflow_eval import canonical_json, non_finite_path
 
 log = logging.getLogger("eap_worker")
 
@@ -296,8 +340,9 @@ async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     run_id = str(ctx.deps.run_id)
     rt = get_runtime()
     # Output processors (P0.17): unchecked text must never reach the client, so no live deltas; the
-    # UI waits for the checked model_message. The crash point stays where the delta would go out.
-    live = not ctx.deps.spec.output_processors
+    # UI waits for the checked model_message. Structured output (AC.4): no deltas either (native and
+    # prompted modes would stream raw JSON fragments). The crash point stays where the delta would go.
+    live = not ctx.deps.spec.output_processors and ctx.deps.spec.output is None
     async for event in events:
         text = _text_of(event)
         if text:
@@ -317,6 +362,9 @@ agent: Agent[WorkerDeps, str] = Agent(
         ResolveModelId(make_resolver(lambda: get_runtime().settings)),
         # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
         RetrieveNumbering(),
+        # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
+        # hooks only: no step. Before DBOSDurability, which stays last.
+        SpecCapability(),
         DBOSDurability(
             parallel_execution_mode="sequential",
             event_stream_handler=_publish_deltas,
@@ -476,9 +524,14 @@ async def finish_run_step(
     output: str | None,
     error: str | None,
     messages: list[dict[str, Any]] | None = None,
+    output_format: str | None = None,
 ) -> None:
+    """The terminal status. `output_format` is `json` for a structured output's canonical JSON text
+    (AC.4); None leaves runs.output_format NULL (text)."""
     rt = get_runtime()
-    await asyncio.to_thread(rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages)
+    await asyncio.to_thread(
+        rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages, output_format
+    )
 
 
 async def _heartbeat(run_id: str, tenant_id: str) -> None:
@@ -608,7 +661,11 @@ async def _record_processor_results(run_id: str, tenant_id: str, chain: ChainRun
 def _blocked_error(chain: ChainRun, phase: str) -> Exception:
     record = chain.blocked_by
     index, processor_type = (record.index, str(record.data.get("processor_type"))) if record else (-1, "?")
-    return InputBlocked(index, processor_type) if phase == "input" else OutputBlocked(index, processor_type)
+    if phase == "input":
+        return InputBlocked(index, processor_type)
+    # AC.4: two object keys that processing made equal: the object no longer fits its schema.
+    reason = SCHEMA_INVALID_AFTER_PROCESSING if record and record.data.get("reason") == SCHEMA_INVALID_AFTER_PROCESSING else None
+    return OutputBlocked(index, processor_type, reason)
 
 
 def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
@@ -628,15 +685,172 @@ def effective_model_id(spec: AgentSpec, link: dict[str, Any]) -> str:
     return model_id_for(spec.model.provider, spec.model.name)
 
 
+def _candidate_value(spec: AgentSpec, output_calls: list[ToolCallPart], text: str) -> Any:
+    """The raw structured candidate of a response (tool arguments, or the parsed JSON text in
+    native or prompted mode), or None when there is none or it does not parse. Pure. Used ONLY to
+    recompute a rejected candidate's error paths (output_retry); never stored or processed, so a
+    non-finite number is kept here (schema_errors names its path as "must be a finite number")."""
+    if output_calls:
+        try:
+            return output_calls[0].args_as_dict(raise_if_invalid=True)
+        except (ValueError, AssertionError):  # malformed or non-object JSON: Pydantic AI asks again
+            return None
+    if text:
+        return _parse_json_text(text, allow_non_finite=True)
+    return None
+
+
+def _no_constants(name: str) -> Any:
+    raise ValueError(name)
+
+
+def _parse_json_text(text: str, *, allow_non_finite: bool = False) -> Any:
+    """`text` as a JSON object or array (NaN and Infinity refused unless `allow_non_finite`), else None."""
+    try:
+        value = json.loads(text) if allow_non_finite else json.loads(text, parse_constant=_no_constants)
+    except ValueError:
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+def _structured_args(call: ToolCallPart) -> dict[str, Any] | None:
+    """An output call's arguments as a JSON object for leaf processing, or None when they are not
+    one: malformed JSON, a non-object, or a non-finite number (NaN and Infinity are not JSON, JSONB
+    rejects them, and SpecCapability asks the model again for them). Those are processed as text."""
+    try:
+        args = call.args_as_dict(raise_if_invalid=True)
+    except (ValueError, AssertionError):
+        return None
+    return None if non_finite_path(args) is not None else args
+
+
+def _args_text(call: ToolCallPart) -> str:
+    """An output call's arguments as the model's text (a dict is dumped as JSON, NaN kept as a token)."""
+    if isinstance(call.args, str):
+        return call.args
+    return json.dumps(call.args or {}, ensure_ascii=False, default=str)
+
+
+def _is_output_retry(part: Any) -> bool:
+    if isinstance(part, ToolReturnPart):
+        return part.tool_name == OUTPUT_TOOL_NAME and part.outcome == "retried"
+    if isinstance(part, RetryFeedbackPart):
+        return True
+    return isinstance(part, RetryPromptPart) and part.tool_name in (None, OUTPUT_TOOL_NAME)
+
+
+def _candidate_errors(spec: AgentSpec, candidate: Any, content: Any = None) -> list[str]:
+    """The JSON paths a rejected candidate broke: Pydantic's own error list when it rejected the
+    candidate itself, else the schema check's (recomputed: pure). Never values."""
+    paths = error_paths(content)
+    if paths or spec.output is None or candidate is None:
+        return paths
+    return list(dict.fromkeys(path for path, _ in schema_errors(spec.output.json_schema, candidate)))
+
+
+async def _record_output_retry(
+    run_id: str, tenant_id: str, spec: AgentSpec, n: int, candidate: Any, parts: list[Any]
+) -> list[str] | None:
+    """One `output_retry` event (`output:{n}:retry`) when the request after response n asks the
+    model again for its output; returns the error paths, or None when it does not."""
+    retry = next((p for p in parts if _is_output_retry(p)), None)
+    if retry is None:
+        return None
+    errors = _candidate_errors(spec, candidate, retry.content)
+    data: dict[str, Any] = {"model_request": n, "errors": errors}
+    info = getattr(retry, "retry", None)
+    cause = getattr(info, "cause", None)
+    if isinstance(cause, str):
+        data["cause"] = cause
+    await append_event_step(run_id, tenant_id, f"output:{n}:retry", "output_retry", data)
+    return errors
+
+
+async def _blocked_response(run_id: str, tenant_id: str, n: int, usage: Any, chain: ChainRun) -> None:
+    """A blocked (or failed) response: keep the request's usage, never its content; then fail."""
+    await append_event_step(
+        run_id, tenant_id, f"model:{n}:final", "model_message",
+        {"model_request": n, "text": "", "blocked": True}, usage=usage,
+    )
+    raise chain.error if chain.error is not None else _blocked_error(chain, "output")
+
+
+async def _process_structured_response(
+    run_id: str,
+    tenant_id: str,
+    spec: AgentSpec,
+    n: int,
+    message: dict[str, Any],
+    text: str,
+    output_calls: list[ToolCallPart],
+    candidate: bool,
+    usage: Any,
+) -> tuple[dict[str, Any], str]:
+    """Output processors over one response of a structured spec (AC.4), before anything of it is
+    stored: the deterministic processors on every string leaf of each output candidate (tool
+    arguments, or native/prompted JSON text), on plain text otherwise. No moderation here: it runs
+    once on the final object. Returns the (message, text) to store; a block writes the blocked
+    model_message and raises."""
+    processors = spec.output_processors
+    suffix = f":model:{n}"
+    for k, call in enumerate(output_calls):
+        key = suffix if k == 0 else f"{suffix}:{k}"
+        args = _structured_args(call)
+        if args is not None:
+            chain = await run_structured_chain(
+                run_id, tenant_id, processors, args, moderation=False, schema=spec.output.json_schema
+            )
+        else:  # not a finite JSON object: processed as text, stored as the (processed) string
+            chain = await run_chain(run_id, tenant_id, "output", processors, _args_text(call), moderation=False)
+        await _record_processor_results(run_id, tenant_id, chain, key)
+        if chain.text is None:
+            await _blocked_response(run_id, tenant_id, n, usage, chain)
+        message = processed_output_call(message, call.tool_call_id, chain.text)
+    if not text:
+        return message, text
+    value = _parse_json_text(text) if candidate and not output_calls else None
+    key = f"{suffix}:text" if output_calls else suffix
+    if value is not None:
+        chain = await run_structured_chain(
+            run_id, tenant_id, processors, value, moderation=False, schema=spec.output.json_schema
+        )
+    else:
+        chain = await run_chain(run_id, tenant_id, "output", processors, text, moderation=False)
+    await _record_processor_results(run_id, tenant_id, chain, key)
+    if chain.text is None:
+        await _blocked_response(run_id, tenant_id, n, usage, chain)
+    text = canonical_json(chain.text) if value is not None else chain.text
+    return processed_message(message, text), text
+
+
+async def _final_structured_output(run_id: str, tenant_id: str, spec: AgentSpec, value: Any) -> Any:
+    """The validated object after the output processors' final pass (AC.4): the whole chain in
+    list order (moderation once, on the canonical JSON; the deterministic processors are pure, so
+    they give what the stored candidate holds), then re-validation against the schema. Records the
+    moderation outcomes (and a block) as `processor:output:{i}:final`."""
+    assert spec.output is not None
+    final = await run_structured_chain(
+        run_id, tenant_id, spec.output_processors, value, moderation=True, schema=spec.output.json_schema
+    )
+    shown = [r for r in final.records if r.data.get("processor_type") == "moderation" or r.blocked]
+    await _record_processor_results(run_id, tenant_id, ChainRun(final.text, shown, final.error), ":final")
+    if final.text is None:
+        raise final.error if final.error is not None else _blocked_error(final, "output")
+    if schema_errors(spec.output.json_schema, final.text):
+        raise OutputBlocked(-1, "output_schema", SCHEMA_INVALID_AFTER_PROCESSING)
+    return final.text
+
+
 async def _drive_agent(
     run_id: str,
     deps: WorkerDeps,
     input_text: str,
     history: list[ModelMessage] | None = None,
     model_id: str | None = None,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], Any]:
     """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
-    messages as JSON)."""
+    messages as JSON, output_json). For a structured spec (AC.4) `output_json` is the validated,
+    processed object and `output` its canonical JSON text; otherwise `output_json` is None."""
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
@@ -647,91 +861,131 @@ async def _drive_agent(
 
     if model_id is None:
         model_id = model_id_for(spec.model.provider, spec.model.name)
+    # AC.4: only a structured spec passes output_type and retries (a spec without `output` runs as before).
+    structured = spec.output is not None
+    mode = spec.output.effective_mode() if spec.output is not None else None
+    run_options: dict[str, Any] = {}
+    if structured:
+        run_options = {"output_type": output_type_for(spec), "retries": retries_for(spec)}
     # RM.12: a memory turn stores no copy of the note (eap_worker.memory.scrub_memory_messages).
     memory = memory_of(deps)
     n = 0
     pending: list[ToolCallPart] = []
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
+    stored: dict[int, dict[str, Any]] = {}  # structured + output processors: n -> the stored response
+    candidates: dict[int, Any] = {}  # structured: n -> its raw candidate (for output_retry paths)
+    awaiting_retry: int | None = None  # structured: the response whose retry (if any) comes next
     final_text: str | None = None
-    async with agent.iter(
-        input_text,
-        message_history=history or None,
-        deps=deps,
-        model=model_id,
-        model_settings=settings,
-    ) as run:
-        async for node in run:
-            if pending:
+    try:
+        async with agent.iter(
+            input_text,
+            message_history=history or None,
+            deps=deps,
+            model=model_id,
+            model_settings=settings,
+            **run_options,
+        ) as run:
+            async for node in run:
                 request_parts = list(node.request.parts) if Agent.is_model_request_node(node) else []
-                await _record_tool_results(run_id, tenant_id, pending, request_parts, _all_parts(run.all_messages()))
-                pending = []
-            if Agent.is_call_tools_node(node):
-                # The model request that produced this response is already checkpointed.
-                response: ModelResponse = node.model_response
-                calls = [p for p in response.parts if isinstance(p, ToolCallPart)]
-                text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
-                usage = request_usage_input(model_id, response.model_name, response.usage)
-                message = _message_json(response)
-                message = scrub_memory_message(message, memory)
-                if spec.output_processors:
-                    # Thinking is model text no processor checks: never stored, for every response.
-                    message = strip_thinking(message)
-                if spec.output_processors and text:
-                    # Only responses with text: an empty or thinking-only answer has nothing to check
-                    # (the agent retries it). Before anything of this response is stored. Moderation
-                    # only on the final answer (text and no tool calls).
-                    final = not calls
-                    chain = await run_chain(
-                        run_id, tenant_id, "output", spec.output_processors, text, moderation=final
+                if pending:
+                    await _record_tool_results(run_id, tenant_id, pending, request_parts, _all_parts(run.all_messages()))
+                    pending = []
+                if awaiting_retry is not None and request_parts:
+                    await _record_output_retry(
+                        run_id, tenant_id, spec, awaiting_retry, candidates.get(awaiting_retry), request_parts
                     )
-                    await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
-                    if chain.text is None:
-                        # Blocked (or failed): keep the request's usage, never its text.
-                        await append_event_step(
-                            run_id, tenant_id, f"model:{n}:final", "model_message",
-                            {"model_request": n, "text": "", "blocked": True}, usage=usage,
+                if Agent.is_model_request_node(node) or Agent.is_call_tools_node(node):
+                    awaiting_retry = None
+                if Agent.is_call_tools_node(node):
+                    # The model request that produced this response is already checkpointed.
+                    response: ModelResponse = node.model_response
+                    calls = [p for p in response.parts if isinstance(p, ToolCallPart)]
+                    # AC.4: the output tool is not a tool call (no tool events); its call is the candidate.
+                    output_calls = [c for c in calls if mode == "tool" and c.tool_name == OUTPUT_TOOL_NAME]
+                    if output_calls:
+                        calls = [c for c in calls if c.tool_name != OUTPUT_TOOL_NAME]
+                    text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
+                    candidate = bool(output_calls) or (structured and mode != "tool" and not calls and bool(text))
+                    if candidate:
+                        candidates[n] = _candidate_value(spec, output_calls, text)
+                    usage = request_usage_input(model_id, response.model_name, response.usage)
+                    message = _message_json(response)
+                    message = scrub_memory_message(message, memory)
+                    if spec.output_processors:
+                        # Thinking is model text no processor checks: never stored, for every response.
+                        message = strip_thinking(message)
+                    if spec.output_processors and structured:
+                        message, text = await _process_structured_response(
+                            run_id, tenant_id, spec, n, message, text, output_calls, candidate, usage
                         )
-                        raise chain.error if chain.error is not None else _blocked_error(chain, "output")
-                    text = chain.text
-                    message = processed_message(message, text)
-                    processed[n] = text
-                    if final:
-                        final_text = text
-                await append_event_step(
-                    run_id,
-                    tenant_id,
-                    f"model:{n}:final",
-                    "model_message",
-                    {"model_request": n, "text": text, "message": message},
-                    usage=usage,
-                )
-                for call in calls:
-                    await append_event_step(
-                        run_id,
-                        tenant_id,
-                        f"tool:{call.tool_call_id}:call",
-                        "tool_call",
-                        {
-                            "tool_call_id": call.tool_call_id,
-                            "tool_name": call.tool_name,
-                            "args": scrub_memory_tool_args(
-                                call.tool_name, to_jsonable_python(call.args_as_dict(), fallback=str), memory
-                            ),
-                        },
-                    )
-                pending = calls
-                n += 1
-        if pending:
-            await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
-        assert run.result is not None
-        new_messages = scrub_memory_messages(
-            ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json"), memory
-        )
-        if not spec.output_processors:
-            return run.result.output, new_messages
-        if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
-            raise OutputBlocked(-1, "unchecked")
-        return final_text, processed_messages(new_messages, processed, strip_thinking_parts=True)
+                        stored[n] = message
+                    elif spec.output_processors and text:
+                        # Only responses with text: an empty or thinking-only answer has nothing to check
+                        # (the agent retries it). Before anything of this response is stored. Moderation
+                        # only on the final answer (text and no tool calls).
+                        final = not calls
+                        chain = await run_chain(
+                            run_id, tenant_id, "output", spec.output_processors, text, moderation=final
+                        )
+                        await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
+                        if chain.text is None:
+                            # Blocked (or failed): keep the request's usage, never its text.
+                            await _blocked_response(run_id, tenant_id, n, usage, chain)
+                        text = chain.text
+                        message = processed_message(message, text)
+                        processed[n] = text
+                        if final:
+                            final_text = text
+                    data: dict[str, Any] = {"model_request": n, "text": text, "message": message}
+                    if candidate:
+                        data["output_candidate"] = True
+                        crash_point("output_candidate", event_key=f"model:{n}:final")
+                    await append_event_step(run_id, tenant_id, f"model:{n}:final", "model_message", data, usage=usage)
+                    for call in calls:
+                        await append_event_step(
+                            run_id,
+                            tenant_id,
+                            f"tool:{call.tool_call_id}:call",
+                            "tool_call",
+                            {
+                                "tool_call_id": call.tool_call_id,
+                                "tool_name": call.tool_name,
+                                "args": scrub_memory_tool_args(
+                                    call.tool_name, to_jsonable_python(call.args_as_dict(), fallback=str), memory
+                                ),
+                            },
+                        )
+                    pending = calls
+                    if structured:
+                        awaiting_retry = n
+                    n += 1
+            if pending:
+                await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
+            assert run.result is not None
+            new_messages = scrub_memory_messages(
+                ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json"), memory
+            )
+            result_output = run.result.output
+    except Exception as exc:
+        if spec.output is not None:
+            if isinstance(exc, UnexpectedModelBehavior) and "output retries" in str(exc):
+                # Retries exhausted: the last candidate's error paths only, never its values.
+                errors = _candidate_errors(spec, candidates.get(n - 1))
+                raise OutputInvalid(spec.output.effective_max_retries(), tuple(errors)) from None
+            if native_output_unsupported(exc):
+                raise OutputModeUnsupported(str(mode)) from None
+        raise
+    if spec.output is not None:
+        value = result_output
+        if spec.output_processors:
+            value = await _final_structured_output(run_id, tenant_id, spec, value)
+            new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
+        return canonical_json(value), new_messages, value
+    if not spec.output_processors:
+        return result_output, new_messages, None
+    if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
+        raise OutputBlocked(-1, "unchecked")
+    return final_text, processed_messages(new_messages, processed, strip_thinking_parts=True), None
 
 
 # --------------------------------------------------------------------------- the workflow
@@ -844,7 +1098,7 @@ async def _run_body(
                     input_text, loaded,
                 )
             deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded, recall))
-        output, new_messages = await _drive_agent(run_id, deps, input_text, history, model_id)
+        output, new_messages, output_json = await _drive_agent(run_id, deps, input_text, history, model_id)
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
         status = "needs_attention" if _is_side_effect_unknown(exc) else failure.status
@@ -853,18 +1107,24 @@ async def _run_body(
             run_id=run_id, tenant_id=tenant_id,
         )
         heartbeat.cancel()
-        await append_event_step(
-            run_id, tenant_id, "end", "run_failed",
-            {"status": status, "error": failure.error, "error_code": failure.code},
-        )
+        failed: dict[str, Any] = {"status": status, "error": failure.error, "error_code": failure.code}
+        if failure.reason is not None:
+            failed["reason"] = failure.reason  # AC.4: e.g. output_blocked schema_invalid_after_processing
+        await append_event_step(run_id, tenant_id, "end", "run_failed", failed)
         await finish_run_step(run_id, tenant_id, status, None, failure.error)
         return {"status": status, "error": failure.error, "error_code": failure.code}
     finally:
         heartbeat.cancel()
     # End event before the terminal status: a reader that sees a terminal status always finds the
     # complete event log.
-    await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
-    await finish_run_step(run_id, tenant_id, "completed", output, None, new_messages)
+    completed: dict[str, Any] = {"output": output}
+    if spec.output is not None:  # AC.4: the canonical JSON text plus the object itself
+        completed["output_json"] = output_json
+    await append_event_step(run_id, tenant_id, "end", "run_completed", completed)
+    await finish_run_step(
+        run_id, tenant_id, "completed", output, None, new_messages,
+        output_format="json" if spec.output is not None else None,
+    )
     if spec.memory is not None and spec.memory.semantic_recall is not None and link.get("conversation_id") is not None:
         # RM.14: post-turn index of the processed input and final answer (never fails the turn).
         await index_after_turn(
@@ -874,6 +1134,8 @@ async def _run_body(
         # RM.13: post-turn observational memory, after the run is completed (never delays the answer,
         # never fails the turn).
         await observe_after_turn(run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec)
+    if spec.output is not None:
+        return {"status": "completed", "output": output, "output_json": output_json}
     return {"status": "completed", "output": output}
 
 

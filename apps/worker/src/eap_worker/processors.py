@@ -30,6 +30,19 @@ processors they are dropped from every stored response. Moderation checks only t
 (text and no tool calls): text that accompanies tool calls gets the deterministic output processors
 but not moderation.
 
+Structured output (AC.4): for a spec with `output`, every output CANDIDATE (the `final_result` tool
+call's arguments, or the parsed JSON text in native or prompted mode) is processed leaf by leaf: the
+deterministic processors run on EACH STRING LEAF of the JSON value, in one step per segment,
+`eap.output_processors_structured` (a value that is not JSON is processed as text, as before).
+`max_length` measures the value's canonical JSON instead, and its `truncate` action acts as `block`
+(JSON cannot be truncated). Moderation never runs on candidates: it runs once, on the validated
+output's canonical JSON, in the final pass (`run_structured_chain(..., moderation=True)`), which runs
+the whole chain in list order again. Object keys the schema does NOT declare as `properties` (the
+model chooses them under `additionalProperties: true`) are processed like string leaves; declared
+property names are fixed by the schema and never changed. Two keys of one object that become equal
+after processing block the candidate (reason `schema_invalid_after_processing`). Numbers and
+booleans are never changed.
+
 Release note (P0.17 deploy): a run of a spec WITH processors that is in flight across this deploy
 fails DBOS recovery on a step-name mismatch (its recorded steps predate the processor steps). Drain
 the `eap-agent-runs` queue (let in-flight runs finish) before deploying. Runs of specs without
@@ -72,12 +85,14 @@ from eap_worker.errors import classify
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
 from eap_worker.pricing import request_usage_input
 from eap_worker.runtime import get_runtime
+from eap_worker.workflow_eval import canonical_json
 
 log = logging.getLogger("eap_worker")
 
 MODERATOR_NAME = "eap-moderator"
 INPUT_STEP = "eap.input_processors"
 OUTPUT_STEP = "eap.output_processors"
+STRUCTURED_OUTPUT_STEP = "eap.output_processors_structured"
 
 # The fixed platform prompt (not per tenant): the verdict format is the ModerationVerdict contract.
 MODERATION_INSTRUCTIONS = (
@@ -194,6 +209,213 @@ async def output_processors_step(run_id: str, tenant_id: str, processors: list[d
     return out
 
 
+# --------------------------------------------------------------------------- structured output (AC.4)
+
+
+def _merge_counts(into: dict[str, int], counts: Any) -> None:
+    for key, count in dict(counts).items():
+        into[key] = into.get(key, 0) + int(count)
+
+
+# The processor outcome reason when processing made two keys of one object equal (AC.4).
+KEY_COLLISION_REASON = "schema_invalid_after_processing"
+
+
+def _child_schema(schema: Any, key: str) -> Any:
+    """The subschema for property `key` of an object schema ({} when unknown: anything goes)."""
+    if not isinstance(schema, dict):
+        return {}
+    properties = schema.get("properties")
+    if isinstance(properties, dict) and key in properties:
+        return properties[key]
+    extra = schema.get("additionalProperties")
+    return extra if isinstance(extra, dict) else {}
+
+
+def _declared(schema: Any) -> frozenset[str]:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    return frozenset(properties) if isinstance(properties, dict) else frozenset()
+
+
+class _KeyCollision(Exception):
+    pass
+
+
+def _map_leaves(value: Any, fn: Any, schema: Any = None) -> Any:
+    """`value` with every string leaf replaced by `fn(leaf)`, and every object key that `schema`
+    does not declare as a property replaced by `fn(key)` (declared names are kept). Dict items are
+    visited in sorted key order so counts and budgets are deterministic. Raises _KeyCollision when
+    two keys of one object become equal."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        declared = _declared(schema)
+        out: dict[str, Any] = {}
+        for key in sorted(value):
+            child = _map_leaves(value[key], fn, _child_schema(schema, key))
+            new_key = key if key in declared else fn(key)
+            if new_key in out:
+                raise _KeyCollision()
+            out[new_key] = child
+        return out
+    if isinstance(value, list):
+        items = schema.get("items") if isinstance(schema, dict) else None
+        return [_map_leaves(v, fn, items if isinstance(items, dict) else {}) for v in value]
+    return value
+
+
+class _LeafBlocked(Exception):
+    def __init__(self, outcome: Any) -> None:
+        self.outcome = outcome
+        super().__init__()
+
+
+def _apply_structured_segment(
+    processors: list[dict[str, Any]], value: Any, schema: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Deterministic processors in list order over a JSON value (string leaves, and the object keys
+    `schema` does not declare): {"value": processed or None, "outcomes"}. Never raises exception
+    text (see ProcessorStepFailed)."""
+    from eap_processors.engine import MaxLength, ProcessorOutcome, new_budget
+
+    try:
+        specs = [PROCESSOR_SPEC_ADAPTER.validate_python(p) for p in processors]
+        chain = compiled_chain(specs, "output_processors")
+        budget = new_budget()
+        outcomes: list[dict[str, Any]] = []
+        current = value
+        for processor in chain:
+            if isinstance(processor, MaxLength):
+                over = len(canonical_json(current)) - processor.config.max_chars
+                if over > 0:  # truncate cannot apply to JSON: it blocks
+                    outcomes.append(ProcessorOutcome(processor.processor_type, "block", {"chars_over_limit": over}).to_json())
+                    return {"value": None, "outcomes": outcomes}
+                outcomes.append(ProcessorOutcome(processor.processor_type, "allow").to_json())
+                continue
+            counts: dict[str, int] = {}
+            changed = False
+
+            def leaf(text: str, processor: Any = processor, counts: dict[str, int] = counts) -> str:
+                nonlocal changed
+                result = processor.apply(text, budget)
+                if result.blocked:
+                    raise _LeafBlocked(result.outcome)
+                _merge_counts(counts, result.outcome.match_counts)
+                if result.text != text:
+                    changed = True
+                return result.text
+
+            try:
+                current = _map_leaves(current, leaf, schema)
+            except _KeyCollision:
+                outcomes.append(
+                    ProcessorOutcome(processor.processor_type, "block", counts, KEY_COLLISION_REASON).to_json()
+                )
+                return {"value": None, "outcomes": outcomes}
+            except _LeafBlocked as blocked:
+                outcome = blocked.outcome
+                _merge_counts(counts, outcome.match_counts)
+                outcomes.append(ProcessorOutcome(outcome.processor_type, "block", counts, outcome.reason).to_json())
+                return {"value": None, "outcomes": outcomes}
+            action = "redact" if changed else "allow"
+            outcomes.append(ProcessorOutcome(processor.processor_type, action, counts if changed else {}).to_json())
+    except Exception as exc:  # noqa: BLE001 - never let exception text (could quote output) escape
+        raise ProcessorStepFailed("output", exception_type(exc)) from None
+    return {"value": current, "outcomes": outcomes}
+
+
+@DBOS.step(name=STRUCTURED_OUTPUT_STEP)
+async def output_processors_structured_step(
+    run_id: str, tenant_id: str, processors: list[dict[str, Any]], value: Any,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deterministic output processors on one structured candidate (a JSON value), leaf by leaf and
+    on the object keys the output schema does not declare."""
+    out = await asyncio.to_thread(_apply_structured_segment, processors, value, schema)
+    crash_point("output_processors")
+    return out
+
+
+async def run_structured_chain(
+    run_id: str, tenant_id: str, specs: tuple[Any, ...], value: Any, *, moderation: bool,
+    schema: dict[str, Any] | None = None,
+) -> ChainRun:
+    """`run_chain` for a structured value: the returned ChainRun's `text` is the processed JSON value
+    (None when blocked or failed). Deterministic segments run in `eap.output_processors_structured`;
+    moderation (only with `moderation=True`) checks the current value's canonical JSON."""
+    records: list[ProcessorResultRecord] = []
+    current = value
+    i = 0
+    try:
+        while i < len(specs):
+            spec = specs[i]
+            if isinstance(spec, ModerationProcessor):
+                if moderation:
+                    record = await moderate("output", i, spec, canonical_json(current))
+                    records.append(record)
+                    if record.blocked:
+                        return ChainRun(None, records)
+                i += 1
+                continue
+            j = i
+            while j < len(specs) and not isinstance(specs[j], ModerationProcessor):
+                j += 1
+            segment = [PROCESSOR_SPEC_ADAPTER.dump_python(s, mode="json") for s in specs[i:j]]
+            out = await output_processors_structured_step(run_id, tenant_id, segment, current, schema)
+            for k, outcome in enumerate(out["outcomes"]):
+                records.append(ProcessorResultRecord(i + k, {"phase": "output", "index": i + k, **outcome}))
+            if out["value"] is None:
+                return ChainRun(None, records)
+            current = out["value"]
+            i = j
+    except Exception as exc:  # noqa: BLE001 - the caller records what ran, then fails the run
+        return ChainRun(None, records, exc)
+    return ChainRun(current, records)
+
+
+def processed_output_call(message: dict[str, Any], tool_call_id: str, args: Any) -> dict[str, Any]:
+    """A model response (JSON) with the arguments of tool call `tool_call_id` replaced."""
+    parts = [
+        {**p, "args": args} if p.get("part_kind") == "tool-call" and p.get("tool_call_id") == tool_call_id else p
+        for p in message.get("parts", [])
+    ]
+    return {**message, "parts": parts}
+
+
+def replace_responses(messages: list[dict[str, Any]], stored: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """A run's new messages with the k-th model response replaced by `stored[k]` (the message its
+    `model:{k}:final` event stored), so runs.messages hold exactly the processed responses."""
+    out: list[dict[str, Any]] = []
+    n = 0
+    for message in messages:
+        if message.get("kind") == "response":
+            message = stored.get(n, message)
+            n += 1
+        out.append(message)
+    return out
+
+
+def scrub_retry_inputs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Messages without the `input` of validation-error details in retry parts (Pydantic AI copies
+    the rejected model output there, which output processors never saw)."""
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("kind") == "request":
+            parts = []
+            for part in message.get("parts", []):
+                content = part.get("content")
+                kind = part.get("part_kind")
+                retry = kind in ("retry-feedback", "retry-prompt") or (kind == "tool-return" and part.get("outcome") == "retried")
+                if retry and isinstance(content, list):
+                    part = {**part, "content": [
+                        {k: v for k, v in d.items() if k != "input"} if isinstance(d, dict) else d for d in content
+                    ]}
+                parts.append(part)
+            message = {**message, "parts": parts}
+        out.append(message)
+    return out
+
+
 # --------------------------------------------------------------------------- the chain (workflow code)
 
 
@@ -214,9 +436,10 @@ class ProcessorResultRecord:
 @dataclass
 class ChainRun:
     """`text` is the processed text (None when blocked or failed); `error` is an exception that
-    ended the chain (it fails the run; the outcomes before it are still recorded)."""
+    ended the chain (it fails the run; the outcomes before it are still recorded). For a structured
+    chain (`run_structured_chain`) `text` holds the processed JSON value instead."""
 
-    text: str | None
+    text: Any
     records: list[ProcessorResultRecord] = field(default_factory=list)
     error: Exception | None = None
 
@@ -365,9 +588,11 @@ def describe(record: ProcessorResultRecord) -> str:
 
 __all__ = [
     "INPUT_STEP",
+    "KEY_COLLISION_REASON",
     "MODERATION_INSTRUCTIONS",
     "MODERATOR_NAME",
     "OUTPUT_STEP",
+    "STRUCTURED_OUTPUT_STEP",
     "ChainRun",
     "ProcessorResultRecord",
     "ProcessorStepFailed",
@@ -376,9 +601,14 @@ __all__ = [
     "moderate",
     "moderator",
     "output_processors_step",
+    "output_processors_structured_step",
+    "processed_output_call",
     "parse_verdict",
     "processed_message",
     "processed_messages",
+    "replace_responses",
     "run_chain",
+    "run_structured_chain",
+    "scrub_retry_inputs",
     "strip_thinking",
 ]

@@ -107,6 +107,7 @@ from pydantic_ai.settings import ModelSettings
 from eap_observability import log_failure
 from eap_run_store import ConversationNotFound, MemoryEvent, MemoryStore, RunNotFound
 from eap_schemas.memory import MemoryConfig, ObservationalMemoryConfig
+from eap_schemas.output import OUTPUT_TOOL_NAME
 from eap_schemas.processors import PiiRedactConfig
 from eap_worker.config import MEMORY_OBSERVE_QUEUE_NAME, MEMORY_OBSERVE_WORKFLOW_NAME
 from eap_worker.crash import crash_point
@@ -330,15 +331,59 @@ def _content_text(content: Any) -> str:
         return str(content)
 
 
+def _output_args_text(args: Any) -> str:
+    """A structured answer's arguments as canonical JSON text (AC.4), whatever form they are stored in."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return args
+    return json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _retried_output_calls(messages: list[Any]) -> set[str]:
+    """The ids of `final_result` calls the run rejected (a retried return or a retry prompt)."""
+    retried: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for part in message.get("parts") or []:
+            if not isinstance(part, dict) or part.get("tool_name") != OUTPUT_TOOL_NAME:
+                continue
+            kind = part.get("part_kind")
+            if (kind == "tool-return" and part.get("outcome") == "retried") or kind == "retry-prompt":
+                retried.add(str(part.get("tool_call_id")))
+    return retried
+
+
+def _rejected_text_responses(messages: list[Any]) -> set[int]:
+    """Indexes of responses whose text the run rejected: the next message carries retry feedback
+    (a native or prompted structured candidate that failed validation, AC.4)."""
+    rejected: set[int] = set()
+    for i, message in enumerate(messages[:-1]):
+        nxt = messages[i + 1]
+        if isinstance(message, dict) and message.get("kind") == "response" and isinstance(nxt, dict) and any(
+            isinstance(p, dict) and p.get("part_kind") == "retry-feedback" for p in nxt.get("parts") or []
+        ):
+            rejected.add(i)
+    return rejected
+
+
 def turn_text(turn: Mapping[str, Any], limit: int = 4 * MAX_TURN_CHARS) -> str:
     """A completed turn as plain text for the observer, from its stored (processed) messages: user
     prompts, assistant text, tool calls by name and clipped tool results. A turn stored without
     messages uses its input and output. Thinking and system parts are left out. Clipped (at
-    whitespace) to `limit`; observe_prompt redacts it and then clips it to MAX_TURN_CHARS."""
+    whitespace) to `limit`; observe_prompt redacts it and then clips it to MAX_TURN_CHARS.
+
+    A structured turn (AC.4) shows its answer as the assistant's: the accepted `final_result` call's
+    arguments as canonical JSON, never as a tool call. Rejected candidates, the output tool's
+    return and retry feedback are left out."""
     lines: list[str] = []
     messages = turn.get("messages")
     if isinstance(messages, list) and messages:
-        for message in messages:
+        retried = _retried_output_calls(messages)
+        rejected = _rejected_text_responses(messages)
+        for index, message in enumerate(messages):
             if not isinstance(message, dict):
                 continue
             for part in message.get("parts") or []:
@@ -347,10 +392,17 @@ def turn_text(turn: Mapping[str, Any], limit: int = 4 * MAX_TURN_CHARS) -> str:
                 kind = part.get("part_kind")
                 if kind == "user-prompt":
                     lines.append(f"User: {_content_text(part.get('content'))}")
+                elif kind == "text" and index in rejected:
+                    continue
                 elif kind == "text":
                     lines.append(f"Assistant: {part.get('content') or ''}")
+                elif kind == "tool-call" and part.get("tool_name") == OUTPUT_TOOL_NAME:
+                    if str(part.get("tool_call_id")) not in retried:
+                        lines.append(f"Assistant: {_output_args_text(part.get('args'))}")
                 elif kind == "tool-call":
                     lines.append(f"Assistant called tool {part.get('tool_name')}.")
+                elif kind == "tool-return" and part.get("tool_name") == OUTPUT_TOOL_NAME:
+                    continue
                 elif kind == "tool-return":
                     result = _clip(_content_text(part.get("content")), MAX_TOOL_RESULT_CHARS)
                     lines.append(f"Tool {part.get('tool_name')} returned: {result}")

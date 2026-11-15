@@ -16,11 +16,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 
 from eap_observability import exception_type
 from eap_runtime import SideEffectOutcomeUnknown, ToolNotAllowedError, UnknownToolError
 from eap_schemas.models_policy import ModelNotAllowed
+from eap_schemas.output import OutputInvalid
 from eap_worker.mcp import McpToolUnavailable
 
 _MAX_FIELD = 200
@@ -66,20 +67,52 @@ class InputBlocked(Exception):
 
 
 class OutputBlocked(Exception):
-    """An output processor (P0.17) blocked a model response: it is never stored or shown."""
+    """An output processor (P0.17) blocked a model response: it is never stored or shown.
 
-    def __init__(self, index: int, processor_type: str) -> None:
+    `reason` (AC.4) is a fixed code when the block is not a processor's own verdict:
+    SCHEMA_INVALID_AFTER_PROCESSING when the processed structured output no longer matches the
+    output schema (e.g. a redaction broke a `const` or `minLength`)."""
+
+    def __init__(self, index: int, processor_type: str, reason: str | None = None) -> None:
         self.index = index
         self.processor_type = processor_type
-        super().__init__(index, processor_type)  # pickle-safe
+        self.reason = reason
+        super().__init__(index, processor_type, reason)  # pickle-safe
 
     def __str__(self) -> str:
-        return f"output blocked by output_processors[{self.index}] ({self.processor_type})"
+        suffix = f": {self.reason}" if self.reason else ""
+        return f"output blocked by output_processors[{self.index}] ({self.processor_type}){suffix}"
+
+
+SCHEMA_INVALID_AFTER_PROCESSING = "schema_invalid_after_processing"
+
+
+class OutputModeUnsupported(Exception):
+    """The run's model cannot produce the spec's structured output mode (AC.4: `native` on a model
+    whose profile has no JSON-schema output). Raised at the first model request; no output."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        super().__init__(mode)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"the model does not support {self.mode} structured output"
+
+
+# Pydantic AI's fixed UserError text when NativeOutput meets a model without JSON-schema output.
+_NATIVE_UNSUPPORTED = "Native structured output is not supported by this model"
 
 
 # The fixed, user-safe messages of a blocked turn (stored as runs.error and in run_failed).
 INPUT_BLOCKED_MESSAGE = "the message was blocked by this agent's input processors"
 OUTPUT_BLOCKED_MESSAGE = "the answer was blocked by this agent's output processors"
+SCHEMA_INVALID_AFTER_PROCESSING_MESSAGE = (
+    "the answer no longer matched the output schema after this agent's output processors"
+)
+OUTPUT_INVALID_MESSAGE = "the answer did not match the agent's output schema within the allowed retries"
+OUTPUT_MODE_UNSUPPORTED_MESSAGE = (
+    "the model does not support this structured output mode; use tool mode or another model"
+)
 
 
 # Workflow runs (eap_worker.workflow_run): a step or run failure with a stable code and a fixed
@@ -124,6 +157,7 @@ class RunFailure:
     code: str  # stable, for logs, spans and alerting
     error_type: str  # the classified exception's class name
     message: str  # stored as runs.error and in the run_failed event
+    reason: str | None = None  # a fixed sub-code for run_failed data (AC.4: output_blocked's reason)
 
     @property
     def error(self) -> str:
@@ -156,7 +190,16 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
     ),
     (RequestContextInvalid, "failed", "request_context_invalid", lambda e: REQUEST_CONTEXT_INVALID_MESSAGE),
     (InputBlocked, "failed", "input_blocked", lambda e: INPUT_BLOCKED_MESSAGE),
-    (OutputBlocked, "failed", "output_blocked", lambda e: OUTPUT_BLOCKED_MESSAGE),
+    (
+        OutputBlocked,
+        "failed",
+        "output_blocked",
+        lambda e: SCHEMA_INVALID_AFTER_PROCESSING_MESSAGE
+        if getattr(e, "reason", None) == SCHEMA_INVALID_AFTER_PROCESSING
+        else OUTPUT_BLOCKED_MESSAGE,
+    ),
+    (OutputInvalid, "failed", "output_invalid", lambda e: OUTPUT_INVALID_MESSAGE),
+    (OutputModeUnsupported, "failed", "output_mode_unsupported", lambda e: OUTPUT_MODE_UNSUPPORTED_MESSAGE),
     (UnknownToolError, "failed", "unknown_tool", lambda e: f"tool '{_field(e, 'tool_id')}' is not registered"),
     (ToolNotAllowedError, "failed", "tool_not_allowed", lambda e: f"tool '{_field(e, 'tool_id')}' is not allowed on this worker"),
     (ToolInputInvalid, "failed", "tool_input_invalid", lambda e: f"the input does not match tool '{_field(e, 'tool_id')}'"),
@@ -201,8 +244,23 @@ def classify(exc: BaseException) -> RunFailure:
         for cur in chain:
             # By name too: a step's recorded exception may come back as a re-created class.
             if isinstance(cur, cls) or type(cur).__name__ == cls.__name__:
-                return RunFailure(status, code, exception_type(cur), message(cur))
+                return RunFailure(status, code, exception_type(cur), message(cur), _reason(cur))
     return RunFailure("failed", "internal_error", exception_type(exc), "the run failed with an internal error")
+
+
+def _reason(exc: BaseException) -> str | None:
+    """A known fixed reason code carried by the exception (never free text)."""
+    reason = getattr(exc, "reason", None)
+    return reason if reason == SCHEMA_INVALID_AFTER_PROCESSING else None
+
+
+def native_output_unsupported(exc: BaseException) -> bool:
+    """Whether Pydantic AI refused NativeOutput for the run's model anywhere in the exception chain
+    (also inside DBOS's step-retry wrapper: the refusal happens in the model request step)."""
+    return any(
+        (isinstance(cur, UserError) or type(cur).__name__ == "UserError") and _NATIVE_UNSUPPORTED in str(cur)
+        for cur in _chain(exc)
+    )
 
 
 def _workflow_failure(exc: BaseException) -> RunFailure:
@@ -219,13 +277,19 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
 __all__ = [
     "INPUT_BLOCKED_MESSAGE",
     "OUTPUT_BLOCKED_MESSAGE",
+    "OUTPUT_INVALID_MESSAGE",
+    "OUTPUT_MODE_UNSUPPORTED_MESSAGE",
+    "SCHEMA_INVALID_AFTER_PROCESSING",
+    "SCHEMA_INVALID_AFTER_PROCESSING_MESSAGE",
     "REQUEST_CONTEXT_INVALID_MESSAGE",
     "WORKFLOW_FAILURES",
     "InputBlocked",
     "OutputBlocked",
+    "OutputModeUnsupported",
     "RequestContextInvalid",
     "RunFailure",
     "ToolInputInvalid",
     "WorkflowStepError",
     "classify",
+    "native_output_unsupported",
 ]

@@ -83,6 +83,10 @@
   (rows, `embed:index:{turn}` event, usage row) committed and before the step checkpoint (the run
   is already completed). Recovery re-runs the step: index_turn answers `existing`, the event key
   exists, so one row per role, one event, one usage row.
+- `output_candidate` (AC.4): in the agent run's workflow code, for a structured output candidate,
+  after its model request step is checkpointed (and its output processors ran) and right before
+  its `model:{n}:final` event is written. Filtered by `EAP_CRASH_EVENT_KEY` against
+  `model:{n}:final`. Recovery replays the model step: one model_message event, the same object.
 
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
