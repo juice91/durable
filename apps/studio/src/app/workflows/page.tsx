@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { formatDateTime } from "@/components/workflows/ApprovalCard";
+import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import { getWorkflowVersion, listWorkflows, type Workflow, type WorkflowSpec } from "@/lib/workflows";
 import { routes } from "@/lib/routes";
 import { PageHeader } from "@/components/frame/PageHeader";

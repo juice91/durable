@@ -20,6 +20,7 @@ import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
+import type { RunStatus } from "@/lib/runs";
 import { AgentArchiveMenu, ArchivedBanner } from "./AgentArchiveMenu";
 import { THREADS_TITLE } from "./AgentChatPanes";
 import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
@@ -78,6 +79,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [configVersion, setConfigVersion] = useState<VersionRef>(null);
+  // AC.14: the chat's latest turn status, for the Config panel's waiting pill.
+  const [chatStatus, setChatStatus] = useState<RunStatus | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   // The chat's address while on this agent, so Chat → Traces → Chat returns to the same conversation.
   const [chatHref, setChatHref] = useState<string | null>(null);
@@ -275,6 +278,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       reload,
       configVersion,
       setConfigVersion,
+      chatStatus,
+      setChatStatus,
       threadsOpen,
       setThreadsOpen,
       requestThreadsOpen,
@@ -285,7 +290,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, requestThreadsOpen, setThreadsCloseGuard, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, chatStatus, threadsOpen, setThreadsOpen, requestThreadsOpen, setThreadsCloseGuard, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -374,6 +379,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
                 agent={agent}
                 versions={versions}
                 versionRef={tab === "chat" ? configVersion : null}
+                turnStatus={tab === "chat" ? chatStatus : null}
               />
             ) : (
               <p className="px-3 py-3 text-label text-muted-foreground">{loadError ?? "Loading configuration…"}</p>

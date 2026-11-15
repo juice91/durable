@@ -11,7 +11,7 @@ import { Badge, type BadgeProps } from "@/components/ui/Badge";
 import { focusRing } from "@/components/ui/Button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/Collapsible";
 import { SafeLink, SafeMarkdown } from "@/components/markdown/SafeMarkdown";
-import { CITATION_ATTR, citationSourcesForRun, type CitationSource } from "./citations";
+import { CITATION_ATTR, citationHref, citationSourcesForRun, type CitationSource } from "./citations";
 import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
 
 /**
@@ -23,6 +23,8 @@ export const ToolCallInfoContext = createContext<ReadonlyMap<string, ToolCallInf
 
 const STATUS_VARIANT: Record<ToolCallStatus, BadgeProps["variant"]> = {
   running: "info",
+  waiting: "warning",
+  denied: "warning",
   ok: "success",
   error: "destructive",
   no_result: "neutral",
@@ -116,17 +118,38 @@ function CitationLink({ n, href, source }: { n: string; href: string; source: Ci
   );
 }
 
-/**
- * Assistant text as Markdown (GFM, no raw HTML, images as their alt text only), styled with theme
- * tokens. In a turn that called the
- * `retrieve` tool, `[n]` markers link to that call's structured sources (citations.ts), never to a
- * URL written in the text.
- */
-export function MarkdownText({ text }: TextMessagePartProps) {
+/** `[n]` → source for the message's turn (from its retrieve results), or null when it retrieved nothing. */
+export function useTurnSources(): Map<number, CitationSource> | null {
   const messageId = useAuiState((s) => s.message.id);
   const runId = messageRunId(messageId);
   const infos = useContext(ToolCallInfoContext);
-  const sources = useMemo(() => (runId === null ? null : citationSourcesForRun(infos, runId)), [infos, runId]);
+  return useMemo(() => (runId === null ? null : citationSourcesForRun(infos, runId)), [infos, runId]);
+}
+
+/** One `[n]` citation chip outside Markdown (a structured `citations: [n, …]` field, AC.14). */
+export function CitationChip({ n, sources }: { n: number; sources: ReadonlyMap<number, CitationSource> | null }) {
+  const source = sources?.get(n);
+  const href = source ? citationHref(source) : null;
+  if (!source || !href) return <span className="mx-0.5 font-mono text-caption text-muted-foreground">[{n}]</span>;
+  return <CitationLink n={String(n)} href={href} source={source} />;
+}
+
+export const markdownClass = cn(
+  "min-w-0 space-y-2 break-words text-body leading-relaxed",
+  "[&_a]:text-info-text [&_a]:underline [&_a]:underline-offset-2",
+  "[&_code]:rounded-sm [&_code]:bg-fill-hover [&_code]:px-1 [&_code]:font-mono [&_code]:text-caption",
+  "[&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-border [&_pre]:bg-fill-hover [&_pre]:p-3",
+  "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
+  "[&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5",
+  "[&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
+  "[&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_th]:border [&_th]:border-border [&_th]:px-2",
+);
+
+/**
+ * Text as Markdown (GFM, no raw HTML, images as their alt text only) where `[n]` markers link to
+ * `sources` (citations.ts), never to a URL written in the text. Null sources: no citation rewriting.
+ */
+export function CitationMarkdown({ text, sources, className }: { text: string; sources: ReadonlyMap<number, CitationSource> | null; className?: string }) {
   // Images (alt text only), raw HTML and URL rules come from SafeMarkdown; only citations add an `a`.
   const components = useMemo<Omit<Components, "img"> | undefined>(
     () =>
@@ -142,21 +165,19 @@ export function MarkdownText({ text }: TextMessagePartProps) {
     [sources],
   );
   return (
-    <div
-      className={cn(
-        "min-w-0 space-y-2 break-words text-body leading-relaxed",
-        "[&_a]:text-info-text [&_a]:underline [&_a]:underline-offset-2",
-        "[&_code]:rounded-sm [&_code]:bg-fill-hover [&_code]:px-1 [&_code]:font-mono [&_code]:text-caption",
-        "[&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-border [&_pre]:bg-fill-hover [&_pre]:p-3",
-        "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
-        "[&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5",
-        "[&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
-        "[&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_td]:border [&_td]:border-border [&_td]:px-2 [&_th]:border [&_th]:border-border [&_th]:px-2",
-      )}
-    >
+    <div className={className ?? markdownClass}>
       <SafeMarkdown citations={sources} components={components}>
         {text}
       </SafeMarkdown>
     </div>
   );
+}
+
+/**
+ * Assistant text as Markdown, styled with theme tokens. In a turn that called the `retrieve` tool,
+ * `[n]` markers link to that call's structured sources (citations.ts), never to a URL in the text.
+ */
+export function MarkdownText({ text }: TextMessagePartProps) {
+  const sources = useTurnSources();
+  return <CitationMarkdown text={text} sources={sources} />;
 }

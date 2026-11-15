@@ -2,6 +2,7 @@ import type { ThreadMessage } from "@assistant-ui/react";
 
 // One definition of the event shapes: the canonical types live in lib/runs.ts.
 import type { PartialTextMap, RunEvent } from "@/lib/runs";
+import { OUTPUT_RETRY_PART, STRUCTURED_OUTPUT_PART, TOOL_APPROVAL_PART, toolApprovals } from "./turnCapabilities";
 
 export type { PartialTextMap, RunEvent };
 
@@ -34,6 +35,29 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
         data.content !== undefined ? data.content : data.result,
       );
     }
+  }
+
+  // AC.14: each gated call's approval (with its decision, if any), shown after the call.
+  const approvals = new Map(toolApprovals(events).map((item) => [item.toolCallId, item]));
+
+  /** An assistant message holding one data part (structured output, a retry marker, an approval). */
+  function pushData(id: string, ts: string, name: string, data: unknown) {
+    finalizeAssistantMessage();
+    currentModelRequest = null;
+    messages.push({
+      id: `${idPrefix}${id}`,
+      createdAt: new Date(ts),
+      role: "assistant",
+      content: [{ type: "data", name, data }],
+      status: { type: "complete", reason: "stop" },
+      metadata: {
+        custom: {},
+        unstable_annotations: [],
+        unstable_data: [],
+        unstable_state: null,
+        steps: [],
+      },
+    });
   }
 
   let userMessage: ThreadMessage | null = null;
@@ -81,6 +105,7 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
           is_partial?: boolean;
         }>;
         is_final: boolean;
+        output_candidate?: boolean;
       };
 
       const modelReqNum = eventData.model_request;
@@ -107,8 +132,10 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
         }
       }
 
+      // AC.14: a structured-output candidate's text is the raw JSON (native or prompted mode): never
+      // shown as text; the validated object renders from run_completed.output_json.
       // Handle text - Rule 4: partial text is transient, replaced by model_message
-      if (eventData.text) {
+      if (eventData.text && !eventData.output_candidate) {
         if (eventData.is_final) {
           // Final message replaces partial text completely (Rule 4)
           currentModelRequest.text = eventData.text;
@@ -157,6 +184,13 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
           steps: [],
         },
       });
+    } else if (event.type === "tool_approval_waiting") {
+      const approval = typeof event.data.tool_call_id === "string" ? approvals.get(event.data.tool_call_id) : undefined;
+      if (approval) pushData(`assistant-approval-${approval.toolCallId}`, event.ts, TOOL_APPROVAL_PART, approval);
+    } else if (event.type === "output_retry") {
+      pushData(`assistant-retry-${event.seq}`, event.ts, OUTPUT_RETRY_PART, event.data);
+    } else if (event.type === "run_completed" && event.data.output_json !== undefined) {
+      pushData("assistant-output", event.ts, STRUCTURED_OUTPUT_PART, { value: event.data.output_json });
     } else if (event.type === "tool_result") {
       // Record tool result to be added as model content
       const toolResultData = event.data as {
@@ -176,12 +210,13 @@ export function runToThread(events: RunEvent[] = [], partialText: PartialTextMap
 
   function finalizeAssistantMessage() {
     if (!currentModelRequest) return;
+    const request = currentModelRequest;
 
     // Build content array with all parts
     const content: ThreadMessage["content"] = [
       // Add tool call parts (each tool call followed by its result as model content)
       ...currentModelRequest.toolCalls.map((toolCall, i) => {
-        const result = currentModelRequest.toolResults[i];
+        const result = request.toolResults[i];
         return [{
           type: "tool-call" as const,
           toolCallId: toolCall.tool_call_id,

@@ -31,7 +31,8 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
   return new ApiError(response.status, message);
 }
 
-export type RunStatus = "queued" | "running" | "recovering" | "completed" | "failed" | "needs_attention";
+/** `waiting_approval` (AC.6) is a display status only: a running run with an open tool approval. */
+export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval" | "completed" | "failed" | "needs_attention";
 
 /**
  * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
@@ -108,7 +109,12 @@ export interface RunEvent {
     // reason, categories; never the processed or matched text.
     | "processor_result"
     // RAG and memory (RM.10 to RM.14; rows in RM.19): counts, ids, model and cost, never text.
-    | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed";
+    | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed"
+    // Agent capabilities (AC.4, AC.6): a rejected structured-output candidate, and tool approvals.
+    | "output_retry"
+    | "tool_approval_waiting" | "tool_approved" | "tool_denied" | "tool_approval_timed_out"
+    // Eval runs (AC.11): one per case, status and counts only.
+    | "eval_case_result";
   data: RunEventData;
   ts: string;
 }

@@ -55,8 +55,8 @@ describe("Navigation", () => {
 
     test("groups and items render in the planned order; empty groups are left out", () => {
       expect(NAV_GROUPS.map((group) => group.id)).toEqual(["approvals", "primitives", "evaluation", "observability", "settings"]);
-      expect(navSections.map((section) => section.group.id)).toEqual(["primitives", "observability", "settings"]);
-      expect(navSections.map((section) => section.group.title)).toEqual(["Primitives", "Observability", null]);
+      expect(navSections.map((section) => section.group.id)).toEqual(["approvals", "primitives", "observability", "settings"]);
+      expect(navSections.map((section) => section.group.title)).toEqual([null, "Primitives", "Observability", null]);
       const permanent = (groupId: string) =>
         navSections.find((section) => section.group.id === groupId)!.items.filter((item) => !item.transitional).map((item) => item.label);
       expect(permanent("primitives")).toEqual(["Agents", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge"]);
@@ -73,14 +73,14 @@ describe("Navigation", () => {
 
     test("g-keys follow the plan", () => {
       const keys = Object.fromEntries(navItems.filter((item) => item.gKey).map((item) => [item.gKey, item.id]));
-      expect(keys).toEqual({ a: "agents", w: "workflows", o: "tools", m: "mcp", p: "processors", k: "knowledge", n: "metrics", t: "traces", l: "logs", ",": "settings" });
+      expect(keys).toEqual({ i: "approvals", a: "agents", w: "workflows", o: "tools", m: "mcp", p: "processors", k: "knowledge", n: "metrics", t: "traces", l: "logs", ",": "settings" });
       expect(navItemForGKey("t")?.href).toBe(routes.traces());
       expect(navItemForGKey("z")).toBeNull();
     });
 
     test("navSectionsFor drops a group whose items are all gone", () => {
       const sections = navSectionsFor(navItems.filter((item) => item.group !== "observability"));
-      expect(sections.map((section) => section.group.id)).toEqual(["primitives", "settings"]);
+      expect(sections.map((section) => section.group.id)).toEqual(["approvals", "primitives", "settings"]);
     });
   });
 

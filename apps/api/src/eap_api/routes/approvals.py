@@ -5,6 +5,9 @@
 pending (newest request first) or decided (newest decision first), with `kind` and `agent_id`
 filters and an opaque cursor.
 
+`GET /approvals/{run_id}/{kind}/{key}` reads one item of either list (the approval Sheet's shared
+link), in the same shape, whatever its age; 404 when unknown or another tenant's.
+
 `POST /runs/{run_id}/tool-approvals/{tool_call_id}/approve|deny {comment?}` records the decision of
 a gated tool call as the run's `tool:{tool_call_id}:approval:decision` event (tool_approved |
 tool_denied), atomically under the run-row lock and only while the call waits, with the inbox row
@@ -52,6 +55,7 @@ RUN_NOT_FOUND_DETAIL = "Run not found"
 TOOL_CALL_NOT_FOUND_DETAIL = "Tool call not found"
 ALREADY_DECIDED_DETAIL = "tool call is already decided"
 NOT_WAITING_DETAIL = "tool call is not waiting for approval"
+APPROVAL_NOT_FOUND_DETAIL = "Approval not found"
 INVALID_CURSOR_DETAIL = "cursor is not valid; pass the previous page's next_cursor verbatim"
 
 ApprovalRoute = guarded_json_route(max_body_bytes=MAX_DECISION_BODY_BYTES, max_depth=MAX_DECISION_BODY_DEPTH)
@@ -147,6 +151,24 @@ def list_approvals(
     except InvalidRunCursor:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=INVALID_CURSOR_DETAIL)
     return JSONResponse(content={"items": [approval_json(r) for r in rows], "next_cursor": next_cursor})
+
+
+@router.get("/approvals/{run_id}/{kind}/{key}", responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}})
+def get_approval(
+    run_id: uuid.UUID,
+    kind: Annotated[Literal["tool", "step"], Path()],
+    key: Annotated[str, Path(min_length=1, max_length=MAX_TOOL_CALL_ID_CHARS, pattern=TOOL_CALL_ID_PATTERN)],
+    principal: PrincipalDep,
+    store: ApprovalStoreDep,
+) -> JSONResponse:
+    """One approval, pending or decided, in the inbox item's shape. `key` is the tool call id (kind
+    tool) or the step id (kind step). A pending item of a run that has ended keeps `status:
+    "pending"` with the run's terminal `run_status` (it can no longer be decided). 404 unknown, or
+    another tenant's; 422 a malformed run id, kind or key."""
+    row = store.get(principal.tenant_id, str(run_id), kind, key)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=APPROVAL_NOT_FOUND_DETAIL)
+    return JSONResponse(content=approval_json(row))
 
 
 ToolCallIdPath = Annotated[

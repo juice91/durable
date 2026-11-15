@@ -6,8 +6,10 @@ import { usePathname } from "next/navigation";
 import { Monitor, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
-import { activeNavItem, navSections, type NavItem, type NavSection } from "@/lib/nav";
+import { activeNavItem, navSections, type NavBadgeId, type NavItem, type NavSection } from "@/lib/nav";
+import { pendingBadgeLabel, usePendingApprovals } from "@/lib/approvals";
 import type { ThemePreference } from "@/lib/theme";
+import { Badge } from "@/components/ui/Badge";
 import { focusRing } from "@/components/ui/Button";
 import {
   DropdownMenu,
@@ -46,21 +48,41 @@ export function Monogram({ className }: { className?: string }) {
   );
 }
 
+/** A nav badge's text (null when hidden), and the words that say it to assistive tech. */
+export interface NavBadgeValue {
+  label: string;
+  /** "3 pending" (the accessible description of the count). */
+  spoken: string;
+}
+
+/**
+ * The live value of each nav badge (AC.15). Every source is shared module state, so the sidebar,
+ * the drawer and the mobile menu button read one poll.
+ */
+export function useNavBadges(): Partial<Record<NavBadgeId, NavBadgeValue>> {
+  const pending = usePendingApprovals();
+  const label = pendingBadgeLabel(pending);
+  return label ? { approvals_pending: { label, spoken: `${label} pending` } } : {};
+}
+
 interface NavLinkProps {
   item: NavItem;
   active: boolean;
   /** Icon rail: the label becomes the tooltip and the accessible name. */
   rail: boolean;
+  /** The item's badge, or null when hidden (no badge, or a count of 0). */
+  badge?: NavBadgeValue | null;
   onNavigate?: () => void;
 }
 
-function NavLink({ item, active, rail, onNavigate }: NavLinkProps) {
+function NavLink({ item, active, rail, badge = null, onNavigate }: NavLinkProps) {
   const Icon = item.icon;
+  const name = badge ? `${item.label}, ${badge.spoken}` : item.label;
   const link = (
     <Link
       href={item.href}
       aria-current={active ? "page" : undefined}
-      aria-label={rail ? item.label : undefined}
+      aria-label={rail || badge ? name : undefined}
       data-nav-id={item.id}
       data-rail-item=""
       onClick={onNavigate}
@@ -68,16 +90,24 @@ function NavLink({ item, active, rail, onNavigate }: NavLinkProps) {
         "flex h-sidebar-item min-w-0 items-center gap-2 rounded-md px-2 text-label font-medium text-muted-foreground transition-colors motion-reduce:transition-none",
         "hover:bg-fill-hover hover:text-foreground",
         active && "bg-fill-selected text-foreground",
-        rail && "w-sidebar-item justify-center px-0",
+        rail && "relative w-sidebar-item justify-center px-0",
         focusRing,
       )}
     >
       <Icon className="size-icon shrink-0" aria-hidden="true" />
-      {rail ? null : <span data-rail-hidden="" className="min-w-0 truncate">{item.label}</span>}
+      {rail ? null : <span data-rail-hidden="" className="min-w-0 flex-1 truncate">{item.label}</span>}
+      {badge && !rail ? (
+        <Badge variant="warning" aria-hidden="true" data-testid={`nav-badge-${item.id}`} className="ml-auto tabular-nums">
+          {badge.label}
+        </Badge>
+      ) : null}
+      {badge && rail ? (
+        <span aria-hidden="true" data-testid={`nav-badge-dot-${item.id}`} className="absolute right-1.5 top-1.5 size-2 rounded-full bg-warning ring-2 ring-canvas" />
+      ) : null}
     </Link>
   );
   return (
-    <Tooltip content={item.label} side="right" disabled={!rail}>
+    <Tooltip content={rail && badge ? `${item.label} (${badge.spoken})` : item.label} side="right" disabled={!rail}>
       {link}
     </Tooltip>
   );
@@ -87,10 +117,11 @@ interface NavGroupListProps {
   section: NavSection;
   activeId: string | null;
   rail: boolean;
+  badges?: Partial<Record<NavBadgeId, NavBadgeValue>>;
   onNavigate?: () => void;
 }
 
-function NavGroupList({ section, activeId, rail, onNavigate }: NavGroupListProps) {
+function NavGroupList({ section, activeId, rail, badges = {}, onNavigate }: NavGroupListProps) {
   const labelId = useId();
   const title = section.group.title;
   return (
@@ -103,7 +134,7 @@ function NavGroupList({ section, activeId, rail, onNavigate }: NavGroupListProps
       <ul aria-labelledby={title ? labelId : undefined} className={cn("flex flex-col gap-0.5", rail && "items-center")}>
         {section.items.map((item) => (
           <li key={item.id} className={cn("min-w-0", !rail && "w-full")}>
-            <NavLink item={item} active={item.id === activeId} rail={rail} onNavigate={onNavigate} />
+            <NavLink item={item} active={item.id === activeId} rail={rail} badge={item.badge ? badges[item.badge] ?? null : null} onNavigate={onNavigate} />
           </li>
         ))}
       </ul>
@@ -188,13 +219,14 @@ export function SidebarNav({ rail = false, onNavigate, label = "Main" }: Sidebar
   const main = navSections.filter((section) => section.group.placement === "main");
   const footer = navSections.filter((section) => section.group.placement === "footer");
   const version = studioVersion();
+  const badges = useNavBadges();
   return (
     <>
       <nav aria-label={label} className={cn("flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2 py-2", rail && "items-center")}>
         {main.map((section, index) => (
           <React.Fragment key={section.group.id}>
             {rail && index > 0 ? <span aria-hidden="true" className="h-px w-6 shrink-0 bg-border" /> : null}
-            <NavGroupList section={section} activeId={activeId} rail={rail} onNavigate={onNavigate} />
+            <NavGroupList section={section} activeId={activeId} rail={rail} badges={badges} onNavigate={onNavigate} />
           </React.Fragment>
         ))}
       </nav>
@@ -202,7 +234,7 @@ export function SidebarNav({ rail = false, onNavigate, label = "Main" }: Sidebar
         {footer.length > 0 ? (
           <nav aria-label={`${label} footer`} className={cn("flex flex-col gap-0.5", rail && "items-center")}>
             {footer.map((section) => (
-              <NavGroupList key={section.group.id} section={section} activeId={activeId} rail={rail} onNavigate={onNavigate} />
+              <NavGroupList key={section.group.id} section={section} activeId={activeId} rail={rail} badges={badges} onNavigate={onNavigate} />
             ))}
           </nav>
         ) : null}

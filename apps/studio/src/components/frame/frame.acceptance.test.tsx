@@ -253,7 +253,8 @@ describe("sidebar", () => {
     render(<FrameHarness />);
     const groups = Array.from(sidebar().querySelectorAll("[data-nav-group]")).map((el) => el.getAttribute("data-nav-group"));
     expect(groups).toEqual(navSections.map((section) => section.group.id));
-    expect(groups).not.toContain("approvals");
+    // AC.15 fills the untitled approvals group, first.
+    expect(groups[0]).toBe("approvals");
     expect(groups).not.toContain("evaluation");
     for (const el of sidebar().querySelectorAll("[data-nav-group]")) expect(el.querySelectorAll("li").length).toBeGreaterThan(0);
     expect(groups[groups.length - 1]).toBe("settings");

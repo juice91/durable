@@ -3,7 +3,7 @@
 import React from "react";
 import { formatValue } from "@/components/runs/EventTimeline";
 import { NODE_STATE_CLASSES, NODE_STATE_LABELS } from "./WorkflowGraph";
-import { formatDateTime } from "./ApprovalCard";
+import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import type { StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
@@ -69,12 +69,25 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
             <p data-testid="step-io-output" className="mt-1 text-sm text-muted-foreground">No output (parallel step).</p>
           </div>
         ) : type === "agent" ? (
-          // AC.9: a structured agent's validated object, shown as JSON (the shared JSON view of AC.14
-          // replaces this rendering when it lands); a text agent's answer stays text.
+          // AC.9: a structured agent's validated object, shown as escaped JSON text (kept so: the
+          // chat's tree view renders strings as Markdown); a text agent's answer stays text.
           isStructuredAgentOutput(type, detail.output)
             ? <Block label="Structured output" value={detail.output} testId="step-io-output" format="json" />
             : <Block label="Output" value={detail.output} testId="step-io-output" format="text" />
         ) : <Block label="Output" value={detail.output} testId="step-io-output" />
+      ) : null}
+      {detail.unresolvedRefs && detail.unresolvedRefs.length > 0 ? (
+        <div role="note" data-testid="step-io-unresolved-refs" className="rounded-md border border-warning/40 bg-warning/10 p-2 text-sm text-warning-text">
+          <p className="font-medium">
+            {detail.unresolvedRefs.length === 1 ? "A reference resolved to nothing" : `${detail.unresolvedRefs.length} references resolved to nothing`}
+            {type === "branch" ? "; the branch took its default." : "."}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {detail.unresolvedRefs.map((ref) => (
+              <li key={ref} className="break-all font-mono text-xs">{ref}</li>
+            ))}
+          </ul>
+        </div>
       ) : null}
       {detail.error || detail.errorCode ? (
         <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">

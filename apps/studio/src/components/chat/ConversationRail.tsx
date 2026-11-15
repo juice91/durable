@@ -24,7 +24,7 @@ export const CONVERSATION_PAGE_SIZE = 30;
  */
 export const RAIL_SETTLE_MS = 1500;
 export const RAIL_SETTLE_READS = 5;
-const UNFINISHED = new Set(["queued", "running", "recovering"]);
+const UNFINISHED = new Set(["queued", "running", "recovering", "waiting_approval"]);
 
 /** Whether the row's latest turn has not finished (by its status). */
 export function turnUnfinished(conversation: Pick<Conversation, "last_turn_status" | "last_turn_display_status">): boolean {
@@ -37,6 +37,7 @@ const STATUS_LABELS: Record<string, string> = {
   queued: "Queued",
   running: "Running",
   recovering: "Recovering",
+  waiting_approval: "Waiting for approval",
   completed: "Completed",
   failed: "Failed",
   needs_attention: "Needs attention",
