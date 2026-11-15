@@ -1,9 +1,9 @@
 """Loop specs at the API before the loops runtime lands (LP.1 review fixes).
 
 Draft save (create and patch) validates the full WorkflowSpec, so LP.1's rejections are 422 there.
-A valid foreach spec saves as a draft but is refused at publish (`runtime_pending_problems`) until the
-worker can run it (LP.10). `loop` steps publish only with the loops preview
-(EAP_WORKFLOW_LOOPS_PREVIEW=1) until LP.11; all/any/not branch conditions publish since LP.7.
+A valid foreach spec saves as a draft. `loop` (LP.7) and `foreach` (LP.10) steps publish only with the
+loops preview (EAP_WORKFLOW_LOOPS_PREVIEW=1) until LP.11; evaluate steps and `limits` stay refused
+(`runtime_pending_problems`); all/any/not branch conditions publish since LP.7.
 """
 
 import pytest
@@ -65,13 +65,14 @@ FOREACH = _wf({"id": "each", "type": "foreach", "items": _ref("input.list"), "ma
 
 
 @pytest.mark.parametrize("spec, step", [(FOREACH, "each")])
-def test_valid_loop_specs_save_but_publish_is_refused_until_the_runtime_lands(client, auth_header, spec, step):
+def test_valid_foreach_specs_save_but_publish_needs_the_loops_preview(client, auth_header, monkeypatch, spec, step):
+    monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
     created = client.post(BASE, json={"spec": spec}, headers=auth_header)
     assert created.status_code == 201, created.text
     resp = client.post(f"{BASE}/{created.json()['id']}/versions", headers=auth_header)
     assert resp.status_code == 422, resp.text
     detail = resp.json()["detail"]
-    assert f"step '{step}'" in detail and "workflow loops runtime has not landed" in detail
+    assert f"step '{step}': the foreach step" in detail and "EAP_WORKFLOW_LOOPS_PREVIEW=1" in detail
 
 
 def _publish(client, auth_header, spec):
@@ -81,22 +82,30 @@ def _publish(client, auth_header, spec):
 
 
 @pytest.mark.parametrize("value", [None, "", "0"])
-def test_loop_steps_are_refused_without_the_loops_preview(client, auth_header, monkeypatch, value):
-    """LP.7 runs `loop` steps, but without the cost cap and cooperative cancel (LP.11), so they
-    publish only with EAP_WORKFLOW_LOOPS_PREVIEW=1."""
+@pytest.mark.parametrize("spec, step", [(VALID_LOOP, "lp"), (FOREACH, "each")], ids=["loop", "foreach"])
+def test_loop_steps_are_refused_without_the_loops_preview(client, auth_header, monkeypatch, value, spec, step):
+    """LP.7 runs `loop` steps and LP.10 `foreach` steps, but without the cost cap and cooperative
+    cancel (LP.11), so they publish only with EAP_WORKFLOW_LOOPS_PREVIEW=1."""
     if value is None:
         monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
     else:
         monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", value)
-    resp = _publish(client, auth_header, VALID_LOOP)
+    resp = _publish(client, auth_header, spec)
     assert resp.status_code == 422, resp.text
     detail = resp.json()["detail"]
-    assert "step 'lp'" in detail and "EAP_WORKFLOW_LOOPS_PREVIEW=1" in detail
+    assert f"step '{step}'" in detail and "EAP_WORKFLOW_LOOPS_PREVIEW=1" in detail
 
 
-def test_loop_steps_publish_with_the_loops_preview(client, auth_header, monkeypatch):
+@pytest.mark.parametrize("spec", [VALID_LOOP, FOREACH], ids=["loop", "foreach"])
+def test_loop_steps_publish_with_the_loops_preview(client, auth_header, monkeypatch, spec):
     monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
-    resp = _publish(client, auth_header, VALID_LOOP)
+    resp = _publish(client, auth_header, spec)
+    assert resp.status_code == 201, resp.text
+
+
+def test_foreach_in_a_loop_body_publishes_with_the_loops_preview(client, auth_header, monkeypatch):
+    monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
+    resp = _publish(client, auth_header, NESTED_FOREACH)
     assert resp.status_code == 201, resp.text
 
 
@@ -111,14 +120,12 @@ LIMITS = {**VALID_LOOP, "limits": {"max_cost_usd": "1"}}
 
 
 @pytest.mark.parametrize("spec, where", [
-    (FOREACH, "step 'each': the foreach step"),
-    (NESTED_FOREACH, "step 'each': the foreach step"),
     (EVALUATE, "step 'ev': the evaluate step"),
     (LIMITS, "limits is not available yet"),
-], ids=["foreach", "foreach-in-loop-body", "evaluate", "limits"])
+], ids=["evaluate", "limits"])
 def test_unlanded_features_stay_refused_with_the_loops_preview(client, auth_header, monkeypatch, spec, where):
-    """The preview opens `loop` steps only: foreach (any depth, LP.10), evaluate (LP.14) and
-    `limits` (LP.11) are refused with EAP_WORKFLOW_LOOPS_PREVIEW=1 too."""
+    """The preview opens `loop` and `foreach` steps only: evaluate (LP.14) and `limits` (LP.11)
+    are refused with EAP_WORKFLOW_LOOPS_PREVIEW=1 too."""
     monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
     resp = _publish(client, auth_header, spec)
     assert resp.status_code == 422, resp.text

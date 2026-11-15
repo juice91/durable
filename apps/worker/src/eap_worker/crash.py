@@ -33,6 +33,10 @@
   the step's result is checkpointed. Recovery re-runs the step, finds the row and reuses ITS
   version (never re-resolving 'latest'). Filtered by `EAP_CRASH_EVENT_KEY` against
   `step:{step_id}:child`.
+- `foreach_refill` (LP.10): in a foreach step, right after the parent recorded the start of the
+  item that refills the window (item i+c, after awaiting item i) and before it awaits the next
+  item. Filtered by `EAP_CRASH_EVENT_KEY` against `loop:{S}:refill` (S: the refilled item's
+  scope, e.g. `loop:each.3:refill`).
 - `workflow_waiting`: in a workflow approval step, right after its `step_waiting` event is
   recorded and before the workflow starts waiting for the decision. Filtered by
   `EAP_CRASH_EVENT_KEY` against `step:{step_id}:waiting`.
@@ -117,6 +121,7 @@ CRASH_POINTS = frozenset(
         "workflow_mid_step",
         "after_workflow_tool_call",
         "workflow_waiting",
+        "foreach_refill",
         "after_child_run_insert",
         "input_processors",
         "output_processors",

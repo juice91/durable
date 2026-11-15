@@ -147,14 +147,15 @@ def _version_response(version: WorkflowVersionModel) -> dict:
     }
 
 
-LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed for it (LP.10/LP.11/LP.14)"
+LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed for it (LP.11/LP.14)"
 LOOP_PREVIEW_PENDING = (
     "is not available yet: loop steps run without the cost cap and cooperative cancel until LP.11 "
     "(set EAP_WORKFLOW_LOOPS_PREVIEW=1 to try them in development and tests)"
 )
 
-# The loops preview (LP.7): `loop` steps (while/until) run on the worker since LP.7, but the loop
-# tick (cost cap, deadline, cooperative cancel) is LP.11. Until then they publish and start only
+# The loops preview (LP.7): `loop` steps (while/until) run on the worker since LP.7 and `foreach`
+# steps since LP.10, but the loop tick (cost cap, deadline, cooperative cancel) is LP.11. Until
+# then they publish and start only
 # with EAP_WORKFLOW_LOOPS_PREVIEW=1, a dev and test switch, default off. LP.11 removes the flag
 # and opens the gate for good. Unset, blank or "0" is off, "1" is on; any other value fails
 # startup (check_workflow_configuration).
@@ -172,19 +173,19 @@ def loops_preview_enabled() -> bool:
 
 def runtime_pending_problems(spec: WorkflowSpec) -> list[str]:
     """Spec features the schema accepts but the platform does not run yet (workflow loops
-    milestone, a temporary gate removed kind by kind as the runtime lands): foreach (LP.10) and
-    evaluate (LP.14) steps at any depth and ``limits`` (the cost cap, LP.11), always; `loop` steps
-    unless the loops preview is on (EAP_WORKFLOW_LOOPS_PREVIEW=1; LP.11 removes the flag).
+    milestone, a temporary gate removed kind by kind as the runtime lands): evaluate (LP.14)
+    steps at any depth and ``limits`` (the cost cap, LP.11), always; `loop` and `foreach` (LP.10)
+    steps unless the loops preview is on (EAP_WORKFLOW_LOOPS_PREVIEW=1; LP.11 removes the flag).
     all/any/not conditions in branch steps are open since LP.7 (the worker evaluates them; they
     need no loop runtime). Refused at publish and at run start, so a run never reaches the worker
     with them. Drafts may still be saved with them."""
     problems: list[str] = []
     preview = loops_preview_enabled()
     for _, step in walk_steps(spec.steps):
-        if step.type in ("foreach", "evaluate"):
+        if step.type == "evaluate":
             problems.append(f"step '{step.id}': the {step.type} step {LOOP_RUNTIME_PENDING}")
-        elif step.type == "loop" and not preview:
-            problems.append(f"step '{step.id}': the loop step {LOOP_PREVIEW_PENDING}")
+        elif step.type in ("loop", "foreach") and not preview:
+            problems.append(f"step '{step.id}': the {step.type} step {LOOP_PREVIEW_PENDING}")
     if spec.limits is not None and not spec.limits.is_empty():
         problems.append(f"limits {LOOP_RUNTIME_PENDING}")
     return problems

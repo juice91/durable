@@ -79,3 +79,28 @@ def test_parallel_and_branch_keep_their_steps(worker, client, worker_settings, t
     branch = step_names(worker_settings.dbos_system_schema, f"{run_id}:fan:a")
     print(branch)
     assert branch == [BEGIN, *AGENT, EVENT]
+
+
+ITERATION = "eap.workflow_iteration"
+GOLDEN_FOREACH = [  # LP.10: three items, concurrency 2 (a sliding window in item order)
+    "eap.start_workflow_run", EVENT,
+    BEGIN, ITERATION, ITERATION,                            # each: start items 0 and 1
+    "DBOS.getResult", EVENT, ITERATION,                     # await 0, loop:each.0:completed, start 2
+    "DBOS.getResult", EVENT, "DBOS.getResult", EVENT,       # await 1, await 2
+    EVENT,                                                  # step:each:completed
+    EVENT, "eap.finish_run",
+]
+
+
+def test_foreach_window_steps(worker, client, worker_settings, tenant, defs):
+    tool = {"id": "x", "type": "tool", "tool_id": "clock.now", "input": {}}
+    spec = {
+        "name": "Each", "input_schema": {"type": "object"}, "start": "each",
+        "steps": [{"id": "each", "type": "foreach", "items": {"$ref": "input.items"}, "max_items": 3,
+                   "concurrency": 2, "body": {"start": "x", "steps": [tool]}}],
+    }
+    run_id, run = _run(worker, client, tenant, spec, {"items": [1, 2, 3]})
+    assert run["status"] == "completed", run["error"]
+    schema = worker_settings.dbos_system_schema
+    assert step_names(schema, run_id) == GOLDEN_FOREACH
+    assert step_names(schema, f"{run_id}:loop:each.0") == [EVENT, BEGIN, "eap.check_tool", "eap.workflow_tool_call", EVENT]

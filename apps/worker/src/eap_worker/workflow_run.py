@@ -28,6 +28,10 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
       loop:     per iteration i (LP.7, loops D5): child workflow eap.workflow_iteration, id
                 `{run_id}:loop:{S}` (S = the iteration's scope, `L.i`, `outer.2/inner.0`), its
                 result, then eap.append_event `loop:{S}:completed` | `loop:{S}:failed`
+      foreach:  (LP.10, loops D7) a sliding window in item order: eap.workflow_iteration for
+                items 0..c-1 (c = concurrency), then per item i its result,
+                `loop:{S}:completed|failed` and the start of item i+c; so with c = 1 exactly the
+                loop's 3 operations per item, and for any c a function of the recorded results only
       eap.append_event   step_completed `step:{id}:completed` {step_id, output, unresolved_refs?, warnings?}
                      or  step_failed    `step:{id}:failed`    {step_id, status, error, error_code}
     eap.append_event   end              run_completed {output, result} | run_failed {...}
@@ -43,17 +47,23 @@ index, state, limits, traceparent)`, loops D6: references, never the spec, outpu
                  `body_reads` outputs from their `...step:{id}:completed` events, and the
                  enclosing iterations' `loop:{S'}:started` events (their state)
     eap.append_event   `loop:{S}:started` loop_iteration_started {step_id, scope, index, state}
+                 (a foreach: {step_id, scope, index, item}; the item is its `items` ref resolved
+                 again over the same immutable reads, plus the producing step's completed event)
     the body's steps, exactly as above, with scoped keys and ids (D4): events
                  `loop:{S}:step:{id}:started|completed|failed` (data adds `scope`), child agent
                  run uuid5(`{run_id}:{S}:{id}`) with parent_step_id `{S}/{id}` (approval_mode
                  "deny", D8a), tool guard `{run_id}:{S}:{id}` and tool call id
                  `wf_{instance token}`, nested loops' iterations `{run_id}:loop:{S}/{inner}.{j}`
     then `carry` and `until` (pure); returns {status, done, state, last_key, until}
+                 (a foreach iteration: {status, last_key}; it passes `state` None)
 
 Iteration events carry the loop step's bare `step_id`, its `scope` (the enclosing iterations,
 `[]` for a top-level loop) and the `index`. A loop step's output is {iterations, exited:
 "condition" | "max_iterations", last, state}; `last` is read once from the event `last_key` names
-and recorded only in the loop's step_completed. A `while` that is UNKNOWN (a MISSING operand)
+and recorded only in the loop's step_completed. A foreach step's output is the list of each
+item's `last` in item order, read the same way (one read, at the end); under `on_item_error:
+collect` a failed item's place holds `{error_code, error}`. A foreach completed event carries
+`last_key` only (no state, no until). A `while` that is UNKNOWN (a MISSING operand)
 stops the loop, an UNKNOWN `until` does not end it, and a branch case that is UNKNOWN is not
 taken; each adds a `condition_unknown` warning ({code, condition: "while" | "until" |
 "cases.<i>", index?}) to the step's step_completed `warnings` (absent when there is none).
@@ -139,6 +149,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dbos import DBOS, SetWorkflowID
+from dbos._error import DBOSWorkflowCancelledError
 from pydantic import ValidationError
 from sqlalchemy import text
 
@@ -170,10 +181,12 @@ from eap_schemas.workflows import (
     LoopStep,
     MAX_STEPS,
     ParallelStep,
+    REF_KEY,
     ToolStep,
     WorkflowSpec,
     body_reads,
     iter_refs,
+    parse_ref,
     run_concurrency,
     static_execution_bound,
     walk_steps,
@@ -194,6 +207,7 @@ from eap_worker.workflow_eval import (
     RefMissing,
     build_context,
     canonical_json,
+    foreach_items,
     initial_state,
     iteration_exit,
     json_size,
@@ -734,12 +748,14 @@ class _Interpreter:
             return {"case": None, "next": step.default}
         if isinstance(step, LoopStep):
             return await self._loop(step)
+        if isinstance(step, ForeachStep):
+            return await self._foreach(step)
         if isinstance(step, ParallelStep):
             return await self._parallel(step)
         if isinstance(step, ApprovalStep):
             return await self._approval(step)
-        # foreach (LP.10) and evaluate (LP.14) are refused at publish until their runtime lands; a
-        # version that has one anyway fails like a spec an old worker cannot run.
+        # evaluate (LP.14) is refused at publish until its runtime lands; a version that has one
+        # anyway fails like a spec an old worker cannot run.
         raise WorkflowStepError("workflow_spec_invalid", step.id)
 
     async def _agent(self, step: AgentStep, resolved: dict[str, Any]) -> Any:
@@ -819,7 +835,8 @@ class _Interpreter:
             if step.on_max_iterations == "fail":
                 raise WorkflowStepError("loop_max_iterations", step.id)
             exited = "max_iterations"
-        return {"iterations": iterations, "exited": exited, "last": await self._read_last(last_key), "state": state}
+        last = await self._read_last(step, last_key)
+        return {"iterations": iterations, "exited": exited, "last": last, "state": state}
 
     def _check_state(self, step: Any, state: Any) -> None:
         try:
@@ -833,22 +850,41 @@ class _Interpreter:
         """Start iteration `index` (a child workflow taking references, D6), await it, and record
         `loop:{S}:completed` or `loop:{S}:failed`. Returns the child's result; a failed iteration
         raises StepFailed with the failure of the body step that failed (its code and status)."""
+        handle = await self._start_iteration(step, index, state)
+        result = await self._finish_iteration(step, index, handle)
+        if result.get("status") != "completed":
+            raise StepFailed(step.id, _result_failure(result))
+        return result
+
+    async def _start_iteration(self, step: ForeachStep | LoopStep, index: int, state: dict[str, Any] | None) -> Any:
+        """Start iteration `index` of `step` as an `eap.workflow_iteration` child (D5, D6): the
+        arguments are references only (a foreach passes `state` None; its item is read by the
+        iteration itself)."""
         scope = child_scope(self.scope, step.id, index)
         with SetWorkflowID(iteration_workflow_id(self.run_id, scope)):
-            handle = await DBOS.start_workflow_async(
+            return await DBOS.start_workflow_async(
                 workflow_iteration, self.run_id, self.tenant_id, self.workflow_version_id,
                 [*loop_path(self.scope), step.id], scope_to_data(self.scope), index, state, self.limits,
                 self.traceparent,
             )
+
+    async def _finish_iteration(self, step: ForeachStep | LoopStep, index: int, handle: Any) -> dict[str, Any]:
+        """Await an iteration and record `loop:{S}:completed` or `loop:{S}:failed`. Returns the
+        child's result, or {status, error, error_code, step_id, cancelled} for an iteration that
+        failed, raised, or was cancelled (`cancelled`: True only for an awaited child DBOS
+        cancelled, which is `run_cancelled`, loops D7)."""
+        scope = child_scope(self.scope, step.id, index)
         try:
             result = await handle.get_result()
         except Exception as exc:  # noqa: BLE001 - the child raised or was cancelled
-            if type(exc).__name__ == "DBOSAwaitedWorkflowCancelledError":
+            cancelled = type(exc).__name__ == "DBOSAwaitedWorkflowCancelledError"
+            if cancelled:
                 failure = classify(WorkflowStepError("run_cancelled", step.id))
             else:
                 failure = classify(exc)
                 failure = RunFailure(_failure_status(exc, failure), failure.code, failure.error_type, failure.message)
-            result = {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": None}
+            result = {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": None,
+                      "cancelled": cancelled}
         base = {"step_id": step.id, "scope": scope_to_data(self.scope), "index": index}
         if result.get("status") != "completed":
             await append_event_step(
@@ -856,24 +892,119 @@ class _Interpreter:
                 {**base, "status": result["status"], "error": result["error"], "error_code": result["error_code"],
                  "failed_step_id": result.get("step_id")},
             )
-            raise StepFailed(step.id, RunFailure(result["status"], result["error_code"], *_split_error(result["error"])))
-        completed = {**base, "state": result["state"], "last_key": result["last_key"]}
-        if step.until is not None:
-            completed["until"] = result.get("until")
+            return result
+        if isinstance(step, ForeachStep):
+            completed = {**base, "last_key": result["last_key"]}
+        else:
+            completed = {**base, "state": result["state"], "last_key": result["last_key"]}
+            if step.until is not None:
+                completed["until"] = result.get("until")
         await append_event_step(
             self.run_id, self.tenant_id, iteration_event_key(scope, "completed"), "loop_iteration_completed",
             completed,
         )
         return result
 
-    async def _read_last(self, last_key: str | None) -> Any:
+    # ------------------------------------------------------------------ foreach (LP.10)
+
+    async def _foreach(self, step: ForeachStep) -> Any:
+        """A foreach (D2, D3, D7): one `eap.workflow_iteration` child per item, at most
+        `concurrency` at a time, in a sliding window in item order: start items 0..c-1, then await
+        item i (recording `loop:{S}:completed|failed`) and start item i+c. The parent's operation
+        order is therefore a function of the item count and the recorded results only, never of
+        timing. Under `on_item_error: fail` the first failed item stops new starts; every started
+        item is still awaited, then the step fails with that item's failure. Under `collect` a
+        failed item's place in the output is `{error_code, error}`. Never collected: an item whose
+        child was cancelled (`run_cancelled`, which wins over every other failure) and an item
+        that ended `needs_attention` (a side effect of unknown outcome), which fail the step as
+        under `fail`. Output: the list of each item's `last` (the output of the body step that
+        ended its path), read once at the end through the immutable event read."""
+        if self.workflow_version_id is None:  # a parallel branch: the schema forbids loops there
+            raise WorkflowStepError("loop_in_parallel_not_allowed", step.id)
+        try:
+            items = foreach_items(step, self.context())
+        except RefMissing:
+            raise WorkflowStepError("input_ref_missing", step.id) from None
+        count = len(items)
+        width = min(step.concurrency, loop_limit(self.limits, "max_run_concurrency"))
+        handles: dict[int, Any] = {}
+        started = 0
+        while started < min(width, count):
+            handles[started] = await self._start_iteration(step, started, None)
+            started += 1
+        entries: list[tuple[str, Any]] = []  # ("key", last_key) or ("error", entry), in item order
+        stopping: dict[str, Any] | None = None  # the failure that stops new starts
+        cancelled: dict[str, Any] | None = None
+        try:
+            for index in range(count):
+                if index >= started:
+                    break  # stopped: every started item has been awaited
+                result = await self._finish_iteration(step, index, handles.pop(index))
+                if result.get("status") == "completed":
+                    entries.append(("key", result.get("last_key")))
+                elif result.get("cancelled"):
+                    cancelled = cancelled or result
+                elif step.on_item_error == "collect" and result.get("status") != "needs_attention":
+                    entries.append(("error", {"error_code": result["error_code"], "error": result["error"]}))
+                else:
+                    stopping = stopping or result
+                if stopping is None and cancelled is None and started < count:
+                    handles[started] = await self._start_iteration(step, started, None)
+                    # The refill's start is recorded; the parent has not awaited it yet.
+                    refill = scope_string(child_scope(self.scope, step.id, started))
+                    crash_point("foreach_refill", event_key=f"loop:{refill}:refill")
+                    started += 1
+        except DBOSWorkflowCancelledError:
+            # This workflow itself was cancelled: cancel the started items it has not awaited (the
+            # cascade does too; best effort, as in `_parallel`). ONLY this error: a plain
+            # asyncio.CancelledError is a graceful worker shutdown (DBOS.destroy cancels every
+            # task), after which the run must resume on another worker with its items intact, and
+            # an ordinary Exception is a failure of this step, not a reason to cancel the items.
+            for other in handles.values():
+                try:
+                    await DBOS.cancel_workflow_async(other.get_workflow_id())
+                except BaseException:  # noqa: BLE001 - best effort while being cancelled
+                    pass
+            raise
+        if cancelled is not None:
+            raise StepFailed(step.id, _result_failure(cancelled))
+        if stopping is not None:
+            raise StepFailed(step.id, _result_failure(stopping))
+        return await self._read_entries(step, entries)
+
+    async def _read_entries(self, step: ForeachStep, entries: list[tuple[str, Any]]) -> list[Any]:
+        """The foreach output in item order: each completed item's `last` (one immutable read for
+        all of them), or its error entry. A `last_key` whose event is missing (D6 says it was
+        committed before the item returned) fails the step `internal_error`, never a silent null."""
+        keys = [value for kind, value in entries if kind == "key" and value is not None]
+        events = (
+            await immutable_read(get_runtime().event_log.read_outputs, self.tenant_id, self.run_id, keys)
+            if keys else {}
+        )
+        output: list[Any] = []
+        for kind, value in entries:
+            if kind == "error":
+                output.append(value)
+            elif value is None:
+                output.append(None)  # an empty path recorded no step (not reachable from the schema)
+            else:
+                event = events.get(value)
+                if event is None:
+                    raise _missing_last(step.id)
+                output.append((event.data or {}).get("output"))
+        return output
+
+    async def _read_last(self, step: LoopStep, last_key: str | None) -> Any:
         """The output recorded by the event `last_key` (D6's immutable read: events are
-        append-only and idempotent by key, and this one committed before the iteration returned)."""
+        append-only and idempotent by key, and this one committed before the iteration returned).
+        A missing event fails the step `internal_error` (`_missing_last`)."""
         if last_key is None:
             return None
         events = await immutable_read(get_runtime().event_log.read_outputs, self.tenant_id, self.run_id, [last_key])
         event = events.get(last_key)
-        return (event.data or {}).get("output") if event is not None else None
+        if event is None:
+            raise _missing_last(step.id)
+        return (event.data or {}).get("output")
 
     async def _parallel(self, step: ParallelStep) -> Any:
         # Branches are child workflows: each has its own deterministic step sequence, so running
@@ -900,7 +1031,9 @@ class _Interpreter:
                 failure = classify(exc)
                 results.append({"status": _failure_status(exc, failure), "error": failure.error,
                                 "error_code": failure.code, "step_id": None})
-            except BaseException:
+            except DBOSWorkflowCancelledError:
+                # Only this workflow's own cancel, never asyncio.CancelledError (a graceful worker
+                # shutdown, after which the branches must resume on recovery), see `_foreach`.
                 for other in handles[index + 1:]:
                     try:
                         await DBOS.cancel_workflow_async(other.get_workflow_id())
@@ -963,6 +1096,19 @@ class _Interpreter:
         if kind == "step_rejected":
             raise WorkflowStepError("approval_rejected", step.id)
         raise WorkflowStepError("approval_timeout", step.id)
+
+
+def _missing_last(step_id: str) -> WorkflowStepError:
+    """A loop's `last_key` names an event that is not there (D6: impossible unless the event log
+    lost a row): an internal error, so the run fails instead of reporting a wrong (null) output."""
+    return WorkflowStepError(
+        "internal_error", step_id, "failed", "WorkflowStepError: a loop iteration's last output event is missing"
+    )
+
+
+def _result_failure(result: dict[str, Any]) -> RunFailure:
+    """The RunFailure of a failed child result ({status, error, error_code, ...})."""
+    return RunFailure(result["status"], result["error_code"], *_split_error(result["error"]))
 
 
 def _split_error(error: str) -> tuple[str, str]:
@@ -1199,6 +1345,8 @@ def _read_iteration_inputs(
     except (ValidationError, WorkflowStepError):
         return dict(row.spec), {}
     keys = ["start", *_body_read_keys(spec, step, outer).values(), *_frame_keys(outer)]
+    if isinstance(step, ForeachStep):
+        keys += _items_read_keys(spec, step, outer).values()
     events = rt.event_log.read_outputs(tenant_id, run_id, keys)
     return dict(row.spec), {k: dict(e.data or {}) for k, e in events.items()}
 
@@ -1214,6 +1362,36 @@ def _body_read_keys(spec: WorkflowSpec, step: Any, outer: Scope) -> dict[str, st
         if loops is not None:
             keys[step_id] = scoped_event_key(outer[: len(loops)], step_id, "completed")
     return keys
+
+
+def _items_read_keys(spec: WorkflowSpec, step: ForeachStep, outer: Scope) -> dict[str, str]:
+    """{step id: its completed key} of the step a foreach's `items` reads, if it reads one (an
+    `input` or `loop.<L>` items ref is served by the `start` and `loop:{S}:started` reads)."""
+    root, name, _ = parse_ref(step.items[REF_KEY])
+    if root != "steps" or name is None:
+        return {}
+    loops = {s.id: loops for loops, s in walk_steps(spec.steps)}.get(name)
+    return {} if loops is None else {name: scoped_event_key(outer[: len(loops)], name, "completed")}
+
+
+def _iteration_item(
+    spec: WorkflowSpec, step: ForeachStep, outer: Scope, events: dict[str, Any], frames: dict[str, dict[str, Any]],
+    index: int,
+) -> Any:
+    """Item `index` of a foreach (D6): its `items` ref resolved again, inside the iteration, over
+    the same recorded values the parent resolved it over (the run input, the producing step's
+    completed event, the enclosing iterations' started events), so it is never passed as an
+    argument. The parent checked the list (a list, at most max_items) before starting this child."""
+    outputs = {
+        step_id: events[key]["output"]
+        for step_id, key in _items_read_keys(spec, step, outer).items()
+        if "output" in events.get(key, {})
+    }
+    context = build_context((events.get("start") or {}).get("input"), outputs, frames)
+    items = foreach_items(step, context)
+    if index >= len(items):
+        raise WorkflowStepError("workflow_spec_invalid", step.id)
+    return items[index]
 
 
 def _frame_keys(outer: Scope) -> list[str]:
@@ -1244,15 +1422,17 @@ async def workflow_iteration(
     path: list[str],
     scope: list[dict[str, Any]],
     index: int,
-    state: dict[str, Any],
+    state: dict[str, Any] | None,
     limits: dict[str, Any],
     traceparent: str | None,
 ) -> dict[str, Any]:
-    """One iteration of the loop step at `path` (D5, D6), inside the parent's run (same events,
-    same run row). Its arguments are references: no spec, no outputs, no item. `scope` is the
-    loop step's own scope (the enclosing iterations), `state` the state carried into this
-    iteration (capped by the parent). It loads what it reads through `_read_iteration_inputs`,
-    records `loop:{S}:started` {step_id, scope, index, state}, runs the body, then evaluates
+    """One iteration of the loop or foreach step at `path` (D5, D6), inside the parent's run (same
+    events, same run row). Its arguments are references: no spec, no outputs, no item. `scope` is
+    the loop step's own scope (the enclosing iterations), `state` the state carried into this
+    iteration (capped by the parent; None for a foreach, whose item is read here, `_iteration_item`).
+    A foreach iteration returns {"status": "completed", "last_key"} and evaluates no carry or
+    until. It loads what it reads through `_read_iteration_inputs`, records `loop:{S}:started`
+    {step_id, scope, index, state | item}, runs the body, then evaluates
     `carry` and `until` (D3). Never raises for a step failure. Returns
     {"status": "completed", "done", "state", "last_key", "until"} (`last_key`: the event key of the
     body step that ended the path; `until`: its outcome, None for a `while` loop), or
@@ -1270,12 +1450,20 @@ async def workflow_iteration(
         except ValidationError:
             raise WorkflowStepError("workflow_spec_invalid") from None
         step = _find_loop(spec, path)
-        if not isinstance(step, LoopStep) or list(loop_path(outer)) != list(path[:-1]):
+        if list(loop_path(outer)) != list(path[:-1]):
             raise WorkflowStepError("workflow_spec_invalid", step.id)
         iteration = child_scope(outer, step.id, index)
+        frames = _iteration_frames(spec, outer, events)
+        started: dict[str, Any] = {"step_id": step.id, "scope": scope_to_data(outer), "index": index}
+        if isinstance(step, ForeachStep):
+            item = _iteration_item(spec, step, outer, events, frames, index)
+            started["item"] = item
+            frames[step.id] = {"index": index, "item": item}
+        else:
+            started["state"] = state
+            frames[step.id] = {"index": index, "state": state}
         await append_event_step(
-            run_id, tenant_id, iteration_event_key(iteration, "started"), "loop_iteration_started",
-            {"step_id": step.id, "scope": scope_to_data(outer), "index": index, "state": state},
+            run_id, tenant_id, iteration_event_key(iteration, "started"), "loop_iteration_started", started,
         )
         start = events.get("start") or {}
         outputs = {
@@ -1283,13 +1471,14 @@ async def workflow_iteration(
             for step_id, key in _body_read_keys(spec, step, outer).items()
             if "output" in events.get(key, {})
         }
-        frames = _iteration_frames(spec, outer, events)
-        frames[step.id] = {"index": index, "state": state}
         interp = _Interpreter(
             run_id, tenant_id, spec, start.get("input"), outputs, limits, traceparent,
             steps=step.body.steps, scope=iteration, loops=frames, workflow_version_id=workflow_version_id,
         )
         last_step, _last = await interp.run_path(step.body.start, None)
+        last_key = scoped_event_key(iteration, last_step, "completed") if last_step is not None else None
+        if isinstance(step, ForeachStep):
+            return {"status": "completed", "last_key": last_key}
         try:
             exit_ = iteration_exit(step, interp.context())
         except RefMissing:
@@ -1310,7 +1499,7 @@ async def workflow_iteration(
         "status": "completed",
         "done": exit_.done,
         "state": exit_.state,
-        "last_key": scoped_event_key(iteration, last_step, "completed") if last_step is not None else None,
+        "last_key": last_key,
         "until": exit_.until,
     }
 
