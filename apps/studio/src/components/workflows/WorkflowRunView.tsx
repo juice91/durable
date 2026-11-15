@@ -50,6 +50,9 @@ interface WorkflowRunViewProps {
   workflowId?: string;
   /** The workflow page's tabs, shown in the header (the run view belongs to Graph). */
   tabs?: LinkTab[];
+  /** The graph's collapsed loops (the page's `?collapsed=` state), shared by the canvas and the step list. */
+  collapsedLoops?: ReadonlySet<string>;
+  onCollapsedLoopsChange?: (next: Set<string>) => void;
 }
 
 /**
@@ -60,7 +63,11 @@ interface WorkflowRunViewProps {
  * (backfill and refresh) and the SSE stream; both are merged by seq, so duplicates and replays are
  * harmless.
  */
-export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProps) {
+export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCollapsedLoopsChange }: WorkflowRunViewProps) {
+  // One collapsed set for the canvas and the step list: the page's URL state, else kept here.
+  const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const collapsed = collapsedLoops ?? ownCollapsed;
+  const setCollapsed = onCollapsedLoopsChange ?? setOwnCollapsed;
   const [run, setRun] = useState<Run | null>(null);
   const [spec, setSpec] = useState<WorkflowSpec | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -206,7 +213,7 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
     <PageHeader
       crumbs={[
         navCrumb("workflows"),
-        { label: spec?.name ?? "Workflow", href: effectiveWorkflowId ? routes.workflow(effectiveWorkflowId) : undefined },
+        { label: spec?.name ?? "Workflow", href: effectiveWorkflowId ? routes.workflow(effectiveWorkflowId, { collapsed }) : undefined },
         { label: <span className="font-mono">{runLabel}</span> },
       ]}
       documentTitle={`${runLabel} · ${spec?.name ?? "Workflow"}`}
@@ -295,7 +302,7 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
               </dl>
               <p className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-label">
                 {effectiveWorkflowId ? (
-                  <Link href={routes.workflow(effectiveWorkflowId)} className="rounded-sm text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">Back to workflow</Link>
+                  <Link href={routes.workflow(effectiveWorkflowId, { collapsed })} className="rounded-sm text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">Back to workflow</Link>
                 ) : null}
                 {/* The run's events in the trace Sheet, in place (SL.12). */}
                 <TraceLink runId={runId} tab="events" className="rounded-sm text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">Run details</TraceLink>
@@ -338,7 +345,7 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
             {spec ? (
               <PanelCard title="Steps" titleId="workflow-run-steps-heading">
                 <p className="mb-2 text-caption text-muted-foreground">Select a step to see its input and output.</p>
-                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend />
+                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
               </PanelCard>
             ) : null}
 
@@ -350,7 +357,7 @@ export function WorkflowRunView({ runId, workflowId, tabs }: WorkflowRunViewProp
             </PanelCard>
           </WorkflowFloatingPanel>
           {spec ? (
-            <WorkflowCanvas spec={spec} states={states} deadEdges={view.deadEdges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" />
+            <WorkflowCanvas spec={spec} states={states} deadEdges={view.deadEdges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
               {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}

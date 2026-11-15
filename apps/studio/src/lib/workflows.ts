@@ -12,11 +12,24 @@ import { createRunLedger } from "./toolRunLedger";
 
 export type ConditionOp = "eq" | "ne" | "gt" | "lt" | "contains" | "exists";
 
+/** One comparison (a bare comparison keeps its JSON). */
 export interface Condition {
   op: ConditionOp;
   left: unknown;
   right?: unknown;
 }
+
+/** Combinators over conditions (loops milestone D9): at most 8 operands, nesting depth at most 4. */
+export interface AllCondition {
+  all: Expression[];
+}
+export interface AnyCondition {
+  any: Expression[];
+}
+export interface NotCondition {
+  not: Expression;
+}
+export type Expression = Condition | AllCondition | AnyCondition | NotCondition;
 
 interface StepBase {
   id: string;
@@ -46,7 +59,7 @@ export interface ApprovalStep extends StepBase {
 
 export interface BranchStep extends StepBase {
   type: "branch";
-  cases: { when: Condition; next: string }[];
+  cases: { when: Expression; next: string }[];
   default: string;
 }
 
@@ -56,8 +69,78 @@ export interface ParallelStep extends StepBase {
   join: string;
 }
 
-export type WorkflowStep = AgentStep | ToolStep | ApprovalStep | BranchStep | ParallelStep;
+/** A loop's body: its own graph of steps with its own start (step ids are unique across the spec). */
+export interface LoopBody {
+  start: string;
+  steps: WorkflowStep[];
+}
+
+/** Run `body` once per item of the list at `items` (a $ref), in item order. Output: a list. */
+export interface ForeachStep extends StepBase {
+  type: "foreach";
+  items: { $ref: string };
+  max_items: number;
+  /** 1 to 8; 1 when omitted. */
+  concurrency?: number;
+  /** "fail" when omitted. */
+  on_item_error?: "fail" | "collect";
+  body: LoopBody;
+  next?: string | null;
+}
+
+/** Repeat `body` while `while` holds, or until `until` holds (exactly one is set). */
+export interface LoopStep extends StepBase {
+  type: "loop";
+  while?: Expression;
+  until?: Expression;
+  max_iterations: number;
+  /** "fail" when omitted. */
+  on_max_iterations?: "fail" | "exit";
+  state?: Record<string, unknown>;
+  carry?: Record<string, unknown>;
+  body: LoopBody;
+  next?: string | null;
+}
+
+/** One evaluator of an evaluate step (the eval suites' evaluator union, by `kind`). */
+export interface EvaluatorSpec {
+  kind: string;
+  name?: string | null;
+  [field: string]: unknown;
+}
+
+/** Score `value` (a $ref) with 1 to 8 evaluators. Output: {passed, score, reason, results}. */
+export interface EvaluateStep extends StepBase {
+  type: "evaluate";
+  value: { $ref: string };
+  expected?: unknown;
+  evaluators: EvaluatorSpec[];
+  /** "all" when omitted. */
+  pass?: "all" | "any";
+  next?: string | null;
+}
+
+export type WorkflowStep =
+  | AgentStep
+  | ToolStep
+  | ApprovalStep
+  | BranchStep
+  | ParallelStep
+  | ForeachStep
+  | LoopStep
+  | EvaluateStep;
 export type StepType = WorkflowStep["type"];
+export type LoopKindStep = ForeachStep | LoopStep;
+
+export function isLoopStep(step: { type: string }): step is LoopKindStep {
+  return step.type === "foreach" || step.type === "loop";
+}
+
+/** Run-wide limits; omitted while empty. */
+export interface WorkflowLimits {
+  /** USD as a decimal string or number (0.0001 to 1000). */
+  max_cost_usd?: string | number | null;
+}
 
 export interface WorkflowSpec {
   spec_version: 1;
@@ -67,6 +150,7 @@ export interface WorkflowSpec {
   output_schema?: Record<string, unknown> | null;
   steps: WorkflowStep[];
   start: string;
+  limits?: WorkflowLimits | null;
 }
 
 export interface Workflow {

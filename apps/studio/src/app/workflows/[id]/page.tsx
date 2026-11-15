@@ -11,6 +11,7 @@ import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/workflows/ApprovalCard";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
+import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { routes } from "@/lib/routes";
 import { parseWorkflowTab, WORKFLOW_TAB_PARAM, WORKFLOW_TRACE_TAB_PARAM } from "@/lib/routes/workflows";
@@ -37,6 +38,9 @@ function WorkflowDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const control = useWorkflowLayout();
+  // The graph's collapsed loops are URL state (`?collapsed=`), kept across a version switch and
+  // carried to the run view.
+  const { collapsed, setCollapsed } = useCollapsedLoops();
 
   useEffect(() => {
     if (!id) return;
@@ -109,7 +113,7 @@ function WorkflowDetail() {
                 workflowName={workflow.name}
                 version={current?.version ?? null}
                 spec={spec}
-                onStarted={(runId) => router.push(routes.workflowRun(workflow.id, runId))}
+                onStarted={(runId) => router.push(routes.workflowRun(workflow.id, runId, { collapsed }))}
               />
               <WorkflowRunHistory
                 workflowId={workflow.id}
@@ -124,12 +128,12 @@ function WorkflowDetail() {
               />
               {graphSpec ? (
                 <PanelCard title="Steps" titleId="workflow-steps-heading">
-                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} />
+                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
                 </PanelCard>
               ) : null}
             </WorkflowFloatingPanel>
             {graphSpec ? (
-              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" />
+              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
             ) : (
               <div className="absolute inset-0 flex items-center justify-center bg-background">
                 <p className="text-label text-muted-foreground">No definition to show.</p>

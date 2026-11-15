@@ -5,13 +5,16 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { NodeState } from "@/lib/workflowRunState";
-import { NODE_STATE_CLASSES, NODE_STATE_LABELS, STEP_TYPE_LABELS } from "./WorkflowGraph";
+import { NODE_STATE_CLASSES, NODE_STATE_LABELS, stepTypeLabel } from "./WorkflowGraph";
 import { DockResizeHandle } from "./WorkflowFloatingPanel";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { TIMELINE_BAR_HEIGHT } from "./workflowLayout";
 import { timelineSummary, type TimelineRow } from "./workflowTimeline";
 
 /** The bar colour of each state: the chart series tokens, critical for failures. */
+/** Left padding per loop depth (0: top level; deeper levels as deep as the step list's nesting). */
+const TIMELINE_INDENT = ["", "pl-7", "pl-11", "pl-14", "pl-16"] as const;
+
 const BAR_CLASSES: Record<NodeState, string> = {
   pending: "bg-transparent",
   running: "bg-[var(--viz-series-1-color)] animate-pulse motion-reduce:animate-none",
@@ -73,20 +76,22 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
           ) : (
             <ol aria-label="Step timeline" data-testid="workflow-timeline" className="divide-y divide-border">
               {rows.map((row) => (
-                <li key={row.stepId} data-testid={`workflow-timeline-row-${row.stepId}`} data-state={row.state}>
+                <li key={row.stepId} data-testid={`workflow-timeline-row-${row.stepId}`} data-state={row.state} data-depth={row.depth}>
                   <button
                     type="button"
                     aria-pressed={row.stepId === selectedStepId}
                     onClick={() => onSelectStep(row.stepId)}
                     className={cn(
                       "grid w-full min-w-0 grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] items-center gap-3 px-3 py-1.5 text-left outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                      // A loop's body rows are indented under it, as in the step list.
+                      TIMELINE_INDENT[Math.min(row.depth, TIMELINE_INDENT.length - 1)],
                       row.stepId === selectedStepId && "bg-fill-selected",
                     )}
                   >
                     <span className="flex min-w-0 flex-col">
                       <span className="truncate font-mono text-label text-foreground">{row.stepId}</span>
                       <span className="flex items-center gap-1.5 text-caption text-muted-foreground">
-                        {row.stepType ? STEP_TYPE_LABELS[row.stepType] : null}
+                        {row.stepType ? stepTypeLabel(row.stepType) : null}
                         <span data-testid="workflow-timeline-state" className={cn("rounded-sm border px-1 text-badge", NODE_STATE_CLASSES[row.state])}>
                           {NODE_STATE_LABELS[row.state]}
                         </span>

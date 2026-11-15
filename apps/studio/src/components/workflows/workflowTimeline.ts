@@ -22,6 +22,10 @@ export interface TimelineRow {
   durationMs: number | null;
   /** Where the bar starts and how wide it is, as fractions of the run's span [0, 1]; null when the step has not started. */
   bar: { offset: number; width: number } | null;
+  /** The enclosing loop step's id (a loop body step), or null at the top level. */
+  parentId: string | null;
+  /** 0 at the top level, 1 in a loop body, 2 in a nested loop's body (the step list's indent). */
+  depth: number;
 }
 
 function ms(iso: string | null): number | null {
@@ -50,9 +54,9 @@ export function timelineClock(view: WorkflowRunView, runUpdatedAt: string | null
 export function timelineRows(spec: WorkflowSpec | null, view: WorkflowRunView, clock: number): TimelineRow[] {
   if (!spec) return [];
   const ended = isTerminal(view.status);
-  const order = buildWorkflowGraph(spec).nodes.map((node) => ({ id: node.id, type: node.step.type }));
+  const order = buildWorkflowGraph(spec).nodes.map((node) => ({ id: node.id, type: node.step.type, parentId: node.parentId, depth: node.depth }));
   const rank = new Map(order.map((node, index) => [node.id, index]));
-  const rows = order.map(({ id, type }): TimelineRow => {
+  const rows = order.map(({ id, type, parentId, depth }): TimelineRow => {
     const detail = view.steps[id];
     const start = ms(detail?.startedAt ?? null);
     const end = ms(detail?.endedAt ?? null);
@@ -64,6 +68,8 @@ export function timelineRows(spec: WorkflowSpec | null, view: WorkflowRunView, c
       endedAt: detail?.endedAt ?? null,
       durationMs: start !== null && end !== null && end >= start ? end - start : start !== null && ended ? Math.max(0, clock - start) : null,
       bar: null,
+      parentId,
+      depth,
     };
   });
 
@@ -83,13 +89,29 @@ export function timelineRows(spec: WorkflowSpec | null, view: WorkflowRunView, c
     }
   }
 
-  return rows.sort((a, b) => {
+  const compare = (a: TimelineRow, b: TimelineRow) => {
     const sa = ms(a.startedAt);
     const sb = ms(b.startedAt);
     if (sa !== null && sb !== null && sa !== sb) return sa - sb;
     if ((sa === null) !== (sb === null)) return sa === null ? 1 : -1;
     return (rank.get(a.stepId) ?? 0) - (rank.get(b.stepId) ?? 0);
-  });
+  };
+  // Each level is ordered on its own; a loop's body rows follow the loop's row (as in the step
+  // list), so a loop-free spec keeps exactly the flat order.
+  const byParent = new Map<string | null, TimelineRow[]>();
+  for (const row of rows) {
+    if (!byParent.has(row.parentId)) byParent.set(row.parentId, []);
+    byParent.get(row.parentId)!.push(row);
+  }
+  const out: TimelineRow[] = [];
+  const emit = (parentId: string | null) => {
+    for (const row of (byParent.get(parentId) ?? []).sort(compare)) {
+      out.push(row);
+      emit(row.stepId);
+    }
+  };
+  emit(null);
+  return out;
 }
 
 /** "n of m steps done" for the collapsed dock bar: completed or skipped count as done. */
