@@ -98,6 +98,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from dbos import DBOS, SetWorkflowID
+from dbos._error import DBOSWorkflowCancelledError  # not re-exported by dbos
 from pydantic import ValidationError
 from sqlalchemy import text
 
@@ -620,7 +621,10 @@ class _Interpreter:
         # Await EVERY branch before deciding anything, so no branch is still running (and calling
         # tools) once this run is terminal. A branch whose result raises (e.g. it was cancelled)
         # counts as failed. If this workflow itself is being cancelled (DBOSWorkflowCancelledError,
-        # a BaseException), the remaining branches are cancelled too before it propagates.
+        # a BaseException), the remaining branches are cancelled too before it propagates. Any other
+        # BaseException, notably the asyncio CancelledError DBOS.destroy sends at a graceful worker
+        # shutdown (SIGTERM), propagates untouched: the branches stay pending and are recovered
+        # with this workflow (cancelling them would record cancel operations recovery cannot replay).
         results: list[dict[str, Any]] = []
         for index, handle in enumerate(handles):
             try:
@@ -629,11 +633,11 @@ class _Interpreter:
                 failure = classify(exc)
                 results.append({"status": _failure_status(exc, failure), "error": failure.error,
                                 "error_code": failure.code, "step_id": None})
-            except BaseException:
+            except DBOSWorkflowCancelledError:
                 for other in handles[index + 1:]:
                     try:
                         await DBOS.cancel_workflow_async(other.get_workflow_id())
-                    except BaseException:  # noqa: BLE001 - best effort while being cancelled
+                    except (Exception, DBOSWorkflowCancelledError):  # noqa: BLE001 - best effort while being cancelled
                         pass
                 raise
         failed = [r for r in results if r.get("status") != "completed"]
