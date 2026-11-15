@@ -155,8 +155,14 @@ validate_and_prepare_data_dir() {
     mkdir -m 700 -- "$logical"
   fi
 
-  owner=$(stat -f '%u' "$logical")
-  mode=$(stat -f '%OLp' "$logical")
+  # BSD stat (macOS, the deployment host) uses -f; GNU stat (Linux CI runners) uses -c.
+  if stat -f '%u' "$logical" >/dev/null 2>&1; then
+    owner=$(stat -f '%u' "$logical")
+    mode=$(stat -f '%OLp' "$logical")
+  else
+    owner=$(stat -c '%u' "$logical")
+    mode=$(stat -c '%a' "$logical")
+  fi
   if [[ "$owner" != "$(id -u)" ]]; then
     printf 'Refusing to start: data directory %s is not owned by the current user (uid %s).\n' "$canonical" "$owner" >&2
     exit 1
