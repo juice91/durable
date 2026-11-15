@@ -13,7 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { SafeLink, SafeMarkdown } from "@/components/markdown/SafeMarkdown";
 import { ToolDecisionView } from "./ToolDecisionView";
 import type { ToolDecision } from "./turnCapabilities";
-import { CITATION_ATTR, citationHref, citationSourcesForRun, type CitationSource } from "./citations";
+import { CITATION_ATTR, citationHref, citationSourcesForRun, citationTitle, pageLabel, type CitationSource } from "./citations";
 import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
 
 /**
@@ -136,18 +136,21 @@ const citationClass = cn(
 
 /** One `[n]` citation: a link to `sources[n]` (an http(s) URL in a new tab, or its document in Studio). */
 function CitationLink({ n, href, source }: { n: string; href: string; source: CitationSource | undefined }) {
-  const label = source ? `Source ${n}: ${source.title}` : `Source ${n}`;
-  const title = source ? `${source.title}${source.url ? ` — ${source.url}` : ""}` : undefined;
+  const label = source ? `Source ${n}: ${citationTitle(source)}` : `Source ${n}`;
+  const title = source ? `${citationTitle(source)}${source.url ? ` — ${source.url}` : ""}` : undefined;
+  // A PDF section's page, after the marker: "[3] p. 212".
+  const pageText = source ? pageLabel(source) : null;
+  const page = pageText ? <span className="ml-1" data-testid="citation-page">{pageText}</span> : null;
   if (/^https?:\/\//i.test(href)) {
     return (
       <a href={href} target="_blank" rel="noopener noreferrer nofollow" data-testid="citation-link" data-citation={n} aria-label={label} title={title} className={citationClass}>
-        [{n}]
+        [{n}]{page}
       </a>
     );
   }
   return (
     <Link href={href} data-testid="citation-link" data-citation={n} aria-label={label} title={title} className={citationClass}>
-      [{n}]
+      [{n}]{page}
     </Link>
   );
 }

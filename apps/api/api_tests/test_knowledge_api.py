@@ -129,9 +129,9 @@ def test_upload_creates_a_kb_ingest_run_and_unchanged_is_a_noop(pg, tenant_of, f
     assert doc["title"] == "guide.md" and doc["metadata"] == {"team": "it"} and "content" not in doc
 
     (options, args), = fake_dbos.calls
-    assert options["workflow_name"] == "eap.kb_ingest" and options["queue_name"] == "eap-kb-ingest"
-    assert options["workflow_id"] == run_id
-    expected_input = json.dumps({"doc_version": 1, "document_id": doc["id"]}, separators=(",", ":"))
+    assert options["workflow_name"] == "eap.kb_ingest" and options["queue_name"] == "eap-kb-ingest-fair"
+    assert options["workflow_id"] == run_id and options["queue_partition_key"] == f"{tenant}:{kb['id']}"
+    expected_input = json.dumps({"doc_version": 1, "document_id": doc["id"], "embed_split": True}, separators=(",", ":"))  # P1.C5
     assert args == (run_id, tenant, kb["id"], expected_input)
 
     run = client.get(f"{API}/runs/{run_id}", headers=headers).json()
@@ -426,7 +426,7 @@ def test_reindex_dry_run_start_conflict_and_cancel(pg, tenant_of, fake_dbos, kb_
     assert started.json()["knowledge_base"]["status"] == "reindexing"
     assert started.json()["knowledge_base"]["pending_generation"] == 2
     (options, args), = fake_dbos.calls
-    assert options["workflow_name"] == "eap.kb_ingest" and args == (run_id, tenant, kb["id"], '{"reindex":2}')
+    assert options["workflow_name"] == "eap.kb_ingest" and args == (run_id, tenant, kb["id"], '{"embed_split":true,"reindex":2}')
     # Retry of the same request: same run, no second reindex.
     again = client.post(url, json={"embedding_model": "test:hash768", "run_id": run_id}, headers=headers)
     assert again.status_code == 202 and again.json()["run_id"] == run_id
@@ -450,7 +450,7 @@ def test_reindex_retry_after_failure(pg, tenant_of, fake_dbos, kb_cleanup):
     app.state.knowledge_store.mark_reindex_failed(tenant, kb["id"], 2, "embedding_failed")
     retry = client.post(url, json={"embedding_model": "test:hash768"}, headers=headers)
     assert retry.status_code == 202 and retry.json()["run_id"] != first
-    assert fake_dbos.calls[-1][1][3] == '{"reindex":2}'
+    assert fake_dbos.calls[-1][1][3] == '{"embed_split":true,"reindex":2}'
     # Another model while one is pending (failed) is still a conflict.
     assert client.post(url, json={"embedding_model": "test:hash"}, headers=headers).status_code == 409
 
@@ -604,7 +604,7 @@ def test_reindex_enqueue_failure_is_cancelled_and_a_plain_retry_works(pg, tenant
     assert client.get(f"{API}/runs/{failed.json()['run_id']}", headers=headers).json()["status"] == "failed"
     retry = client.post(url, json={"embedding_model": "test:hash768"}, headers=headers)
     assert retry.status_code == 202 and retry.json()["knowledge_base"]["pending_generation"] == 3
-    assert args_of(fake_dbos.calls[-1]) == (retry.json()["run_id"], tenant, kb["id"], '{"reindex":3}')
+    assert args_of(fake_dbos.calls[-1]) == (retry.json()["run_id"], tenant, kb["id"], '{"embed_split":true,"reindex":3}')
     # Replay with the right run_id but another model is a conflict.
     other = client.post(url, json={"embedding_model": "test:hash", "run_id": retry.json()["run_id"]}, headers=headers)
     assert other.status_code == 409

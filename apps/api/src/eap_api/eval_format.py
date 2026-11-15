@@ -76,8 +76,9 @@ error (`EvalFormatError`, a 422), as are unknown classes, non-text `inputs`, a c
 in one linear pass over the text when its flow or indent nesting, its alias-like tokens, its line
 count or its value count (lines plus flow-collection items) go over a cap. The caps bound the
 parse: a worst-case 1 MiB file within them parses in about 1.2 s of CPU, a normal 500-case
-suite in about 0.1 s. After loading, a node reached twice (an alias) is refused, so no alias
-expansion survives. The API never imports `pydantic_evals`. No I/O.
+suite in about 0.1 s. Composing refuses any anchor or alias (so no merge key or expansion
+survives), and before constructing, every node must carry a JSON tag (no timestamps, `!!binary`,
+`!!set` or local tags), and no mapping may repeat a key (refused with its path; JSON too). The API never imports `pydantic_evals`. No I/O.
 """
 
 from __future__ import annotations
@@ -384,28 +385,82 @@ def prescan_yaml(text: str) -> None:
             raise EvalFormatError(f"the file is nested more than {MAX_YAML_DEPTH} levels deep")
 
 
-def _reject_shared_nodes(data: Any) -> None:
-    """A list or mapping reached twice is an alias: refused (no expansion survives the load)."""
-    seen: set[int] = set()
-    stack = [data]
+class _JsonYamlLoader(yaml.composer.Composer, _YAML_LOADER):  # type: ignore[misc, valid-type]
+    """The safe loader (libyaml's parser when available) with PyYAML's Python composer first in the
+    MRO (libyaml's own composer hides anchors): any anchor or alias is refused while composing, so
+    nothing is ever shared or expanded."""
+
+    def __init__(self, stream: str) -> None:
+        _YAML_LOADER.__init__(self, stream)
+        yaml.composer.Composer.__init__(self)
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent) or self.peek_event().anchor is not None:
+            event = self.peek_event()
+            line = f" (line {event.start_mark.line + 1})" if event.start_mark is not None else ""
+            raise EvalFormatError(f"YAML anchors and aliases (&name, *name) are not supported{line}")
+        return yaml.composer.Composer.compose_node(self, parent, index)
+
+
+_JSON_TAGS = frozenset(
+    f"tag:yaml.org,2002:{t}" for t in ("str", "int", "float", "bool", "null", "seq", "map")
+)
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+_STR_TAG = "tag:yaml.org,2002:str"
+
+
+def _check_nodes(root: Any) -> None:
+    """Refuse, with the path, what JSON cannot hold: a tag outside the JSON types (timestamps,
+    `!!binary`, `!!set`, local tags, ...), a merge key (`<<`), a key that is not a string (a
+    collection, or a scalar that resolves to a number, bool or null: `1:`, `true:`, `null:`; quote
+    it), a duplicate key."""
+    stack: list[tuple[Any, str]] = [(root, "")]
     while stack:
-        node = stack.pop()
-        if isinstance(node, (list, dict)):
-            if id(node) in seen:
-                raise EvalFormatError("YAML aliases (*name) are not supported")
-            seen.add(id(node))
-            stack.extend(node.values() if isinstance(node, dict) else node)
+        node, path = stack.pop()
+        if node.tag not in _JSON_TAGS:
+            name = node.tag.removeprefix("tag:yaml.org,2002:")[:40]
+            raise EvalFormatError(f"unsupported YAML tag {name!r}: only JSON values are allowed", path)
+        if isinstance(node, yaml.SequenceNode):
+            stack.extend((item, f"{path}[{i}]") for i, item in enumerate(node.value))
+        elif isinstance(node, yaml.MappingNode):
+            seen: set[tuple[str, str]] = set()
+            for key, value in node.value:
+                if key.tag == _MERGE_TAG:
+                    raise EvalFormatError("YAML merge keys (<<) are not supported", path)
+                if not isinstance(key, yaml.ScalarNode) or key.tag != _STR_TAG:
+                    raise EvalFormatError("a mapping key must be text (quote a number, bool or null key)", path)
+                where = f"{path}.{key.value[:100]}" if path else key.value[:100]
+                if (key.tag, key.value) in seen:
+                    raise EvalFormatError(f"duplicate key {key.value[:100]!r}", where)
+                seen.add((key.tag, key.value))
+                stack.append((key, where))
+                stack.append((value, where))
+
+
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise EvalFormatError(f"duplicate key {key[:100]!r}")
+        out[key] = value
+    return out
 
 
 def parse_file(text: str, fmt: ExportFormat) -> Any:
     """The file's data: JSON, or YAML parsed once with the C safe loader (see the module docstring)."""
     try:
         if fmt == "json":
-            return json.loads(text)
+            return json.loads(text, object_pairs_hook=_json_object)
         prescan_yaml(text)
-        data = yaml.load(text, Loader=_YAML_LOADER)  # noqa: S506 - a safe loader (CSafeLoader or SafeLoader)
-        _reject_shared_nodes(data)
-        return data
+        loader = _JsonYamlLoader(text)
+        try:
+            node = loader.get_single_node()
+            if node is None:
+                return None
+            _check_nodes(node)
+            return loader.construct_document(node)
+        finally:
+            loader.dispose()
     except EvalFormatError:
         raise
     except json.JSONDecodeError as exc:

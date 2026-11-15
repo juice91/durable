@@ -442,7 +442,7 @@ def test_o1_crash_in_the_post_turn_observation(rm: Harness, report: Callable[[st
     recover(h, run2)
     assert_recovered_once(
         h, run2, before=before, usage_before=usage_before,
-        expected_keys=["start", "model:0:final", "end", "memory:observe:2"],
+        expected_keys=["start", "model:0:final", "end", "memory:observe:2", "memory:post_turn:2"],  # P1.C1
         expected_requests={"model:0": ("test:echo", "chat"), "memory:observe:2": ("test:observer", "chat")},
     )
     rows = h.sql(
@@ -493,7 +493,7 @@ def test_s1_crash_in_semantic_recall(rm: Harness, report: Callable[[str], None],
     assert run["status"] == "completed" and "the code word is pelican" in run["output"]
     events = assert_recovered_once(
         h, run_b, before=before, usage_before=usage_before,
-        expected_keys=["start", "embed:recall:1", "model:0:final", "end", "embed:index:1"],
+        expected_keys=["start", "embed:recall:1", "model:0:final", "end", "embed:index:1", "memory:post_turn:1"],  # P1.C1
         expected_requests={
             "embed:recall:1": ("test:hash", "embedding"),
             "model:0": ("test:context", "chat"),

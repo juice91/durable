@@ -74,6 +74,21 @@ describe("DataList", () => {
     await expectNoAxeViolations(document.body);
   }, AXE_TIMEOUT_MS);
 
+  it("fits a phone: the scroll wrapper is positioned, so an sr-only header cannot escape its overflow clip", () => {
+    const withSrOnly: DataListColumn<Agent>[] = [
+      ...columns,
+      { id: "actions", header: <span className="sr-only">Actions</span>, cell: () => <button type="button">Open</button> },
+    ];
+    render(<DataList label="Agents" rows={agents} columns={withSrOnly} getRowId={(row) => row.id} />);
+    const scroll = screen.getByTestId("datalist-scroll");
+    expect(scroll).toContainElement(screen.getByRole("table", { name: "Agents" }));
+    // `relative` is the containing block for absolutely positioned (sr-only) descendants;
+    // `overflow-x-auto` clips them and scrolls the table instead of the page; `min-w-0` lets the
+    // wrapper shrink inside flex and grid parents.
+    expect(scroll.className.split(/\s+/)).toEqual(expect.arrayContaining(["relative", "min-w-0", "overflow-x-auto"]));
+    expect(scroll).toContainElement(screen.getByText("Actions"));
+  });
+
   it("follows the row link when any part of the row is clicked, but not from the row's own controls", () => {
     const onLinkClick = vi.fn((event: MouseEvent) => event.preventDefault());
     const onAction = vi.fn();

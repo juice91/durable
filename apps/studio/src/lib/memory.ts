@@ -367,7 +367,17 @@ export function reflectionDue(items: readonly Observation[], reflectAfterTokens:
 }
 
 /**
- * Whether the post-turn steps have reported: the observer's `memory_updated` (stage observe or
+ * Whether the worker wrote `post_turn_done` (P1.C1): the last event of a completed turn's post-turn
+ * memory steps, data `{observe: created|skipped|failed|off, index: done|skipped|failed|off}`.
+ * Workers from before it never write one; the poll's timeout covers them.
+ */
+export function postTurnDone(events: readonly LooseRunEvent[]): boolean {
+  return events.some((item) => item.type === "post_turn_done");
+}
+
+/**
+ * Whether the post-turn steps have reported: `post_turn_done` (P1.C1, always the end); else, for
+ * workers from before it, the observer's `memory_updated` (stage observe or
  * reflect) or `memory_observe_failed` with observational memory on, else the recall index
  * `embedding` event (stage index). With `awaitReflection` (the observe left enough to reflect over,
  * see `reflectionDue`), a successful observe is not the end: the reflect stage's event is. The
@@ -379,6 +389,7 @@ export function postTurnReported(
   features: PostTurnFeatures,
   { awaitReflection = false }: { awaitReflection?: boolean } = {},
 ): boolean {
+  if (postTurnDone(events)) return true;
   if (features.observational) {
     const progress = observerProgress(events);
     return progress === "done" || (progress === "observed" && !awaitReflection);

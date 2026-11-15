@@ -9,6 +9,10 @@ import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Final review MINOR 3: these full-stepper renders timed out at the 5 s default when the machine was
+// loaded (other suites running); 76/76 pass alone. A longer budget, not a weaker assertion.
+vi.setConfig({ testTimeout: 30_000 });
+
 const nav = vi.hoisted(() => ({ search: "", path: "", push: vi.fn(), replace: vi.fn() }));
 vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(), listEmbeddingModels: vi.fn() }));
 vi.mock("next/navigation", () => ({

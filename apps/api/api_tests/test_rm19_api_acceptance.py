@@ -30,19 +30,20 @@ API = "/api/v1"
 BASE = datetime(2026, 7, 1, tzinfo=timezone.utc)
 AGENT_A, AGENT_B = str(uuid.uuid4()), str(uuid.uuid4())
 WINDOW = {"from": BASE.isoformat(), "to": (BASE + timedelta(days=1)).isoformat()}
-OPS = ("chat", "moderation", "observer", "reflector", "embedding")
+OPS = ("chat", "moderation", "observer", "reflector", "embedding", "judge")  # AC.17 added judge
 KEYS = [
     ("model:{n}", "chat"), ("moderation:input:{n}", "chat"), ("memory:observe:{n}", "chat"),
     ("memory:reflect:{n}", "chat"), ("embed:retrieve:c{n}", "embedding"), ("embed:recall:{n}", "embedding"),
     ("embed:index:{n}", "embedding"), ("embed:batch:{n}", "embedding"), ("embed:recall:{n}", "chat"),
-    ("moderation:x{n}", "embedding"), ("other:{n}", "chat"),
+    ("moderation:x{n}", "embedding"), ("other:{n}", "chat"), ("judge:{n}", "chat"), ("judge:x{n}", "embedding"),
 ]
 
 
 def op_of(key, op):
     if op == "embedding":
         return "embedding"
-    for prefix, name in (("moderation:", "moderation"), ("memory:observe:", "observer"), ("memory:reflect:", "reflector")):
+    for prefix, name in (("moderation:", "moderation"), ("memory:observe:", "observer"), ("memory:reflect:", "reflector"),
+                         ("judge:", "judge")):
         if key.startswith(prefix):
             return name
     return "chat"

@@ -24,7 +24,7 @@ import pytest
 from worker_tests.conftest import APP_VERSION, enqueue_run, ticket_spec, wait_terminal
 from worker_tests.mcp_helpers import mcp_spec, register_mcp_server
 from worker_tests.test_conversation import step_names
-from worker_tests.test_observational_memory import OBSERVE_RUN, obs_spec, observer_workflow_id, wait_workflow
+from worker_tests.test_observational_memory import OBSERVE_RUN, POST_TURN_DONE, obs_spec, observer_workflow_id, wait_workflow
 from worker_tests.test_processors_runtime import BASELINE, PII, echo_spec, moderation
 from worker_tests.test_retrieve import PRINTER, ingest, kb_tenant, make_kb, rag_spec  # noqa: F401 - fixture
 from worker_tests.test_semantic_recall import recall_spec
@@ -36,7 +36,9 @@ MODEL = "eap-agent__model.request_stream"
 HANDLER = "eap-agent__event_stream_handler"
 EVENT = "eap.append_event"
 
-# Recorded before AC.4 (8cadcdd). Never edit these for a spec without the new AC fields.
+# Recorded before AC.4 (8cadcdd). Never edit these for a spec without the new AC fields. The one
+# change is main's P1.C1 `post_turn_done` event, the last post-turn step of a memory turn (it is in
+# OBSERVE_RUN and POST_TURN_DONE, shared with main's own memory tests).
 GOLDEN: dict[str, list[str]] = {
     "plain": BASELINE["echo"],
     "tool": BASELINE["ticket"],
@@ -48,7 +50,7 @@ GOLDEN: dict[str, list[str]] = {
     "mcp": BASELINE["ticket"][:6] + ["eap-agent__dynamic_toolset__eap-spec-tools.validate_args"] + BASELINE["ticket"][6:],
     "knowledge": BASELINE["ticket"],
     "memory_history": MEMORY_TURN,
-    "memory_recall": MEMORY_TURN[:3] + ["eap.memory_recall"] + MEMORY_TURN[3:] + ["eap.memory_index"],
+    "memory_recall": MEMORY_TURN[:3] + ["eap.memory_recall"] + MEMORY_TURN[3:] + ["eap.memory_index", *POST_TURN_DONE],
     "memory_observational": MEMORY_TURN + OBSERVE_RUN,
 }
 OBSERVER_STEPS_BELOW_THRESHOLD = ["eap.memory_observe"]
@@ -76,7 +78,7 @@ GOLDEN_OUTPUT: dict[str, list[str]] = {
     # retrieve inside call_tool exactly as without `output`, then the structured answer.
     "knowledge": BASELINE["ticket"][:10] + OUTPUT_TURN + [EVENT, "eap.finish_run"],
     "memory_history": MEMORY_TURN[:3] + OUTPUT_TURN + [EVENT, "eap.finish_run"],
-    "memory_recall": MEMORY_TURN[:3] + ["eap.memory_recall"] + OUTPUT_TURN + [EVENT, "eap.finish_run", "eap.memory_index"],
+    "memory_recall": MEMORY_TURN[:3] + ["eap.memory_recall"] + OUTPUT_TURN + [EVENT, "eap.finish_run", "eap.memory_index", *POST_TURN_DONE],
     "memory_observational": MEMORY_TURN[:3] + OUTPUT_TURN + [EVENT, "eap.finish_run"] + OBSERVE_RUN,
 }
 
@@ -357,7 +359,7 @@ def test_approval_memory_turns_run_post_turn_steps_after_the_wait(worker, client
 
     shapes = (
         (memory_spec(model="approval", history={"last_turns": 5}), [], []),
-        (recall_spec(model="approval"), ["eap.memory_recall"], ["eap.memory_index"]),
+        (recall_spec(model="approval"), ["eap.memory_recall"], ["eap.memory_index", *POST_TURN_DONE]),
         (obs_spec(model="approval"), [], OBSERVE_RUN),
     )
     for base, pre, post in shapes:

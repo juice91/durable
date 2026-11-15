@@ -676,6 +676,45 @@ def _enqueue_failed_finish() -> dict[str, Any]:
     return {"finished_at": datetime.now(timezone.utc), "input_tokens": 0, "output_tokens": 0, "cost_usd": Decimal(0)}
 
 
+def _status_values(
+    tenant_id: str, run_id: UUID | str, status: str, output: str | None, error: str | None, messages: list[Any] | None,
+    output_format: str | None = None,
+) -> dict[str, Any]:
+    """The columns RunStore.set_status writes (see there)."""
+    values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
+    if output is not None:
+        values["output"] = output
+    if error is not None:
+        values["error"] = error
+    if messages is not None:
+        values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+    if output_format is not None:
+        if output_format not in RUN_OUTPUT_FORMATS:
+            raise ValueError(f"output_format must be one of {RUN_OUTPUT_FORMATS}")
+        values["output_format"] = output_format
+    if status in TERMINAL_RUN_STATUSES:
+        values.update(_finish_values(tenant_id, str(run_id), status))
+    return values
+
+
+def set_status_in_session(
+    session, tenant_id: str, run_id: UUID | str, status: str, output: str | None = None, error: str | None = None,
+) -> None:
+    """RunStore.set_status's work inside the caller's open session (which commits it): a store that
+    must check its own rows and finish a run in one transaction (KnowledgeStore.write_search_result).
+    Raises RunNotFound (the caller rolls back)."""
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    updated = session.execute(
+        update(RunModel)
+        .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+        .values(**_status_values(tenant_id, run_id, status, output, error, None))
+        .returning(RunModel.id)
+    ).fetchone()
+    if updated is None:
+        raise RunNotFound(tenant_id, run_id)
+
+
 def _finish_values(tenant_id: str, run_id: str, status: str) -> dict[str, Any]:
     """The columns a terminal set_status writes besides the status, as SQL expressions evaluated in
     the same UPDATE: `finished_at` and the usage totals.
@@ -1033,20 +1072,9 @@ class RunStore:
         totals in the same statement (see _finish_values).
         Raises RunNotFound (and changes nothing) if the run does not exist or belongs to another tenant.
         """
-        values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
-        if output is not None:
-            values["output"] = output
-        if error is not None:
-            values["error"] = error
-        if messages is not None:
-            values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
-        if output_format is not None:
-            if output_format not in RUN_OUTPUT_FORMATS:
-                raise ValueError(f"output_format must be one of {RUN_OUTPUT_FORMATS}")
-            values["output_format"] = output_format
-        if status in TERMINAL_RUN_STATUSES:
-            values.update(_finish_values(tenant_id, str(run_id), status))
-        self._update_owned(tenant_id, run_id, values)
+        self._update_owned(
+            tenant_id, run_id, _status_values(tenant_id, run_id, status, output, error, messages, output_format)
+        )
 
     def mark_enqueue_failed(self, tenant_id: str, run_id: UUID) -> bool:
         """The run could not be handed to the orchestrator: queued -> failed (ENQUEUE_FAILED_ERROR).

@@ -108,10 +108,11 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 # Durable events with no AG-UI rendering (cost stays native; memory work follows the turn; evals
-# are not served over AG-UI).
+# and knowledge ingestion are not served over AG-UI). `memory_observe_trimmed` is post-turn memory
+# work (RAG P1.C6); `extracted` belongs to kb_ingest runs (RAG P1.A3).
 SILENT_EVENT_TYPES = frozenset(
-    {"embedding", "memory_updated", "memory_observe_failed", "post_turn_done", "eval_case_result",
-     "ingest_progress", "text_delta"}
+    {"embedding", "memory_updated", "memory_observe_failed", "memory_observe_trimmed", "post_turn_done",
+     "eval_case_result", "ingest_progress", "extracted", "text_delta"}
 )
 STEP_DECISIONS = {"step_approved": "approved", "step_rejected": "rejected", "step_timed_out": "timed_out"}
 TOOL_DECISIONS = {"tool_approved": "approved", "tool_denied": "denied", "tool_approval_timed_out": "timed_out"}

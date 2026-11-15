@@ -4,8 +4,9 @@ import React, { useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { Button } from "@/components/ui/Button";
-import { STUCK_INGEST_TEXT, describeIngestError, displayedDocumentStatus, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument } from "@/lib/knowledge";
+import { STUCK_INGEST_TEXT, describeDocumentError, displayedDocumentStatus, formatLabel, isIngestInFlight, progressLabel, reingestDocument, type IngestProgress, type KnowledgeDocument, type ReextractResult } from "@/lib/knowledge";
 import { DocumentStatusBadge, formatWhen } from "./knowledgeUi";
+import { ReextractDialog, reextractStartedText } from "./ReextractDialog";
 import type { KnowledgeDocumentsState } from "./useKnowledgeDocuments";
 import { useStuckIngests } from "./useStuckIngests";
 
@@ -23,6 +24,10 @@ export interface DocumentsTabProps {
   openDocument: string | null;
   onOpenDocument: (documentKey: string) => void;
   onUpload: () => void;
+  /** The knowledge base's chunker version (`chunkerVersionOf`): on 1, "Re-extract outdated" offers chunker v2. */
+  chunkerVersion?: number;
+  /** A bulk re-extract started (its runs are queued; the list is re-read here). */
+  onReextracted?: (result: ReextractResult) => void;
 }
 
 function versionLabel(doc: KnowledgeDocument): string {
@@ -30,8 +35,12 @@ function versionLabel(doc: KnowledgeDocument): string {
   return doc.active_version === doc.latest_version ? `v${doc.active_version}` : `v${doc.active_version} → v${doc.latest_version}`;
 }
 
-/** The Documents tab: status with live progress, sections, version, Retry for a failed ingest. */
-export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, onOpenDocument, onUpload }: DocumentsTabProps) {
+/**
+ * The Documents tab: status with live progress, format, sections, version, Retry for a failed
+ * ingest, and "Re-extract outdated" (a dry run, then a new version of each outdated document).
+ */
+export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, onOpenDocument, onUpload, chunkerVersion = 2, onReextracted }: DocumentsTabProps) {
+  const [reextractOpen, setReextractOpen] = useState(false);
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [actionError, setActionError] = useState<string | null>(null);
   // A Retry the API answered 409 "already being ingested": the run is going, not an error.
@@ -99,12 +108,20 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
             ) : null}
             {doc.status === "failed" ? (
               <span className="line-clamp-2 text-caption text-destructive-text" data-testid="knowledge-document-error" title={doc.error ?? undefined}>
-                {describeIngestError(doc.error)}
+                {describeDocumentError(doc)}
               </span>
             ) : null}
           </span>
         );
       },
+    },
+    {
+      id: "format",
+      header: "Format",
+      sortable: true,
+      sortValue: (doc) => formatLabel(doc.mime_type),
+      className: "hidden whitespace-nowrap sm:table-cell",
+      cell: (doc) => <span className="text-caption text-muted-foreground" data-testid="knowledge-document-format-cell">{formatLabel(doc.mime_type)}</span>,
     },
     {
       id: "sections",
@@ -152,6 +169,13 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-testid="knowledge-documents-tab">
+      {docs.documents.length > 0 ? (
+        <div className="flex min-w-0 flex-wrap justify-end gap-2">
+          <Button size="sm" variant="secondary" onClick={() => setReextractOpen(true)} data-testid="knowledge-documents-reextract">
+            Re-extract outdated
+          </Button>
+        </div>
+      ) : null}
       {actionInfo ? <p role="status" data-testid="knowledge-documents-info" className="rounded-md border border-border bg-fill-hover p-3 text-body text-muted-foreground">{actionInfo}</p> : null}
       {actionError ? <p role="alert" data-testid="knowledge-documents-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
       <DataList
@@ -174,7 +198,7 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
         onRetry={docs.reload}
         empty={{
           title: "No documents yet",
-          description: "Upload Markdown, text or HTML files, or paste text. Each is split into sections and embedded.",
+          description: "Upload Markdown, text, HTML, reStructuredText, PDF, YAML or JSON files, or paste text. Each is split into sections and embedded.",
           action: <Button variant="primary" onClick={onUpload}>Upload documents</Button>,
         }}
       />
@@ -184,6 +208,20 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
             {docs.loadingMore ? "Loading…" : "Load more"}
           </Button>
         </div>
+      ) : null}
+      {reextractOpen ? (
+        <ReextractDialog
+          kbId={kbId}
+          chunkerVersion={chunkerVersion}
+          onClose={() => setReextractOpen(false)}
+          onStarted={(result) => {
+            setReextractOpen(false);
+            setActionError(null);
+            setActionInfo(reextractStartedText(result));
+            docs.reload();
+            onReextracted?.(result);
+          }}
+        />
       ) : null}
     </div>
   );

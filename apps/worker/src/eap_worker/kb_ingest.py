@@ -2,9 +2,10 @@
 
 Hand-off (apps/api/src/eap_api/launcher.py, KB_INGEST_WORKFLOW_NAME): the API inserts a `runs` row of
 kind 'kb_ingest' and enqueues `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on
-its own queue `eap-kb-ingest` (eap_worker.config.KB_INGEST_QUEUE_NAME; at most
-EAP_KB_INGEST_CONCURRENCY, default 2, running per worker) with workflow_id = run_id. Runs enqueued
-on `eap-agent-runs` before that split still run there. `input_json` is the run's canonical input:
+its own queue `eap-kb-ingest-fair` (eap_worker.config.KB_INGEST_QUEUE_NAME, partitioned by tenant
+and knowledge base; at most EAP_KB_INGEST_CONCURRENCY, default 2, running per worker) with
+workflow_id = run_id. Runs enqueued on the unpartitioned `eap-kb-ingest` or on `eap-agent-runs`
+before those changes still run there. `input_json` is the run's canonical input:
 
     ingest:  {"doc_version": N, "document_id": "<uuid>"}   chunk and embed that version, then switch
     reindex: {"reindex": G}                                 embed the pending generation G, then switch
@@ -19,6 +20,19 @@ Step layout (each line is a DBOS step, so recovery replays recorded results):
     eap.kb_chunk       (ingest)         re-read the document, extract + chunk (eap_knowledge), upsert the
                                         chunk rows without embeddings (idempotent per slot), reuse cached
                                         embeddings, count what is left: returns counts only
+    eap.kb_extract_chunk (ingest, RAG P1) in kb_chunk's slot for a WORKER-EXTRACTED document (rst, PDF,
+                                        YAML, JSON, Doxygen Markdown: eap_knowledge.formats.extractor_for)
+                                        of a run whose input has `embed_split: true`: the extractor id is
+                                        recorded in eap.start_ingest's output (`extractor`). Re-read the
+                                        document, parse it in the sandbox child (eap_worker.extract_sandbox),
+                                        chunk it, upsert the rows with `metadata.eap` (extractor, version,
+                                        page, condition), then the `extracted` event (key
+                                        `extract:{doc_version}`, counts only); reuse cached embeddings,
+                                        count what is left. The chunk rows ARE the stored extraction: a
+                                        re-execution that finds this run's event and the rows returns
+                                        the same total/embedded/pending counts without parsing, with
+                                        `inserted` 0 (as kb_chunk's re-execution). Text/Markdown/HTML documents and
+                                        runs without the flag keep eap.kb_chunk; reindex never parses
     eap.kb_copy        (reindex)        copy the active chunks into G (no re-chunking), reuse cached
                                         embeddings in G, count what is left
                                         -> cost cap: un-cached approx tokens over EAP_KB_MAX_INGEST_TOKENS
@@ -29,6 +43,17 @@ Step layout (each line is a DBOS step, so recovery replays recorded results):
                                         the cache, the rest embedded in one embedding call (request key `embed:batch:{i}`), then the vectors,
                                         the usage row and an `ingest_progress` event (key
                                         `embed:batch:{i}`) in ONE transaction (write_embeddings)
+    -- or, for a run whose input has `embed_split: true` (every run the API creates since P1.C5),
+       each batch is two steps, so a database retry of the write never calls the provider again:
+    eap.kb_embed_call  (i = 0, 1, ...)  select, cache fill, the one provider call (retryable provider
+                                        errors retried inside); returns the chunk ids, the vectors
+                                        as float32 bytes, usage and event data (no text)
+    eap.kb_embed_write                  only when the call returned vectors: the vectors, usage row
+                                        and `ingest_progress` event (key `embed:batch:{i}`) in ONE
+                                        transaction, or the refusal; retried on 40P01/40001/lost
+                                        connection without a provider call
+       Runs enqueued without the flag keep eap.kb_embed_batch, so in-flight workflows recover
+       unchanged (the step layout differs only for new runs).
     eap.kb_finalize                     finalize_document / finalize_reindex: the atomic switch (+ event
                                         `finalize:{r}`); 'incomplete' / 'stale_generation' -> next round
     --- end ---
@@ -86,6 +111,8 @@ import json
 import logging
 import os
 import random
+import sys
+from array import array
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -118,6 +145,7 @@ INGEST_PROGRESS = "ingest_progress"
 MAX_INGEST_TOKENS_ENV = "EAP_KB_MAX_INGEST_TOKENS"
 DEFAULT_MAX_INGEST_TOKENS = 2_000_000
 BATCH_CHUNKS_ENV = "EAP_KB_EMBED_BATCH_CHUNKS"
+MAX_BATCH_CHUNKS = 128  # P1.C5: bounds the eap.kb_embed_call checkpoint (see _batch_chunks)
 # Rounds of chunk/copy -> embed -> finalise. One normally; another only when the generation switched
 # under an ingest ('stale_generation'), or documents were activated during a reindex ('incomplete').
 # Rounds that make progress (rows inserted, copied or embedded) never fail the run, up to the
@@ -156,8 +184,17 @@ __all__ = [
     "batch_request_key",
     "kb_chunk_step",
     "kb_copy_step",
+    "kb_extract_chunk_step",
+    "extract_event_key",
+    "EMBED_SPLIT_KEY",
+    "MAX_BATCH_CHUNKS",
+    "embed_batch",
     "kb_embed_batch_step",
+    "kb_embed_call_step",
+    "kb_embed_write_step",
     "kb_finalize_step",
+    "pack_vectors",
+    "unpack_vectors",
     "kb_ingest",
     "kb_mark_failed_step",
     "max_ingest_tokens",
@@ -169,13 +206,15 @@ __all__ = [
 
 class IngestFailed(Exception):
     """The ingest run failed with a known code; `message` is fixed, user-safe text built from ids,
-    model ids and counts only. Pickle-safe."""
+    model ids and counts only. `reason` (RAG P1) is the extraction error code of an
+    `extraction_failed` from the sandbox (`document_encrypted`, ...), else None. Pickle-safe."""
 
-    def __init__(self, code: str, error_type: str, message: str) -> None:
+    def __init__(self, code: str, error_type: str, message: str, reason: str | None = None) -> None:
         self.code = code
         self.error_type = error_type
         self.message = message
-        super().__init__(code, error_type, message)
+        self.reason = reason
+        super().__init__(code, error_type, message, reason)
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
@@ -200,21 +239,27 @@ def max_ingest_tokens() -> int:
 
 
 def _batch_chunks() -> int:
-    """EAP_KB_EMBED_BATCH_CHUNKS: un-embedded chunks per batch (default 64; below 1 means 1)."""
+    """EAP_KB_EMBED_BATCH_CHUNKS: un-embedded chunks per batch (default 64; below 1 means 1, above
+    MAX_BATCH_CHUNKS means MAX_BATCH_CHUNKS, so eap.kb_embed_call's checkpoint of the batch's
+    float32 vectors stays far below DBOS's 2 MB guidance: 128 x 1536 x 4 bytes = 768 KiB)."""
     raw = os.environ.get(BATCH_CHUNKS_ENV)
     if raw is None or not raw.strip():
         return DEFAULT_BATCH_CHUNKS
     try:
-        return max(1, int(raw))
+        return min(MAX_BATCH_CHUNKS, max(1, int(raw)))
     except ValueError:
         raise ValueError(f"{BATCH_CHUNKS_ENV} must be a positive integer, got {raw!r}") from None
 
 
 def validate_settings() -> None:
     """Parse the ingest settings that the steps read (EAP_KB_MAX_INGEST_TOKENS,
-    EAP_KB_EMBED_BATCH_CHUNKS), so a bad value fails the worker at start, not each run."""
+    EAP_KB_EMBED_BATCH_CHUNKS, and the EAP_KB_* extraction limits of the sandbox), so a bad value
+    fails the worker at start, not each run."""
+    from eap_worker.config import extract_limits
+
     max_ingest_tokens()
     _batch_chunks()
+    extract_limits()
 
 
 def batch_request_key(index: int) -> str:
@@ -245,8 +290,11 @@ def _sqlstate(exc: BaseException) -> str | None:
 def _transient(exc: BaseException) -> bool:
     """Whether DBOS should try a step again: database deadlocks (40P01), serialization failures
     (40001) and lost connections. Provider errors never get here: eap.kb_embed_batch retries and
-    classifies them itself. Anything else fails at once."""
+    classifies them itself. RAG P1: a sandbox child that could not be started (SandboxSpawnFailed:
+    EAGAIN, ENOMEM, EMFILE) is transient too. Anything else fails at once."""
     if _sqlstate(exc) in ("40P01", "40001"):
+        return True
+    if type(exc).__name__ == "SandboxSpawnFailed":
         return True
     from sqlalchemy.exc import OperationalError
 
@@ -333,6 +381,27 @@ def refusal_outcome(reason: str, mode: str, model_id: str, embedded: int, total:
     return _failure("internal_error", "IngestFailed", "the ingest failed with an internal error")
 
 
+def _worker_extractor(params: dict[str, Any], source: dict[str, Any]) -> str | None:
+    """The worker extractor id of the source document (eap_knowledge.formats.extractor_for with the
+    knowledge base's `chunking.extract`), or None: for API-extracted types, for a run without
+    `embed_split` (enqueued by an earlier API), and for an unknown type or an invalid config (then
+    eap.kb_chunk fails the run with `extraction_failed` as before)."""
+    if params.get(EMBED_SPLIT_KEY) is not True:
+        return None
+    from eap_knowledge import extractor_for
+
+    try:
+        config = ChunkingConfig.model_validate(source["chunking"])
+        return extractor_for(str(source["document"]["mime_type"]), config.extract)
+    except Exception:  # noqa: BLE001 - unsupported or invalid: eap.kb_chunk reports it
+        return None
+
+
+def extract_event_key(doc_version: int) -> str:
+    """The `extracted` event's key: one per document version in a run."""
+    return f"extract:{int(doc_version)}"
+
+
 def _scope(mode: str, document_id: str | None, doc_version: int | None) -> dict[str, Any]:
     return {"document_id": document_id, "doc_version": doc_version} if mode == "ingest" else {}
 
@@ -343,7 +412,12 @@ def _scope(mode: str, document_id: str | None, doc_version: int | None) -> dict[
 @DBOS.step(name="eap.start_ingest")
 async def start_ingest_step(run_id: str, tenant_id: str, kb_id: str, input_json: str) -> dict[str, Any]:
     """Returns {"traceparent", "outcome": ok | missing | superseded | already_active, "reason"?,
-    "generation"?, "embedding_model"?}. Ingest 'ok' marks the document 'ingesting'."""
+    "generation"?, "embedding_model"?, "extractor"?}. Ingest 'ok' marks the document 'ingesting'.
+
+    `extractor` (RAG P1) names the worker extractor of a worker-extracted document, only for a run
+    whose input has `embed_split: true` (created by an API that knows worker formats): the workflow
+    then runs eap.kb_extract_chunk instead of eap.kb_chunk. A run recorded before (no key in this
+    step's checkpointed output) or without the flag keeps eap.kb_chunk."""
     rt = get_runtime()
     store = _store()
     params = json.loads(input_json)
@@ -371,6 +445,9 @@ async def start_ingest_step(run_id: str, tenant_id: str, kb_id: str, input_json:
             reason = "knowledge_base_deleted" if store.get_knowledge_base(tenant_id, kb_id) is None else "document_deleted"
             return {**out, **_cancelled(reason), "outcome": "missing"}
         base = {**out, "generation": source["generation"], "embedding_model": source["embedding_model"]}
+        extractor = _worker_extractor(params, source)
+        if extractor is not None:
+            base["extractor"] = extractor
         if source["already_active"]:
             return {**base, "outcome": "already_active"}
         if source["superseded"]:
@@ -459,6 +536,241 @@ async def kb_chunk_step(run_id: str, tenant_id: str, kb_id: str, document_id: st
     return await asyncio.to_thread(work)
 
 
+def _extraction_failure(exc: Any) -> dict[str, Any]:
+    """A worker extraction failure (eap_knowledge.ExtractionFailed) as a text-free failure dict: the
+    run fails `extraction_failed` (INGEST_FAILURE_CODES is unchanged) with the reason's fixed,
+    user-safe message, and `reason` carries the extraction code (`document_encrypted`, ...). Never
+    the exception's text or detail, which may name parser internals."""
+    return {**_failure("extraction_failed", "ExtractionFailed", exc.user_message), "reason": exc.code}
+
+
+# The extraction code that ends an ingest as an EMPTY document rather than a failure (RAG P1
+# quality fix): the document is 'ready' with 0 chunks, and its `extracted` event carries
+# `empty_reason` so Studio and the API show why.
+EMPTY_REASON = "no_extractable_text"
+
+
+def _finish_empty(
+    run_id: str, tenant_id: str, kb_id: str, document_id: str, doc_version: int, extractor: str,
+    base: dict[str, Any], key: str, limit: int, result: Any = None,
+) -> dict[str, Any]:
+    """kb_extract_chunk's outcome for a version with no extractable text, on a document with no
+    active chunks: the `extracted` event (counts only, `empty_reason`), no rows, and the usual "ok"
+    counts (all 0). The workflow then embeds nothing and finalize switches to the empty version:
+    status 'ready', chunk_count 0, no error. Idempotent: the event is keyed, and a re-execution
+    (there are no rows to find) parses again and writes nothing new."""
+    from eap_schemas.knowledge import ExtractedEventData
+
+    rt = get_runtime()
+    store = _store()
+    document = result.document if result is not None else None
+    data = ExtractedEventData(
+        extractor=extractor,
+        extractor_version=_extractor_version(extractor),
+        sections=len(document.sections) if document is not None else 0,
+        chars=document.extracted_chars if document is not None else 0,
+        pages=result.pages if result is not None else None,
+        warnings=(len(document.warnings) or None) if document is not None else None,
+        empty_reason=EMPTY_REASON,
+    ).model_dump(mode="json")
+    rt.event_log.append(tenant_id, UUID(str(run_id)), key, "extracted", data)
+    progress = store.embedding_progress(
+        tenant_id, kb_id, base["generation"], document_id=document_id, doc_version=doc_version
+    )
+    return {
+        **base,
+        "status": "ok",
+        "total": progress.total,
+        "embedded": progress.embedded,
+        "pending_tokens": progress.pending_tokens,
+        "limit": limit,
+        "inserted": 0,
+    }
+
+
+def _extracted_event_data(extractor: str, result: Any, chunks: list[Any]) -> dict[str, Any]:
+    from eap_schemas.knowledge import MAX_IMAGE_ONLY_PAGES_LISTED, ExtractedEventData
+
+    document = result.document
+    conditions = sum(1 for s in document.sections if s.condition)
+    return ExtractedEventData(
+        extractor=extractor,
+        extractor_version=_extractor_version(extractor),
+        sections=len(document.sections),
+        chars=document.extracted_chars,
+        pages=result.pages,
+        image_only_pages=tuple(result.image_only_pages[:MAX_IMAGE_ONLY_PAGES_LISTED]) or None,
+        conditions=conditions or None,
+        warnings=len(document.warnings) or None,
+    ).model_dump(mode="json")
+
+
+def _extractor_version(extractor: str) -> int:
+    from eap_knowledge import EXTRACTOR_VERSIONS
+
+    return EXTRACTOR_VERSIONS[extractor]
+
+
+def _chunk_extract_metadata(extractor: str, chunks: list[Any]) -> list[dict[str, Any]]:
+    """Each chunk's `metadata.eap` record (eap_schemas.knowledge.ChunkExtractMetadata)."""
+    from eap_schemas.knowledge import ChunkExtractMetadata
+
+    version = _extractor_version(extractor)
+    return [
+        ChunkExtractMetadata(
+            extractor=extractor, extractor_version=version, page=c.page, page_end=c.page_end, condition=c.condition
+        ).model_dump(mode="json")
+        for c in chunks
+    ]
+
+
+@DBOS.step(name="eap.kb_extract_chunk", should_retry=_transient, **STEP_RETRY)
+async def kb_extract_chunk_step(
+    run_id: str, tenant_id: str, kb_id: str, document_id: str, doc_version: int, extractor: str
+) -> dict[str, Any]:
+    """eap.kb_chunk for a worker-extracted document (RAG P1): parse the version in the sandbox child,
+    chunk it, upsert its rows with `metadata.eap`, then write the `extracted` event (once per run and
+    version: `extract:{doc_version}`, first write wins). Same result shape as kb_chunk_step.
+
+    A re-execution that finds this run's `extracted` event AND the version's rows in the generation
+    (the step committed, then crashed before its checkpoint) returns the same `total`, `embedded`
+    and `pending_tokens` without parsing, with `inserted` 0, exactly as a re-executed eap.kb_chunk
+    (whose ON CONFLICT DO NOTHING insert also counts 0); `inserted` only feeds the idle-round
+    count, so this costs at most one idle round. A crash before the event re-parses once (the
+    upsert inserts nothing new; the event is written once). A retry run after an extractor upgrade
+    replaces the version's older rows (upsert_chunks). Extraction failures (sandbox codes) are checkpointed as failure dicts, never retried:
+    they are deterministic. Database errors propagate (DBOS retries 40P01/40001/lost connections)."""
+    from eap_knowledge import ExtractionFailed, InvalidChunkingConfig, chunk
+    from pydantic import ValidationError
+
+    from eap_worker import extract_sandbox
+
+    rt = get_runtime()
+    store = _store()
+    limit = max_ingest_tokens()
+    key = extract_event_key(doc_version)
+
+    def read() -> dict[str, Any]:
+        source = store.get_ingest_source(tenant_id, document_id, doc_version)
+        if source is None or source["document"]["kb_id"] != str(kb_id):
+            kb_gone = store.get_knowledge_base(tenant_id, kb_id) is None
+            return {"outcome": _cancelled("knowledge_base_deleted" if kb_gone else "document_deleted")}
+        generation, model = source["generation"], source["embedding_model"]
+        base = {"generation": generation, "embedding_model": model}
+        if source["already_active"]:
+            return {"outcome": {**base, "status": "already_active"}}
+        if source["superseded"]:
+            return {"outcome": {**base, "status": "superseded"}}
+        if rt.event_log.get_event(tenant_id, run_id, key) is not None:
+            progress = store.embedding_progress(
+                tenant_id, kb_id, generation, document_id=document_id, doc_version=doc_version
+            )
+            if progress.total > 0:  # committed by an earlier execution of this step: no parse
+                return {"base": base, "reuse": True}
+        return {"base": base, "source": source}
+
+    state = await asyncio.to_thread(read)
+    if "outcome" in state:
+        return state["outcome"]
+    base = state["base"]
+    inserted = 0
+    if not state.get("reuse"):
+        source = state.pop("source")
+        doc = source["document"]
+        metadata = doc["metadata"] or {}  # the version's snapshot, as eap.kb_chunk uses
+        try:
+            config = ChunkingConfig.model_validate(source["chunking"])
+        except (InvalidChunkingConfig, ValidationError):
+            return _failure("extraction_failed", "InvalidChunkingConfig", "the knowledge base's chunking config is invalid")
+        # A version may become an empty one (no extractable text) only while the document has no
+        # searchable text to lose: never switch away from an active version with chunks.
+        # PDFs never become empty: a PDF with no text has pages (images) that a later image extractor
+        # can read, so it stays failed and a re-extract selects it.
+        may_be_empty = extractor != "pdf" and not (doc["active_version"] is not None and (doc["chunk_count"] or 0) > 0)
+        try:
+            result = await extract_sandbox.extract_in_sandbox(
+                extractor,
+                doc["content"],
+                title=doc["title"] or "",
+                source_url=doc["source_url"],
+                options=config.extract.model_dump(mode="json") if config.extract is not None else None,
+                max_tokens=config.max_tokens,
+            )
+        except ExtractionFailed as exc:
+            log.info("kb_ingest run %s extraction failed: %s", run_id, exc.code)
+            if exc.code == EMPTY_REASON and may_be_empty:
+                return await asyncio.to_thread(_finish_empty, run_id, tenant_id, kb_id, document_id, doc_version,
+                                               extractor, base, key, limit)
+            return _extraction_failure(exc)
+        del source, doc
+        crash_point("kb_extract_sandbox")
+        try:
+            chunks = await asyncio.to_thread(chunk, result.document, config)
+        except InvalidChunkingConfig:
+            return _failure("extraction_failed", "InvalidChunkingConfig", "the knowledge base's chunking config is invalid")
+        if result.document.extracted_chars == 0 or not chunks:
+            if may_be_empty:
+                # A toctree- or include-only rst page, an empty YAML file: ready with 0 chunks, the
+                # `extracted` event saying why. Not a failure.
+                return await asyncio.to_thread(_finish_empty, run_id, tenant_id, kb_id, document_id, doc_version,
+                                               extractor, base, key, limit, result)
+            # Fail closed: never switch to an empty version (that would delete the active one's chunks).
+            return _extraction_failure(ExtractionFailed(EMPTY_REASON))
+        event_data = _extracted_event_data(extractor, result, chunks)
+        records = _chunk_extract_metadata(extractor, chunks)
+
+        def write() -> dict[str, Any] | int:
+            try:
+                upserted = store.upsert_chunks(
+                    tenant_id, document_id, doc_version, base["generation"], chunks,
+                    metadata=metadata, extract_metadata=records,
+                )
+            except DocumentNotFound:
+                return _cancelled("document_deleted")
+            except KnowledgeBaseNotFound:
+                return _cancelled("knowledge_base_deleted")
+            except GenerationNotWritable:
+                return {**base, "status": "stale"}
+            except KnowledgeBaseLimitExceeded as exc:
+                return _failure(
+                    "knowledge_base_limit_exceeded", "KnowledgeBaseLimitExceeded",
+                    f"the knowledge base would exceed {exc.limit} {exc.what}",
+                )
+            rt.event_log.append(tenant_id, UUID(str(run_id)), key, "extracted", event_data)
+            return upserted.inserted
+
+        written = await asyncio.to_thread(write)
+        if isinstance(written, dict):
+            return written
+        inserted = written
+        crash_point("kb_extract_chunk")
+
+    def finish() -> dict[str, Any]:
+        generation = base["generation"]
+        try:
+            store.apply_cached_embeddings(
+                tenant_id, kb_id, generation, document_id=document_id, doc_version=doc_version
+            )
+        except KnowledgeBaseNotFound:
+            return _cancelled("knowledge_base_deleted")
+        except GenerationNotWritable:
+            return {**base, "status": "stale"}
+        progress = store.embedding_progress(
+            tenant_id, kb_id, generation, document_id=document_id, doc_version=doc_version
+        )
+        return {
+            **base,
+            "status": "ok",
+            "total": progress.total,
+            "embedded": progress.embedded,
+            "pending_tokens": progress.pending_tokens,
+            "limit": limit,
+            "inserted": inserted,
+        }
+
+    return await asyncio.to_thread(finish)
+
+
 @DBOS.step(name="eap.kb_copy", should_retry=_transient, **STEP_RETRY)
 async def kb_copy_step(run_id: str, tenant_id: str, kb_id: str, generation: int) -> dict[str, Any]:
     """Reindex: copy the active chunks into the pending `generation` (idempotent), reuse cached
@@ -492,6 +804,156 @@ async def kb_copy_step(run_id: str, tenant_id: str, kb_id: str, generation: int)
     return await asyncio.to_thread(work)
 
 
+def _gone_outcome(exc: BaseException, mode: str) -> dict[str, Any]:
+    if isinstance(exc, KnowledgeBaseNotFound):
+        return _cancelled("knowledge_base_deleted")
+    if mode == "reindex":  # a reindex generation no longer pending: cancelled (or switched)
+        return _cancelled("reindex_cancelled")
+    return {"status": "stale"}  # the active generation switched under an ingest: chunk again
+
+
+def _recorded_batch(rt: Any, tenant_id: str, run_id: str, key: str, mode: str, embedding_model: str,
+                    embedded_before: int, total: int) -> dict[str, Any] | None:
+    """The outcome a committed batch recorded (its event), or None. Committed before a crash (after
+    the commit, before the checkpoint): no provider call, nothing written twice."""
+    done = rt.event_log.get_event(tenant_id, run_id, key)
+    if done is not None and done.type == _embeddings.EMBEDDING_EVENT_TYPE:
+        # The batch was embedded and paid for, but the store refused the vectors: replay the refusal.
+        return refusal_outcome(str(done.data.get("refused", "")), mode, embedding_model, embedded_before, total)
+    if done is not None:
+        d = done.data
+        return {
+            "status": "embedded", "embedded": int(d.get("embedded", embedded_before)),
+            "total": int(d.get("total", total)), "written": int(d.get("written", 0)),
+            "filled": int(d.get("filled", 0)), "tokens": int(d.get("approx_tokens", 0)), "replayed": True,
+        }
+    return None
+
+
+def _prepare_batch(
+    rt: Any, store: KnowledgeStore, *, run_id: str, tenant_id: str, kb_id: str, mode: str, generation: int,
+    embedding_model: str, key: str, embedded_before: int, total: int, scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Select the batch and fill it from the cache. {"status": "pending", "batch", "filled"} or a
+    final outcome (replayed, done, stale, cancelled)."""
+    recorded = _recorded_batch(rt, tenant_id, run_id, key, mode, embedding_model, embedded_before, total)
+    if recorded is not None:
+        return recorded
+    try:
+        batch = store.next_unembedded_batch(
+            tenant_id, kb_id, generation, **scope, max_chunks=_batch_chunks(), max_tokens=DEFAULT_BATCH_TOKENS
+        )
+        if not batch:
+            return {"status": "done", "embedded": embedded_before, "total": total, "written": 0, "filled": 0, "tokens": 0}
+        filled = store.fill_cached_embeddings(tenant_id, kb_id, generation, [c.id for c in batch])
+    except (KnowledgeBaseNotFound, GenerationNotWritable) as exc:
+        return _gone_outcome(exc, mode)
+    return {"status": "pending", "batch": [c for c in batch if c.id not in filled], "filled": len(filled)}
+
+
+def _batch_texts(batch: list[Any]) -> tuple[list[str], dict[str, int], int]:
+    """(texts, slot by embed_text_hash, approx tokens): identical texts in one batch embedded once."""
+    texts: list[str] = []
+    slot: dict[str, int] = {}
+    tokens = 0
+    for c in batch:
+        if c.embed_text_hash not in slot:
+            slot[c.embed_text_hash] = len(texts)
+            texts.append(c.embed_text)
+            tokens += c.approx_tokens
+    return texts, slot, tokens
+
+
+async def _call_provider(
+    rt: Any, *, run_id: str, tenant_id: str, key: str, embedding_model: str, texts: list[str],
+) -> tuple[Any, dict[str, Any] | None]:
+    """(the EmbeddingCall, None) or (None, a text-free failure dict). Retryable provider errors are
+    retried here (EMBED_ATTEMPTS, RATE_LIMIT_ATTEMPTS for a rate limit); nothing is re-raised."""
+    for attempt in range(max(EMBED_ATTEMPTS, RATE_LIMIT_ATTEMPTS)):
+        try:
+            call = await _embeddings.embed_documents(
+                rt.settings, tenant_id=tenant_id, run_id=run_id, request_key=key, model_id=embedding_model, texts=texts
+            )
+            return call, None
+        except Exception as exc:  # noqa: BLE001 - classified here: a text-free failure dict, never re-raised
+            limited = is_rate_limited(exc)
+            if is_retryable(exc) and attempt + 1 < (RATE_LIMIT_ATTEMPTS if limited else EMBED_ATTEMPTS):
+                log_failure(
+                    log, "kb ingest embedding attempt failed; retrying", exc,
+                    code="embedding_rate_limited" if limited else "embedding_retry",
+                    run_id=run_id, tenant_id=tenant_id,
+                )
+                await asyncio.sleep(embed_retry_delay(exc, attempt))
+                continue
+            failure = _embedding_failure(exc, embedding_model)
+            log_failure(log, "kb ingest embedding failed", exc, code=failure["code"], run_id=run_id, tenant_id=tenant_id)
+            return None, failure
+    raise AssertionError("unreachable")  # pragma: no cover - the last attempt returns
+
+
+def _record_refusal(
+    rt: Any, *, run_id: str, tenant_id: str, mode: str, embedding_model: str, index: int,
+    event_data: dict[str, Any], usage: dict[str, Any], reason: str, embedded: int, total: int,
+) -> dict[str, Any]:
+    """The provider call was made (and is charged) but its vectors are not stored: record its usage
+    as an `embedding` event under the batch's key, `{phase: refused, refused: <reason>}`, with its
+    run_model_requests row in ONE transaction (first write wins, so a re-execution never records it
+    twice). The event also makes a re-execution replay this refusal without another provider call."""
+    key = batch_request_key(index)
+    rt.event_log.append(
+        tenant_id, UUID(str(run_id)), key, _embeddings.EMBEDDING_EVENT_TYPE,
+        {**event_data, "phase": "refused", "batch": index, "refused": reason}, usage=usage,
+    )
+    return refusal_outcome(reason, mode, embedding_model, embedded, total)
+
+
+def _write_batch(
+    rt: Any, store: KnowledgeStore, *, run_id: str, tenant_id: str, kb_id: str, mode: str, generation: int,
+    embedding_model: str, index: int, embedded_before: int, total: int, vectors: dict[str, Any], filled: int,
+    tokens: int, event_data: dict[str, Any], usage: dict[str, Any], requests: int,
+) -> dict[str, Any]:
+    """ONE transaction: the vectors, the usage row and the batch's `ingest_progress` event
+    (write_embeddings); or, when the store refuses the vectors, the usage with an `embedding`
+    refusal event. Database errors propagate (the step's DBOS retry)."""
+    key = batch_request_key(index)
+    expected = embedded_before + filled + len(vectors)
+    data = {
+        **event_data,
+        "phase": "embedding",
+        "batch": index,
+        "chunks": len(vectors),
+        "filled": filled,
+        "written": len(vectors),
+        "approx_tokens": tokens,
+        "embedded": expected,
+        "total": total,
+        "message": progress_message(expected, total),
+    }
+
+    def refused(reason: str) -> dict[str, Any]:
+        return _record_refusal(rt, run_id=run_id, tenant_id=tenant_id, mode=mode, embedding_model=embedding_model,
+                               index=index, event_data=event_data, usage=usage, reason=reason,
+                               embedded=embedded_before + filled, total=total)
+
+    try:
+        result = store.write_embeddings(
+            tenant_id, kb_id, generation, vectors, embedding_model=embedding_model, run_id=run_id,
+            event_key=key, event_type=INGEST_PROGRESS, event_data=data, usage=usage,
+        )
+    except KnowledgeBaseNotFound:
+        return refused("knowledge_base_deleted")
+    except GenerationNotWritable:
+        return refused("reindex_cancelled" if mode == "reindex" else "stale")
+    except GenerationModelMismatch:
+        return refused("stale" if mode == "ingest" else "reindex_cancelled")
+    except EmbeddingDimensionMismatch:
+        return refused("embedding_dimension_mismatch")
+    return {
+        "status": "embedded", "embedded": embedded_before + filled + result.written, "total": total,
+        "written": result.written, "filled": filled, "tokens": tokens, "requests": requests,
+    }
+
+
 @DBOS.step(name="eap.kb_embed_batch", should_retry=_transient, **STEP_RETRY)
 async def kb_embed_batch_step(
     run_id: str,
@@ -507,6 +969,8 @@ async def kb_embed_batch_step(
     doc_version: int | None = None,
 ) -> dict[str, Any]:
     """Embed the next batch of the scope (one document version, or the whole reindex generation).
+    Used by runs enqueued WITHOUT `embed_split` (before P1.C5); new runs use eap.kb_embed_call and
+    eap.kb_embed_write, so a database retry of the write never calls the provider again.
 
     The batch is selected first (up to EAP_KB_EMBED_BATCH_CHUNKS un-embedded chunks), then only
     those rows are filled from the cache, and the rest are embedded in one call. `embedded_before`
@@ -524,40 +988,12 @@ async def kb_embed_batch_step(
     store = _store()
     key = batch_request_key(index)
     scope = _scope(mode, document_id, doc_version)
-
-    def gone(exc: BaseException) -> dict[str, Any]:
-        if isinstance(exc, KnowledgeBaseNotFound):
-            return _cancelled("knowledge_base_deleted")
-        if mode == "reindex":  # a reindex generation no longer pending: cancelled (or switched)
-            return _cancelled("reindex_cancelled")
-        return {"status": "stale"}  # the active generation switched under an ingest: chunk again
-
-    def prepare() -> dict[str, Any]:
-        # Committed before a crash (after the commit, before the checkpoint): the batch's event holds
-        # its counts. No provider call, nothing written twice.
-        done = rt.event_log.get_event(tenant_id, run_id, key)
-        if done is not None and done.type == _embeddings.EMBEDDING_EVENT_TYPE:
-            # The batch was embedded and paid for, but the store refused the vectors: replay the refusal.
-            return refusal_outcome(str(done.data.get("refused", "")), mode, embedding_model, embedded_before, total)
-        if done is not None:
-            d = done.data
-            return {
-                "status": "embedded", "embedded": int(d.get("embedded", embedded_before)),
-                "total": int(d.get("total", total)), "written": int(d.get("written", 0)),
-                "filled": int(d.get("filled", 0)), "tokens": int(d.get("approx_tokens", 0)), "replayed": True,
-            }
-        try:
-            batch = store.next_unembedded_batch(
-                tenant_id, kb_id, generation, **scope, max_chunks=_batch_chunks(), max_tokens=DEFAULT_BATCH_TOKENS
-            )
-            if not batch:
-                return {"status": "done", "embedded": embedded_before, "total": total, "written": 0, "filled": 0, "tokens": 0}
-            filled = store.fill_cached_embeddings(tenant_id, kb_id, generation, [c.id for c in batch])
-        except (KnowledgeBaseNotFound, GenerationNotWritable) as exc:
-            return gone(exc)
-        return {"status": "pending", "batch": [c for c in batch if c.id not in filled], "filled": len(filled)}
-
-    prepared = await asyncio.to_thread(prepare)
+    prepared = await asyncio.to_thread(
+        lambda: _prepare_batch(
+            rt, store, run_id=run_id, tenant_id=tenant_id, kb_id=kb_id, mode=mode, generation=generation,
+            embedding_model=embedding_model, key=key, embedded_before=embedded_before, total=total, scope=scope,
+        )
+    )
     if prepared["status"] != "pending":
         return prepared
     batch, filled = prepared["batch"], prepared["filled"]
@@ -566,86 +1002,195 @@ async def kb_embed_batch_step(
             "status": "embedded", "embedded": embedded_before + filled, "total": total,
             "written": 0, "filled": filled, "tokens": 0,
         }
-    # Identical texts in one batch are embedded once.
-    texts: list[str] = []
-    slot: dict[str, int] = {}
-    tokens = 0
-    for c in batch:
-        if c.embed_text_hash not in slot:
-            slot[c.embed_text_hash] = len(texts)
-            texts.append(c.embed_text)
-            tokens += c.approx_tokens
-    call = None
-    for attempt in range(max(EMBED_ATTEMPTS, RATE_LIMIT_ATTEMPTS)):
-        try:
-            call = await _embeddings.embed_documents(
-                rt.settings, tenant_id=tenant_id, run_id=run_id, request_key=key, model_id=embedding_model, texts=texts
-            )
-            break
-        except Exception as exc:  # noqa: BLE001 - classified here: a text-free failure dict, never re-raised
-            limited = is_rate_limited(exc)
-            if is_retryable(exc) and attempt + 1 < (RATE_LIMIT_ATTEMPTS if limited else EMBED_ATTEMPTS):
-                log_failure(
-                    log, "kb ingest embedding attempt failed; retrying", exc,
-                    code="embedding_rate_limited" if limited else "embedding_retry",
-                    run_id=run_id, tenant_id=tenant_id,
-                )
-                await asyncio.sleep(embed_retry_delay(exc, attempt))
-                continue
-            failure = _embedding_failure(exc, embedding_model)
-            log_failure(log, "kb ingest embedding failed", exc, code=failure["code"], run_id=run_id, tenant_id=tenant_id)
-            return {**failure, "embedded": embedded_before + filled, "total": total}
-    assert call is not None
+    texts, slot, tokens = _batch_texts(batch)
+    call, failure = await _call_provider(
+        rt, run_id=run_id, tenant_id=tenant_id, key=key, embedding_model=embedding_model, texts=texts
+    )
+    if failure is not None:
+        return {**failure, "embedded": embedded_before + filled, "total": total}
     crash_point("kb_batch_before_commit", event_key=key)
     vectors = {c.id: call.vectors[slot[c.embed_text_hash]] for c in batch}
-    expected = embedded_before + filled + len(batch)
-    data = {
-        **call.event_data,
-        "phase": "embedding",
-        "batch": index,
-        "chunks": len(batch),
-        "filled": filled,
-        "written": len(batch),
-        "approx_tokens": tokens,
-        "embedded": expected,
-        "total": total,
-        "message": progress_message(expected, total),
-    }
-
-    def refused(reason: str) -> dict[str, Any]:
-        # The provider call was made (and is charged): record its usage even though the store refused
-        # the vectors, as an `embedding` event under the batch's key with its run_model_requests row in
-        # ONE transaction (first write wins, so a re-execution never records it twice). The event
-        # also makes a re-execution replay this refusal without another provider call.
-        rt.event_log.append(
-            tenant_id, UUID(str(run_id)), key, _embeddings.EMBEDDING_EVENT_TYPE,
-            {**call.event_data, "phase": "refused", "batch": index, "refused": reason}, usage=call.usage,
+    result = await asyncio.to_thread(
+        lambda: _write_batch(
+            rt, store, run_id=run_id, tenant_id=tenant_id, kb_id=kb_id, mode=mode, generation=generation,
+            embedding_model=embedding_model, index=index, embedded_before=embedded_before, total=total,
+            vectors=vectors, filled=filled, tokens=tokens, event_data=call.event_data, usage=call.usage,
+            requests=call.requests,
         )
-        return refusal_outcome(reason, mode, embedding_model, embedded_before + filled, total)
-
-    def write() -> dict[str, Any]:
-        try:
-            result = store.write_embeddings(
-                tenant_id, kb_id, generation, vectors, embedding_model=embedding_model, run_id=run_id,
-                event_key=key, event_type=INGEST_PROGRESS, event_data=data, usage=call.usage,
-            )
-        except KnowledgeBaseNotFound:
-            return refused("knowledge_base_deleted")
-        except GenerationNotWritable:
-            return refused("reindex_cancelled" if mode == "reindex" else "stale")
-        except GenerationModelMismatch:
-            return refused("stale" if mode == "ingest" else "reindex_cancelled")
-        except EmbeddingDimensionMismatch:
-            return refused("embedding_dimension_mismatch")
-        return {
-            "status": "embedded", "embedded": embedded_before + filled + result.written, "total": total,
-            "written": result.written, "filled": filled, "tokens": tokens, "requests": call.requests,
-        }
-
-    result = await asyncio.to_thread(write)
+    )
     if result["status"] == "embedded":
         crash_point("kb_batch_after_commit", event_key=key)
     return result
+
+
+# --------------------------------------------------------------------------- the embed split (P1.C5)
+
+EMBED_SPLIT_KEY = "embed_split"
+# The call step's checkpoint holds the batch's vectors as float32 bytes (what pgvector stores):
+# at most EAP_KB_EMBED_BATCH_CHUNKS (capped at MAX_BATCH_CHUNKS) distinct texts x 1536 dimensions x
+# 4 bytes, so 64 x 1536 = 384 KiB raw (DBOS stores the pickle base64-encoded, about 4/3 of that).
+VECTOR_FORMAT = "f32"
+
+
+def pack_vectors(vectors: Any) -> tuple[bytes, int]:
+    """(little-endian float32 bytes, dimensions) of equal-length vectors."""
+    rows = [list(v) for v in vectors]
+    dims = len(rows[0]) if rows else 0
+    if any(len(r) != dims for r in rows):
+        raise ValueError("vectors of different lengths")
+    packed = array("f", (x for r in rows for x in r))
+    if sys.byteorder != "little":  # pragma: no cover - every supported host is little-endian
+        packed.byteswap()
+    return packed.tobytes(), dims
+
+
+def unpack_vectors(blob: bytes, dims: int) -> list[list[float]]:
+    values = array("f")
+    values.frombytes(blob)
+    if sys.byteorder != "little":  # pragma: no cover
+        values.byteswap()
+    if dims <= 0:
+        return []
+    return [values[i:i + dims].tolist() for i in range(0, len(values), dims)]
+
+
+@DBOS.step(name="eap.kb_embed_call", should_retry=_transient, **STEP_RETRY)
+async def kb_embed_call_step(
+    run_id: str,
+    tenant_id: str,
+    kb_id: str,
+    mode: str,
+    generation: int,
+    embedding_model: str,
+    index: int,
+    embedded_before: int,
+    total: int,
+    document_id: str | None = None,
+    doc_version: int | None = None,
+) -> dict[str, Any]:
+    """The first half of a batch (runs with `embed_split`): select it, fill it from the cache, and
+    make the ONE provider call (retrying retryable provider errors itself, like eap.kb_embed_batch).
+    Database work happens only before the call, so a DBOS retry of this step (40P01, 40001, a lost
+    connection) never follows a provider call; after the call the step only returns.
+
+    Returns a final outcome (as eap.kb_embed_batch: replayed, done, stale, cancelled, failed, or
+    embedded from the cache alone), or {"status": "called", "chunk_ids", "slots" (the vector of each
+    chunk), "vectors" (float32 bytes), "dimensions", "usage", "event_data", "requests", "filled",
+    "tokens"}, which the workflow hands to eap.kb_embed_write. No chunk text."""
+    rt = get_runtime()
+    store = _store()
+    key = batch_request_key(index)
+    scope = _scope(mode, document_id, doc_version)
+    prepared = await asyncio.to_thread(
+        lambda: _prepare_batch(
+            rt, store, run_id=run_id, tenant_id=tenant_id, kb_id=kb_id, mode=mode, generation=generation,
+            embedding_model=embedding_model, key=key, embedded_before=embedded_before, total=total, scope=scope,
+        )
+    )
+    if prepared["status"] != "pending":
+        return prepared
+    batch, filled = prepared["batch"], prepared["filled"]
+    if not batch:  # all from the cache: nothing to embed, no event, no usage
+        return {
+            "status": "embedded", "embedded": embedded_before + filled, "total": total,
+            "written": 0, "filled": filled, "tokens": 0,
+        }
+    texts, slot, tokens = _batch_texts(batch)
+    call, failure = await _call_provider(
+        rt, run_id=run_id, tenant_id=tenant_id, key=key, embedding_model=embedding_model, texts=texts
+    )
+    if failure is not None:
+        return {**failure, "embedded": embedded_before + filled, "total": total}
+    try:
+        blob, dims = pack_vectors(call.vectors)
+    except ValueError:
+        # Vectors of different lengths (a misbehaving provider): the call was charged, so its usage
+        # is recorded with the refusal, as the write's EmbeddingDimensionMismatch would.
+        return await asyncio.to_thread(
+            lambda: _record_refusal(
+                rt, run_id=run_id, tenant_id=tenant_id, mode=mode, embedding_model=embedding_model, index=index,
+                event_data=dict(call.event_data), usage=dict(call.usage), reason="embedding_dimension_mismatch",
+                embedded=embedded_before + filled, total=total,
+            )
+        )
+    crash_point("kb_embed_after_call", event_key=key)
+    return {
+        "status": "called",
+        "chunk_ids": [str(c.id) for c in batch],
+        "slots": [slot[c.embed_text_hash] for c in batch],
+        "vectors": blob,
+        "vector_format": VECTOR_FORMAT,
+        "dimensions": dims,
+        "usage": dict(call.usage),
+        "event_data": dict(call.event_data),
+        "requests": int(call.requests),
+        "filled": filled,
+        "tokens": tokens,
+    }
+
+
+@DBOS.step(name="eap.kb_embed_write", should_retry=_transient, **STEP_RETRY)
+async def kb_embed_write_step(
+    run_id: str,
+    tenant_id: str,
+    kb_id: str,
+    mode: str,
+    generation: int,
+    embedding_model: str,
+    index: int,
+    embedded_before: int,
+    total: int,
+    called: dict[str, Any],
+) -> dict[str, Any]:
+    """The second half of a batch (runs with `embed_split`): ONE transaction with the vectors of
+    `called` (eap.kb_embed_call's checkpointed output), the usage row and the `ingest_progress`
+    event, both under `embed:batch:{index}`; or the refusal path (usage with an `embedding` event,
+    phase refused). Never calls the provider: a DBOS retry (40P01, 40001, a lost connection) or a
+    re-execution after a crash writes from the same checkpointed vectors. A write already committed
+    (its event exists) answers its recorded counts. Returns the eap.kb_embed_batch outcome shape."""
+    rt = get_runtime()
+    store = _store()
+    key = batch_request_key(index)
+    crash_point("kb_batch_before_commit", event_key=key)
+
+    def work() -> dict[str, Any]:
+        recorded = _recorded_batch(rt, tenant_id, run_id, key, mode, embedding_model, embedded_before, total)
+        if recorded is not None:
+            return recorded
+        rows = unpack_vectors(called["vectors"], int(called["dimensions"]))
+        vectors = {cid: rows[i] for cid, i in zip(called["chunk_ids"], called["slots"], strict=True)}
+        return _write_batch(
+            rt, store, run_id=run_id, tenant_id=tenant_id, kb_id=kb_id, mode=mode, generation=generation,
+            embedding_model=embedding_model, index=index, embedded_before=embedded_before, total=total,
+            vectors=vectors, filled=int(called["filled"]), tokens=int(called["tokens"]),
+            event_data=called["event_data"], usage=called["usage"], requests=int(called["requests"]),
+        )
+
+    result = await asyncio.to_thread(work)
+    if result["status"] == "embedded" and not result.get("replayed"):
+        crash_point("kb_batch_after_commit", event_key=key)
+    return result
+
+
+async def embed_batch(
+    split: bool, run_id: str, tenant_id: str, kb_id: str, mode: str, generation: int, embedding_model: str,
+    index: int, embedded_before: int, total: int, document_id: str | None, doc_version: int | None,
+) -> dict[str, Any]:
+    """Workflow code: one batch, with the split steps (`embed_split` runs) or eap.kb_embed_batch."""
+    if not split:
+        return await kb_embed_batch_step(
+            run_id, tenant_id, kb_id, mode, generation, embedding_model, index, embedded_before, total,
+            document_id, doc_version,
+        )
+    called = await kb_embed_call_step(
+        run_id, tenant_id, kb_id, mode, generation, embedding_model, index, embedded_before, total,
+        document_id, doc_version,
+    )
+    if called["status"] != "called":
+        return called
+    return await kb_embed_write_step(
+        run_id, tenant_id, kb_id, mode, generation, embedding_model, index, embedded_before, total, called,
+    )
 
 
 @DBOS.step(name="eap.kb_finalize", should_retry=_transient, **STEP_RETRY)
@@ -699,10 +1244,15 @@ async def kb_mark_failed_step(
     generation: int | None,
     document_id: str | None = None,
     doc_version: int | None = None,
+    message: str | None = None,
 ) -> dict[str, Any]:
     """Record the failure on the document ('failed', "<code>: N of M sections embedded") or the
     knowledge base ('reindex_failed'). The active version or generation stays searchable. Returns
-    the counts ({"embedded", "total"}; zeros when nothing was chunked)."""
+    the counts ({"embedded", "total"}; zeros when nothing was chunked).
+
+    With `message` (RAG P1: a sandbox extraction failure's fixed, user-safe message) the document's
+    error is "<code>: <message>" instead, e.g. "extraction_failed: The PDF is encrypted with a
+    password." Old runs never pass it, so their recorded behaviour is unchanged."""
     store = _store()
 
     def work() -> dict[str, Any]:
@@ -716,7 +1266,7 @@ async def kb_mark_failed_step(
             progress = store.embedding_progress(tenant_id, kb_id, g, **_scope(mode, document_id, doc_version))
         except KnowledgeBaseNotFound:
             return {"embedded": 0, "total": 0, "marked": False}
-        error = f"{code}: {progress_message(progress.embedded, progress.total)}"
+        error = f"{code}: {message}" if message else f"{code}: {progress_message(progress.embedded, progress.total)}"
         if mode == "ingest":
             marked = store.mark_document_failed(tenant_id, str(document_id), int(doc_version or 0), error)
         else:
@@ -755,6 +1305,8 @@ class _Ctx:
         self.document_id = document_id
         self.doc_version = doc_version
         self.generation: int | None = None
+        self.embed_split = False  # P1.C5: runs.input.embed_split (new runs); else eap.kb_embed_batch
+        self.extractor: str | None = None  # P1.A3: eap.start_ingest's `extractor` -> eap.kb_extract_chunk
 
 
 def _ctx_of(input_json: str) -> _Ctx:
@@ -776,7 +1328,7 @@ def _cancel(reason: str) -> IngestFailed:
 
 def _raise_failure(out: dict[str, Any]) -> None:
     if out["status"] == "failed":
-        raise IngestFailed(out["code"], out["error_type"], out["message"])
+        raise IngestFailed(out["code"], out["error_type"], out["message"], out.get("reason"))
     if out["status"] == "missing":
         raise _cancel(out.get("reason", "document_deleted"))
 
@@ -790,6 +1342,7 @@ async def _ingest_body(
         None if mode == "reindex" else str(params["document_id"]),
         None if mode == "reindex" else int(params["doc_version"]),
     )
+    ctx.embed_split = params.get(EMBED_SPLIT_KEY) is True
     started: dict[str, Any] = {"kind": "kb_ingest", "mode": mode, "knowledge_base_id": kb_id}
     if mode == "reindex":
         started["generation"] = int(params["reindex"])
@@ -819,6 +1372,7 @@ async def _drive(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, start: dict
     if start["outcome"] == "missing":
         raise _cancel(start.get("reason", "document_deleted"))
     ctx.generation = start.get("generation")
+    ctx.extractor = start.get("extractor") if ctx.mode == "ingest" else None
     if start["outcome"] == "superseded":
         return {"mode": ctx.mode, "status": "superseded"}
     model: str = start["embedding_model"]
@@ -830,7 +1384,11 @@ async def _drive(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, start: dict
     for round_ in range(MAX_ROUNDS):
         progressed = False
         if not skip_chunking:
-            if ctx.mode == "ingest":
+            if ctx.mode == "ingest" and ctx.extractor is not None:
+                prep = await kb_extract_chunk_step(
+                    run_id, tenant_id, kb_id, str(ctx.document_id), int(ctx.doc_version or 0), ctx.extractor
+                )
+            elif ctx.mode == "ingest":
                 prep = await kb_chunk_step(run_id, tenant_id, kb_id, str(ctx.document_id), int(ctx.doc_version or 0))
             else:
                 prep = await kb_copy_step(run_id, tenant_id, kb_id, int(ctx.generation or 0))
@@ -862,9 +1420,9 @@ async def _drive(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, start: dict
                 )
                 stale = False
                 while True:
-                    out = await kb_embed_batch_step(
-                        run_id, tenant_id, kb_id, ctx.mode, int(ctx.generation or 0), model, index,
-                        embedded, total, ctx.document_id, ctx.doc_version,
+                    out = await embed_batch(
+                        ctx.embed_split, run_id, tenant_id, kb_id, ctx.mode, int(ctx.generation or 0), model,
+                        index, embedded, total, ctx.document_id, ctx.doc_version,
                     )
                     _raise_failure(out)
                     if out["status"] == "stale":
@@ -945,9 +1503,10 @@ def _classify(exc: BaseException) -> IngestFailed:
                 stack.append(linked)
     for cur in chain:
         if isinstance(cur, IngestFailed) or type(cur).__name__ == "IngestFailed":
+            reason = getattr(cur, "reason", None)
             return IngestFailed(
                 str(getattr(cur, "code", "internal_error")), str(getattr(cur, "error_type", "IngestFailed")),
-                str(getattr(cur, "message", "the ingest failed")),
+                str(getattr(cur, "message", "the ingest failed")), reason if isinstance(reason, str) else None,
             )
     if any(_sqlstate(cur) in ("40P01", "40001") for cur in chain):
         return IngestFailed("internal_error", "DeadlockDetected", "the ingest kept conflicting with other writes; retry it")
@@ -965,14 +1524,22 @@ async def _fail(run_id: str, tenant_id: str, kb_id: str, ctx: _Ctx, exc: BaseExc
     counts: dict[str, Any] = {}
     if failure.code != INGEST_CANCELLED and (ctx.mode == "reindex" or ctx.document_id is not None):
         try:
-            counts = await kb_mark_failed_step(
-                run_id, tenant_id, kb_id, ctx.mode, failure.code, ctx.generation, ctx.document_id, ctx.doc_version
-            )
+            if failure.reason is not None:  # a sandbox extraction failure: its fixed message on the document
+                counts = await kb_mark_failed_step(
+                    run_id, tenant_id, kb_id, ctx.mode, failure.code, ctx.generation, ctx.document_id,
+                    ctx.doc_version, failure.message,
+                )
+            else:
+                counts = await kb_mark_failed_step(
+                    run_id, tenant_id, kb_id, ctx.mode, failure.code, ctx.generation, ctx.document_id, ctx.doc_version
+                )
         except Exception as mark_exc:  # noqa: BLE001 - the run must still end failed
             log_failure(log, "kb_ingest mark-failed failed", mark_exc, code="kb_mark_failed_failed",
                         run_id=run_id, tenant_id=tenant_id)
             counts = {}
     data: dict[str, Any] = {"status": "failed", "error": failure.error, "error_code": failure.code}
+    if failure.reason is not None:
+        data["extraction_code"] = failure.reason
     if counts:
         data.update(
             embedded=counts["embedded"], total=counts["total"],

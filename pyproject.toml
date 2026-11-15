@@ -80,11 +80,13 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Knowledge chunking imports only the standard library, eap_schemas and markdown_it"
+name = "Knowledge extraction imports only the standard library, eap_schemas and its parsers"
 type = "forbidden"
 source_modules = ["eap_knowledge"]
 # Pure and deterministic: the API (upload validation) and the worker (kb_ingest) import
 # eap_knowledge; it imports nothing of theirs and no I/O, web, database, agent or telemetry library.
+# Its parsers: markdown_it (API path), and docutils and yaml (RAG P1, the worker extractors in
+# eap_knowledge.formats.*, which only the worker's sandbox child imports).
 forbidden_modules = [
     "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
     "eap_processors", "fastapi", "starlette", "sqlalchemy", "psycopg", "pgvector", "pydantic_ai", "fastmcp",
@@ -102,6 +104,32 @@ forbidden_modules = ["ag_ui"]
 ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
 unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "The API and the run store never import a document parser"
+type = "forbidden"
+source_modules = ["eap_api", "eap_run_store"]
+# RAG P1: uploaded files are parsed only in the worker's sandbox child. The API may import the
+# parser-free format registry (eap_knowledge.formats) and extract() (markdown_it), never the
+# worker-side extractor modules, the sandbox entry point or their parsers.
+forbidden_modules = [
+    "docutils", "pypdf", "pypdfium2", "PIL", "eap_knowledge.formats.rst",
+    "eap_knowledge.formats.structured", "eap_knowledge.formats.doxygen", "eap_knowledge.formats.pdf",
+    "eap_knowledge.sandbox",
+]
+
+[[tool.importlinter.contracts]]
+name = "The worker process never imports a document parser (only its sandbox child does)"
+type = "forbidden"
+source_modules = ["eap_worker"]
+# RAG P1 (P1.A3): eap_worker.extract_sandbox starts `python -I -m eap_knowledge.sandbox` as a child
+# process; a parser bug or bomb must kill that child, never the worker. Importing a parser here would
+# put it in the worker's own process.
+forbidden_modules = [
+    "docutils", "pypdf", "pypdfium2", "PIL", "eap_knowledge.formats.rst",
+    "eap_knowledge.formats.structured", "eap_knowledge.formats.doxygen", "eap_knowledge.formats.pdf",
+    "eap_knowledge.sandbox",
+]
 
 [[tool.importlinter.contracts]]
 name = "Pricing imports only the standard library, eap_schemas, pydantic and genai_prices"

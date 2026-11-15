@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.request
@@ -60,7 +61,12 @@ def main() -> None:
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
                     if response.status == 200:
-                        print(f"EAP_API_READY port={port}", flush=True)
+                        # One write, newline included: print() writes the text and its newline
+                        # separately, and the API's own access log line for this /healthz request
+                        # (P1.C2 `eap.access`, another thread) could land in between, gluing its
+                        # timestamp onto the port (`port=584492026`).
+                        sys.stdout.write(f"EAP_API_READY port={port}\n")
+                        sys.stdout.flush()
                         return
             except OSError:
                 time.sleep(0.1)

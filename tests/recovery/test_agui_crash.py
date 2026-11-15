@@ -204,9 +204,10 @@ class AgUi:
             self.h.run_ids.append(run_id)
         return run_id
 
-    def crash_worker(self, name: str, crash_at: str, event_key: str | None = None) -> Any:
+    def crash_worker(self, name: str, crash_at: str, event_key: str | None = None, gate: Any = None) -> Any:
         self.h.crash_marker.unlink(missing_ok=True)  # each scenario may crash more than once
-        return self.h.start_worker(name, crash_at=crash_at, event_key=event_key, extra_env=ENV)
+        env = ENV if gate is None else {**ENV, "EAP_CRASH_GATE_FILE": str(gate)}
+        return self.h.start_worker(name, crash_at=crash_at, event_key=event_key, extra_env=env)
 
     def worker(self, name: str) -> Any:
         return self.h.start_worker(name, extra_env=ENV)
@@ -480,9 +481,16 @@ def test_worker_kill_inside_a_child_run_mid_workflow_stream(ag: AgUi, report) ->
             {"id": "done", "type": "agent", "agent_id": echo, "input": {"prompt": {"$ref": "steps.ask.output"}}},
         ],
     })
-    crashing = ag.crash_worker("worker1-crashing", "model_request")
+    # The stream subscribes to the `ask` child's deltas only once a poll (every 0.5 s) has read its
+    # `step_started`; the echo child reaches its first delta sooner, so the crashing worker holds
+    # that delta (EAP_CRASH_GATE_FILE) until the stream has shown the step.
+    gate = h.tmp_path / "model_request.gate"
+    crashing = ag.crash_worker("worker1-crashing", "model_request", gate=gate)
     stream = ag.stream(wf_url(workflow), body("th", "w1", input={"q": "printer on fire, please help"}))
     run_id = ag.native_run("w1")
+    stream.wait(lambda s: "STEP_STARTED" in s.types(), "the ask step")
+    time.sleep(0.5)
+    gate.touch()
     ag.expect_crash(crashing, "model_request")
     stream.wait(lambda s: "TEXT_MESSAGE_CONTENT" in s.types(), "the child's first delta")
     time.sleep(1.0)

@@ -25,6 +25,7 @@ import { formatTokens } from "@/lib/format";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import {
   cancelReindex,
+  chunkerVersionOf,
   describeIngestError,
   getKnowledgeBase,
   isIngestInFlight,
@@ -311,6 +312,11 @@ function KnowledgeBaseDetailView() {
                 openDocument={openDocument}
                 onOpenDocument={(key) => docSheet.open(key)}
                 onUpload={() => setUploadOpen(true)}
+                chunkerVersion={chunkerVersionOf(kb)}
+                onReextracted={() => {
+                  setRunsRefresh((n) => n + 1);
+                  void loadKb();
+                }}
               />
             ) : null}
             {tab === "search" ? <SearchTab kbId={kb.id} /> : null}
@@ -339,6 +345,10 @@ function KnowledgeBaseDetailView() {
             progress={listedDocument?.last_run_id ? progress[listedDocument.last_run_id] ?? null : null}
             startedRuns={startedRuns}
             onOpenChange={docSheet.onOpenChange}
+            onReextracted={(result) => {
+              if (result.document) docs.upsert(result.document);
+              setRunsRefresh((n) => n + 1);
+            }}
             onLoaded={(doc) => {
               if (docs.documents.some((item) => item.document_key === doc.document_key)) docs.upsert(doc);
             }}

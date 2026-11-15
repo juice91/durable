@@ -8,6 +8,7 @@ from eap_observability.agents import instrument_pydantic_ai
 
 from eap_worker.config import (
     KB_INGEST_QUEUE_NAME,
+    LEGACY_KB_INGEST_QUEUE_NAME,
     MEMORY_OBSERVE_QUEUE_NAME,
     QUEUE_NAME,
     WorkerSettings,
@@ -69,10 +70,26 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     # (Queue(...) can no longer be constructed directly). The DBOSClient enqueues by name.
     DBOS.register_queue(QUEUE_NAME, polling_interval_sec=queue_polling_interval())
     # eap.kb_ingest on its own queue, at most EAP_KB_INGEST_CONCURRENCY (2) running per worker, so a
-    # bulk upload neither starves agent runs nor floods the embedding provider.
+    # bulk upload neither starves agent runs nor floods the embedding provider. Partitioned by tenant
+    # and knowledge base (the API's queue_partition_key): any partition limit makes a DBOS queue
+    # partitioned, and partition_worker_concurrency = the worker cap restricts nothing by itself, so
+    # one knowledge base alone still uses every slot. Each poll visits the partitions with queued
+    # runs in random order, so a knowledge base with one upload gets the next free slot about half
+    # the time even behind another's bulk import of hundreds.
+    concurrency = kb_ingest_concurrency()
     DBOS.register_queue(
         KB_INGEST_QUEUE_NAME,
-        worker_concurrency=kb_ingest_concurrency(),
+        worker_concurrency=concurrency,
+        partition_worker_concurrency=concurrency,
+        polling_interval_sec=queue_polling_interval(),
+    )
+    # The unpartitioned queue the API used before (its runs carry no partition key, which a
+    # partitioned queue never dequeues): still registered, so runs enqueued before the upgrade
+    # drain. Nothing new is enqueued here. Every worker polls every queue row in the system
+    # database, so removing it takes DBOS.delete_queue, not just this call: apps/worker/README.md.
+    DBOS.register_queue(
+        LEGACY_KB_INGEST_QUEUE_NAME,
+        worker_concurrency=concurrency,
         polling_interval_sec=queue_polling_interval(),
     )
     # eap.memory_observe_run (RM.13): one observer workflow at a time per conversation (the partition
@@ -90,12 +107,13 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
 def validate_startup(settings: WorkerSettings) -> None:
     """Fail at start (before DBOS launches or recovers anything) on settings that would otherwise
     first fail inside a step: the ingest caps, the ingest queue's concurrency, the exact-search
-    fallback cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
+    fallback cap, the reflector input cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
     from eap_run_store.knowledge import check_exact_search_max_chunks
 
     from eap_worker.config import embedding_endpoint_problem
 
     _kb_ingest.validate_settings()
+    _observational.max_active_observation_tokens()
     check_exact_search_max_chunks()
     kb_ingest_concurrency()
     _retention.RetentionConfig.from_env()

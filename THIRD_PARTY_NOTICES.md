@@ -96,5 +96,56 @@ The API (`apps/api`, Python) also depends on:
 rxjs is distributed under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
 and is used unmodified as a dependency.
 
-Every licence in this file is MIT, ISC, Apache-2.0 or OFL-1.1, except axe-core (MPL-2.0), which
+Every Studio licence in this file is MIT, ISC, Apache-2.0 or OFL-1.1, except axe-core (MPL-2.0), which
 is a development and test dependency only and is not shipped in the Studio build.
+
+## Python document parsers (RAG P1)
+
+The worker parses uploaded documents with the packages below, inside its sandboxed extraction
+child (`eap_knowledge.formats.*`); the API never imports them (an import-linter contract). Each is
+used unmodified, as a dependency of `packages/knowledge`, pinned exactly because parser output
+feeds chunk hashes.
+
+| Package | Version | Licence | Used for |
+|---|---|---|---|
+| docutils | 0.23 | Public domain, with BSD-2-Clause (and BSD-3-Clause in `utils/smartquotes.py`) for the files `COPYING.rst` lists, and public domain or 0BSD (BSD-0-Clause) for `utils/_roman_numerals.py` | reStructuredText (`formats/rst.py`) |
+| PyYAML | 6.0.3 | MIT | YAML (`formats/structured.py`); already a transitive dependency |
+| pypdf | 6.21.4 | BSD-3-Clause | PDF text, outlines and encryption detection (`formats/pdf.py`) |
+| cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause (used under BSD-3-Clause); its dependency cffi is MIT | AES decryption of empty-password encrypted PDFs, through pypdf; already a transitive dependency |
+
+### docutils licence check (P1.A2, 2026-11-15)
+
+PyPI lists three licence classifiers for docutils, GPL among them. The installed 0.23 wheel was
+checked file by file:
+
+- `docutils-0.23.dist-info/licenses/COPYING.rst` places docutils in the public domain, except for
+  listed files under BSD-2-Clause (and one under a revised BSD-3-Clause), and one GPL-3.0-or-later
+  file: `tools/editors/emacs/rst.el`, an Emacs editor mode. `math2html.py` and its CSS came from the
+  GPL eLyXer project but were relicensed by their author to BSD-2-Clause for docutils.
+- The wheel's `RECORD` contains only the `docutils/` package, its `dist-info` and the `rst2*`
+  console scripts: no `tools/` directory and no `.el` file. The GPL text ships only as
+  `licenses/gpl-3-0.txt` (the licence file itself).
+- The extractor loads the `docutils` package and 36 modules below it at runtime (`core`,
+  `frontend`, `io`, `nodes`, `statemachine`, `utils`, `parsers.rst` with its states, directives
+  and roles, `readers`, `transforms`, `writers.null`, `languages`). They are public domain, except
+  `utils/smartquotes.py` and `utils/punctuation_chars.py`, which are BSD-2-Clause (smartquotes also
+  carries SmartyPants' revised BSD-3-Clause notice), and `utils/_roman_numerals.py`, which its own
+  header places in the public domain or under the Zero Clause BSD licence (0BSD), whichever is more
+  permissive (`COPYING.rst` does not list it). No file in the installed `docutils` package contains
+  GPL text.
+
+Result: nothing GPL is imported or shipped by the worker. `packages/knowledge/knowledge_tests/
+test_p1a2_formats.py` re-checks the installed wheel (no `.el` file, no GPL text inside the
+`docutils` package, the pinned version) on every test run.
+
+### pypdf licence check (P1.A3, 2026-11-15)
+
+The installed 6.21.4 wheel declares `License-Expression: BSD-3-Clause` in its `METADATA`, and its
+only licence file, `pypdf-6.21.4.dist-info/licenses/LICENSE`, is the BSD-3-Clause text (copyright
+Mathieu Fenniak and contributors). The wheel's `RECORD` lists only the `pypdf/` package and its
+`dist-info`; no file in the package mentions the GPL, LGPL or AGPL. pypdf is pure Python and has no
+required dependencies. Its optional AES support uses `cryptography` 50.0.2, now declared by
+`packages/knowledge` (the installed wheel's `METADATA`: `License-Expression: Apache-2.0 OR
+BSD-3-Clause`, with `LICENSE`, `LICENSE.APACHE` and `LICENSE.BSD`), and the extractor never calls the external
+`jbig2dec` binary (disabled through pypdf's configuration in the sandbox child). PyMuPDF (AGPL-3.0)
+is not used.

@@ -6,7 +6,10 @@
 - `model_request`: inside the DBOS model-request step, right after the first text delta of a
   model response has been published over NOTIFY (the stream has started, no final message is
   checkpointed yet). Only responses that stream text reach it; with the `test:ticket` model that
-  is model request 1 (request 0 is a tool call).
+  is model request 1 (request 0 is a tool call). With `EAP_CRASH_GATE_FILE` set, the crashing
+  worker waits (up to 60 s) for that file to exist before publishing the first delta
+  (`crash_gate`), so a test can let a client subscribe first: a workflow stream subscribes to an
+  agent step's child deltas only after polling its `step_started` (AGUI.15 scenario 5).
 - `after_tool_call`: inside the `tickets.create` tool step, right after the external ticket
   service returned and before `side_effects.complete` and the DBOS step checkpoint (the side
   effect row stays `reserved`). Also inside an MCP tool step (eap_worker.mcp), right after the MCP
@@ -63,6 +66,17 @@
 - `kb_batch_after_commit` (RM.10): inside `eap.kb_embed_batch`, right after that transaction
   committed and before the step checkpoint. Recovery finds the batch's event and returns its counts
   without a provider call. Filtered like `kb_batch_before_commit`.
+- `kb_embed_after_call` (P1.C5): inside `eap.kb_embed_call`, after the provider answered and before
+  the step's checkpoint: recovery calls the provider once more (the call step re-executes). In the
+  split layout `kb_batch_before_commit` / `kb_batch_after_commit` are inside `eap.kb_embed_write`
+  (before / right after its transaction): recovery re-executes only the write, from the
+  checkpointed vectors, without a provider call. Filtered like `kb_batch_before_commit`.
+- `kb_extract_sandbox` (P1.A3): inside `eap.kb_extract_chunk`, right after the sandbox child
+  returned a document and before the chunk rows are written. Recovery parses again (one more
+  sandbox run) and writes the rows and the `extracted` event once.
+- `kb_extract_chunk` (P1.A3): inside `eap.kb_extract_chunk`, right after the chunk rows and the
+  `extracted` event (`extract:{doc_version}`) committed and before the step checkpoint. Recovery
+  finds both and returns the same counts without parsing.
 - `kb_before_finalize` / `kb_finalize` (RM.10): inside `eap.kb_finalize`, right before / right after
   the atomic version (or generation) switch transaction. Recovery re-runs the switch, which answers
   'already_active' when it had committed.
@@ -114,6 +128,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import sys
+import time
 
 CRASH_POINTS = frozenset(
     {
@@ -131,6 +146,9 @@ CRASH_POINTS = frozenset(
         "kb_chunk",
         "kb_batch_before_commit",
         "kb_batch_after_commit",
+        "kb_embed_after_call",
+        "kb_extract_sandbox",
+        "kb_extract_chunk",
         "kb_before_finalize",
         "kb_finalize",
         "load_memory",
@@ -143,6 +161,20 @@ CRASH_POINTS = frozenset(
         "eval_case_scored",
     }
 )
+
+
+def crash_gate(name: str) -> None:
+    """Block (up to 60 s) until EAP_CRASH_GATE_FILE exists, only in a worker set to crash at `name`
+    with that variable set; a no-op otherwise (and in every non-test process)."""
+    gate = os.environ.get("EAP_CRASH_GATE_FILE")
+    if not gate or os.environ.get("EAP_CRASH_AT") != name:
+        return
+    marker = os.environ.get("EAP_CRASH_MARKER")
+    if marker and os.path.exists(marker):
+        return  # this worker already crashed once (a later run of the scenario): no gate
+    deadline = time.monotonic() + 60
+    while not os.path.exists(gate) and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def crash_point(name: str, *, event_key: str | None = None) -> None:
