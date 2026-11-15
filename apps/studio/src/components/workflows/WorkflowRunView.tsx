@@ -352,7 +352,7 @@ export function WorkflowRunView({
     </section>
   ) : null;
   const floatingDetail = selectedDetail && layout.stepDetail === "floating" ? (
-    <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
+    <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
   ) : null;
   const rightLeft = layout.leftOccupied > 0 ? layout.leftOccupied + 2 * CANVAS_INSET_PX : CANVAS_INSET_PX;
 
@@ -521,7 +521,7 @@ export function WorkflowRunView({
           <SheetContent size="md" aria-describedby={undefined} data-testid="workflow-step-sheet">
             <SheetHeader title={`Step ${selectedDetail.stepId}`} />
             <SheetBody>
-              <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
+              <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
             </SheetBody>
           </SheetContent>
         </Sheet>

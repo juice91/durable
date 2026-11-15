@@ -28,14 +28,16 @@ export type SpanKind =
   | "judge"
   // Workflow loop spans (LP.9): a loop or foreach step, and one span per iteration.
   | "loop"
-  | "loop_iteration";
+  | "loop_iteration"
+  // LP.15: a workflow evaluate step (verdict, evaluator results, judge usage; never text).
+  | "evaluate";
 
 /** Every span kind, in legend order. */
 export const SPAN_KINDS: readonly SpanKind[] = [
   "run", "child_run", "model_request", "tool_call", "processor", "workflow_step",
   "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
   "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
-  "loop", "loop_iteration",
+  "loop", "loop_iteration", "evaluate",
 ];
 
 /** The agent capability span kinds (AC.17). */
@@ -442,6 +444,10 @@ export function spanLabel(
     const i = num(a.index);
     return `Iteration ${i !== null ? i + 1 : "?"}: ${str(a.step_id) ?? span.name}`;
   }
+  if (span.kind === "evaluate") {
+    const verdict = a.passed === true ? "passed" : a.passed === false ? "failed" : null;
+    return `Evaluate: ${span.name}${verdict ? ` (${verdict})` : ""}`;
+  }
   if (span.kind === "judge") {
     const i = num(a.evaluator_index);
     return `Judge${i !== null ? ` (evaluator ${i + 1})` : ""}: ${str(a.model_id) ?? "unknown model"}`;
@@ -471,6 +477,7 @@ export const KIND_LABELS: Record<SpanKind, string> = {
   judge: "Judge request",
   loop: "Loop",
   loop_iteration: "Loop iteration",
+  evaluate: "Evaluate step",
 };
 
 // ---------------------------------------------------------------------------- formatting

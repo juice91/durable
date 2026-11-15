@@ -109,6 +109,21 @@ scoped key; a scope `S` is the chain of `(loop, index)` frames (`each.3`, `outer
   version, an invalid spec) has no span: it shows only in the loop span's `iterations_failed`
   and the loop step's error.
 
+Evaluate spans (LP.15, loops D15). Attributes never carry the judged value, a judge's reason or any
+other output text:
+- `evaluate`: an `evaluate` step (top level or in a body), instead of a `workflow_step` span, with
+  the same id, start, end, status, input and output (the step's recorded `{passed, score, reason,
+  results}`, as every step span shows its output). Attributes add `passed`, `score`, `evaluators`,
+  `evaluators_passed`, `evaluators_failed`, `evaluators_skipped`, `results` (per evaluator: name,
+  kind, passed, score, skipped, error_type, error_code; never its reason) and the step's judge
+  usage: `judge_requests`, `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`
+  (null when a judge row is unpriced or there is none).
+- `judge`: one zero-length span per judge usage row of the step on the workflow run
+  (`judge:{id}:{k}`, `judge:{S}:{id}:{k}` in a body), id `{run_id}:{request_key}`, under the
+  evaluate span at its end (the rows carry no timing): request_key, step_id, scope,
+  evaluator_index, evaluator_name, model, usage and cost. A left-out iteration's evaluate steps
+  have no span, so their judges have none either; their cost still counts in the totals.
+
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
 (whose events are idempotent by key) never shows a duplicate span. Spans are listed parents first.
@@ -161,6 +176,7 @@ from eap_schemas.workflow_scope import (
     parse_scope,
     scope_string,
     scoped_event_key,
+    scoped_judge_key,
     scoped_parent_step_id,
 )
 
@@ -204,6 +220,8 @@ SPAN_KINDS = (
     "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
     # LP.9
     "loop", "loop_iteration",
+    # LP.15
+    "evaluate",
 )
 SPAN_STATUSES = ("ok", "error", "running", "waiting", "incomplete")
 
@@ -1292,9 +1310,14 @@ class _Builder:
                 "at": _iso(decision["ts"]),
             }
         kind = "workflow_step"
+        judge_rows: list[tuple[int, dict[str, Any]]] = []
         if data.get("step_type") in LOOP_STEP_TYPES:
             kind = "loop"
             attrs.update(self._loop_attributes(rd, scope, step_id, output))
+        elif data.get("step_type") == "evaluate":
+            kind = "evaluate"
+            judge_rows = _judge_rows(rd, scope, step_id)
+            attrs.update(_evaluate_attributes(output, judge_rows))
         if scope:
             parent_span = f"{rid}:loop:{scope_string(scope)}"
             if parent_span not in self.ids:
@@ -1309,12 +1332,41 @@ class _Builder:
             span_id, parent_span, kind, step_id, event["ts"], end, status, attrs,
             data.get("input"), output,
         )
-        if span_id not in self.ids or rd is not self.data.root:
+        if span_id not in self.ids:
+            return
+        if judge_rows:
+            self._judges(rd, span_id, scope, step_id, judge_rows, output, end or event["ts"])
+        if rd is not self.data.root:
             return
         for child in self.children_by_step.get(scoped_parent_step_id(scope, step_id), ()):
             if child.run["id"] not in self.placed_children:
                 self.placed_children.add(child.run["id"])
                 self.run(child, span_id, "child_run")
+
+    def _judges(
+        self, rd: RunData, span_id: str, scope: Scope, step_id: str,
+        rows: list[tuple[int, dict[str, Any]]], output: Any, at: datetime,
+    ) -> None:
+        """LP.15: one zero-length `judge` span per judge usage row of an evaluate step, under it, at
+        the step's end (the rows carry no timing): usage, cost, model and which evaluator; never
+        the judge's reason or the judged value."""
+        rid = rd.run["id"]
+        results = output.get("results") if isinstance(output, dict) else None
+        for index, row in rows:
+            usage, model_attrs = _model_usage(row, {}, {})
+            jattrs: dict[str, Any] = {
+                "request_key": row["request_key"], "step_id": step_id, "evaluator_index": index,
+            }
+            if scope:
+                jattrs["scope"] = scope_string(scope)
+            entry = results[index] if isinstance(results, list) and index < len(results) else None
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                jattrs["evaluator_name"] = entry["name"]
+            jattrs.update(**model_attrs, usage=usage)
+            self.add(
+                f"{rid}:{row['request_key']}", span_id, "judge",
+                f"judge {model_attrs.get('model_id') or ''}".strip(), at, at, "ok", jattrs,
+            )
 
     # -- workflow loops (LP.9)
 
@@ -1581,6 +1633,68 @@ def _parse_duration(value: Any) -> timedelta | None:
     except ValidationError:
         return None
     return parsed if parsed >= timedelta(0) else None
+
+
+# LP.15: an evaluate step's result fields copied into its span (never `reason`: model text).
+EVALUATE_RESULT_ATTRIBUTES = ("name", "kind", "passed", "score", "skipped", "error_type", "error_code")
+# At most this many result entries are read (a spec allows 1..8 evaluators).
+MAX_EVALUATE_RESULTS = 8
+
+
+def _judge_rows(rd: RunData, scope: Scope, step_id: str) -> list[tuple[int, dict[str, Any]]]:
+    """(evaluator index, usage row) of an evaluate step's judge requests on the workflow run
+    (`judge:{id}:{k}`, `judge:{S}:{id}:{k}` in a body; scoped_judge_key), by index."""
+    try:
+        prefix = scoped_judge_key(scope, step_id, 0)[:-1]
+    except ScopeInvalid:
+        return []
+    rows = [
+        (int(key[len(prefix):]), row) for key, row in rd.requests.items()
+        if key.startswith(prefix) and key[len(prefix):].isdecimal()
+    ]
+    return sorted(rows, key=lambda r: r[0])
+
+
+def _evaluate_attributes(output: Any, rows: list[tuple[int, dict[str, Any]]]) -> dict[str, Any]:
+    """An evaluate span's attributes (LP.15): the verdict (`passed`, `score`), each evaluator's
+    allowlisted result fields (EVALUATE_RESULT_ATTRIBUTES, never its reason), the counts, and the
+    step's judge usage: `judge_requests`, `judge_input_tokens`, `judge_output_tokens` and
+    `judge_cost_usd` (null when a judge row is unpriced)."""
+    attrs: dict[str, Any] = {}
+    if isinstance(output, dict):
+        if isinstance(output.get("passed"), bool):
+            attrs["passed"] = output["passed"]
+        score = output.get("score")
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            attrs["score"] = score
+        raw = output.get("results")
+        if isinstance(raw, list):
+            results = [
+                {k: r[k] for k in EVALUATE_RESULT_ATTRIBUTES if k in r and not isinstance(r[k], (dict, list))}
+                for r in raw[:MAX_EVALUATE_RESULTS] if isinstance(r, dict)
+            ]
+            attrs["results"] = results
+            attrs["evaluators"] = len(raw)
+            attrs["evaluators_passed"] = sum(1 for r in results if r.get("passed") is True)
+            attrs["evaluators_failed"] = sum(1 for r in results if r.get("passed") is False)
+            attrs["evaluators_skipped"] = sum(1 for r in results if r.get("skipped") is True)
+    tokens_in = tokens_out = 0
+    cost = Decimal(0)
+    unpriced = False
+    for _index, row in rows:
+        tokens_in += int(row.get("input_tokens") or 0)
+        tokens_out += int(row.get("output_tokens") or 0)
+        if row.get("cost_usd") is None:
+            unpriced = True
+        else:
+            cost += Decimal(str(row["cost_usd"]))
+    attrs.update(
+        judge_requests=len(rows),
+        judge_input_tokens=tokens_in if rows else None,
+        judge_output_tokens=tokens_out if rows else None,
+        judge_cost_usd=None if (unpriced or not rows) else format(cost, "f"),
+    )
+    return attrs
 
 
 def _int_or(value: str, default: Any = 1 << 30) -> Any:
