@@ -123,6 +123,8 @@ jobs:
         run: |
           go install github.com/yannh/kubeconform/cmd/kubeconform@"${KUBECONFORM_VERSION}"
           go install github.com/rhysd/actionlint/cmd/actionlint@"${ACTIONLINT_VERSION}"
+          # go install writes to $(go env GOPATH)/bin, which is not on the runner's PATH.
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Validate rendered manifests
         run: kubectl kustomize deploy/k8s | kubeconform -strict -summary
       - name: Shellcheck deployment scripts
