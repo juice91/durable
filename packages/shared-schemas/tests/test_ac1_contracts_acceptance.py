@@ -1,6 +1,6 @@
 """AC.1 acceptance: contracts compared with main, boundaries, messages and round-trips.
 
-Main's eap_schemas is loaded with `git show main:<path>` into a temp package and run in a
+Pre-AC main's eap_schemas (PRE_AC_MAIN) is loaded with `git show <commit>:<path>` into a temp package and run in a
 subprocess (`python -I`), so hashes, canonical JSON and the working-memory validator are compared
 byte for byte with the pre-AC.1 implementation.
 """
@@ -100,6 +100,11 @@ json.dump(res, open(out, "w"))
 '''
 
 
+# The last main commit before AC landed (main now contains AC, so `main` itself can no longer serve
+# as the pre-AC baseline).
+PRE_AC_MAIN = "8acdda2b7d6a4c911a17a6455f7cd8a823aac93f"
+
+
 def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=REPO, check=True, capture_output=True, text=True).stdout
 
@@ -108,11 +113,11 @@ def _git(*args: str) -> str:
 def main_src(tmp_path_factory) -> Path:
     root = tmp_path_factory.mktemp("main_schemas")
     prefix = "packages/shared-schemas/src/eap_schemas/"
-    for name in _git("ls-tree", "-r", "--name-only", "main", prefix).split():
+    for name in _git("ls-tree", "-r", "--name-only", PRE_AC_MAIN, prefix).split():
         target = root / "eap_schemas" / name.removeprefix(prefix)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_git("show", f"main:{name}"))
-    assert not (root / "eap_schemas" / "evals.py").exists()  # main has none of the AC.1 modules
+        target.write_text(_git("show", f"{PRE_AC_MAIN}:{name}"))
+    assert not (root / "eap_schemas" / "evals.py").exists()  # pre-AC main has none of the AC.1 modules
     return root
 
 
