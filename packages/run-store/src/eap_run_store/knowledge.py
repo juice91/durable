@@ -1295,7 +1295,7 @@ class KnowledgeStore:
         self,
         tenant_id: str,
         kb_id: str,
-        current: Mapping[str, tuple[str, int]],
+        current: Mapping[str, tuple[str | None, int]],
     ) -> list[dict[str, Any]]:
         """The documents (without content, by key) whose extraction is outdated.
 
@@ -1306,7 +1306,19 @@ class KnowledgeStore:
         outdated when its active version has no chunk, at the active generation, whose
         `metadata.eap` records that extractor at that version or later: an older extractor version,
         a different extractor (the knowledge base's Markdown flavour changed), the API path (no
-        record), or no active version at all (never ingested, or every ingest failed)."""
+        record), or no active version at all (never ingested, or every ingest failed).
+
+        An extractor of None means the API extracts that type in this knowledge base (its version
+        is ignored): such a document is outdated when its active chunks DO carry a worker
+        extractor record (`metadata.eap.extractor`), e.g. Markdown extracted as Doxygen before the
+        knowledge base's flavour went back to plain. One with no active version is not selected
+        (an upload or reingest starts its run; there is no stale extraction to replace).
+
+        A document whose newer version is in flight (`latest_version` above an active version,
+        status `pending` or `ingesting`: a re-extract started by an earlier call is queued or
+        running) is not selected, so repeating the same bulk re-extract (a double click, a CLI
+        retry) before those runs finish starts nothing instead of superseding them. Once its run
+        ends (ready or failed) the document is judged on its active chunks again."""
         kid = _canonical_uuid(kb_id)
         if kid is None or not current:
             return []
@@ -1321,13 +1333,19 @@ class KnowledgeStore:
                     "   AS cur(mime, extractor, version)"
                     "   ON cur.mime = lower(btrim(split_part(d.mime_type, ';', 1)))"
                     " WHERE d.tenant_id = :t AND d.kb_id = :kb"
-                    " AND NOT EXISTS (SELECT 1 FROM kb_chunks c"
+                    " AND NOT (d.active_version IS NOT NULL AND d.latest_version > d.active_version"
+                    "   AND d.status IN ('pending', 'ingesting'))"
+                    " AND CASE WHEN cur.extractor IS NULL THEN EXISTS (SELECT 1 FROM kb_chunks c"
+                    "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
+                    "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
+                    "   AND c.metadata -> 'eap' ->> 'extractor' IS NOT NULL)"
+                    " ELSE NOT EXISTS (SELECT 1 FROM kb_chunks c"
                     "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
                     "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
                     "   AND c.metadata -> 'eap' ->> 'extractor' = cur.extractor"
                     "   AND CASE WHEN jsonb_typeof(c.metadata -> 'eap' -> 'extractor_version') = 'number'"
                     "     THEN CAST(c.metadata -> 'eap' ->> 'extractor_version' AS numeric) >= cur.version"
-                    "     ELSE false END)"
+                    "     ELSE false END) END"
                     " ORDER BY d.document_key"
                 ),
                 {

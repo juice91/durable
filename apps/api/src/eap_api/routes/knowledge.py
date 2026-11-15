@@ -226,8 +226,9 @@ def extract_limits() -> ExtractLimits:
 
 def upload_guard_bytes() -> int:
     """The upload route's request-body guard: `max(text cap, ceil(binary cap × 4/3) + 64 KiB)`, so a
-    base64 PDF at the binary cap fits. Text uploads keep their own cap on the body
-    (EAP_KB_MAX_DOCUMENT_BYTES, checked in the route with the guard's message), and every format's
+    base64 PDF at the binary cap fits. Only a body with `content_base64` may stream past the text
+    cap (EAP_KB_MAX_DOCUMENT_BYTES, `_is_base64_upload`); any other is refused there, before it is
+    buffered further, and the route checks the text cap on the body again. Every format's
     decoded-size cap is checked after decoding."""
     try:
         limits = extract_limits()
@@ -251,8 +252,30 @@ def check_knowledge_configuration() -> None:
     binary_upload_concurrency()
 
 
-# The document upload's guard: the same checks as every JSON write route, with its own body cap.
-DocumentUploadRoute = guarded_json_route(max_body_bytes=upload_guard_bytes)
+def _guard_text_cap() -> int:
+    """The upload guard's soft cap: the text cap (EAP_KB_MAX_DOCUMENT_BYTES) on the request body."""
+    try:
+        return max_document_bytes()
+    except ValueError:  # checked at startup; the environment changed under the process
+        return DEFAULT_KB_MAX_DOCUMENT_BYTES
+
+
+_BASE64_KEY = b'"content_base64"'
+
+
+def _is_base64_upload(prefix: bytes) -> bool:
+    """Whether a body that streamed past the text cap may grow to the binary guard: its first
+    text-cap bytes hold the `content_base64` key (every other field is far below the text cap, so
+    a binary upload always names it by then). A text body (`content`) is refused at the text cap
+    before it is buffered further, as before RAG P1."""
+    return _BASE64_KEY in prefix
+
+
+# The document upload's guard: the same checks as every JSON write route, with its own body cap:
+# the text cap for a body without `content_base64`, the binary guard for a base64 one.
+DocumentUploadRoute = guarded_json_route(
+    max_body_bytes=upload_guard_bytes, soft_body_bytes=_guard_text_cap, allow_beyond_soft=_is_base64_upload
+)
 
 router = APIRouter(tags=["knowledge"])
 _kb = APIRouter(
@@ -1493,20 +1516,21 @@ def _reextract_replay(
     return _run_view(run)
 
 
-def outdated_extractor_map(kb: dict[str, Any], formats: set[str] | None = None) -> dict[str, tuple[str, int]]:
+def outdated_extractor_map(
+    kb: dict[str, Any], formats: set[str] | None = None
+) -> dict[str, tuple[str | None, int]]:
     """Base MIME type (every alias too) -> (the worker extractor that handles it in this knowledge
-    base, its current version), for KnowledgeStore.outdated_extraction_documents. API-extracted
-    types are left out (they record no extractor, so they are never outdated)."""
+    base, its current version), for KnowledgeStore.outdated_extraction_documents. An API-extracted
+    type maps to (None, 0): its document is outdated only when its active chunks still carry a
+    worker extractor's record (a flavour or extractor change, e.g. Markdown back from Doxygen)."""
     extract_config = kb_extract_config(kb)
-    out: dict[str, tuple[str, int]] = {}
+    out: dict[str, tuple[str | None, int]] = {}
     for spec in FORMAT_SPECS:
         if formats is not None and spec.format not in formats:
             continue
         extractor = extractor_for(spec.mime_type, extract_config)
-        if extractor is None:
-            continue
         for mime in spec.mime_types:
-            out[mime.lower()] = (extractor, EXTRACTOR_VERSIONS[extractor])
+            out[mime.lower()] = (extractor, EXTRACTOR_VERSIONS[extractor]) if extractor is not None else (None, 0)
     return out
 
 

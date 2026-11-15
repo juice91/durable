@@ -387,9 +387,14 @@ class ReextractCreate(BaseModel):
     - `formats`: registry format names (`markdown`, `html`, `text`, `rst`, `pdf`, `yaml`, `json`) to
       limit the selection to; omitted means every format.
     - `only_outdated` (default true): only documents whose recorded extraction is not the current
-      version of their worker extractor (`metadata.eap.extractor_version` on the active chunks).
-      API-extracted documents are never outdated, so they are re-extracted only with
-      `only_outdated: false`.
+      one: a worker-extracted type whose active chunks do not record its current extractor at its
+      current version (`metadata.eap`), or an API-extracted type whose active chunks still record a
+      worker extractor (e.g. Markdown extracted as Doxygen, after `markdown_flavor` went back to
+      plain). Other API-extracted documents are never outdated: re-extract them with
+      `only_outdated: false`. A document whose re-extract from an earlier call is still pending or
+      ingesting is not selected, so repeating the call before those runs end starts nothing
+      (`only_outdated: false` and `chunker_version` select regardless; a repeated chunker switch
+      is itself a no-op).
     - `chunker_version: 2`: move the knowledge base to chunker v2 and re-extract EVERY document
       (`formats` must be omitted; `only_outdated` is ignored). On a knowledge base already on v2
       it changes nothing and the call selects as without it.

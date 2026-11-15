@@ -94,6 +94,10 @@ value stops the worker instead of failing each run.
 | `EAP_RECALL_TIMEOUT_S` | 8 | Deadline of each pre-turn recall query attempt |
 | `EAP_KB_INGEST_CONCURRENCY` | 2 | `eap.kb_ingest` runs at once per worker, on the `eap-kb-ingest` queue |
 | `EAP_KB_MAX_INGEST_TOKENS` | 2000000 | Per-run budget of un-cached approximate embedding tokens (`ingest_budget_exceeded` before any provider call) |
+| `EAP_KB_MAX_PDF_PAGES` | 2000 (1 to 20000) | Pages a PDF may have; more fails the ingest `extraction_failed` (`extract_limit`) |
+| `EAP_KB_EXTRACT_CPU_SECONDS` | 60 (1 to 3600) | `RLIMIT_CPU` of the extraction sandbox child; its wall timeout is twice this (`extract_timeout`) |
+| `EAP_KB_EXTRACT_MEMORY_MB` | 1024 (256 to 65536) | `RLIMIT_AS` of the sandbox child, **Linux only** (macOS has no working `RLIMIT_AS`: there the input caps and the wall timeout bound it) |
+| `EAP_KB_EXTRACT_CONCURRENCY` | 2 (1 to 64) | Sandbox children at once per worker process |
 | `EAP_KB_EMBED_BATCH_CHUNKS` | 64 (max 128) | Un-embedded chunks per batch (`eap.kb_embed_call` + `eap.kb_embed_write`, or `eap.kb_embed_batch` for runs enqueued before P1.C5); the cap bounds the call step's checkpoint of float32 vectors (128 x 1536 x 4 bytes) |
 | `EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS` | 32000 (min 1000) | Reflector input cap (P1.C6), never below 2 x the spec's `reflect_after_tokens` nor `reflect_after_tokens` + the largest active row, so a normal reflection is never cut. Past it (a backlog left by failing reflections), only the newest active observations within the cap are sent, and the reflection **removes the older ones from the agent's memory** (they stay in the table as superseded rows), with one `memory_observe_trimmed` event (counts only). Lowering it discards memory content sooner. A bad value stops the worker at start |
 | `EAP_MEMORY_RETENTION_DAYS` | unset | Retention in days (1 to 36500) of message embeddings and observations (by `created_at`) and conversation working memory (by `updated_at`); `off` removes the shared schedule. Unset on this worker: it schedules nothing and leaves another worker's schedule alone |
@@ -216,16 +220,23 @@ step layouts:
   SELECT count(*) FROM kb_chunks WHERE metadata ? 'eap';
   SELECT count(*) FROM agent_versions v CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(v.spec -> 'knowledge_bases') = 'array' THEN v.spec -> 'knowledge_bases' ELSE '[]'::jsonb END) r WHERE r -> 'filter' ? 'eap';
   SELECT count(*) FROM agents a CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(a.draft_spec -> 'knowledge_bases') = 'array' THEN a.draft_spec -> 'knowledge_bases' ELSE '[]'::jsonb END) r WHERE r -> 'filter' ? 'eap';
+  SELECT count(*) FROM runs u CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(u.draft_spec -> 'knowledge_bases') = 'array' THEN u.draft_spec -> 'knowledge_bases' ELSE '[]'::jsonb END) r WHERE r -> 'filter' ? 'eap';
   ```
+
+  The last one covers draft test runs: their stored target (`runs.draft_spec`) is validated as an
+  `AgentSpec` whenever it is reloaded.
 - **New knowledge bases use chunker v2** (`chunking.chunker_version` 2, `min_tokens` 64 unless
   given); existing ones keep their stored config until `POST /knowledge-bases/{id}/reextract
-  {"chunker_version": 2}`. The ingest run input is unchanged (`document_id`, `doc_version`,
-  `embed_split`): the worker picks `eap.kb_extract_chunk` from the document's MIME type and the
+  {"chunker_version": 2}`. The ingest run input has no new key besides P1.C5's `embed_split`
+  (`document_id`, `doc_version`, `embed_split`): the worker picks `eap.kb_extract_chunk` from the document's MIME type and the
   knowledge base's `chunking.extract`.
 - **Uploads.** MIME types are stored canonical (`text/x-markdown` → `text/markdown`), so the first
   re-upload of an older document stored under an alias or with parameters makes one new version.
   The upload route's body guard grows to `max(EAP_KB_MAX_DOCUMENT_BYTES, ceil(EAP_KB_MAX_BINARY_BYTES
-  × 4/3) + 64 KiB)` (about 33.4 MiB by default) for base64 PDFs; text uploads keep their body cap.
+  × 4/3) + 64 KiB)` (about 33.4 MiB by default) for base64 PDFs only: a body that streams past
+  `EAP_KB_MAX_DOCUMENT_BYTES` is refused there (413, the text cap's message) unless its first
+  `EAP_KB_MAX_DOCUMENT_BYTES` hold the `content_base64` key, so a text upload is never buffered
+  past its cap.
   `EAP_KB_BINARY_UPLOAD_CONCURRENCY` (default 4) bounds the binary uploads one API process decodes
   at once.
 - **Changed 422 text for HTML that cannot be extracted.** The detail used to be
@@ -235,12 +246,19 @@ step layouts:
 
 ### RAG P1.A3 extraction sandbox (deploy note)
 
+- **Image dependencies.** The worker image needs `packages/knowledge`'s parser dependencies
+  (docutils, pypdf, cryptography for encrypted PDFs, PyYAML): `uv sync --all-packages` installs
+  them. The sandbox child runs `sys.executable`, so it must be the worker's own venv interpreter.
 - Worker-extracted documents (rst, PDF, YAML, JSON, Doxygen Markdown) are parsed in a child process,
   `python -I -B -m eap_knowledge.sandbox` (`eap_worker/extract_sandbox.py`): empty environment
   (`PATH=/usr/bin:/bin`, `LANG=C.UTF-8`); the child sets its own limits before reading the payload:
   `RLIMIT_CPU` = `EAP_KB_EXTRACT_CPU_SECONDS`, `RLIMIT_AS` = `EAP_KB_EXTRACT_MEMORY_MB` (Linux only),
   `RLIMIT_FSIZE` 0 (no file can grow), 32 open files; wall timeout 2 x CPU; at most
   `EAP_KB_EXTRACT_CONCURRENCY` children per worker process; 64 MiB of output.
+- **Tests on macOS skip the `RLIMIT_AS` case.** `worker_tests/test_extract_sandbox.py`'s memory
+  limit test runs only on Linux (macOS has no working `RLIMIT_AS`), so `bash scripts/test.sh` on a
+  macOS dev machine reports one skip. A "green with no skips" claim needs a Linux run (CI or a
+  Linux container).
 - An audit hook in the child refuses sockets and every resolver call (`getaddrinfo`,
   `gethostbyname`, `gethostbyaddr`, `getnameinfo`), process starts (including
   `_posixsubprocess.fork_exec`, which has no audit event: it is replaced and cannot be reloaded),

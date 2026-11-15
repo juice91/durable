@@ -175,11 +175,13 @@ def test_concurrent_chunker_switches_change_the_config_exactly_once(store, tenan
     [t.start() for t in threads]
     [t.join(timeout=30) for t in threads]
     assert len(results) == 4 and sum(changed for _, _, changed in results) == 1
-    versions = {d["document_key"]: [] for d in results[0][1]}
-    for _, docs, _ in results:
-        for d in docs:
-            versions[d["document_key"]].append(d["latest_version"])
-    assert all(sorted(v) == [2, 3, 4, 5] for v in versions.values())  # serialised by the knowledge base lock: no lost bump
+    # Serialised by the knowledge base lock: the request that made the switch bumps every document
+    # once; the duplicates find the switch done and return no documents (one version each).
+    winner = [docs for _, docs, changed in results if changed]
+    assert len(winner) == 1 and sorted(d["document_key"] for d in winner[0]) == ["a.rst", "b.rst"]
+    assert all(d["latest_version"] == 2 for d in winner[0])
+    assert all(docs == [] for _, docs, changed in results if not changed)
+    assert [store.get_document(tenant, kb["id"], k)["latest_version"] for k in ("a.rst", "b.rst")] == [2, 2]
     assert store.get_knowledge_base(tenant, kb["id"])["chunking"]["chunker_version"] == 2
 
 
@@ -225,7 +227,49 @@ def test_latest_extraction_ignores_other_documents_and_other_event_types(store, 
                          " VALUES (:t, :r, :s, :k, :ty, CAST(:d AS jsonb), now())"),
                     {"t": tenant, "r": str(run_id), "s": seq, "k": key, "ty": kind, "d": json.dumps(data)},
                 )
+    # latest_extraction reads the ACTIVE version only: nothing until a version is active.
+    assert store.latest_extraction(tenant, kb["id"], theirs["id"]) is None
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET active_version = 1, status = 'ready' WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                     {"ids": [mine["id"], theirs["id"]]})
     assert store.latest_extraction(tenant, kb["id"], mine["id"]) is None
     assert store.latest_extraction(tenant, kb["id"], theirs["id"])["pages"] == 99
     assert store.latest_extraction(tenant, kb["id"], "junk") is None
     assert store.latest_extraction(tenant, "junk", theirs["id"]) is None
+
+
+def test_an_api_extracted_type_is_outdated_only_while_its_active_chunks_carry_a_worker_record(store, engine, tenant):
+    # Branch review MINOR 3: Markdown extracted as Doxygen, then the knowledge base back on plain Markdown.
+    kb = make_kb(store, tenant)
+    doxy = _rst(store, engine, tenant, kb, "doxy.md", {"extractor": "markdown-doxygen", "extractor_version": 1})
+    plain = _rst(store, engine, tenant, kb, "plain.md", None)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET mime_type = 'text/markdown' WHERE id = ANY(CAST(:ids AS uuid[]))"),
+                     {"ids": [doxy["id"], plain["id"]]})
+    never = _put(store, tenant, kb, "never.md", mime="text/markdown")  # no active version: not selected
+    api_map = {"text/markdown": (None, 0)}
+    assert _keys(store, tenant, kb, api_map) == ["doxy.md"]
+    # A record on another generation or version than the active one does not count.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_chunks SET generation = generation + 1 WHERE document_id = :d"), {"d": doxy["id"]})
+    assert _keys(store, tenant, kb, api_map) == []
+    # Mixed maps: worker types keep their rule next to API types.
+    assert _keys(store, tenant, kb, {**api_map, "text/x-rst": ("rst", 2)}) == []
+    del never
+
+
+def test_a_document_whose_newer_version_is_in_flight_is_not_selected_again(store, engine, tenant):
+    # Branch review MINOR 4: a repeat bulk re-extract while the first one's runs are queued is a no-op.
+    kb = make_kb(store, tenant)
+    doc = _rst(store, engine, tenant, kb, "a.rst", {"extractor": "rst", "extractor_version": 1})
+    assert _keys(store, tenant, kb) == ["a.rst"]
+    _, bumped, _ = store.start_reextract(tenant, kb["id"], document_ids=[doc["id"]])
+    assert [d["latest_version"] for d in bumped] == [2]
+    for status in ("pending", "ingesting"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE kb_documents SET status = :s WHERE id = :d"), {"s": status, "d": doc["id"]})
+        assert _keys(store, tenant, kb) == [], status
+    # Once the run ends without activating the new version, the document is judged on its active chunks again.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET status = 'failed' WHERE id = :d"), {"d": doc["id"]})
+    assert _keys(store, tenant, kb) == ["a.rst"]
