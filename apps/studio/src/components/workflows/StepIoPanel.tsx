@@ -8,13 +8,18 @@ import type { StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
 
-function Block({ label, value, testId }: { label: string; value: unknown; testId: string }) {
+function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
   return (
     <div>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h4>
-      <pre data-testid={testId} className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+      <pre data-testid={testId} data-output-format={format} className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground">{formatValue(value)}</pre>
     </div>
   );
+}
+
+/** An agent step's output is an object when its agent has structured output (AC.9), else its text. */
+export function isStructuredAgentOutput(type: string | null | undefined, output: unknown): boolean {
+  return type === "agent" && output !== null && typeof output === "object";
 }
 
 const DECISION_LABELS = { approved: "Approved", rejected: "Rejected", timed_out: "Timed out" } as const;
@@ -63,6 +68,12 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
             <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Output</h4>
             <p data-testid="step-io-output" className="mt-1 text-sm text-muted-foreground">No output (parallel step).</p>
           </div>
+        ) : type === "agent" ? (
+          // AC.9: a structured agent's validated object, shown as JSON (the shared JSON view of AC.14
+          // replaces this rendering when it lands); a text agent's answer stays text.
+          isStructuredAgentOutput(type, detail.output)
+            ? <Block label="Structured output" value={detail.output} testId="step-io-output" format="json" />
+            : <Block label="Output" value={detail.output} testId="step-io-output" format="text" />
         ) : <Block label="Output" value={detail.output} testId="step-io-output" />
       ) : null}
       {detail.error || detail.errorCode ? (
