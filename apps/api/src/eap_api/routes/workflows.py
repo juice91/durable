@@ -456,19 +456,39 @@ def output_ref_checks(
             schemas[step_id] = None if row is None else (step.version is not None, output_schema_of(row.spec))
         return schemas[step_id]
 
-    def resolve(path: str, hops: int = 0) -> tuple[str, list[str], str] | None:
-        """(agent step id, segments in its output, via note) a field ref reads, None when it does not
-        read an agent step's output. Follows `loop.<L>.item` through the foreach's `items` ref."""
+    def resolve(path: str, hops: int = 0) -> tuple[str, list[str], str, list[tuple[int, str, str]]] | None:
+        """(agent step id, segments in its output, via note, item steps) a field ref reads, None when
+        it does not read an agent step's output. Follows `loop.<L>.item` through the foreach's
+        `items` ref, which adds the segment `0` (an array's items); each item step is (index of
+        that `0` in segments, foreach id, items ref), outermost first."""
         step_id, loop_id, loop_root, rest = _ref_segments(path)
         if step_id is not None:
-            return (step_id, rest, "") if step_id in agent_steps else None
+            return (step_id, rest, "", []) if step_id in agent_steps else None
         if loop_root != "item" or loop_id not in foreach_steps or hops > len(foreach_steps):
             return None
         items_ref = foreach_steps[loop_id].items[REF_KEY]
         base = resolve(items_ref, hops + 1)
         if base is None:
             return None
-        return base[0], [*base[1], "0", *rest], f" (an item of foreach '{loop_id}' over '{items_ref}')"
+        agent, prefix, _, item_steps = base
+        return (
+            agent,
+            [*prefix, "0", *rest],
+            f" (an item of foreach '{loop_id}' over '{items_ref}')",
+            [*item_steps, (len(prefix), loop_id, items_ref)],
+        )
+
+    def items_problem(schema: dict[str, Any], segments: list[str], item_steps: list[tuple[int, str, str]]):
+        """(skip, problem) for the foreach lists a `loop.<L>.item` ref goes through: skip when an
+        `items` path itself cannot exist (its own ref reports that); a blocking problem, worded
+        without the internal `0` segment, when the listed value cannot be a list."""
+        for at, loop_id, items_ref in item_steps:
+            if (outer := output_ref_problem(schema, segments[:at])) is not None and outer.blocking:
+                return True, None
+            inner = output_ref_problem(schema, segments[: at + 1])
+            if inner is not None and inner.blocking:
+                return False, RefProblem(True, f"the items of foreach '{loop_id}' ('{items_ref}') are not a list")
+        return False, None
 
     problems: list[str] = []
     warnings: list[dict[str, str]] = []
@@ -479,7 +499,7 @@ def output_ref_checks(
             resolved = resolve(path)
             if resolved is None:
                 continue
-            ref_step, segments, via = resolved
+            ref_step, segments, via, item_steps = resolved
             found = target(ref_step)
             if found is None:
                 continue
@@ -495,7 +515,10 @@ def output_ref_checks(
                     ),
                 })
                 continue
-            problem = output_ref_problem(schema, segments)
+            skip, problem = items_problem(schema, segments, item_steps)
+            if skip:
+                continue
+            problem = problem or output_ref_problem(schema, segments)
             if not pinned:
                 # Always: the version is resolved when a run reaches the step, so a later agent
                 # version can rename the field (the branch then logs `unresolved_refs`).

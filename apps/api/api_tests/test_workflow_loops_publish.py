@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from eap_api.routes import workflows as workflow_routes
 from eap_schemas.workflows import WorkflowSpec
@@ -206,7 +207,7 @@ def test_loop_spec_publishes_and_get_is_identical(client, no_runtime_gate):
     got = client.get(f"{BASE}/{resp.json()['workflow_id']}/versions/1", headers=_auth())
     assert got.status_code == 200
     published = {k: v for k, v in resp.json().items() if k != "warnings"}
-    assert got.json() == published
+    assert got.content == JSONResponse(content=published).body  # byte-identical
 
 
 @requires_pg
@@ -277,3 +278,23 @@ def test_body_ref_into_a_body_agent_is_checked(client, no_runtime_gate):
     body = [_agent_step("a", agent_id, 1, "x"), _tool("x", None, t=_ref("steps.a.output.tikets"))]
     resp = _publish(client, _wf(_foreach(body)))
     assert resp.status_code == 422 and "step 'x': $ref 'steps.a.output.tikets'" in resp.json()["detail"]
+
+
+@requires_pg
+def test_loop_item_over_a_non_list_says_so(client, no_runtime_gate):
+    agent_id = _agent(client, schema=TICKETS)
+    spec = _wf(
+        _agent_step("triage", agent_id, 1, "each"),
+        _foreach([_foreach([_tool("x", None, u=_ref("loop.inner.item.urgency"))], items="loop.each.item.title",
+                           sid="inner")], items="steps.triage.output.tickets"),
+    )
+    resp = _publish(client, spec)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "the items of foreach 'inner' ('loop.each.item.title') are not a list" in detail
+    assert "'0'" not in detail
+    # an items path that cannot exist is reported once, on the items ref, not again on the item ref
+    spec["steps"][1]["body"]["steps"][0]["items"] = _ref("loop.each.item.nope")
+    detail = _publish(client, spec).json()["detail"]
+    assert "step 'inner': $ref 'loop.each.item.nope'" in detail
+    assert "step 'x'" not in detail

@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import pytest
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from eap_api.routes import workflows as wr
@@ -245,6 +246,16 @@ def test_judge_model_checked_at_top_level_and_non_judge_evaluators_ignored(clien
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*")
     top = _wf(_tool("x", "ev"), _judge({"provider": "openai", "name": "gpt-x"}))
     assert _publish(client, top).status_code == 422
+    # non-judge evaluators have no model: they are skipped, and only the judge's index is named
+    plain = [{"kind": "contains", "value": "x"}, {"kind": "regex", "pattern": "^a"}]
+    only_plain = {"id": "ev", "type": "evaluate", "value": _ref("steps.x.output"), "evaluators": plain}
+    assert _publish(client, _wf(_tool("x", "ev"), only_plain)).status_code == 201
+    mixed = {**only_plain, "evaluators": [*plain, _judge({"provider": "openai", "name": "gpt-x"})["evaluators"][0]]}
+    r = _publish(client, _wf(_nested(_tool("x", "ev"), mixed)))
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "step 'ev': evaluators.2 (llm_judge): model 'openai:gpt-x' is not allowed" in detail
+    assert "evaluators.0" not in detail and "evaluators.1" not in detail
 
 
 # --- D8a ----------------------------------------------------------------------------------------
@@ -450,6 +461,10 @@ def test_d8a_only_reads_the_callers_agent_versions(client, no_gate):
     assert r.status_code == 201 and r.json()["warnings"] == []
     r = _publish(client, _wf(_foreach([_agent_step("a", theirs_gated, 1)])))
     assert r.status_code == 422  # foreign agent: refusal, not a warning that would leak its policy
+    detail = r.json()["detail"]
+    assert detail == f"step 'a': agent '{theirs_gated}' was not found"
+    assert "tickets.create" not in r.text and "loop_agent_approvals_denied" not in r.text
+    assert "approval" not in r.text
 
 
 # --- old workflows publish exactly as before (AC.9 behaviour) -----------------------------------
@@ -495,8 +510,11 @@ def test_loop_free_still_gated_message_unchanged_and_get_identical(client):
     # the runtime gate only concerns loop specs; a loop-free spec publishes without the monkeypatch
     r = _publish(client, _wf(_tool("a", "b"), _tool("b")))
     assert r.status_code == 201 and r.json()["warnings"] == []
-    got = client.get(f"{BASE}/{r.json()['workflow_id']}/versions/1", headers=_h()).json()
-    assert got == {k: v for k, v in r.json().items() if k != "warnings"}
+    first = client.get(f"{BASE}/{r.json()['workflow_id']}/versions/1", headers=_h())
+    again = client.get(f"{BASE}/{r.json()['workflow_id']}/versions/1", headers=_h())
+    published = {k: v for k, v in r.json().items() if k != "warnings"}
+    # byte-identical: the GET body is exactly the publish body minus `warnings`, and stable
+    assert first.content == JSONResponse(content=published).body == again.content
 
 
 @requires_pg
@@ -551,12 +569,11 @@ def test_dev_env_example_lists_the_three_vars_commented_out():
 @requires_pg
 @pytest.mark.parametrize("var", [ITER, EXEC, CONC])
 def test_invalid_cap_value_fails_app_startup(monkeypatch, var):
-    # Coordinator brief: the env vars are "validated at startup, and invalid values fail". The
-    # implementation falls back to the default instead (see report).
+    # A malformed cap fails create_app (check_workflow_configuration), naming the variable.
     from eap_api.app import create_app
 
     from .run_helpers import PG_URL
 
     monkeypatch.setenv(var, "not-a-number")
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match=f"{var} must be a whole number"):
         create_app(database_url=PG_URL)
