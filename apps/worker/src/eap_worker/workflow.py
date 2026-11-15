@@ -191,7 +191,9 @@ with `{limit, value}`. `limits.max_cost_usd` adds one step before every model re
 Fallback adds no step: the resolver builds a FallbackModel inside the model step (every request
 starts at the primary). The fallback models are re-checked against the allowlist at run start. A
 per-run model override disables fallback (`run_started.fallback: "disabled_by_override"`). The
-`model_message` event of a request on a chain adds `requested_model_id`, `fallback_index` and
+`model_message` event of EVERY model request carries `answering_model` (the `provider:name` id of
+the model that answered: the run's model without a chain); a request on a chain also adds
+`requested_model_id`, `fallback_index` and
 `failed_attempts: [{model_id, outcome, error_type}]`; its usage row is the ANSWERING model's, and
 failed attempts that reported usage get rows `model:{n}:failed:{k}` in the same transaction. Every
 model failing ends the run `fallback_exhausted` (`cause`: the first failure's code). A failed
@@ -1085,6 +1087,7 @@ async def _drive_agent(
                         usage = request_usage_input(
                             model_id, response.model_name, response.usage, streamed_response=response
                         )
+                        fallback_data = {"answering_model": model_id}  # AC.5: on every model_message
                     # AC.5: a fallback attempt's error text (provider body, request) is never stored.
                     message = scrub_failed_attempts_message(_message_json(response))
                     message = scrub_memory_message(message, memory)

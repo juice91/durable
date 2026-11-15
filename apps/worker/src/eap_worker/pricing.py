@@ -349,7 +349,13 @@ def fallback_usage(
         failed_data.append(entry)
         if attempt.usage is not None:
             failed_usage.append({"k": k, **request_usage_input(model_id, attempt.model_name, attempt.usage)})
-    extra = {"requested_model_id": chain[0], "fallback_index": index, "failed_attempts": failed_data}
+    # answering_model: the answering model's provider:name id (= chain[fallback_index]).
+    extra = {
+        "requested_model_id": chain[0],
+        "answering_model": chain[index],
+        "fallback_index": index,
+        "failed_attempts": failed_data,
+    }
     return usage, extra, failed_usage
 
 
