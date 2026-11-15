@@ -818,3 +818,54 @@ def test_a_late_commit_in_a_parallel_branch_never_moves_the_runs_end(ag, tenant)
     assert status == 200
     names = [i["id"].rsplit(":", 1)[1] for i in finished(again)["outcome"]["interrupts"]]
     assert names == ["ca", "cb"]
+
+
+def test_a_workflow_q5_cut_after_run_started_resumes_with_minus_one(ag, tenant, script):
+    """D7, as on the agent path: the Q5 re-send records nothing, so a client that lost it after
+    RUN_STARTED re-POSTs with `{runId}:-1` and gets the interrupts again, without RUN_STARTED."""
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    wf = publish(client, h, script)
+    _, _, first = post(client, wf_url(wf), body("th", "r1", input={"q": "hi"}), h)
+    q5 = body("th", "r2", messages=[{"id": "u", "role": "user", "content": "?"}])
+    with client.stream("POST", wf_url(wf), json=q5, headers={**h, "Last-Event-ID": "r2:-1"}) as r:
+        assert r.status_code == 200
+        frames = parse_frames([r.read().decode()])
+    check(frames, continuation=True, run_id="r2")
+    assert "RUN_STARTED" not in types(frames)
+    assert finished(frames)["outcome"]["interrupts"] == finished(first)["outcome"]["interrupts"]
+    assert agui_rows(app, tenant) == [("r1", -1)]  # still nothing recorded
+    # Any other cursor on an unknown runId is 404, and records nothing either.
+    for cursor in ("r2:0", "r2:5", "other:-1"):
+        with client.stream("POST", wf_url(wf), json=q5, headers={**h, "Last-Event-ID": cursor}) as r:
+            assert r.status_code == 404, cursor
+            r.read()
+    assert agui_rows(app, tenant) == [("r1", -1)]
+
+
+def test_thread_and_run_ids_must_be_addressable_url_path_segments(ag, tenant, script):
+    """A threadId or runId is also a path segment of the attach routes: '/', '\\', '..', a bare
+    '.' and non-ASCII are refused with 422 before anything runs; the GET routes answer 404."""
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    wf = publish(client, h, script)
+    agent = f"/api/v1/ag-ui/agents/{script.agent_id}"
+    user = [{"id": "u", "role": "user", "content": "hi"}]
+    for bad in ("org/thread", "..", ".", "a..b", "back\\slash", "thé"):
+        for url, payload in ((wf_url(wf), body(bad, "r1", input={"q": "hi"})), (agent, body(bad, "r1", messages=user))):
+            status, detail, _ = post(client, url, payload, h)
+            assert status == 422 and detail["detail"][0]["type"] == "thread_id_invalid", (bad, url, detail)
+            assert detail["detail"][0]["loc"] == ["body", "threadId"]
+        status, detail, _ = post(client, wf_url(wf), body("th", bad, input={"q": "hi"}), h)
+        assert status == 422 and detail["detail"][0]["type"] == "run_id_invalid", (bad, detail)
+    assert script.enqueues == [] and agui_rows(app, tenant) == []
+    # Ordinary ids (spaces, dots, colons and other printable ASCII) still work end to end.
+    thread = "org:team th.1~"
+    status, _, frames = post(client, wf_url(wf), body(thread, "run 1.a", input={"q": "hi"}), h)
+    assert status == 200 and finished(frames)["outcome"]["type"] == "interrupt"
+    from urllib.parse import quote
+    url = f"{wf_url(wf)}/threads/{quote(thread, safe='')}/runs/{quote('run 1.a', safe='')}/stream"
+    with client.stream("GET", url, headers=h) as r:
+        body_ = r.read()
+        assert r.status_code == 200, (url, body_)
+    assert client.get(f"{wf_url(wf)}/threads/a..b", headers=h).status_code == 404

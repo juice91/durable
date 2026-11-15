@@ -199,8 +199,11 @@ def test_derived_ids_are_deterministic_and_pinned_to_the_namespace() -> None:
 @pytest.mark.parametrize("key", ["threadId", "runId"])
 def test_thread_and_run_id_limits_and_charset(key: str) -> None:
     assert parse_run_agent_input(body(**{key: "x" * 256}))
-    assert parse_run_agent_input(body(**{key: "日本é:/ #"}))
-    for bad in ("x" * 257, "", "a\x00b", "a\tb", "a\x7fb", None, 1, ["a"], {"a": 1}, True):
+    assert parse_run_agent_input(body(**{key: "a:b #.c~%"}))
+    # The ids are URL path segments of the attach routes (AG-UI checkpoint review, MINOR 1):
+    # printable ASCII only, no '/', '\\' or '..', and not '.'.
+    bad_path = ("日本é", "a/b", "a\\b", "..", ".", "a..b")
+    for bad in ("x" * 257, "", "a\x00b", "a\tb", "a\x7fb", None, 1, ["a"], {"a": 1}, True, *bad_path):
         err = refused(body(**{key: bad}))
         assert err.status_code == 422 and err.detail[0]["loc"] == ["body", key]
     err = refused({k: v for k, v in body().items() if k != key})

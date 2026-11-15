@@ -7,7 +7,8 @@ own lenient parsing (the AG-UI 1.0 `RunAgentInput` shape), so this module needs 
 
 What it does, in order (`parse_run_agent_input`):
 
-- `threadId`, `runId`: strings of 1-256 characters without control characters; the threadId is
+- `threadId`, `runId`: strings of 1-256 printable ASCII characters (space through `~`) without
+  `/`, `\\` or `..`, and not `.` (both are URL path segments of the attach routes); the threadId is
   keyed with `thread_key` (a hyphenated UUID is lowercased, anything else is opaque).
 - `messages`: only the **tail after the last assistant message** is read (D5). In it, `user`
   messages give the new input (text only: a string, or a list of `{"type": "text"}` parts; any
@@ -284,6 +285,36 @@ class AgUiInput:
 # --------------------------------------------------------------------------- parsing
 
 
+# threadId and runId are also path segments of the GET routes (.../threads/{threadId}/runs/{runId}/
+# stream): printable ASCII (space through ~), no '/' (decoded before routing, so the segment
+# would split), no '\\' (some proxies read it as '/'), and no '..' or bare '.' (clients and proxies
+# collapse dot segments, so the request would reach another path).
+_PATH_SAFE_ID = re.compile(r"^[\x20-\x7e]{1,%d}$" % MAX_EXTERNAL_ID_CHARS)
+
+
+def path_safe_id(value: str) -> bool:
+    """`value` can be addressed as one URL path segment by every AG-UI route (see _PATH_SAFE_ID)."""
+    return (
+        _PATH_SAFE_ID.match(value) is not None
+        and "/" not in value
+        and "\\" not in value
+        and ".." not in value
+        and value != "."
+    )
+
+
+def _path_id(value: Any, loc: Sequence[str | int], code: str) -> str:
+    """A threadId or runId (D7): _external_id, and addressable as a URL path segment (422)."""
+    value = _external_id(value, loc, code)
+    if not path_safe_id(value):
+        name = str(loc[-1])
+        raise _unprocessable(
+            code, loc,
+            f"{name} must be printable ASCII without '/', '\\' or '..' (it is a URL path segment of the attach routes)",
+        )
+    return value
+
+
 def _external_id(value: Any, loc: Sequence[str | int], code: str) -> str:
     name = str(loc[-1])
     if (
@@ -496,8 +527,8 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
     rules; any violation is an AgUiInputError (422) before the stream."""
     if not isinstance(body, dict):
         raise _unprocessable(BODY_INVALID, [], "the body must be a RunAgentInput object")
-    thread_id = _external_id(body.get("threadId"), ["threadId"], THREAD_ID_INVALID)
-    run_id = _external_id(body.get("runId"), ["runId"], RUN_ID_INVALID)
+    thread_id = _path_id(body.get("threadId"), ["threadId"], THREAD_ID_INVALID)
+    run_id = _path_id(body.get("runId"), ["runId"], RUN_ID_INVALID)
     users, results, result_indexes, before_tail, ignored_roles = _parse_messages(body.get("messages"))
     client_tools = _parse_tools(body.get("tools"))
     options = _parse_options(body.get("forwardedProps"))
@@ -870,6 +901,7 @@ __all__ = [
     "FINGERPRINT_VERSION",
     "parse_run_agent_input",
     "parse_run_agent_input_async",
+    "path_safe_id",
     "thread_key",
     "resolve_agent_thread",
     "server_tool_names",

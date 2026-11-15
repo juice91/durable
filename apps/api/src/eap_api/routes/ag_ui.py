@@ -104,6 +104,7 @@ from eap_api.ag_ui.input import (
     fingerprint,
     parse_run_agent_input,
     parse_run_agent_input_async,
+    path_safe_id,
     resolve_agent_thread,
     thread_key,
     thread_resource_id,
@@ -272,7 +273,9 @@ def _agent_id_or_404(principal: AgUiPrincipal, value: str) -> str:
 
 
 def _path_id(value: str, detail: str) -> str:
-    if not value or len(value) > MAX_PATH_ID_CHARS or _CONTROL.search(value) is not None:
+    """A threadId or runId path segment: the same rule as the POST's input (path_safe_id); anything
+    else can never have been recorded, so it is 404 like an unknown id."""
+    if not value or len(value) > MAX_PATH_ID_CHARS or _CONTROL.search(value) is not None or not path_safe_id(value):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
     return value
 

@@ -124,7 +124,7 @@ from eap_api.sse import (
 )
 from eap_api.streams.formatter import format_stream
 from eap_api.streams.native import ChildScope
-from eap_api.streams.resume import StreamPlan, plan_stream
+from eap_api.streams.resume import LastEventIdError, StreamPlan, parse_last_event_id, plan_stream
 from eap_api.streams.native import TERMINAL_EVENT_TYPES
 from eap_api.streams.workflow import Merged, WorkflowItemStream, agent_step_child, merged_events
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
@@ -339,6 +339,9 @@ class _WPrepared:
     prefix: str
     child_priors: list[ChildPrior] = field(default_factory=list)
     static_frames: list[str] | None = None
+    # A new runId re-POSTed with `{runId}:-1` (D7): the client holds only RUN_STARTED, so the
+    # stream opens as a continuation (no RUN_STARTED).
+    opens_as_continuation: bool = False
     after: int | None = None  # the position (root_order) the stream's durable items start after
     scopes: dict[str, ChildScope] = field(default_factory=dict)  # agent steps started by then
     stop_after: int | None = None  # this AG-UI run's end, once it has ended
@@ -718,7 +721,9 @@ def _seeded_formatter(c: _WCtx, run: dict[str, Any], thread_id: str, agui_run_id
     )
 
 
-def _reinterrupt(c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, interrupts: ThreadInterrupts) -> _WPrepared:
+def _reinterrupt(
+    c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, interrupts: ThreadInterrupts, *, continuation: bool = False
+) -> _WPrepared:
     """Q5 (D15): ALL open interrupts (approval steps and agent steps' gated tool calls) again under
     this runId, in the order they were requested; nothing recorded."""
     run_id = str(run["id"])
@@ -736,7 +741,7 @@ def _reinterrupt(c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, inte
              mapped.run_id, len(approvals), run_id)
     return _WPrepared(
         plan=StreamPlan(status=200, mode="attach", after_seq=record.from_seq), run=run, record=record, prior=[],
-        prefix=prefix, static_frames=formatter.reinterrupt_frames(approvals),
+        prefix=prefix, static_frames=formatter.reinterrupt_frames(approvals, run_started=not continuation),
     )
 
 
@@ -762,8 +767,27 @@ def _prepare_post(
         record, _ = _record(c, mapped, fp, run_id, -1)
     if record is not None:
         return _prepare_known(c, record, same_fingerprint=record.fingerprint == fp, last_event_id=header, relaunch=True)
+    continuation = False
     if header:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
+        # As on the agent path (D7): only `{runId}:-1` may name a runId not recorded yet, a client
+        # that holds RUN_STARTED alone (a Q5 re-send, which records nothing, cut after its first
+        # frame). It is served as the new request, opened as a continuation.
+        try:
+            continuation = parse_last_event_id(header, mapped.run_id, None) == -1
+        except LastEventIdError:
+            continuation = False
+        if not continuation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
+    prepared = _prepare_new(c, workflow, run, run_id, mapped, fp, decisions, continuation=continuation)
+    prepared.opens_as_continuation = continuation
+    return prepared
+
+
+def _prepare_new(
+    c: _WCtx, workflow: Any, run: dict[str, Any] | None, run_id: str, mapped: AgUiInput, fp: str,
+    decisions: list[ResumeDecision], *, continuation: bool,
+) -> _WPrepared:
+    """A runId not recorded yet: a new thread, a resume, or the Q5 re-send (module docstring 4-6)."""
     if run is None:
         check_resume_covers(mapped, [], [])  # a resume on a thread without a run names nothing
         return _start(c, workflow, mapped, fp, run_id)
@@ -786,7 +810,7 @@ def _prepare_post(
             NEW_INPUT_DETAIL,
         )
     if interrupts.open:
-        return _reinterrupt(c, run, mapped, fp, interrupts)
+        return _reinterrupt(c, run, mapped, fp, interrupts, continuation=continuation)
     raise _server_conflict(
         WORKFLOW_THREAD_FINISHED if finished else WORKFLOW_THREAD_RUNNING,
         ["threadId"],
@@ -926,7 +950,7 @@ def _frames(d: _StreamDeps, p: _WPrepared) -> AsyncIterator[str]:
             answered_interrupts=p.answered,
         )
     )
-    resume_after = p.plan.after_seq if p.plan.mode == "continue" else None
+    resume_after = p.plan.after_seq if (p.plan.mode == "continue" or p.opens_as_continuation) else None
     return _with_all_open(d, p, format_stream(items, formatter, resume_after=resume_after))  # type: ignore[arg-type]
 
 
