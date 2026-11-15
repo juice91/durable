@@ -353,3 +353,67 @@ def test_ungated_and_approved_calls_together_count_against_the_limit(worker, cli
     assert (end["error_code"], end["limit"], end["value"]) == ("usage_limit_exceeded", "max_tool_calls", 1)
     assert side_effects(worker, tenant) == []
     contiguous(worker, run_id)
+
+
+# --------------------------------------------------------------------------- reused tool call ids
+
+
+def _reusing_model():
+    """A model that numbers its calls per response, like some OpenAI-compatible backends: every
+    response calls tickets__create with tool_call_id `call_0`, twice, then answers with the outcomes."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+    from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+
+    def plan(messages):
+        returns = [p for m in messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, ToolReturnPart)]
+        if len(returns) < 2:
+            args = {"title": f"Ticket {len(returns)}", "body": "Second call, different args." if returns else "First."}
+            return None, args
+        return "\n".join(f"outcome={r.outcome} content={r.content}" for r in returns), None
+
+    def respond(messages, info):
+        text_out, args = plan(messages)
+        if text_out is None:
+            return ModelResponse(parts=[ToolCallPart("tickets__create", args, tool_call_id="call_0")])
+        return ModelResponse(parts=[TextPart(text_out)])
+
+    async def stream(messages, info):
+        text_out, args = plan(messages)
+        if text_out is None:
+            yield {0: DeltaToolCall(name="tickets__create", json_args=json.dumps(args), tool_call_id="call_0")}
+        else:
+            yield text_out
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-reuse")
+
+
+def test_a_reused_tool_call_id_never_inherits_an_earlier_approval(worker, client, tenant, monkeypatch):
+    """Security: the second call reuses `call_0` (other args, a later model request). The first
+    call's approval must not authorise it: it is denied at once (duplicate_tool_call_id), with no
+    new wait, no inbox row and no second ticket."""
+    from eap_worker import models
+    from eap_worker.capabilities import DUPLICATE_ID_MESSAGE
+
+    monkeypatch.setattr(models, "scripted_approval_model", _reusing_model)
+    run_id = start(worker, client, tenant, gated_spec(), "hi")
+    (waiting,) = wait_waiting(worker, run_id)
+    assert (waiting["tool_call_id"], waiting["model_request"]) == ("call_0", 0)
+    assert decide(worker, client, tenant, run_id, "call_0") == "created"
+    run = wait_terminal(worker.run_store, tenant, run_id)
+    assert run["status"] == "completed", run["error"]
+    first, second = run["output"].splitlines()
+    assert first.startswith("outcome=success")
+    assert second == f"outcome=denied content={DUPLICATE_ID_MESSAGE}"
+    ev = events(worker, run_id)
+    assert [k for k in ev if k.startswith("tool:call_0:approval:")] == [
+        "tool:call_0:approval:waiting", "tool:call_0:approval:decision", "tool:call_0:approval:duplicate:1"]
+    denied = ev["tool:call_0:approval:duplicate:1"]
+    assert denied[0] == "tool_denied"
+    assert (denied[1]["decided_by"], denied[1]["reason"], denied[1]["model_request"]) == (
+        "system", "duplicate_tool_call_id", 1)
+    # One wait in the whole run, one inbox row, one ticket.
+    names = step_names(_schema(), run_id)
+    assert names.count("eap.tool_approval_begin") == 2 and names.count("eap.tool_approval_deny") == 1
+    assert len(ApprovalStore(worker.engine).list_for_run(tenant, str(run_id))) == 1
+    assert worker.tickets.ticket_count(tenant, f"{run_id}:") == 1
+    contiguous(worker, run_id)
