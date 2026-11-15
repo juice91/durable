@@ -725,7 +725,9 @@ async def _drive_agent(
                 response: ModelResponse = node.model_response
                 calls = [p for p in response.parts if isinstance(p, ToolCallPart)]
                 text = "".join(p.content for p in response.parts if isinstance(p, TextPart))
-                usage = request_usage_input(model_id, response.model_name, response.usage)
+                # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
+                usage = request_usage_input(model_id, response.model_name, response.usage,
+                                            streamed_response=response)
                 message = _message_json(response)
                 message = scrub_memory_message(message, memory)
                 if spec.output_processors:

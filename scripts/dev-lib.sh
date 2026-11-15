@@ -453,8 +453,54 @@ stop_service_by_pid() {
     rm -f "$pid_file"
 }
 
-# Stop docker services
+# The command that stops one docker service (postgres, lgtm) of the dev stack, printed one word
+# per line (empty: nothing to stop). Read-only: it only inspects the eap_<service> container.
+# Containers of one machine may belong to DIFFERENT compose projects (e.g. eap_postgres in `eap`,
+# eap_lgtm in `docker`), so the project comes from the container's own com.docker.compose.project
+# label, never from compose's default for this directory: under another project, compose would not
+# find the container (or would act on another project's). A container without the label (created
+# outside compose) is stopped by name. Only `stop` is ever used: never down, rm or -v, so no volume
+# is touched.
+docker_service_stop_command() {
+    local service="$1"
+    local container="eap_${service}"
+    local compose="${REPO_ROOT}/infrastructure/docker/compose.yaml"
+    local project
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        return 0
+    fi
+    project=$(postgres_compose_project "$container")
+    if [[ -n "$project" ]]; then
+        printf '%s\n' docker compose -p "$project" -f "$compose" stop "$service"
+    else
+        printf '%s\n' docker stop "$container"
+    fi
+}
+
+# Stop one docker service with its own compose project (see docker_service_stop_command).
+# With DRY_RUN=1, print the command instead of running it.
+stop_docker_service() {
+    local service="$1"
+    local cmd=()
+    while IFS= read -r word; do
+        cmd+=("$word")
+    done < <(docker_service_stop_command "$service")
+    if [[ ${#cmd[@]} -eq 0 ]]; then
+        echo "[$service] No eap_${service} container, skipping"
+        return 0
+    fi
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[dry-run] ${cmd[*]}"
+        return 0
+    fi
+    echo "[$service] ${cmd[*]}"
+    "${cmd[@]}"
+}
+
+# Stop the docker services (postgres, lgtm), each under its own compose project. Never `down`.
 stop_docker_services() {
-    local compose_dir="${REPO_ROOT}/infrastructure/docker"
-    docker compose -f "${compose_dir}/compose.yaml" down
+    local service
+    for service in postgres lgtm; do
+        stop_docker_service "$service"
+    done
 }

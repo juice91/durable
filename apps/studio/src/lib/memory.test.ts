@@ -91,9 +91,21 @@ describe("working memory requests", () => {
     ]);
   });
 
-  it("answers null for a missing note (404)", async () => {
+  it("answers null for a missing note from an API without ?missing (404)", async () => {
     answer = () => json({ detail: "Working memory not found" }, 404);
     await expect(getWorkingMemory({ scope: "conversation", conversationId: "c1" })).resolves.toBeNull();
+  });
+
+  it("asks with ?missing=null on both routes, so a missing note is a 200 null, not a failed request (follow-up 4)", async () => {
+    answer = () => json(null);
+    await expect(getWorkingMemory({ scope: "conversation", conversationId: "c1" })).resolves.toBeNull();
+    await expect(getWorkingMemory({ scope: "resource", agentId: "a1", resourceId: "alice" })).resolves.toBeNull();
+    expect(calls.map((c) => c.url.searchParams.get("missing"))).toEqual(["null", "null"]);
+  });
+
+  it("other errors still throw", async () => {
+    answer = () => json({ detail: "Conversation not found" }, 500);
+    await expect(getWorkingMemory({ scope: "conversation", conversationId: "c1" })).rejects.toMatchObject({ status: 500 });
   });
 
   it("PUT sends the content and If-Match with the edit's base version (0: create only)", async () => {

@@ -103,4 +103,30 @@ describe("useLogSearch", () => {
     expect(result.current.error).toBeNull();
     expect(searchLogs).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps 'load older' while the agent filter left older runs out, on a window ending at the oldest record (review minor 7)", async () => {
+    const limited = (items: LogItem[], agent_runs_limited: boolean): LogsResponse => ({ ...page(items, 5), agent_runs: 200, agent_runs_limited });
+    vi.mocked(searchLogs)
+      .mockResolvedValueOnce(limited([item("2026-11-13T09:50:00+00:00", "b"), item("2026-11-13T09:40:00+00:00", "a")], true))
+      .mockResolvedValueOnce(limited([item("2026-11-13T09:20:00+00:00", "z")], true))
+      .mockResolvedValueOnce(limited([item("2026-11-13T09:10:00+00:00", "y")], false));
+    const { result } = renderHook(() => useLogSearch("k", () => ({ agent_id: "a1", limit: 5 })));
+    // A short page (2 < 5) still has older records: the API searched only the agent's newest runs.
+    await waitFor(() => expect(result.current.hasOlder).toBe(true));
+    act(() => result.current.loadOlder());
+    await waitFor(() => expect(result.current.items).toHaveLength(3));
+    expect(vi.mocked(searchLogs).mock.calls[1][0]).toMatchObject({ agent_id: "a1", from: "2026-11-13T09:00:00+00:00", to: "2026-11-13T09:40:00.000001Z" });
+    expect(result.current.hasOlder).toBe(true);
+    act(() => result.current.loadOlder());
+    await waitFor(() => expect(result.current.items).toHaveLength(4));
+    // Not limited any more, and a short page: nothing older.
+    expect(result.current.hasOlder).toBe(false);
+  });
+
+  it("a short page without the limit has nothing older", async () => {
+    vi.mocked(searchLogs).mockResolvedValueOnce({ ...page([item("2026-11-13T09:50:00+00:00", "b")], 5), agent_runs: 3, agent_runs_limited: false });
+    const { result } = renderHook(() => useLogSearch("k", () => ({ agent_id: "a1", limit: 5 })));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.hasOlder).toBe(false);
+  });
 });

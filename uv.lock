@@ -14,6 +14,7 @@ members = [
     "eap-db",
     "eap-knowledge",
     "eap-observability",
+    "eap-pricing",
     "eap-processors",
     "eap-run-store",
     "eap-schemas",
@@ -564,6 +565,7 @@ dependencies = [
     { name = "eap-db" },
     { name = "eap-knowledge" },
     { name = "eap-observability" },
+    { name = "eap-pricing" },
     { name = "eap-processors" },
     { name = "eap-run-store" },
     { name = "eap-schemas" },
@@ -591,6 +593,7 @@ requires-dist = [
     { name = "eap-db", editable = "packages/db" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-observability", editable = "packages/observability" },
+    { name = "eap-pricing", editable = "packages/pricing" },
     { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
@@ -680,6 +683,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "eap-pricing"
+version = "0.1.0"
+source = { editable = "packages/pricing" }
+dependencies = [
+    { name = "genai-prices" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "genai-prices", specifier = ">=0.2.3" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
 name = "eap-processors"
 version = "0.1.0"
 source = { editable = "packages/processors" }
@@ -753,6 +771,7 @@ dependencies = [
     { name = "eap-db" },
     { name = "eap-knowledge" },
     { name = "eap-observability" },
+    { name = "eap-pricing" },
     { name = "eap-processors" },
     { name = "eap-run-store" },
     { name = "eap-schemas" },
@@ -778,6 +797,7 @@ requires-dist = [
     { name = "eap-db", editable = "packages/db" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-observability", editable = "packages/observability" },
+    { name = "eap-pricing", editable = "packages/pricing" },
     { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },

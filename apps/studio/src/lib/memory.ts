@@ -139,10 +139,15 @@ function notePath(target: WorkingMemoryTarget): string {
     : `/api/v1/agents/${enc(target.agentId)}/memory/resources/${enc(target.resourceId)}/working`;
 }
 
-/** The note, or null when there is none (404). */
+/**
+ * The note, or null when there is none. Asks with `?missing=null` (follow-up 4): an absent note is a
+ * 200 `null`, not a 404 the browser logs as a failed request on every chat load. An API without the
+ * parameter still answers 404, which also means none.
+ */
 export async function getWorkingMemory(target: WorkingMemoryTarget): Promise<WorkingMemoryNote | null> {
   try {
-    return (await (await call(notePath(target))).json()) as WorkingMemoryNote;
+    const note = (await (await call(`${notePath(target)}?missing=null`)).json()) as WorkingMemoryNote | null;
+    return note ?? null;
   } catch (error) {
     if (errorStatus(error) === 404) return null;
     throw error;

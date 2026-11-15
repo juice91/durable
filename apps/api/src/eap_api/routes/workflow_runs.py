@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from eap_api.agent_archive import archived_step_problems
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
@@ -209,7 +210,7 @@ def start_workflow_run(
     """Run a published workflow version as a durable, tenant-scoped run; 202 with the run id.
 
     404 unknown (or another tenant's, or archived) workflow, or unknown `version`; 409 no published
-    version; 422 body rejected, input not valid for the version's input_schema (loc/msg/type only,
+    version, or an agent step's agent is archived (naming the step); 422 body rejected, input not valid for the version's input_schema (loc/msg/type only,
     never the input), a non-finite number anywhere in the input (NaN, Infinity), input over 32 KiB as JSON, or the version points at something this tenant
     can no longer run (an agent gone, a tool no longer allowed); 409 `run_id` already used by a
     different request. A retry with the same `run_id`, input and version answers 202 again and
@@ -229,11 +230,21 @@ def start_workflow_run(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"input must be at most {MAX_WORKFLOW_INPUT_BYTES // 1024} KiB as JSON",
         )
-    problems = reference_problems(db, spec, tenant_id)
-    if problems:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="; ".join(problems))
-
     run_store, _ = stores
+    # A retry of a recorded run (same run_id) gets the normal retry handling below (compared with the
+    # row, then re-enqueued): the run already committed to its version, and the worker reports a step
+    # whose agent was archived since as `agent_archived`. Only a new run is checked up front.
+    recorded = body.run_id is not None and run_store.get_run(tenant_id, body.run_id) is not None
+    if not recorded:
+        archived = archived_step_problems(db, tenant_id, spec.steps)
+        if archived:
+            # Before anything runs: an archived agent step would fail the run mid-way, after the
+            # earlier steps' side effects (eap_api.agent_archive).
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="; ".join(archived))
+        problems = reference_problems(db, spec, tenant_id)
+        if problems:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="; ".join(problems))
+
     run_id = body.run_id or uuid.uuid4()
     trace_id, traceparent = current_trace_context()
     try:
