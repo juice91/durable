@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from eap_schemas.workflow_scope import child_scope, scoped_judge_key
 
-from eap_run_store.trace import SPAN_KINDS, RunData, TraceInput, build_trace
+from eap_run_store.trace import SPAN_KINDS, RunData, TraceInput, _judge_rows, build_trace
 
 from .loop_trace_fixtures import RUN, Log, workflow_run
 
@@ -166,4 +166,31 @@ def test_malformed_evaluate_output_is_tolerated():
     log.add("end", "run_completed", {"output": None})
     a = _by_id(_trace(log.events, {}))[f"{RUN}:step:ev"]["attributes"]
     assert "passed" not in a and "score" not in a
-    assert a["results"] == [{"kind": "contains", "passed": True}] and a["evaluators"] == 2
+    # `evaluators` counts the entries read, like the passed/failed/skipped counts (review MINOR 5).
+    assert a["results"] == [{"kind": "contains", "passed": True}] and a["evaluators"] == 1
+    assert a["evaluators_passed"] == 1 and a["evaluators_failed"] == 0
+
+
+class _CountingRequests(dict):
+    """A requests dict that counts how often it is iterated."""
+
+    scans = 0
+
+    def items(self):  # type: ignore[override]
+        type(self).scans += 1
+        return super().items()
+
+
+def test_judge_rows_are_grouped_once_per_run():
+    # Review MINOR 4: the run's requests are scanned once, not once per evaluate span.
+    loop = child_scope((), "refine", 0)
+    keys = [scoped_judge_key((), "ev", 1), scoped_judge_key((), "ev", 0), "judge:ev:x", "judge:evx:0",
+            scoped_judge_key(loop, "ev", 0), scoped_judge_key(child_scope((), "refine", 1), "ev", 2), "chat:0"]
+    _CountingRequests.scans = 0
+    rd = RunData(run=workflow_run(), events=[], requests=_CountingRequests({k: _row(k) for k in keys}))
+    assert [i for i, _ in _judge_rows(rd, (), "ev")] == [0, 1]
+    assert [r["request_key"] for _, r in _judge_rows(rd, loop, "ev")] == [scoped_judge_key(loop, "ev", 0)]
+    assert [i for i, _ in _judge_rows(rd, child_scope((), "refine", 1), "ev")] == [2]
+    assert _judge_rows(rd, (), "evx") == [(0, rd.requests["judge:evx:0"])]
+    assert _judge_rows(rd, child_scope((), "refine", 9), "ev") == []
+    assert _CountingRequests.scans == 1

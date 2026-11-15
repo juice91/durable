@@ -6,7 +6,7 @@ import { SpanDetail } from "./SpanDetail";
 import { TraceWaterfall } from "./TraceWaterfall";
 import { TraceTotals } from "./TraceTotals";
 import { subjectLink } from "./TraceSheet";
-import { formatScore } from "./RagSpanSections";
+import { formatScore } from "@/lib/format";
 import { KIND_BADGE, KIND_ICON, KIND_TONE } from "./spanStyles";
 import {
   KIND_LABELS,
@@ -158,7 +158,7 @@ describe("SpanDetail for RAG and memory spans", () => {
   });
 
   it("formats scores to three places", () => {
-    expect(formatScore(0.5)).toBe("0.500");
+    expect(formatScore(0.5, 3)).toBe("0.500");
     expect(formatScore(null)).toBe("-");
   });
 

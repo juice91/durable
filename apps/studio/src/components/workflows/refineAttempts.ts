@@ -56,11 +56,6 @@ export function evaluationView(output: unknown): EvaluationView | null {
   };
 }
 
-/** A score in 0..1 with two decimals ("0.75"); "—" when there is none. */
-export function formatScore(score: number | null): string {
-  return score === null ? "—" : score.toFixed(2);
-}
-
 /** One attempt of a refine loop: an iteration, what its evaluate step judged and its verdict. */
 export interface RefineAttempt {
   /** 0-based iteration index (shown as index + 1). */

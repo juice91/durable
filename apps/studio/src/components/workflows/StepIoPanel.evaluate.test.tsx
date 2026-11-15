@@ -224,12 +224,15 @@ describe("refineAttempts", () => {
     const iterations = [
       iterationOf(1, { write: detail({ stepId: "write", hasOutput: true, output: { draft: "two" } }), judge: detail({ state: "failed", errorCode: "run_budget_exceeded" }) }),
       iterationOf(0, { write: detail({ stepId: "write", hasOutput: true, output: { draft: "one" } }), judge: detail({ hasOutput: true, output: judgeOutput(1) }) }),
+      // An open iteration: its write step is still running and its evaluate step has not started.
+      { ...iterationOf(2, { write: detail({ stepId: "write", state: "running" }) }), state: "running" as const },
     ];
     const attempts = refineAttempts(loop, iterations);
-    expect(attempts.map((a) => a.index)).toEqual([0, 1]);
+    expect(attempts.map((a) => a.index)).toEqual([0, 1, 2]);
     expect(attempts[0]).toMatchObject({ draft: "one", errorCode: null });
     expect(attempts[0].evaluation?.score).toBe(0.25);
     expect(attempts[1]).toMatchObject({ draft: "two", evaluation: null, errorCode: "run_budget_exceeded" });
+    expect(attempts[2]).toMatchObject({ iterationState: "running", draft: undefined, evaluation: null, errorCode: null });
     expect(refineAttempts(loop, null)).toEqual([]);
   });
 

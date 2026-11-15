@@ -259,6 +259,10 @@ class RunData:
     # LP.9: which loop-scoped events were kept and every loop instance's iteration counts; None
     # until filtered (build_trace filters `events` itself when the reader has not).
     loops: "LoopEvents | None" = None
+    # LP.15: the judge usage rows grouped by request-key prefix, built once (see `_judge_rows`).
+    judge_index: "dict[str, list[tuple[int, dict[str, Any]]]] | None" = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
 
 @dataclass
@@ -1648,11 +1652,25 @@ def _judge_rows(rd: RunData, scope: Scope, step_id: str) -> list[tuple[int, dict
         prefix = scoped_judge_key(scope, step_id, 0)[:-1]
     except ScopeInvalid:
         return []
-    rows = [
-        (int(key[len(prefix):]), row) for key, row in rd.requests.items()
-        if key.startswith(prefix) and key[len(prefix):].isdecimal()
-    ]
-    return sorted(rows, key=lambda r: r[0])
+    return _judge_index(rd).get(prefix, [])
+
+
+def _judge_index(rd: RunData) -> dict[str, list[tuple[int, dict[str, Any]]]]:
+    """The run's `judge:` usage rows grouped once by key prefix (everything up to and including the
+    last `:`), each group sorted by its decimal evaluator index, so an evaluate span looks its rows
+    up instead of scanning every request (one scan per run, not per iteration)."""
+    if rd.judge_index is None:
+        index: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for key, row in rd.requests.items():
+            if not key.startswith("judge:"):
+                continue
+            head, sep, k = key.rpartition(":")
+            if sep and k.isdecimal():
+                index.setdefault(head + ":", []).append((int(k), row))
+        for rows in index.values():
+            rows.sort(key=lambda r: r[0])
+        rd.judge_index = index
+    return rd.judge_index
 
 
 def _evaluate_attributes(output: Any, rows: list[tuple[int, dict[str, Any]]]) -> dict[str, Any]:
@@ -1674,7 +1692,8 @@ def _evaluate_attributes(output: Any, rows: list[tuple[int, dict[str, Any]]]) ->
                 for r in raw[:MAX_EVALUATE_RESULTS] if isinstance(r, dict)
             ]
             attrs["results"] = results
-            attrs["evaluators"] = len(raw)
+            # The entries read (dicts, at most MAX_EVALUATE_RESULTS): the counts below are of these.
+            attrs["evaluators"] = len(results)
             attrs["evaluators_passed"] = sum(1 for r in results if r.get("passed") is True)
             attrs["evaluators_failed"] = sum(1 for r in results if r.get("passed") is False)
             attrs["evaluators_skipped"] = sum(1 for r in results if r.get("skipped") is True)

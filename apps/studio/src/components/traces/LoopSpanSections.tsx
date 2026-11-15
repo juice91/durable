@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { formatCost, formatTokens } from "@/lib/format";
+import { formatCost, formatScore, formatTokens } from "@/lib/format";
 import type { SpanKind, TraceSpan } from "@/lib/traces";
 
 // LP.15: the detail sections of the workflow loop spans (LP.9's `loop` and `loop_iteration`) and of
@@ -27,12 +27,6 @@ function num(value: unknown): number | null {
 
 function str(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
-}
-
-/** A score in 0..1 with two decimals ("0.75"); "-" when there is none. */
-export function formatScore(value: unknown): string {
-  const n = num(value);
-  return n === null ? "-" : n.toFixed(2);
 }
 
 function Row({ label, children, testId }: { label: string; children: React.ReactNode; testId?: string }) {
@@ -141,6 +135,7 @@ function EvaluateSection({ span }: { span: TraceSpan }) {
         ) : null
       }
     >
+      {str(a.scope) ? <Row label="Scope" testId="span-evaluate-scope">{a.scope as string}</Row> : null}
       {verdict ? <Row label="Verdict" testId="span-evaluate-verdict">{verdict}</Row> : null}
       {num(a.score) !== null ? <Row label="Score" testId="span-evaluate-score">{formatScore(a.score)}</Row> : null}
       {num(a.evaluators) !== null ? (

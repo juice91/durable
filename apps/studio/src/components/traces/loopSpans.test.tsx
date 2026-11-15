@@ -150,6 +150,9 @@ describe("span detail sections", () => {
     const section = screen.getByTestId("span-evaluate");
     expect(within(section).getByTestId("span-evaluate-verdict")).toHaveTextContent("failed");
     expect(within(section).getByTestId("span-evaluate-score")).toHaveTextContent("0.25");
+    // Scope is left out of the generic attribute list, so the section names the iteration (review MINOR 1).
+    expect(LOOP_SHOWN.evaluate).toContain("scope");
+    expect(within(section).getByTestId("span-evaluate-scope")).toHaveTextContent("refine.0");
     const results = within(section).getAllByTestId("span-evaluate-result");
     expect(results.map((r) => r.getAttribute("data-passed"))).toEqual(["true", "false"]);
     expect(results[1]).toHaveTextContent("judge (llm_judge)");
@@ -165,6 +168,8 @@ describe("span detail sections", () => {
     render(<SpanDetail span={span("evaluate", { passed: true, score: 1, judge_requests: 0, judge_cost_usd: null })} />);
     expect(screen.getByTestId("span-evaluate-judges")).toHaveTextContent("0");
     expect(screen.queryByTestId("span-evaluate-judge-cost")).toBeNull();
+    // A top-level evaluate span has no scope: no Scope row.
+    expect(screen.queryByTestId("span-evaluate-scope")).toBeNull();
     cleanup();
     render(<SpanDetail span={span("evaluate", { judge_requests: 2, judge_input_tokens: 9, judge_output_tokens: 1, judge_cost_usd: null })} />);
     expect(screen.getByTestId("span-evaluate-judge-cost")).toHaveTextContent("no price");

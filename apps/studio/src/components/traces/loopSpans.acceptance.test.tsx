@@ -86,7 +86,7 @@ describe("section rendering is defensive", () => {
     }
   });
 
-  it("an evaluate span still shows as a plain workflow_step-like span when it has no step attributes", () => {
+  it("a workflow_step-kind span gets no evaluate section, even with evaluate attributes", () => {
     render(<SpanDetail span={span("workflow_step", { step_id: "x", step_type: "evaluate", passed: true })} />);
     expect(screen.queryByTestId("span-evaluate")).toBeNull();
   });

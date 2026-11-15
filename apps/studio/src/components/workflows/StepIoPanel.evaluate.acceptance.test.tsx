@@ -97,10 +97,43 @@ describe("hostile and long reasons", () => {
     expect(reason.className).toContain("break-words");
     expect(reason.textContent).toBe(LONG);
     const draft = screen.getByTestId("step-refine-attempt-draft");
-    expect(draft.className).toMatch(/overflow-auto/);
     expect(draft.className).toContain("break-words");
-    expect(screen.getByRole("list", { name: "Refine attempts" }).className).toMatch(/max-h-/);
+    // The draft and the list scroll inside clipped regions a keyboard can reach (review MINOR 6).
+    const draftScroll = screen.getByRole("region", { name: "Attempt 1 draft" });
+    expect(draftScroll).toContainElement(draft);
+    expect(draftScroll.className).toMatch(/max-h-40/);
+    expect(draftScroll.className).toMatch(/overflow-auto/);
+    expect(draftScroll).toHaveAttribute("tabindex", "0");
+    const listScroll = screen.getByRole("region", { name: "Refine attempts" });
+    expect(listScroll).toContainElement(screen.getByRole("list", { name: "Refine attempts" }));
+    expect(listScroll.className).toMatch(/max-h-96/);
+    expect(listScroll).toHaveAttribute("tabindex", "0");
   });
+
+  it("clips the step reason and each evaluator reason in height (review MINOR 2)", () => {
+    const results = Array.from({ length: 8 }, (_, i) => ({ name: `judge${i}`, kind: "llm_judge", passed: false, score: 0, reason: "r".repeat(2000) }));
+    render(<StepIoPanel step={null} detail={detail({ hasOutput: true, output: { passed: false, score: 0, reason: "s".repeat(2000), results } })} onClose={() => undefined} />);
+    const stepReason = screen.getByRole("region", { name: "Evaluation reason" });
+    expect(stepReason).toContainElement(screen.getByTestId("step-io-evaluation-reason"));
+    expect(stepReason.className).toMatch(/max-h-40/);
+    expect(stepReason.className).toMatch(/overflow-auto/);
+    expect(stepReason).toHaveAttribute("tabindex", "0");
+    const reasons = screen.getAllByTestId("step-io-evaluator-reason");
+    expect(reasons).toHaveLength(8);
+    reasons.forEach((reason, i) => {
+      const region = screen.getByRole("region", { name: `Reason of evaluator ${i + 1} (judge${i})` });
+      expect(region).toContainElement(reason);
+      expect(region.className).toMatch(/max-h-24/);
+      expect(region.className).toMatch(/overflow-auto/);
+      expect(region).toHaveAttribute("tabindex", "0");
+      expect(reason.textContent).toBe("r".repeat(2000));
+    });
+  });
+
+  it("the clipped reason regions have no axe violations", async () => {
+    const { container } = render(<StepIoPanel step={null} detail={detail({ hasOutput: true, output: { passed: false, score: 0.5, reason: "why", results: [{ name: "a", kind: "contains", passed: false, score: 0, reason: "a reason" }, { name: "a", kind: "contains", passed: true, score: 1, reason: "same name" }] } })} onClose={() => undefined} />);
+    await expectNoAxeViolations(container);
+  }, AXE_TIMEOUT_MS);
 
   it("shows HTML and Markdown in a reason as plain text; nothing is created or run", () => {
     render(<StepIoPanel step={null} detail={detail({ hasOutput: true, output: out(false, 0, HTML) })} onClose={() => undefined} />);
@@ -131,7 +164,7 @@ describe("empty states", () => {
 
   it("an unknown verdict shows a dash score and no verdict badge claim", () => {
     render(<StepIoPanel step={null} detail={detail({ hasOutput: true, output: { results: [{ name: "a" }] } })} onClose={() => undefined} />);
-    expect(screen.getByTestId("step-io-evaluation-score")).toHaveTextContent("—");
+    expect(screen.getByTestId("step-io-evaluation-score")).toHaveTextContent("-");
     expect(screen.getByTestId("step-io-evaluation-verdict")).toHaveAttribute("data-passed", "none");
   });
 

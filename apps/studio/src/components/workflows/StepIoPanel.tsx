@@ -7,13 +7,24 @@ import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import type { IterationDetail, StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
-import { evaluationView, formatScore, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
+import { formatScore } from "@/lib/format";
+import { evaluationView, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
 
 function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
   return (
     <div>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h4>
       <pre data-testid={testId} data-output-format={format} className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+    </div>
+  );
+}
+
+/** A clipped scroll region that a keyboard can reach and scroll (axe scrollable-region-focusable):
+ * model text (reasons, drafts) can run to thousands of characters. */
+function Scroller({ label, className, testId, children }: { label: string; className: string; testId?: string; children: React.ReactNode }) {
+  return (
+    <div role="region" aria-label={label} tabIndex={0} data-testid={testId} className={`${className} min-w-0 overflow-auto rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring`}>
+      {children}
     </div>
   );
 }
@@ -35,7 +46,7 @@ function Verdict({ passed, testId }: { passed: boolean | null; testId?: string }
 function resultLabel(r: EvaluationView["results"][number]): string {
   if (r.skipped) return "Skipped";
   if (r.errorCode) return `Error (${r.errorCode})`;
-  return r.passed === true ? "Passed" : r.passed === false ? "Failed" : "—";
+  return r.passed === true ? "Passed" : r.passed === false ? "Failed" : "-";
 }
 
 /** LP.15: an evaluate step's verdict, score, reason and per-evaluator results (plain text, never Markdown). */
@@ -47,7 +58,11 @@ function EvaluationSection({ view }: { view: EvaluationView }) {
         <Verdict passed={view.passed} testId="step-io-evaluation-verdict" />
         <span className="text-muted-foreground">Score <span data-testid="step-io-evaluation-score" className="font-mono tabular-nums text-foreground">{formatScore(view.score)}</span></span>
       </p>
-      {view.reason ? <p data-testid="step-io-evaluation-reason" className="whitespace-pre-wrap break-words text-sm text-foreground">{view.reason}</p> : null}
+      {view.reason ? (
+        <Scroller label="Evaluation reason" className="max-h-40">
+          <p data-testid="step-io-evaluation-reason" className="whitespace-pre-wrap break-words text-sm text-foreground">{view.reason}</p>
+        </Scroller>
+      ) : null}
       {view.results.length > 0 ? (
         <ul aria-label="Evaluator results" className="min-w-0 divide-y divide-border rounded-md border border-border">
           {view.results.map((r, i) => (
@@ -59,7 +74,11 @@ function EvaluationSection({ view }: { view: EvaluationView }) {
                 </span>
                 <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{resultLabel(r)}{r.score !== null ? `, ${formatScore(r.score)}` : ""}</span>
               </div>
-              {r.reason ? <p className="whitespace-pre-wrap break-words text-muted-foreground">{r.reason}</p> : null}
+              {r.reason ? (
+                <Scroller label={`Reason of evaluator ${i + 1} (${r.name})`} className="max-h-24">
+                  <p data-testid="step-io-evaluator-reason" className="whitespace-pre-wrap break-words text-muted-foreground">{r.reason}</p>
+                </Scroller>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -79,7 +98,8 @@ export function RefineAttempts({ attempts, evaluateStepId }: { attempts: readonl
     <div data-testid="step-refine-attempts" className="min-w-0">
       <h4 className="text-caption font-semibold uppercase tracking-wide text-muted-foreground">Attempts ({attempts.length})</h4>
       <p className="text-caption text-muted-foreground">Judged by <span className="font-mono">{evaluateStepId}</span>.</p>
-      <ol aria-label="Refine attempts" className="mt-1 max-h-96 min-w-0 space-y-2 overflow-auto">
+      <Scroller label="Refine attempts" className="mt-1 max-h-96" testId="step-refine-attempts-scroll">
+      <ol aria-label="Refine attempts" className="min-w-0 space-y-2">
         {attempts.map((a) => {
           const draft = draftText(a.draft);
           const ev = a.evaluation;
@@ -91,13 +111,16 @@ export function RefineAttempts({ attempts, evaluateStepId }: { attempts: readonl
                 {ev ? <span className="text-muted-foreground">Score <span data-testid="step-refine-attempt-score" className="font-mono tabular-nums text-foreground">{formatScore(ev.score)}</span></span> : null}
               </div>
               {draft !== null ? (
-                <pre data-testid="step-refine-attempt-draft" className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted p-1.5 font-mono text-caption text-foreground">{draft}</pre>
+                <Scroller label={`Attempt ${a.index + 1} draft`} className="max-h-40">
+                  <pre data-testid="step-refine-attempt-draft" className="whitespace-pre-wrap break-words rounded-sm bg-muted p-1.5 font-mono text-caption text-foreground">{draft}</pre>
+                </Scroller>
               ) : null}
               {ev?.reason ? <p data-testid="step-refine-attempt-reason" className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{ev.reason}</p> : null}
             </li>
           );
         })}
       </ol>
+      </Scroller>
     </div>
   );
 }
