@@ -9,19 +9,26 @@ import { CopilotRuntime, ExperimentalEmptyAdapter, copilotRuntimeNextJSAppRouter
 import type { NextRequest } from "next/server";
 
 import { configuredTargets, endpointUrl } from "@/lib/agents";
+import { PydanticOSHistoryRunner, pydanticosHistory } from "@/lib/historyRunner";
 
 function buildRuntime(): CopilotRuntime {
   const key = process.env.PYDANTICOS_API_KEY?.trim();
   if (!key) throw new Error("Set PYDANTICOS_API_KEY (a pos_... tenant API key) in .env.local");
   const agents: Record<string, HttpAgent> = {};
-  for (const target of configuredTargets()) {
+  const targets = configuredTargets();
+  for (const target of targets) {
     agents[target.name] = new HttpAgent({
       url: endpointUrl(target),
       headers: { Authorization: `Bearer ${key}` },
     });
   }
   if (Object.keys(agents).length === 0) throw new Error("Set PYDANTICOS_AGENT_ID (or PYDANTICOS_AGENTS) in .env.local");
-  return new CopilotRuntime({ agents });
+  return new CopilotRuntime({
+    agents,
+    // CopilotKit's in-memory runner, plus the thread's history from PydanticOS when it holds none
+    // (after a reload in a new server process, or a restart): see lib/historyRunner.ts.
+    runner: new PydanticOSHistoryRunner(new Map(targets.map((t) => [t.name, t])), pydanticosHistory(key)),
+  });
 }
 
 let runtime: CopilotRuntime | undefined;

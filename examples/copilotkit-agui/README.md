@@ -9,6 +9,7 @@ It shows:
 | Feature | Where |
 |---|---|
 | Chat with a published agent, through `HttpAgent` and a tenant API key | `app/api/copilotkit/route.ts` |
+| History restored from PydanticOS after a reload or a restart | `lib/historyRunner.ts` (the runtime's `runner`) |
 | Server tool calls (MCP, built-in) with CopilotKit's tool card | `useDefaultRenderTool()` in `app/chat.tsx` |
 | A frontend tool that runs in the browser | `useFrontendTool` (`set_theme_color`) |
 | A human-in-the-loop tool: the agent asks, the user answers | `useHumanInTheLoop` (`confirm_with_user`) |
@@ -72,11 +73,17 @@ same agents on a dev-mode API with a real model.
   next message heals the thread: the server waits for the previous turn, sends the missed answer
   in a `MESSAGES_SNAPSHOT`, then runs the new turn.
 - **Snapshot order.** `@ag-ui/client` 1.0.2 merges a snapshot by message id. The missed answer is
-  appended after your new message, and messages the snapshot lacks are dropped. For example, a
-  workflow's input message disappears when its resume run's snapshot arrives.
-- **Reload.** The thread id stays in the URL (`?thread=`), so the next message after a reload goes
-  to the same thread. CopilotKit does not reload the earlier messages from PydanticOS; they are in
-  `GET /api/v1/ag-ui/agents/{id}/threads/{threadId}`.
+  appended after your new message, and messages the snapshot lacks are dropped. PydanticOS's
+  snapshots carry the whole thread, a workflow's input message included, so nothing you sent
+  disappears.
+- **Reload.** The thread id stays in the URL (`?thread=`). CopilotKit by itself restores a thread
+  only from its runtime's in-memory runner, which loses it on a restart and never holds threads
+  started elsewhere. `lib/historyRunner.ts` falls back to PydanticOS's thread GET, so a reload,
+  a restart or a thread started by another client opens with its history (see the guide's
+  "CopilotKit limitation: history after a reload"). The fallback keeps CopilotKit's thread
+  owners: it never loads a thread this process holds for another owner, and with
+  `identifyUser` it loads only when the runner's `canRead` callback confirms the caller owns the
+  thread (this example sets no `identifyUser`, so a thread id is the capability).
 - **Approvals.** `useInterrupt` resolves a tool-call interrupt with `resume[]` and also adds a
   `tool` message holding the payload. PydanticOS drops that echo, and the resume entry alone
   decides.

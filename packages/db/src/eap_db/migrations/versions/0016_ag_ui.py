@@ -26,6 +26,9 @@ Create Date: 2026-11-15 18:00:00
   (those are ordered by (ts, run_id, seq)).
 - `ag_ui_runs.from_order` / `end_order`: where a workflow AG-UI run starts and ends in its root's
   `root_order` (NULL: the beginning / not ended yet); recorded, never re-derived.
+- `ag_ui_runs.input_messages`: the user messages a workflow thread's first AG-UI run carried, a
+  JSONB array of `{id, content}` (NULL on every other row), so the thread's snapshots and its
+  thread GET show them (AGUI.16 follow-up).
 
 - `ix_execution_events_run_root_order` on `execution_events (run_id, root_order)`, partial
   (`root_order IS NOT NULL`): a workflow stream's poll reads each run of the tree after a position
@@ -78,6 +81,7 @@ _SCOPE_KIND_CHECK = "scope_kind IN ('agent', 'workflow')"
 _FROM_SEQ_CHECK = "from_seq >= -1"
 _FINGERPRINT_CHECK = "fingerprint ~ '^[0-9a-f]{64}$'"
 _INPUT_MESSAGE_IDS_CHECK = "jsonb_typeof(input_message_ids) = 'array'"
+_INPUT_MESSAGES_CHECK = "input_messages IS NULL OR jsonb_typeof(input_messages) = 'array'"
 # Same texts as eap_run_store.store.
 _CLIENT_TOOLS_CHECK = "client_tools IS NULL OR jsonb_typeof(client_tools) = 'array'"
 _CLIENT_TOOL_RESULTS_CHECK = "client_tool_results IS NULL OR jsonb_typeof(client_tool_results) = 'array'"
@@ -135,6 +139,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("from_order", sa.BigInteger(), nullable=True),
         sa.Column("end_order", sa.BigInteger(), nullable=True),
+        sa.Column("input_messages", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.PrimaryKeyConstraint(
             "tenant_id", "scope_kind", "scope_id", "external_thread_id", "external_run_id", name="ag_ui_runs_pkey"
         ),
@@ -148,6 +153,7 @@ def upgrade() -> None:
         sa.CheckConstraint(_FROM_SEQ_CHECK, name="ck_ag_ui_runs_from_seq"),
         sa.CheckConstraint(_FINGERPRINT_CHECK, name="ck_ag_ui_runs_fingerprint"),
         sa.CheckConstraint(_INPUT_MESSAGE_IDS_CHECK, name="ck_ag_ui_runs_input_message_ids"),
+        sa.CheckConstraint(_INPUT_MESSAGES_CHECK, name="ck_ag_ui_runs_input_messages"),
     )
     # A run's AG-UI runs (and the run FK's cascade).
     op.create_index("ix_ag_ui_runs_tenant_run", "ag_ui_runs", ["tenant_id", "run_id"], unique=False)

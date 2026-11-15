@@ -42,6 +42,11 @@ The POST, in order, everything before the stream opens:
    with open interrupts, ALL of them again in the order requested (Q5), nothing recorded; else
    the same 409 codes at loc `threadId`, the detail saying what to send instead.
 
+The user messages of the thread's first AG-UI run (the tail of its `messages`, whatever carried
+the workflow input) are stored on its starter row (`ag_ui_runs.input_messages`) and prefix every
+MESSAGES_SNAPSHOT of the thread and its thread GET (`history_of`), once each: a client that merges
+snapshots by id (`@ag-ui/client` drops held messages a snapshot lacks) keeps them.
+
 Streams are exact slices of the root's commit order (`root_order`, 0016_ag_ui: every append takes
 the root run's row lock, so commit order is root_order and readers see a gapless prefix) over the
 workflow run and its agent steps' child runs (`streams.workflow`). A run's start and end are
@@ -302,12 +307,30 @@ def _thread_rows(c: _WCtx, thread_id: str) -> list[AgUiRunModel]:
         return list(rows)
 
 
-def _starter_run_id(c: _WCtx, record: AgUiRunRecord) -> str:
-    """The AG-UI runId that started the thread's run (the D13 prefix of child-run messages)."""
+def _as_user_messages(stored: Any) -> list[dict[str, Any]]:
+    return [
+        {"id": str(m["id"]), "role": "user", "content": str(m["content"])}
+        for m in (stored or ())
+        if isinstance(m, dict) and m.get("id")
+    ]
+
+
+def history_of(rows: list[AgUiRunModel]) -> list[dict[str, Any]]:
+    """The user messages the thread's first AG-UI run carried (`ag_ui_runs.input_messages` of its
+    starter row, from_seq -1), as AG-UI user messages: the prefix of every snapshot of the thread
+    and of its thread GET, so a client's merge keeps them (AGUI.16 follow-up)."""
+    starter = next((r for r in rows if r.from_seq < 0), None)
+    return [] if starter is None else _as_user_messages(starter.input_messages)
+
+
+def _thread_start(c: _WCtx, record: AgUiRunRecord) -> tuple[str, list[dict[str, Any]]]:
+    """The AG-UI runId that started the thread's run (the D13 prefix of child-run messages) and
+    the thread's input user messages (`history_of`). The starter record carries both, so a
+    stream of the thread's first run reads no rows; a later run reads the thread's rows once."""
     if record.from_seq < 0:
-        return record.external_run_id
+        return record.external_run_id, _as_user_messages(record.input_messages)
     rows = _thread_rows(c, record.external_thread_id)
-    return rows[0].external_run_id if rows else record.external_run_id
+    return (rows[0].external_run_id if rows else record.external_run_id), history_of(rows)
 
 
 def _run_info(run: dict[str, Any]) -> dict[str, Any]:
@@ -346,6 +369,8 @@ class _WPrepared:
     scopes: dict[str, ChildScope] = field(default_factory=dict)  # agent steps started by then
     stop_after: int | None = None  # this AG-UI run's end, once it has ended
     answered: frozenset[str] = frozenset()
+    # The thread's input user messages (`history_of`), the prefix of every snapshot.
+    history: list[dict[str, Any]] = field(default_factory=list)
 
 
 SEED_ALL = 2**62  # own_after for a child run seeded only for snapshots (nothing in it ends the run)
@@ -535,10 +560,11 @@ def _prepared(c: _WCtx, run: dict[str, Any], record: AgUiRunRecord, plan: Stream
         earlier = [e.seq for k, e in keyed_child if start is not None and k <= start]
         priors.append(ChildPrior(scope, seeded, earlier[-1] if earlier else -1))
         scopes[scope.run_id] = scope
+    prefix, history = _thread_start(c, record)
     return _WPrepared(
         plan=plan, run=run, record=record, prior=[e for e in tl.events if e.seq <= parent_after],
-        prefix=_starter_run_id(c, record), child_priors=priors, after=cutoff, scopes=scopes,
-        stop_after=stop, answered=_answered(record),
+        prefix=prefix, child_priors=priors, after=cutoff, scopes=scopes,
+        stop_after=stop, answered=_answered(record), history=history,
     )
 
 
@@ -657,7 +683,7 @@ def _start(c: _WCtx, workflow: WorkflowModel, mapped: AgUiInput, fp: str, run_id
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
     if not created and (run["kind"] != "workflow" or run["workflow_id"] != str(workflow.id) or run["input"] != input_json):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
-    record, rec_created = _record(c, mapped, fp, run_id, -1)
+    record, rec_created = _record(c, mapped, fp, run_id, -1, input_messages=_input_messages(mapped))
     _launch(c, run, created=created)
     run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id)) or run
     if created:
@@ -665,14 +691,27 @@ def _start(c: _WCtx, workflow: WorkflowModel, mapped: AgUiInput, fp: str, run_id
     return _fresh(c, run, record, rec_created)
 
 
+def _input_messages(mapped: AgUiInput) -> list[dict[str, str]] | None:
+    """The tail's user messages as stored on a thread's starter row ([{id, content}]), or None.
+
+    Recorded once, by the first writer (D4: a known runId never records again). Their text is in
+    the fingerprint (`input`), their ids are not (the fingerprint never covers ids), so a re-POST
+    of the same runId whose messages have the same joined text under other ids (or split across
+    messages differently) is the same request: it attaches, and the snapshots keep the STORED ids
+    and messages. The thread then shows exactly one copy of what the run received; the client's
+    merge replaces its own copy with the server's, as for every other D13 id. Agent turns keep
+    their first `input_message_ids` the same way."""
+    return [{"id": i, "content": t} for i, t in mapped.input_messages] or None
+
+
 def _record(
     c: _WCtx, mapped: AgUiInput, fp: str, run_id: str, from_seq: int, answered: tuple[str, ...] = (),
-    from_order: int | None = None,
+    from_order: int | None = None, input_messages: list[dict[str, str]] | None = None,
 ) -> tuple[AgUiRunRecord, bool]:
     try:
         record, created = c.ag_ui.record_ag_ui_run(
             c.tenant_id, **c.key(mapped.thread_id, mapped.run_id), run_id=run_id, fingerprint=fp, from_seq=from_seq,
-            input_message_ids=answered, from_order=from_order,
+            input_message_ids=answered, from_order=from_order, input_messages=input_messages,
         )
     except AgUiScopeMismatch:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another workflow")
@@ -705,7 +744,7 @@ def _resume(c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, decisions
 
 
 def _seeded_formatter(c: _WCtx, run: dict[str, Any], thread_id: str, agui_run_id: str, prefix: str,
-                      events: list[RunEvent]) -> AgUiFormatter:
+                      events: list[RunEvent], history: list[dict[str, Any]]) -> AgUiFormatter:
     """A formatter seeded with every event of the run and of all its agent steps' child runs."""
     children = [
         ChildPrior(scope, _events(c, scope.run_id), SEED_ALL)
@@ -716,7 +755,7 @@ def _seeded_formatter(c: _WCtx, run: dict[str, Any], thread_id: str, agui_run_id
         AgUiStreamContext(
             thread_id=thread_id, run_id=agui_run_id, native_run_id=str(run["id"]), kind="workflow",
             from_seq=events[-1].seq if events else -1, run_info=_run_info(run), prior_events=events,
-            message_prefix=prefix, prior_child_events=children,
+            message_prefix=prefix, prior_child_events=children, history=history,
         )
     )
 
@@ -730,7 +769,9 @@ def _reinterrupt(
     events = _events(c, run_id)
     rows = _thread_rows(c, mapped.thread_id)
     prefix = rows[0].external_run_id if rows else mapped.run_id
-    formatter = _seeded_formatter(c, run, mapped.client_thread_id or mapped.thread_id, mapped.run_id, prefix, events)
+    formatter = _seeded_formatter(
+        c, run, mapped.client_thread_id or mapped.thread_id, mapped.run_id, prefix, events, history_of(rows)
+    )
     approvals = open_approvals(c.event_log, c.tenant_id, interrupts.open_rows)
     record = AgUiRunRecord(
         tenant_id=c.tenant_id, scope_kind="workflow", scope_id=c.workflow_id, external_thread_id=mapped.thread_id,
@@ -764,7 +805,7 @@ def _prepare_post(
             same = False
         if not same:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
-        record, _ = _record(c, mapped, fp, run_id, -1)
+        record, _ = _record(c, mapped, fp, run_id, -1, input_messages=_input_messages(mapped))
     if record is not None:
         return _prepare_known(c, record, same_fingerprint=record.fingerprint == fp, last_event_id=header, relaunch=True)
     continuation = False
@@ -872,7 +913,7 @@ def open_at(tl: _Timeline, key: int) -> list[OpenApproval]:
 
 
 def _seeded_upto(c: _WCtx, tl: _Timeline, run: dict[str, Any], thread_id: str, agui_run_id: str, prefix: str,
-                 key: int) -> AgUiFormatter:
+                 key: int, history: list[dict[str, Any]]) -> AgUiFormatter:
     """A formatter seeded with everything at or before position `key`."""
     events = [e for k, e in tl.parent_keyed() if k <= key]
     children = [
@@ -883,7 +924,7 @@ def _seeded_upto(c: _WCtx, tl: _Timeline, run: dict[str, Any], thread_id: str, a
         AgUiStreamContext(
             thread_id=thread_id, run_id=agui_run_id, native_run_id=str(run["id"]), kind="workflow",
             from_seq=events[-1].seq if events else -1, run_info=_run_info(run), prior_events=events,
-            message_prefix=prefix, prior_child_events=children,
+            message_prefix=prefix, prior_child_events=children, history=history,
         )
     )
 
@@ -903,7 +944,7 @@ def _all_open_tail(d: _StreamDeps, p: _WPrepared, frame: str, shown: list[str]) 
     if {a.interrupt().id for a in approvals} <= set(shown):
         return None
     run = c.run_store.get_run(c.tenant_id, uuid.UUID(p.record.run_id)) or p.run
-    formatter = _seeded_upto(c, tl, run, d.thread_id, p.record.external_run_id, p.prefix, end)
+    formatter = _seeded_upto(c, tl, run, d.thread_id, p.record.external_run_id, p.prefix, end, p.history)
     return formatter.interrupt_tail(approvals, set(shown), _frame_id(frame))
 
 
@@ -948,6 +989,7 @@ def _frames(d: _StreamDeps, p: _WPrepared) -> AsyncIterator[str]:
             message_prefix=p.prefix,
             prior_child_events=p.child_priors,
             answered_interrupts=p.answered,
+            history=p.history,
         )
     )
     resume_after = p.plan.after_seq if (p.plan.mode == "continue" or p.opens_as_continuation) else None
@@ -1015,7 +1057,7 @@ def _thread_json(c: _WCtx, thread_id: str) -> dict[str, Any]:
     formatter = AgUiFormatter(
         AgUiStreamContext(
             thread_id=thread_id, run_id=rows[0].external_run_id, native_run_id=run_id, kind="workflow",
-            from_seq=max_seq, prior_events=events, prior_child_events=children,
+            from_seq=max_seq, prior_events=events, prior_child_events=children, history=history_of(rows),
         )
     )
     latest = max(rows, key=lambda r: (r.from_seq, r.created_at))

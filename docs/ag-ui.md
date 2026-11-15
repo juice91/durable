@@ -121,15 +121,13 @@ server's order.
 
 **`@ag-ui/client` 1.0.2 and 1.0.3 merge a snapshot by message id:** messages the client already
 holds keep their position (with the snapshot's content), messages it holds that the snapshot does
-not contain are removed, and new ones are appended. Two effects:
+not contain are removed, and new ones are appended. So after previous-turn healing (below), a
+plain `HttpAgent`, and CopilotKit, list the missed answer **after** the user message you just
+sent, although the server's thread has it before. Because held messages a snapshot lacks are
+removed, every snapshot is the thread's **whole** history: an agent thread's earlier turns, and a
+workflow thread's input user messages (see [Workflows](#workflows)).
 
-- after previous-turn healing (below), a plain `HttpAgent`, and CopilotKit, list the missed answer
-  **after** the user message you just sent, although the server's thread has it before;
-- a workflow thread's snapshot holds the workflow's messages (its agent steps' answers), not the
-  user message that carried the input, so that message disappears from a CopilotKit chat when the
-  resume run's snapshot arrives.
-
- To show the server's order, reload the history from
+To show the server's order, reload the history from
 `GET .../threads/{threadId}` (Studio does), or replace your messages with the snapshot's yourself.
 Compare messages as a set, not as a list, if you test against the server's thread.
 
@@ -270,6 +268,10 @@ message, responseSchema, expiresAt}`. Before a tool-call interrupt you always ge
   each run.
 - The input is `forwardedProps.pydanticos.input`, else the last user message parsed as JSON; it is
   validated against the workflow's input schema (422).
+- The user messages the thread's first run carried (whether or not one of them was the input) are
+  kept with the thread: every `MESSAGES_SNAPSHOT` of the thread and its thread GET start with them,
+  once each, followed by the agent steps' messages. A thread started with
+  `forwardedProps.pydanticos.input` alone has none.
 - Steps stream as `STEP_STARTED/FINISHED`; an agent step's text and tool calls stream inside the
   step. Progress is read-only `STATE_*`; inbound `state` is ignored.
 - A gated tool call inside an agent step is an interrupt naming the step's **child** run; answer it
@@ -359,6 +361,102 @@ In the page, with the v2 hooks (`@copilotkit/react-core/v2`):
 - The CopilotKit runtime's `HttpAgent` cannot resume a cut stream; previous-turn healing covers it.
 - CopilotKit collects telemetry by default; set `COPILOTKIT_TELEMETRY_DISABLED=true` on the runtime
   (and `SCARF_ANALYTICS=false` when installing) to turn it off.
+
+### CopilotKit limitation: history after a reload
+
+CopilotKit 1.83 does not load a thread's history from PydanticOS. When the chat mounts on a
+thread (a reload, a thread switch), it asks the runtime's **runner** to `connect`, and the default
+`InMemoryAgentRunner` replays only the events this server process saw and still holds in memory.
+A thread it does not hold comes back **empty**: after a restart, on another instance behind a load
+balancer, or for a thread started elsewhere (Studio, another client). The server-side thread is
+intact; the next message still continues it, because the server reads only the tail and keeps the
+history itself.
+
+**Workaround: a runner that falls back to the thread GET.** CopilotRuntime takes a `runner`.
+Extend `InMemoryAgentRunner` (`@copilotkit/runtime/v2`) so that, when its own `connect` replays
+nothing, it reads `GET /api/v1/ag-ui/{agents|workflows}/{id}/threads/{threadId}` with the key and
+replays the thread as `RUN_STARTED`, `MESSAGES_SNAPSHOT` (the GET's `messages`) and
+`RUN_FINISHED`:
+
+```ts
+import { EventType, type BaseEvent, type Message } from "@ag-ui/client";
+import { type AgentRunnerConnectRequest, InMemoryAgentRunner, ɵresolveThreadOwner } from "@copilotkit/runtime/v2";
+import { Observable } from "rxjs";
+
+class PydanticOSHistoryRunner extends InMemoryAgentRunner {
+  constructor(private readonly threadUrl: (agentId: string, threadId: string) => string | undefined,
+              private readonly apiKey: string) {
+    super();
+  }
+
+  override connect(request: AgentRunnerConnectRequest): Observable<BaseEvent> {
+    const inMemory = super.connect(request);
+    const url = request.agentId ? this.threadUrl(request.agentId, request.threadId) : undefined;
+    if (!url) return inMemory;
+    return new Observable<BaseEvent>((subscriber) => {
+      let replayed = false;
+      let closed = false;
+      const inner = inMemory.subscribe({
+        next: (event) => { replayed = true; subscriber.next(event); },
+        error: (error) => subscriber.error(error),
+        complete: () => {
+          if (replayed) return subscriber.complete();
+          this.history(request, url)
+            .then((messages) => {
+              if (closed) return;
+              if (messages.length > 0) {
+                const runId = `history-${request.threadId}`;
+                subscriber.next({ type: EventType.RUN_STARTED, threadId: request.threadId, runId } as BaseEvent);
+                subscriber.next({ type: EventType.MESSAGES_SNAPSHOT, messages } as BaseEvent);
+                subscriber.next({ type: EventType.RUN_FINISHED, threadId: request.threadId, runId } as BaseEvent);
+              }
+              subscriber.complete();
+            })
+            // API down, a non-JSON body: connect empty, never an unhandled rejection.
+            .catch(() => { if (!closed) subscriber.complete(); });
+        },
+      });
+      return () => { closed = true; inner.unsubscribe(); };
+    });
+  }
+
+  private async history(request: AgentRunnerConnectRequest, url: string): Promise<Message[]> {
+    const owner = ɵresolveThreadOwner(request.ownerId);
+    // Another owner holds this thread here: CopilotKit answered "unknown", so must the fallback.
+    if (!this.isThreadAccessible(request.threadId, { ownerId: owner })) return [];
+    // With identifyUser, the key cannot tell users apart: check ownership in your own records.
+    if (owner !== "") return [];
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${this.apiKey}` } });
+    return response.ok ? ((await response.json()).messages ?? []) : [];
+  }
+}
+
+const runtime = new CopilotRuntime({
+  agents: { pydanticosAgent: new HttpAgent({ url: AGENT_URL, headers: { Authorization: `Bearer ${KEY}` } }) },
+  runner: new PydanticOSHistoryRunner(
+    (agentId, threadId) => agentId === "pydanticosAgent" ? `${AGENT_URL}/threads/${encodeURIComponent(threadId)}` : undefined,
+    KEY,
+  ),
+});
+```
+
+**Thread owners.** The API key is the tenant's, so PydanticOS serves the thread GET to whoever
+holds it: it cannot tell CopilotKit's users apart. CopilotKit scopes its threads by `ownerId`
+(the anonymous owner `""` without `identifyUser`, else the identified user's id), and the
+fallback must keep that scope:
+
+- never load a thread that this process holds for another owner (`isThreadAccessible`);
+- with `identifyUser`, load only after checking, in your own records, that the caller owns the
+  thread id (the example takes a `canRead(ownerId, target, threadId)` callback; without one,
+  identified callers get no fallback), or give each user their own thread-id namespace;
+- without `identifyUser`, a thread id is a capability, as in CopilotKit itself: whoever knows it
+  may open it.
+
+The example ships this as `examples/copilotkit-agui/lib/historyRunner.ts` and keeps the thread
+id in the page URL, so a reload reopens the same thread with its history. The restored history is
+the server's (D13 ids), so the next run's snapshots merge cleanly. It does not reattach to a run
+still in progress after a restart: the next message waits for it (previous-turn healing), or a
+client can GET the attach route itself.
 
 Studio's agent and workflow pages have a **Connect (AG-UI)** sheet with this snippet filled in
 with the endpoint URL; it never shows the key.

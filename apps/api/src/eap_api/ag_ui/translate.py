@@ -14,7 +14,8 @@ beyond the items comes in `AgUiStreamContext`:
   seed state (a resumed workflow's steps); those after it are this run's events the client
   already holds (a continuation): they update state as if sent, so nothing is sent twice;
 - `snapshot_on_start`: attach from start (`MESSAGES_SNAPSHOT` after `RUN_STARTED`; a workflow
-  adds `STATE_SNAPSHOT`, and `MESSAGES_SNAPSHOT` when child runs were seeded);
+  adds `STATE_SNAPSHOT`, and `MESSAGES_SNAPSHOT` when child runs were seeded or the thread has
+  input user messages in `history`);
 - `message_prefix` (AGUI.8): the prefix of D13 message ids when it is not `run_id`: a resumed
   AG-UI run continues the turn the first AG-UI run started, so its messages keep that run's ids;
 - `answered_interrupts` (AGUI.8): the interrupts a workflow resume run answered; reaching their
@@ -710,8 +711,11 @@ class AgUiFormatter:
         if self.ctx.kind == "workflow":
             if self._seeded or self.ctx.snapshot_on_start:
                 events.append(StateSnapshotEvent(snapshot=json.loads(json.dumps(self._state))))
-            if (self.ctx.snapshot_on_start or self.ctx.prior_child_events) and self._child_turns:
+            if (self.ctx.snapshot_on_start and self.ctx.history) or (
+                (self.ctx.snapshot_on_start or self.ctx.prior_child_events) and self._child_turns
+            ):
                 # Seeded child runs: the client's list is replaced by one with all their messages.
+                # An attach from the start also sends the thread's input user messages (history).
                 events.append(self._messages_snapshot())
             for step_id in self._announced:
                 events.append(StepStartedEvent(step_name=step_id))

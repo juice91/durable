@@ -91,7 +91,7 @@ def test_ag_ui_revision_round_trip_on_a_populated_0015_schema():
             # The commit order: old events have no root_order (NULL), every run's counter starts at 0.
             assert conn.execute(text("SELECT count(*) FROM execution_events WHERE root_order IS NOT NULL")).scalar_one() == 0
             assert conn.execute(text("SELECT DISTINCT event_order_next FROM runs")).scalars().all() == [0]
-            assert {"from_order", "end_order"} <= _columns(conn, "ag_ui_runs")
+            assert {"from_order", "end_order", "input_messages"} <= _columns(conn, "ag_ui_runs")
             assert conn.execute(text("SELECT to_regclass('ix_execution_events_run_root_order')")).scalar_one() is not None
             assert conn.execute(text(
                 "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_execution_events_root_order'"
@@ -110,6 +110,14 @@ def test_ag_ui_revision_round_trip_on_a_populated_0015_schema():
             _insert_ag_ui(conn, "t1", "r1", ids='["u1"]')
             _insert_ag_ui(conn, "t2", "r2")
             _insert_ag_ui(conn, "t1", "wf1", scope_kind="workflow", from_seq=4)
+            # A workflow thread's starter row keeps its input user messages; others stay NULL.
+            conn.execute(text(
+                "UPDATE ag_ui_runs SET input_messages = '[{\"id\": \"u1\", \"content\": \"hi\"}]'::jsonb"
+                " WHERE tenant_id = 't1' AND run_id = 'wf1'"
+            ))
+            assert conn.execute(text(
+                "SELECT count(*) FROM ag_ui_runs WHERE input_messages IS NULL"
+            )).scalar_one() == 2
             conn.execute(text(
                 "UPDATE runs SET client_tools = '[{\"name\": \"pick\"}]'::jsonb,"
                 " client_tool_results = '[]'::jsonb WHERE id = 'r1'"
@@ -125,6 +133,8 @@ def test_ag_ui_revision_round_trip_on_a_populated_0015_schema():
             (lambda c: _insert_ag_ui(c, "t1", "r1", "y", from_seq=-2), "ck_ag_ui_runs_from_seq"),
             (lambda c: _insert_ag_ui(c, "t1", "r1", "y", fp="nope"), "ck_ag_ui_runs_fingerprint"),
             (lambda c: _insert_ag_ui(c, "t1", "r1", "y", ids="{}"), "ck_ag_ui_runs_input_message_ids"),
+            (lambda c: c.execute(text("UPDATE ag_ui_runs SET input_messages = 'null'::jsonb WHERE run_id = 'r1'")),
+             "ck_ag_ui_runs_input_messages"),
             # Another tenant's run cannot be named (composite FK).
             (lambda c: _insert_ag_ui(c, "t1", "r2", "y"), "fk_ag_ui_runs_tenant_run"),
             (lambda c: c.execute(text("UPDATE runs SET client_tools = '{}'::jsonb WHERE id = 'r2'")),

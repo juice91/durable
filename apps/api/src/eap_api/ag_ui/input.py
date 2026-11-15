@@ -268,7 +268,8 @@ class AgUiInput:
     - `input_text`: the tail's non-blank user messages, joined with a blank line ("" when none);
       `last_user_text` is the last of them alone (a workflow's JSON input, D12).
     - `input_message_ids`: the client's ids of exactly those (non-blank) user messages, in order
-      (D13); blank user messages contribute neither text nor id.
+      (D13); blank user messages contribute neither text nor id. `input_messages` pairs each of
+      those ids with its text (a workflow thread stores them for its snapshots).
     - `tool_results`: the tail's client tool results, in message order;
       `tool_result_message_indexes[k]` is the index in `messages` of `tool_results[k]`.
     - `client_tools`: the declared frontend tools, in declaration order.
@@ -288,6 +289,7 @@ class AgUiInput:
     ignored: IgnoredInput
     client_thread_id: str = ""
     tool_result_message_indexes: tuple[int, ...] = ()
+    input_messages: tuple[tuple[str, str], ...] = ()
 
     @property
     def has_user_input(self) -> bool:
@@ -592,6 +594,7 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
         input_text=input_text,
         last_user_text=kept[-1][1] if kept else None,
         input_message_ids=tuple(message_id for message_id, _ in kept),
+        input_messages=tuple(kept),
         tool_results=tuple(results),
         tool_result_message_indexes=tuple(result_indexes),
         client_tools=client_tools,

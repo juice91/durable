@@ -49,6 +49,7 @@ AG_UI_SCOPE_KIND_CHECK = "scope_kind IN ('agent', 'workflow')"
 AG_UI_FROM_SEQ_CHECK = "from_seq >= -1"
 AG_UI_FINGERPRINT_CHECK = "fingerprint ~ '^[0-9a-f]{64}$'"
 AG_UI_INPUT_MESSAGE_IDS_CHECK = "jsonb_typeof(input_message_ids) = 'array'"
+AG_UI_INPUT_MESSAGES_CHECK = "input_messages IS NULL OR jsonb_typeof(input_messages) = 'array'"
 
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -82,6 +83,9 @@ class AgUiRunModel(Base):
     # NULL: the beginning / not ended yet). Recorded once, never re-derived (AGUI.8, D7).
     from_order: Mapped[int | None] = mapped_column("from_order", BigInteger, nullable=True)
     end_order: Mapped[int | None] = mapped_column("end_order", BigInteger, nullable=True)
+    # A workflow thread's first AG-UI run only: the user messages it carried, [{id, content}], so
+    # the thread's snapshots and its thread GET show them. NULL on every other row.
+    input_messages: Mapped[list | None] = mapped_column("input_messages", JSONB, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -97,6 +101,7 @@ class AgUiRunModel(Base):
         CheckConstraint(AG_UI_FROM_SEQ_CHECK, name="ck_ag_ui_runs_from_seq"),
         CheckConstraint(AG_UI_FINGERPRINT_CHECK, name="ck_ag_ui_runs_fingerprint"),
         CheckConstraint(AG_UI_INPUT_MESSAGE_IDS_CHECK, name="ck_ag_ui_runs_input_message_ids"),
+        CheckConstraint(AG_UI_INPUT_MESSAGES_CHECK, name="ck_ag_ui_runs_input_messages"),
         Index("ix_ag_ui_runs_tenant_run", "tenant_id", "run_id"),
     )
 
@@ -115,6 +120,8 @@ class AgUiRunRecord:
     created_at: datetime
     from_order: int | None = None
     end_order: int | None = None
+    # [{id, content}] of a workflow thread's first AG-UI run; () on every other row.
+    input_messages: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -145,6 +152,9 @@ def _record(row: AgUiRunModel) -> AgUiRunRecord:
         created_at=row.created_at,
         from_order=None if row.from_order is None else int(row.from_order),
         end_order=None if row.end_order is None else int(row.end_order),
+        input_messages=tuple(
+            {"id": str(m["id"]), "content": str(m["content"])} for m in (row.input_messages or ()) if isinstance(m, dict)
+        ),
     )
 
 
@@ -173,6 +183,8 @@ class AgUiRunWrite:
     fingerprint: str
     from_seq: int = -1
     input_message_ids: tuple[str, ...] = ()
+    # [{id, content}]: a workflow thread's first AG-UI run only (None: not stored).
+    input_messages: tuple[dict[str, str], ...] | None = None
 
 
 class AgUiScopeMismatch(ValueError):
@@ -214,7 +226,15 @@ def validated_ag_ui_values(tenant_id: str, run_id: str, write: AgUiRunWrite) -> 
     message_ids = list(write.input_message_ids)
     if not all(isinstance(m, str) for m in message_ids):
         raise ValueError("input_message_ids must be strings")
-    return dict(
+    messages = None
+    if write.input_messages is not None:
+        messages = [dict(m) for m in write.input_messages]
+        if not all(
+            set(m) == {"id", "content"} and isinstance(m["id"], str) and m["id"] and isinstance(m["content"], str)
+            for m in messages
+        ):
+            raise ValueError("input_messages must be {id, content} objects of strings with a non-empty id")
+    values = dict(
         tenant_id=tenant_id,
         scope_kind=write.scope_kind,
         scope_id=str(write.scope_id),
@@ -225,6 +245,9 @@ def validated_ag_ui_values(tenant_id: str, run_id: str, write: AgUiRunWrite) -> 
         fingerprint=write.fingerprint,
         input_message_ids=message_ids,
     )
+    if messages is not None:  # absent stays SQL NULL (a Python None would be JSON null)
+        values["input_messages"] = messages
+    return values
 
 
 def check_run_scope(tenant_id: str, run: RunModel, scope_kind: str, scope_id: str) -> None:
@@ -271,6 +294,7 @@ class AgUiStore:
         from_seq: int = -1,
         input_message_ids: tuple[str, ...] | list[str] = (),
         from_order: int | None = None,
+        input_messages: tuple[dict[str, str], ...] | list[dict[str, str]] | None = None,
     ) -> tuple[AgUiRunRecord, bool]:
         """Record the AG-UI run `(scope, threadId, runId)`; idempotent, the first writer wins.
 
@@ -295,6 +319,7 @@ class AgUiStore:
             fingerprint=fingerprint,
             from_seq=from_seq,
             input_message_ids=tuple(input_message_ids),
+            input_messages=None if input_messages is None else tuple(input_messages),
         )
         values = validated_ag_ui_values(tenant_id, run_id, write)
         if from_order is not None:

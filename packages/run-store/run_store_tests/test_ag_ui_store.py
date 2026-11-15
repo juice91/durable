@@ -147,6 +147,28 @@ def test_record_refuses_another_tenants_run(run_store, ag_ui, tenant, other_tena
         _record(ag_ui, tenant, str(uuid4()))
 
 
+def test_input_messages_are_stored_on_request_and_sql_null_otherwise(engine, run_store, ag_ui, tenant):
+    wf_run = str(uuid4())
+    run_store.create_workflow_run(tenant, "wf", 1, "{}", wf_run)
+    stored = [{"id": "u1", "content": "refund 42"}, {"id": "u2", "content": ""}]
+    starter, _ = _record(ag_ui, tenant, wf_run, scope_kind="workflow", scope_id="wf", external_run_id="r1",
+                         input_messages=stored)
+    assert starter.input_messages == tuple(stored)
+    plain, _ = _record(ag_ui, tenant, wf_run, scope_kind="workflow", scope_id="wf", external_run_id="r2", from_seq=4)
+    assert plain.input_messages == ()
+    empty, _ = _record(ag_ui, tenant, wf_run, scope_kind="workflow", scope_id="wf", external_run_id="r3", from_seq=5,
+                       input_messages=[])
+    assert empty.input_messages == ()
+    # First writer wins: a later call's messages never replace the stored ones.
+    again, created = _record(ag_ui, tenant, wf_run, scope_kind="workflow", scope_id="wf", external_run_id="r1",
+                             input_messages=[{"id": "other", "content": "refund 42"}])
+    assert created is False and again.input_messages == tuple(stored)
+    with engine.connect() as conn:
+        rows = dict(conn.execute(text(
+            "SELECT external_run_id, input_messages IS NULL FROM ag_ui_runs WHERE tenant_id = :t"), {"t": tenant}).all())
+    assert rows == {"r1": False, "r2": True, "r3": False}  # None is SQL NULL, never JSON null
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -161,6 +183,13 @@ def test_record_refuses_another_tenants_run(run_store, ag_ui, tenant, other_tena
         # `$` would accept a trailing newline; the DB check does not (never a RunNotFound).
         {"fingerprint": _fp() + "\n"},
         {"input_message_ids": [1]},
+        # input_messages (AGUI.16 follow-up): exactly {id, content}, both strings, a non-empty id.
+        {"input_messages": [{"id": "u1", "content": "hi", "role": "user"}]},
+        {"input_messages": [{"id": "u1"}]},
+        {"input_messages": [{"id": "", "content": "hi"}]},
+        {"input_messages": [{"id": 1, "content": "hi"}]},
+        {"input_messages": [{"id": "u1", "content": 7}]},
+        {"input_messages": [{"id": "u1", "content": None}]},
     ],
 )
 def test_record_validates_arguments(ag_ui, tenant, override):
