@@ -14,6 +14,7 @@ import { requestContextStep } from "./RequestContextStep";
 import { processorsStep } from "./ProcessorsStep";
 import { knowledgeStep } from "./KnowledgeStep";
 import { memoryStep } from "./MemoryStep";
+import { outputStep } from "./OutputStep";
 
 /**
  * The top-level spec keys each built-in step owns, for routing a 422 by its first `detail[].loc`
@@ -22,9 +23,10 @@ import { memoryStep } from "./MemoryStep";
  * claimed by a later step's message matcher.
  */
 const CORE_SPEC_KEYS: Record<string, readonly string[]> = {
-  identity: ["name", "model", "model_settings"],
+  // AC.13: the Identity step's "Limits and fallback models" group and the Tools step's approvals.
+  identity: ["name", "model", "model_settings", "limits", "fallback_models"],
   instructions: ["instructions"],
-  tools: ["tools", "mcp_tools"],
+  tools: ["tools", "mcp_tools", "approvals"],
   "request-context": ["context_fields"],
   processors: ["input_processors", "output_processors"],
 };
@@ -42,6 +44,8 @@ export const EDITOR_STEPS: readonly EditorStepDefinition[] = [
   // RM.17: steps 6 and 7.
   knowledgeStep,
   memoryStep,
+  // AC.13: step 8.
+  outputStep,
 ];
 
 /** The first step: where the editor opens without (or with an unknown) `?step=`. */
@@ -91,10 +95,21 @@ export function stepForError(
   const first = locations[0];
   const key = first ? specKeyOfLocation(first) : null;
   if (key) {
-    const owner = steps.find((step) => (step.specKeys ?? CORE_SPEC_KEYS[step.id])?.includes(key));
+    const owner = stepOwningKey(key, steps);
     if (owner) return owner.id;
   }
+  // A message without a location that starts with a spec path (`output.json_schema: ...`,
+  // `Value error, fallback_models[1]: ...`) belongs to the step owning that top-level key: the most
+  // specific match, before any step's looser text matcher can claim it.
+  const pathKey = /^(?:Value error, )?([a-z_]+)(?:[.[]|:)/.exec(message)?.[1];
+  const pathOwner = pathKey ? stepOwningKey(pathKey, steps) : undefined;
+  if (pathOwner) return pathOwner.id;
   return steps.find((step) => step.ownsError(message))?.id ?? null;
+}
+
+/** The step whose spec keys (its own `specKeys`, or the built-in ones) include `key`. */
+function stepOwningKey(key: string, steps: readonly EditorStepDefinition[]): EditorStepDefinition | undefined {
+  return steps.find((step) => (step.specKeys ?? CORE_SPEC_KEYS[step.id])?.includes(key));
 }
 
 /** Every step's blocking fields (`missing`), in step order. */

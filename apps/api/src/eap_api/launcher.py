@@ -40,6 +40,14 @@ WORKFLOW_RUN_NAME = "eap.workflow_run"
 #                                                          are the knowledge base's pending_* columns)
 KB_INGEST_WORKFLOW_NAME = "eap.kb_ingest"
 KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
+# Eval runs (agent capabilities milestone; AC.12 enqueues, AC.11 implements):
+# `eap.eval_run(run_id, tenant_id, input_json)` on the agent-run queue, workflow_id = run_id, where
+# `input_json` is the run's stored `input`: the suite snapshot's canonical JSON
+# (`EvalSuiteSnapshot.canonical_json()`). The agent version or draft snapshot is read from the run row.
+# Size note (AC.12 review, for AC.11): the snapshot can reach ~32 MiB for 500 maximum-size cases, and
+# DBOS stores workflow inputs again in its system database. AC.11 may read `runs.input` by run id
+# instead and ignore `input_json`; the argument stays so the hand-off shape matches the plan.
+EVAL_WORKFLOW_NAME = "eap.eval_run"
 
 
 def approval_topic(step_id: str) -> str:
@@ -111,6 +119,15 @@ class RunLauncher(Protocol):
         traceparent: str | None = None,
     ) -> None: ...
 
+    def launch_eval(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None: ...
+
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None: ...
 
     def notify_tool_approval(
@@ -121,7 +138,7 @@ class RunLauncher(Protocol):
 
 
 class DBOSRunLauncher:
-    """Enqueues `eap.agent_run`, `eap.tool_run` and `eap.workflow_run` on `eap-agent-runs`, and
+    """Enqueues `eap.agent_run`, `eap.tool_run`, `eap.workflow_run` and `eap.eval_run` on `eap-agent-runs`, and
     `eap.kb_ingest` on `eap-kb-ingest`. The DBOSClient is created on first use."""
 
     def __init__(self, settings: LauncherSettings, client: Any | None = None) -> None:
@@ -196,6 +213,19 @@ class DBOSRunLauncher:
         (see KB_INGEST_WORKFLOW_NAME for the input modes)."""
         options = self._options(KB_INGEST_WORKFLOW_NAME, run_id, traceparent, queue_name=KB_INGEST_QUEUE_NAME)
         self._get_client().enqueue(options, str(run_id), tenant_id, str(knowledge_base_id), input_json)
+
+    def launch_eval(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        input_json: str,
+        traceparent: str | None = None,
+    ) -> None:
+        """Enqueue `eap.eval_run(run_id, tenant_id, input_json)`, workflow_id = run_id (see
+        EVAL_WORKFLOW_NAME)."""
+        options = self._options(EVAL_WORKFLOW_NAME, run_id, traceparent)
+        self._get_client().enqueue(options, str(run_id), tenant_id, input_json)
 
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None:
         """Wake the DBOS workflow waiting on approval step `step_id` (DBOS send on its topic). Only a

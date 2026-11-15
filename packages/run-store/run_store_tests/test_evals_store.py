@@ -539,3 +539,31 @@ def test_update_case_after_a_concurrent_delete_is_not_found(engine, store, tenan
     monkeypatch.setattr(EvalStore, "_writable_suite", delete_then_lock)
     with pytest.raises(EvalCaseNotFound):
         store.update_case(tenant, cases[0].id, input="z")
+
+
+def test_field_equals_null_value_round_trips(store, tenant, engine):
+    """A required field that is null (`field_equals.value: null`) is stored and read back; optional
+    None fields stay left out, so the stored shape of suites without nulls is unchanged."""
+    fe = {"kind": "field_equals", "path": "a.0", "value": None, "name": "fe_null"}
+    plain = [{"kind": "equals_expected"}, {"kind": "contains", "name": "c"}]
+    suite = store.create_suite(tenant, "ag", f"nulls-{uuid4().hex[:6]}", evaluators=[fe, *plain])
+    assert store.get_suite(tenant, suite.id).evaluators[0].value is None
+    case = store.add_case(tenant, suite.id, {"name": "c0", "input": "x", "evaluators": [
+        {"kind": "field_equals", "path": "b", "value": None}]})
+    assert store.get_case(tenant, case.id).evaluators[0].value is None
+    store.update_case(tenant, case.id, input="y")
+    store.upsert_cases(tenant, suite.id, [{"name": "c1", "input": "z", "evaluators": [
+        {"kind": "field_equals", "path": "c", "value": None, "name": "fe2"}]}])
+    snap = store.snapshot(tenant, suite.id)
+    assert snap.evaluators[0].value is None
+    assert [c.evaluators[0].value for c in snap.ordered_cases()] == [None, None]
+    assert EvalSuiteSnapshot.model_validate_json(snap.canonical_json()) == snap
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT evaluators FROM eval_suites WHERE tenant_id = :t AND id = :s"), {"t": tenant, "s": suite.id}
+        ).scalar_one()
+    assert stored == [
+        {"kind": "field_equals", "path": "a.0", "value": None, "name": "fe_null"},
+        {"kind": "equals_expected"},
+        {"kind": "contains", "case_sensitive": True, "name": "c"},
+    ]

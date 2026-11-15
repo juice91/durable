@@ -85,9 +85,9 @@ describe("editor draft", () => {
 });
 
 describe("step registry", () => {
-  it("has the five built-in steps in order, then Knowledge and Memory (RM.17), with the ids the Config panel links to", () => {
-    expect(EDITOR_STEPS.map((step) => step.id)).toEqual([...CORE_STEP_IDS, "knowledge", "memory"]);
-    expect(EDITOR_STEPS.map((step) => step.label)).toEqual(["Identity and model", "Instructions", "Tools", "Request context", "Processors", "Knowledge", "Memory"]);
+  it("has the five built-in steps in order, then Knowledge and Memory (RM.17) and Output (AC.13), with the ids the Config panel links to", () => {
+    expect(EDITOR_STEPS.map((step) => step.id)).toEqual([...CORE_STEP_IDS, "knowledge", "memory", "output"]);
+    expect(EDITOR_STEPS.map((step) => step.label)).toEqual(["Identity and model", "Instructions", "Tools", "Request context", "Processors", "Knowledge", "Memory", "Output"]);
     expect(FIRST_STEP_ID).toBe("identity");
     expect(editorStep("request-context")?.label).toBe("Request context");
   });
@@ -103,7 +103,8 @@ describe("step registry", () => {
     expect(neighbourSteps("tools").previous?.label).toBe("Instructions");
     expect(neighbourSteps("tools").next?.label).toBe("Request context");
     expect(neighbourSteps("processors").next?.label).toBe("Knowledge");
-    expect(neighbourSteps("memory").next).toBeNull();
+    expect(neighbourSteps("memory").next?.label).toBe("Output");
+    expect(neighbourSteps("output").next).toBeNull();
   });
 
   // [message, built-in step (stepForErrorMessage), registry step (stepForError, with RM.17's steps)]

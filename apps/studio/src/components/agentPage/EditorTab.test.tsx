@@ -277,6 +277,19 @@ describe("AgentDetailPage", () => {
     expect(await screen.findByText(/hash2000/)).toBeInTheDocument();
   });
 
+  it("Publish 201 with warnings lists them (AC.13)", async () => {
+    vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent);
+    vi.mocked(api.versions.list).mockResolvedValueOnce([version(1)]).mockResolvedValueOnce([version(2), version(1)]);
+    const warning = { code: "cost_cap_unpriced_model", path: "model", message: "model: 'test:echo' has no price in the model price override file" };
+    vi.mocked(api.versions.create).mockResolvedValueOnce({ ...version(2), warnings: [warning] } as ReturnType<typeof version>);
+
+    render(<AgentDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+
+    expect(await screen.findByText("Version 2 published")).toBeInTheDocument();
+    expect(screen.getByTestId("publish-warnings")).toHaveTextContent(warning.message);
+  });
+
   it("Publish disabled while unsaved changes", async () => {
     vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent);
     vi.mocked(api.versions.list).mockResolvedValueOnce([]);
@@ -292,6 +305,32 @@ describe("AgentDetailPage", () => {
     expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
 
     fireEvent.click(screen.getByText("Save draft"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Publish" })).toBeEnabled());
+    expect(screen.queryByText("Save the draft before publishing")).not.toBeInTheDocument();
+  });
+
+  it("a cost typed with trailing zeros (0.50) is saved in the server's form: the draft is clean and Publish is enabled (AC.13 review)", async () => {
+    vi.mocked(api.agents.get).mockResolvedValueOnce(baseAgent);
+    vi.mocked(api.versions.list).mockResolvedValue([]);
+    // The server stores the cost normalised (eap_schemas.limits normalise_usd) and returns that.
+    vi.mocked(api.agents.update).mockImplementation(async (_id, spec) => {
+      const limits = (spec as unknown as { limits?: { max_cost_usd?: string } }).limits;
+      const stored = limits?.max_cost_usd ? { ...spec, limits: { ...limits, max_cost_usd: String(Number(limits.max_cost_usd)) } } : spec;
+      return { ...baseAgent, draft_spec: stored };
+    });
+
+    render(<AgentDetailPage />);
+    await screen.findByDisplayValue("Base Agent");
+    fireEvent.click(screen.getByRole("button", { name: /Limits and fallback models/ }));
+    const cost = screen.getByLabelText(/^Cost \(USD/) as HTMLInputElement;
+    fireEvent.change(cost, { target: { value: "0.50" } });
+    // The field keeps the text as typed.
+    expect(cost.value).toBe("0.50");
+    expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
+
+    fireEvent.click(screen.getByText("Save draft"));
+    await waitFor(() => expect(api.agents.update).toHaveBeenCalled());
+    expect((vi.mocked(api.agents.update).mock.calls[0][1] as unknown as { limits: unknown }).limits).toEqual({ max_cost_usd: "0.5" });
     await waitFor(() => expect(screen.getByRole("button", { name: "Publish" })).toBeEnabled());
     expect(screen.queryByText("Save the draft before publishing")).not.toBeInTheDocument();
   });

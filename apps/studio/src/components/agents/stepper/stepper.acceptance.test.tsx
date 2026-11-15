@@ -174,9 +174,10 @@ describe("deep links and reload", () => {
 });
 
 describe("step navigation", () => {
-  it("Previous and Next walk all seven steps in order with matching names and headings", async () => {
+  it("Previous and Next walk all eight steps in order with matching names and headings", async () => {
     await renderEditor();
-    const labels = ["Identity and model", "Instructions", "Tools", "Request context", "Processors", "Knowledge", "Memory"];
+    // AC.13: Output is step 8.
+    const labels = ["Identity and model", "Instructions", "Tools", "Request context", "Processors", "Knowledge", "Memory", "Output"];
     for (let index = 0; index < labels.length; index++) {
       expect(region(labels[index])).toBeVisible();
       expect(navButton(new RegExp(`^${labels[index]}`))).toHaveAttribute("aria-current", "step");
@@ -189,7 +190,7 @@ describe("step navigation", () => {
       }
     }
     fireEvent.click(screen.getByTestId("stepper-previous"));
-    expect(region("Knowledge")).toBeVisible();
+    expect(region("Memory")).toBeVisible();
   });
 
   it("only the active step's body is visible; the others stay mounted", async () => {
@@ -230,7 +231,7 @@ describe("step navigation", () => {
     await renderEditor();
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
     expect(select.value).toBe("tools");
-    expect(screen.getByText("Step 3 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Step 3 of 8")).toBeInTheDocument();
     expect(Array.from(select.options).map((option) => option.value)).toEqual(EDITOR_STEPS.map((step) => step.id));
     expect(select.options[0].textContent).toContain("test:echo");
     fireEvent.change(screen.getByRole("textbox", { name: "Instructions", hidden: true }), { target: { value: "" } });
@@ -238,7 +239,7 @@ describe("step navigation", () => {
     fireEvent.change(select, { target: { value: "processors" } });
     expect(region("Processors")).toBeVisible();
     expect(lastReplace().params.get("step")).toBe("processors");
-    expect(screen.getByText("Step 5 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Step 5 of 8")).toBeInTheDocument();
   });
 });
 

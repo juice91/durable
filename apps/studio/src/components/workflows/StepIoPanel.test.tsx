@@ -5,7 +5,7 @@ import type { StepDetail } from "@/lib/workflowRunState";
 
 vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 
-import { StepIoPanel } from "./StepIoPanel";
+import { StepIoPanel, isStructuredAgentOutput } from "./StepIoPanel";
 
 const detail = (overrides: Partial<StepDetail>): StepDetail => ({
   stepId: "s",
@@ -52,5 +52,41 @@ describe("StepIoPanel", () => {
   it("still prints a non-parallel step's null output as JSON", () => {
     render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "tool", started: true, hasOutput: true, output: null })} onClose={() => undefined} />);
     expect(screen.getByTestId("step-io-output")).toHaveTextContent("null");
+  });
+
+  it("renders a structured agent step's object output as JSON (AC.9)", () => {
+    const output = { priority: "high", tags: ["disk"] };
+    render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "agent", started: true, hasOutput: true, output })} onClose={() => undefined} />);
+    const block = screen.getByTestId("step-io-output");
+    expect(block).toHaveAttribute("data-output-format", "json");
+    expect(block.textContent).toBe(JSON.stringify(output, null, 2));
+    expect(screen.getByText("Structured output")).toBeInTheDocument();
+  });
+
+  it("keeps a text agent step's output as plain text", () => {
+    render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "agent", started: true, hasOutput: true, output: "Echo: hi" })} onClose={() => undefined} />);
+    const block = screen.getByTestId("step-io-output");
+    expect(block).toHaveAttribute("data-output-format", "text");
+    expect(block.textContent).toBe("Echo: hi");
+    expect(screen.queryByText("Structured output")).toBeNull();
+  });
+
+  it("shows markup inside a structured output as escaped text, under the JSON label", () => {
+    const output = { summary: "<img src=x onerror=alert(1)>", note: "<b>bold</b>" };
+    const { container } = render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "agent", started: true, hasOutput: true, output })} onClose={() => undefined} />);
+    const block = screen.getByTestId("step-io-output");
+    expect(block.previousElementSibling).toHaveTextContent("Structured output");
+    expect(block).toHaveAttribute("data-output-format", "json");
+    expect(block.textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(block.innerHTML).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(block.querySelector("img, b")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("only treats an agent step's object as structured", () => {
+    expect(isStructuredAgentOutput("agent", { a: 1 })).toBe(true);
+    expect(isStructuredAgentOutput("agent", "text")).toBe(false);
+    expect(isStructuredAgentOutput("agent", null)).toBe(false);
+    expect(isStructuredAgentOutput("tool", { a: 1 })).toBe(false);
   });
 });

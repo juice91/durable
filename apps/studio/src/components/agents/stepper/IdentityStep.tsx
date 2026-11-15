@@ -1,16 +1,21 @@
 "use client";
 
 import React from "react";
+import { fallbackProblems, limitsProblems } from "../agentCapabilities";
 import { stepForErrorMessage, stepStatus } from "../specSections";
 import { numberProblems, TEMPERATURE_MAX, TEMPERATURE_MIN, type EditorDraft } from "./editorDraft";
 import { fieldClass, labelClass } from "./fieldStyles";
+import { LimitsFields, limitsFieldId } from "./LimitsFields";
 import type { EditorStepDefinition, MissingField, StepProps } from "./types";
 
 // Polite and persistent, like the instructions' placeholder checks.
 const problemClass = "mt-1 text-caption text-destructive-text";
 
-/** Step 1: the agent's name, model and model settings. (Limits and fallback models: AC.13.) */
-export function IdentityStep({ draft, onChange }: StepProps) {
+/**
+ * Step 1: the agent's name, model and model settings, then the collapsible "Limits and fallback
+ * models" group (AC.13: `spec.limits` and `spec.fallback_models`, edited through `onSpecChange`).
+ */
+export function IdentityStep({ draft, spec, onChange, onSpecChange }: StepProps) {
   const problems = numberProblems(draft);
   return (
     <div className="space-y-4">
@@ -80,6 +85,8 @@ export function IdentityStep({ draft, onChange }: StepProps) {
           </p>
         </div>
       </div>
+
+      <LimitsFields spec={spec} onSpecChange={onSpecChange} />
     </div>
   );
 }
@@ -90,7 +97,7 @@ export const identityStep: EditorStepDefinition = {
   Component: IdentityStep,
   status: (spec) => stepStatus("identity", spec)!,
   ownsError: (message) => stepForErrorMessage(message) === "identity",
-  missing: (draft: EditorDraft): MissingField[] => {
+  missing: (draft: EditorDraft, spec): MissingField[] => {
     const out: MissingField[] = [];
     if (!draft.name.trim()) out.push({ step: "identity", fieldId: "name" });
     if (!draft.provider.trim()) out.push({ step: "identity", fieldId: "provider" });
@@ -98,6 +105,9 @@ export const identityStep: EditorStepDefinition = {
     const problems = numberProblems(draft);
     if (problems.temperature) out.push({ step: "identity", fieldId: "temperature", message: problems.temperature });
     if (problems.maxTokens) out.push({ step: "identity", fieldId: "maxTokens", message: problems.maxTokens });
+    for (const problem of limitsProblems(spec)) out.push({ step: "identity", fieldId: limitsFieldId(problem.field), message: problem.message });
+    // The problem fields are the element ids already: `fallback-<i>` (fallbackFieldId) or `fallback-add`.
+    for (const problem of fallbackProblems(spec)) out.push({ step: "identity", fieldId: problem.field, message: problem.message });
     return out;
   },
 };
