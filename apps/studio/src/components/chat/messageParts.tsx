@@ -11,6 +11,8 @@ import { Badge, type BadgeProps } from "@/components/ui/Badge";
 import { focusRing } from "@/components/ui/Button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/Collapsible";
 import { SafeLink, SafeMarkdown } from "@/components/markdown/SafeMarkdown";
+import { ToolDecisionView } from "./ToolDecisionView";
+import type { ToolDecision } from "./turnCapabilities";
 import { CITATION_ATTR, citationHref, citationSourcesForRun, type CitationSource } from "./citations";
 import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type ToolCallInfo, type ToolCallStatus } from "./toolCalls";
 
@@ -20,6 +22,34 @@ import { formatDuration, messageRunId, toolCallInfoKey, TOOL_STATUS_LABELS, type
  * scripted model reuses ids per tool name across turns).
  */
 export const ToolCallInfoContext = createContext<ReadonlyMap<string, ToolCallInfo>>(new Map());
+
+/**
+ * Thread message id → the native run id of its turn, when message ids do not carry it. The native
+ * runtime's ids are `<runId>:...` (`messageRunId`); the AG-UI runtime's are the server's D13 ids or
+ * the client's, so the AG-UI chat provides this map (AGUI.12). Null: parse the id.
+ */
+export const MessageRunsContext = createContext<ReadonlyMap<string, string> | null>(null);
+
+/** A gated call's recorded decision, shown under its tool card (the AG-UI chat, AGUI.12). */
+export interface ToolDecisionEntry {
+  toolName: string;
+  decision: ToolDecision;
+  lostRace: boolean;
+}
+
+/**
+ * `toolCallInfoKey(runId, toolCallId)` → the call's decision line. Provided by the AG-UI chat only:
+ * the native chat renders the same line as its own data part (ToolApprovalPart).
+ */
+export const ToolDecisionsContext = createContext<ReadonlyMap<string, ToolDecisionEntry> | null>(null);
+
+/** The native run id of the current message's turn, or null. */
+export function useMessageRunId(): string | null {
+  const messageId = useAuiState((s) => s.message.id);
+  const runs = useContext(MessageRunsContext);
+  if (runs) return runs.get(messageId) ?? null;
+  return messageRunId(messageId);
+}
 
 const STATUS_VARIANT: Record<ToolCallStatus, BadgeProps["variant"]> = {
   running: "info",
@@ -46,13 +76,15 @@ const monoBlock = "max-h-64 overflow-auto whitespace-pre-wrap break-words rounde
  * arguments and result in mono inside. Collapsed by default.
  */
 export function ToolCallCard({ toolCallId, toolName, args, result }: ToolCallMessagePartProps) {
-  const messageId = useAuiState((s) => s.message.id);
-  const runId = messageRunId(messageId);
+  const runId = useMessageRunId();
   const infos = useContext(ToolCallInfoContext);
   const info = runId === null ? undefined : infos.get(toolCallInfoKey(runId, toolCallId));
   const status: ToolCallStatus = info?.status ?? (result !== undefined ? "ok" : "running");
   const [open, setOpen] = useState(false);
+  const decisions = useContext(ToolDecisionsContext);
+  const decision = runId === null ? undefined : decisions?.get(toolCallInfoKey(runId, toolCallId));
   return (
+    <>
     <Collapsible open={open} onOpenChange={setOpen} asChild>
       <div data-testid="tool-call-card" data-status={status} className="my-2 min-w-0 rounded-md border border-border bg-surface text-foreground">
         <CollapsibleTrigger
@@ -92,6 +124,8 @@ export function ToolCallCard({ toolCallId, toolName, args, result }: ToolCallMes
         </CollapsibleContent>
       </div>
     </Collapsible>
+    {decision ? <ToolDecisionView toolName={decision.toolName} toolCallId={toolCallId} decision={decision.decision} lostRace={decision.lostRace} /> : null}
+    </>
   );
 }
 
@@ -120,8 +154,7 @@ function CitationLink({ n, href, source }: { n: string; href: string; source: Ci
 
 /** `[n]` → source for the message's turn (from its retrieve results), or null when it retrieved nothing. */
 export function useTurnSources(): Map<number, CitationSource> | null {
-  const messageId = useAuiState((s) => s.message.id);
-  const runId = messageRunId(messageId);
+  const runId = useMessageRunId();
   const infos = useContext(ToolCallInfoContext);
   return useMemo(() => (runId === null ? null : citationSourcesForRun(infos, runId)), [infos, runId]);
 }

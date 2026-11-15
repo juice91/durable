@@ -29,6 +29,9 @@ export interface ApprovalCardProps {
   /** Optional (AC.14 review): the decision lost a race (409). Called before the refresh, so a host
    * whose card unmounts once the refresh shows the recorded decision can still explain it. */
   onConflict?: (message: string) => void;
+  /** Optional (AGUI.12): records the decision another way than the REST routes (the AG-UI chat
+   * answers its interrupt with `resume`). Errors are shown like a REST failure. */
+  submit?: (decision: "approve" | "deny", comment: string) => Promise<void>;
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
@@ -74,7 +77,7 @@ function prettyJson(value: unknown): string {
  * A waiting approval: the step's prompt, or the tool and its arguments; the deadline with a
  * countdown; an optional comment; Approve, and Reject (step) or Deny (tool) after a confirm.
  */
-export function ApprovalCard({ approval, onRefresh, onDecided, onConflict }: ApprovalCardProps) {
+export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submit }: ApprovalCardProps) {
   const tool = approval.kind === "tool";
   const key = tool ? `tool-${approval.toolCallId}` : approval.stepId;
   const denyLabel = tool ? "Deny" : "Reject";
@@ -102,7 +105,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict }: App
     setError(null);
     setDialogError(null);
     try {
-      if (approval.kind === "tool") {
+      if (submit) {
+        await submit(decision, comment);
+      } else if (approval.kind === "tool") {
         await decideToolApproval(approval.runId, approval.toolCallId, decision, comment);
       } else {
         await decideApproval(approval.runId, approval.stepId, decision === "approve" ? "approve" : "reject", comment);

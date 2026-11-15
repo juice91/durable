@@ -39,6 +39,33 @@ import {
   type VersionRef,
 } from "@/components/chat/runOptions";
 import { TurnStartError, startTurnWithOptions } from "@/components/chat/turnApi";
+import { useChatProtocol } from "@/components/chat/chatProtocol";
+import {
+  agUiThreadHistory,
+  createChatAgent,
+  displayStatusOf,
+  inputUserText,
+  pydanticosOptions,
+  refusalOf,
+  refusalText,
+  runInfoOf,
+  EMPTY_RUN_MAPS,
+  approvalDecidedOf,
+  inputUserMessageId,
+  outputRetryEventOf,
+  resumeDecisions,
+  type RunMaps,
+  type AgUiThread,
+  type ChatAgentListener,
+  type PydanticosRunInfo,
+  toolInterruptTarget,
+  type StudioChatAgent,
+} from "@/components/chat/agUiChat";
+import type { AgUiApprovalLookups } from "@/components/chat/AgUiApprovals";
+import { ApprovalCard } from "@/components/approvals/ApprovalCard";
+import type { ToolDecisionEntry } from "@/components/chat/messageParts";
+import { toolCallInfoKey as decisionKey } from "@/components/chat/toolCalls";
+import type { ToolDecision } from "@/components/chat/turnCapabilities";
 import {
   effectiveTurnStatus,
   fallbackDisabledByOverride,
@@ -47,6 +74,8 @@ import {
   turnFallback,
   turnLooksStructured,
   turnOutputJson,
+  toolApprovals,
+  toolDecisions,
 } from "@/components/chat/turnCapabilities";
 import { IDLE_VALIDATION, type ContextValidationState } from "@/components/requestContext";
 import { RequestContextPopover } from "@/components/requestContext/RequestContextPopover";
@@ -60,6 +89,7 @@ import {
   type Conversation,
 } from "@/lib/conversations";
 import { fetchModels, type ModelOption } from "@/lib/metrics";
+import type { RunEvent } from "@/lib/runs";
 import {
   RequestContextValidationError,
   getRequestContext,
@@ -70,6 +100,7 @@ import {
 } from "@/lib/requestContext";
 import {
   deltaReducer,
+  getRun,
   listEvents,
   subscribeRun,
   type RunStatus,
@@ -80,7 +111,7 @@ import { agentChatPathState, routes } from "@/lib/routes";
 import { matchesNow, WIDE_QUERY } from "@/components/frame/useMediaQuery";
 import { useAgentPage } from "./AgentPageContext";
 import { AgentChatPanes } from "./AgentChatPanes";
-import { ChatPane, footerMessageIds } from "./ChatPane";
+import { AgUiChatPane, ChatPane } from "./ChatPane";
 import { Composer } from "./Composer";
 import { ComposerFieldError } from "./ComposerChip";
 import { ComposerModelChip, MODEL_ERROR_ID } from "./ComposerModelChip";
@@ -125,6 +156,38 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
 
 function failedEventStatus(status: unknown): "failed" | "needs_attention" {
   return status === "needs_attention" ? "needs_attention" : "failed";
+}
+
+/** A turn with freshly read events merged in by seq (and what its terminal events say). */
+function withEvents(turn: Turn, fresh: readonly RunEvent[]): Turn {
+  const seen = new Set(turn.events.map((item) => item.seq));
+  const added = fresh.filter((item) => !seen.has(item.seq));
+  if (added.length === 0) return turn;
+  const events = [...turn.events, ...added].sort((a, b) => a.seq - b.seq);
+  let { displayStatus, error } = turn;
+  for (const event of added) {
+    if (event.type === "run_completed") displayStatus = "completed";
+    else if (event.type === "run_failed") {
+      displayStatus = failedEventStatus(event.data.status);
+      if (typeof event.data.error === "string") error = event.data.error;
+    }
+  }
+  return { ...turn, events, displayStatus, error, modelId: turn.modelId ?? turnModelId(events, turn.row) };
+}
+
+/** AG-UI `RUN_ERROR` codes about the stream, not the run (the run goes on). */
+const STREAM_ERROR_CODES = new Set(["stream.resume_failed", "previous_turn_running", "unauthorized", "stream_interrupted"]);
+
+/** The AG-UI chat's thread: one pane (and agent) per `key`. A new conversation's `threadId` is a
+ * fresh id (the API derives its conversation, D3); an existing one's is the conversation id. */
+interface AgUiSession {
+  key: string;
+  threadId: string;
+}
+
+function newSession(): AgUiSession {
+  const threadId = crypto.randomUUID();
+  return { key: `new:${threadId}`, threadId };
 }
 
 /**
@@ -290,6 +353,32 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   // The URL is written only after it has been read, so a reload never loses its options.
   const [urlReady, setUrlReady] = useState(false);
 
+  // AGUI.12 (D21): the chat stream over AG-UI, or the native runtime (Settings → Chat, Q6).
+  const [protocol] = useChatProtocol();
+  const agui = protocol === "agui";
+  const aguiRef = useRef(agui);
+  aguiRef.current = agui;
+  // The AG-UI thread (null until the route is read): its pane, agent and history are made per key.
+  const [aguiSession, setAguiSession] = useState<AgUiSession | null>(null);
+  // Native run ids of the thread's shown turns, oldest first (the AG-UI messages map onto them).
+  const [runMaps, setRunMaps] = useState<RunMaps>(EMPTY_RUN_MAPS);
+  // Structured output per native run id, from RUN_FINISHED.result.
+  const [structuredResults, setStructuredResults] = useState<ReadonlyMap<string, unknown>>(() => new Map());
+  const [aguiInterrupts, setAguiInterrupts] = useState(0);
+  // Gated calls whose resume lost a race (409): shown with the recorded decision (AC.14).
+  // `toolCallInfoKey(run, call)` of gated calls whose decision from this page lost a race: the
+  // stream's approval_decided named another decision than the one sent (AC.14's notice).
+  const [lostRaceKeys, setLostRaceKeys] = useState<ReadonlySet<string>>(() => new Set());
+  // Decisions the stream announced (approval_decided) before the native events are re-read.
+  const [liveDecisions, setLiveDecisions] = useState<ReadonlyMap<string, ToolDecision>>(() => new Map());
+  // A turn started by the native protocol (no AG-UI run to attach to) still running when the thread
+  // opened on AG-UI: followed natively until it ends, then the thread reloads (its id).
+  const [nativeFollow, setNativeFollow] = useState<string | null>(null);
+  // A refused AG-UI send: the pane drops its user message (a new key each time).
+  const [dropLastTurn, setDropLastTurn] = useState<{ key: number } | null>(null);
+  const dropKeyRef = useRef(0);
+  const conversationIdRef = useRef<string | null>(null);
+
   const latestVersion = selectedAgent?.latest_version ?? null;
   const versionRef = selectedAgent
     ? effectiveVersionRef(requestedVersion, latestVersion, versions)
@@ -301,6 +390,9 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   const modelChoiceError = "error" in resolvedModel ? resolvedModel.error : null;
 
   const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
   // The Memory tab and "Act as user" show only for an agent with memory (draft or latest version).
   const memoryChip = agentHasMemory(selectedAgent, versions);
 
@@ -463,6 +555,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     stripPreferPresetParam();
     setRequestedVersion(initial.version);
     setPendingModelId(initial.model);
+    setAguiSession(initialConversationRef.current ? { key: initialConversationRef.current, threadId: initialConversationRef.current } : newSession());
     setReady(true);
     setUrlReady(true);
     writeLastAgent(agentId);
@@ -566,11 +659,27 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       pendingConversationRef.current = null;
       if (pending?.refused && pending.id !== id) void discardEmptyConversation(pending.id);
       setConversationId(id);
+      conversationIdRef.current = id;
       setConversationResourceId(undefined);
       setTurns([]);
       setError(null);
       setAnnounceRunId(null);
-      setRunActive(true);
+      const viaAgUi = aguiRef.current;
+      if (viaAgUi) {
+        // The AG-UI pane loads the thread's messages (and reattaches to a running turn) itself;
+        // this reads the native turns for the badges, usage and banners.
+        setAguiSession({ key: id, threadId: id });
+        setRunMaps(EMPTY_RUN_MAPS);
+        setStructuredResults(new Map());
+        setAguiInterrupts(0);
+        setLostRaceKeys(new Set());
+        setLiveDecisions(new Map());
+        setNativeFollow(null);
+        // The new pane reports its own running state (an attach while a turn runs).
+        setRunActive(false);
+      } else {
+        setRunActive(true);
+      }
       try {
         const conversation = await getConversation(id);
         if (!current()) return;
@@ -578,8 +687,10 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
           // Another agent's conversation (an old link): it opens in that agent's chat, not here, so
           // none of its events are read.
           setConversationId(null);
+          conversationIdRef.current = null;
           setConversationParam(null);
           setRunActive(false);
+          if (viaAgUi) setAguiSession(newSession());
           setOtherAgentConversation({ agentId: conversation.agent_id, conversationId: conversation.id });
           return;
         }
@@ -612,6 +723,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
           }),
         );
         const latest = loaded[loaded.length - 1];
+        // AG-UI: the pane's attach follows a running turn (and its re-POST heals an unlaunched one).
+        if (viaAgUi) return;
         if (!latest || TERMINAL_STATUSES.has(latest.run.display_status)) {
           setRunActive(false);
           return;
@@ -666,6 +779,16 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     if (pending?.refused) void discardEmptyConversation(pending.id);
     generationRef.current += 1;
     setConversationId(null);
+    conversationIdRef.current = null;
+    if (aguiRef.current) {
+      setAguiSession(newSession());
+      setRunMaps(EMPTY_RUN_MAPS);
+      setStructuredResults(new Map());
+      setAguiInterrupts(0);
+      setLostRaceKeys(new Set());
+      setLiveDecisions(new Map());
+      setNativeFollow(null);
+    }
     setConversationResourceId(undefined);
     setTurns([]);
     setRunActive(false);
@@ -878,6 +1001,347 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     ],
   );
 
+  // ------------------------------------------------------------------ AG-UI chat (AGUI.12, D21)
+  // The run options of the next AG-UI send, read when its run starts (`forwardedProps.pydanticos`).
+  const sendOptions: TurnOptions = {
+    version: versionRef,
+    model: overrideFor(chosenModelId, defaultModelId),
+    // A target without context fields gets none (a remembered value may hold stale keys).
+    request_context: contextInfo !== null && contextInfo.fields.length === 0 ? null : contextToSend(contextValue),
+  };
+  const sendOptionsRef = useRef(sendOptions);
+  sendOptionsRef.current = sendOptions;
+  // "Act as user" for a new thread (its conversation is created by the API with this resource).
+  const newThreadUserRef = useRef("");
+  newThreadUserRef.current = memoryChip ? actAs : "";
+  const lastSentOptionsRef = useRef<TurnOptions | null>(null);
+  // AG-UI runId (of a POST or an attach) → the native run id its `CUSTOM pydanticos.run` named.
+  const aguiRunsRef = useRef(new Map<string, string>());
+  const sessionKey = aguiSession?.key ?? null;
+  const sessionThreadId = aguiSession?.threadId ?? null;
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+
+  /** Re-read one turn's events (and, `withRow`, its run row: usage and cost) from the native API. */
+  const refreshTurn = useCallback(
+    async (runId: string, withRow = false) => {
+      try {
+        const [fresh, row] = await Promise.all([listEvents(runId), withRow ? getRun(runId).catch(() => null) : Promise.resolve(null)]);
+        updateTurn(runId, (turn) => {
+          const next = withEvents(turn, fresh);
+          if (!row) return next;
+          const run = row as typeof row & RunUsageRow & { display_status?: RunStatus };
+          return { ...next, row: run, displayStatus: run.display_status ?? next.displayStatus, modelId: run.model_id ?? next.modelId };
+        });
+      } catch {
+        // The badge keeps what it has; the next stream event or reload reads again.
+      }
+    },
+    [updateTurn],
+  );
+  const refreshTurnAction = useCallback((runId: string) => refreshTurn(runId), [refreshTurn]);
+
+  /** Ties an AG-UI runId (and the user message it sent) to a native run, for the message mapping. */
+  const mapRun = useCallback((aguiRunId: string, runId: string, userMessageId: string | null) => {
+    aguiRunsRef.current.set(aguiRunId, runId);
+    setRunMaps((current) => {
+      const prefixKnown = current.byPrefix.get(aguiRunId) === runId;
+      const userKnown = userMessageId === null || current.byUserMessage.get(userMessageId) === runId;
+      if (prefixKnown && userKnown) return current;
+      const byPrefix = new Map(current.byPrefix).set(aguiRunId, runId);
+      const byUserMessage = userMessageId === null ? current.byUserMessage : new Map(current.byUserMessage).set(userMessageId, runId);
+      return { byPrefix, byUserMessage };
+    });
+  }, []);
+
+  const handleRunInfo = useCallback(
+    (info: PydanticosRunInfo, aguiRunId: string, input: string, userMessageId: string | null) => {
+      mapRun(aguiRunId, info.run_id, userMessageId);
+      const options = lastSentOptionsRef.current;
+      setTurns((existing) =>
+        existing.some((turn) => turn.runId === info.run_id)
+          ? existing
+          : [
+              ...existing,
+              {
+                runId: info.run_id,
+                input,
+                events: [],
+                partials: {},
+                displayStatus: "running",
+                error: null,
+                modelId: info.model_id,
+                modelOverridden: Boolean(options?.model),
+                draft: info.draft,
+                version: info.draft ? null : info.version,
+                row: null,
+                liveText: null,
+              },
+            ],
+      );
+      // A new thread's first turn: the API created its conversation; now it shows and goes in the URL.
+      if (conversationIdRef.current === null && info.conversation_id) {
+        const created = info.conversation_id;
+        conversationIdRef.current = created;
+        setConversationId(created);
+        setConversationParam(created);
+        setConversationResourceId(undefined);
+        void getConversation(created)
+          .then((conversation) => {
+            if (conversationIdRef.current === created) setConversationResourceId(conversation.resource_id ?? null);
+          })
+          .catch(() => undefined);
+      }
+      refreshRail();
+    },
+    [mapRun, refreshRail, setConversationParam],
+  );
+
+  const listenerRef = useRef<ChatAgentListener | null>(null);
+  listenerRef.current = {
+    onEvent: (event, input) => {
+      const info = runInfoOf(event);
+      const sent = resumeDecisions(input as { resume?: unknown });
+      if (info) {
+        // A resume run's input holds no new user message (resumeTranscript "appended").
+        handleRunInfo(info, input.runId, inputUserText(input), sent.length > 0 ? null : inputUserMessageId(input));
+        return;
+      }
+      // A resume run names its native run in the interrupt ids, should `pydanticos.run` be missing.
+      if (!aguiRunsRef.current.has(input.runId) && sent.length > 0) mapRun(input.runId, sent[0].runId, null);
+      const runId = aguiRunsRef.current.get(input.runId) ?? null;
+      const decided = approvalDecidedOf(event);
+      if (decided) {
+        // D15: the recorded decision wins. Another one than this page sent is a lost race (AC.14).
+        const target = runId ?? sent.find((item) => item.toolCallId === decided.toolCallId)?.runId ?? null;
+        if (!target) return;
+        const key = decisionKey(target, decided.toolCallId);
+        setLiveDecisions((current) => new Map(current).set(key, { kind: decided.decision, decidedBy: null, comment: null }));
+        const mine = sent.find((item) => item.runId === target && item.toolCallId === decided.toolCallId);
+        if (mine && decided.decision !== mine.sent && !(mine.sent === "denied" && decided.decision === "timed_out")) {
+          setLostRaceKeys((current) => (current.has(key) ? current : new Set(current).add(key)));
+        }
+        // Who decided, and the comment, are native.
+        void refreshTurn(target, true);
+        return;
+      }
+      if (outputRetryEventOf(event)) {
+        if (runId) void refreshTurn(runId);
+        return;
+      }
+      const status = displayStatusOf(event);
+      if (status) {
+        if (runId) updateTurn(runId, (turn) => ({ ...turn, displayStatus: status }));
+        return;
+      }
+      const type = event.type as string;
+      if (type === "TOOL_CALL_RESULT") {
+        // Tool status, duration and retrieve sources (citations) are native.
+        if (runId) void refreshTurn(runId);
+      } else if (type === "RUN_FINISHED") {
+        if (!runId) return;
+        const finished = event as typeof event & { result?: unknown; outcome?: { type?: unknown } };
+        if (finished.result !== undefined) setStructuredResults((current) => new Map(current).set(runId, finished.result));
+        if (finished.outcome?.type === "interrupt") updateTurn(runId, (turn) => ({ ...turn, displayStatus: "waiting_approval" }));
+        void refreshTurn(runId, true);
+        refreshRail();
+      } else if (type === "RUN_ERROR") {
+        const failed = event as typeof event & { code?: unknown; message?: unknown };
+        const code = typeof failed.code === "string" ? failed.code : null;
+        const message = typeof failed.message === "string" ? failed.message : "";
+        if (code === "abort") return;
+        if (code !== null && STREAM_ERROR_CODES.has(code)) {
+          // The stream stopped, not the run: say so; the native data shows where the run is.
+          setError(`The chat stream stopped${message ? `: ${message}` : "."}`);
+          if (runId) void refreshTurn(runId, true);
+          return;
+        }
+        if (runId) {
+          updateTurn(runId, (turn) => ({ ...turn, displayStatus: code === "needs_attention" ? "needs_attention" : "failed", error: message || turn.error }));
+          setAnnounceRunId(runId);
+          void refreshTurn(runId, true);
+        } else {
+          setError(message || "The run failed.");
+        }
+        refreshRail();
+      }
+    },
+    onError: (failure, input) => {
+      const refusal = refusalOf(failure);
+      const resume = Array.isArray((input as { resume?: unknown }).resume) && ((input as { resume?: unknown[] }).resume?.length ?? 0) > 0;
+      if (refusal && !resume) {
+        // Refused before the stream (nothing was recorded): the text goes back in the composer.
+        const text = inputUserText(input);
+        setDropLastTurn({ key: ++dropKeyRef.current });
+        if (text) putBack(text);
+        const options = lastSentOptionsRef.current ?? sendOptionsRef.current;
+        if (refusal.status === 422) {
+          const errors = classifyTurnError(refusal.status, refusal.detail, options);
+          setOptionErrors(errors);
+          setUnsentInput(text || null);
+          if (errors.context) setContextOpen(true);
+        } else {
+          setError(`Failed to send the message: ${refusalText(refusal)}`);
+        }
+        return;
+      }
+      if (refusal) {
+        const targets = ((input as { resume?: { interruptId?: unknown }[] }).resume ?? [])
+          .map((entry) => (typeof entry?.interruptId === "string" ? toolInterruptTarget({ id: entry.interruptId }) : null))
+          .filter((target): target is NonNullable<typeof target> => target !== null);
+        // The resume was refused before its stream (422, or a 409 for a reused runId): say so and
+        // re-read the runs now and shortly after, so the cards and tool statuses show what is recorded.
+        setError(`The decision could not be sent: ${refusalText(refusal)}`);
+        for (const runId of new Set(targets.map((target) => target.runId))) {
+          void refreshTurn(runId, true);
+          setTimeout(() => void refreshTurn(runId, true), 700);
+        }
+        refreshRail();
+        return;
+      }
+      setError("The chat stream failed. Reload the page to reattach to the run.");
+    },
+  };
+
+  const aguiAgent = useMemo<StudioChatAgent | null>(() => {
+    if (!agui || sessionKey === null || sessionThreadId === null) return null;
+    const agent = createChatAgent(agentId, sessionThreadId);
+    // Events of a thread no longer shown (a stream still closing) are dropped.
+    const current = () => sessionKeyRef.current === sessionKey;
+    agent.listener = {
+      onEvent: (event, input) => {
+        if (current()) listenerRef.current?.onEvent(event, input);
+      },
+      onError: (failure, input) => {
+        if (current()) listenerRef.current?.onError(failure, input);
+      },
+    };
+    agent.options = () => {
+      const options = sendOptionsRef.current;
+      lastSentOptionsRef.current = options;
+      if (current()) {
+        // A send (or a decision) supersedes the last refusal's notices.
+        setError(null);
+        setOptionErrors(NO_OPTION_ERRORS);
+        setUnsentInput(null);
+        setRestoreDraft(null);
+        setAnnounceRunId(null);
+      }
+      return pydanticosOptions(options, conversationIdRef.current === null ? newThreadUserRef.current || null : null);
+    };
+    return agent;
+  }, [agentId, agui, sessionKey, sessionThreadId]);
+  // Leaving a thread closes its stream only: the run goes on server side (D7).
+  useEffect(() => () => aguiAgent?.abortRun(), [aguiAgent]);
+
+  const aguiHistory = useMemo(() => {
+    if (!aguiAgent) return null;
+    const key = sessionKey;
+    return agUiThreadHistory(
+      agentId,
+      aguiAgent,
+      (loaded: AgUiThread) => {
+        if (sessionKeyRef.current !== key) return;
+        // D13: a turn's message ids carry the AG-UI runId that started it, else its native run id.
+        for (const run of loaded.runs) {
+          const prefix = run.runId ?? run.run_id;
+          aguiRunsRef.current.set(prefix, run.run_id);
+          setRunMaps((current) => ({ ...current, byPrefix: new Map(current.byPrefix).set(prefix, run.run_id) }));
+        }
+        // A running turn with no AG-UI run (started natively) cannot be attached: follow it natively.
+        const last = loaded.runs[loaded.runs.length - 1];
+        if (!loaded.activeRunId && last && !TERMINAL_STATUSES.has(last.display_status as RunStatus)) setNativeFollow(last.run_id);
+      },
+      () => {
+        if (sessionKeyRef.current === key) setError("Failed to load conversation.");
+      },
+    );
+  }, [agentId, aguiAgent, sessionKey]);
+
+  // Structured output by run: RUN_FINISHED.result, else (history) the run's native output_json.
+  const structuredByRun = useMemo(() => {
+    const results = new Map(structuredResults);
+    for (const turn of turns) {
+      if (results.has(turn.runId)) continue;
+      const value = turnOutputJson(turn.events);
+      if (value !== undefined) results.set(turn.runId, value);
+    }
+    return results;
+  }, [structuredResults, turns]);
+
+  // The approval cards' arguments and deadline, and decisions made elsewhere, from native events.
+  const approvalLookups = useMemo<AgUiApprovalLookups>(() => {
+    const byRun = new Map(turns.map((turn) => [turn.runId, turn]));
+    return {
+      details: (runId, toolCallId) => {
+        const turn = byRun.get(runId);
+        const approval = turn ? toolApprovals(turn.events).find((item) => item.toolCallId === toolCallId) : undefined;
+        return approval ? { toolName: approval.toolName, args: approval.args, deadline: approval.deadline } : null;
+      },
+      decision: (runId, toolCallId) => {
+        const turn = byRun.get(runId);
+        return turn ? (toolDecisions(turn.events).get(toolCallId) ?? null) : null;
+      },
+    };
+  }, [turns]);
+
+  // Each decided gated call's line (under its tool card): the native decision, else the stream's.
+  const toolDecisionEntries = useMemo(() => {
+    const entries = new Map<string, ToolDecisionEntry>();
+    for (const turn of turns) {
+      const recorded = toolDecisions(turn.events);
+      for (const approval of toolApprovals(turn.events)) {
+        const key = decisionKey(turn.runId, approval.toolCallId);
+        const decision = recorded.get(approval.toolCallId) ?? liveDecisions.get(key);
+        if (decision) entries.set(key, { toolName: approval.toolName, decision, lostRace: lostRaceKeys.has(key) });
+      }
+    }
+    return entries;
+  }, [liveDecisions, lostRaceKeys, turns]);
+
+  // Output retries per run (the AC.14 marker), from the native events.
+  const outputRetries = useMemo(() => {
+    const retries = new Map<string, Record<string, unknown>[]>();
+    for (const turn of turns) {
+      const items = turn.events.filter((event) => event.type === "output_retry").map((event) => event.data as Record<string, unknown>);
+      if (items.length > 0) retries.set(turn.runId, items);
+    }
+    return retries;
+  }, [turns]);
+
+  // A natively started turn: once its native turn is loaded, follow it; when it ends, reload the
+  // thread (a new pane key), whose GET now holds its messages.
+  const followedRef = useRef<string | null>(null);
+  const followedTurn = nativeFollow ? turns.find((turn) => turn.runId === nativeFollow) ?? null : null;
+  useEffect(() => {
+    if (!nativeFollow || !followedTurn || followedRef.current === nativeFollow) return;
+    followedRef.current = nativeFollow;
+    followRun(nativeFollow, followedTurn.events.reduce((max, item) => Math.max(max, item.seq), -1));
+  }, [followRun, followedTurn, nativeFollow]);
+  const followedDone = followedTurn !== null && TERMINAL_STATUSES.has(followedTurn.displayStatus);
+  useEffect(() => {
+    if (!nativeFollow || !followedDone) return;
+    stopSubscription();
+    followedRef.current = null;
+    setNativeFollow(null);
+    const id = conversationIdRef.current;
+    if (id) setAguiSession({ key: `${id}#${nativeFollow}`, threadId: id });
+  }, [followedDone, nativeFollow, stopSubscription]);
+  // Its waiting gated calls (no interrupt exists for them): the shared card, decided over REST.
+  const nativeWaiting = followedTurn ? toolApprovals(followedTurn.events).filter((approval) => !approval.decision) : [];
+
+  // The Settings switch changed the protocol while the chat is open: reopen the thread with it.
+  const protocolSeenRef = useRef(protocol);
+  useEffect(() => {
+    if (protocolSeenRef.current === protocol) return;
+    protocolSeenRef.current = protocol;
+    if (!ready) return;
+    stopSubscription();
+    const id = conversationIdRef.current;
+    if (id) void loadConversation(id);
+    else resetConversation();
+  }, [loadConversation, protocol, ready, resetConversation, stopSubscription]);
+
   const handleVersionChange = (ref: VersionRef) => {
     setRequestedVersion(ref);
     // The last check was against the previous version's fields: it says nothing about this one.
@@ -898,15 +1362,14 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     if (selectedAgentId) savePlaygroundContext(selectedAgentId, value);
   };
 
-  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError);
-  const thread = useMemo(() => conversationToThread(turns), [turns]);
+  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError) || (agui && (aguiInterrupts > 0 || nativeFollow !== null));
+  const thread = useMemo(() => (agui ? { messages: [] } : conversationToThread(turns)), [agui, turns]);
 
+  // Each turn's badge and notices, by native run id (the pane puts each under its turn's last message).
   const turnViews = useMemo(() => {
-    const byRun = new Map(turns.map((turn) => [turn.runId, turn]));
     const views = new Map<string, TurnView>();
-    for (const [messageId, runId] of footerMessageIds(thread.messages)) {
-      const turn = byRun.get(runId);
-      if (!turn) continue;
+    for (const turn of turns) {
+      const runId = turn.runId;
       const shownStatus = effectiveTurnStatus(turn.displayStatus, turn.events);
       const running = !TERMINAL_STATUSES.has(shownStatus);
       const liveText = turnLiveText(
@@ -920,7 +1383,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       const failure = turnCapabilityFailure(turn.events);
       const turnTarget = targetSpec(turn.draft ? "draft" : turn.version, selectedAgent?.draft_spec, selectedAgent?.latest_version ?? null, versions);
       const structured = hasStructuredOutput(turnTarget) || turnLooksStructured(turn.events);
-      views.set(messageId, {
+      views.set(runId, {
         runId,
         status: shownStatus,
         modelId: turn.modelId ?? turnModelId(turn.events, turn.row),
@@ -940,7 +1403,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       });
     }
     return views;
-  }, [announceRunId, selectedAgent, thread.messages, turns, versions]);
+  }, [announceRunId, selectedAgent, turns, versions]);
 
   const latest = turns.length > 0 ? turns[turns.length - 1] : null;
   const status = latest ? effectiveTurnStatus(latest.displayStatus, latest.events) : undefined;
@@ -1136,7 +1599,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
 
   const alert = "rounded-md border px-3 py-2 text-label";
   const header =
-    (latest && status) || agentError || otherAgentConversation || status === "recovering" || error || statusError ? (
+    (latest && status) || agentError || otherAgentConversation || status === "recovering" || error || statusError || (agui && nativeFollow) ? (
       <div className="space-y-2">
         {latest && status ? (
           <div className="flex flex-wrap items-center gap-3" data-testid="chat-run-status">
@@ -1144,6 +1607,20 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             <TraceLink runId={latest.runId} tab="events" className="text-label text-info-text hover:underline">
               View run
             </TraceLink>
+          </div>
+        ) : null}
+        {agui && nativeFollow ? (
+          <div data-testid="chat-native-follow" className="space-y-2">
+            <p role="status" className={`${alert} border-info/40 bg-info/10 text-info-text`}>
+              This turn was started with the native chat protocol. Its answer shows here when it ends.
+            </p>
+            {nativeWaiting.map((approval) => (
+              <ApprovalCard
+                key={approval.toolCallId}
+                approval={{ kind: "tool", runId: nativeFollow, toolCallId: approval.toolCallId, toolName: approval.toolName, args: approval.args, deadline: approval.deadline }}
+                onRefresh={() => refreshTurn(nativeFollow, true)}
+              />
+            ))}
           </div>
         ) : null}
         {agentError ? (
@@ -1180,26 +1657,59 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     <div data-testid="playground-page" className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
       <AgentChatPanes agentId={agentId} threads={threads}>
         <div data-testid="agent-chat" className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-          <ChatPane
-            messages={thread.messages}
-            disabled={composerDisabled}
-            running={runActive}
-            onNew={handleNewMessage}
-            turnViews={turnViews}
-            toolInfos={toolInfos}
-            landingTitle={selectedAgent?.name ?? "Chat"}
-            header={header}
-            restoreDraft={restoreDraft}
-            onDraftRestored={clearRestoreDraft}
-            onRefreshRun={refreshRun}
-            composer={
-              <Composer
-                chips={chips}
-                outputChecked={hasOutputProcessors(spec)}
-                notices={hasNotices ? notices : null}
+          {agui ? (
+            aguiAgent && aguiHistory && aguiSession ? (
+              <AgUiChatPane
+                key={aguiSession.key}
+                agent={aguiAgent}
+                history={aguiHistory}
+                runMaps={runMaps}
+                structured={structuredByRun}
+                disabled={composerDisabled}
+                turnViews={turnViews}
+                toolInfos={toolInfos}
+                landingTitle={selectedAgent?.name ?? "Chat"}
+                header={header}
+                restoreDraft={restoreDraft}
+                onDraftRestored={clearRestoreDraft}
+                onRefreshRun={refreshTurnAction}
+                onRunningChange={setRunActive}
+                onInterruptsChange={setAguiInterrupts}
+                dropLastTurn={dropLastTurn}
+                approvals={approvalLookups}
+                decisions={toolDecisionEntries}
+                retries={outputRetries}
+                composer={
+                  <Composer
+                    chips={chips}
+                    outputChecked={hasOutputProcessors(spec)}
+                    notices={hasNotices ? notices : null}
+                  />
+                }
               />
-            }
-          />
+            ) : null
+          ) : (
+            <ChatPane
+              messages={thread.messages}
+              disabled={composerDisabled}
+              running={runActive}
+              onNew={handleNewMessage}
+              turnViews={turnViews}
+              toolInfos={toolInfos}
+              landingTitle={selectedAgent?.name ?? "Chat"}
+              header={header}
+              restoreDraft={restoreDraft}
+              onDraftRestored={clearRestoreDraft}
+              onRefreshRun={refreshRun}
+              composer={
+                <Composer
+                  chips={chips}
+                  outputChecked={hasOutputProcessors(spec)}
+                  notices={hasNotices ? notices : null}
+                />
+              }
+            />
+          )}
         </div>
       </AgentChatPanes>
       {memoryDirty ? <WorkingMemoryGuard /> : null}

@@ -1,6 +1,11 @@
 import { beforeAll, beforeEach, expect } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { resetWorkingMemoryCache } from "@/lib/workingMemoryCache";
+import { setChatProtocolDefaultForTests } from "@/components/chat/chatProtocol";
+
+// The chat suites written before AGUI.12 mock the native run routes: with nothing stored, the Chat
+// tab uses the native protocol in tests. AG-UI suites store "agui" (a stored value wins).
+setChatProtocolDefaultForTests("native");
 
 // The shared working memory reads (module state) must not carry a note from one test to the next.
 beforeEach(() => resetWorkingMemoryCache());
