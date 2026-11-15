@@ -1,5 +1,6 @@
 // RM.17: the editor's Knowledge and Memory steps: config round trip, memory null vs object,
 // knowledge base attach and detach, filters, inline and server errors, phone width, axe.
+import { readableError } from "@/components/agents/readableError";
 import React from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -378,7 +379,8 @@ describe("server errors open the step", () => {
     await waitFor(() => expect(navButton(new RegExp(`^${label}`))).toHaveAttribute("aria-current", "step"));
     expect(navButton(new RegExp(`^${label}`))).toHaveTextContent("Has an error");
     const region = screen.getByRole("region", { name: label });
-    expect(within(region).getByTestId("agent-save-error")).toHaveTextContent(message);
+    // Shown in plain words (follow-up 1b); routed on the raw message.
+    expect(within(region).getByTestId("agent-save-error")).toHaveTextContent(readableError(message));
   });
 });
 
@@ -387,11 +389,12 @@ describe("phone width and accessibility", () => {
     const { container } = setup(FULL, { start: "memory", layout: "compact" });
     await act(async () => undefined);
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
-    expect(Array.from(select.options).slice(-2).map((o) => o.textContent)).toEqual([
+    // AC.13 added step 8 (Output) after Memory.
+    expect(Array.from(select.options).slice(-3, -1).map((o) => o.textContent)).toEqual([
       "6. Knowledge — 1 knowledge base",
       "7. Memory — History 12 · Working · Observational · Recall",
     ]);
-    expect(screen.getByText("Step 7 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Step 7 of 8")).toBeInTheDocument();
     const offenders: string[] = [];
     for (const step of ["knowledge", "memory"]) {
       container.querySelector(`section[data-step="${step}"]`)!.querySelectorAll("*").forEach((element) => {
@@ -474,5 +477,16 @@ describe("review fixes", () => {
       element!.focus();
       expect(document.activeElement, id).toBe(element);
     }
+  });
+});
+
+describe("server errors in plain words (follow-up 1b)", () => {
+  it("a pydantic 'Value error' on the name opens Identity without the prefix", async () => {
+    const { rerender } = setup(PLAIN, { start: "memory" });
+    rerender(<Host initial={PLAIN} onSubmit={async () => undefined} serverError="Value error, name cannot be empty" start="memory" />);
+    await waitFor(() => expect(navButton(/^Identity/)).toHaveAttribute("aria-current", "step"));
+    const alert = within(screen.getByRole("region", { name: /^Identity/ })).getByTestId("agent-save-error");
+    expect(alert).toHaveTextContent(/^Name cannot be empty$/);
+    expect(alert.textContent).not.toMatch(/Value error/);
   });
 });

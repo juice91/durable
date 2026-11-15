@@ -115,7 +115,8 @@ describe("stepped editor (SL.11)", () => {
     expect(nav.replace).toHaveBeenLastCalledWith(routes.agentEditor("a1", { step: "instructions" }), { scroll: false });
     expect(screen.getByTestId("stepper-previous")).toHaveAccessibleName("Previous step: Identity and model");
     expect(screen.getByTestId("stepper-next")).toHaveAccessibleName("Next step: Tools");
-    fireEvent.click(navButton(/^Memory/));
+    // AC.13: Output is the last step (8, after Memory).
+    fireEvent.click(navButton(/^Output/));
     expect(screen.queryByTestId("stepper-next")).toBeNull();
   });
 

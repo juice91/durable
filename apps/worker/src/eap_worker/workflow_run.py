@@ -25,17 +25,25 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
       parallel: one child workflow eap.workflow_branch per branch, id `{run_id}:{id}:{branch}`
       approval: eap.append_event step_waiting `step:{id}:waiting`, then a loop of
                 eap.workflow_approval_decision / eap.workflow_clock / DBOS.recv(`approval:{id}`)
-      eap.append_event   step_completed `step:{id}:completed` {step_id, output}
+      eap.append_event   step_completed `step:{id}:completed` {step_id, output, unresolved_refs?}
                      or  step_failed    `step:{id}:failed`    {step_id, status, error, error_code}
     eap.append_event   end              run_completed {output, result} | run_failed {...}
     eap.finish_run                      completed | failed | needs_attention
 
-Step outputs (`steps.<id>.output`): agent -> the agent's final text; tool -> the tool's JSON
+Step outputs (`steps.<id>.output`): agent -> the agent's final text, or for an agent with
+structured output (AC.9) the validated object (`agent_run`'s `output_json`), so
+`steps.<id>.output.<field>` reads its fields and the step output cap applies to it; tool -> the tool's JSON
 result; branch -> {"case": <index of the matching case, or null for default>, "next": <target>};
 parallel -> none (its step_completed carries `output: null` and `steps.<parallel>.output` is not
 readable, per eap_schemas.workflows; from the join on, the steps its branches ran are); approval -> {"approved": true, "decided_by",
 "comment"}. An agent step's input mapping becomes its prompt: the single value if the mapping has
 exactly one string value, else the mapping as canonical JSON.
+
+A branch condition `$ref` into a field of an agent step's structured output that resolves to
+nothing (typically an unpinned agent whose schema changed) is false, as any missing ref is, and the
+branch's step_completed data lists those paths as `unresolved_refs` (paths only, never values; the
+key is absent when there are none). It rides on the existing event, so it adds no durable step.
+(Input-template refs already fail the step, `input_ref_missing`.)
 
 Run output: the output of the step that ended the main path (a step with no `next`). With an
 `output_schema`, that value is validated against it (jsonschema, empty referencing.Registry); a
@@ -102,6 +110,7 @@ from eap_schemas.workflows import (
     ParallelStep,
     ToolStep,
     WorkflowSpec,
+    iter_refs,
 )
 from eap_worker.config import WORKFLOW_BRANCH_NAME, WORKFLOW_RUN_NAME
 from eap_worker.crash import crash_point
@@ -110,11 +119,13 @@ from eap_worker.runtime import get_runtime
 from eap_worker.tool_run import _REJECTIONS, call_tool_guarded, check_tool_step
 from eap_worker.workflow import _heartbeat, agent_run, append_event_step, finish_run_step
 from eap_worker.workflow_eval import (
+    MISSING,
     RefMissing,
     canonical_json,
     evaluate,
     json_size,
     non_finite_path,
+    resolve_ref,
     resolve_template,
 )
 
@@ -198,7 +209,9 @@ def read_limits() -> dict[str, Any]:
 # --------------------------------------------------------------------------- steps
 
 _VERSION = text("SELECT workflow_id, version, spec FROM workflow_versions WHERE id = :id AND tenant_id = :t")
-_AGENT = text("SELECT 1 FROM agents WHERE id = :a AND tenant_id = :t AND archived IS NOT TRUE")
+# The agent's archived flag (no row: not this tenant's agent). An archived agent is reported as such
+# (`agent_archived`), not as missing.
+_AGENT = text("SELECT archived FROM agents WHERE id = :a AND tenant_id = :t")
 _AGENT_VERSION = text(
     "SELECT version, spec FROM agent_versions WHERE agent_id = :a AND tenant_id = :t AND version = :v"
 )
@@ -262,8 +275,9 @@ async def resolve_agent_step(
     traceparent: str | None,
 ) -> dict[str, Any]:
     """Resolve the agent version ONCE (pinned, or the latest published when None) and create the
-    child agent run row. Returns {"found": False} or {"found": True, "version", "spec_json",
-    "child_run_id"}; checkpointed, so a replay never re-resolves 'latest'.
+    child agent run row. Returns {"found": False} (with "archived": True when the agent exists but
+    is archived) or {"found": True, "version", "spec_json", "child_run_id"}; checkpointed, so a
+    replay never re-resolves 'latest'.
 
     The agent must exist and not be archived only when the child row is CREATED. A re-executed
     step (killed after `after_child_run_insert`, before the checkpoint) finds the child row and
@@ -284,8 +298,11 @@ async def resolve_agent_step(
         if existing is not None:
             return pinned(existing.get("agent_version"))
         with rt.engine.connect() as conn:
-            if conn.execute(_AGENT, {"a": agent_id, "t": tenant_id}).fetchone() is None:
+            agent = conn.execute(_AGENT, {"a": agent_id, "t": tenant_id}).fetchone()
+            if agent is None:
                 return {"found": False}
+            if agent.archived:
+                return {"found": False, "archived": True}
             if version is None:
                 row = conn.execute(_AGENT_LATEST, {"a": agent_id, "t": tenant_id}).fetchone()
             else:
@@ -391,6 +408,15 @@ def _agent_prompt(resolved: dict[str, Any]) -> str:
     return canonical_json(resolved) if resolved else ""
 
 
+def agent_step_output(result: dict[str, Any]) -> Any:
+    """An agent step's output (`steps.<id>.output`) from the child's completed result (AC.9): the
+    validated object of a structured agent (`output_json`), else the final text. A child recorded
+    before AC.4 carries no `output_json` key, so a recovered old run reads the same text."""
+    if result.get("output_json") is not None:
+        return result["output_json"]
+    return result.get("output")
+
+
 def _failure_status(exc: BaseException, failure: RunFailure) -> str:
     from eap_worker.workflow import _is_side_effect_unknown
 
@@ -493,11 +519,39 @@ class _Interpreter:
         if not isinstance(step, ParallelStep):  # a parallel step has no readable output
             self.context_bytes += size
             self.outputs[step_id] = output
+        completed: dict[str, Any] = {"step_id": step_id, "output": output}
+        unresolved = self.unresolved_output_refs(step) if isinstance(step, BranchStep) else []
+        if unresolved:
+            # AC.9: carried in step_completed (no new durable step, so the step layout is unchanged).
+            completed["unresolved_refs"] = unresolved
+            log.warning(
+                "workflow branch read missing structured fields",
+                extra={"run_id": self.run_id, "step_id": step_id, "paths": unresolved},
+            )
         await append_event_step(
-            self.run_id, self.tenant_id, f"step:{step_id}:completed", "step_completed",
-            {"step_id": step_id, "output": output},
+            self.run_id, self.tenant_id, f"step:{step_id}:completed", "step_completed", completed,
         )
         return output
+
+    def unresolved_output_refs(self, step: Any) -> list[str]:
+        """The step's `$ref` paths into a field of an agent step's STRUCTURED output (an object or
+        array) that resolve to nothing, in spec order, without duplicates. A pure function of
+        recorded outputs. Such a path usually means the (unpinned) agent's output schema changed;
+        the condition is false, as for any missing ref, and the branch takes its default."""
+        context = self.context()
+        found: list[str] = []
+        for path in dict.fromkeys(iter_refs(step)):
+            parts = path.split(".")
+            if parts[0] != "steps" or len(parts) < 4:
+                continue
+            target = self.by_id.get(parts[1])
+            if not isinstance(target, AgentStep) or parts[1] not in self.outputs:
+                continue
+            if not isinstance(self.outputs[parts[1]], (dict, list)):
+                continue  # a text agent's output: publish warns for field refs into it
+            if resolve_ref(context, path) is MISSING:
+                found.append(path)
+        return found
 
     async def _record_failure(self, step_id: str, failure: RunFailure) -> None:
         await append_event_step(
@@ -528,7 +582,7 @@ class _Interpreter:
             self.run_id, self.tenant_id, step.id, str(step.agent_id), step.version, prompt, self.traceparent
         )
         if not found.get("found"):
-            raise WorkflowStepError("agent_not_found", step.id)
+            raise WorkflowStepError("agent_archived" if found.get("archived") else "agent_not_found", step.id)
         child = found["child_run_id"]
         with SetWorkflowID(child):
             handle = await DBOS.start_workflow_async(
@@ -540,7 +594,7 @@ class _Interpreter:
                 str(result.get("error_code") or "internal_error"), step.id,
                 str(result.get("status") or "failed"), result.get("error"),
             )
-        return result.get("output")
+        return agent_step_output(result)
 
     async def _tool(self, step: ToolStep, resolved: dict[str, Any]) -> Any:
         check = await check_tool_step(step.tool_id, resolved)
@@ -784,6 +838,7 @@ async def workflow_branch(
 
 __all__ = [
     "CHILD_RUN_NAMESPACE",
+    "agent_step_output",
     "approval_topic",
     "branch_workflow_id",
     "child_run_id",

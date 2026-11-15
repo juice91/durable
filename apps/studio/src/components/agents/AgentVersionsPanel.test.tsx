@@ -142,6 +142,15 @@ describe("AgentVersionsPanel compare and restore", () => {
     expect(screen.getByRole("status")).toHaveFocus();
   });
 
+  it("a restore response's publish warnings are listed under the notice (AC.13 review)", async () => {
+    const warning = { code: "cost_cap_unpriced_model", path: "model", message: "model: 'test:echo' has no price in the model price override file" };
+    vi.mocked(restoreVersion).mockResolvedValueOnce({ ...v(5, 1), spec: {}, created_by: "alice", warnings: [warning] } as never);
+    render(<AgentVersionsPanel versions={versions} agentId="a1" />);
+    await chooseVersionAction(1, "Restore this version");
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Restore and publish" }));
+    expect(await screen.findByTestId("publish-warnings")).toHaveTextContent(warning.message);
+  });
+
   it("a cancelled confirm still returns focus to its opener", async () => {
     const { useVersionRestore } = await import("./AgentVersionsPanel");
     function SheetLike() {

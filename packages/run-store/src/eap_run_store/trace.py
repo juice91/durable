@@ -470,6 +470,8 @@ class _Builder:
             "display_status": run.get("display_status"),
             "agent_id": run.get("agent_id"),
             "agent_version": run.get("agent_version"),
+            # A draft test run (or draft chat turn) has no version: Studio labels it "Draft".
+            "draft": run.get("draft_spec") is not None,
             "tool_id": run.get("tool_id"),
             "workflow_id": run.get("workflow_id"),
             "workflow_version": run.get("workflow_version"),

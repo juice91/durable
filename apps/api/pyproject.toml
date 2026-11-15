@@ -24,10 +24,14 @@ dependencies = [
     "eap-processors",
     # Knowledge base uploads are extracted once to reject unsupported or unsafe content early.
     "eap-knowledge",
+    # The model price override file and cost arithmetic (shared by the worker and the API).
+    "eap-pricing",
     # Workflow run input is checked against the version's input_schema, with an empty
     # referencing.Registry (no remote $ref is ever retrieved).
     "jsonschema>=4.20",
     "referencing>=0.30",
+    # Test suite import and export (the pydantic_evals dataset file): yaml.safe_load only.
+    "pyyaml==6.0.3",
     # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
     "fastmcp-slim[client]>=3.3.0,<5",
     # AG-UI 1.0 event models and encoder (D19); imported only inside eap_api.ag_ui.
@@ -49,3 +53,4 @@ eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
+eap-pricing = { workspace = true }

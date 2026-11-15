@@ -103,6 +103,10 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  fail (0.0); also a fail without a marker. `reason` names the marker. Calls the output tool with
                  `{"reason", "pass", "score"}` when offered, else answers that JSON as text. Fixed
                  usage of 200 input and 50 output tokens; priced in the test price file.
+- `test:text-tool` (AC.5) answers request 0 with text `Let me check.` AND a call of the first
+                 offered tool with `{}` (one response); after the return it answers `Done.`. Without
+                 tools: `Done.`. Proves a response with text and a tool call (output processors run
+                 on its text) is handled like any other.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -121,6 +125,15 @@ Scripted embedding models (RM.6), resolved by `eap_worker.embeddings`, not by th
 Every id must also pass the platform model allowlist (EAP_ALLOWED_MODELS, default `test:*`). The
 workflow checks it before the agent starts; the resolver checks it again so no code path can build
 a model that the policy forbids.
+
+Fallback models (agent capabilities milestone, AC.5), for `eap-agent` only (`make_resolver(...,
+fallback=True)`): when the requested id is the run spec's primary model (`ctx.deps.spec`) and the
+spec has `fallback_models`, the resolver returns `FallbackModel(primary, *fallbacks)`, every member
+built by this same per-id resolver, so each is checked against the allowlist. It runs inside the
+model step (and workflow-side, where the run picks its model), so every model request starts at the
+primary and a DBOS retry of the step re-runs the whole chain. A run whose model was overridden
+(P0.19) requests another id, so it gets the bare model: the override disables fallback. The
+observer, the moderator and the judge build their resolvers without `fallback`: one model each.
 """
 
 from __future__ import annotations
@@ -148,6 +161,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.embeddings import EmbeddingModel as PaiEmbeddingModel, EmbeddingResult, EmbeddingSettings
 from pydantic_ai.embeddings.result import EmbedInputType
 from pydantic_ai.models import Model, ModelResolutionContext
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.usage import RequestUsage
 
@@ -903,6 +917,32 @@ def scripted_approval_model() -> FunctionModel:
     return _planned_model(_approval_plan, "scripted-approval")
 
 
+TEXT_TOOL_PREFIX = "Let me check."
+
+
+def scripted_text_tool_model() -> FunctionModel:
+    """`test:text-tool`: see the module docstring."""
+
+    def first_turn(messages: list[ModelMessage]) -> bool:
+        return not any(isinstance(p, ToolReturnPart) for p in _this_turn(messages))
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if info.function_tools and first_turn(messages):
+            return ModelResponse(parts=[
+                TextPart(TEXT_TOOL_PREFIX), ToolCallPart(info.function_tools[0].name, {}, tool_call_id="text-tool-0")
+            ])
+        return ModelResponse(parts=[TextPart("Done.")])
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        if info.function_tools and first_turn(messages):
+            yield TEXT_TOOL_PREFIX
+            yield {0: DeltaToolCall(name=info.function_tools[0].name, json_args="{}", tool_call_id="text-tool-0")}
+            return
+        yield "Done."
+
+    return FunctionModel(respond, stream_function=stream, model_name="scripted-text-tool")
+
+
 def scripted_failing_model(status_code: int) -> FunctionModel:
     """`test:fail-<status>`: every request raises `ModelHTTPError(status_code)` before any output
     (503 is a `ModelAPIError` that FallbackModel falls back on; so is 400)."""
@@ -1138,10 +1178,39 @@ def scripted_embedding_model(name: str) -> HashEmbeddingModel | None:
     return HashEmbeddingModel(name) if name in HASH_EMBEDDING_MODELS else None
 
 
-def make_resolver(settings_getter: Any):
-    """Build the ResolveModelId callback. `settings_getter()` returns the live WorkerSettings."""
+def fallback_chain(spec: Any, model_id: str) -> tuple[str, ...]:
+    """The model ids a request for `model_id` tries, in order (AC.5): `(primary, *fallbacks)` when
+    `model_id` is the spec's primary model and the spec has `fallback_models`, else `(model_id,)`
+    (no fallback, or a per-run override: a different id). Pure."""
+    fallbacks = tuple(getattr(spec, "fallback_models", ()) or ())
+    primary = model_id_for(spec.model.provider, spec.model.name) if spec is not None else None
+    if not fallbacks or model_id != primary:
+        return (model_id,)
+    return (model_id, *(model_id_for(ref.provider, ref.name) for ref in fallbacks))
+
+
+def make_resolver(settings_getter: Any, *, fallback: bool = False):
+    """Build the ResolveModelId callback. `settings_getter()` returns the live WorkerSettings.
+
+    `fallback=True` (eap-agent only, AC.5): a request for the run spec's primary model resolves to a
+    FallbackModel over `fallback_chain(ctx.deps.spec, model_id)`, each member resolved (and
+    allowlist-checked) on its own."""
 
     def resolve_model(ctx: ModelResolutionContext[Any], model_id: str) -> Model | None:
+        if fallback:
+            chain = fallback_chain(getattr(ctx.deps, "spec", None), model_id)
+            if len(chain) > 1:
+                members = [_member(ctx, member_id) for member_id in chain]
+                return FallbackModel(members[0], *members[1:])
+        return resolve_one(ctx, model_id)
+
+    def _member(ctx: ModelResolutionContext[Any], model_id: str) -> Model | str:
+        # A provider this resolver leaves to infer_model is passed as its string (FallbackModel
+        # infers it), exactly as the bare resolver would.
+        model = resolve_one(ctx, model_id)
+        return model if model is not None else model_id
+
+    def resolve_one(ctx: ModelResolutionContext[Any], model_id: str) -> Model | None:
         if model_id == PLACEHOLDER_MODEL:
             raise RuntimeError("agent run started without a per-run model")
         provider, _, name = model_id.partition(":")
@@ -1195,6 +1264,8 @@ def make_resolver(settings_getter: Any):
                 return scripted_priced_model()
             if name == "judge":
                 return scripted_judge_model()
+            if name == "text-tool":
+                return scripted_text_tool_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

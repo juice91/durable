@@ -180,8 +180,11 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
   const decision = a.decision as Record<string, unknown> | undefined;
   const ragShown = new Set(RAG_SHOWN[span.kind] ?? []);
   const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && !ragShown.has(k) && v !== null && v !== undefined);
-  // A model request always shows its usage; the RAG and memory kinds when they carry a model.
-  const showUsage = span.kind === "model_request" || (USAGE_KINDS.has(span.kind) && (str(a.model_id) !== null || a.usage != null));
+  // A model request always shows its usage; the RAG and memory kinds and processors when they carry a model.
+  // A moderation processor is a model call of its own (its model, not the agent's chat model).
+  const showUsage =
+    span.kind === "model_request" ||
+    ((USAGE_KINDS.has(span.kind) || span.kind === "processor") && (str(a.model_id) !== null || a.usage != null));
 
   return (
     <aside aria-label="Span detail" data-testid="span-detail" className="space-y-4 rounded-md border border-border bg-card p-4">

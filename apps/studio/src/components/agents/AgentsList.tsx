@@ -9,7 +9,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { routes } from "@/lib/routes";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { EmptyState } from "@/components/shared/EmptyState";
-import { focusRing } from "@/components/ui/Button";
+import { Button, focusRing } from "@/components/ui/Button";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { Tooltip, TooltipProvider } from "@/components/ui/Tooltip";
 import { agentPurpose, readAgentsView, writeAgentsView, type AgentsView } from "@/components/agentPage/agentPageModel";
@@ -22,15 +22,31 @@ export interface AgentListItem {
   draft_spec?: AgentSpec;
 }
 
+/** Which agents the list shows: the active ones, or the archived ones (`/agents?view=archived`). */
+export type AgentsScope = "active" | "archived";
+
+/** The list's scope from the URL: `?view=archived` shows the archived agents. */
+export function scopeFromParams(params: URLSearchParams | null): AgentsScope {
+  return params?.get("view") === "archived" ? "archived" : "active";
+}
+
 export interface AgentsListUIProps {
   agents: AgentListItem[];
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
+  /** Default "active". With `onScopeChange`, the toolbar shows an Active / Archived switch. */
+  scope?: AgentsScope;
+  onScopeChange?: (scope: AgentsScope) => void;
+  /** The archived scope's per-agent Unarchive action. */
+  onUnarchive?: (agent: AgentListItem) => void;
+  /** The agent whose Unarchive is running (its button is disabled). */
+  unarchivingId?: string | null;
 }
 
 export const AGENTS_SEARCH_PLACEHOLDER = "Search by name or instructions";
 const EMPTY = { title: "No agents yet", description: "Create your first agent to get started." };
+const EMPTY_ARCHIVED = { title: "No archived agents", description: "Agents you archive from their page's More actions menu appear here." };
 
 /** Case-insensitive match on the name or the instructions; an empty query matches every agent. */
 export function filterAgents<T extends { name: string; draft_spec?: AgentSpec }>(agents: T[], query: string): T[] {
@@ -104,7 +120,46 @@ const columns: DataListColumn<AgentListItem>[] = [
  * The agents list (decision "Agents list"): a DataList with search and sortable columns, or a compact
  * card grid; the choice persists in `localStorage["studio.agents.view"]`. A row opens the agent's chat.
  */
-export function AgentsListUI({ agents, loading = false, error = null, onRetry }: AgentsListUIProps) {
+export function AgentsListUI({
+  agents,
+  loading = false,
+  error = null,
+  onRetry,
+  scope = "active",
+  onScopeChange,
+  onUnarchive,
+  unarchivingId = null,
+}: AgentsListUIProps) {
+  const archivedScope = scope === "archived";
+  const empty = archivedScope ? EMPTY_ARCHIVED : EMPTY;
+  const unarchiveButton = (agent: AgentListItem) =>
+    onUnarchive && archivedScope ? (
+      <Button
+        size="sm"
+        disabled={unarchivingId === agent.id}
+        aria-label={`Unarchive ${agent.name}`}
+        data-testid="agent-unarchive-row"
+        onClick={() => onUnarchive(agent)}
+      >
+        Unarchive
+      </Button>
+    ) : null;
+  const listColumns: DataListColumn<AgentListItem>[] =
+    onUnarchive && archivedScope
+      ? [...columns, { id: "actions", header: <span className="sr-only">Actions</span>, cell: unarchiveButton, align: "end" }]
+      : columns;
+  const scopeSwitch = onScopeChange ? (
+    <SegmentedControl<AgentsScope>
+      label="Which agents"
+      size="sm"
+      value={scope}
+      onValueChange={onScopeChange}
+      options={[
+        { value: "active", label: "Active" },
+        { value: "archived", label: "Archived" },
+      ]}
+    />
+  ) : null;
   // Read after mount: the server render cannot know the stored choice.
   const [view, setView] = useState<AgentsView>("list");
   const [query, setQuery] = useState("");
@@ -142,7 +197,7 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
         <DataList<AgentListItem>
           label="Agents"
           rows={agents}
-          columns={columns}
+          columns={listColumns}
           getRowId={(agent) => agent.id}
           getRowHref={(agent) => routes.agentChat(agent.id)}
           getRowLabel={(agent) => agent.name}
@@ -155,6 +210,7 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
           toolbar={
             <>
               {count}
+              {scopeSwitch}
               {viewToggle}
             </>
           }
@@ -162,7 +218,7 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
           loading={loading}
           error={error}
           onRetry={onRetry}
-          empty={EMPTY}
+          empty={empty}
           noMatchText="No agent name or instructions match this search."
           testId="agents-list"
         />
@@ -186,6 +242,7 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
           className={cn("h-8 min-w-0 flex-1 basis-56 rounded-md border border-input bg-background px-3 text-label text-foreground placeholder:text-muted-foreground", focusRing)}
         />
         {count}
+        {scopeSwitch}
         {viewToggle}
       </div>
       {loading && agents.length === 0 ? (
@@ -197,17 +254,17 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
           {error}
         </p>
       ) : agents.length === 0 ? (
-        <EmptyState title={EMPTY.title} description={EMPTY.description} />
+        <EmptyState title={empty.title} description={empty.description} />
       ) : visible.length === 0 ? (
         <EmptyState title="No matching agents" description="No agent name or instructions match this search." />
       ) : (
         <ul className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 16rem), 1fr))" }}>
           {visible.map((agent) => (
-            <li key={agent.id} className="min-w-0">
+            <li key={agent.id} className="flex min-w-0 flex-col gap-1">
               <Link
                 href={routes.agentChat(agent.id)}
                 data-testid="agent-card"
-                className={cn("flex h-full min-w-0 flex-col gap-1 rounded-lg border border-border bg-surface p-3 hover:bg-fill-hover", focusRing)}
+                className={cn("flex min-w-0 flex-1 flex-col gap-1 rounded-lg border border-border bg-surface p-3 hover:bg-fill-hover", focusRing)}
               >
                 <span className="truncate font-medium text-foreground">{agent.name}</span>
                 <span className="line-clamp-2 text-label text-muted-foreground">{agentPurpose(agent.draft_spec)}</span>
@@ -217,6 +274,7 @@ export function AgentsListUI({ agents, loading = false, error = null, onRetry }:
                   <span>{versionLabel(agent)}</span>
                 </span>
               </Link>
+              {unarchiveButton(agent) ? <div className="flex justify-end">{unarchiveButton(agent)}</div> : null}
             </li>
           ))}
         </ul>

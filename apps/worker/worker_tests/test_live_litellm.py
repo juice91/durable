@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from sqlalchemy import text
 
 from worker_tests.conftest import APP_VERSION, enqueue_run, event_rows, ticket_spec, wait_terminal
 
@@ -23,6 +24,13 @@ HAS_KEY = bool(os.environ.get("EAP_LITELLM_API_KEY") or os.environ.get("LITELLM_
 HAS_EMBEDDING_KEY = bool(os.environ.get("EAP_LITELLM_EMBEDDING_API_KEY") or HAS_KEY)
 DEFAULT_LIVE_EMBEDDING_MODEL = "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
 DEFAULT_BASE_URL = "http://127.0.0.1:14001/v1"
+
+
+def _reported_reasoning_tokens(message: dict) -> int:
+    """The reasoning tokens the provider reported, from the stored ModelResponse's own usage."""
+    usage = message.get("usage") or {}
+    details = usage.get("details") or {}
+    return max(int(usage.get("output_reasoning_tokens") or 0), int(details.get("reasoning_tokens") or 0))
 
 
 @pytest.mark.skipif(not HAS_KEY, reason="no EAP_LITELLM_API_KEY / LITELLM_API_KEY set")
@@ -39,9 +47,10 @@ def test_live_qwen_one_turn(worker, client, tenant, monkeypatch):
                                                      allowed_models=ModelPolicy.parse("litellm:qwen3.8-thinking")))
     spec = ticket_spec(tools=())
     spec["model"] = {"provider": "litellm", "name": "qwen3.8-thinking"}
-    spec["instructions"] = "Answer in one short sentence."
+    spec["instructions"] = "Answer in about 100 words of plain prose."
     run_id = enqueue_run(client, worker.run_store, tenant_id=tenant, spec=spec,
-                         input_text="What is the capital of France?", app_version=APP_VERSION)
+                         input_text="Describe Paris, the capital of France, in about 100 words.",
+                         app_version=APP_VERSION)
     run = wait_terminal(worker.run_store, tenant, run_id, timeout=280)
     assert run["status"] == "completed", run["error"]
     events = event_rows(worker.engine, run_id)
@@ -54,6 +63,19 @@ def test_live_qwen_one_turn(worker, client, tenant, monkeypatch):
     usage = events[1][3]["usage"]
     assert usage["measured"] is True and usage["input_tokens"] > 0 and usage["output_tokens"] > 0, usage
     assert events[1][3]["model_id"] == "litellm:qwen3.8-thinking"
+    # Streamed usage must be possible: completion includes reasoning, and covers the answer's text.
+    # (The gateway has reported completion_tokens of 1-3 below the reasoning count; the worker
+    # then records an estimate, marked usage.estimated, which this still checks against.)
+    from eap_schemas.knowledge import approx_tokens
+
+    with worker.engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT output_tokens FROM run_model_requests WHERE run_id = :r AND request_key = 'model:0'"
+        ), {"r": str(run_id)}).scalars().all()
+    assert rows == [usage["output_tokens"]], (rows, usage)
+    reasoning = _reported_reasoning_tokens(events[1][3]["message"])
+    assert usage["output_tokens"] >= reasoning, (usage, reasoning)
+    assert usage["output_tokens"] >= approx_tokens(run["output"]) // 2, (usage, approx_tokens(run["output"]))
     assert run["input_tokens"] == usage["input_tokens"] and run["cost_usd"] == 0
 
 

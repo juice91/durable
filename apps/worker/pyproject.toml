@@ -19,6 +19,8 @@ dependencies = [
     "eap-processors",
     # Knowledge base extraction and chunking (RM.10, eap.kb_ingest).
     "eap-knowledge",
+    # The model price override file and cost arithmetic (shared by the worker and the API).
+    "eap-pricing",
     "pydantic-ai-slim[anthropic,dbos,openai]>=2.67.0",
     "dbos[otel]>=3.5.0",
     # MCP tools in agents (task 3.5): the MCP client Pydantic AI's [mcp] extra builds on.
@@ -54,3 +56,4 @@ eap-secrets = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
 eap-api = { workspace = true }
+eap-pricing = { workspace = true }

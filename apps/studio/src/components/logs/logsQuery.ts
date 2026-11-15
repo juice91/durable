@@ -1,8 +1,10 @@
 // Studio logs (P0.20): the GET /logs client, the Logs page URL filters, the API query they become,
 // error classification, and the "load older" cursor. The API builds the LogQL; Studio only sends
-// structured parameters (run_id, q, level, from, to, limit).
+// structured parameters (run_id, agent_id, q, level, from, to, limit).
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { versionLabel } from "@/components/chat/runOptions";
+import type { TraceRun } from "@/lib/traces";
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 export const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error", "fatal"];
@@ -24,6 +26,10 @@ export interface LogsResponse {
   from: string;
   to: string;
   limit: number;
+  /** With `agent_id`: how many of the agent's runs were searched, and whether older runs in the
+   * window were left out (the API covers at most its 200 newest runs there). */
+  agent_runs?: number;
+  agent_runs_limited?: boolean;
 }
 
 /** API bounds (apps/api routes/logs.py). */
@@ -33,11 +39,13 @@ export const MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const PAGE_LIMIT = 100;
 /** Logs page search-box debounce before the URL (and so the query) changes. */
 export const SEARCH_DEBOUNCE_MS = 300;
-/** How many of an agent's most recent runs the Logs page agent filter covers. */
+/** How many of an agent's most recent runs the Logs page run picker suggests (and the most the API's
+ * agent filter searches in one window). */
 export const AGENT_RUNS_LIMIT = 200;
 
 export interface LogsQueryParams {
   run_id?: string | null;
+  agent_id?: string | null;
   q?: string | null;
   level?: LogLevel | null;
   from?: string | null;
@@ -48,6 +56,7 @@ export interface LogsQueryParams {
 export function logsQueryString(params: LogsQueryParams): string {
   const search = new URLSearchParams();
   if (params.run_id) search.set("run_id", params.run_id);
+  if (params.agent_id) search.set("agent_id", params.agent_id);
   if (params.q) search.set("q", params.q);
   if (params.level) search.set("level", params.level);
   if (params.from) search.set("from", params.from);
@@ -69,7 +78,7 @@ export async function searchLogs(params: LogsQueryParams, signal?: AbortSignal):
 
 // ---------------------------------------------------------------------------- errors
 
-export type LogsErrorKind = "unavailable" | "not_found" | "invalid" | "failed";
+export type LogsErrorKind = "unavailable" | "not_found" | "agent_not_found" | "invalid" | "failed";
 
 export interface LogsError {
   kind: LogsErrorKind;
@@ -81,7 +90,12 @@ export interface LogsError {
 export function classifyLogsError(error: unknown): LogsError {
   if (error instanceof ApiError) {
     if (error.status === 503) return { kind: "unavailable", message: error.message || "Log search is unavailable" };
-    if (error.status === 404) return { kind: "not_found", message: "Run not found" };
+    // GET /logs answers 404 for an unknown run ("Run not found") or agent ("Agent not found").
+    if (error.status === 404) {
+      return /agent/i.test(error.message)
+        ? { kind: "agent_not_found", message: "Agent not found" }
+        : { kind: "not_found", message: "Run not found" };
+    }
     if (error.status === 422) return { kind: "invalid", message: error.message || "Invalid log search" };
     if (error.status === 502) return { kind: "failed", message: "Log search failed" };
     if (error.status === 0) return { kind: "failed", message: error.message || "No API credentials configured" };
@@ -188,7 +202,7 @@ export function logFiltersProblem(filters: LogFilters): string | null {
 
 /** The API query for the page's filters at time `now`. A preset becomes `from` = now - preset (the
  * API's `to` defaults to now). With a run and no range, `run` (when loaded) gives the run's
- * lifetime window. The agent filter is not an API parameter (see `agentRunFilter`). */
+ * lifetime window. The agent filter is the API's `agent_id` (its runs in the window). */
 export function logsRequestParams(
   filters: LogFilters,
   now: number = Date.now(),
@@ -197,6 +211,7 @@ export function logsRequestParams(
 ): LogsQueryParams {
   const params: LogsQueryParams = { limit };
   if (filters.run_id) params.run_id = filters.run_id;
+  if (filters.agent_id) params.agent_id = filters.agent_id;
   if (filters.q) params.q = filters.q;
   if (filters.level) params.level = filters.level;
   if (filters.from || filters.to) {
@@ -272,16 +287,6 @@ export function appendOlder(current: LogItem[], older: LogItem[]): { items: LogI
     fresh.push(item);
   }
   return { items: fresh.length ? [...current, ...fresh] : current, added: fresh.length };
-}
-
-// ---------------------------------------------------------------------------- agent filter
-
-/** The agent filter, applied in the browser: GET /logs has no agent parameter, so with an agent and
- * no run, only records of that agent's known runs are kept. Null = keep everything. */
-export function agentRunFilter(filters: LogFilters, agentRunIds: ReadonlySet<string> | null): ((item: LogItem) => boolean) | null {
-  if (!filters.agent_id || filters.run_id) return null;
-  const ids = agentRunIds ?? new Set<string>();
-  return (item) => item.run_id !== null && ids.has(item.run_id);
 }
 
 // ---------------------------------------------------------------------------- trace panel
@@ -384,4 +389,14 @@ export function formatLogTime(iso: string): { time: string; date: string } {
     time: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`,
     date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
   };
+}
+
+// ---------------------------------------------------------------------------- run picker
+
+/** A run suggestion in the Logs page's run picker: when, the agent version ("Draft" for a draft run) and status. */
+export function runOptionLabel(run: TraceRun): string {
+  const when = new Date(run.created_at).toLocaleString();
+  // Agent runs name their version, or "Draft" for a draft test run or turn (follow-up 1c).
+  const version = run.agent_id ? versionLabel(run.draft === true, run.version) : null;
+  return [when, version, run.display_status].filter(Boolean).join(" · ");
 }

@@ -136,15 +136,13 @@ describe("Logs page", () => {
     expect(searchLogs).not.toHaveBeenCalled();
   });
 
-  it("filters by agent in the browser through the agent's runs", async () => {
+  it("filters by agent through the API's agent_id", async () => {
     currentParams = new URLSearchParams({ agent_id: AGENT });
-    vi.mocked(listTraceRuns).mockResolvedValue({ items: [{ run_id: RUN, created_at: "2026-11-13T09:59:00Z", display_status: "completed" } as never], next_before: null });
-    vi.mocked(searchLogs).mockResolvedValue(response([log("mine"), log("theirs", OTHER_RUN)]));
+    vi.mocked(searchLogs).mockResolvedValue({ ...response([log("mine")]), agent_runs: 1, agent_runs_limited: false });
     render(<LogsPage />);
     expect(await screen.findByText("mine")).toBeInTheDocument();
-    expect(screen.queryByText("theirs")).toBeNull();
-    expect(vi.mocked(listTraceRuns).mock.calls.at(-1)?.[0]).toMatchObject({ agent_id: AGENT });
-    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("1 most recent run");
+    expect(vi.mocked(searchLogs).mock.calls[0][0]).toMatchObject({ agent_id: AGENT });
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("Searched this agent's 1 run in this time range.");
   });
 
   it("loads older records", async () => {
@@ -246,16 +244,24 @@ describe("Logs page", () => {
     expect(await screen.findByRole("option", { name: "Since the run started" })).toBeInTheDocument();
   });
 
-  it("says when the agent's runs cannot be loaded, and re-fetches them on Refresh", async () => {
-    currentParams = new URLSearchParams({ agent_id: AGENT });
-    vi.mocked(listTraceRuns).mockRejectedValueOnce(new Error("down"));
-    vi.mocked(searchLogs).mockResolvedValue(response([log("mine")]));
+  it("an unknown agent says Agent not found and offers to clear the agent filter", async () => {
+    currentParams = new URLSearchParams({ agent_id: AGENT, level: "error" });
+    vi.mocked(searchLogs).mockRejectedValue(new ApiError(404, "Agent not found"));
     render(<LogsPage />);
-    expect(await screen.findByTestId("logs-agent-note")).toHaveTextContent("Could not load this agent's runs");
-    vi.mocked(listTraceRuns).mockResolvedValue({ items: [{ run_id: RUN, created_at: "2026-11-13T09:59:00Z", display_status: "completed" } as never], next_before: null });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    const error = await screen.findByTestId("logs-error");
+    expect(error).toHaveTextContent("Agent not found");
+    expect(error).not.toHaveTextContent("Run not found");
+    fireEvent.click(screen.getByRole("button", { name: "Clear agent filter" }));
+    expect(replace).toHaveBeenLastCalledWith(routes.logs({ level: "error" }), { scroll: false });
+  });
+
+  it("still searches the agent's logs when its run suggestions cannot be loaded", async () => {
+    currentParams = new URLSearchParams({ agent_id: AGENT });
+    vi.mocked(listTraceRuns).mockRejectedValue(new Error("down"));
+    vi.mocked(searchLogs).mockResolvedValue({ ...response([log("mine")]), agent_runs: 1, agent_runs_limited: false });
+    render(<LogsPage />);
     expect(await screen.findByText("mine")).toBeInTheDocument();
-    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("1 most recent run");
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("1 run");
   });
 
   it("cuts a very long message with an expand control", async () => {

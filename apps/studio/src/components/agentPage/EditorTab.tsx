@@ -8,9 +8,12 @@ import { routes } from "@/lib/routes";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Button } from "@/components/ui/Button";
 import { AgentEditor } from "@/components/agents/AgentEditor";
+import { publishWarningsOf, type PublishWarning } from "@/components/agents/agentCapabilities";
+import { PublishWarnings } from "@/components/agents/PublishWarnings";
 import { AgentVersionsPanel, useVersionRestore } from "@/components/agents/AgentVersionsPanel";
 import { canonicalJson, errorTarget } from "@/components/agents/specSections";
 import { stepForError } from "@/components/agents/stepper/registry";
+import { readableError } from "@/components/agents/readableError";
 import { CompareSheet } from "@/components/agents/stepper/CompareSheet";
 import { useRestoreFocus } from "./restoreFocus";
 import { useEditorLayout } from "@/components/agents/stepper/useEditorLayout";
@@ -45,7 +48,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const [versions, setVersions] = useState<AgentVersion[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [lastPublishResult, setLastPublishResult] = useState<{ type: "success"; version: number } | { type: "conflict"; message: string } | null>(null);
+  const [lastPublishResult, setLastPublishResult] = useState<{ type: "success"; version: number; warnings?: PublishWarning[] } | { type: "conflict"; message: string } | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   // Bumped after a restore replaces the draft, so the editor re-reads it.
   const [editorKey, setEditorKey] = useState(0);
@@ -109,7 +112,8 @@ export function EditorTab({ agentId }: { agentId: string }) {
     setSaveErrorLocations([]);
     try {
       const version = await api.versions.create(agent.id);
-      setLastPublishResult({ type: "success", version: version.version });
+      // AC.13: the publish response's `warnings` (AC.7: an unpriced model under a cost cap...).
+      setLastPublishResult({ type: "success", version: version.version, warnings: publishWarningsOf(version) });
       const versionsData = await api.versions.list(agent.id);
       setVersions(versionsData);
       void refreshPage?.();
@@ -209,12 +213,13 @@ export function EditorTab({ agentId }: { agentId: string }) {
       {/* Errors a step owns show in that step instead (inline, or at the top of the step). */}
       {saveError && !errorTarget(saveError) && !stepForError(saveError) ? (
         <div role="alert" data-testid="agent-save-error" className={`${notice} border-destructive/40 bg-destructive/10 text-destructive-text`}>
-          {saveError}
+          {readableError(saveError)}
         </div>
       ) : null}
       {lastPublishResult?.type === "success" ? (
         <div className={`${notice} border-success/40 bg-success/10 text-success-text`}>Version {lastPublishResult.version} published</div>
       ) : null}
+      {lastPublishResult?.type === "success" ? <PublishWarnings warnings={lastPublishResult.warnings ?? []} /> : null}
       {lastPublishResult?.type === "conflict" ? (
         <div className={`${notice} border-warning/40 bg-warning/10 text-warning-text`}>{lastPublishResult.message}</div>
       ) : null}
@@ -224,6 +229,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
           {compareRestore.notice}
         </p>
       ) : null}
+      {compareRestore.notice ? <PublishWarnings warnings={compareRestore.warnings} /> : null}
     </>
   );
 

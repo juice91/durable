@@ -71,8 +71,8 @@ function versionParam(version: RouteVersion): string | undefined {
 export type AgentTab = "chat" | "traces" | "editor" | "memory";
 
 export const agentRoutes = {
-  /** `/agents`: the agents list. */
-  agents: (): string => "/agents",
+  /** `/agents[?view=archived]`: the agents list (the archived agents with `archived`). */
+  agents: (opts: { archived?: boolean } = {}): string => withQuery("/agents", { view: opts.archived ? "archived" : undefined }),
   /** `/agents/new`: the create form. */
   agentNew: (): string => "/agents/new",
   /** `/agents/:id`: the agent page's root, which redirects to the Chat tab (it was the editor before SL.6). */

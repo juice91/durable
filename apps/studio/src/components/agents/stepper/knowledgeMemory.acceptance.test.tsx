@@ -398,7 +398,7 @@ describe("a stored model outside the allowlist", () => {
     fireEvent.click(publishButton());
     await waitFor(() => expect(region("Memory")).toBeVisible());
     expect(navButton(/^Memory/)).toHaveTextContent("Has an error");
-    expect(within(region("Memory")).getByTestId("agent-save-error")).toHaveTextContent("observer model 'test:gone' is not allowed");
+    expect(within(region("Memory")).getByTestId("agent-save-error")).toHaveTextContent("Observer model 'test:gone' is not allowed");
   });
 });
 
@@ -601,9 +601,10 @@ describe("phone width (by classes)", () => {
     expect(screen.getByTestId("agent-stepper")).toHaveAttribute("data-layout", "compact");
     expect(screen.queryByRole("navigation", { name: "Editor steps" })).toBeNull();
     const options = Array.from((screen.getByTestId("stepper-select") as HTMLSelectElement).options).map((o) => o.textContent);
-    expect(options.slice(-2)).toEqual(["6. Knowledge — 2 knowledge bases", "7. Memory — History 12 · Working · Observational · Recall"]);
+    // AC.13 added step 8 (Output) after Memory.
+    expect(options.slice(-3, -1)).toEqual(["6. Knowledge — 2 knowledge bases", "7. Memory — History 12 · Working · Observational · Recall"]);
     fireEvent.change(screen.getByTestId("stepper-select"), { target: { value: "knowledge" } });
-    expect(screen.getByText("Step 6 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Step 6 of 8")).toBeInTheDocument();
     expect(region("Knowledge")).toBeVisible();
   });
 
@@ -647,7 +648,8 @@ describe("phone width (by classes)", () => {
     expect(screen.getByTestId("stepper-next")).toHaveTextContent("Memory");
     fireEvent.click(screen.getByTestId("stepper-next"));
     expect(screen.getByTestId("stepper-previous")).toHaveTextContent("Knowledge");
-    expect(screen.queryByTestId("stepper-next")).toBeNull();
+    // AC.13: Output (step 8) follows Memory.
+    expect(screen.getByTestId("stepper-next")).toHaveTextContent("Output");
   });
 });
 

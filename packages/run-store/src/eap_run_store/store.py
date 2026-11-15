@@ -1172,6 +1172,20 @@ class RunStore:
                 raise RunNotFound(tenant_id, run_id)
             session.commit()
 
+    def recorded_cost_usd(self, tenant_id: str, run_id: UUID | str) -> Decimal:
+        """The sum of `cost_usd` over the run's own `run_model_requests` rows recorded so far
+        (AC.5 `eap.check_budget`): chat requests, failed fallback attempts that billed, moderation
+        and embedding rows alike; an unpriced row counts as 0. Another tenant's run, or a run
+        without rows, gives 0. Never the child runs' rows (a cap is per run)."""
+        with self.Session() as session:
+            total = session.execute(
+                select(func.coalesce(func.sum(RunModelRequestModel.cost_usd), 0)).where(
+                    RunModelRequestModel.tenant_id == tenant_id,
+                    RunModelRequestModel.run_id == str(run_id),
+                )
+            ).scalar_one()
+            return Decimal(total)
+
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
         """Get a run by ID. Returns None if not found or belongs to another tenant.
 
@@ -1265,6 +1279,95 @@ class RunStore:
                 if getattr(getattr(exc, "orig", None), "sqlstate", None) == "57014":  # query_canceled
                     raise MetricsQueryTimeout(timeout_ms) from None
                 raise
+
+    def chat_usage(self, tenant_id: str, run_ids: list[UUID | str]) -> dict[str, dict[str, Any]]:
+        """The chat model's own usage per run (its own requests, not its child runs'), with the
+        null rules of the trace's `chat_*` split (eap_run_store.trace._UsageSplit): one statement
+        for the whole list, so a page of runs costs one query.
+
+        A request is "chat" as in eap_run_store.trace.request_operation: not an embedding, a
+        moderation check, an observer or a reflector request. The run's requests are its usage rows
+        plus its `model_message` events without one (reserved, not completed: the trace counts them
+        too). For each run with any usage row or such event: `chat_input_tokens`,
+        `chat_output_tokens` (null when the run had chat requests but none was recorded; 0 when it
+        had none) and `chat_cost_usd` (a decimal string; null when a chat request had no price or
+        no usage row). Runs with neither are absent (the caller reports null: not recorded)."""
+        ids = [str(r) for r in run_ids]
+        if not ids:
+            return {}
+        not_chat_key = (
+            "({k} LIKE 'moderation:%' OR {k} LIKE 'memory:observe:%' OR {k} LIKE 'memory:reflect:%')"
+        )
+        sql = text(
+            "WITH rows AS ("
+            "  SELECT run_id,"
+            "   sum(input_tokens) FILTER (WHERE chat) AS inp, sum(output_tokens) FILTER (WHERE chat) AS outp,"
+            "   sum(cost_usd) FILTER (WHERE chat) AS cost, count(*) FILTER (WHERE chat) AS recorded,"
+            "   count(*) FILTER (WHERE chat AND cost_usd IS NULL) AS unpriced"
+            "  FROM (SELECT q.*, (q.operation = 'chat' AND NOT " + not_chat_key.format(k="q.request_key") + ") AS chat"
+            "        FROM run_model_requests q WHERE q.tenant_id = :t AND q.run_id = ANY(:ids)) r"
+            "  GROUP BY run_id),"
+            " unrecorded AS ("
+            "  SELECT e.run_id, count(DISTINCT k.key) AS n"
+            "  FROM execution_events e"
+            "  CROSS JOIN LATERAL (SELECT CASE WHEN e.event_key LIKE '%\\:final'"
+            "                      THEN left(e.event_key, -6) ELSE e.event_key END AS key) k"
+            "  WHERE e.tenant_id = :t AND e.run_id = ANY(:ids) AND e.type = 'model_message'"
+            "   AND NOT " + not_chat_key.format(k="k.key") + ""
+            "   AND NOT EXISTS (SELECT 1 FROM run_model_requests q"
+            "                   WHERE q.tenant_id = e.tenant_id AND q.run_id = e.run_id AND q.request_key = k.key)"
+            "  GROUP BY e.run_id)"
+            " SELECT coalesce(rows.run_id, unrecorded.run_id) AS run_id, rows.inp, rows.outp, rows.cost,"
+            "  coalesce(rows.recorded, 0) AS recorded, coalesce(rows.unpriced, 0) AS unpriced,"
+            "  coalesce(unrecorded.n, 0) AS unrecorded"
+            " FROM rows FULL JOIN unrecorded ON unrecorded.run_id = rows.run_id"
+        )
+        out: dict[str, dict[str, Any]] = {}
+        with self.Session() as session:
+            for row in session.execute(sql, {"t": tenant_id, "ids": ids}):
+                requests = row.recorded + row.unrecorded
+                no_tokens = requests > 0 and row.recorded == 0
+                missing_cost = row.unpriced or row.unrecorded
+                out[str(row.run_id)] = {
+                    "chat_input_tokens": None if no_tokens else int(row.inp or 0),
+                    "chat_output_tokens": None if no_tokens else int(row.outp or 0),
+                    "chat_cost_usd": None
+                    if missing_cost
+                    else format(Decimal(row.cost) if row.cost is not None else Decimal(0), "f"),
+                }
+        return out
+
+    def agent_run_ids(
+        self,
+        tenant_id: str,
+        agent_id: UUID | str,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> tuple[list[str], bool]:
+        """The ids of the tenant's runs of `agent_id` that may have logged in `[start, end]`: created
+        by `end` and not finished before `start` (child runs of workflows included), newest first, at
+        most `limit`. Returns (ids, more): `more` is True when older matching runs were left out.
+        For GET /logs?agent_id= (log records carry the run id, not the agent id).
+
+        Known gap (review finding 3, P1, needs a migration): no index on (tenant_id, agent_id,
+        created_at), so this filters ix_runs_tenant_created's rows by agent; fine at today's sizes,
+        slow for a tenant with many runs of other agents in the window."""
+        query = (
+            select(RunModel.id)
+            .where(
+                RunModel.tenant_id == tenant_id,
+                RunModel.agent_id == str(agent_id),
+                RunModel.created_at <= end,
+                or_(RunModel.finished_at.is_(None), RunModel.finished_at >= start),
+            )
+            .order_by(RunModel.created_at.desc(), RunModel.id.desc())
+            .limit(limit + 1)
+        )
+        with self.Session() as session:
+            ids = [str(r) for r in session.execute(query).scalars()]
+        return ids[:limit], len(ids) > limit
 
     # ------------------------------------------------------------------ conversations
 
@@ -1591,11 +1694,13 @@ def append_event_in_session(
     event_key: str,
     type: RunEventType | str,
     data: dict | None = None,
-    usage: dict[str, Any] | None = None,
+    usage: dict[str, Any] | list[dict[str, Any]] | None = None,
 ) -> tuple[RunEvent, bool]:
     """EventLog.append's work inside the caller's open ORM session, which commits it: a store that
     must write its own rows, an event and a usage row in one transaction (KnowledgeStore) uses this.
     Same rules as EventLog.append (seq under the runs row lock, repeated key = no write).
+    `usage` is one row or a list of rows (AC.5: a model request answered by a fallback model plus
+    its failed attempts that reported usage), all written in the event's transaction.
     A usage row inserted on a FINISHED run also refreshes the run's totals (insert_usage_in_session).
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
     if not tenant_id:
@@ -1634,10 +1739,19 @@ def append_event_in_session(
     )
     session.add(event_model)
     session.flush()
-    if usage is not None:
+    for row in usage_rows(usage):
         # A usage row on a finished run (post-turn steps) also refreshes the run's totals.
-        insert_usage_in_session(session, tenant_id, run_id, usage, event_model.ts)
+        insert_usage_in_session(session, tenant_id, run_id, row, event_model.ts)
     return _run_event_from_model(event_model), True
+
+
+def usage_rows(usage: dict[str, Any] | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """`EventLog.append`'s `usage` argument as a list of rows: None -> [], one row -> [row]."""
+    if usage is None:
+        return []
+    if isinstance(usage, dict):
+        return [usage]
+    return list(usage)
 
 
 class EventLog:
@@ -1654,7 +1768,7 @@ class EventLog:
         event_key: str,
         type: RunEventType,
         data: dict | None = None,
-        usage: dict[str, Any] | None = None,
+        usage: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> tuple[RunEvent, bool]:
         """Append an event to a run owned by `tenant_id`. Seq is assigned atomically.
 
@@ -1666,7 +1780,9 @@ class EventLog:
         optionally operation ('chat' by default, 'embedding' for an embedding call) and
         created_at), inserted in the event's transaction with ON CONFLICT DO NOTHING. A
         repeated key writes no row: the first event's row stands, so usage and cost are recorded
-        exactly once per request and never recomputed.
+        exactly once per request and never recomputed. `usage` may also be a list of such rows
+        (AC.5: the answering model's row plus `model:{n}:failed:{k}` rows of failed fallback
+        attempts that reported usage), all in the event's transaction; a single row still works.
         Raises RunNotFound (and writes nothing) if the run does not exist or belongs to another tenant.
         """
         if not tenant_id:

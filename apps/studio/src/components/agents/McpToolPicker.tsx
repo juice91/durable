@@ -6,16 +6,28 @@ import { describeMcpError, mcpServers, mcpToolKey, type McpServer, type McpTestR
 
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-card-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
 
+/** What a server said about a tool when it was listed (MCP `annotations`), when the API passes them on. */
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+}
+
 interface McpToolPickerProps {
   value: McpToolRef[];
   onChange: (value: McpToolRef[]) => void;
+  /**
+   * Optional extra content for each selected tool's row (AC.13: the "Require approval" toggle).
+   * `annotations` is the tool's MCP annotations from this session's "Load tools" result, or null
+   * when the tools were not loaded or the API did not include them.
+   */
+  renderSelectedExtra?: (ref: McpToolRef, annotations: McpToolAnnotations | null) => React.ReactNode;
 }
 
 /**
  * Pick MCP tools per registered server. Tools are listed through the server's connection test
  * (on demand); when that fails the tool name can be typed instead. Publish checks the server.
  */
-export function McpToolPicker({ value, onChange }: McpToolPickerProps) {
+export function McpToolPicker({ value, onChange, renderSelectedExtra }: McpToolPickerProps) {
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [discovered, setDiscovered] = useState<Record<string, McpTestResult>>({});
@@ -56,6 +68,14 @@ export function McpToolPicker({ value, onChange }: McpToolPickerProps) {
   };
 
   const byName = new Map((servers ?? []).map((server) => [server.name, server]));
+  // Annotations of a selected tool, from this session's "Load tools" result (read defensively: the
+  // API may not include them).
+  const annotationsOf = (ref: McpToolRef): McpToolAnnotations | null => {
+    const server = byName.get(ref.server);
+    const tool = server ? discovered[server.id]?.tools.find((t) => t.name === ref.tool) : undefined;
+    const annotations = (tool as { annotations?: unknown } | undefined)?.annotations;
+    return annotations && typeof annotations === "object" ? (annotations as McpToolAnnotations) : null;
+  };
   const enabledServers = (servers ?? []).filter((server) => server.enabled);
 
   return (
@@ -68,9 +88,10 @@ export function McpToolPicker({ value, onChange }: McpToolPickerProps) {
             const server = byName.get(ref.server);
             const warning = servers === null ? null : !server ? "server not registered" : !server.enabled ? "server disabled" : null;
             return (
-              <li key={mcpToolKey(ref)} data-testid="mcp-selected-tool" className="inline-flex items-center gap-2 rounded-md border border-border bg-card px-2 py-1 text-sm">
-                <span className="font-mono text-card-foreground">{ref.server}/{ref.tool}</span>
+              <li key={mcpToolKey(ref)} data-testid="mcp-selected-tool" className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-2 rounded-md border border-border bg-card px-2 py-1 text-sm">
+                <span className="break-all font-mono text-card-foreground">{ref.server}/{ref.tool}</span>
                 {warning ? <span className="text-xs text-destructive-text">{warning}</span> : null}
+                {renderSelectedExtra ? renderSelectedExtra(ref, annotationsOf(ref)) : null}
                 <button type="button" aria-label={`Remove ${ref.server}/${ref.tool}`} className="text-xs text-muted-foreground hover:text-card-foreground" onClick={() => toggle(ref)}>Remove</button>
               </li>
             );

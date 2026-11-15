@@ -255,9 +255,10 @@ def test_agent_step_with_a_required_context_field_fails_request_context_invalid(
     assert child_events[-1][3]["error_code"] == "request_context_invalid"
 
 
-def test_archived_agent_is_agent_not_found_when_the_child_would_be_created(worker, client, tenant, defs):
+def test_archived_agent_is_agent_archived_when_the_child_would_be_created(worker, client, tenant, defs):
     """The archived check still guards the create path: a fresh step never creates a child run for
-    an archived agent (recovery of an already-created child is the W5b crash test)."""
+    an archived agent, and fails with `agent_archived` (not `agent_not_found`: the agent exists).
+    Recovery of an already-created child is the W5b crash test."""
     from sqlalchemy import text
 
     agent_id = publish_agent(worker.engine, tenant, agent_spec())
@@ -271,7 +272,10 @@ def test_archived_agent_is_agent_not_found_when_the_child_would_be_created(worke
     }
     _, run_id = _start(worker, client, tenant, spec, {})
     assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "failed"
-    assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "agent_not_found"
+    last = event_rows(worker.engine, run_id)[-1][3]
+    assert last["error_code"] == "agent_archived" and last["step_id"] == "a"
+    run = worker.run_store.get_run(tenant, run_id)
+    assert "archived" in (run["error"] or "")
     with worker.engine.connect() as conn:
         children = conn.execute(text("SELECT id FROM runs WHERE parent_run_id = :r"), {"r": str(run_id)}).fetchall()
     assert children == []

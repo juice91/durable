@@ -23,6 +23,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/DropdownMenu";
 import { GUARD_SELF_ATTRIBUTE } from "@/components/agents/stepper/useUnsavedChangesGuard";
+import { publishWarningsOf, type PublishWarning } from "./agentCapabilities";
+import { PublishWarnings } from "./PublishWarnings";
 import { compareRefLabel, isDirtyDraftConflict, restoreVersion, type CompareRef } from "@/lib/agentVersions";
 
 interface AgentVersion {
@@ -61,6 +63,8 @@ export interface VersionRestore {
   dialog: React.ReactNode;
   /** "Version 5 published, restored from v1" after a restore. */
   notice: string | null;
+  /** The restore response's publish `warnings` (AC.13; empty when none). */
+  warnings: PublishWarning[];
   clearNotice: () => void;
 }
 
@@ -72,6 +76,7 @@ export interface VersionRestore {
 export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, onRestored }: VersionRestoreOptions): VersionRestore {
   const [restore, setRestore] = useState<RestoreState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<PublishWarning[]>([]);
   // Set when a restore succeeded: its confirm then sends focus to the notice, not back to its opener.
   const restoredRef = useRef(false);
   const skipOpenerReturn = useCallback(() => restoredRef.current, []);
@@ -85,6 +90,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
       restoredRef.current = true;
       setRestore(null);
       setNotice(`Version ${created.version} published, restored from v${state.version}`);
+      setWarnings(publishWarningsOf(created));
       onRestored?.(created);
     } catch (err: unknown) {
       if (err instanceof ApiError && !state.discard && isDirtyDraftConflict(err.status, err.message)) {
@@ -98,10 +104,14 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
 
   const start = useCallback((version: number) => {
     setNotice(null);
+    setWarnings([]);
     restoredRef.current = false;
     setRestore({ version, discard: false, busy: false, error: null });
   }, []);
-  const clearNotice = useCallback(() => setNotice(null), []);
+  const clearNotice = useCallback(() => {
+    setNotice(null);
+    setWarnings([]);
+  }, []);
 
   const dialog = restore ? (
     restore.discard ? (
@@ -148,7 +158,7 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
     )
   ) : null;
 
-  return { start, dialog, notice, clearNotice };
+  return { start, dialog, notice, warnings, clearNotice };
 }
 
 interface AgentVersionsPanelProps {
@@ -314,6 +324,7 @@ export function AgentVersionsPanel({ versions, agentId, hasUnsavedEdits = false,
           {restore.notice}
         </p>
       ) : null}
+      {restore.notice ? <PublishWarnings warnings={restore.warnings} className="mb-3" /> : null}
       {inlineCompare && agentId ? (
         <div className="mb-4">
           <VersionCompare agentId={agentId} base={inlineCompare.base} target={inlineCompare.target} onClose={() => setInlineCompare(null)} />

@@ -14,6 +14,7 @@ members = [
     "eap-db",
     "eap-knowledge",
     "eap-observability",
+    "eap-pricing",
     "eap-processors",
     "eap-run-store",
     "eap-schemas",
@@ -568,6 +569,7 @@ dependencies = [
     { name = "eap-db" },
     { name = "eap-knowledge" },
     { name = "eap-observability" },
+    { name = "eap-pricing" },
     { name = "eap-processors" },
     { name = "eap-run-store" },
     { name = "eap-schemas" },
@@ -577,6 +579,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "referencing" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
@@ -596,6 +599,7 @@ requires-dist = [
     { name = "eap-db", editable = "packages/db" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-observability", editable = "packages/observability" },
+    { name = "eap-pricing", editable = "packages/pricing" },
     { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
@@ -605,6 +609,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "pyyaml", specifier = "==6.0.3" },
     { name = "referencing", specifier = ">=0.30" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
@@ -674,6 +679,21 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-logging", specifier = ">=0.63b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.67.0" },
+]
+
+[[package]]
+name = "eap-pricing"
+version = "0.1.0"
+source = { editable = "packages/pricing" }
+dependencies = [
+    { name = "genai-prices" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "genai-prices", specifier = ">=0.2.3" },
+    { name = "pydantic", specifier = ">=2" },
 ]
 
 [[package]]
@@ -754,6 +774,7 @@ dependencies = [
     { name = "eap-db" },
     { name = "eap-knowledge" },
     { name = "eap-observability" },
+    { name = "eap-pricing" },
     { name = "eap-processors" },
     { name = "eap-run-store" },
     { name = "eap-schemas" },
@@ -781,6 +802,7 @@ requires-dist = [
     { name = "eap-db", editable = "packages/db" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-observability", editable = "packages/observability" },
+    { name = "eap-pricing", editable = "packages/pricing" },
     { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-run-store", editable = "packages/run-store" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
