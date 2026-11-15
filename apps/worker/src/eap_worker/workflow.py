@@ -209,11 +209,24 @@ and before its tools run. With output processors that event carries no text (`"w
 
 Billed usage is recorded inside the model step (loops D12, LP.8): a cancel fences the next DBOS
 operation, so the `model:{n}:final` append of a request that finished after a cancel never runs.
-The model-request step's event handler (_publish_deltas, which runs inside the step) therefore
-prices the drained response exactly as the workflow does (_request_usage) and writes its
+DBOSDurability resolves the run's model inside the model-request step, so the agent's
+ResolveModelId resolver wraps every resolved model in UsageRecordingModel (_recording_resolver).
+When the wrapped request returns, or its stream is drained and closed, still inside the step, it
+prices the response exactly as the workflow does (_request_usage) and writes its
 `run_model_requests` rows (`model:{n}`, plus `model:{n}:failed:{k}`) with ON CONFLICT DO NOTHING;
-the later append writes the same keys and so skips them. No step is added; a failed write is
+the later append writes the same keys and so skips them. The event stream handler
+(_publish_deltas) only publishes deltas and writes nothing. No step is added; a failed write is
 logged and left to the append, so it never retries (re-bills) the model call.
+- A crash after that write and before the step's checkpoint re-executes the request (billed again,
+  as before this change). The first execution's row stands (first write wins), and the
+  `model:{n}:final` event takes its usage, model and cost fields from that stored row
+  (append_event_step), so the event and run_model_requests always agree; the event's message,
+  text and fallback fields describe the checkpointed (second) response. The second execution's
+  cost is not recorded: before this change the first one's was lost instead.
+- Suspended responses (Pydantic AI's background/batch `state == "suspended"`) are not recorded in
+  the step: their usage is provisional. Forward risk, if such a model is ever used: the completing
+  request must record the real usage under `model:{n}`, which the append does today; recording the
+  provisional one first would make the real one a no-op (first write wins).
 
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
@@ -407,8 +420,9 @@ def _usage_rows(request_key: str, usage: dict[str, Any]) -> tuple[list[dict[str,
     return [row, *failed_attempt_rows(request_key, failed, row["created_at"])], fields
 
 
-# The model request in progress of this workflow execution (set by _drive_agent, read by the model
-# step's event handler in the same task): run, tenant, the model chain and the request's index n.
+# The model request in progress of this workflow execution (set by _drive_agent; read inside the
+# model step, in the same task, by UsageRecordingModel): run, tenant, the model chain and the
+# request's index n.
 _MODEL_REQUEST: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "eap_model_request", default=None
 )
@@ -450,13 +464,60 @@ def _write_request_usage(tenant_id: str, run_id: str, rows: list[dict[str, Any]]
         session.commit()
 
 
+_USAGE_COLUMNS = (
+    "model_id", "provider_model_name", "input_tokens", "output_tokens", "cache_read_tokens",
+    "cache_write_tokens", "usage_measured", "cost_usd", "price_source",
+)
+
+
+def _stored_usage_row(tenant_id: str, run_id: str, request_key: str) -> dict[str, Any] | None:
+    """The run's recorded run_model_requests row for `request_key` (the _USAGE_COLUMNS), or None."""
+    from sqlalchemy import text as sql_text
+
+    with get_runtime().engine.connect() as conn:
+        row = conn.execute(
+            sql_text(
+                f"SELECT {', '.join(_USAGE_COLUMNS)} FROM run_model_requests"
+                " WHERE tenant_id = :t AND run_id = :r AND request_key = :k"
+            ),
+            {"t": tenant_id, "r": run_id, "k": request_key},
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _same_usage(stored: dict[str, Any], row: dict[str, Any]) -> bool:
+    """Whether a stored row records the same request as `row` (cost and price source aside, which
+    depend only on these and the price file)."""
+    return all(stored[c] == row[c] for c in _USAGE_COLUMNS if c not in ("cost_usd", "price_source"))
+
+
+def _usage_fields_from_row(stored: dict[str, Any]) -> dict[str, Any]:
+    """A model_message event's usage fields (pricing.usage_record's shape) from a stored row, marked
+    `recorded_attempt: "earlier"`: the row of an earlier execution of the model step."""
+    cost = stored["cost_usd"]
+    return {
+        "model_id": stored["model_id"],
+        "usage": {
+            "input_tokens": stored["input_tokens"],
+            "output_tokens": stored["output_tokens"],
+            "cache_read_tokens": stored["cache_read_tokens"],
+            "cache_write_tokens": stored["cache_write_tokens"],
+            "measured": stored["usage_measured"],
+            "provider_model_name": stored["provider_model_name"],
+            "price_source": stored["price_source"],
+            "recorded_attempt": "earlier",
+        },
+        "cost_usd": None if cost is None else format(cost, "f"),
+    }
+
+
 async def _record_usage_in_model_step(response: ModelResponse) -> None:
     """Inside the model-request step, once the response is complete: write its usage rows (module
     docstring, "Billed usage is recorded inside the model step"). Only for the run's own requests
     (_drive_agent sets _MODEL_REQUEST); never raises."""
     current = _MODEL_REQUEST.get()
-    if current is None:
-        return
+    if current is None or getattr(response, "state", "complete") == "suspended":
+        return  # not the run's own request, or provisional usage (module docstring)
     try:
         quiet = _QUIET_USAGE_GUARD.set(True)
         try:
@@ -707,6 +768,13 @@ async def append_event_step(
     if usage is not None:
         key = request_key or event_key.removesuffix(":final")
         row_list, fields = _usage_rows(key, usage)
+        if request_key is None and event_key.startswith("model:"):
+            # The model step may have recorded this request already (UsageRecordingModel). If it
+            # recorded another execution's usage (a crash between that write and the step's
+            # checkpoint), the event reports the stored row, so the two never disagree.
+            stored = await asyncio.to_thread(_stored_usage_row, tenant_id, run_id, key)
+            if stored is not None and not _same_usage(stored, row_list[0]):
+                fields = _usage_fields_from_row(stored)
         data = {**data, **fields}
         rows = row_list if len(row_list) > 1 else row_list[0]
     result = await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, rows)

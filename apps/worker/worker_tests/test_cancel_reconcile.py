@@ -181,3 +181,12 @@ def test_a_terminal_kb_ingest_run_is_not_run(worker, client, tenant):
         assert chunk_stats(worker.engine, tenant, document_id) == []
     finally:
         cleanup_knowledge(worker.engine, tenant)
+
+
+def test_an_invalid_cron_is_refused_before_launch():
+    """LP.8 review: the schedule is checked in from_env (before DBOS launches), as DBOS would."""
+    for cron in ("every minute", "61 * * * * *", "* * *"):
+        with pytest.raises(CancelReconcileConfigError, match="EAP_CANCEL_RECONCILE_SCHEDULE must be a DBOS cron"):
+            ReconcileConfig.from_env({"EAP_CANCEL_RECONCILE_SCHEDULE": cron})
+    for cron in ("0 * * * * *", "*/5 * * * * *", "0 3 * * *"):
+        assert ReconcileConfig.from_env({"EAP_CANCEL_RECONCILE_SCHEDULE": cron}).schedule == cron

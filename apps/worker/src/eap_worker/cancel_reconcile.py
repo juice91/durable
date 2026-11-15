@@ -71,7 +71,8 @@ OFF = "off"
 
 
 class CancelReconcileConfigError(ValueError):
-    """An invalid EAP_CANCEL_RECONCILE_* setting (raised when the schedule is applied)."""
+    """An invalid EAP_CANCEL_RECONCILE_* setting (raised by ReconcileConfig.from_env, which
+    `python -m eap_worker` calls before DBOS launches or recovers anything)."""
 
     def __init__(self, name: str, value: str):
         super().__init__(name, value)
@@ -79,6 +80,8 @@ class CancelReconcileConfigError(ValueError):
         self.value = value
 
     def __str__(self) -> str:
+        if self.name == SCHEDULE_ENV:
+            return f"{self.name} must be a DBOS cron expression (seconds first) or 'off', not {self.value!r}"
         return f"{self.name} must be a positive integer, not {self.value!r}"
 
 
@@ -95,6 +98,13 @@ def _positive_int(env: Mapping[str, str], name: str, default: int, maximum: int 
     return value
 
 
+def valid_cron(schedule: str) -> bool:
+    """The check DBOS.apply_schedules makes (croniter, seconds first; 5 fields also pass)."""
+    from croniter import croniter
+
+    return bool(croniter.is_valid(schedule, second_at_beginning=True))
+
+
 @dataclass(frozen=True)
 class ReconcileConfig:
     schedule: str = DEFAULT_SCHEDULE
@@ -108,6 +118,9 @@ class ReconcileConfig:
         schedule = (env.get(SCHEDULE_ENV) or "").strip() or DEFAULT_SCHEDULE
         if schedule.lower() == OFF:
             return cls(off=True)
+        if not valid_cron(schedule):
+            # Before launch: DBOS.apply_schedules would only reject it after recovery has started.
+            raise CancelReconcileConfigError(SCHEDULE_ENV, schedule)
         return cls(
             schedule=schedule,
             after_seconds=_positive_int(env, AFTER_SECONDS_ENV, DEFAULT_AFTER_SECONDS),
