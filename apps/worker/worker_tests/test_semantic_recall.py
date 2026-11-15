@@ -201,7 +201,7 @@ def seed_turn(worker, tenant, agent, conv_id, user: str, answer: str, model: str
 
     run_id, created = worker.run_store.create_turn(tenant, conv_id, 1, user, uuid.uuid4())
     assert created
-    worker.run_store.set_status(tenant, run_id, "completed", answer, None)
+    worker.run_store.finish_with_end(tenant, run_id, "completed", answer, None)
     MemoryStore(worker.engine).index_turn(
         tenant, str(agent), conv_id, str(run_id),
         [TurnText("user", user, hash_embedding(user, dims)), TurnText("assistant", answer, hash_embedding(answer, dims))],
@@ -252,12 +252,12 @@ def test_a_deleted_conversation_is_a_no_op_for_the_index_step(worker, tenant):
     conv = conversation(worker, tenant, agent)
     run_id, created = worker.run_store.create_turn(tenant, conv["id"], 1, "hello there", uuid.uuid4())
     assert created
-    worker.run_store.set_status(tenant, run_id, "completed", "hi", None)
+    worker.run_store.finish_with_end(tenant, run_id, "completed", "hi", None)
     assert MemoryStore(worker.engine).delete_conversation(tenant, conv["id"])
     out = asyncio.run(memory_index_step(str(run_id), tenant, str(agent), conv["id"], 1, "hello there", "hi", RECALL,
                                         None))
     assert out["status"] == "conversation_deleted"
-    assert event_rows(worker.engine, run_id) == []
+    assert [row[1] for row in event_rows(worker.engine, run_id)] == ["end"]  # only the turn's own end
     assert usage_keys(worker.engine, run_id) == ["embed:index:1"]  # the provider charged
 
 

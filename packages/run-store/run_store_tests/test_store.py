@@ -132,16 +132,16 @@ def test_set_status_round_trip(run_store, test_tenant):
     assert run["status"] == "running"
     
     # Update status to completed with output
-    run_store.set_status(test_tenant, run_id, "completed", output="test output")
+    run_store.finish_with_end(test_tenant, run_id, "completed", output="test output")
     run = run_store.get_run(test_tenant, run_id)
     assert run["status"] == "completed"
     assert run["output"] == "test output"
     
-    # Update status to failed with error
-    run_store.set_status(test_tenant, run_id, "failed", error="test error")
+    # A terminal run stays terminal (loops D12): its end fixes the status, so failed is refused
+    assert run_store.finish_with_end(test_tenant, run_id, "failed", error="test error") is False
     run = run_store.get_run(test_tenant, run_id)
-    assert run["status"] == "failed"
-    assert run["error"] == "test error"
+    assert run["status"] == "completed"
+    assert run["error"] is None
 
 
 def test_cross_tenant_get_run_returns_none(run_store, test_tenant):
@@ -681,7 +681,7 @@ def test_list_runs_recovering_filter_matches_stale_running_runs(run_store, test_
         run_store.create_run(tenant_id=test_tenant, agent_id=agent_id, agent_version=1, input="x", run_id=rid)
     run_store.set_status(test_tenant, stale, "running")
     run_store.set_status(test_tenant, fresh, "running")
-    run_store.set_status(test_tenant, done, "completed")
+    run_store.finish_with_end(test_tenant, done, "completed")
     run_store.heartbeat(test_tenant, fresh)
     with run_store.engine.begin() as conn:
         conn.execute(

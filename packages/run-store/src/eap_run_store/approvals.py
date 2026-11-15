@@ -265,6 +265,35 @@ def record_decision_in_session(
     return closed is not None
 
 
+# How cancel_run_tree closes a cancelled run tree's open rows (loops D12). The decision CHECK
+# (ck_pending_approvals_decision) has no `cancelled` value and this milestone plans no migration
+# (D14), so a cancelled wait is closed as `denied` (the call or step never runs), and decided_by
+# marks it as the system's cancel, not a person's decision.
+CANCELLED_DECISION = "denied"
+CANCELLED_DECIDED_BY = "system:run_cancelled"
+
+
+def close_open_for_tree_in_session(
+    session, *, tenant_id: str, root_run_id: str, run_ids: list[str], decided_at: datetime
+) -> int:
+    """Close every open row of a cancelled run tree in the caller's transaction: rows whose
+    `root_run_id` is the tree's root (the root's own and its child runs' approvals) and rows of any
+    run in `run_ids`. Tenant-scoped. Writes no decision event: the runs' `end` events already
+    end the waits (decisions after `end` are refused). Returns the number of rows closed."""
+    closed = session.execute(
+        update(PendingApprovalModel)
+        .where(
+            PendingApprovalModel.tenant_id == tenant_id,
+            PendingApprovalModel.decided_at.is_(None),
+            or_(PendingApprovalModel.root_run_id == root_run_id, PendingApprovalModel.run_id.in_(run_ids)),
+        )
+        .values(decision=CANCELLED_DECISION, decided_at=decided_at, decided_by=CANCELLED_DECIDED_BY)
+        .returning(PendingApprovalModel.run_id)
+        .execution_options(synchronize_session=False)
+    ).fetchall()
+    return len(closed)
+
+
 def open_approval_exists(run_table=RunModel) -> Any:
     """SQL: the run (or, for a workflow run, one of its child runs) has an open approval row (the
     `waiting_approval` display status). Correlated to `run_table`.
@@ -478,10 +507,13 @@ class ApprovalStore:
 __all__ = [
     "APPROVAL_ARGS_MAX_BYTES",
     "APPROVAL_DECISIONS",
+    "CANCELLED_DECIDED_BY",
+    "CANCELLED_DECISION",
     "APPROVAL_KINDS",
     "ApprovalCursor",
     "ApprovalStore",
     "DECISION_BY_EVENT_TYPE",
+    "close_open_for_tree_in_session",
     "PendingApprovalModel",
     "STEP_DECISION_TYPES",
     "TOOL_DECISION_TYPES",

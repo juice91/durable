@@ -119,7 +119,7 @@ def by_key(events, key: str) -> list[tuple[str, dict]]:
 def completed_turn(worker, tenant, conv_id, input_text: str, output: str = "ok") -> uuid.UUID:
     run_id, created = worker.run_store.create_turn(tenant, conv_id, 1, input_text, uuid.uuid4())
     assert created
-    worker.run_store.set_status(tenant, run_id, "completed", output, None)
+    worker.run_store.finish_with_end(tenant, run_id, "completed", output, None)
     return run_id
 
 
@@ -342,7 +342,7 @@ def test_a_deleted_conversation_is_a_no_op_for_the_post_turn_steps(worker, tenan
         out = asyncio.run(observe_write_step(str(run_id), tenant, str(agent), conv["id"], 1, small, notes, code,
                                              None, None, memory_json))
         assert out["status"] == "conversation_deleted"
-    assert event_rows(worker.engine, run_id) == []
+    assert [row[1] for row in event_rows(worker.engine, run_id)] == ["end"]  # only the turn's own end
 
 
 # --------------------------------------------------------------------------- racing observers

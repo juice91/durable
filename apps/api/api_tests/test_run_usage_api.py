@@ -47,7 +47,7 @@ def test_run_json_usage_fields(pg, tenant_of):
         "input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 0,
         "usage_measured": True, "cost_usd": Decimal("0.0000000001"), "price_source": "override",
     })
-    store.set_status(tenant, uuid.UUID(run_id), "completed", output="done")
+    store.finish_with_end(tenant, uuid.UUID(run_id), "completed", output="done")
 
     body = client.get(f"/api/v1/runs/{run_id}", headers=h).json()
     assert (body["input_tokens"], body["output_tokens"], body["cost_usd"]) == (1, 2, "0.0000000001")

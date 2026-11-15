@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from eap_run_store import RunStore
+from eap_run_store import TERMINAL_RUN_STATUSES, RunStore
 
 from .run_helpers import requires_pg
 from .test_runs import (  # noqa: F401 - fixtures
@@ -52,8 +52,12 @@ def finish(app, run_id: str, status: str = "completed", output: str | None = "ok
     store = RunStore(app.state.database_engine)
     with app.state.database_engine.connect() as conn:
         tenant = conn.execute(text("SELECT tenant_id FROM runs WHERE id = :r"), {"r": run_id}).scalar_one()
-    store.set_status(tenant, uuid.UUID(run_id), status, output=output if status == "completed" else None,
-                     error=None if status == "completed" else "boom")
+    if status not in TERMINAL_RUN_STATUSES:
+        store.set_status(tenant, uuid.UUID(run_id), status)
+        return
+    # A terminal status comes with its `end` event (loops D12), as the worker writes it.
+    store.finish_with_end(tenant, uuid.UUID(run_id), status, output=output if status == "completed" else None,
+                          error=None if status == "completed" else "boom")
 
 
 class TestConversationCrud:

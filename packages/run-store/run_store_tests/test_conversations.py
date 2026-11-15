@@ -80,7 +80,7 @@ def test_turns_are_numbered_and_the_next_waits_for_a_terminal_previous_turn(stor
     with pytest.raises(TurnInProgress):
         store.create_turn(tenant, conv["id"], 1, "second", uuid4())
 
-    store.set_status(tenant, r1, "failed", error="boom")  # failed is terminal: the thread can go on
+    store.finish_with_end(tenant, r1, "failed", error="boom")  # failed is terminal: the thread can go on
     r2, _ = store.create_turn(tenant, conv["id"], 1, "second", uuid4())
     assert store.get_run(tenant, r2)["turn"] == 2
     assert [r["turn"] for r in store.list_turns(tenant, conv["id"])] == [1, 2]
@@ -124,11 +124,11 @@ def test_a_run_cannot_point_at_another_tenants_conversation(engine, store, tenan
 def test_completed_history_skips_unfinished_and_failed_turns_and_messages_are_written_once(store, tenant):
     conv, _ = store.create_conversation(tenant, uuid4())
     r1, _ = store.create_turn(tenant, conv["id"], 1, "one", uuid4())
-    store.set_status(tenant, r1, "completed", output="ONE", messages=[{"kind": "request", "n": 1}])
+    store.finish_with_end(tenant, r1, "completed", output="ONE", messages=[{"kind": "request", "n": 1}])
     # A re-executed finish step must not replace the stored messages.
-    store.set_status(tenant, r1, "completed", output="ONE", messages=[{"kind": "request", "n": 999}])
+    store.finish_with_end(tenant, r1, "completed", output="ONE", messages=[{"kind": "request", "n": 999}])
     r2, _ = store.create_turn(tenant, conv["id"], 1, "two", uuid4())
-    store.set_status(tenant, r2, "failed", error="boom")
+    store.finish_with_end(tenant, r2, "failed", error="boom")
     r3, _ = store.create_turn(tenant, conv["id"], 1, "three", uuid4())
 
     history = store.completed_turns_before(tenant, conv["id"], 3)
@@ -155,7 +155,7 @@ def test_first_turn_titles_an_untitled_conversation_once(store, tenant):
     conv, _ = store.create_conversation(tenant, uuid4())
     run1, _ = store.create_turn(tenant, conv["id"], 1, "My printer\nis on fire " + "!" * 80, uuid4())
     assert store.get_conversation(tenant, conv["id"])["title"] == ("My printer is on fire " + "!" * 80)[:60]
-    store.set_status(tenant, run1, "completed", output="ok")
+    store.finish_with_end(tenant, run1, "completed", output="ok")
     store.create_turn(tenant, conv["id"], 1, "second question", uuid4())
     assert store.get_conversation(tenant, conv["id"])["title"].startswith("My printer is on fire")
 
@@ -189,7 +189,7 @@ def test_list_carries_turn_count_and_latest_turn_status(store, tenant):
     row = store.list_conversations(tenant)[0]
     assert (row["turn_count"], row["last_turn_status"], row["last_turn_run_id"]) == (0, None, None)
     run1, _ = store.create_turn(tenant, conv["id"], 1, "one", uuid4())
-    store.set_status(tenant, run1, "completed", output="ok")
+    store.finish_with_end(tenant, run1, "completed", output="ok")
     run2, _ = store.create_turn(tenant, conv["id"], 1, "two", uuid4())
     row = store.list_conversations(tenant)[0]
     assert row["turn_count"] == 2 and row["last_turn_run_id"] == str(run2)

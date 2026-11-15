@@ -50,7 +50,7 @@ def _seed(engine, event_log, tenant, run_id, events, usage=None) -> None:
 
 def _finish(engine, run_store, tenant, run_id, status="completed", output="done", seconds=100) -> None:
     run_store.mark_running(tenant, UUID(str(run_id)))
-    run_store.set_status(tenant, UUID(str(run_id)), status, output=output if status == "completed" else None,
+    run_store.finish_with_end(tenant, UUID(str(run_id)), status, output=output if status == "completed" else None,
                          error=None if status == "completed" else "Boom: failed")
     with engine.begin() as conn:
         conn.execute(

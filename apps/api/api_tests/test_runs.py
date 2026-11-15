@@ -380,7 +380,7 @@ class TestStream:
         seed(app, run_id, FULL_RUN)
         from eap_run_store import RunStore
 
-        RunStore(app.state.database_engine).set_status(_tenant_of_run(app, run_id), uuid.UUID(run_id), "completed", "done")
+        RunStore(app.state.database_engine).finish_with_end(_tenant_of_run(app, run_id), uuid.UUID(run_id), "completed", "done")
         # Resuming after the final event: only a status frame, then the stream ends.
         frames = read_all_frames(client, f"/api/v1/runs/{run_id}/stream", {**h, "Last-Event-ID": "4"})
         assert [(f.event, f.data["display_status"]) for f in frames] == [("status", "completed")]

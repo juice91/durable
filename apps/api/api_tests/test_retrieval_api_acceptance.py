@@ -133,7 +133,7 @@ def test_wait_zero_answers_202_and_the_run_is_readable_by_its_tenant_only(pg, te
     # A failed run is answered as 200 with its error and no result.
     store = app.state.run_stores[0]
     store.mark_running(tenant, uuid.UUID(run_id))
-    store.set_status(tenant, uuid.UUID(run_id), "failed", None, "KnowledgeBaseNotFound: gone")
+    store.finish_with_end(tenant, uuid.UUID(run_id), "failed", None, "KnowledgeBaseNotFound: gone")
     r = client.post(url, json={"query": SECRET_QUERY, "run_id": run_id}, headers=h)
     assert r.status_code == 200 and r.json()["status"] == "failed" and "result" not in r.json()
 
