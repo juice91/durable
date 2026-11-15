@@ -100,10 +100,31 @@ def test_loop_steps_publish_with_the_loops_preview(client, auth_header, monkeypa
     assert resp.status_code == 201, resp.text
 
 
-def test_foreach_stays_refused_with_the_loops_preview(client, auth_header, monkeypatch):
+EVALUATE = _wf(
+    {**_tool("x", "ev")},
+    {"id": "ev", "type": "evaluate", "value": _ref("steps.x.output"),
+     "evaluators": [{"kind": "contains", "value": "a"}]},
+)
+NESTED_FOREACH = _wf(_loop([{"id": "each", "type": "foreach", "items": _ref("input.list"), "max_items": 3,
+                             "body": {"start": "y", "steps": [_tool("y")]}}]))
+LIMITS = {**VALID_LOOP, "limits": {"max_cost_usd": "1"}}
+
+
+@pytest.mark.parametrize("spec, where", [
+    (FOREACH, "step 'each': the foreach step"),
+    (NESTED_FOREACH, "step 'each': the foreach step"),
+    (EVALUATE, "step 'ev': the evaluate step"),
+    (LIMITS, "limits is not available yet"),
+], ids=["foreach", "foreach-in-loop-body", "evaluate", "limits"])
+def test_unlanded_features_stay_refused_with_the_loops_preview(client, auth_header, monkeypatch, spec, where):
+    """The preview opens `loop` steps only: foreach (any depth, LP.10), evaluate (LP.14) and
+    `limits` (LP.11) are refused with EAP_WORKFLOW_LOOPS_PREVIEW=1 too."""
     monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
-    resp = _publish(client, auth_header, FOREACH)
-    assert resp.status_code == 422 and "workflow loops runtime has not landed" in resp.json()["detail"]
+    resp = _publish(client, auth_header, spec)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert where in detail and "workflow loops runtime has not landed" in detail
+    assert "step 'lp'" not in detail  # the loop itself passes the gate
 
 
 def test_combinator_branches_publish_without_the_preview(client, auth_header, monkeypatch):

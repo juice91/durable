@@ -59,3 +59,55 @@ def test_run_bounds_guard_only_loop_specs():
         "steps": [{"id": "t", "type": "tool", "tool_id": "clock.now", "input": {}}],
     })
     _check_run_bounds(plain, {"max_step_executions": 0})  # never checked without loops
+
+
+def _operational():
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("SELECT 1", {}, Exception("server closed the connection unexpectedly"))
+
+
+def test_immutable_read_retries_transient_db_errors(monkeypatch):
+    import asyncio
+
+    import eap_worker.workflow_run as wr
+
+    monkeypatch.setattr(wr, "IMMUTABLE_READ_DELAYS", (0.0, 0.0, 0.0))
+    calls = []
+
+    def flaky(x):
+        calls.append(x)
+        if len(calls) < 3:
+            raise _operational()
+        return {"ok": x}
+
+    assert asyncio.run(wr.immutable_read(flaky, 7)) == {"ok": 7} and len(calls) == 3
+
+
+def test_immutable_read_gives_up_and_never_retries_other_errors(monkeypatch):
+    import asyncio
+
+    import eap_worker.workflow_run as wr
+
+    monkeypatch.setattr(wr, "IMMUTABLE_READ_DELAYS", (0.0, 0.0))
+    calls = []
+
+    def down():
+        calls.append(1)
+        raise _operational()
+
+    from sqlalchemy.exc import OperationalError
+
+    with pytest.raises(OperationalError):
+        asyncio.run(wr.immutable_read(down))
+    assert len(calls) == 3  # two retries, then the error is raised
+
+    calls.clear()
+
+    def broken():
+        calls.append(1)
+        raise KeyError("not transient")
+
+    with pytest.raises(KeyError):
+        asyncio.run(wr.immutable_read(broken))
+    assert len(calls) == 1

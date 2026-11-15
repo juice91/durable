@@ -152,7 +152,7 @@ def test_body_reads_outputs_of_steps_before_the_loop(worker, client, tenant, def
         assert events[f"loop:lp.{i}:step:ask:started"][1]["input"] == {"p": "Echo: seed"}
 
 
-def test_identifiers_follow_the_scope_helpers_and_replay_adds_nothing(
+def test_identifiers_follow_the_scope_helpers_and_a_duplicate_enqueue_adds_nothing(
     worker, client, worker_settings, tenant, defs
 ):
     agent_id = publish_agent(worker.engine, tenant, agent_spec())
@@ -170,7 +170,8 @@ def test_identifiers_follow_the_scope_helpers_and_replay_adds_nothing(
     children = sorted(c["id"] for c in worker.run_store.list_runs(tenant, parent_run_id=run_id))
     assert children == sorted(scoped_child_run_id(str(run_id), make_scope([("lp", i)]), "ask") for i in range(3))
     before = (event_rows(worker.engine, run_id), children)
-    # Replay: the same workflow id enqueued again returns the recorded run and starts nothing.
+    # A duplicate enqueue of the same workflow id: DBOS dedups it, so the finished run starts
+    # nothing again. (This is not a recovery replay; the crash tests below cover that.)
     client.enqueue({"queue_name": "eap-agent-runs", "workflow_name": "eap.workflow_run",
                     "workflow_id": str(run_id), "app_version": APP_VERSION}, str(run_id), tenant, version_id, "{}")
     time.sleep(1.0)
@@ -191,7 +192,7 @@ def _expected_keys():
     return ["start", "step:lp:started", *per(0), *per(1), *per(2), "step:lp:completed", "end"]
 
 
-def _crash_and_recover(worker, tenant, crash_schema, tmp_path, crash_env, *, wait_key):
+def _crash_and_recover(worker, tenant, crash_schema, tmp_path, crash_env):
     spec = _crash_loop_spec()
     workflow_id, version_id = publish_workflow(worker.engine, tenant, spec)
     executor_id = f"lp-{uuid.uuid4().hex[:8]}"
@@ -230,20 +231,68 @@ def _crash_and_recover(worker, tenant, crash_schema, tmp_path, crash_env, *, wai
 
 def test_crash_mid_iteration_before_the_tool_runs(worker, tenant, defs, crash_schema, tmp_path):
     _crash_and_recover(worker, tenant, crash_schema, tmp_path,
-                       {"EAP_CRASH_AT": "workflow_mid_step", "EAP_CRASH_EVENT_KEY": "loop:lp.1:step:mk:started"},
-                       wait_key="loop:lp.1:step:mk:started")
+                       {"EAP_CRASH_AT": "workflow_mid_step", "EAP_CRASH_EVENT_KEY": "loop:lp.1:step:mk:started"})
+
+
+def test_crash_inside_an_iteration_after_its_started_event(worker, tenant, defs, crash_schema, tmp_path):
+    """Killed in the iteration workflow right after `loop:{S}:started`, before its first body step."""
+    _crash_and_recover(worker, tenant, crash_schema, tmp_path,
+                       {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:lp.1:started"})
+
+
+def test_crash_after_a_body_tool_call_under_its_scoped_guard(worker, tenant, defs, crash_schema, tmp_path):
+    """Killed after the body's side-effecting call and before its result was stored. The scoped
+    guard `{run_id}:lp.1:mk` stays `reserved`, so recovery never calls the tool again. As for a
+    top-level tool step, the outcome is unknown: the body step, the iteration, the loop step and the
+    run all end `needs_attention` with side_effect_outcome_unknown."""
+    spec = _crash_loop_spec()
+    workflow_id, version_id = publish_workflow(worker.engine, tenant, spec)
+    executor_id = f"lp-{uuid.uuid4().hex[:8]}"
+    env = {"EAP_CRASH_AT": "after_workflow_tool_call", "EAP_CRASH_EVENT_KEY": "loop:lp.1:step:mk:call"}
+    first = WorkerProcess(_env(crash_schema, executor_id, **env), tmp_path / "w1.log")
+    second: WorkerProcess | None = None
+    dbos_client: DBOSClient | None = None
+    try:
+        first.wait_ready()
+        dbos_client = DBOSClient(system_database_url=DBOS_DB_URL, dbos_system_schema=crash_schema)
+        run_id = enqueue_workflow_run(dbos_client, worker.run_store, tenant_id=tenant, workflow_id=workflow_id,
+                                      version_id=version_id, input_value={}, app_version=CRASH_APP_VERSION)
+        assert first.wait_exit() == 137, (tmp_path / "w1.log").read_text()
+        assert worker.tickets.call_count(tenant, f"{run_id}:") == 2  # iterations 0 and 1
+        second = WorkerProcess(_env(crash_schema, executor_id), tmp_path / "w2.log")
+        second.wait_ready()
+        run = wait_terminal(worker.run_store, tenant, run_id, timeout=90)
+        assert run["status"] == "needs_attention", (run["error"], (tmp_path / "w2.log").read_text())
+        assert worker.tickets.call_count(tenant, f"{run_id}:") == 2  # never called again
+        events = event_rows(worker.engine, run_id)
+        assert [e[0] for e in events] == list(range(len(events)))
+        keys = [e[1] for e in events]
+        assert keys[-6:] == ["loop:lp.1:started", "loop:lp.1:step:mk:started", "loop:lp.1:step:mk:failed",
+                             "loop:lp.1:failed", "step:lp:failed", "end"]
+        by_key = {e[1]: e[3] for e in events}
+        for key in ("loop:lp.1:step:mk:failed", "loop:lp.1:failed", "step:lp:failed", "end"):
+            assert by_key[key]["error_code"] == "side_effect_outcome_unknown", key
+            assert by_key[key]["status"] == "needs_attention", key
+        with worker.engine.connect() as conn:
+            guard = conn.execute(text("SELECT state FROM side_effects WHERE tenant_id = :t AND key = :k"),
+                                 {"t": tenant, "k": f"{run_id}:lp.1:mk"}).scalar()
+        assert guard == "reserved"
+    finally:
+        first.kill()
+        if second is not None:
+            second.stop()
+        if dbos_client is not None:
+            dbos_client.destroy()
 
 
 def test_crash_between_iterations(worker, tenant, defs, crash_schema, tmp_path):
     _crash_and_recover(worker, tenant, crash_schema, tmp_path,
-                       {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:lp.0:completed"},
-                       wait_key="loop:lp.0:completed")
+                       {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:lp.0:completed"})
 
 
 def test_crash_after_the_last_iteration_before_the_step_completes(worker, tenant, defs, crash_schema, tmp_path):
     _crash_and_recover(worker, tenant, crash_schema, tmp_path,
-                       {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:lp.2:completed"},
-                       wait_key="loop:lp.2:completed")
+                       {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:lp.2:completed"})
 
 
 # ---------------------------------------------------------------------------- through the API

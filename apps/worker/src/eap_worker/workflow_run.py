@@ -111,13 +111,19 @@ EAP_APPROVAL_POLL_SECONDS (3600), so a lost wake-up delays, never loses, a decis
 deadline the worker records step_timed_out under the same key; whoever writes the key first wins.
 Rejection fails the run with `approval_rejected`, a timeout with `approval_timeout`.
 
-Known limitation, cancellation (there is no product cancel API yet): cancelling a run's DBOS
-workflow (DBOS.cancel_workflow) does not cascade to its children. While a parallel step awaits its
-branches, a cancelled parent cancels only the branches after the one it is awaiting at that moment
-(best effort, in `_parallel`); the branch being awaited, and anything it already started (a child
-agent run, an approval wait), keeps running until it ends on its own. Child agent runs of agent
-steps are never cancelled with the parent either. A cancel API must cancel the run's whole tree
-(branch workflows `{run_id}:{step}:{branch}` and child runs) explicitly.
+Cancellation (loops D12, LP.8): `POST /runs/{id}/cancel` records `cancel_requested` (key `cancel`),
+cancels the run's DBOS workflow with `cancel_children=True` (launcher.cancel_workflow_tree), which
+reaches the whole tree level by level (parallel branch workflows `{run_id}:{step}:{branch}`, loop
+iteration workflows `{run_id}:loop:{S}` and child agent runs), and then writes the guarded terminal
+state (RunStore.cancel_run_tree: `end` run_failed `run_cancelled` and `failed`, or
+`needs_attention` while a side effect is still `reserved`). The scheduled `eap.cancel_reconcile`
+(eap_worker.cancel_reconcile) finishes a cancel the API did not. DBOS stops a cancelled workflow at
+its next operation: a step already running completes first, and the store's terminal guards drop
+its late events and refuse its late status (append_event_step and finish_run_step treat that as
+success). A run cancelled before a worker started it is never started (`started` above). The
+cooperative path (the loop tick seeing `cancel_requested`, with no DBOS cancel) is LP.11's.
+`_parallel` still cancels the branches after the one it awaits when it is cancelled itself; with
+the cascade that is redundant but harmless.
 """
 
 from __future__ import annotations
@@ -865,9 +871,7 @@ class _Interpreter:
         append-only and idempotent by key, and this one committed before the iteration returned)."""
         if last_key is None:
             return None
-        events = await asyncio.to_thread(
-            get_runtime().event_log.read_outputs, self.tenant_id, self.run_id, [last_key]
-        )
+        events = await immutable_read(get_runtime().event_log.read_outputs, self.tenant_id, self.run_id, [last_key])
         event = events.get(last_key)
         return (event.data or {}).get("output") if event is not None else None
 
@@ -1143,6 +1147,40 @@ def _find_loop(spec: WorkflowSpec, path: list[str]) -> ForeachStep | LoopStep:
     return found
 
 
+# D6's immutable reads are not DBOS steps (recording them would copy the spec and the read outputs
+# into every iteration's checkpoint), so DBOS never retries them. A transient database error
+# (a dropped connection, a failover, the pool timing out) is retried here instead, with backoff:
+# about two minutes in all before the error is let through. The reads are idempotent and their
+# result never depends on when they succeed (immutable rows), so retrying cannot change a path.
+IMMUTABLE_READ_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
+
+
+def _transient_db_error(exc: BaseException) -> bool:
+    from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+    from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+    if isinstance(exc, (OperationalError, InterfaceError, PoolTimeout)):
+        return True
+    return isinstance(exc, DBAPIError) and bool(exc.connection_invalidated)
+
+
+async def immutable_read(fn: Any, *args: Any) -> Any:
+    """Run the blocking immutable read `fn(*args)` in a thread, retrying transient database errors
+    (IMMUTABLE_READ_DELAYS). Any other error, or the last transient one, is raised."""
+    for delay in (*IMMUTABLE_READ_DELAYS, None):
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as exc:  # noqa: BLE001 - only transient database errors are retried
+            if delay is None or not _transient_db_error(exc):
+                raise
+            log.warning(
+                "workflow loop read failed, retrying",
+                extra={"error_type": type(exc).__name__, "retry_in_s": delay},
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _read_iteration_inputs(
     tenant_id: str, run_id: str, workflow_version_id: str, path: list[str], outer: Scope
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -1222,7 +1260,7 @@ async def workflow_iteration(
     outer = scope_from_data(scope)
     iteration = EMPTY_SCOPE
     try:
-        spec_json, events = await asyncio.to_thread(
+        spec_json, events = await immutable_read(
             _read_iteration_inputs, tenant_id, run_id, workflow_version_id, path, outer
         )
         if spec_json is None:

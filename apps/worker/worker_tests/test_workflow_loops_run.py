@@ -124,9 +124,19 @@ def test_until_runs_three_iterations_with_carried_state(worker, client, worker_s
             f'SELECT output FROM "{schema}".operation_outputs WHERE workflow_uuid = %s'
             " AND function_name = 'DBOS.getResult' ORDER BY function_id", (str(run_id),),
         ).fetchall()
-    args = pickle.loads(base64.b64decode(inputs))["args"]
-    assert list(args[3:7]) == [["lp"], [], 1, {"msg": "Echo: hi"}]
-    assert "Triage" not in inputs and len(inputs) < 1024 + 2 * len(json.dumps(args[6]))
+    recorded = pickle.loads(base64.b64decode(inputs))
+    args = recorded["args"]
+    assert len(args) == 9 and not recorded.get("kwargs")
+    assert list(args[:3]) == [str(run_id), tenant, args[2]] and list(args[3:7]) == [["lp"], [], 1, {"msg": "Echo: hi"}]
+    from eap_worker.workflow_run import read_limits
+
+    assert set(args[7]) == set(read_limits()) | {"started_at"}  # the recorded knobs, nothing else
+    decoded = repr(args)
+    # No spec (the agent id and the body appear only in the spec), no step output (the previous
+    # iteration's output reaches the iteration only as the carried state, args[6]).
+    assert agent_id not in decoded and "loop.lp.state.msg" not in decoded and "'steps'" not in decoded
+    assert decoded.count("Echo: hi") == 1
+    assert len(inputs) < 1024 + 2 * len(json.dumps(args[6]))
     for (output,) in results:
         value = pickle.loads(base64.b64decode(output))
         assert set(value) == {"status", "done", "state", "last_key", "until"}  # no body output
