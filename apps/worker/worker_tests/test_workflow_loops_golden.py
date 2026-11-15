@@ -82,10 +82,11 @@ def test_parallel_and_branch_keep_their_steps(worker, client, worker_settings, t
 
 
 ITERATION = "eap.workflow_iteration"
+TICK = "eap.workflow_loop_tick"  # LP.11: before every iteration start
 GOLDEN_FOREACH = [  # LP.10: three items, concurrency 2 (a sliding window in item order)
     "eap.start_workflow_run", EVENT,
-    BEGIN, ITERATION, ITERATION,                            # each: start items 0 and 1
-    "DBOS.getResult", EVENT, ITERATION,                     # await 0, loop:each.0:completed, start 2
+    BEGIN, TICK, ITERATION, ITERATION,                      # each: one tick, start items 0 and 1
+    "DBOS.getResult", EVENT, TICK, ITERATION,               # await 0, loop:each.0:completed, start 2
     "DBOS.getResult", EVENT, "DBOS.getResult", EVENT,       # await 1, await 2
     EVENT,                                                  # step:each:completed
     EVENT, "eap.finish_run",

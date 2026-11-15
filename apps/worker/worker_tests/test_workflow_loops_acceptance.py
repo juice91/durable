@@ -299,10 +299,11 @@ def test_crash_after_the_last_iteration_before_the_step_completes(worker, tenant
 def test_three_iteration_until_loop_runs_end_to_end_through_the_api(
     worker, worker_settings, tenant, defs, monkeypatch
 ):
-    """LP.7 acceptance: publish and start over HTTP (preview on); the worker runs 3 iterations."""
+    """LP.7 acceptance: publish and start over HTTP (no preview flag since LP.11); the worker runs
+    3 iterations."""
     from worker_tests.test_workflow_run_acceptance import auth_header, workflow_api
 
-    monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
+    monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
     agent_id = publish_agent(worker.engine, tenant, agent_spec())
     ask = {"id": "ask", "type": "agent", "agent_id": agent_id, "input": {"p": _ref("loop.lp.state.msg")}}
     loop = _loop([ask], max_iterations=5, state={"msg": _ref("input.q")}, carry={"msg": _ref("steps.ask.output")},

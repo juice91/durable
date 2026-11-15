@@ -28,7 +28,7 @@ from worker_tests.workflow_run_helpers import (
 EVENT = "eap.append_event"
 BEGIN = "eap.workflow_step_begin"
 AGENT = ["eap.workflow_resolve_agent", "eap.agent_run", "DBOS.getResult"]
-ITERATION = ["eap.workflow_iteration", "DBOS.getResult", EVENT]  # per iteration, in the parent
+ITERATION = ["eap.workflow_loop_tick", "eap.workflow_iteration", "DBOS.getResult", EVENT]  # per iteration (LP.11 tick)
 
 
 @pytest.fixture

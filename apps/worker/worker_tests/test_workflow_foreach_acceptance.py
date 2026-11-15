@@ -25,7 +25,7 @@ from eap_worker.models import _last_prompt
 from worker_tests.conftest import APP_VERSION, DBOS_DB_URL, event_rows, wait_terminal
 from worker_tests.test_conversation import step_names
 from worker_tests.test_crash_recovery import crash_schema  # noqa: F401 - fixture
-from worker_tests.test_workflow_foreach_run import AWAIT, BEGIN, EVENT, START, _events, _foreach, _ref, _wf
+from worker_tests.test_workflow_foreach_run import AWAIT, BEGIN, EVENT, START, TICK, _events, _foreach, _ref, _wf
 from worker_tests.workflow_run_helpers import (
     agent_spec,
     cleanup_definitions,
@@ -141,8 +141,9 @@ def test_parent_operation_order_is_independent_of_latency(worker, client, worker
         assert json.loads(run["output"]) == [f"Echo: {i}" for i in items]
         layouts.append(step_names(worker_settings.dbos_system_schema, run_id))
     assert layouts[0] == layouts[1]
-    assert layouts[0] == ["eap.start_workflow_run", EVENT, BEGIN, START, START, START, *AWAIT, START, *AWAIT,
-                          START, *AWAIT, START, *AWAIT, *AWAIT, *AWAIT, EVENT, EVENT, "eap.finish_run"]
+    assert layouts[0] == ["eap.start_workflow_run", EVENT, BEGIN, TICK, START, START, START,
+                          *AWAIT, TICK, START, *AWAIT, TICK, START, *AWAIT, TICK, START, *AWAIT, *AWAIT, *AWAIT,
+                          EVENT, EVENT, "eap.finish_run"]
 
 
 def test_concurrency_over_the_run_cap_is_refused_before_any_step(worker, client, tenant, defs, monkeypatch):
@@ -449,7 +450,7 @@ def test_while_and_until_loops_keep_their_step_lists(worker, client, worker_sett
     assert run["status"] == "completed", run["error"]
     assert json.loads(run["output"])["iterations"] == 2
     schema = worker_settings.dbos_system_schema
-    per = ["eap.workflow_iteration", "DBOS.getResult", EVENT]  # the layout recorded at HEAD (LP.7)
+    per = ["eap.workflow_loop_tick", "eap.workflow_iteration", "DBOS.getResult", EVENT]  # LP.7 + the LP.11 tick
     assert step_names(schema, run_id) == ["eap.start_workflow_run", EVENT, BEGIN, *per, *per, EVENT, EVENT,
                                           "eap.finish_run"]
     assert step_names(schema, f"{run_id}:loop:lp.0") == [
@@ -472,7 +473,10 @@ def _crash_spec(worker, tenant, **kw):
     return _wf(_foreach(body, concurrency=3, max_items=N, **kw))
 
 
-def _crash_run(worker, tenant, crash_schema, tmp_path, crash_env, spec, status="completed"):
+def _crash_run(worker, tenant, crash_schema, tmp_path, crash_env, spec, status="completed", *,
+               run_id=None, after_enqueue=None):
+    """`run_id` fixes the run's id (to gate it before it exists); `after_enqueue(run_id)` runs
+    while the first worker is still alive, before waiting for its crash."""
     import uuid
 
     from dbos import DBOSClient
@@ -488,7 +492,9 @@ def _crash_run(worker, tenant, crash_schema, tmp_path, crash_env, spec, status="
         dbos_client = DBOSClient(system_database_url=DBOS_DB_URL, dbos_system_schema=crash_schema)
         run_id = enqueue_workflow_run(dbos_client, worker.run_store, tenant_id=tenant, workflow_id=workflow_id,
                                       version_id=version_id, input_value={"items": [f"i{n}" for n in range(N)]},
-                                      app_version=CRASH_APP_VERSION)
+                                      app_version=CRASH_APP_VERSION, run_id=run_id)
+        if after_enqueue is not None:
+            after_enqueue(run_id)
         assert first.wait_exit() == 137, (tmp_path / "w1.log").read_text()
         assert "end" not in [e[1] for e in event_rows(worker.engine, run_id)]
         second = WorkerProcess(_env(crash_schema, executor_id), tmp_path / "w2.log")
@@ -520,8 +526,6 @@ def _expected_keys():
                  id="in-flight-iteration"),
     pytest.param({"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:each.0:completed"},
                  id="parent-after-first-await"),
-    pytest.param({"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:each.3:completed"},
-                 id="parent-mid-window"),
     # The refill (LP.10 review): item 3's start is recorded after awaiting item 0, then the parent
     # dies before awaiting item 1; recovery replays the start (same workflow id) and runs item 3 once.
     pytest.param({"EAP_CRASH_AT": "foreach_refill", "EAP_CRASH_EVENT_KEY": "loop:each.3:refill"},
@@ -551,6 +555,107 @@ def test_crash_recovery_runs_each_item_once_in_order(worker, tenant, defs, crash
     assert [(k[1], k[2]) for k in kids] == [(f"each.{i}/ask", "completed") for i in range(N)]  # one per item
     assert worker.tickets.call_count(tenant, f"{run_id}:") == N
     assert worker.tickets.ticket_count(tenant, f"{run_id}:") == N
+
+
+class TicketGate:
+    """Holds one item's `tickets.create` call in the worker process, deterministically: an
+    uncommitted row in the fake external ticket table under that item's idempotency key
+    (`{run_id}:wf_each.{i}~mk`), so the item's `INSERT ... ON CONFLICT DO NOTHING` waits on it
+    until `release()` rolls it back (after which the item inserts its ticket normally). The item's
+    workflow guard `{run_id}:each.{i}:mk` is already `reserved` while it waits."""
+
+    def __init__(self, worker, tenant, run_id, item):
+        from eap_worker.tickets import _ticket_id, fake_external_tickets
+
+        self.key = f"{run_id}:wf_each.{item}~mk"
+        self.conn = worker.engine.connect()
+        self.tx = self.conn.begin()
+        self.conn.execute(fake_external_tickets.insert().values(
+            tenant_id=tenant, idempotency_key=self.key, ticket_id=_ticket_id(tenant, self.key), title="gate", body="gate"))
+
+    def release(self):
+        if self.tx.is_active:
+            self.tx.rollback()
+        self.conn.close()
+
+
+def _guard_state(worker, tenant, run_id, item):
+    with worker.engine.connect() as conn:
+        return conn.execute(text("SELECT state FROM side_effects WHERE tenant_id = :t AND key = :k"),
+                            {"t": tenant, "k": f"{run_id}:each.{item}:mk"}).scalar()
+
+
+MID_WINDOW_CRASH = {"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:each.3:completed"}
+
+
+def test_crash_mid_window_recovers_every_item_once_in_order(worker, tenant, defs, crash_schema, tmp_path):
+    """The parent dies right after recording `loop:each.3:completed` while item 4 is started and not
+    yet awaited, with NO side effect in flight (deterministic, no timing): item 3's ticket call is
+    held at a TicketGate until item 4 has completed its side effect and its body, then released,
+    so when the parent records item 3 every item's call has settled. Recovery completes the window:
+    each item once, in order (as the other crash cases)."""
+    import uuid
+
+    from worker_tests.workflow_run_helpers import wait_event
+
+    run_id = uuid.uuid4()
+    gate = TicketGate(worker, tenant, run_id, 3)
+
+    def settle_then_release(rid):
+        wait_event(worker.engine, rid, "loop:each.4:step:mk:completed", timeout=60)
+        assert _guard_state(worker, tenant, rid, 4) == "completed"
+        assert _guard_state(worker, tenant, rid, 3) == "reserved"  # item 3 is held at the gate
+        assert "loop:each.3:step:mk:completed" not in [e[1] for e in event_rows(worker.engine, rid)]
+        gate.release()
+
+    try:
+        run_id, run = _crash_run(worker, tenant, crash_schema, tmp_path, MID_WINDOW_CRASH, _crash_spec(worker, tenant),
+                                 run_id=run_id, after_enqueue=settle_then_release)
+    finally:
+        gate.release()
+    events = event_rows(worker.engine, run_id)
+    keys = [e[1] for e in events]
+    assert [e[0] for e in events] == list(range(len(events)))  # gap-free seq
+    assert len(set(keys)) == len(keys), "a duplicate event"
+    assert set(keys) == _expected_keys() and keys.count("end") == 1 and keys[-1] == "end"
+    seq = {e[1]: e[0] for e in events}
+    assert [seq[f"loop:each.{i}:completed"] for i in range(N)] == sorted(seq[f"loop:each.{i}:completed"] for i in range(N))
+    data = {e[1]: e[3] for e in events}
+    out = json.loads(run["output"])
+    assert len(out) == N and len({o["ticket_id"] for o in out}) == N
+    assert out == [data[f"loop:each.{i}:step:mk:completed"]["output"] for i in range(N)]  # item order
+    assert worker.tickets.call_count(tenant, f"{run_id}:") == N
+    assert worker.tickets.ticket_count(tenant, f"{run_id}:") == N
+
+
+def test_crash_mid_window_with_a_call_in_flight_needs_attention(worker, tenant, defs, crash_schema, tmp_path):
+    """The same kill point, but item 4's ticket call IS in flight (held at its TicketGate, guard
+    `reserved`) when the parent dies after recording item 3: recovery never calls it again and
+    ends the run `needs_attention` (side_effect_outcome_unknown), with no ticket for item 4."""
+    import uuid
+
+    from worker_tests.conftest import wait_for
+
+    run_id = uuid.uuid4()
+    gate3, gate4 = TicketGate(worker, tenant, run_id, 3), TicketGate(worker, tenant, run_id, 4)
+
+    def hold_item_4(rid):
+        wait_for(lambda: _guard_state(worker, tenant, rid, 4) == "reserved", timeout=60, what="item 4 at its gate")
+        gate3.release()  # item 3 finishes; the parent records it and dies, item 4 still held
+
+    try:
+        run_id, run = _crash_run(worker, tenant, crash_schema, tmp_path, MID_WINDOW_CRASH, _crash_spec(worker, tenant),
+                                 status="needs_attention", run_id=run_id, after_enqueue=hold_item_4)
+    finally:
+        gate3.release()
+        gate4.release()
+    data = {e[1]: e[3] for e in event_rows(worker.engine, run_id)}
+    assert "loop:each.3:completed" in data and "step:each:completed" not in data
+    for key in ("loop:each.4:step:mk:failed", "loop:each.4:failed", "step:each:failed", "end"):
+        assert data[key]["error_code"] == "side_effect_outcome_unknown", key
+    assert _guard_state(worker, tenant, run_id, 4) == "reserved"  # never called again
+    assert worker.tickets.ticket_count(tenant, f"{run_id}:wf_each.4~") == 0
+    assert worker.tickets.ticket_count(tenant, f"{run_id}:") == worker.tickets.call_count(tenant, f"{run_id}:") == N - 1
 
 
 def test_crash_after_a_side_effecting_item_call_needs_attention_once_even_under_collect(
@@ -583,7 +688,6 @@ def test_cancel_mid_window_stops_children_starts_nothing_and_keeps_usage(
     from worker_tests.test_workflow_run_acceptance import auth_header, workflow_api
     from worker_tests.workflow_run_helpers import wait_event
 
-    monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
     release, parked = threading.Event(), []
 
     def build() -> FunctionModel:  # i0 answers at once (its usage is billed); the others park
@@ -644,7 +748,7 @@ def test_cancel_mid_window_stops_children_starts_nothing_and_keeps_usage(
 
 
 # ---------------------------------------------------------------------------- through the API
-def test_foreach_runs_end_to_end_through_the_api_with_the_flag_on_and_is_refused_off(
+def test_foreach_runs_end_to_end_through_the_api(
         worker, worker_settings, tenant, defs, monkeypatch):
     import uuid
 
@@ -657,10 +761,7 @@ def test_foreach_runs_end_to_end_through_the_api_with_the_flag_on_and_is_refused
         created = api.post("/api/v1/workflows", json={"spec": spec}, headers=headers)
         assert created.status_code == 201, created.text
         wid = created.json()["id"]
-        monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
-        refused = api.post(f"/api/v1/workflows/{wid}/versions", headers=headers)
-        assert refused.status_code == 422 and "EAP_WORKFLOW_LOOPS_PREVIEW=1" in refused.json()["detail"]
-        monkeypatch.setenv("EAP_WORKFLOW_LOOPS_PREVIEW", "1")
+        monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)  # LP.11: no flag needed
         assert api.post(f"/api/v1/workflows/{wid}/versions", headers=headers).status_code == 201
         items = [f"i{n}" for n in range(6)]
         started = api.post(f"/api/v1/workflows/{wid}/runs", json={"input": {"items": items}}, headers=headers)
@@ -677,6 +778,3 @@ def test_foreach_runs_end_to_end_through_the_api_with_the_flag_on_and_is_refused
         assert [e["seq"] for e in api_events] == list(range(len(api_events))) and len(api_events) == len(rows)
         types = [e["type"] for e in api_events]
         assert types.count("loop_iteration_completed") == 6 and types[-1] == "run_completed"
-        monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW")  # off again: run start is refused, no new run
-        again = api.post(f"/api/v1/workflows/{wid}/runs", json={"input": {"items": items}}, headers=headers)
-        assert again.status_code == 422, again.text

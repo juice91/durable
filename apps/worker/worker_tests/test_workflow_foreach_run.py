@@ -27,6 +27,7 @@ from worker_tests.workflow_run_helpers import (
 EVENT = "eap.append_event"
 BEGIN = "eap.workflow_step_begin"
 AGENT = ["eap.workflow_resolve_agent", "eap.agent_run", "DBOS.getResult"]
+TICK = "eap.workflow_loop_tick"  # LP.11: once before the initial window, then before each refill
 START = "eap.workflow_iteration"
 AWAIT = ["DBOS.getResult", EVENT]  # an item's result and its loop:{S}:completed|failed
 
@@ -85,7 +86,7 @@ def test_window_output_in_item_order_and_parent_layout(worker, client, worker_se
     # Sliding window, c = 2: start 0 and 1; await 0, start 2; await 1; await 2.
     schema = worker_settings.dbos_system_schema
     assert step_names(schema, run_id) == [
-        "eap.start_workflow_run", EVENT, BEGIN, START, START, *AWAIT, START, *AWAIT, *AWAIT, EVENT,
+        "eap.start_workflow_run", EVENT, BEGIN, TICK, START, START, *AWAIT, TICK, START, *AWAIT, *AWAIT, EVENT,
         EVENT, "eap.finish_run"]
     assert step_names(schema, f"{run_id}:loop:each.0") == [EVENT, BEGIN, *AGENT, EVENT]
     children = worker.run_store.list_runs(tenant, parent_run_id=run_id)
@@ -118,7 +119,7 @@ def test_concurrency_one_keeps_the_loop_layout(worker, client, worker_settings, 
     assert run["status"] == "completed", run["error"]
     assert len(json.loads(run["output"])) == 2
     assert step_names(worker_settings.dbos_system_schema, run_id) == [
-        "eap.start_workflow_run", EVENT, BEGIN, START, *AWAIT, START, *AWAIT, EVENT, EVENT, "eap.finish_run"]
+        "eap.start_workflow_run", EVENT, BEGIN, TICK, START, *AWAIT, TICK, START, *AWAIT, EVENT, EVENT, "eap.finish_run"]
     keys = [k for _, k, _, _ in event_rows(worker.engine, run_id)]
     assert keys == ["start", "step:each:started",
                     "loop:each.0:started", "loop:each.0:step:x:started", "loop:each.0:step:x:completed",
@@ -224,7 +225,7 @@ def test_nested_foreach_in_until_uses_unique_scoped_keys(worker, client, worker_
         "outer.0/each.0/ask", "outer.0/each.1/ask", "outer.1/each.0/ask", "outer.1/each.1/ask"]
     schema = worker_settings.dbos_system_schema
     assert step_names(schema, f"{run_id}:loop:outer.0") == [
-        EVENT, BEGIN, START, START, *AWAIT, *AWAIT, EVENT]
+        EVENT, BEGIN, TICK, START, START, *AWAIT, *AWAIT, EVENT]
 
 
 def test_nested_foreach_reads_items_from_the_outer_item_and_a_step(worker, client, tenant, defs):

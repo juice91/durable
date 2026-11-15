@@ -17,6 +17,7 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
     eap.append_event   start            run_started {kind, workflow_id, workflow_version, input}
     per workflow step, in graph order:
       eap.workflow_step_begin           step_started  `step:{id}:started` {step_id, step_type, input?, ...}
+      (LP.11) with `limits` only, before a top-level agent or evaluate step: eap.workflow_loop_tick
       agent:    eap.workflow_resolve_agent   agent version (null = latest published, resolved ONCE here)
                                              and the child run row (kind agent, parent_run_id/step_id)
                 child workflow eap.agent_run, workflow id = child run id = uuid5(run_id:step_id)
@@ -25,13 +26,15 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
       parallel: one child workflow eap.workflow_branch per branch, id `{run_id}:{id}:{branch}`
       approval: eap.append_event step_waiting `step:{id}:waiting`, then a loop of
                 eap.workflow_approval_decision / eap.workflow_clock / DBOS.recv(`approval:{id}`)
-      loop:     per iteration i (LP.7, loops D5): child workflow eap.workflow_iteration, id
-                `{run_id}:loop:{S}` (S = the iteration's scope, `L.i`, `outer.2/inner.0`), its
-                result, then eap.append_event `loop:{S}:completed` | `loop:{S}:failed`
-      foreach:  (LP.10, loops D7) a sliding window in item order: eap.workflow_iteration for
-                items 0..c-1 (c = concurrency), then per item i its result,
-                `loop:{S}:completed|failed` and the start of item i+c; so with c = 1 exactly the
-                loop's 3 operations per item, and for any c a function of the recorded results only
+      loop:     per iteration i (LP.7, loops D5): eap.workflow_loop_tick (LP.11), child workflow
+                eap.workflow_iteration, id `{run_id}:loop:{S}` (S = the iteration's scope, `L.i`,
+                `outer.2/inner.0`), its result, then eap.append_event `loop:{S}:completed` |
+                `loop:{S}:failed`
+      foreach:  (LP.10, loops D7) a sliding window in item order: one eap.workflow_loop_tick,
+                then eap.workflow_iteration for items 0..c-1 (c = concurrency) back to back, then
+                per item i its result, `loop:{S}:completed|failed` and the tick + start of item
+                i+c; so with c = 1 exactly the loop's 4 operations per item, and for any c a
+                function of the recorded results only
       eap.append_event   step_completed `step:{id}:completed` {step_id, output, unresolved_refs?, warnings?}
                      or  step_failed    `step:{id}:failed`    {step_id, status, error, error_code}
     eap.append_event   end              run_completed {output, result} | run_failed {...}
@@ -97,6 +100,25 @@ once inside eap.workflow_approval_begin. A worker restarted with other values ne
 path of a run already started. A non-finite number in the run input (the API refuses it) fails
 the run with `input_invalid` before any step, and run_started then carries `input: null`.
 
+The loop tick (LP.11, D10-D12; `eap.workflow_loop_tick`, recorded): before every iteration starts
+(one tick for a foreach's initial window, whose items start back to back), and with `limits` before every top-level agent and evaluate step (a parallel branch's included),
+it reads the clock, whether the run has its `cancel_requested` event, and with
+`limits.max_cost_usd` the run tree's cost (RunStore.run_tree_cost: the run, its child runs and the
+judge rows on the run, AC.5's sum). The step about to start then fails, in this order:
+`run_cancelled` (the cooperative cancel), `workflow_deadline_exceeded` (the recorded
+max_run_seconds), `run_budget_exceeded` (cost >= the cap; RunBudgetExceeded, so step_failed and
+run_failed carry AC.5's {limit: "max_cost_usd", value, spent_usd}). A foreach whose tick stops it
+starts no more items, awaits the started ones, then fails; a tick failure (those three codes,
+or the tick step itself raising, e.g. a lost DB connection: `internal_error`) is never collected
+as an error entry under `on_item_error: collect`, so a foreach never completes with items
+missing. Concurrent iterations can overshoot the cap by what is already in flight (each child
+agent is bounded by its own AC.5 cap). The tick runs between iterations only: a cooperative
+cancel written while an iteration runs lets that iteration's remaining body steps (tool side
+effects included) run to its end; no further iteration starts. The API's cancel also DBOS-cancels
+the tree, which fences that. A loop or foreach run, or a run with `limits`, started before LP.11
+(the preview) does not recover on this code (the tick is a new operation): drain or cancel those
+first.
+
 Loop knobs (LP.7, D10; recorded in `limits`, read with `loop_limit`, which falls back to the default
 for a run recorded before they existed): a loop step's output at most
 EAP_WORKFLOW_MAX_LOOP_OUTPUT_BYTES (256 KiB) instead of the step output cap; a loop state at most
@@ -131,7 +153,9 @@ state (RunStore.cancel_run_tree: `end` run_failed `run_cancelled` and `failed`, 
 its next operation: a step already running completes first, and the store's terminal guards drop
 its late events and refuse its late status (append_event_step and finish_run_step treat that as
 success). A run cancelled before a worker started it is never started (`started` above). The
-cooperative path (the loop tick seeing `cancel_requested`, with no DBOS cancel) is LP.11's.
+cooperative path (LP.11): the loop tick sees `cancel_requested` without any DBOS cancel (the API
+died before its cascade) and fails the step about to start with `run_cancelled`, so the run ends
+`run_failed` `run_cancelled` through the worker's own events, with no further iteration.
 `_parallel` still cancels the branches after the one it awaits when it is cancelled itself; with
 the cascade that is redundant but harmless.
 """
@@ -139,6 +163,7 @@ the cascade that is redundant but harmless.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -146,14 +171,24 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from dbos import DBOS, SetWorkflowID
-from dbos._error import DBOSWorkflowCancelledError  # not re-exported by dbos
+from dbos._error import DBOSWorkflowCancelledError, DBOSWorkflowConflictIDError  # not re-exported by dbos
 from pydantic import ValidationError
 from sqlalchemy import text
 
-from eap_observability import log_context, log_failure, run_span, set_run_outcome
+from eap_observability import (
+    iteration_span,
+    log_context,
+    log_failure,
+    run_span,
+    set_iteration_outcome,
+    set_run_outcome,
+)
+from eap_run_store import CANCEL_EVENT_KEY, END_EVENT_KEY, ParentRunStopped
+from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.workflow_scope import (
     CHILD_RUN_NAMESPACE,
     EMPTY_SCOPE,
@@ -171,6 +206,7 @@ from eap_schemas.workflow_scope import (
     scoped_guard_key,
     scoped_parent_step_id,
     scoped_tool_call_id,
+    status_for_end,
 )
 from eap_schemas.workflows import (
     LOOP_STEP_TYPES,
@@ -242,6 +278,16 @@ def tool_call_id_for(step_id: str, scope: Scope = EMPTY_SCOPE) -> str:
     """ctx.tool_call_id a workflow tool step's tool sees (tickets.create then reserves
     `{run_id}:wf_{step_id}`, distinct from the step's guard key; `wf_{instance token}` in a loop)."""
     return scoped_tool_call_id(scope, step_id)
+
+
+# Top-level step kinds the loop tick guards when the spec has `limits` (D11): an agent step, and an
+# evaluate step (LP.14) whose judge calls cost money. Never inside a loop body (the iteration's own
+# tick covers it) and never without `limits` (loop-free goldens).
+TICKED_STEP_TYPES = ("agent", "evaluate")
+
+# Item failures a foreach never collects as an error entry (D7, D11, D12): they are about the run,
+# not the item, so they fail the step as under `on_item_error: fail`. `run_cancelled` wins over all.
+_RUN_LEVEL_CODES = frozenset({"run_cancelled", "run_budget_exceeded", "workflow_deadline_exceeded"})
 
 
 def approval_topic(step_id: str) -> str:
@@ -372,6 +418,57 @@ async def clock_step() -> float:
     return time.time()
 
 
+@DBOS.step(name="eap.workflow_loop_tick")
+async def loop_tick_step(run_id: str, tenant_id: str, scope_text: str, step_id: str, with_cost: bool) -> dict[str, Any]:
+    """The loop tick (loops D10, D11, D12; LP.11): before each loop iteration starts (`scope_text`
+    = that iteration's scope, `L.i`) and, for a spec with `limits`, before each top-level agent
+    and evaluate step (`scope_text` "", `step_id` that step). Returns {"now" (epoch seconds),
+    "cancel_requested" (the run has its `cancel` event), "cost_usd" (with `with_cost`:
+    RunStore.run_tree_cost as a decimal string, the run, its child runs and the judge rows on the
+    run; else None)}. Recorded, so a replay decides exactly as the first attempt did; the decision
+    itself is workflow code (`_Interpreter._tick`)."""
+    rt = get_runtime()
+
+    def work() -> dict[str, Any]:
+        cancel = rt.event_log.get_event(tenant_id, run_id, CANCEL_EVENT_KEY)
+        cost = rt.run_store.run_tree_cost(tenant_id, run_id) if with_cost else None
+        return {
+            "now": time.time(),
+            "cancel_requested": cancel is not None and cancel.type == "cancel_requested",
+            "cost_usd": None if cost is None else format(cost, "f"),
+        }
+
+    return await asyncio.to_thread(work)
+
+
+def parent_stop_failure(rt: Any, tenant_id: str, run_id: str) -> dict[str, Any]:
+    """Why a child run was refused (`ParentRunStopped`, D12), as the failure of the step that asked
+    for it: {"code", "status", "error"}, plus "budget" {value, spent_usd} for an `end` that failed
+    on the cost cap with AC.5's data (the step then raises RunBudgetExceeded). The run's `end` is the truth when it exists (the API's
+    `run_cancelled`, or the code the run already failed with: `run_budget_exceeded`,
+    `workflow_deadline_exceeded`, ...); a `cancel` without `end` is `run_cancelled`, exactly as the
+    cooperative cancel at the next tick. Runs inside the step, so a replay reads the recorded answer."""
+    end = rt.event_log.get_event(tenant_id, run_id, END_EVENT_KEY)
+    if end is not None and end.type == "run_failed" and (end.data or {}).get("error_code"):
+        data = end.data or {}
+        error = data.get("error")
+        stopped: dict[str, Any] = {
+            "code": str(data["error_code"]),
+            "status": status_for_end(end.type, data),
+            "error": str(error) if error else None,
+        }
+        if (
+            data["error_code"] == "run_budget_exceeded" and data.get("limit") == "max_cost_usd"
+            and data.get("value") is not None and data.get("spent_usd") is not None
+        ):
+            # Keep AC.5's {limit, value, spent_usd} on the refused step (RunBudgetExceeded).
+            stopped["budget"] = {"value": str(data["value"]), "spent_usd": str(data["spent_usd"])}
+        return stopped
+    if end is not None:  # an end without a failure code: never expected, never hidden as a cancel
+        return {"code": "internal_error", "status": None, "error": None}
+    return {"code": "run_cancelled", "status": None, "error": None}
+
+
 @DBOS.step(name="eap.workflow_resolve_agent")
 async def resolve_agent_step(
     run_id: str,
@@ -424,10 +521,13 @@ async def resolve_agent_step(
                 row = conn.execute(_AGENT_VERSION, {"a": agent_id, "t": tenant_id, "v": version}).fetchone()
         if row is None:
             return {"found": False}
-        _, created = rt.run_store.create_child_agent_run(
-            tenant_id, agent_id, row.version, input_text, uuid.UUID(child), run_id, parent_step_id,
-            traceparent=traceparent,
-        )
+        try:
+            _, created = rt.run_store.create_child_agent_run(
+                tenant_id, agent_id, row.version, input_text, uuid.UUID(child), run_id, parent_step_id,
+                traceparent=traceparent,
+            )
+        except ParentRunStopped:
+            return {"found": False, "stopped": parent_stop_failure(rt, tenant_id, run_id)}
         crash_point("after_child_run_insert", event_key=scoped_event_key(scope, step_id, "child"))
         if not created:
             # Lost a race with a concurrent attempt that inserted first: that row's version wins.
@@ -582,6 +682,10 @@ class _Interpreter:
         self.loops = loops or {}
         self.workflow_version_id = workflow_version_id
         self._warnings: list[dict[str, Any]] = []
+        # The cost cap (D11): the spec's `limits`, empty or absent for every spec published before
+        # LP.11, so their runs never tick outside loops.
+        self.limited = spec.limits is not None and not spec.limits.is_empty()
+        self.cap_usd: Decimal | None = spec.limits.max_cost_usd if spec.limits is not None else None
 
     # ------------------------------------------------------------------ scoped names (D4)
 
@@ -656,6 +760,8 @@ class _Interpreter:
                 raise problem
             if now - self.limits["started_at"] > self.limits["max_run_seconds"]:
                 raise WorkflowStepError("workflow_deadline_exceeded", step_id)
+            if self.limited and not self.scope and step.type in TICKED_STEP_TYPES:
+                await self._tick(step_id, EMPTY_SCOPE)  # D11: only with `limits`, so goldens hold
             output = await self._execute(step, resolved)
             try:
                 size = json_size(output)
@@ -677,7 +783,7 @@ class _Interpreter:
         except Exception as exc:  # noqa: BLE001 - every step failure is a durable step_failed
             failure = classify(exc)
             status = _failure_status(exc, failure)
-            failure = RunFailure(status, failure.code, failure.error_type, failure.message)
+            failure = dataclasses.replace(failure, status=status)  # keeps `data` (the cost cap's)
             log_failure(
                 log, f"workflow step {status}", exc, code=failure.code, error_type=failure.error_type,
                 run_id=self.run_id, tenant_id=self.tenant_id,
@@ -725,12 +831,38 @@ class _Interpreter:
         return found
 
     async def _record_failure(self, step_id: str, failure: RunFailure) -> None:
+        # A failure's structured data (AC.5's {limit, value, spent_usd} for run_budget_exceeded)
+        # rides along; every failure a loop-free run could record before LP.11 has none.
         await append_event_step(
             self.run_id, self.tenant_id, self.key(step_id, "failed"), "step_failed",
             self._scoped(
-                {"step_id": step_id, "status": failure.status, "error": failure.error, "error_code": failure.code}
+                {**(failure.data or {}), "step_id": step_id, "status": failure.status, "error": failure.error,
+                 "error_code": failure.code}
             ),
         )
+
+    # ------------------------------------------------------------------ the loop tick (LP.11)
+
+    async def _tick(self, step_id: str, at: Scope) -> None:
+        """`eap.workflow_loop_tick`, then its decision (a pure function of the recorded result):
+        a `cancel_requested` event ends the step `run_cancelled` (the cooperative cancel, D12); a
+        run older than its recorded `max_run_seconds` fails `workflow_deadline_exceeded`; with
+        `limits.max_cost_usd`, a run-tree cost at or over the cap raises RunBudgetExceeded
+        (`run_budget_exceeded`, data {limit: "max_cost_usd", value, spent_usd}, D11). `at` is the
+        iteration about to start, or the empty scope before a top-level agent or evaluate step."""
+        scope_text = scope_string(at)
+        tick = await loop_tick_step(self.run_id, self.tenant_id, scope_text, step_id, self.cap_usd is not None)
+        crash_point(
+            "after_loop_tick",
+            event_key=f"loop:{scope_text}:tick" if at else scoped_event_key(self.scope, step_id, "tick"),
+        )
+        if tick.get("cancel_requested"):
+            raise WorkflowStepError("run_cancelled", step_id)
+        if tick["now"] - self.limits["started_at"] > self.limits["max_run_seconds"]:
+            raise WorkflowStepError("workflow_deadline_exceeded", step_id)
+        spent = tick.get("cost_usd")
+        if self.cap_usd is not None and spent is not None and Decimal(spent) >= self.cap_usd:
+            raise RunBudgetExceeded(spent, self.cap_usd)
 
     async def _execute(self, step: Any, resolved: dict[str, Any] | None) -> Any:
         if isinstance(step, AgentStep):
@@ -764,6 +896,14 @@ class _Interpreter:
             self.run_id, self.tenant_id, step.id, str(step.agent_id), step.version, prompt, self.traceparent,
             *((self.scope_text,) if self.scope else ()),
         )
+        stopped = found.get("stopped")
+        if stopped:
+            # The child run was refused: the run was cancelled (or has ended) while this step was
+            # starting (a recorded tick that predates the cancel, on recovery or as a live race).
+            budget = stopped.get("budget")
+            if budget:  # the run already failed on its cost cap: same code, with AC.5's data
+                raise RunBudgetExceeded(budget["spent_usd"], budget["value"])
+            raise WorkflowStepError(stopped["code"], step.id, stopped.get("status"), stopped.get("error"))
         if not found.get("found"):
             raise WorkflowStepError("agent_archived" if found.get("archived") else "agent_not_found", step.id)
         child = found["child_run_id"]
@@ -821,6 +961,7 @@ class _Interpreter:
             if index == step.max_iterations:
                 break  # the cap, with the condition still asking for another iteration
             self._check_state(step, state)
+            await self._tick(step.id, child_scope(self.scope, step.id, index))
             outcome_ = await self._iteration(step, index, state)
             iterations += 1
             state = outcome_["state"]
@@ -882,7 +1023,7 @@ class _Interpreter:
                 failure = classify(WorkflowStepError("run_cancelled", step.id))
             else:
                 failure = classify(exc)
-                failure = RunFailure(_failure_status(exc, failure), failure.code, failure.error_type, failure.message)
+                failure = dataclasses.replace(failure, status=_failure_status(exc, failure))
             result = {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": None,
                       "cancelled": cancelled}
         base = {"step_id": step.id, "scope": scope_to_data(self.scope), "index": index}
@@ -928,28 +1069,59 @@ class _Interpreter:
         count = len(items)
         width = min(step.concurrency, loop_limit(self.limits, "max_run_concurrency"))
         handles: dict[int, Any] = {}
-        started = 0
-        while started < min(width, count):
-            handles[started] = await self._start_iteration(step, started, None)
-            started += 1
         entries: list[tuple[str, Any]] = []  # ("key", last_key) or ("error", entry), in item order
         stopping: dict[str, Any] | None = None  # the failure that stops new starts
         cancelled: dict[str, Any] | None = None
+
+        def settle(result: dict[str, Any]) -> None:
+            nonlocal stopping, cancelled
+            if result.get("status") == "completed":
+                entries.append(("key", result.get("last_key")))
+            elif result.get("cancelled") or result.get("error_code") == "run_cancelled":
+                cancelled = cancelled or result
+            elif (
+                step.on_item_error == "collect" and result.get("status") != "needs_attention"
+                and result.get("error_code") not in _RUN_LEVEL_CODES
+            ):
+                entries.append(("error", {"error_code": result["error_code"], "error": result["error"]}))
+            else:
+                stopping = stopping or result
+
+        async def start(first: int, last: int) -> bool:
+            """One tick, then the starts of items first..last-1 back to back (no await between
+            them, so the tick's reading holds for all of them); False (and the tick's failure
+            settled) when the tick stops the foreach: no item starts after it, started items are
+            awaited."""
+            nonlocal stopping, cancelled
+            try:
+                await self._tick(step.id, child_scope(self.scope, step.id, first))
+            except Exception as exc:  # noqa: BLE001 - run_cancelled, the deadline, the cost cap, or the tick failed
+                # A tick failure is a run-level failure, NEVER an item error (not even under
+                # `collect`): it belongs to no item, and collecting it would drop the items that
+                # never start. `run_cancelled` ends the run cancelled; every other code (the
+                # deadline, the cost cap, an unexpected error such as a lost DB connection, which
+                # classifies `internal_error`) stops the foreach and fails the step with it.
+                result = _exception_result(exc)
+                if result.get("error_code") == "run_cancelled":
+                    cancelled = cancelled or result
+                else:
+                    stopping = stopping or result
+                return False
+            for index in range(first, last):
+                handles[index] = await self._start_iteration(step, index, None)
+            return True
+
+        started = 0
+        if count and await start(0, min(width, count)):  # the initial window: one tick
+            started = min(width, count)
         try:
             for index in range(count):
                 if index >= started:
                     break  # stopped: every started item has been awaited
-                result = await self._finish_iteration(step, index, handles.pop(index))
-                if result.get("status") == "completed":
-                    entries.append(("key", result.get("last_key")))
-                elif result.get("cancelled"):
-                    cancelled = cancelled or result
-                elif step.on_item_error == "collect" and result.get("status") != "needs_attention":
-                    entries.append(("error", {"error_code": result["error_code"], "error": result["error"]}))
-                else:
-                    stopping = stopping or result
+                settle(await self._finish_iteration(step, index, handles.pop(index)))
                 if stopping is None and cancelled is None and started < count:
-                    handles[started] = await self._start_iteration(step, started, None)
+                    if not await start(started, started + 1):
+                        continue
                     # The refill's start is recorded; the parent has not awaited it yet.
                     refill = scope_string(child_scope(self.scope, step.id, started))
                     crash_point("foreach_refill", event_key=f"loop:{refill}:refill")
@@ -1046,10 +1218,7 @@ class _Interpreter:
         failed = [r for r in results if r.get("status") != "completed"]
         if failed:
             worst = next((r for r in failed if r.get("status") == "needs_attention"), failed[0])
-            raise StepFailed(
-                step.id,
-                RunFailure(worst["status"], worst["error_code"], *_split_error(worst["error"])),
-            )
+            raise StepFailed(step.id, _result_failure(worst))
         # A parallel step has no output of its own (eap_schemas.workflows): from the join on, the
         # steps its branches ran (those that end each branch included) are readable.
         for result in results:
@@ -1110,8 +1279,30 @@ def _missing_last(step_id: str) -> WorkflowStepError:
 
 
 def _result_failure(result: dict[str, Any]) -> RunFailure:
-    """The RunFailure of a failed child result ({status, error, error_code, ...})."""
-    return RunFailure(result["status"], result["error_code"], *_split_error(result["error"]))
+    """The RunFailure of a failed child result ({status, error, error_code, data?, ...})."""
+    return RunFailure(
+        result["status"], result["error_code"], *_split_error(result["error"]), data=result.get("data") or None
+    )
+
+
+def _failure_result(failure: RunFailure, step_id: str | None) -> dict[str, Any]:
+    """A child workflow's failed result (a parallel branch, an iteration): {status, error,
+    error_code, step_id}, plus `data` only when the failure carries some (LP.11: the cost cap's
+    {limit, value, spent_usd}), so every result a loop-free run recorded keeps its shape."""
+    result: dict[str, Any] = {"status": failure.status, "error": failure.error, "error_code": failure.code,
+                              "step_id": step_id}
+    if failure.data:
+        result["data"] = failure.data
+    return result
+
+
+def _exception_result(exc: BaseException) -> dict[str, Any]:
+    """`_failure_result` of an exception raised in workflow code (not inside a child)."""
+    failure = classify(exc)
+    return _failure_result(
+        dataclasses.replace(failure, status=_failure_status(exc, failure)),
+        None,
+    )
 
 
 def _split_error(error: str) -> tuple[str, str]:
@@ -1217,7 +1408,7 @@ async def _workflow_body(
         failure, failed_step = exc.failure, exc.step_id
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
-        failure = RunFailure(_failure_status(exc, failure), failure.code, failure.error_type, failure.message)
+        failure = dataclasses.replace(failure, status=_failure_status(exc, failure))
         log_failure(
             log, f"workflow run {failure.status}", exc, code=failure.code, error_type=failure.error_type,
             run_id=run_id, tenant_id=tenant_id,
@@ -1232,7 +1423,8 @@ async def _workflow_body(
         heartbeat.cancel()
     await append_event_step(
         run_id, tenant_id, "end", "run_failed",
-        {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": failed_step},
+        {**(failure.data or {}), "status": failure.status, "error": failure.error, "error_code": failure.code,
+         "step_id": failed_step},
     )
     await finish_run_step(run_id, tenant_id, failure.status, None, failure.error)
     return {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": failed_step}
@@ -1258,11 +1450,9 @@ async def workflow_branch(
         interp = _Interpreter(run_id, tenant_id, spec, input_value, outputs, limits, traceparent)
         _last_step, last = await interp.run_path(branch, stop)
     except StepFailed as exc:
-        f = exc.failure
-        return {"status": f.status, "error": f.error, "error_code": f.code, "step_id": exc.step_id}
+        return _failure_result(exc.failure, exc.step_id)
     except Exception as exc:  # noqa: BLE001
-        f = classify(exc)
-        return {"status": _failure_status(exc, f), "error": f.error, "error_code": f.code, "step_id": None}
+        return _exception_result(exc)
     new = {k: v for k, v in interp.outputs.items() if k not in interp.inherited}
     return {"status": "completed", "outputs": new, "last": last}
 
@@ -1439,8 +1629,65 @@ async def workflow_iteration(
     `carry` and `until` (D3). Never raises for a step failure. Returns
     {"status": "completed", "done", "state", "last_key", "until"} (`last_key`: the event key of the
     body step that ended the path; `until`: its outcome, None for a `while` loop), or
-    {"status", "error", "error_code", "step_id"} (the body step that failed, or None)."""
+    {"status", "error", "error_code", "step_id"} (the body step that failed, or None).
+
+    Telemetry (LP.9): the whole iteration runs inside its `eap.loop_iteration` span (ids and counts
+    only), ended with set_iteration_outcome: OK only for `completed`; a failed iteration (a nested
+    tick's `run_cancelled` or `run_budget_exceeded` included) and this workflow's own DBOS cancel
+    end it as an error."""
     outer = scope_from_data(scope)
+    loop_id = path[-1] if path else ""
+    try:  # a malformed path fails below as workflow_spec_invalid, never here
+        span_scope = scope_string(child_scope(outer, loop_id, index)) if path else ""
+    except ValueError:
+        span_scope = ""
+    counts = {"body_steps": 0}
+    with iteration_span(run_id, tenant_id, loop_id, index, scope=span_scope, traceparent=traceparent) as span:
+        try:
+            result = await _iteration_run(
+                span, counts, run_id, tenant_id, workflow_version_id, path, outer, index, state, limits, traceparent,
+            )
+        except DBOSWorkflowCancelledError:
+            set_iteration_outcome(span, "failed", "run_cancelled", body_steps=counts["body_steps"])
+            raise
+        except DBOSWorkflowConflictIDError:
+            # Another execution of this iteration workflow (a recovery or a concurrent replay)
+            # recorded the same operation first, so this one stops. Telemetry only: name it
+            # run_cancelled when the run has its `cancel` (the run is stopping anyway); otherwise
+            # keep the bare error status, as the other execution goes on. Re-raised either way.
+            if await _run_cancel_requested(run_id, tenant_id):
+                set_iteration_outcome(span, "failed", "run_cancelled", body_steps=counts["body_steps"])
+            raise
+        set_iteration_outcome(span, result["status"], result.get("error_code"), body_steps=counts["body_steps"])
+        return result
+
+
+async def _run_cancel_requested(run_id: str, tenant_id: str) -> bool:
+    """Telemetry only, on the way out of an iteration that lost its workflow: does the run have its
+    `cancel` event? A plain read (no DBOS operation, its answer never reaches workflow logic);
+    False when it cannot be read."""
+    try:
+        cancel = await asyncio.to_thread(get_runtime().event_log.get_event, tenant_id, run_id, CANCEL_EVENT_KEY)
+    except Exception:  # noqa: BLE001 - best effort, the iteration is already stopping
+        return False
+    return cancel is not None
+
+
+async def _iteration_run(
+    span: Any,
+    counts: dict[str, int],
+    run_id: str,
+    tenant_id: str,
+    workflow_version_id: str,
+    path: list[str],
+    outer: Scope,
+    index: int,
+    state: dict[str, Any] | None,
+    limits: dict[str, Any],
+    traceparent: str | None,
+) -> dict[str, Any]:
+    """workflow_iteration's work (see there). `counts["body_steps"]` is kept current with the body
+    steps the iteration executed, for its span; `eap.loop_kind` is set once the step is known."""
     iteration = EMPTY_SCOPE
     try:
         spec_json, events = await immutable_read(
@@ -1453,6 +1700,7 @@ async def workflow_iteration(
         except ValidationError:
             raise WorkflowStepError("workflow_spec_invalid") from None
         step = _find_loop(spec, path)
+        span.set_attribute("eap.loop_kind", step.type)
         if list(loop_path(outer)) != list(path[:-1]):
             raise WorkflowStepError("workflow_spec_invalid", step.id)
         iteration = child_scope(outer, step.id, index)
@@ -1478,7 +1726,10 @@ async def workflow_iteration(
             run_id, tenant_id, spec, start.get("input"), outputs, limits, traceparent,
             steps=step.body.steps, scope=iteration, loops=frames, workflow_version_id=workflow_version_id,
         )
-        last_step, _last = await interp.run_path(step.body.start, None)
+        try:
+            last_step, _last = await interp.run_path(step.body.start, None)
+        finally:
+            counts["body_steps"] = len(interp.executed)
         last_key = scoped_event_key(iteration, last_step, "completed") if last_step is not None else None
         if isinstance(step, ForeachStep):
             return {"status": "completed", "last_key": last_key}
@@ -1493,11 +1744,9 @@ async def workflow_iteration(
         if size > loop_limit(limits, "max_loop_state_bytes"):
             raise WorkflowStepError("loop_state_too_large", step.id)
     except StepFailed as exc:
-        f = exc.failure
-        return {"status": f.status, "error": f.error, "error_code": f.code, "step_id": exc.step_id}
+        return _failure_result(exc.failure, exc.step_id)
     except Exception as exc:  # noqa: BLE001
-        f = classify(exc)
-        return {"status": _failure_status(exc, f), "error": f.error, "error_code": f.code, "step_id": None}
+        return _exception_result(exc)
     return {
         "status": "completed",
         "done": exit_.done,

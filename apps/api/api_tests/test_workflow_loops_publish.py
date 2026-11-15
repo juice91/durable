@@ -1,8 +1,9 @@
 """LP.5: workflow publish checks loop specs: environment caps, body references, judge models, the
 D8a approval warning and `loop.<L>.item` field refs.
 
-The loops runtime gate (`runtime_pending_problems`) refuses loop and foreach specs at publish unless
-the loops preview is on (LP.7/LP.10); these tests switch it off to reach the LP.5 checks behind it.
+The loops runtime gate (`runtime_pending_problems`) refuses evaluate steps at publish until LP.14
+(loop and foreach steps are open since LP.11); these tests switch it off to reach the LP.5 checks
+behind it.
 """
 
 from __future__ import annotations
@@ -174,11 +175,11 @@ def _publish(client, spec):
 
 
 @requires_pg
-def test_gate_still_refuses_loops(client, monkeypatch):
-    """Since LP.10 a foreach publishes only with the loops preview (EAP_WORKFLOW_LOOPS_PREVIEW=1)."""
+def test_the_gate_lets_loops_through(client, monkeypatch):
+    """Since LP.11 a foreach publishes with no preview flag (the gate refuses only evaluate steps)."""
     monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
     resp = _publish(client, _wf(_foreach([_tool("x")])))
-    assert resp.status_code == 422 and "EAP_WORKFLOW_LOOPS_PREVIEW=1" in resp.json()["detail"]
+    assert resp.status_code == 201, resp.text
 
 
 @requires_pg

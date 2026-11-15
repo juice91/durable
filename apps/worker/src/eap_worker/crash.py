@@ -37,6 +37,11 @@
   item that refills the window (item i+c, after awaiting item i) and before it awaits the next
   item. Filtered by `EAP_CRASH_EVENT_KEY` against `loop:{S}:refill` (S: the refilled item's
   scope, e.g. `loop:each.3:refill`).
+- `after_loop_tick` (LP.11): in a workflow run, right after `eap.workflow_loop_tick` was
+  checkpointed and before the parent acts on it (starts the iteration, or the top-level agent or
+  evaluate step). Filtered by `EAP_CRASH_EVENT_KEY` against `loop:{S}:tick` (S: the iteration about
+  to start, e.g. `loop:lp.2:tick`) or `step:{step_id}:tick` before a top-level step. Recovery
+  replays the recorded tick, so the run decides identically.
 - `workflow_waiting`: in a workflow approval step, right after its `step_waiting` event is
   recorded and before the workflow starts waiting for the decision. Filtered by
   `EAP_CRASH_EVENT_KEY` against `step:{step_id}:waiting`.

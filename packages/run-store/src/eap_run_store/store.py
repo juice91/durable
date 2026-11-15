@@ -1595,20 +1595,23 @@ class RunStore:
         compares to a cap) summed over the tree, so a loop's cost and a run's budget can't disagree.
         It includes the run's own rows such as judge requests (`judge:` keys). Tenant-scoped.
         Unpriced requests (NULL cost) count as 0. Decimal 0 for a run without requests, an unknown
-        run or another tenant's."""
+        run or another tenant's. One statement (the recursive CTE on ix_runs_parent_run joined to
+        the SUM on the run_model_requests PK), so the loop tick costs one round trip and no bind
+        list of run ids; the same quantity as `_recorded_cost_in_session` over the tree's ids."""
         with self.Session() as session:
-            tree_ids = session.execute(
+            total = session.execute(
                 text(
                     "WITH RECURSIVE tree(id, depth) AS ("
                     " SELECT id, 0 FROM runs WHERE tenant_id = :t AND id = :r"
                     " UNION ALL"
                     " SELECT c.id, tree.depth + 1 FROM runs c JOIN tree ON c.parent_run_id = tree.id"
                     " WHERE c.tenant_id = :t AND tree.depth < 16"
-                    ") SELECT id FROM tree"
+                    ") SELECT COALESCE(SUM(m.cost_usd), 0) FROM tree"
+                    " JOIN run_model_requests m ON m.run_id = tree.id AND m.tenant_id = :t"
                 ),
                 {"t": tenant_id, "r": str(run_id)},
-            ).scalars().all()
-            return _recorded_cost_in_session(session, tenant_id, [str(i) for i in tree_ids])
+            ).scalar_one()
+            return Decimal(total)
 
     def recorded_cost_usd(self, tenant_id: str, run_id: UUID | str) -> Decimal:
         """The sum of `cost_usd` over the run's own `run_model_requests` rows recorded so far
