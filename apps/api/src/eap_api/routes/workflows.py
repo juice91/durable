@@ -19,11 +19,27 @@ following it as the runtime validates it (output_ref_problem):
   path in `unresolved_refs`).
 Publish answers 201 with the version and `warnings` ([{code, path: "steps[<index>]", message}]). `GET /workflows/agent-output-schema` serves an
 agent version's output schema and its field paths to API clients and editors.
+
+Workflow loops (LP.5): every check above walks loop bodies at every depth, and a body step's
+warning `path` is `steps[<i>].body.steps[<j>]`.
+- Agent and tool steps inside bodies are checked like top-level ones (reference_problems).
+- Every `llm_judge` evaluator of an `evaluate` step needs an allowlisted model (EAP_ALLOWED_MODELS).
+- Environment caps (loop_limit_problems): each loop's `max_items`/`max_iterations` <=
+  EAP_WORKFLOW_MAX_LOOP_ITERATIONS (100); `static_execution_bound` <= EAP_WORKFLOW_MAX_STEP_EXECUTIONS
+  (2000, `workflow_too_many_executions`); `run_concurrency` <= EAP_WORKFLOW_MAX_RUN_CONCURRENCY (8,
+  `workflow_concurrency_exceeded`). Checked at publish and run start; a draft save accepts them.
+  A malformed value fails app startup (check_workflow_configuration).
+- `loop.<L>.item.<path>` is checked like a field ref: the foreach's `items` ref is followed to the
+  agent step output it lists, and the path is checked under that array's `items` schema.
+- A pinned body agent whose version has an approval policy gives the warning
+  `loop_agent_approvals_denied` (D8a): inside a loop its gated tool calls are denied.
 """
 
 from __future__ import annotations
 
+import os
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -42,17 +58,30 @@ from eap_api.routes.tools import _allowed_tool_ids
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
+from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.tools import TOOL_DECLARATIONS
+from eap_schemas.workflow_scope import LOOP_ERROR_MESSAGES
 from eap_schemas.workflows import (
+    LOOP_STEP_TYPES,
+    MAX_FOREACH_CONCURRENCY,
+    MAX_LOOP_DEPTH,
+    MAX_LOOP_ITERATIONS,
     MAX_SPEC_DEPTH,
+    REF_KEY,
     REF_PATTERN,
     AgentStep,
     BranchStep,
     Condition,
+    EvaluateStep,
+    ForeachStep,
+    Step,
     ToolStep,
     WorkflowSpec,
     canonical_workflow_hash,
     iter_refs,
+    loop_exit_refs,
+    run_concurrency,
+    static_execution_bound,
     walk_steps,
 )
 
@@ -139,13 +168,103 @@ def runtime_pending_problems(spec: WorkflowSpec) -> list[str]:
     return problems
 
 
+# Environment caps of loop specs (LP.5, D7a, D10): (variable, default). Read at every publish and
+# run start. Unset or blank means the default; any other value must be ASCII digits within the
+# variable's bounds, else ValueError naming the variable. create_app calls
+# check_workflow_configuration, so a malformed value fails startup rather than the first publish.
+LOOP_ITERATIONS_ENV = ("EAP_WORKFLOW_MAX_LOOP_ITERATIONS", 100)
+STEP_EXECUTIONS_ENV = ("EAP_WORKFLOW_MAX_STEP_EXECUTIONS", 2000)
+RUN_CONCURRENCY_ENV = ("EAP_WORKFLOW_MAX_RUN_CONCURRENCY", 8)
+# Inclusive bounds: the schema's loop ceiling; a generous execution ceiling; the largest product of
+# foreach concurrency the schema allows (8 per foreach, nested 2 deep).
+CAP_BOUNDS: dict[str, tuple[int, int]] = {
+    LOOP_ITERATIONS_ENV[0]: (1, MAX_LOOP_ITERATIONS),
+    STEP_EXECUTIONS_ENV[0]: (1, 1_000_000),
+    RUN_CONCURRENCY_ENV[0]: (1, MAX_FOREACH_CONCURRENCY**MAX_LOOP_DEPTH),
+}
+
+
+def _env_cap(setting: tuple[str, int]) -> int:
+    name, default = setting
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    low, high = CAP_BOUNDS[name]
+    # str.isdigit alone accepts non-ASCII digits (e.g. "٣"); int() would accept signs, "_" and spaces.
+    if not (raw.isascii() and raw.isdigit()) or not low <= int(raw) <= high:
+        raise ValueError(f"{name} must be a whole number from {low} to {high}, got {raw!r}")
+    return int(raw)
+
+
+def check_workflow_configuration() -> None:
+    """Fail startup on a malformed EAP_WORKFLOW_MAX_LOOP_ITERATIONS, EAP_WORKFLOW_MAX_STEP_EXECUTIONS
+    or EAP_WORKFLOW_MAX_RUN_CONCURRENCY (ValueError), not at the first publish or run start."""
+    for setting in (LOOP_ITERATIONS_ENV, STEP_EXECUTIONS_ENV, RUN_CONCURRENCY_ENV):
+        _env_cap(setting)
+
+
+def loop_limit_problems(spec: WorkflowSpec) -> list[str]:
+    """The platform's loop caps (LP.5): each loop's bound, the static execution bound and the run
+    concurrency, one message per problem. Empty for a spec without loops."""
+    loops = [step for _, step in walk_steps(spec.steps) if isinstance(step, LOOP_STEP_TYPES)]
+    if not loops:
+        return []
+    problems: list[str] = []
+    iterations_cap = _env_cap(LOOP_ITERATIONS_ENV)
+    for step in loops:
+        field, bound = (
+            ("max_items", step.max_items) if isinstance(step, ForeachStep) else ("max_iterations", step.max_iterations)
+        )
+        if bound > iterations_cap:
+            problems.append(
+                f"step '{step.id}': {field} {bound} is above this platform's loop limit of {iterations_cap} "
+                f"({LOOP_ITERATIONS_ENV[0]})"
+            )
+    executions, executions_cap = static_execution_bound(spec), _env_cap(STEP_EXECUTIONS_ENV)
+    if executions > executions_cap:
+        problems.append(
+            f"workflow_too_many_executions: {LOOP_ERROR_MESSAGES['workflow_too_many_executions']} "
+            f"(up to {executions} step executions, the limit is {executions_cap}, {STEP_EXECUTIONS_ENV[0]})"
+        )
+    concurrency, concurrency_cap = run_concurrency(spec), _env_cap(RUN_CONCURRENCY_ENV)
+    if concurrency > concurrency_cap:
+        problems.append(
+            f"workflow_concurrency_exceeded: {LOOP_ERROR_MESSAGES['workflow_concurrency_exceeded']} "
+            f"(up to {concurrency} iterations at once, the limit is {concurrency_cap}, {RUN_CONCURRENCY_ENV[0]})"
+        )
+    return problems
+
+
+def judge_model_problems(spec: WorkflowSpec) -> list[str]:
+    """Every `llm_judge` evaluator of an evaluate step (at any depth) names an allowlisted model
+    (EAP_ALLOWED_MODELS), as an eval suite's judge must; the worker re-checks at call time."""
+    policy: ModelPolicy | None = None
+    problems: list[str] = []
+    for _, step in walk_steps(spec.steps):
+        if not isinstance(step, EvaluateStep):
+            continue
+        for i, evaluator in enumerate(step.evaluators):
+            if evaluator.kind != "llm_judge":
+                continue
+            policy = policy or ModelPolicy.from_env()
+            if not policy.allows(evaluator.model.provider, evaluator.model.name):
+                problems.append(
+                    f"step '{step.id}': evaluators.{i} (llm_judge): model "
+                    f"'{evaluator.model.provider}:{evaluator.model.name}' is not allowed on this platform "
+                    "(not in the EAP_ALLOWED_MODELS allowlist)"
+                )
+    return problems
+
+
 def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str) -> list[str]:
-    """What a spec points at that this tenant cannot run, one message per problem, naming the step.
+    """What a spec points at that this tenant cannot run, one message per problem, naming the step:
+    agent and tool steps at every depth (loop bodies included), judge models, and the loop caps.
 
     Another tenant's agent reads exactly like a missing one, so nothing about it leaks."""
     problems: list[str] = runtime_pending_problems(spec)
+    problems += loop_limit_problems(spec)
     allowed_tools = _allowed_tool_ids()
-    for step in spec.steps:
+    for _, step in walk_steps(spec.steps):
         if isinstance(step, AgentStep):
             agent_id = str(step.agent_id)
             agent = (
@@ -172,6 +291,7 @@ def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str) -> list[
                     f"step '{step.id}': tool '{step.tool_id}' is not allowed on this platform "
                     "(not in the EAP_ALLOWED_TOOLS allowlist)"
                 )
+    problems += judge_model_problems(spec)
     return problems
 
 
@@ -287,12 +407,45 @@ def _agent_version(db: Session, tenant_id: str, agent_id: str, version: int | No
     return query.order_by(AgentVersionModel.version.desc()).first()
 
 
+WARNING_LOOP_AGENT_APPROVALS = "loop_agent_approvals_denied"
+
+
+def _walk_with_paths(
+    steps: tuple[Step, ...], prefix: str = "steps"
+) -> Iterator[tuple[str, tuple[str, ...], Step]]:
+    """Every step at every depth, depth first in spec order: (warning path, enclosing loop ids, step).
+    A top-level step's path is `steps[<i>]` (AC.9's shape); a body step's is
+    `steps[<i>].body.steps[<j>]`."""
+
+    def walk(steps: tuple[Step, ...], prefix: str, loops: tuple[str, ...]):
+        for i, step in enumerate(steps):
+            where = f"{prefix}[{i}]"
+            yield where, loops, step
+            if isinstance(step, LOOP_STEP_TYPES):
+                yield from walk(step.body.steps, f"{where}.body.steps", (*loops, step.id))
+
+    return walk(steps, prefix, ())
+
+
+def _ref_segments(path: str) -> tuple[str | None, str | None, str | None, list[str]]:
+    """(step id, loop id, loop root, segments after the root) of a valid ref path."""
+    match = REF_PATTERN.fullmatch(path)
+    if match is None:
+        return None, None, None, []
+    rest = [seg for seg in (match.group("rest") or "").split(".") if seg]
+    return match.group("step"), match.group("loop"), match.group("loop_root"), rest
+
+
 def output_ref_checks(
     db: Session, spec: WorkflowSpec, tenant_id: str
 ) -> tuple[list[str], list[dict[str, str]]]:
-    """(problems, warnings) for `$ref`s into agent step outputs (see the module docstring). Steps
+    """(problems, warnings) for `$ref`s into agent step outputs (see the module docstring), at every
+    depth. A `loop.<L>.item.<path>` ref of a foreach whose `items` lists an agent step's output (or
+    an enclosing foreach's item) is checked as `<items path>.0.<path>` in that agent's schema. Steps
     whose agent or version does not resolve are left to reference_problems."""
-    agent_steps = {s.id: s for s in spec.steps if isinstance(s, AgentStep)}
+    walked = list(_walk_with_paths(spec.steps))
+    agent_steps = {s.id: s for _, _, s in walked if isinstance(s, AgentStep)}
+    foreach_steps = {s.id: s for _, _, s in walked if isinstance(s, ForeachStep)}
     schemas: dict[str, tuple[bool, dict[str, Any] | None] | None] = {}
 
     def target(step_id: str) -> tuple[bool, dict[str, Any] | None] | None:
@@ -303,29 +456,41 @@ def output_ref_checks(
             schemas[step_id] = None if row is None else (step.version is not None, output_schema_of(row.spec))
         return schemas[step_id]
 
+    def resolve(path: str, hops: int = 0) -> tuple[str, list[str], str] | None:
+        """(agent step id, segments in its output, via note) a field ref reads, None when it does not
+        read an agent step's output. Follows `loop.<L>.item` through the foreach's `items` ref."""
+        step_id, loop_id, loop_root, rest = _ref_segments(path)
+        if step_id is not None:
+            return (step_id, rest, "") if step_id in agent_steps else None
+        if loop_root != "item" or loop_id not in foreach_steps or hops > len(foreach_steps):
+            return None
+        items_ref = foreach_steps[loop_id].items[REF_KEY]
+        base = resolve(items_ref, hops + 1)
+        if base is None:
+            return None
+        return base[0], [*base[1], "0", *rest], f" (an item of foreach '{loop_id}' over '{items_ref}')"
+
     problems: list[str] = []
     warnings: list[dict[str, str]] = []
-    for index, step in enumerate(spec.steps):
-        for path in dict.fromkeys(iter_refs(step)):
-            match = REF_PATTERN.fullmatch(path)
-            ref_step = match.group("step") if match else None
-            if ref_step not in agent_steps:
+    for where, _, step in walked:
+        for path in dict.fromkeys(iter_refs(step) + loop_exit_refs(step)):
+            if not _ref_segments(path)[3]:
+                continue  # the whole output (or the whole item)
+            resolved = resolve(path)
+            if resolved is None:
                 continue
-            segments = path.split(".")[3:]
-            if not segments:
-                continue  # the whole output
+            ref_step, segments, via = resolved
             found = target(ref_step)
             if found is None:
                 continue
             pinned, schema = found
-            where = f"steps[{index}]"
             if schema is None:
                 version_note = "" if pinned else " (not pinned: its latest version)"
                 warnings.append({
                     "code": WARNING_TEXT_OUTPUT_REF if pinned else WARNING_UNPINNED_OUTPUT_REF,
                     "path": where,
                     "message": (
-                        f"step '{step.id}': $ref '{path}' reads a field, but agent step '{ref_step}'"
+                        f"step '{step.id}': $ref '{path}'{via} reads a field, but agent step '{ref_step}'"
                         f"{version_note} outputs text (no structured output), so it does not resolve"
                     ),
                 })
@@ -342,7 +507,7 @@ def output_ref_checks(
                     "code": WARNING_UNPINNED_OUTPUT_REF,
                     "path": where,
                     "message": (
-                        f"step '{step.id}': $ref '{path}' reads the output of agent step '{ref_step}', "
+                        f"step '{step.id}': $ref '{path}'{via} reads the output of agent step '{ref_step}', "
                         f"which is not pinned to a version; {detail}. Pin the version to check it at publish"
                     ),
                 })
@@ -350,16 +515,42 @@ def output_ref_checks(
                 continue
             elif problem.blocking:
                 problems.append(
-                    f"step '{step.id}': $ref '{path}' does not match the output schema of agent step "
+                    f"step '{step.id}': $ref '{path}'{via} does not match the output schema of agent step "
                     f"'{ref_step}': {problem.message}"
                 )
             else:
                 warnings.append({
                     "code": WARNING_UNLISTED_OUTPUT_FIELD,
                     "path": where,
-                    "message": f"step '{step.id}': $ref '{path}' into agent step '{ref_step}': {problem.message}",
+                    "message": f"step '{step.id}': $ref '{path}'{via} into agent step '{ref_step}': {problem.message}",
                 })
     return problems, warnings
+
+
+def loop_agent_approval_warnings(db: Session, spec: WorkflowSpec, tenant_id: str) -> list[dict[str, str]]:
+    """D8a: a pinned agent step inside a loop body whose version has an approval policy runs with
+    tool approvals denied, so publish warns (not 422: an unpinned agent can gain a policy after
+    publish, so a publish-time refusal could not be complete). Unresolved versions are left to
+    reference_problems."""
+    warnings: list[dict[str, str]] = []
+    for where, loops, step in _walk_with_paths(spec.steps):
+        if not loops or not isinstance(step, AgentStep) or step.version is None:
+            continue
+        row = _agent_version(db, tenant_id, str(step.agent_id), step.version)
+        approvals = (row.spec or {}).get("approvals") if row is not None else None
+        if not isinstance(approvals, dict) or not approvals.get("tools"):
+            continue
+        tools = ", ".join(f"'{t}'" for t in approvals["tools"])
+        warnings.append({
+            "code": WARNING_LOOP_AGENT_APPROVALS,
+            "path": where,
+            "message": (
+                f"step '{step.id}': agent '{step.agent_id}' version {step.version} requires approval for "
+                f"{tools}, but tool approvals are not available inside loops (loop '{loops[-1]}'), so "
+                "those tool calls are denied and the model reads the denial"
+            ),
+        })
+    return warnings
 
 
 @router.get(
@@ -461,7 +652,8 @@ def patch_workflow(
 )
 def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     """Publish the draft as the next immutable version (409 when it equals the latest one): 201 with
-    the version and `warnings` (AC.9: refs into unpinned or text agents' output)."""
+    the version and `warnings` (AC.9: refs into unpinned or text agents' output; LP.5: pinned loop
+    body agents with an approval policy)."""
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
     if workflow.draft_spec is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workflow has no draft spec")
@@ -473,6 +665,7 @@ def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db
     problems = reference_problems(db, spec, principal.tenant_id)
     ref_problems, warnings = output_ref_checks(db, spec, principal.tenant_id)
     problems += ref_problems
+    warnings += loop_agent_approval_warnings(db, spec, principal.tenant_id)
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 
