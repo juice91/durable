@@ -387,11 +387,12 @@ describe("phone width and accessibility", () => {
     const { container } = setup(FULL, { start: "memory", layout: "compact" });
     await act(async () => undefined);
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
-    expect(Array.from(select.options).slice(-2).map((o) => o.textContent)).toEqual([
+    // AC.13 added step 8 (Output) after Memory.
+    expect(Array.from(select.options).slice(-3, -1).map((o) => o.textContent)).toEqual([
       "6. Knowledge — 1 knowledge base",
       "7. Memory — History 12 · Working · Observational · Recall",
     ]);
-    expect(screen.getByText("Step 7 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Step 7 of 8")).toBeInTheDocument();
     const offenders: string[] = [];
     for (const step of ["knowledge", "memory"]) {
       container.querySelector(`section[data-step="${step}"]`)!.querySelectorAll("*").forEach((element) => {

@@ -13,6 +13,18 @@ import { configCounts, effectiveConfig, instructionSegments } from "./agentPageM
 import { copyText } from "@/lib/clipboard";
 import { listKnowledgeBases } from "@/lib/knowledge";
 import { knowledgeBasesOf, knowledgeRefSummary, memorySummaryLines } from "@/components/agents/knowledgeMemory";
+import {
+  approvalsOf,
+  DEFAULT_APPROVAL_TIMEOUT_HOURS,
+  effectiveOutputMode,
+  fallbackModelsOf,
+  LIMIT_FIELDS,
+  limitsOf,
+  mcpApprovalRef,
+  outputModeLabel,
+  outputOf,
+  schemaTypeLabel,
+} from "@/components/agents/agentCapabilities";
 
 /** Editor steps the "Edit" links open (the stepper's `?step=` ids, `stepper/registry.ts`). */
 export type ConfigStep = CoreStepId | (string & {});
@@ -80,6 +92,20 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
   const knowledgeRefs = knowledgeBasesOf(spec);
   const memoryLines = memorySummaryLines(spec);
   const kbNames = useKnowledgeBaseNames(knowledgeRefs.length > 0);
+  // AC.13: fallback models and limits under Model, approval marks on tools, and the Output section.
+  const fallbacks = fallbackModelsOf(spec);
+  const limits = limitsOf(spec);
+  const limitLines = limits
+    ? [
+        ...LIMIT_FIELDS.filter(({ key }) => limits[key] != null).map(({ key, label }) => `${label} ≤ ${Number(limits[key]).toLocaleString("en-US")}`),
+        ...(limits.max_cost_usd != null ? [`Cost ≤ $${String(limits.max_cost_usd)}`] : []),
+      ]
+    : [];
+  const approvals = approvalsOf(spec);
+  const gated = new Set(approvals?.tools ?? []);
+  const output = outputOf(spec);
+  const outputSchema = output?.json_schema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+  const outputFields = outputSchema && typeof outputSchema === "object" && outputSchema.properties && typeof outputSchema.properties === "object" ? Object.entries(outputSchema.properties) : [];
 
   const copyInstructions = async () => {
     setCopied((await copyText(spec?.instructions ?? "")) ? "Instructions copied" : "Copying is not available here");
@@ -109,6 +135,30 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
               <p className={cn("text-caption", muted)}>Temperature {spec.model_settings.temperature}</p>
             ) : null}
             {spec.model_settings?.max_tokens ? <p className={cn("text-caption", muted)}>Max tokens {spec.model_settings.max_tokens}</p> : null}
+            {fallbacks.length > 0 ? (
+              <div className="mt-1.5 text-caption" data-testid="config-fallback-models">
+                <p className={muted}>Fallback models</p>
+                <ol className="list-inside list-decimal">
+                  {fallbacks.map((ref, index) => (
+                    <li key={`${ref.provider}:${ref.name}:${index}`} className="break-all font-mono">
+                      {ref.provider}:{ref.name}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+            {limitLines.length > 0 ? (
+              <div className="mt-1.5 text-caption" data-testid="config-limits">
+                <p className={muted}>Limits per run</p>
+                <ul>
+                  {limitLines.map((line) => (
+                    <li key={line} className="break-words">
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </Section>
 
           <Section id="instructions" title="Instructions" editHref={edit("instructions")}>
@@ -154,15 +204,22 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
                 {spec.tools.map((tool) => (
                   <li key={`builtin:${tool}`} className="break-all">
                     {tool}
+                    {gated.has(tool) ? <ApprovalMark /> : null}
                   </li>
                 ))}
                 {(spec.mcp_tools ?? []).map((ref) => (
                   <li key={`mcp:${ref.server}:${ref.tool}`} className="break-all">
                     {ref.tool} <span className={muted}>· MCP {ref.server}</span>
+                    {gated.has(mcpApprovalRef(ref)) ? <ApprovalMark /> : null}
                   </li>
                 ))}
               </ul>
             )}
+            {gated.size > 0 ? (
+              <p className={cn("mt-1 text-caption", muted)} data-testid="config-approval-timeout">
+                Approval timeout {String(approvals?.timeout_hours ?? DEFAULT_APPROVAL_TIMEOUT_HOURS)} h
+              </p>
+            ) : null}
           </Section>
 
           <Section id="context-fields" title="Request context fields" count={counts.contextFields} editHref={edit("request-context")}>
@@ -242,9 +299,50 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
               </Link>
             ) : null}
           </Section>
+
+          <Section id="output" title="Output" count={output ? outputFields.length : undefined} editHref={edit("output")}>
+            {output ? (
+              <div className="text-caption" data-testid="config-output">
+                <p>
+                  Structured · {outputModeLabel(effectiveOutputMode(output))}
+                </p>
+                {outputFields.length === 0 ? (
+                  <p className={muted}>No fields</p>
+                ) : (
+                  <ul className="mt-0.5 space-y-0.5">
+                    {outputFields.map(([name, node]) => (
+                      <li key={name} className="break-all">
+                        <span className="font-mono">{name}</span>{" "}
+                        <span className={muted}>
+                          {schemaTypeLabel(node)}
+                          {outputSchema?.required?.includes(name) ? ", required" : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : (
+              <p className={muted} data-testid="config-output-text">
+                Text
+              </p>
+            )}
+          </Section>
         </>
       )}
     </div>
+  );
+}
+
+/** The mark on a tool that requires approval. */
+function ApprovalMark() {
+  return (
+    <>
+      {" "}
+      <Badge variant="warning" data-testid="config-approval-mark">
+        Approval
+      </Badge>
+    </>
   );
 }
 

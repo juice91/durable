@@ -704,7 +704,7 @@ export function isMemoryError(message: string): boolean {
   // Messages a 422 carries without a location (publish checks), or when its `loc` is missing; a
   // save's 422 is routed by `loc` first (`specKeys`). "duplicate PII kind" is memory.redact's own
   // (a pii_redact processor's kinds are validated the same way, but its 422 carries a loc).
-  return /(^|[\s,])memory[.:\s]|observer model|embedding model|working memory|(^|, |error, )template |json_schema|EAP_ALLOWED_EMBEDDING_MODELS|duplicate PII kind/i.test(message);
+  return /(^|[\s,])memory[.:\s]|observer model|embedding model|working memory|(^|, |error, )template |template or json_schema|(^|[\s,'"])(memory\.)?working(_memory)?\.json_schema|EAP_ALLOWED_EMBEDDING_MODELS|duplicate PII kind/i.test(message);
 }
 
 // ------------------------------------------------------------------ summaries (Config panel, memory card)

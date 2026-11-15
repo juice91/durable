@@ -7,6 +7,16 @@
  */
 import { apiErrorFromResponse, apiHeaders, BASE_URL, type AgentSpec } from "@/lib/api";
 import type { JsonSchema } from "@/lib/tools";
+import {
+  approvalProblems,
+  approvalsOf,
+  fallbackModelsOf,
+  fallbackProblems,
+  isApprovalError,
+  isIdentityCapabilityError,
+  limitsOf,
+  limitsProblems,
+} from "./agentCapabilities";
 
 export type ProcessorPhase = "input" | "output";
 export type ProcessorType = "pii_redact" | "regex_blocklist" | "max_length" | "moderation";
@@ -305,7 +315,15 @@ export function stepStatus(stepId: string, spec: AgentSpec | null | undefined): 
   switch (stepId) {
     case "identity": {
       const ok = Boolean(spec?.name?.trim() && spec.model?.provider?.trim() && spec.model?.name?.trim());
-      return ok ? { text: `${spec!.model.provider}:${spec!.model.name}`, valid: true } : { text: "Required", valid: false };
+      if (!ok) return { text: "Required", valid: false };
+      // AC.13: limits and fallback models live in this step's "Limits and fallback models" group.
+      const problems = limitsProblems(spec).length + fallbackProblems(spec).length;
+      if (problems > 0) return { text: plural(problems, "problem"), valid: false };
+      const parts = [`${spec!.model.provider}:${spec!.model.name}`];
+      const fallbacks = fallbackModelsOf(spec).length;
+      if (fallbacks > 0) parts.push(`fallback ×${fallbacks}`);
+      if (limitsOf(spec)) parts.push("limits");
+      return { text: parts.join(" · "), valid: true };
     }
     case "instructions": {
       const text = spec?.instructions ?? "";
@@ -315,8 +333,12 @@ export function stepStatus(stepId: string, spec: AgentSpec | null | undefined): 
       return { text: plural(text.trim().split(/\s+/).length, "word"), valid: true };
     }
     case "tools": {
+      const problems = approvalProblems(spec).length;
+      if (problems > 0) return { text: plural(problems, "problem"), valid: false };
       const count = (spec?.tools?.length ?? 0) + (spec?.mcp_tools?.length ?? 0);
-      return { text: count === 0 ? "None" : plural(count, "tool"), valid: true };
+      if (count === 0) return { text: "None", valid: true };
+      const gated = approvalsOf(spec)?.tools.length ?? 0;
+      return { text: gated > 0 ? `${plural(count, "tool")} · ${gated} ${gated === 1 ? "needs" : "need"} approval` : plural(count, "tool"), valid: true };
     }
     case "request-context": {
       const fields = sections.context_fields;
@@ -346,6 +368,10 @@ export function stepForErrorMessage(message: string): CoreStepId | null {
   // the spec that merely mentions a tool or a model (a later step's) is not claimed here.
   // "tool name 'retrieve' is reserved for a platform tool" (RM.17): raised once knowledge or memory
   // is on, fixed on the Tools step (at save it arrives as a pydantic "Value error, ...").
+  // AC.13: `approvals.tools[i]: ...` (the Tools step's approval toggles) and `limits` /
+  // `fallback_models[i]: ...` (the Identity step's group); at save they arrive as "Value error, ...".
+  if (isApprovalError(message)) return "tools";
+  if (isIdentityCapabilityError(message)) return "identity";
   if (/^(mcp_tools|tools)(\[\d+\])?[.:\s]/.test(message) || /^MCP server '[^']*'/.test(message) || /^(Value error, )?tool name '[^']*' is reserved/.test(message)) return "tools";
   if (/^(name|model|model_settings)(\.[a-z_]+)*[:\s]/.test(message) || /^Model [^\s]+ is not/.test(message)) return "identity";
   // The spec and ModelRef validators at save (pydantic "Value error, ..."): the agent's name, or the
