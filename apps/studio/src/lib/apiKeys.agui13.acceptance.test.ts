@@ -41,11 +41,14 @@ describe("create body: scopes and allowlists", () => {
     agentIds.push("a2");
     expect(result.ok && result.body.agent_ids).toEqual(["a1"]);
   });
-  it("origins: split, deduplicated, only with a value; a bad origin refuses the whole form", () => {
+  it("origins: split, deduplicated, only with a value; validity is the server's (normalize_origin), so any value is sent as typed", () => {
     const ok = build({ origins: "https://a.example.com\nhttps://a.example.com, http://localhost:3000" });
     expect(ok.ok && ok.body.allowed_origins).toEqual(["https://a.example.com", "http://localhost:3000"]);
-    for (const bad of ["a.example.com", "https://a.example.com/path", "ftp://x.com", "*", "https://x.com?q=1"]) {
-      expect(build({ origins: bad }).ok, bad).toBe(false);
+    // The server accepts a trailing "/" and refuses wildcards and credentials; the client never
+    // second-guesses it, so its 422 is the one answer.
+    for (const value of ["https://a.example.com/", "https://*.x.com", "https://u@h.com", "a.example.com"]) {
+      const built = build({ origins: value });
+      expect(built.ok && built.body.allowed_origins, value).toEqual([value]);
     }
   });
   it("expiry: future is sent, past or now is refused", () => {
@@ -106,13 +109,17 @@ describe("client", () => {
     expect(JSON.stringify(row)).not.toContain("secretsecret");
     expect(created.key).toBe("pos_k1_secretsecret");
   });
-  it("create and list use no-store; revoke encodes the id", async () => {
+  it("create, list and revoke use no-store; revoke encodes the id", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockImplementationOnce(async () => new Response(JSON.stringify(created), { status: 201 }));
+    expect((await apiKeys.create({ name: "Site" })).key).toBe(created.key);
     await apiKeys.list();
     fetchMock.mockImplementationOnce(async () => new Response(null, { status: 204 }));
     await apiKeys.revoke("a/b");
-    for (const call of fetchMock.mock.calls as unknown as [string, RequestInit][]) expect(call[1].cache).toBe("no-store");
-    expect((fetchMock.mock.calls[1] as unknown as [string])[0]).toMatch(/\/api\/v1\/api-keys\/a%2Fb$/);
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls.map(([, init]) => init.method ?? "GET")).toEqual(["POST", "GET", "DELETE"]);
+    for (const call of calls) expect(call[1].cache).toBe("no-store");
+    expect(calls[2][0]).toMatch(/\/api\/v1\/api-keys\/a%2Fb$/);
   });
 });

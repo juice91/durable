@@ -101,6 +101,14 @@ describe("key lifecycle", () => {
     fireEvent.keyDown(screen.getByTestId("api-key-create-dialog"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("api-key-create-dialog")).toBeNull());
     expect(secretLocations()).toEqual([]);
+
+    await submitNamed("B");
+    const dialog = await screen.findByTestId("api-key-create-dialog");
+    await within(dialog).findByTestId("api-key-secret");
+    expect(secretLocations()).not.toEqual([]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByTestId("api-key-create-dialog")).toBeNull());
+    expect(secretLocations()).toEqual([]);
   });
 
   it("a failed create shows the API's message, no secret, and the form stays editable", async () => {

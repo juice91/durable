@@ -97,12 +97,20 @@ export function ApiKeysSection() {
   // Set when the dialog closes because the key was revoked: its Revoke button is about to go.
   const revokedRef = useRef(false);
 
+  // Only the latest list request may write the list: an older answer (a slow first load, or the
+  // reload after an earlier revoke) would otherwise hide a key just created or revoke state.
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     try {
-      setKeys(await apiKeys.list());
+      const listed = await apiKeys.list();
+      if (seq !== loadSeq.current) return;
+      setKeys(listed);
       setLoadError(null);
       setDevOnly(false);
     } catch (reason: unknown) {
+      if (seq !== loadSeq.current) return;
       const refused = reason instanceof ApiError && reason.status === 401 && reason.message === DEV_AUTH_DISABLED;
       setDevOnly(refused);
       setLoadError(refused ? API_KEYS_DEV_ONLY_MESSAGE : errorText(reason, "Could not load API keys"));
@@ -116,6 +124,8 @@ export function ApiKeysSection() {
   const onCreated = (key: ApiKey) => {
     setKeys((current) => [key, ...(current ?? []).filter((item) => item.id !== key.id)]);
     setStatus(`Key ${key.name} created.`);
+    // Supersede any list request that started before the key existed, and fetch one that has it.
+    void load();
   };
 
   const revoke = async (key: ApiKey) => {
@@ -128,13 +138,15 @@ export function ApiKeysSection() {
       setRevoking(null);
       setStatus(`Key ${key.name} revoked. Requests that use it are refused from now on.`);
       toast.success("Key revoked");
-      await load();
+      // Not awaited: the busy state covers the DELETE only, so another key can be revoked while
+      // this reload runs (the latest reload wins, see loadSeq).
+      void load();
     } catch (reason: unknown) {
       if (reason instanceof ApiError && reason.status === 404) {
         revokedRef.current = true;
         setRevoking(null);
         setStatus(`Key ${key.name} no longer exists.`);
-        await load();
+        void load();
       } else {
         setRevokeError(errorText(reason, "The key could not be revoked"));
       }

@@ -89,8 +89,6 @@ export function parseOrigins(text: string): string[] {
   return Array.from(new Set(text.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)));
 }
 
-const ORIGIN_RE = /^https?:\/\/[^/\s?#]+$/i;
-
 /** The POST body for the form, or why it cannot be sent. */
 export function buildApiKeyCreate(input: ApiKeyFormInput, now: Date = new Date()): ApiKeyFormResult {
   const name = input.name.trim();
@@ -103,9 +101,9 @@ export function buildApiKeyCreate(input: ApiKeyFormInput, now: Date = new Date()
     body.agent_ids = [...input.agentIds];
     body.workflow_ids = [...input.workflowIds];
   }
+  // Origins are checked by the server only (eap_run_store.api_keys.normalize_origin: http(s), no
+  // path but "/", no query, fragment, credentials or wildcard); its 422 message is shown as is.
   const origins = parseOrigins(input.origins);
-  const bad = origins.find((origin) => !ORIGIN_RE.test(origin));
-  if (bad) return { ok: false, message: `"${bad}" is not an origin: use a scheme and host, such as https://app.example.com.` };
   if (origins.length > 0) body.allowed_origins = origins;
   if (input.expiresAt) {
     if (Date.parse(input.expiresAt) <= now.getTime()) return { ok: false, message: "The expiry must be in the future." };

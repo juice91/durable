@@ -95,7 +95,8 @@ describe("buildApiKeyCreate", () => {
 
   it("validates the name, origins and expiry", () => {
     expect(buildApiKeyCreate({ ...base, name: "  " }, now).ok).toBe(false);
-    expect(buildApiKeyCreate({ ...base, origins: "app.example.com" }, now)).toMatchObject({ ok: false });
+    // Origins are the server's to judge: sent as typed.
+    expect(buildApiKeyCreate({ ...base, origins: "app.example.com" }, now)).toEqual({ ok: true, body: { name: "Site", allowed_origins: ["app.example.com"] } });
     expect(buildApiKeyCreate({ ...base, origins: "https://a.com\nhttps://a.com, http://b.local:3000" }, now)).toEqual({
       ok: true,
       body: { name: "Site", allowed_origins: ["https://a.com", "http://b.local:3000"] },

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { apiKeys, buildApiKeyCreate, withoutSecret, type ApiKey, type ApiKeyCreated } from "@/lib/apiKeys";
 import { localInputToIso } from "@/lib/datetimeLocal";
@@ -22,11 +22,12 @@ interface Option {
 
 type Options = { status: "idle" | "loading" } | { status: "ready"; agents: Option[]; workflows: Option[] } | { status: "error"; message: string };
 
-function useTargets(enabled: boolean): Options {
+function useTargets(enabled: boolean): Options & { retry: () => void } {
   const [options, setOptions] = useState<Options>({ status: "idle" });
-  // Loads once, the first time `enabled` is true. Not cancelled by its own state change: only an
-  // unmount drops the answer.
-  const started = useRef(false);
+  // One load per attempt, the first time `enabled` is true; Retry starts the next attempt. Not
+  // cancelled by its own state change: only an unmount (or a newer attempt) drops an answer.
+  const [attempt, setAttempt] = useState(0);
+  const startedAttempt = useRef(-1);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -35,12 +36,14 @@ function useTargets(enabled: boolean): Options {
     };
   }, []);
   useEffect(() => {
-    if (!enabled || started.current) return;
-    started.current = true;
+    if (!enabled || startedAttempt.current === attempt) return;
+    startedAttempt.current = attempt;
+    const current = attempt;
+    const live = () => alive.current && startedAttempt.current === current;
     setOptions({ status: "loading" });
     Promise.all([api.agents.list(), listWorkflows()])
       .then(([agents, workflows]) => {
-        if (!alive.current) return;
+        if (!live()) return;
         const byName = (a: Option, b: Option) => a.name.localeCompare(b.name);
         setOptions({
           status: "ready",
@@ -49,10 +52,11 @@ function useTargets(enabled: boolean): Options {
         });
       })
       .catch((reason: unknown) => {
-        if (alive.current) setOptions({ status: "error", message: reason instanceof Error ? reason.message : "Could not load agents and workflows" });
+        if (live()) setOptions({ status: "error", message: reason instanceof Error ? reason.message : "Could not load agents and workflows" });
       });
-  }, [enabled]);
-  return options;
+  }, [enabled, attempt]);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+  return { ...options, retry } as Options & { retry: () => void };
 }
 
 function Checklist({ legend, items, selected, onChange, testId }: { legend: string; items: Option[]; selected: string[]; onChange: (ids: string[]) => void; testId: string }) {
@@ -105,6 +109,12 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
   // Only here, only while the dialog is open.
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const targets = useTargets(access === "some");
+  // The form (and its focused submit button) is replaced by the secret view: move focus to its Copy
+  // button so it stays inside the dialog instead of falling to <body>.
+  const secretRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (created) secretRef.current?.querySelector<HTMLElement>("[data-copy-button]")?.focus();
+  }, [created]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -148,7 +158,7 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
                 This is the only time the key is shown. Store it in your backend&apos;s secrets now; if you lose it, revoke it and create another.
               </DialogDescription>
             </DialogHeader>
-            <div data-testid="api-key-secret">
+            <div ref={secretRef} data-testid="api-key-secret">
               <CopyField label={`${created.name} key`} value={created.key} copiedMessage="Key copied" />
             </div>
             <DialogFooter>
@@ -197,7 +207,12 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
                     <Checklist legend="Workflows" items={targets.workflows} selected={workflowIds} onChange={setWorkflowIds} testId="api-key-workflows" />
                   </div>
                 ) : targets.status === "error" ? (
-                  <p role="alert" className={alertClass}>{targets.message}</p>
+                  <div className="flex min-w-0 flex-col items-start gap-2">
+                    <p role="alert" className={alertClass}>{targets.message}</p>
+                    <Button type="button" variant="secondary" size="sm" onClick={targets.retry} data-testid="api-key-targets-retry">
+                      Retry
+                    </Button>
+                  </div>
                 ) : (
                   <p className={hintClass}>Loading agents and workflows…</p>
                 )

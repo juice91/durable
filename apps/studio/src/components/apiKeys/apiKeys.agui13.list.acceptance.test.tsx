@@ -145,18 +145,27 @@ describe("scopes and allowlists in the dialog", () => {
     expect(posts[0]).toEqual({ name: "All" });
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/v1/agents"))).toBe(false);
   });
-  it.each([
-    ["a bad origin", { origins: "not-an-origin" }, "is not an origin"],
-    ["a past expiry", { expires: "2001-01-01T00:00" }, "must be in the future"],
-  ])("%s blocks the request with a message", async (_n, fields, message) => {
+  it("a past expiry blocks the request with a message", async () => {
     render(<ApiKeysSection />);
     const dialog = await openCreate();
     fireEvent.change(within(dialog).getByTestId("api-key-name"), { target: { value: "x" } });
-    if ("origins" in fields) fireEvent.change(within(dialog).getByTestId("api-key-origins"), { target: { value: fields.origins } });
-    if ("expires" in fields) fireEvent.change(within(dialog).getByTestId("api-key-expires"), { target: { value: fields.expires } });
+    fireEvent.change(within(dialog).getByTestId("api-key-expires"), { target: { value: "2001-01-01T00:00" } });
     fireEvent.click(within(dialog).getByTestId("api-key-create-submit"));
-    expect(await within(dialog).findByTestId("api-key-create-error")).toHaveTextContent(message);
+    expect(await within(dialog).findByTestId("api-key-create-error")).toHaveTextContent("must be in the future");
     expect(posts).toHaveLength(0);
+  });
+  it("a bad origin is judged by the server: its 422 shows in the dialog and no secret appears", async () => {
+    const detail = "wildcards are not allowed in an origin; list each origin: 'https://*.x.com'";
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: string, init: RequestInit = {}) =>
+      String(input).endsWith("/api/v1/api-keys") && init.method === "POST" ? json({ detail }, 422) : base(input, init));
+    render(<ApiKeysSection />);
+    const dialog = await openCreate();
+    fireEvent.change(within(dialog).getByTestId("api-key-name"), { target: { value: "x" } });
+    fireEvent.change(within(dialog).getByTestId("api-key-origins"), { target: { value: "https://*.x.com" } });
+    fireEvent.click(within(dialog).getByTestId("api-key-create-submit"));
+    expect(await within(dialog).findByTestId("api-key-create-error")).toHaveTextContent(detail);
+    expect(screen.queryByTestId("api-key-secret")).toBeNull();
   });
   it("a failed agent list shows an alert and picking nothing still cannot create", async () => {
     fetchMock.mockImplementation(async (input: string) => (String(input).endsWith("/agents") ? json({ detail: "agents down" }, 500) : json({ items: [] })));
@@ -221,6 +230,11 @@ describe("layout, axe, keyboard", () => {
     fireEvent.click(within(dialog).getByTestId("api-key-create-submit"));
     await screen.findByTestId("api-key-create-error");
     await expectNoAxeViolations(screen.getByTestId("api-key-create-dialog"));
+    // The shown-once state: create for real, then check the secret view.
+    fireEvent.click(within(dialog).getByTestId("api-key-access-all"));
+    fireEvent.click(within(dialog).getByTestId("api-key-create-submit"));
+    await screen.findByTestId("api-key-secret");
+    await expectNoAxeViolations(screen.getByTestId("api-key-create-dialog"));
   }, AXE_TIMEOUT_MS);
   it("keyboard: controls are real buttons, the dialog is a modal dialog with a labelled name field, Enter submits", async () => {
     stored = [mk()];
@@ -237,7 +251,9 @@ describe("layout, axe, keyboard", () => {
     await waitFor(() => expect(posts).toHaveLength(1));
     // After create, focus is inside the dialog (the Done/Copy buttons), not lost on body.
     await screen.findByTestId("api-key-done");
-    expect(dialog.contains(document.activeElement) || document.activeElement === document.body).toBe(true);
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toHaveTextContent("Copy");
     expect(within(screen.getByTestId("api-key-secret")).getByRole("button", { name: /Copy/ })).toBeInTheDocument();
   });
 });
