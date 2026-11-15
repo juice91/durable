@@ -123,6 +123,8 @@ export interface DocumentExtraction {
   image_only_pages?: number[] | null;
   conditions?: number | null;
   warnings?: number | null;
+  /** Set when the active version extracted no text: the document is ready with 0 chunks, not failed. */
+  empty_reason?: "no_extractable_text" | null;
 }
 
 export interface DocumentPage {
@@ -1006,6 +1008,7 @@ export const EXTRACTION_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   extract_output_too_large: "The extracted text is too large.",
   document_encrypted: "The PDF is encrypted with a password.",
   no_extractable_text: "No text could be extracted from the document.",
+  no_text_layer: "Image-only PDF with no text layer: it needs image extraction (re-extract once it is available).",
   unsupported_content: "The file's content does not match its declared type.",
   image_model_required: "Images need an image-capable embedding model.",
 };
@@ -1058,6 +1061,25 @@ export function extractionSummary(extraction: DocumentExtraction): string {
   if (typeof extraction.conditions === "number" && extraction.conditions > 0) parts.push(plural(extraction.conditions, "condition"));
   if (typeof extraction.warnings === "number" && extraction.warnings > 0) parts.push(plural(extraction.warnings, "warning"));
   return parts.join(" · ");
+}
+
+/** Why an empty document of each extractor is expected (the second sentence of its note). */
+const EMPTY_EXTRACTION_CAUSES: Readonly<Record<string, string>> = {
+  rst: "Expected for a page with only toctree or include directives.",
+  yaml: "Expected for a YAML file with no values, or only a licence header.",
+  json: "Expected for a JSON file with no values.",
+  "markdown-doxygen": "Expected for a page with only Doxygen commands and no prose.",
+};
+
+/** The note for an empty document (ready, 0 chunks: `empty_reason`), or null for any other one;
+ * its second sentence depends on the extractor (none for an unknown one).
+ * PDFs are never empty: an image-only PDF fails `no_text_layer` (re-extract picks it up). */
+export function emptyExtractionText(
+  extraction: (Pick<DocumentExtraction, "empty_reason"> & { extractor?: string | null }) | null | undefined,
+): string | null {
+  if (!extraction?.empty_reason) return null;
+  const cause = extraction.extractor ? EMPTY_EXTRACTION_CAUSES[extraction.extractor] : undefined;
+  return cause ? `No extractable text: nothing is indexed. ${cause}` : "No extractable text: nothing is indexed.";
 }
 
 /** "3 pages have no text: scanned?" for a PDF's image-only pages, or null when there are none. */

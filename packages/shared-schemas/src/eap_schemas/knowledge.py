@@ -77,6 +77,9 @@ EXTRACTION_ERROR_MESSAGES: dict[str, str] = {
     "extract_output_too_large": "The extracted text is too large.",
     "document_encrypted": "The PDF is encrypted with a password.",
     "no_extractable_text": "No text could be extracted from the document.",
+    # A PDF whose pages are images (scanned) and carry no text: failed, not empty, so a re-extract
+    # with image extraction (P1 part 2) selects it.
+    "no_text_layer": "Image-only PDF with no text layer: it needs image extraction (re-extract once it is available).",
     "unsupported_content": "The file's content does not match its declared type.",
     "image_model_required": "Images need an image-capable embedding model.",
 }
@@ -388,7 +391,12 @@ class ExtractedEventData(OmitNoneModel):
     """The `extracted` run event's data (key `extract:{doc_version}`): counts and ids, never text.
 
     `image_only_pages` lists at most 200 1-based page numbers; `conditions` counts kept, unevaluated
-    rst conditions; `warnings` counts dropped `include`/`literalinclude` directives and the like."""
+    rst conditions; `warnings` counts dropped `include`/`literalinclude` directives and the like.
+    `empty_reason` (`no_extractable_text`) marks a version of a non-PDF format that extracted no
+    text (a toctree- or include-only rst page, a YAML file with only a licence comment, an empty
+    JSON or Doxygen page) and is active with 0 chunks: an empty document, not a failure. A PDF
+    never gets it: one with no text fails (`no_text_layer` when it has image-only pages, else
+    `no_extractable_text`)."""
 
     extractor: ExtractorId
     extractor_version: int = Field(ge=1)
@@ -401,6 +409,7 @@ class ExtractedEventData(OmitNoneModel):
     )
     conditions: int | None = Field(default=None, ge=0)
     warnings: int | None = Field(default=None, ge=0)
+    empty_reason: Literal["no_extractable_text"] | None = None
 
 
 class KnowledgeBaseNotFound(LookupError):

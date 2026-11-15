@@ -325,7 +325,7 @@ def test_bulk_reextract_selects_outdated_documents_and_respects_formats(pg, tena
     }.items():
         docs[key] = _put(client, h, kb["id"], key, **body).json()["document"]
     _activate(pg, docs["a.rst"]["id"], "rst")
-    _activate(pg, docs["b.yaml"]["id"], "yaml")
+    _activate(pg, docs["b.yaml"]["id"], "yaml", routes.EXTRACTOR_VERSIONS["yaml"])  # current (2 since the comments fix)
     _activate(pg, docs["c.md"]["id"], None)
     # d.json's only ingest failed: no active version, so it is outdated. e.json's first ingest is
     # still queued (pending, no active version): it will extract with the current extractor, so it
@@ -337,7 +337,7 @@ def test_bulk_reextract_selects_outdated_documents_and_respects_formats(pg, tena
     dry = client.post(url, json={"dry_run": True}, headers=h)
     assert dry.status_code == 200 and dry.json()["dry_run"] is True
     assert [d["document_key"] for d in dry.json()["documents"]] == ["d.json"]
-    monkeypatch.setitem(routes.EXTRACTOR_VERSIONS, "yaml", 2)
+    monkeypatch.setitem(routes.EXTRACTOR_VERSIONS, "yaml", routes.EXTRACTOR_VERSIONS["yaml"] + 1)
     dry = client.post(url, json={"dry_run": True}, headers=h).json()
     assert [d["document_key"] for d in dry["documents"]] == ["b.yaml", "d.json"]
     only_rst = client.post(url, json={"formats": ["rst"]}, headers=h)
@@ -499,7 +499,7 @@ def test_get_document_shows_its_active_extraction_and_error_codes(pg, tenant_of,
     assert got["extraction"] == {
         "extractor": "pdf", "extractor_version": 1, "current_version": 1, "doc_version": 1,
         "run_id": put["run_id"], "sections": 4, "chars": 900, "pages": 12, "image_only_pages": [3, 7],
-        "conditions": None, "warnings": None,
+        "conditions": None, "warnings": None, "empty_reason": None,
     }
     assert got["error_code"] == "extraction_failed" and got["error_reason"] == "document_encrypted"
     # The list stays lean: no extraction there.

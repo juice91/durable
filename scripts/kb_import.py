@@ -1251,6 +1251,8 @@ def main(
             raise UsageError("--key-prefix must not contain '\\', control characters or surrounding whitespace")
         if "/" in args.key_prefix:
             raise UsageError("--key-prefix must not contain '/'")
+        if args.report_json is not None:
+            check_report_path(args.report_json)
         metadata_map = load_metadata_map(args.metadata_map) if args.metadata_map else None
         token = read_token(args.token_file, env)
         if token is None and not args.dry_run:
@@ -1298,7 +1300,7 @@ def main(
         # Nothing was uploaded or deleted: print the plan (every key that would have been deleted).
         print(redact(format_report(exc.report, delete_missing=True), token), file=out)
         print(f"error: {redact(str(exc), token)}", file=err)
-        _write_json(args.report_json, exc.report, token)
+        _write_json(args.report_json, exc.report, token, err)
         return EXIT_USAGE
     except UsageError as exc:
         print(f"error: {redact(str(exc), token)}", file=err)
@@ -1311,17 +1313,44 @@ def main(
         if callable(close):
             close()
     print(redact(format_report(report, delete_missing=args.delete_missing), token), file=out)
-    _write_json(args.report_json, report, token)
+    written = _write_json(args.report_json, report, token, err)
     if report.delete_refused is not None:
         return EXIT_USAGE  # a dry run over the delete limits exits like the real run would
-    if report.failed or report.delete_failed or report.deletes_skipped or report.walk_errors:
+    if report.failed or report.delete_failed or report.deletes_skipped or report.walk_errors or not written:
         return EXIT_FAILURES
     return EXIT_OK
 
 
-def _write_json(path: Path | None, report: Report, token: str | None) -> None:
-    if path:
+def check_report_path(path: Path) -> None:
+    """--report-json is checked before anything is uploaded: its directory must exist (it is never
+    created), be a directory and be writable, and the path must not be a directory nor an existing
+    file that cannot be written, so the report of a finished run is never lost to a bad path. Each
+    is a usage error (exit 2)."""
+    if path.is_dir():
+        raise UsageError(f"--report-json {path} is a directory")
+    parent = path.parent
+    if not parent.exists():
+        raise UsageError(f"--report-json: the directory {parent} does not exist")
+    if not parent.is_dir():
+        raise UsageError(f"--report-json: {parent} is not a directory")
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise UsageError(f"--report-json: the directory {parent} is not writable")
+    if path.exists() and not os.access(path, os.W_OK):
+        raise UsageError(f"--report-json: {path} exists and is not writable")
+
+
+def _write_json(path: Path | None, report: Report, token: str | None, err: Any = None) -> bool:
+    """Write the JSON report; False (with a message on `err`, never a traceback) when it cannot be
+    written (the directory went away or is not writable after the up-front check)."""
+    if not path:
+        return True
+    try:
         path.write_text(redact(json.dumps(report.to_json(), indent=2), token) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"error: the JSON report could not be written to {path}: {exc.strerror or type(exc).__name__}",
+              file=err or sys.stderr)
+        return False
+    return True
 
 
 class _NoClient:

@@ -555,7 +555,7 @@ def test_device_tree_binding_yaml_one_section_per_top_level_key() -> None:
     assert by[("compatible",)].text == "compatible: ti,cc35xx-spi"
     assert by[("include",)].text == "include:\n- spi-controller.yaml\n- pinctrl-device.yaml\n- base.yaml"
     assert by[("properties",)].text == "properties:\n  reg:\n    required: true"
-    assert doc.format == "yaml" and "Copyright" not in "".join(s.text for s in doc.sections)  # comments are dropped
+    assert doc.format == "yaml" and "Copyright" not in "".join(s.text for s in doc.sections)  # licence comments are dropped
 
 
 def test_timer_binding_is_not_split_below_max_tokens_and_title_comes_from_the_argument() -> None:

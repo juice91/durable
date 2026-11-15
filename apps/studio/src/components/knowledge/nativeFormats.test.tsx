@@ -144,6 +144,27 @@ describe("DocumentSheet", () => {
     expect(within(sheet).queryByTestId("knowledge-document-show-content")).toBeNull();
   });
 
+  it("an empty document (ready, 0 chunks, empty_reason) shows a note, not an error", async () => {
+    const { sheet } = renderSheet({
+      status: "ready", error: null, chunk_count: 0,
+      extraction: { extractor: "rst", extractor_version: 1, current_version: 1, sections: 1, chars: 0, empty_reason: "no_extractable_text" },
+    });
+    expect(await within(sheet).findByTestId("knowledge-document-empty")).toHaveTextContent("No extractable text: nothing is indexed.");
+    expect(within(sheet).queryByTestId("knowledge-document-sheet-error")).toBeNull();
+  });
+
+  it("an image-only PDF is failed with its no-text-layer reason, not empty", async () => {
+    const { sheet } = renderSheet({ status: "failed", error: "extraction_failed: Image-only PDF with no text layer: it needs image extraction (re-extract once it is available).", error_code: "extraction_failed", error_reason: "no_text_layer", extraction: null });
+    expect(await within(sheet).findByTestId("knowledge-document-sheet-error")).toHaveTextContent("Image-only PDF with no text layer");
+    expect(within(sheet).queryByTestId("knowledge-document-empty")).toBeNull();
+  });
+
+  it("a document with text shows no empty note", async () => {
+    const { sheet } = renderSheet();
+    await within(sheet).findByTestId("knowledge-document-extractor");
+    expect(within(sheet).queryByTestId("knowledge-document-empty")).toBeNull();
+  });
+
   it("a failed extraction shows its reason", async () => {
     const { sheet } = renderSheet({ status: "failed", error: "extraction_failed: The PDF is encrypted with a password.", error_code: "extraction_failed", error_reason: "document_encrypted", extraction: null });
     expect(await within(sheet).findByTestId("knowledge-document-sheet-error")).toHaveTextContent("The PDF is encrypted with a password.");

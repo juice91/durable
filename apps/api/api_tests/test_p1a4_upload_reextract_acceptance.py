@@ -535,7 +535,8 @@ def test_dry_run_changes_nothing_in_any_mode(pg, tenant_of, fake_dbos, kb_cleanu
     kb = _kb(client, h, chunker_version=1)
     for key, mime, body in (("a.rst", "text/x-rst", RST), ("b.yaml", "application/yaml", YAML), ("c.md", "text/markdown", "# C\n\nx\n")):
         doc = _put(client, h, kb["id"], key, content=body, mime_type=mime).json()["document"]
-        _activate(pg, doc["id"], {"a.rst": "rst", "b.yaml": "yaml", "c.md": None}[key])
+        extractor = {"a.rst": "rst", "b.yaml": "yaml", "c.md": None}[key]
+        _activate(pg, doc["id"], extractor, routes.EXTRACTOR_VERSIONS[extractor] if extractor else 1)  # current
     monkeypatch.setitem(routes.EXTRACTOR_VERSIONS, "rst", 9)
     url = f"{API}/knowledge-bases/{kb['id']}/reextract"
     before, calls = _snapshot(pg, client, h, kb["id"]), len(fake_dbos.calls)

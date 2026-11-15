@@ -27,7 +27,9 @@ page count and the image-only pages for the ``extracted`` event:
   ``anchor_url`` becomes ``source_url#page=N``) and ``page`` is N (``metadata.eap.page``).
 - **Image-only pages:** fewer than IMAGE_ONLY_MAX_CHARS (32) non-space characters on a page that has
   an image XObject.
-- A PDF with no text at all fails ``no_extractable_text``.
+- A PDF with no text at all fails ``no_text_layer`` when it has image-only pages (scanned), else
+  ``no_extractable_text``. Either way it stays failed (never an empty document), so a later
+  re-extract with image extraction selects it.
 
 Every other failure inside pypdf (a broken file, a polyglot, a recursion) fails ``extract_failed``
 with the exception's type name only, never its text.
@@ -526,7 +528,8 @@ def extract_pdf(
 ) -> PdfExtraction:
     """Extract a PDF (the decoded bytes). ``options`` is the knowledge base's ``chunking.extract``
     (``pdf_headings``); ``max_pages`` is ExtractLimits.max_pdf_pages. Raises ExtractionFailed with
-    ``document_encrypted``, ``extract_limit``, ``no_extractable_text`` or ``extract_failed``."""
+    ``document_encrypted``, ``extract_limit``, ``no_text_layer`` (no text, image-only pages),
+    ``no_extractable_text`` (no text, no image-only page) or ``extract_failed``."""
     from pypdf import apply_configuration
     from pypdf.errors import LimitReachedError
 
@@ -587,7 +590,8 @@ def _extract(data: bytes, mode: str, title: str, source_url: str | None, max_pag
     sections = tuple(builder.sections)
     chars = sum(len("".join(s.text.split())) for s in sections)
     if chars == 0:
-        raise ExtractionFailed("no_extractable_text")
+        # Image pages with no text (a scanned PDF) have content an image extractor can read later.
+        raise ExtractionFailed("no_text_layer" if image_only else "no_extractable_text")
     chars += sum(len("".join(s.heading.split())) for s in sections)
     doc_title = _one_line(title) or _metadata_title(reader)
     document = Document(

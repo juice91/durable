@@ -99,7 +99,7 @@ A map with a nested value, a list or a null value is refused before anything is 
 | `--yes-delete-all` | Lift both limits. |
 | `--max-file-bytes N` | Fail files over `N` bytes without reading them. Default 104857600 (100 MiB). |
 | `--retry-failed` | Start a new ingest for unchanged documents whose last ingest failed. Without it, they are counted as `unchanged but their last ingest failed`. |
-| `--report-json PATH` | Also write the report as JSON: per-document results, run ids, reasons, missing and deleted keys. |
+| `--report-json PATH` | Also write the report as JSON: per-document results, run ids, reasons, missing and deleted keys. Checked before anything is uploaded: its directory must exist and be writable (it is never created); otherwise exit 2. |
 | `--timeout S` | Per-request timeout. Default 300 s. |
 
 **The report** has one line per category:
