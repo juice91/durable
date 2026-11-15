@@ -44,8 +44,11 @@ from worker_tests.test_working_memory import MEMORY_TURN, conversation, memory_s
 OBSERVER = {"provider": "test", "name": "observer"}
 OBSERVE_STEPS = ["eap.memory_observe", "eap-observer__model.request", "eap.memory_observe_write"]
 REFLECT_STEPS = ["eap.memory_observe", "eap-observer__model.request", "eap.memory_reflect"]
-# In the run's own workflow: the observer child workflow's enqueue (recorded under its name), then its result.
-OBSERVE_RUN = ["eap.memory_observe_run", "DBOS.getResult"]
+# The last step of a completed memory turn's post-turn layout (P1.C: the `post_turn_done` event).
+POST_TURN_DONE = ["eap.append_event"]
+# In the run's own workflow: the observer child workflow's enqueue (recorded under its name), then its
+# result, then `post_turn_done`.
+OBSERVE_RUN = ["eap.memory_observe_run", "DBOS.getResult", *POST_TURN_DONE]
 
 
 def post_turn_steps(schema: str, run_id) -> list[str]:
@@ -221,7 +224,7 @@ def test_observations_replace_old_turns_in_the_next_turns_context(worker, client
     assert (obs.kind, obs.covers_from_turn, obs.covers_to_turn) == ("observation", 1, 2)
     assert "turn 1: Fact 1: word word" in obs.content and "turn 2: Fact 2:" in obs.content
     events = event_rows(worker.engine, run_id)
-    assert [k for _, k, _, _ in events][-2:] == ["end", "memory:observe:4"]
+    assert [k for _, k, _, _ in events][-3:] == ["end", "memory:observe:4", "memory:post_turn:4"]
     [(etype, data)] = by_key(events, "memory:observe:4")
     assert etype == "memory_updated"
     assert data["kind"] == "observation" and data["notes"] == 2 and data["model_id"] == "test:observer"
@@ -479,7 +482,8 @@ def test_crash_in_the_post_turn_steps_writes_one_observation_and_one_usage_row(
         events = event_rows(worker.engine, run_id)
         assert [e[0] for e in events] == list(range(len(events)))  # contiguous seq
         keys = [e[1] for e in events]
-        assert keys.count(key) == 1 and keys[-2:] == ["end", key]
+        done = f"memory:post_turn:{key.rsplit(':', 1)[1]}"  # P1.C1: once, after the recovery too
+        assert keys.count(key) == 1 and keys.count(done) == 1 and keys[-3:] == ["end", key, done]
         assert usage_keys(worker.engine, run_id) == [key, "model:0"]
         assert_totals_match(worker, tenant, run_id)
     finally:

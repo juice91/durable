@@ -257,6 +257,36 @@ mode a gated call is denied at once (`eap.tool_approval_deny`, no wait, no inbox
 `running` (display `waiting_approval`) and keeps heartbeating; no post-turn step runs before the
 wait resolves. A spec without `approvals` has no such step.
 
+Client (frontend) tools (AG-UI milestone, AGUI.7; eap_worker.client_tools): only for an AG-UI turn
+that declares them (`runs.client_tools`, recorded by eap.start_run), or the turn after one that ended
+on them. They add NO step. The declared tools join RunToolset as `external` tools (listed inside the
+existing get_tools step) and the run's output type gains DeferredToolRequests; their arguments are
+checked workflow-side (ClientToolsCapability). A model call of one writes its `tool:{id}:call` event
+and then ENDS the turn: `run_completed {output: null, pending_tool_call_ids}`, status completed, no
+output, no post-turn memory step. The next turn's eap.start_run records those pending calls and its
+`client_tool_results`; before its first model request it writes one `tool:{id}:result` event
+(`source: "client"`) per pending call (the client's content or error, else "not executed by the
+client") and continues the pending response with DeferredToolResults:
+
+    eap.start_run                       ... + client_tools, client_tool_results, client_tool_pending
+    eap.append_event   start
+    eap.load_history | eap.load_memory ...
+    eap.append_event   tool:{id}:result tool_result {source: "client"}, per pending call
+    eap-agent__dynamic_toolset__eap-spec-tools.get_tools
+    eap-agent__model.request_stream     ...
+
+A spec or turn without client tools (and without a pending previous turn) keeps its exact layout.
+
+The end of the post-turn steps (P1.C1; eap_worker.post_turn): for a spec with `semantic_recall`
+and/or `observational` and a completed conversation turn, after the steps above (index first, then
+the observer workflow and its getResult), ONE more event:
+
+    eap.append_event   memory:post_turn:{turn}   post_turn_done {observe: created|skipped|failed|off,
+                                                 index: done|skipped|failed|off}; no text
+
+It is appended after the last existing post-turn step (recorded prefixes still match; the deploy
+still drains in-flight runs as a precaution). A spec without either feature keeps its exact layout.
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -297,15 +327,17 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.messages import repair_messages
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
-from eap_schemas import AgentSpec
+from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore
+from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
@@ -322,8 +354,33 @@ from eap_worker.capabilities import (
     set_approval_settings,
     schema_errors,
 )
+from eap_worker.client_tools import (
+    ClientResume,
+    ClientToolArgsInvalid,
+    ClientToolsCapability,
+    ClientToolsRun,
+    client_resume,
+    client_tools_from_link,
+    MAX_CHAIN_CHARS,
+    MAX_CHAIN_TURNS,
+    NOT_CONTINUED_MESSAGE,
+    CLIENT_SOURCE,
+    chain_link_size,
+    clip_chain_text,
+    check_client_tool_calls,
+    client_args_valid,
+    client_toolset_for_run,
+    dangling_tail,
+    logical_turn_texts,
+    pending_ids,
+    pending_link,
+    reset_client_tools,
+    resumable,
+    retries_exhausted,
+    set_client_tools,
+)
 from eap_worker.config import WORKFLOW_NAME
-from eap_worker.crash import crash_point
+from eap_worker.crash import crash_gate, crash_point
 from eap_worker.errors import (
     SCHEMA_INVALID_AFTER_PROCESSING,
     describe_fallback_exhausted,
@@ -348,6 +405,7 @@ from eap_worker.memory import (
     with_memory,
 )
 from eap_worker.observational import observe_after_turn
+from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
@@ -411,7 +469,7 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     """Only the published spec's tools: built-ins checked against registry + allowlist, plus its MCP
     tools (eap_worker.mcp), plus the platform tools it uses (eap_worker.platform_tools: `retrieve`
     when it attaches knowledge bases, `update_working_memory` for a memory turn with writable
-    working memory). No I/O here: MCP server rows and secrets, and knowledge base
+    working memory), plus an AG-UI turn's client tools (eap_worker.client_tools). No I/O here: MCP server rows and secrets, and knowledge base
     names, are read later, inside the get_tools step (and MCP secrets inside a newly reserved call),
     so a replayed step needs neither the database nor the platform key. A spec without MCP tools and
     platform tools gets exactly the FunctionToolset it always did."""
@@ -421,9 +479,12 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     builtin: FunctionToolset[RunDeps] = toolset_for_spec(spec, rt.registry, ctx.deps.allowed_tools)
     mcp = mcp_toolset_for_run(rt.engine, ctx.deps.tenant_id, spec.mcp_tools) if spec.mcp_tools else None
     platform = platform_toolset_for_run(ctx.deps, knowledge=_knowledge_store, memory=_memory_store)
-    if mcp is None and platform is None:
+    # AGUI.7: an AG-UI turn's client tools (`external`: never called here), from the run's recorded
+    # declarations (set by _drive_agent); None for every other run.
+    client = client_toolset_for_run()
+    if mcp is None and platform is None and client is None:
         return builtin
-    return RunToolset(builtin, mcp, platform)
+    return RunToolset(builtin, mcp, platform, client)
 
 
 def _text_of(event: Any) -> str | None:
@@ -641,6 +702,7 @@ async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     async for event in events:
         text = _text_of(event)
         if text:
+            await asyncio.to_thread(crash_gate, "model_request")  # crash tests only (EAP_CRASH_GATE_FILE)
             if live:
                 await asyncio.to_thread(rt.publish_delta, run_id, model_request, attempt, text)
             crash_point("model_request")
@@ -662,6 +724,9 @@ agent: Agent[WorkerDeps, str] = Agent(
         # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
         # hooks only: no step. Before DBOSDurability, which stays last.
         SpecCapability(),
+        # AGUI.7: the schema check of client tool arguments (workflow-side, no step; a no-op without
+        # client tools).
+        ClientToolsCapability(),
         DBOSDurability(
             parallel_execution_mode="sequential",
             event_stream_handler=_publish_deltas,
@@ -703,7 +768,11 @@ async def start_run_step(
     `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person)
     and, with `approval_deny_reason` "loop_body", for an agent step inside a workflow loop body
     (loops D8a), else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
-    Both are recorded here, so a replay waits and denies exactly as the first attempt did."""
+    Both are recorded here, so a replay waits and denies exactly as the first attempt did. AGUI.7:
+    `client_tools` (this turn's client tool declarations, or None), `client_tool_results` (its results
+    for the previous turn's pending client calls, or None) and `client_tool_pending` ([{tool_call_id,
+    tool_name}] the previous turn ended with; [] for a first turn or a standalone run). A checkpoint
+    recorded before AGUI.7 has none of these keys and runs without client tools."""
     rt = get_runtime()
 
     def work() -> dict[str, Any]:
@@ -735,6 +804,16 @@ async def start_run_step(
         if run.get("conversation_id") is not None and memory_spec is not None and memory_spec.memory is not None:
             conversation = rt.run_store.get_conversation(tenant_id, run["conversation_id"]) or {}
             resource_id = conversation.get("resource_id")
+        # AGUI.7: the client calls the previous turn left pending (only a later turn of a
+        # conversation can have any), answered by this turn's client_tool_results.
+        client_pending: list[dict[str, Any]] = []
+        client_chain: list[dict[str, Any]] = []
+        if run.get("conversation_id") is not None and int(run.get("turn") or 0) > 1:
+            ag_ui = AgUiStore(rt.engine)
+            calls = ag_ui.pending_client_tool_calls(tenant_id, str(run["conversation_id"]), before_run_id=run_id)
+            client_pending = pending_link(calls)
+            if calls and memory_spec is not None and memory_spec.memory is not None:
+                client_chain = _client_turn_chain(rt, ag_ui, tenant_id, str(run["conversation_id"]), calls)
         approval_mode = "interactive"
         approval_deny_reason = None
         if run.get("parent_run_id") is not None:
@@ -758,9 +837,81 @@ async def start_run_step(
             "approval_mode": approval_mode,
             "approval_timing": read_approval_timing(),
             **({"approval_deny_reason": approval_deny_reason} if approval_deny_reason else {}),
+            "client_tools": run.get("client_tools") or None,
+            "client_tool_results": run.get("client_tool_results") or None,
+            "client_tool_pending": client_pending,
+            "client_turn_chain": client_chain,
         }
 
     return await asyncio.to_thread(work)
+
+
+MAX_CLIENT_CHAIN_CALLS = 32  # client calls recorded per chain link (MAX_CLIENT_TOOLS-sized)
+MAX_INDEX_INPUT_CHARS = 8_000  # a chain link's input (recall.MAX_INDEX_CHARS)
+
+
+async def _processed_index_text(spec: AgentSpec, text: str | None) -> str | None:
+    """AGUI.7: the client tool lines of a logical turn's index text through the spec's
+    deterministic output processors (pii_redact, regex_blocklist, ...), like the answer they join;
+    moderation is not run (the index is not a model answer). Pure and off the event loop, no step.
+    A block or a failure leaves the lines out of the index (never indexed unprocessed)."""
+    if not text or not spec.output_processors:
+        return text
+    from eap_schemas.processors import PROCESSOR_SPEC_ADAPTER, ModerationProcessor
+    from eap_worker.processors import _apply_segment
+
+    segment = [
+        PROCESSOR_SPEC_ADAPTER.dump_python(p, mode="json")
+        for p in spec.output_processors
+        if not isinstance(p, ModerationProcessor)
+    ]
+    if not segment:
+        return text
+    try:
+        out = await asyncio.to_thread(_apply_segment, "output", segment, text)
+    except Exception:  # noqa: BLE001 - never index text the processors did not pass
+        return None
+    return out["text"]
+
+
+def _client_turn_chain(
+    rt: Any, ag_ui: AgUiStore, tenant_id: str, conversation_id: str, calls: list[Any]
+) -> list[dict[str, Any]]:
+    """AGUI.7, inside eap.start_run, only for a memory spec whose previous turn ended on client
+    calls: the earlier turns of this logical turn, oldest first (the previous turn, and the turns
+    before it as long as each ended on client calls; at most MAX_CHAIN_TURNS). Each with its
+    processed input (its `run_started.input`), its client calls and the results the turn after it
+    recorded (the previous turn's results are this run's, added by the workflow). For the memory
+    index of the turn that completes it (client_tools.logical_turn_texts)."""
+    chain: list[dict[str, Any]] = []
+    later: str | None = None  # the run that holds this link's results (None: this run)
+    size = 0
+    for _ in range(MAX_CHAIN_TURNS):
+        if not calls:
+            break
+        prev = str(calls[0].run_id)
+        start = rt.event_log.get_event(tenant_id, prev, "start")
+        results: dict[str, Any] = {}
+        if later is not None:
+            for call in calls[:MAX_CLIENT_CHAIN_CALLS]:
+                event = rt.event_log.get_event(tenant_id, later, f"tool:{call.tool_call_id}:result")
+                if event is not None:
+                    results[call.tool_call_id] = clip_chain_text((event.data or {}).get("content"))
+        link = {
+            "input": clip_chain_text((start.data or {}).get("input") if start is not None else None, MAX_INDEX_INPUT_CHARS),
+            "calls": [
+                {"tool_call_id": c.tool_call_id, "tool_name": c.tool_name, "args_text": clip_chain_text(c.args or {})}
+                for c in calls[:MAX_CLIENT_CHAIN_CALLS]
+            ],
+            "results": results,
+        }
+        size += chain_link_size(link)
+        if chain and size > MAX_CHAIN_CHARS:
+            break  # older links are dropped: the checkpoint stays bounded (the newest is always kept)
+        chain.insert(0, link)
+        later = prev
+        calls = ag_ui.pending_client_tool_calls(tenant_id, conversation_id, before_run_id=prev)
+    return chain
 
 
 def max_history_bytes() -> int:
@@ -813,6 +964,8 @@ async def append_event_step(
     data: dict[str, Any],
     usage: dict[str, Any] | None = None,
     request_key: str | None = None,
+    conversation: tuple[str, str] | None = None,
+    search_guard: dict[str, Any] | None = None,
 ) -> int:
     """Write one durable event (idempotent per key). `usage` (pricing.request_usage_input) is given
     only for a model request's `model:{n}:final` event, or a moderation outcome's `processor_result`
@@ -827,8 +980,40 @@ async def append_event_step(
     After the run's `end` (loops D12: e.g. the run was cancelled while this step ran), the store
     drops the event (no `seq`, nothing written except the usage rows, whose cost is real) and this
     step still succeeds: it returns the `end` event's seq, so the workflow goes on to its next
-    operation (where DBOS stops a cancelled workflow) instead of failing or retrying."""
+    operation (where DBOS stops a cancelled workflow) instead of failing or retrying.
+
+    `conversation` (agent_id, conversation_id), for a post-turn event (`post_turn_done`, P1.C1):
+    the event is appended with the conversation row held `FOR KEY SHARE`
+    (MemoryStore.append_conversation_event), so nothing is appended to a run whose conversation was
+    deleted; then nothing is written and -1 is returned.
+
+    `search_guard` ({kb_id, document_ids}), for a `knowledge.search` tester run's result events
+    (P1.C4, eap_worker.search_guard): the event is written in one transaction with FOR SHARE locks on
+    the knowledge base and the hits' documents, without the hits of deleted documents (a deleted
+    knowledge base makes it an error / run_failed event)."""
     rt = get_runtime()
+    if search_guard is not None:
+        from eap_worker.search_guard import append_guarded
+
+        seq = await asyncio.to_thread(append_guarded, rt.engine, tenant_id, run_id, event_key, type, data, search_guard)
+        crash_point("after_event_write", event_key=event_key)
+        return seq
+    if conversation is not None:
+        agent_id, conversation_id = conversation
+        memory_event = MemoryEvent(run_id=run_id, event_key=event_key, type=type, data=dict(data))
+
+        def guarded() -> int:
+            store = MemoryStore(rt.engine)
+            try:
+                store.append_conversation_event(tenant_id, agent_id, str(conversation_id), memory_event)
+            except ConversationNotFound:
+                return -1
+            found = rt.event_log.get_event(tenant_id, run_id, event_key)
+            return found.seq if found is not None else -1
+
+        seq = await asyncio.to_thread(guarded)
+        crash_point("after_event_write", event_key=event_key)
+        return seq
     rows: list[dict[str, Any]] | dict[str, Any] | None = None
     if usage is not None:
         key = request_key or event_key.removesuffix(":final")
@@ -858,9 +1043,13 @@ async def finish_run_step(
     error: str | None,
     messages: list[dict[str, Any]] | None = None,
     output_format: str | None = None,
-) -> None:
-    """The terminal status. `output_format` is `json` for a structured output's canonical JSON text
-    (AC.4); None leaves runs.output_format NULL (text).
+    search_guard: dict[str, Any] | None = None,
+) -> str | None:
+    """Set the run's status (and output, error, messages). `output_format` is `json` for a
+    structured output's canonical JSON text (AC.4); None leaves runs.output_format NULL (text).
+    With `search_guard` (a `knowledge.search` tester run, P1.C4): in one transaction with the
+    guard's FOR SHARE locks, the output without deleted documents' hits, or `failed` when the
+    knowledge base is gone; returns the status written (None otherwise, as before).
 
     A refused write is success here (loops D12): when the run already has its terminal status, or
     its `end` fixes another one (a cancel's `run_failed` written before this run's own `end`, which
@@ -868,11 +1057,16 @@ async def finish_run_step(
     `output` and `output_format` on a matching end) and returns False. The step logs it and
     returns normally, so a finish that lands after a cancel neither fails nor retries."""
     rt = get_runtime()
+    if search_guard is not None:
+        from eap_worker.search_guard import finish_guarded
+
+        return await asyncio.to_thread(finish_guarded, rt.engine, tenant_id, run_id, output, search_guard)
     written = await asyncio.to_thread(
         rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages, output_format
     )
     if written is False:
         log.info("run %s: status %s not written: the run's end event already fixed its status", run_id, status)
+    return None
 
 
 @DBOS.step(name="eap.check_budget")
@@ -938,6 +1132,13 @@ def _find_tool_results(call_ids: set[str], *sources: list[ModelMessage] | list[A
     return found
 
 
+def _call_args_or_none(call: ToolCallPart) -> Any:
+    try:
+        return call.args_as_dict(raise_if_invalid=True)
+    except (ValueError, AssertionError):
+        return None
+
+
 def _all_parts(messages: list[ModelMessage]) -> list[Any]:
     return [p for m in messages if isinstance(m, ModelRequest) for p in m.parts]
 
@@ -969,10 +1170,20 @@ def _tool_sources(part: ToolReturnPart) -> list[Any] | None:
 _TOOL_RESULT_STATUS = {"failed": "error", "retried": "error", "denied": "denied"}
 
 
-async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCallPart], *sources: list[Any]) -> None:
+async def _record_tool_results(
+    run_id: str,
+    tenant_id: str,
+    calls: list[ToolCallPart],
+    *sources: list[Any],
+    client_names: frozenset[str] = frozenset(),
+) -> None:
+    """One `tool_result` event per call. AGUI.7: a client tool call without a result (`client_names`)
+    is pending (the client executes it; the next turn records its result): no event."""
     results = _find_tool_results({c.tool_call_id for c in calls}, *sources)
     for call in calls:
         part = results.get(call.tool_call_id)
+        if part is None and call.tool_name in client_names:
+            continue
         if isinstance(part, ToolReturnPart):
             data = {
                 "tool_call_id": call.tool_call_id,
@@ -1265,11 +1476,17 @@ async def _drive_agent(
     history: list[ModelMessage] | None = None,
     model_id: str | None = None,
     approvals: ApprovalSettings | None = None,
-) -> tuple[str, list[dict[str, Any]], Any]:
+    client: ClientToolsRun | None = None,
+    resume: ClientResume | None = None,
+) -> tuple[str | None, list[dict[str, Any]], Any, list[str]]:
     """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
-    messages as JSON, output_json). `approvals` (AC.6): the run's recorded approval options, for
+    messages as JSON, output_json, pending client call ids). `approvals` (AC.6): the run's recorded approval options, for
     SpecCapability's wait (default: interactive). For a structured spec (AC.4) `output_json` is the validated,
-    processed object and `output` its canonical JSON text; otherwise `output_json` is None."""
+    processed object and `output` its canonical JSON text; otherwise `output_json` is None.
+    AGUI.7: `client` (the run's client tools) adds the ClientToolset and DeferredToolRequests to the
+    output type; a run that ends on client calls returns (None, messages, None, their ids).
+    `resume` (the previous turn's pending client calls, answered) continues the history's last
+    response with its deferred results; then `input_text` "" means no new user message."""
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
@@ -1286,6 +1503,15 @@ async def _drive_agent(
     run_options: dict[str, Any] = {}
     if structured:
         run_options = {"output_type": output_type_for(spec), "retries": retries_for(spec)}
+    if client is not None:
+        # AGUI.7 (D10): a client call ends the run with DeferredToolRequests (never executed here).
+        run_options["output_type"] = [run_options.get("output_type") or str, DeferredToolRequests]
+    if resume is not None:
+        run_options["deferred_tool_results"] = resume.results
+    client_names = client.names if client is not None else frozenset()
+    # The resumed response (the previous turn's, from history) is not this run's: no events for it.
+    skip_resumed = resume is not None
+    pending_client: list[str] = []
     # AC.5: only a spec with native limits passes usage_limits; the cost cap is ours (check_budget).
     limits = usage_limits_for(spec)
     if limits is not None:
@@ -1317,9 +1543,10 @@ async def _drive_agent(
     recorded_tokens = RecordedTokens()
     # AC.6: the run's approval options for SpecCapability's hooks (reset when the agent run ends).
     approval_token = set_approval_settings(approvals or ApprovalSettings())
+    client_token = set_client_tools(client)
     try:
         async with agent.iter(
-            input_text,
+            None if resume is not None and not input_text else input_text,
             message_history=history or None,
             deps=deps,
             model=model_id,
@@ -1330,7 +1557,10 @@ async def _drive_agent(
             async for node in run:
                 request_parts = list(node.request.parts) if Agent.is_model_request_node(node) else []
                 if pending:
-                    await _record_tool_results(run_id, tenant_id, pending, request_parts, _all_parts(run.all_messages()))
+                    await _record_tool_results(
+                        run_id, tenant_id, pending, request_parts, _all_parts(run.all_messages()),
+                        client_names=client_names,
+                    )
                     pending = []
                 if awaiting_retry is not None and request_parts:
                     await _record_output_retry(
@@ -1342,6 +1572,9 @@ async def _drive_agent(
                     # AC.5: before model request n (the node runs when the loop advances).
                     await check_budget_step(run_id, tenant_id, n, format(cap_usd, "f"))
                     crash_point("after_check_budget", event_key=f"budget:{n}")
+                if Agent.is_call_tools_node(node) and skip_resumed:
+                    skip_resumed = False  # AGUI.7: the previous turn's response; its calls were recorded then
+                    continue
                 if Agent.is_call_tools_node(node):
                     # The model request that produced this response is already checkpointed.
                     response: ModelResponse = node.model_response
@@ -1422,20 +1655,46 @@ async def _drive_agent(
                                 ),
                             },
                         )
+                    if client is not None and limits is not None:
+                        # AGUI.7: client calls count against max_tool_calls (Pydantic AI counts only
+                        # the calls it runs). Checked like its own up-front check for the response's
+                        # ungated calls, before any of them runs; invalid ones become retries.
+                        valid_client = [
+                            c for c in calls
+                            if c.tool_name in client_names
+                            and await client_args_valid(client.by_name.get(c.tool_name), _call_args_or_none(c))
+                        ]
+                        if valid_client:
+                            gated = approval_required_tool_names(spec) if spec.approvals is not None else set()
+                            ungated = [c for c in calls if c.tool_name not in client_names and c.tool_name not in gated]
+                            check_client_tool_calls(limits, run.usage, len(ungated) + len(valid_client))
                     pending = calls
                     if structured:
                         awaiting_retry = n
                     n += 1
                     request_state["n"] = n
             if pending:
-                await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
+                await _record_tool_results(
+                    run_id, tenant_id, pending, _all_parts(run.all_messages()), client_names=client_names
+                )
             assert run.result is not None
             new_messages = scrub_memory_messages(
                 scrub_failed_attempts(ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")),
                 memory,
             )
             result_output = run.result.output
+            if isinstance(result_output, DeferredToolRequests):
+                # AGUI.7: only client calls end a run this way (SpecCapability resolves approvals).
+                if result_output.approvals:
+                    raise RuntimeError("a run ended with unresolved tool approvals")
+                pending_client = pending_ids(result_output)
+                # AGUI.7: the run's executed calls (approved gated ones included) plus its pending
+                # client calls must stay within max_tool_calls.
+                check_client_tool_calls(limits, run.usage, len(pending_client))
     except Exception as exc:
+        if client is not None and isinstance(exc, UnexpectedModelBehavior) and retries_exhausted(exc):
+            # AGUI.7: the model kept breaking a client tool's schema (no name, args or schema kept).
+            raise ClientToolArgsInvalid() from None
         if isinstance(exc, UsageLimitExceeded) and active_run is not None:
             # AC.5: name the limit from the run's own counters, not from the message text.
             describe_usage_limit(exc, spec.limits, active_run.usage)
@@ -1451,19 +1710,28 @@ async def _drive_agent(
                 raise OutputModeUnsupported(str(mode)) from None
         raise
     finally:
+        reset_client_tools(client_token)
         reset_approval_settings(approval_token)
         _MODEL_REQUEST.reset(request_token)
+    if pending_client:
+        # AGUI.7: no answer yet (the client executes its calls; the next turn continues). The stored
+        # messages get the same treatment as an answered turn's.
+        if spec.output is not None and spec.output_processors:
+            new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
+        elif spec.output_processors:
+            new_messages = processed_messages(new_messages, processed, strip_thinking_parts=True)
+        return None, new_messages, None, pending_client
     if spec.output is not None:
         value = result_output
         if spec.output_processors:
             value = await _final_structured_output(run_id, tenant_id, spec, value)
             new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
-        return canonical_json(value), new_messages, value
+        return canonical_json(value), new_messages, value, []
     if not spec.output_processors:
-        return result_output, new_messages, None
+        return result_output, new_messages, None, []
     if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
         raise OutputBlocked(-1, "unchecked")
-    return final_text, processed_messages(new_messages, processed, strip_thinking_parts=True), None
+    return final_text, processed_messages(new_messages, processed, strip_thinking_parts=True), None, []
 
 
 # --------------------------------------------------------------------------- the workflow
@@ -1582,8 +1850,31 @@ async def _run_body(
                     input_text, loaded,
                 )
             deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded, recall))
-        output, new_messages, output_json = await _drive_agent(
-            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link)
+        # AGUI.7: this turn's client tools, and the previous turn's pending client calls answered.
+        client = client_tools_from_link(link)
+        resume = client_resume(link)
+        if resume is not None and not resumable(history, resume.results.calls):
+            # The pending response is not this history's tail (e.g. memory limits dropped it): the
+            # calls cannot be continued; the dangling-tail repair below closes them out.
+            log.warning("run %s: %d pending client call(s) not continued", run_id, len(resume.results.calls))
+            for data in resume.events:  # every pending id still gets its result event (D10)
+                await append_event_step(
+                    run_id, tenant_id, f"tool:{data['tool_call_id']}:result", "tool_result",
+                    {
+                        "tool_call_id": data["tool_call_id"], "tool_name": data.get("tool_name"), "status": "error",
+                        "content": NOT_CONTINUED_MESSAGE, "source": CLIENT_SOURCE, "not_continued": True,
+                    },
+                )
+            resume = None
+        if resume is None and dangling_tail(history):
+            # A pending client call that was never continued (the turn after it failed): Pydantic AI
+            # refuses a new prompt on such a history, so the calls get synthesized returns.
+            history = repair_messages(history or [])
+        if resume is not None:
+            for data in resume.events:  # before the first model request (D10)
+                await append_event_step(run_id, tenant_id, f"tool:{data['tool_call_id']}:result", "tool_result", data)
+        output, new_messages, output_json, pending_client = await _drive_agent(
+            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume
         )
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
@@ -1605,26 +1896,45 @@ async def _run_body(
         heartbeat.cancel()
     # End event before the terminal status: a reader that sees a terminal status always finds the
     # complete event log.
+    if pending_client:
+        # AGUI.7 (D10): the turn ends on client calls; no answer yet, so no post-turn memory step
+        # (the next turn, which continues it, runs them).
+        await append_event_step(
+            run_id, tenant_id, "end", "run_completed", {"output": None, "pending_tool_call_ids": pending_client}
+        )
+        await finish_run_step(run_id, tenant_id, "completed", None, None, new_messages)
+        return {"status": "completed", "output": None, "pending_tool_call_ids": pending_client}
     completed: dict[str, Any] = {"output": output}
+    result: dict[str, Any] = {"status": "completed", "output": output}
     if spec.output is not None:  # AC.4: the canonical JSON text plus the object itself
         completed["output_json"] = output_json
+        result["output_json"] = output_json
     await append_event_step(run_id, tenant_id, "end", "run_completed", completed)
     await finish_run_step(
         run_id, tenant_id, "completed", output, None, new_messages,
         output_format="json" if spec.output is not None else None,
     )
-    if spec.memory is not None and spec.memory.semantic_recall is not None and link.get("conversation_id") is not None:
+    if link.get("conversation_id") is None or not has_post_turn_steps(spec):
+        return result
+    conversation_id, turn = str(link["conversation_id"]), int(link["turn"])
+    indexed = observed = None
+    if spec.memory.semantic_recall is not None:
         # RM.14: post-turn index of the processed input and final answer (never fails the turn).
-        await index_after_turn(
-            run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec, input_text, output
-        )
-    if spec.memory is not None and spec.memory.observational is not None and link.get("conversation_id") is not None:
+        user_text, answer_text = input_text, output
+        if link.get("client_turn_chain"):
+            # AGUI.7: this turn completes a logical turn that began with client calls: index all of
+            # it (the original question, the client calls and results, the answer), once.
+            user_text, tool_text, answer = logical_turn_texts(link["client_turn_chain"], resume, input_text, output)
+            tool_text = await _processed_index_text(spec, tool_text)
+            answer_text = "\n".join(t for t in (tool_text, answer) if t) or None
+        indexed = await index_after_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec, user_text, answer_text)
+    if spec.memory.observational is not None:
         # RM.13: post-turn observational memory, after the run is completed (never delays the answer,
         # never fails the turn).
-        await observe_after_turn(run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec)
-    if spec.output is not None:
-        return {"status": "completed", "output": output, "output_json": output_json}
-    return {"status": "completed", "output": output}
+        observed = await observe_after_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec)
+    # P1.C: the post-turn steps have reported (`post_turn_done`, Studio stops "Memory updating").
+    await finish_post_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec, indexed, observed)
+    return result
 
 
 __all__ = ["agent", "agent_run", "load_history_step", "AGENT_NAME", "TOOLSET_ID"]

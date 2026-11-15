@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from dataclasses import dataclass
 from typing import Any
 import json
 import logging
@@ -35,6 +36,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.exc import IntegrityError
 
 from eap_run_store.cursor import ConversationCursor, RunCursor
 from sqlalchemy.orm import (
@@ -48,6 +50,8 @@ from sqlalchemy.orm import (
 from eap_schemas import LOOP_ERROR_MESSAGES, RunEvent, RunEventType, status_for_end
 
 log = logging.getLogger(__name__)
+
+log = logging.getLogger("eap_run_store")
 
 # SQLAlchemy 2.x style type annotations
 StrAnnotated = str
@@ -113,6 +117,9 @@ RUN_OUTPUT_FORMATS = ("text", "json")
 RESOURCE_ID_PATTERN = r"^[A-Za-z0-9_.:@-]{1,128}$"
 # Same text as migration 0012_memory.
 CONVERSATION_RESOURCE_ID_CHECK = "resource_id IS NULL OR resource_id ~ '^[A-Za-z0-9_.:@-]{1,128}$'"
+# Same texts as migration 0016_ag_ui.
+RUN_CLIENT_TOOLS_CHECK = "client_tools IS NULL OR jsonb_typeof(client_tools) = 'array'"
+RUN_CLIENT_TOOL_RESULTS_CHECK = "client_tool_results IS NULL OR jsonb_typeof(client_tool_results) = 'array'"
 
 
 class ConversationModel(Base):
@@ -134,6 +141,9 @@ class ConversationModel(Base):
     # The resource (user or entity) the conversation belongs to (0012_memory): set once at creation,
     # never changed. NULL for conversations created before 0012 (resource-scoped memory off).
     resource_id: Mapped[StrAnnotated | None] = mapped_column("resource_id", String, nullable=True)
+    # The raw AG-UI threadId a conversation was derived from (0016_ag_ui, D3): set once at creation,
+    # NULL for every other conversation. Unique per tenant and agent.
+    external_thread_id: Mapped[StrAnnotated | None] = mapped_column("external_thread_id", String, nullable=True)
 
     __table_args__ = (
         # Lets runs reference (tenant_id, conversation_id), so a run can only join its own tenant's thread.
@@ -150,6 +160,15 @@ class ConversationModel(Base):
             "tenant_id",
             "resource_id",
             postgresql_where=text("resource_id IS NOT NULL"),
+        ),
+        # One conversation per AG-UI thread of an agent (0016_ag_ui).
+        Index(
+            "uq_conversations_tenant_agent_external_thread",
+            "tenant_id",
+            "agent_id",
+            "external_thread_id",
+            unique=True,
+            postgresql_where=text("external_thread_id IS NOT NULL"),
         ),
     )
 
@@ -235,6 +254,15 @@ class RunModel(Base):
     # The snapshot's suite_hash (sha256 hex), recorded once at creation: compare uses it, never
     # re-validating an old snapshot.
     eval_suite_hash: Mapped[str | None] = mapped_column("eval_suite_hash", String, nullable=True)
+    # AG-UI client (frontend) tools (0016_ag_ui, D10): the turn's declarations (a JSON array of
+    # eap_schemas ClientToolDecl dumps) and the client's results for the previous turn's pending
+    # calls (a JSON array of ClientToolResult dumps). NULL for every other run.
+    client_tools: Mapped[list | None] = mapped_column("client_tools", JSONB, nullable=True)
+    client_tool_results: Mapped[list | None] = mapped_column("client_tool_results", JSONB, nullable=True)
+    # 0016_ag_ui: the next `root_order` of the events of this run and its children (on a root run).
+    event_order_next: Mapped[int] = mapped_column(
+        "event_order_next", BigInteger, nullable=False, server_default=text("0")
+    )
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -249,6 +277,8 @@ class RunModel(Base):
         CheckConstraint(RUN_KIND_TARGET_CHECK, name="ck_runs_kind_target"),
         CheckConstraint(RUN_PARENT_LINK_CHECK, name="ck_runs_parent_link"),
         CheckConstraint(RUN_OUTPUT_FORMAT_CHECK, name="ck_runs_output_format"),
+        CheckConstraint(RUN_CLIENT_TOOLS_CHECK, name="ck_runs_client_tools"),
+        CheckConstraint(RUN_CLIENT_TOOL_RESULTS_CHECK, name="ck_runs_client_tool_results"),
         ForeignKeyConstraint(
             ["tenant_id", "parent_run_id"], ["runs.tenant_id", "runs.id"], name="fk_runs_tenant_parent_run"
         ),
@@ -287,6 +317,8 @@ class ExecutionEventModel(Base):
     type: Mapped[StrAnnotated] = mapped_column("type", String, nullable=False)
     data: Mapped[dict] = mapped_column("data", JSONB, nullable=False)
     ts: Mapped[datetime] = mapped_column("ts", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # 0016_ag_ui: the event's place in its root run's commit order (NULL before 0016).
+    root_order: Mapped[int | None] = mapped_column("root_order", BigInteger, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("run_id", "event_key", name="uq_run_event_key"),
@@ -296,6 +328,11 @@ class ExecutionEventModel(Base):
             name="fk_execution_events_tenant_run",
         ),
         Index("ix_execution_events_tenant_run", "tenant_id", "run_id"),
+        # 0016_ag_ui: a run's tail after a position (EventLog.list_root_events), as an index range.
+        Index(
+            "ix_execution_events_run_root_order", "run_id", "root_order",
+            postgresql_where=text("root_order IS NOT NULL"),
+        ),
         # One event type across the tenant's runs, by time (processor results).
         Index("ix_execution_events_tenant_type_ts", "tenant_id", "type", "ts"),
     )
@@ -411,6 +448,21 @@ class ParentRunStopped(Exception):
         return f"parent run {self.parent_run_id} {what}: no child run is created"
 
 
+@dataclass(frozen=True)
+class OrderedEvent:
+    """An event with its position in its root run's commit order (EventLog.list_root_events)."""
+
+    position: int
+    event: RunEvent
+
+
+def _ordered(row: Any, position: int) -> OrderedEvent:
+    return OrderedEvent(
+        position,
+        RunEvent(run_id=UUID(str(row.run_id)), seq=row.seq, type=row.type, data=row.data or {}, ts=row.ts),
+    )
+
+
 class RunIdConflict(Exception):
     """Raised when a run_id exists under a different tenant."""
 
@@ -523,6 +575,7 @@ def _iso_conversation(
         "tenant_id": conv.tenant_id,
         "agent_id": conv.agent_id,
         "resource_id": conv.resource_id,
+        "external_thread_id": conv.external_thread_id,
         "title": conv.title,
         "created_at": conv.created_at,
         "updated_at": conv.updated_at,
@@ -624,6 +677,8 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "output_format": run.output_format,
         "eval_suite_id": run.eval_suite_id,
         "eval_suite_hash": run.eval_suite_hash,
+        "client_tools": run.client_tools,
+        "client_tool_results": run.client_tool_results,
     }
 
 
@@ -637,6 +692,45 @@ _ENQUEUE_FAILED_FINISH = ("finished_at", "input_tokens", "output_tokens", "cost_
 
 def _enqueue_failed_finish() -> dict[str, Any]:
     return {"finished_at": datetime.now(timezone.utc), "input_tokens": 0, "output_tokens": 0, "cost_usd": Decimal(0)}
+
+
+def _status_values(
+    tenant_id: str, run_id: UUID | str, status: str, output: str | None, error: str | None, messages: list[Any] | None,
+    output_format: str | None = None,
+) -> dict[str, Any]:
+    """The columns RunStore.set_status writes (see there)."""
+    values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
+    if output is not None:
+        values["output"] = output
+    if error is not None:
+        values["error"] = error
+    if messages is not None:
+        values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+    if output_format is not None:
+        if output_format not in RUN_OUTPUT_FORMATS:
+            raise ValueError(f"output_format must be one of {RUN_OUTPUT_FORMATS}")
+        values["output_format"] = output_format
+    if status in TERMINAL_RUN_STATUSES:
+        values.update(_finish_values(tenant_id, str(run_id), status))
+    return values
+
+
+def set_status_in_session(
+    session, tenant_id: str, run_id: UUID | str, status: str, output: str | None = None, error: str | None = None,
+) -> None:
+    """RunStore.set_status's work inside the caller's open session (which commits it): a store that
+    must check its own rows and finish a run in one transaction (KnowledgeStore.write_search_result).
+    Raises RunNotFound (the caller rolls back)."""
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    updated = session.execute(
+        update(RunModel)
+        .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+        .values(**_status_values(tenant_id, run_id, status, output, error, None))
+        .returning(RunModel.id)
+    ).fetchone()
+    if updated is None:
+        raise RunNotFound(tenant_id, run_id)
 
 
 def _finish_values(tenant_id: str, run_id: str, status: str) -> dict[str, Any]:
@@ -694,9 +788,10 @@ def _totals_values(tenant_id: str, run_id: str) -> dict[str, Any]:
 END_EVENT_KEY = "end"
 
 # Events a completed conversation turn's post-turn steps append after its `end` (RM.13
-# observational memory, RM.14 semantic-recall indexing, and their `:failed` events). They describe
-# work done after the answer, never change the status, and stay allowed after `end`.
-POST_END_EVENT_KEY_PREFIXES = ("memory:observe:", "memory:reflect:", "embed:index:")
+# observational memory, RM.14 semantic-recall indexing, their `:failed` events, and the P1.C1
+# `post_turn_done` marker at `memory:post_turn:{turn}`). They describe work done after the answer,
+# never change the status, and stay allowed after `end`.
+POST_END_EVENT_KEY_PREFIXES = ("memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:")
 
 # The key of the cancel request (`cancel_requested`, written by POST /runs/{id}/cancel).
 CANCEL_EVENT_KEY = "cancel"
@@ -1727,7 +1822,13 @@ class RunStore:
         too). For each run with any usage row or such event: `chat_input_tokens`,
         `chat_output_tokens` (null when the run had chat requests but none was recorded; 0 when it
         had none) and `chat_cost_usd` (a decimal string; null when a chat request had no price or
-        no usage row). Runs with neither are absent (the caller reports null: not recorded)."""
+        no usage row). Runs with neither are absent (the caller reports null: not recorded).
+
+        `answering_model_id`: the model that answered the run's last chat request (the usage row
+        of `model:{n}` with the highest n; a failed fallback attempt's `model:{n}:failed:{k}` row
+        is not an answer). It differs from the run's `model_id` (the requested model) when a
+        fallback model answered. Null when no chat request has a usage row yet; the same rule as
+        the trace's run span (eap_run_store.trace.answering_model_id)."""
         ids = [str(r) for r in run_ids]
         if not ids:
             return {}
@@ -1752,11 +1853,18 @@ class RunStore:
             "   AND NOT " + not_chat_key.format(k="k.key") + ""
             "   AND NOT EXISTS (SELECT 1 FROM run_model_requests q"
             "                   WHERE q.tenant_id = e.tenant_id AND q.run_id = e.run_id AND q.request_key = k.key)"
-            "  GROUP BY e.run_id)"
+            "  GROUP BY e.run_id),"
+            " answering AS ("
+            "  SELECT DISTINCT ON (q.run_id) q.run_id, q.model_id"
+            "  FROM run_model_requests q"
+            "  WHERE q.tenant_id = :t AND q.run_id = ANY(:ids) AND q.operation = 'chat'"
+            "   AND q.request_key ~ '^model:[0-9]{1,18}$'"
+            "  ORDER BY q.run_id, split_part(q.request_key, ':', 2)::bigint DESC)"
             " SELECT coalesce(rows.run_id, unrecorded.run_id) AS run_id, rows.inp, rows.outp, rows.cost,"
             "  coalesce(rows.recorded, 0) AS recorded, coalesce(rows.unpriced, 0) AS unpriced,"
-            "  coalesce(unrecorded.n, 0) AS unrecorded"
+            "  coalesce(unrecorded.n, 0) AS unrecorded, answering.model_id AS answering_model_id"
             " FROM rows FULL JOIN unrecorded ON unrecorded.run_id = rows.run_id"
+            " LEFT JOIN answering ON answering.run_id = coalesce(rows.run_id, unrecorded.run_id)"
         )
         out: dict[str, dict[str, Any]] = {}
         with self.Session() as session:
@@ -1770,6 +1878,7 @@ class RunStore:
                     "chat_cost_usd": None
                     if missing_cost
                     else format(Decimal(row.cost) if row.cost is not None else Decimal(0), "f"),
+                    "answering_model_id": row.answering_model_id,
                 }
         return out
 
@@ -1815,6 +1924,7 @@ class RunStore:
         conversation_id: UUID | str | None = None,
         *,
         resource_id: str | None = None,
+        external_thread_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create a conversation; idempotent on a client-supplied `conversation_id`.
 
@@ -1823,6 +1933,11 @@ class RunStore:
         ConversationIdConflict if the id belongs to another tenant, and its subclass
         ConversationResourceConflict if the tenant's existing conversation has another resource_id
         (None and a value differ: a conversation created before 0012 cannot gain one).
+
+        `external_thread_id` (0016_ag_ui): the raw AG-UI threadId of a conversation derived from it,
+        stored once at creation. A re-create of an existing conversation must name the same value
+        (else ConversationIdConflict); another conversation of the tenant and agent already holding
+        it is a ConversationIdConflict too.
         """
         from sqlalchemy.dialects.postgresql import insert
 
@@ -1831,24 +1946,36 @@ class RunStore:
         validate_resource_id(resource_id)
         conv_id = str(conversation_id or uuid4())
         now = datetime.now(timezone.utc)
+        if external_thread_id is not None and not external_thread_id:
+            raise ValueError("external_thread_id must be non-empty")
         with self.Session() as session:
-            inserted = session.execute(
-                insert(ConversationModel)
-                .values(
-                    id=conv_id,
-                    tenant_id=tenant_id,
-                    agent_id=str(agent_id),
-                    title=title,
-                    resource_id=resource_id,
-                    created_at=now,
-                    updated_at=now,
-                )
-                .on_conflict_do_nothing(constraint="conversations_pkey")
-                .returning(ConversationModel.id)
-            ).fetchone()
-            session.commit()
+            try:
+                inserted = session.execute(
+                    insert(ConversationModel)
+                    .values(
+                        id=conv_id,
+                        tenant_id=tenant_id,
+                        agent_id=str(agent_id),
+                        title=title,
+                        resource_id=resource_id,
+                        external_thread_id=external_thread_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(constraint="conversations_pkey")
+                    .returning(ConversationModel.id)
+                ).fetchone()
+                session.commit()
+            except IntegrityError:
+                # uq_conversations_tenant_agent_external_thread (a non-arbiter index): either a
+                # concurrent identical create won the race (its row has this id, checked below like
+                # any existing row), or another conversation holds the thread (no row with this id).
+                session.rollback()
+                inserted = None
             existing = session.get(ConversationModel, conv_id)
             if existing is None or existing.tenant_id != tenant_id:
+                raise ConversationIdConflict(conv_id)
+            if existing.external_thread_id != external_thread_id:
                 raise ConversationIdConflict(conv_id)
             if existing.resource_id != resource_id:
                 raise ConversationResourceConflict(conv_id)
@@ -1969,6 +2096,9 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        client_tools: list[dict[str, Any]] | None = None,
+        client_tool_results: list[dict[str, Any]] | None = None,
+        ag_ui_run: Any = None,
     ) -> tuple[UUID, bool]:
         """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
 
@@ -1979,9 +2109,25 @@ class RunStore:
         if `run_id` belongs to another tenant.
         `trace_id`/`traceparent` and the run options (`request_context`, `draft_spec` with
         `agent_version` None for a draft turn, `model_id`, `model_overridden`) as in create_run.
+        `client_tools` / `client_tool_results` (0016_ag_ui): an AG-UI turn's client tool
+        declarations and its results for the previous turn's pending calls, JSON arrays stored
+        as given (the API validates them); None (the default) for every other turn.
+        `ag_ui_run` (an eap_run_store.ag_ui.AgUiRunWrite, scope `agent` of this conversation's
+        agent, else ValueError / AgUiScopeMismatch): the AG-UI run that starts this turn, written
+        in the turn's transaction (ON CONFLICT DO NOTHING), so the turn never exists without it.
+        When `run_id` already exists nothing is written (the caller reads the AG-UI row with
+        AgUiStore.get_ag_ui_run, or heals a turn recorded without one by record_ag_ui_run, and
+        compares fingerprints): the creator's row always wins a same-runId race.
         """
         from sqlalchemy.dialects.postgresql import insert
 
+        ag_ui_values = None
+        if ag_ui_run is not None:
+            from eap_run_store.ag_ui import AgUiScopeMismatch, validated_ag_ui_values
+
+            ag_ui_values = validated_ag_ui_values(tenant_id, str(run_id), ag_ui_run)
+            if ag_ui_values["scope_kind"] != "agent":
+                raise AgUiScopeMismatch(tenant_id, str(run_id), ag_ui_values["scope_kind"], ag_ui_values["scope_id"])
         conv_id = str(conversation_id)
         with self.Session() as session:
             conv = session.execute(
@@ -1992,6 +2138,11 @@ class RunStore:
             if conv is None:
                 session.rollback()
                 raise ConversationNotFound(tenant_id, conv_id)
+            if ag_ui_values is not None and ag_ui_values["scope_id"] != str(conv.agent_id):
+                session.rollback()
+                from eap_run_store.ag_ui import AgUiScopeMismatch
+
+                raise AgUiScopeMismatch(tenant_id, str(run_id), "agent", ag_ui_values["scope_id"])
 
             existing = session.get(RunModel, str(run_id))
             if existing is not None:
@@ -2024,6 +2175,9 @@ class RunStore:
                     trace_id=trace_id,
                     traceparent=traceparent,
                     **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+                    # SQL NULL explicitly (JSONB binds Python None as the JSON value `null`).
+                    client_tools=null() if client_tools is None else client_tools,
+                    client_tool_results=null() if client_tool_results is None else client_tool_results,
                 )
                 .on_conflict_do_nothing(constraint="runs_pkey")
                 .returning(RunModel.id)
@@ -2036,6 +2190,10 @@ class RunStore:
                 if raced is None:
                     raise RunIdConflict(run_id)
                 return UUID(raced["id"]), False
+            if ag_ui_values is not None:
+                from eap_run_store.ag_ui import insert_ag_ui_run_in_session
+
+                insert_ag_ui_run_in_session(session, ag_ui_values)
             conv.updated_at = now
             # Auto-title, once: only the first turn, only when the conversation has no title (one the
             # creator or a rename gave it), under the same row lock rename_conversation takes.
@@ -2126,6 +2284,61 @@ class AppendResult(tuple):
         return "dropped" if self.dropped else ("created" if self[1] else "exists")
 
 
+@dataclass(frozen=True)
+class LockedRun:
+    """A run locked for an append: its status, and its root (itself when it has no parent)."""
+
+    run_id: str
+    root_id: str
+    status: str
+
+
+def lock_run_for_append(session, tenant_id: str, run_id: UUID | str) -> LockedRun | None:
+    """Lock the tenant's run for an event append: its ROOT run's row first, then its own (one lock
+    order for every appender, so no two appenders deadlock). A run without `parent_run_id` is its
+    own root; `parent_run_id` never changes, so reading it before locking is safe. None for an
+    unknown run or another tenant's. Every path that appends an event takes the locks through this.
+
+    Throughput: the root lock is held from here until the append's transaction commits, so a whole
+    tree (a workflow run and its agent steps' child runs; an eval run and its case runs) appends one
+    transaction at a time. Measured on a local Postgres (AGUI.8 root-order review, 50 events with
+    usage rows per child): about 110-220 appends/s per tree, against about 400-475 without the root
+    lock. p50 latency is about 3x at 8-32 parallel children, and p99 2-4x. Separate roots do not
+    contend. That is ample for LLM-bound agent steps (deltas go over NOTIFY, not here). An eval run
+    with `max_concurrency` cases now serializes its cases' appends, plus record_case_result, on the
+    eval run's row. Never hold a child run's append transaction open across slow work (an embedding
+    call, a network request): it stalls every writer of the tree. kb_ingest, memory and
+    conversation runs are roots, so they are unaffected."""
+    found = session.execute(
+        text("SELECT parent_run_id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+    if found is None:
+        return None
+    root = str(found.parent_run_id) if found.parent_run_id else str(run_id)
+    if root != str(run_id):
+        session.execute(
+            text("SELECT id FROM runs WHERE id = :root AND tenant_id = :tenant_id FOR UPDATE"),
+            {"root": root, "tenant_id": tenant_id},
+        )
+    owned = session.execute(
+        text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+    if owned is None:
+        return None
+    return LockedRun(str(run_id), root, owned.status)
+
+
+def next_root_order(session, locked: LockedRun) -> int:
+    """The next `root_order` of the root's events (the caller holds the root's row lock until it
+    commits, so commit order is root_order order and the numbers have no gaps)."""
+    return session.execute(
+        text("UPDATE runs SET event_order_next = event_order_next + 1 WHERE id = :root RETURNING event_order_next - 1"),
+        {"root": locked.root_id},
+    ).scalar_one()
+
+
 def append_event_in_session(
     session,
     tenant_id: str,
@@ -2146,12 +2359,9 @@ def append_event_in_session(
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
     if not tenant_id:
         raise ValueError("tenant_id is required")
-    # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
-    owned = session.execute(
-        text("SELECT id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-        {"run_id": str(run_id), "tenant_id": tenant_id},
-    ).fetchone()
-    if owned is None:
+    # Lock the root's row, then the run's (seq uniqueness, the root's commit order, ownership).
+    locked = lock_run_for_append(session, tenant_id, run_id)
+    if locked is None:
         raise RunNotFound(tenant_id, run_id)
 
     existing_event = session.execute(
@@ -2187,6 +2397,7 @@ def append_event_in_session(
         type=type,
         data=data or {},
         ts=datetime.now(timezone.utc),
+        root_order=next_root_order(session, locked),
     )
     session.add(event_model)
     session.flush()
@@ -2408,10 +2619,7 @@ class EventLog:
         decision_key = approvals.decision_event_key(kind, approval_key)
         with self.Session() as session:
             try:
-                owned = session.execute(
-                    text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-                    {"run_id": str(run_id), "tenant_id": tenant_id},
-                ).fetchone()
+                owned = lock_run_for_append(session, tenant_id, run_id)  # the root first, then the run
                 if owned is None:
                     raise RunNotFound(tenant_id, run_id)
                 keys = set(
@@ -2445,6 +2653,7 @@ class EventLog:
                     type=type,
                     data=data or {},
                     ts=datetime.now(timezone.utc),
+                    root_order=next_root_order(session, owned),
                 )
                 session.add(event_model)
                 session.flush()
@@ -2464,6 +2673,50 @@ class EventLog:
                 raise
             session.commit()
             return "created", event
+
+    def list_root_events(self, tenant_id: str, root_run_id: UUID | str, after: int | None = None) -> list[OrderedEvent]:
+        """The events of a root run and of its children (a workflow's agent steps, an eval's
+        cases) in the root's commit order (`root_order`), after position `after` (None: from the
+        start). A reader always sees a gapless prefix, so a position, once seen, never has an
+        earlier event added. [] for another tenant's run.
+
+        The poll reads each run of the tree after `after` through
+        `ix_execution_events_run_root_order` (an index range per run), not the whole tree.
+
+        Rows without `root_order` (recorded before 0016) can only be placed approximately. A full
+        read (`after` None or negative) gives them negative positions in (ts, run_id, seq) order,
+        before every ordered row; an incremental read never returns them. The insert trigger of
+        0016 stamps every row written since, an old-code writer's included, so this set no longer
+        grows and the positions stay stable. Should unordered rows still appear after ordered ones
+        (a writer bypassing the trigger), they are logged and kept first."""
+        root = str(root_run_id)
+        with self.Session() as session:
+            ids = [str(i) for i in session.execute(
+                text("SELECT id FROM runs WHERE tenant_id = :t AND (id = :root OR parent_run_id = :root)"),
+                {"t": tenant_id, "root": root},
+            ).scalars()]
+            if not ids:
+                return []
+            cols = "SELECT run_id, seq, type, data, ts, root_order FROM execution_events"
+            params: dict[str, Any] = {"t": tenant_id, "ids": ids}
+            if after is not None and after >= 0:
+                rows = session.execute(
+                    text(cols + " WHERE tenant_id = :t AND run_id = ANY(:ids) AND root_order IS NOT NULL"
+                         " AND root_order > CAST(:after AS bigint) ORDER BY root_order"),
+                    {**params, "after": after},
+                ).all()
+                return [_ordered(r, int(r.root_order)) for r in rows]
+            rows = session.execute(text(cols + " WHERE tenant_id = :t AND run_id = ANY(:ids)"), params).all()
+        legacy = sorted((r for r in rows if r.root_order is None), key=lambda r: (r.ts, str(r.run_id), r.seq))
+        ordered = sorted((r for r in rows if r.root_order is not None), key=lambda r: r.root_order)
+        if legacy and ordered and legacy[-1].ts > ordered[0].ts:
+            log.warning(
+                "events without root_order written after ordered ones (an old writer?); placed first",
+                extra={"run_id": root},
+            )
+        out = [_ordered(r, i - len(legacy)) for i, r in enumerate(legacy)]
+        out += [_ordered(r, int(r.root_order)) for r in ordered]
+        return [o for o in out if after is None or o.position > after]
 
     def list_events(self, tenant_id: str, run_id: UUID, after_seq: int = -1) -> list[RunEvent]:
         """List events for a run after a given seq. Returns empty for another tenant's run."""

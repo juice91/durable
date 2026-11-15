@@ -338,4 +338,22 @@ describe("TracesPage", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(screen.getByText("Loading runs...")).toBeInTheDocument();
   });
+
+  it("shows the answering model of a fallback run, with the requested one beside it", async () => {
+    (listRuns as any).mockResolvedValue({
+      items: [
+        { ...mockRuns[0], run_id: "run-fb", model_id: "test:fail-503", answering_model_id: "test:priced", model_overridden: false },
+        { ...mockRuns[0], run_id: "run-same", model_id: "test:priced", answering_model_id: "test:priced", model_overridden: false },
+        { ...mockRuns[0], run_id: "run-old", model_id: "test:echo", model_overridden: false },
+      ],
+      next_before: null,
+    });
+    render(<TracesPage />);
+    const rows = await screen.findAllByTestId("trace-row");
+    const model = (i: number) => rows[i].querySelector("[data-testid='trace-row-model']");
+    expect(model(0)).toHaveTextContent(/^test:priced\(requested test:fail-503\)$/);
+    expect(model(1)).toHaveTextContent(/^test:priced$/);
+    // No answering model recorded (an older API or no request yet): the requested model alone.
+    expect(model(2)).toHaveTextContent(/^test:echo$/);
+  });
 });

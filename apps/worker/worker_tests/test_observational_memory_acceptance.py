@@ -382,8 +382,11 @@ def test_a_conversation_deleted_while_the_observer_runs_appends_nothing(api, wor
     gate.set()
     wait_workflow(worker_settings.dbos_system_schema, run_id, 90)  # the workflow ends cleanly (a no-op)
     assert not [k for _, k, _, _ in event_rows(worker.engine, run_id) if k.startswith("memory:")]
-    # No event, but the answered observer request is still priced on the run (the provider charged).
-    assert usage_keys(worker.engine, run_id) == ["memory:observe:1", "model:0"] and _count_obs(worker, otenant) == 0
+    # No event and, since P1.C6, no observer request either: the prompt is rendered inside the
+    # request step, from a snapshot that no longer finds the conversation, so nothing is sent to (or
+    # charged by) the provider. A request answered before a delete is still priced (the write step's
+    # `gone` path, covered by the crash tests).
+    assert usage_keys(worker.engine, run_id) == ["model:0"] and _count_obs(worker, otenant) == 0
     assert_totals_match(worker, otenant, run_id)
     assert worker.run_store.get_run(otenant, run_id)["status"] == "completed"
 
@@ -485,7 +488,7 @@ def test_a_successful_observation_never_delays_the_answer(api, worker, worker_se
     gate.set()
     wait_workflow(worker_settings.dbos_system_schema, run_id, 90)
     assert len(observations(worker, otenant, conv)) == 1
-    assert [k for _, k, _, _ in event_rows(worker.engine, run_id)][-2:] == ["end", "memory:observe:1"]
+    assert [k for _, k, _, _ in event_rows(worker.engine, run_id)][-3:] == ["end", "memory:observe:1", "memory:post_turn:1"]
 
 
 def test_step_layout_only_a_completed_conversation_turn_with_observational_gets_the_steps(

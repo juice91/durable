@@ -2,6 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
+import { pageLabel, sourcePages } from "@/components/chat/citations";
 import { formatScore, formatTokens } from "@/lib/format";
 import { routes } from "@/lib/routes";
 import { isSafeHttpUrl } from "@/lib/safeUrl";
@@ -101,6 +102,8 @@ function RetrieveSection({ span, names }: { span: TraceSpan; names?: NameMaps })
               const title = str(hit.title) ?? str(hit.document_key) ?? "Untitled section";
               const url = isSafeHttpUrl(hit.url) ? hit.url : null;
               const name = kbName(hit.kb_id, names);
+              // A PDF section's page: the hit's `page`/`page_end` when the span carries them, else its URL's `#page=N`.
+              const page = pageLabel(sourcePages(hit as RetrieveHit & { page?: unknown; page_end?: unknown }));
               return (
                 <li key={str(hit.chunk_id) ?? i} className="min-w-0" data-testid="span-retrieve-hit">
                   <div className="flex min-w-0 items-baseline justify-between gap-3">
@@ -124,9 +127,10 @@ function RetrieveSection({ span, names }: { span: TraceSpan; names?: NameMaps })
                       {hitScore(hit.score)}
                     </span>
                   </div>
-                  <p className="break-all font-mono text-xs text-muted-foreground">
+                  <p className="break-all font-mono text-xs text-muted-foreground" data-testid="span-retrieve-hit-meta" data-page={page ?? undefined}>
                     {[
                       !url && str(hit.ref) ? hit.ref : null,
+                      page,
                       name,
                       hit.doc_version != null ? `v${hit.doc_version}` : null,
                     ]

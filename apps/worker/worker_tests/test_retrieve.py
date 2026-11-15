@@ -120,12 +120,37 @@ def by_type(events, type_: str) -> list[dict]:
     return [d for _, _, t, d in events if t == type_]
 
 
-def hit(n: int, content: str = "body", anchor: str | None = "https://x.test/a", title: str = "T") -> SearchHit:
+def hit(
+    n: int, content: str = "body", anchor: str | None = "https://x.test/a", title: str = "T",
+    metadata: dict[str, Any] | None = None,
+) -> SearchHit:
     return SearchHit(
         chunk_id=f"c{n}", kb_id="kb", document_id="d", document_key="doc.md", document_title="Doc", doc_version=1,
         generation=1, ordinal=n, title=title, heading_path=("Doc", title), anchor_url=anchor, content=content,
-        metadata={}, distance=0.1 * n, score=1 - 0.1 * n,
+        metadata=metadata or {}, distance=0.1 * n, score=1 - 0.1 * n,
     )
+
+
+def test_sources_carry_pdf_pages_from_metadata_eap_only_when_present():
+    """RAG P1: a PDF section's source gains `page` (and `page_end` when it spans pages) from its
+    chunk's `metadata.eap`; any other chunk's source keeps its exact shape."""
+    pdf = "https://x.test/trm.pdf"
+    _, sources = format_results([
+        hit(1, anchor=f"{pdf}#page=212", metadata={"eap": {"extractor": "pdf", "extractor_version": 1, "page": 212, "page_end": 214}}),
+        hit(2, anchor=f"{pdf}#page=40", metadata={"eap": {"extractor": "pdf", "extractor_version": 1, "page": 40, "page_end": 40}}),
+        hit(3, metadata={"eap": {"extractor": "rst", "extractor_version": 1}}),
+        hit(4, metadata={"lang": "en"}),
+        hit(5, metadata={"eap": {"page": True, "page_end": 3}}),  # not an int page: ignored
+        hit(6, metadata={"eap": {"page": 9, "page_end": 2}}),  # page_end before page: dropped
+    ])
+    base = {"n", "numbering", "title", "url", "ref", "kb_id", "document_id", "document_key", "chunk_id",
+            "doc_version", "score"}
+    assert (sources[0]["page"], sources[0]["page_end"]) == (212, 214)
+    assert sources[1]["page"] == 40 and "page_end" not in sources[1]
+    for source in sources[2:5]:
+        assert set(source) == base
+    assert sources[5]["page"] == 9 and "page_end" not in sources[5]
+    assert all("eap" not in source and "metadata" not in source for source in sources)
 
 
 # --------------------------------------------------------------------------- unit

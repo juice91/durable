@@ -35,7 +35,15 @@ DELTA_CHANNEL = "eap_run_deltas"
 # holds agent-run slots and never sends more than EAP_KB_INGEST_CONCURRENCY embedding workloads at
 # once from one worker. The API (apps/api launcher.KB_INGEST_QUEUE_NAME) enqueues on exactly this
 # name. Runs enqueued on QUEUE_NAME before the split still run there.
-KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
+#
+# RAG P1 follow-up: the queue is partitioned by tenant and knowledge base
+# (`eap_schemas.knowledge.kb_ingest_partition_key`), so one knowledge base's bulk import cannot
+# starve another's uploads: the worker visits the partitions with queued runs in random order on
+# every poll, still at most EAP_KB_INGEST_CONCURRENCY running per worker in total. A DBOS queue is
+# partitioned or not, so it has a new name; LEGACY_KB_INGEST_QUEUE_NAME is the old unpartitioned
+# queue, still registered (same concurrency; every worker polls it) so runs enqueued before the upgrade drain.
+KB_INGEST_QUEUE_NAME = "eap-kb-ingest-fair"
+LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 KB_INGEST_CONCURRENCY_ENV = "EAP_KB_INGEST_CONCURRENCY"
 # Post-turn observational memory (RM.13) runs as its own workflow, eap.memory_observe_run, enqueued by
 # the turn's eap.agent_run on this partitioned queue with the conversation id as partition key and at
@@ -148,3 +156,17 @@ def embedding_endpoint_problem(settings: WorkerSettings) -> str | None:
 def kb_ingest_concurrency() -> int:
     """At most this many eap.kb_ingest runs at once per worker process (EAP_KB_INGEST_CONCURRENCY, default 2)."""
     return _positive_int(KB_INGEST_CONCURRENCY_ENV, DEFAULT_KB_INGEST_CONCURRENCY)
+
+
+# RAG P1 (P1.A3): the extraction sandbox (eap_worker.extract_sandbox). Its limits are the shared
+# EAP_KB_* extraction settings (eap_knowledge.ExtractLimits: CPU seconds, memory MB, concurrency,
+# PDF pages, the YAML/JSON cap), read here once per call so tests can change them.
+# The child's JSON result is read up to this many bytes; more kills it (extract_output_too_large).
+EXTRACT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+def extract_limits():  # -> eap_knowledge.ExtractLimits
+    """The extraction limits from the environment (ValueError naming a bad variable)."""
+    from eap_knowledge import ExtractLimits
+
+    return ExtractLimits.from_env(os.environ)

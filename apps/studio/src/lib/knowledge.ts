@@ -1,8 +1,10 @@
 // Knowledge base client (/api/v1/knowledge-bases, /api/v1/embedding-models, and the knowledge base's
 // runs on /api/v1/runs) and the pure helpers the Knowledge pages use (RM.16).
 //
-// Uploads are JSON: Studio reads each file as UTF-8 in the browser and maps its extension to the MIME
-// type (decision "Document formats and upload"); PDF and other binary formats are refused here.
+// Uploads are JSON: Studio maps each file's extension to its MIME type through UPLOAD_FORMATS (the
+// API's format registry, eap_knowledge.formats). Text formats are read as strict UTF-8 and sent as
+// `content`; binary formats (PDF) are read as bytes and sent as `content_base64` (RAG P1 decision
+// "Upload contract"). The API is the authority on caps and content sniffing (413/415/422).
 import { apiErrorFromResponse, apiHeaders, ApiError, BASE_URL, type AgentSpec } from "./api";
 import type { Run, RunEvent } from "./runs";
 
@@ -11,11 +13,38 @@ import type { Run, RunEvent } from "./runs";
 
 export type KnowledgeBaseStatus = "ready" | "reindexing" | "reindex_failed";
 
+/** Heading detection for PDFs (`ExtractConfig.pdf_headings`). */
+export type PdfHeadings = "outline" | "font" | "pages";
+export type MarkdownFlavor = "plain" | "doxygen";
+
+/**
+ * A knowledge base's extraction options (`chunking.extract`, eap_schemas.knowledge.ExtractConfig):
+ * every field is left out while unset. `pdf_images` is part 2 and not offered here yet.
+ */
+export interface ExtractConfig {
+  rst_config?: Record<string, MetadataValue>;
+  rst_tags?: string[];
+  pdf_headings?: PdfHeadings;
+  pdf_images?: "off" | "embedded" | "pages";
+  markdown_flavor?: MarkdownFlavor;
+}
+
 export interface ChunkingConfig {
   max_tokens: number;
   overlap_tokens: number;
   min_tokens: number;
   chunker_version?: number;
+  extract?: ExtractConfig;
+}
+
+/** `chunking` of POST /knowledge-bases: every field optional (the API fills in the defaults; new
+ * knowledge bases get chunker v2). */
+export interface ChunkingCreate {
+  max_tokens?: number;
+  overlap_tokens?: number;
+  min_tokens?: number;
+  chunker_version?: number;
+  extract?: ExtractConfig;
 }
 
 export interface KnowledgeBase {
@@ -70,6 +99,32 @@ export interface KnowledgeDocument {
   created_at: string;
   updated_at: string;
   content?: string | null;
+  /** "base64" for a binary document (a PDF): its `content` is always null (the bytes never leave). */
+  content_encoding?: "base64" | null;
+  /** From `error`: the ingest failure code, and for an extraction failure its extraction code. */
+  error_code?: string | null;
+  error_reason?: string | null;
+  /** GET of one document only: the worker extraction of its active version (null for API-extracted
+   * documents, or while no version is active). */
+  extraction?: DocumentExtraction | null;
+}
+
+/** The `extracted` event of a document's active version (counts only, never text). */
+export interface DocumentExtraction {
+  extractor: string;
+  extractor_version: number;
+  /** The extractor's current version; a higher one than `extractor_version` means Re-extract would use a newer extractor. */
+  current_version?: number | null;
+  doc_version?: number | null;
+  run_id?: string | null;
+  sections?: number | null;
+  chars?: number | null;
+  pages?: number | null;
+  image_only_pages?: number[] | null;
+  conditions?: number | null;
+  warnings?: number | null;
+  /** Set when the active version extracted no text: the document is ready with 0 chunks, not failed. */
+  empty_reason?: "no_extractable_text" | null;
 }
 
 export interface DocumentPage {
@@ -91,12 +146,14 @@ export interface KnowledgeBaseCreate {
   name: string;
   description?: string | null;
   embedding_model: string;
-  chunking?: ChunkingConfig | null;
+  chunking?: ChunkingCreate | null;
 }
 
+/** PUT …/documents/{key}: exactly one of `content` (text formats) and `content_base64` (binary). */
 export interface DocumentPut {
   title?: string | null;
-  content: string;
+  content?: string;
+  content_base64?: string;
   mime_type: string;
   source_url?: string | null;
   metadata?: Record<string, MetadataValue> | null;
@@ -123,6 +180,39 @@ export interface IngestRunResult {
   trace_id?: string | null;
   unchanged?: boolean;
   document?: KnowledgeDocument | null;
+  knowledge_base?: KnowledgeBase | null;
+}
+
+/** POST /knowledge-bases/{id}/reextract. */
+export interface ReextractRequest {
+  /** Registry format names (`pdf`, `rst`, …); omitted means every format. */
+  formats?: string[];
+  /** Default true: only documents extracted by an older extractor version. */
+  only_outdated?: boolean;
+  /** 2: move the knowledge base to chunker v2 and re-extract every document. */
+  chunker_version?: 2;
+  dry_run?: boolean;
+}
+
+export interface ReextractDocumentRef {
+  document_id: string;
+  document_key: string;
+  mime_type: string;
+  doc_version: number;
+  run_id: string | null;
+  status?: string | null;
+  detail?: string | null;
+}
+
+export interface ReextractResult {
+  knowledge_base_id: string;
+  dry_run: boolean;
+  chunker_version: number;
+  chunker_version_changed: boolean;
+  selected: number;
+  started: number;
+  failed: number;
+  documents: ReextractDocumentRef[];
   knowledge_base?: KnowledgeBase | null;
 }
 
@@ -301,19 +391,48 @@ export function getDocument(kbId: string, key: string, { includeContent = false,
   return request<KnowledgeDocument>(`${docPath(kbId, key)}${includeContent ? "?include_content=true" : ""}`, { signal });
 }
 
-/** The exact JSON body `putDocument` sends (the API caps the request body, not the content). */
+/** The exact JSON body `putDocument` sends (the API caps the request body, then the decoded content). */
 export function documentPutJson(key: string, body: DocumentPut): string {
   return JSON.stringify({ document_key: key, ...body });
 }
 
-/** The UTF-8 size of that body, which EAP_KB_MAX_DOCUMENT_BYTES limits. */
+/** The UTF-8 size of that body, which EAP_KB_MAX_DOCUMENT_BYTES limits for text uploads. */
 export function documentPutBytes(key: string, body: DocumentPut): number {
   return new TextEncoder().encode(documentPutJson(key, body)).length;
 }
 
-/** Why the upload body is over the cap (as the API would answer 413), or null. */
-export function documentPutProblem(key: string, body: DocumentPut, maxBytes: number = DEFAULT_MAX_DOCUMENT_BYTES): string | null {
-  return documentPutBytes(key, body) > maxBytes ? `The upload is larger than ${mib(maxBytes)} MiB once encoded (JSON).` : null;
+/**
+ * Why the upload is over a cap (as the API would answer 413), or null. A text upload's JSON body is
+ * capped at `maxBytes` (EAP_KB_MAX_DOCUMENT_BYTES), and YAML or JSON content also at the structured
+ * cap; a binary upload's body at the request guard (`uploadGuardBytes`) and its decoded bytes at the
+ * binary cap. `maxBytes` (a number) keeps the text cap's old meaning; pass `caps` for the others.
+ */
+export function documentPutProblem(key: string, body: DocumentPut, maxBytes: number = DEFAULT_MAX_DOCUMENT_BYTES, caps: UploadCaps = DEFAULT_UPLOAD_CAPS): string | null {
+  const limits: UploadCaps = { ...caps, text: maxBytes };
+  const format = uploadFormatForMime(body.mime_type);
+  if (body.content_base64 !== undefined) {
+    const guard = uploadGuardBytes(limits);
+    if (documentPutBase64Bytes(key, body) > guard) return `The upload is larger than ${mibLabel(guard)} MiB once encoded (JSON).`;
+    const cap = format ? capFor(format, limits) : limits.binary;
+    const decoded = base64DecodedLength(body.content_base64);
+    return decoded > cap ? `The file is larger than ${mibLabel(cap)} MiB.` : null;
+  }
+  if (documentPutBytes(key, body) > limits.text) return `The upload is larger than ${mibLabel(limits.text)} MiB once encoded (JSON).`;
+  if (format && format.capClass !== "text") {
+    const cap = capFor(format, limits);
+    if (new TextEncoder().encode(body.content ?? "").length > cap) return `The file is larger than ${mibLabel(cap)} MiB.`;
+  }
+  return null;
+}
+
+/**
+ * `documentPutBytes` of a base64 upload, without serialising its (up to 34 MB) string: base64 is
+ * ASCII and needs no JSON escaping, so the body is the envelope with an empty `content_base64` plus
+ * the string's length.
+ */
+export function documentPutBase64Bytes(key: string, body: DocumentPut): number {
+  const value = body.content_base64 ?? "";
+  return documentPutBytes(key, { ...body, content_base64: "" }) + value.length;
 }
 
 /** Upload (or replace) a document. 200 unchanged; 202 stored with an ingest run (`run_id`). */
@@ -323,6 +442,31 @@ export function putDocument(kbId: string, key: string, body: DocumentPut, init: 
 
 export function deleteDocument(kbId: string, key: string): Promise<void> {
   return request<void>(docPath(kbId, key), { method: "DELETE" });
+}
+
+/**
+ * Re-extract: a new version of the document with the same content and an ingest run of it (202),
+ * so the current extractor and chunker produce its chunks. `runId` (client-generated) makes a
+ * repeated click idempotent: the API answers the same run.
+ */
+export function reextractDocument(kbId: string, key: string, runId?: string | null): Promise<IngestRunResult> {
+  return request<IngestRunResult>(`${docPath(kbId, key)}/reextract`, { method: "POST", body: JSON.stringify(runId ? { run_id: runId } : {}) });
+}
+
+/** A UUID v4 for a client-generated `run_id` (crypto.randomUUID, else built from getRandomValues:
+ * randomUUID exists only in secure contexts). */
+export function newClientRunId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Bulk re-extract (`dry_run` answers the selection and starts nothing). */
+export function reextractKnowledgeBase(kbId: string, body: ReextractRequest): Promise<ReextractResult> {
+  return request<ReextractResult>(`${kbPath(kbId)}/reextract`, { method: "POST", body: JSON.stringify(body) });
 }
 
 /** Retry: a new ingest run of the document's latest version (200 with `run_id` null when already ingested). */
@@ -431,27 +575,104 @@ export function listKnowledgeBaseRuns(
 // ---------------------------------------------------------------------------------------------
 // Uploads
 
-/** Extension (lower case, with the dot) → the MIME type the API accepts. */
-export const SUPPORTED_UPLOAD_TYPES: Readonly<Record<string, string>> = {
-  ".md": "text/markdown",
-  ".markdown": "text/markdown",
-  ".txt": "text/plain",
-  ".text": "text/plain",
-  ".html": "text/html",
-  ".htm": "text/html",
-};
+/** Which cap applies to a format (the registry's `cap_class`). */
+export type UploadCapClass = "text" | "structured" | "binary";
 
-/** For a file input's `accept`. */
-export const UPLOAD_ACCEPT = Object.keys(SUPPORTED_UPLOAD_TYPES).join(",");
+/** One upload format: the mirror of eap_knowledge.formats.FORMAT_SPECS (the API is the authority). */
+export interface UploadFormat {
+  /** The registry name (`markdown`, `html`, `text`, `rst`, `pdf`, `yaml`, `json`). */
+  format: string;
+  label: string;
+  mimeType: string;
+  aliases: readonly string[];
+  extensions: readonly string[];
+  /** Sent as `content_base64` (else as `content`, UTF-8 text). */
+  binary: boolean;
+  capClass: UploadCapClass;
+  /** Extracted by the worker (its extractor and version are recorded; Re-extract applies). */
+  worker: boolean;
+}
+
+export const UPLOAD_FORMATS: readonly UploadFormat[] = [
+  { format: "markdown", label: "Markdown", mimeType: "text/markdown", aliases: ["text/x-markdown", "text/md"], extensions: [".md", ".markdown"], binary: false, capClass: "text", worker: false },
+  { format: "html", label: "HTML", mimeType: "text/html", aliases: ["application/xhtml+xml"], extensions: [".html", ".htm"], binary: false, capClass: "text", worker: false },
+  { format: "text", label: "Plain text", mimeType: "text/plain", aliases: [], extensions: [".txt", ".text"], binary: false, capClass: "text", worker: false },
+  { format: "rst", label: "reStructuredText", mimeType: "text/x-rst", aliases: ["text/prs.fallenstein.rst"], extensions: [".rst", ".rest"], binary: false, capClass: "text", worker: true },
+  { format: "pdf", label: "PDF", mimeType: "application/pdf", aliases: [], extensions: [".pdf"], binary: true, capClass: "binary", worker: true },
+  { format: "yaml", label: "YAML", mimeType: "application/yaml", aliases: ["application/x-yaml", "text/yaml"], extensions: [".yaml", ".yml"], binary: false, capClass: "structured", worker: true },
+  { format: "json", label: "JSON", mimeType: "application/json", aliases: [], extensions: [".json"], binary: false, capClass: "structured", worker: true },
+];
+
+/** Extension (lower case, with the dot) → the MIME type the API accepts. */
+export const SUPPORTED_UPLOAD_TYPES: Readonly<Record<string, string>> = Object.fromEntries(
+  UPLOAD_FORMATS.flatMap((format) => format.extensions.map((ext) => [ext, format.mimeType])),
+);
+
+/** For a file input's `accept`: the extensions, plus the PDF MIME type (pickers on some systems match by type). */
+export const UPLOAD_ACCEPT = [...Object.keys(SUPPORTED_UPLOAD_TYPES), "application/pdf"].join(",");
+
+/** The extensions as a sentence fragment for hints and refusals: ".md, .txt, .html, .rst, .pdf, .yaml, .yml or .json". */
+export const UPLOAD_EXTENSIONS_TEXT = (() => {
+  const shown = [".md", ".txt", ".html", ".rst", ".pdf", ".yaml", ".yml", ".json"];
+  return `${shown.slice(0, -1).join(", ")} or ${shown[shown.length - 1]}`;
+})();
 
 /** The upload cap's default (EAP_KB_MAX_DOCUMENT_BYTES, 5 MiB); the API is the authority. */
 export const DEFAULT_MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+/** EAP_KB_MAX_STRUCTURED_BYTES' default: YAML and JSON (2 MiB). */
+export const DEFAULT_MAX_STRUCTURED_BYTES = 2 * 1024 * 1024;
+/** EAP_KB_MAX_BINARY_BYTES' default: PDF, decoded (25 MiB). */
+export const DEFAULT_MAX_BINARY_BYTES = 25 * 1024 * 1024;
+/** The request guard's allowance over the base64 body (eap_knowledge.config.UPLOAD_ENVELOPE_BYTES). */
+export const UPLOAD_ENVELOPE_BYTES = 64 * 1024;
+
+/** The per-class caps, in bytes of the file (decoded). */
+export interface UploadCaps {
+  text: number;
+  structured: number;
+  binary: number;
+}
+
+export const DEFAULT_UPLOAD_CAPS: Readonly<UploadCaps> = {
+  text: DEFAULT_MAX_DOCUMENT_BYTES,
+  structured: DEFAULT_MAX_STRUCTURED_BYTES,
+  binary: DEFAULT_MAX_BINARY_BYTES,
+};
+
+/** A format's cap (ExtractLimits.max_bytes_for): structured is the smaller of its cap and the text cap. */
+export function capFor(format: Pick<UploadFormat, "capClass">, caps: UploadCaps = DEFAULT_UPLOAD_CAPS): number {
+  if (format.capClass === "structured") return Math.min(caps.text, caps.structured);
+  return format.capClass === "binary" ? caps.binary : caps.text;
+}
+
+/** The upload route's request-body guard: `max(text cap, ceil(binary cap × 4/3) + 64 KiB)`. */
+export function uploadGuardBytes(caps: UploadCaps = DEFAULT_UPLOAD_CAPS): number {
+  return Math.max(caps.text, Math.ceil((caps.binary * 4) / 3) + UPLOAD_ENVELOPE_BYTES);
+}
+
+/** The upload format of `fileName` by its (case-insensitive) extension, or null. */
+export function uploadFormatForFile(fileName: string): UploadFormat | null {
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = fileName.slice(dot).toLowerCase();
+  return UPLOAD_FORMATS.find((format) => format.extensions.includes(ext)) ?? null;
+}
+
+/** The upload format of a MIME type or alias (parameters and case ignored), or null. */
+export function uploadFormatForMime(mimeType: string | null | undefined): UploadFormat | null {
+  if (!mimeType) return null;
+  const base = mimeType.split(";", 1)[0].trim().toLowerCase();
+  return UPLOAD_FORMATS.find((format) => format.mimeType === base || format.aliases.includes(base)) ?? null;
+}
 
 /** The MIME type for `fileName` by its extension, or null when the format is not supported. */
 export function mimeTypeForFile(fileName: string): string | null {
-  const dot = fileName.lastIndexOf(".");
-  if (dot < 0) return null;
-  return SUPPORTED_UPLOAD_TYPES[fileName.slice(dot).toLowerCase()] ?? null;
+  return uploadFormatForFile(fileName)?.mimeType ?? null;
+}
+
+/** "PDF", "YAML", …: a MIME type's readable name (the type itself when it is not in the registry). */
+export function formatLabel(mimeType: string): string {
+  return uploadFormatForMime(mimeType)?.label ?? mimeType;
 }
 
 const MAX_KEY_LENGTH = 256;
@@ -484,7 +705,6 @@ export function titleFromFileName(fileName: string): string {
   return base.trim() || fileName;
 }
 
-/** Reads `file` as UTF-8 text (FileReader). */
 /** Thrown by `readFileAsText` for bytes that are not valid UTF-8. */
 export class NotUtf8Error extends Error {
   constructor() {
@@ -502,41 +722,192 @@ export function decodeUtf8(bytes: ArrayBuffer | Uint8Array): string {
   }
 }
 
-/** Reads `file` (FileReader) and decodes it as strict UTF-8 (see decodeUtf8). */
-export function readFileAsText(file: Blob): Promise<string> {
+function readFileBytes(file: Blob): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      try {
-        resolve(reader.result instanceof ArrayBuffer ? decodeUtf8(reader.result) : String(reader.result ?? ""));
-      } catch (error) {
-        reject(error);
-      }
+      if (reader.result instanceof ArrayBuffer) resolve(reader.result);
+      else reject(new Error("The file could not be read"));
     };
     reader.onerror = () => reject(reader.error ?? new Error("The file could not be read"));
     reader.readAsArrayBuffer(file);
   });
 }
 
-export type UploadCheck = { ok: true; mimeType: string; key: string; title: string } | { ok: false; reason: string };
+/**
+ * The MIME type of a known binary signature at offset 0 of `bytes`, or null: the mirror of the API's
+ * `eap_knowledge.formats.detect_binary_type` (PDF, PNG, JPEG, WebP). Offset 0 only, so text that
+ * merely mentions "%PDF-1.7" is never misread.
+ */
+export function detectBinaryType(bytes: ArrayBuffer | Uint8Array): string | null {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const startsWith = (signature: readonly number[], offset = 0) => signature.every((byte, i) => view[offset + i] === byte);
+  if (startsWith([0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"; // %PDF-
+  if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWith([0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (view.length >= 12 && startsWith([0x52, 0x49, 0x46, 0x46]) && startsWith([0x57, 0x45, 0x42, 0x50], 8)) return "image/webp"; // RIFF....WEBP
+  return null;
+}
+
+/** The API's PDF_SIGNATURE_WINDOW (eap_knowledge.formats): `%PDF-` must start in the first 1 KiB of a PDF upload. */
+export const PDF_SIGNATURE_WINDOW = 1024;
+
+/**
+ * The mirror of the API's `has_pdf_signature`: `%PDF-` starts before byte PDF_SIGNATURE_WINDOW (it
+ * may end past it; junk before the header is legal). Only for files uploaded AS PDF: a text
+ * upload's check is `detectBinaryType` at offset 0, as on the server, so prose that mentions
+ * "%PDF-" is never refused.
+ */
+export function hasPdfSignature(bytes: ArrayBuffer | Uint8Array): boolean {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const signature = [0x25, 0x50, 0x44, 0x46, 0x2d];
+  const last = Math.min(PDF_SIGNATURE_WINDOW - 1, view.length - signature.length);
+  for (let start = 0; start <= last; start += 1) {
+    if (signature.every((byte, i) => view[start + i] === byte)) return true;
+  }
+  return false;
+}
+
+const UNSUPPORTED_CONTENT = "The file's content does not match its declared type.";
+
+/**
+ * Thrown when a file's bytes are not its declared type, with the API's 415 `unsupported_content`
+ * message: a text upload that is really a binary file ("It looks like application/pdf, not
+ * text/plain."), or a PDF upload with no `%PDF-` in its first 1 KiB.
+ */
+export class ContentMismatchError extends Error {
+  readonly detected: string | null;
+  readonly declared: string;
+  constructor(detected: string | null, declared: string, reason?: string) {
+    super(detected ? `${UNSUPPORTED_CONTENT} It looks like ${detected}, not ${declared}.` : `${UNSUPPORTED_CONTENT} ${reason ?? ""}`.trim());
+    this.name = "ContentMismatchError";
+    this.detected = detected;
+    this.declared = declared;
+  }
+}
+
+/** Refuses a PDF upload whose first bytes have no `%PDF-` in the window (the API's 415, same message). */
+async function checkPdfSignature(file: Blob, declaredType: string): Promise<void> {
+  const head = await readFileBytes(file.slice(0, PDF_SIGNATURE_WINDOW + 4));
+  if (hasPdfSignature(head)) return;
+  throw new ContentMismatchError(
+    detectBinaryType(head),
+    declaredType,
+    `It has no %PDF- signature in its first ${PDF_SIGNATURE_WINDOW.toLocaleString("en-US")} bytes, so it is not a PDF.`,
+  );
+}
+
+/**
+ * Reads `file` (FileReader) and decodes it as strict UTF-8 (see decodeUtf8). With `declaredType`
+ * (the MIME type it will be uploaded as), a file that starts with a binary signature is refused
+ * first with ContentMismatchError, which names what it looks like, instead of "not valid UTF-8".
+ */
+export async function readFileAsText(file: Blob, declaredType?: string): Promise<string> {
+  const bytes = await readFileBytes(file);
+  if (declaredType) {
+    const detected = detectBinaryType(bytes);
+    if (detected) throw new ContentMismatchError(detected, declaredType);
+  }
+  return decodeUtf8(bytes);
+}
+
+/** A file the browser cannot send as its declared type (not UTF-8, or a binary file under a text
+ * name): retrying cannot change the outcome, unlike a failed request. */
+export function isUnreadableFileError(reason: unknown): reason is NotUtf8Error | ContentMismatchError {
+  return reason instanceof NotUtf8Error || reason instanceof ContentMismatchError;
+}
+
+/**
+ * Standard base64 (with padding) of `bytes`, in slices so a large buffer never overflows the call
+ * stack. Synchronous: uploads use `readFileAsBase64` (FileReader, off the main thread) instead.
+ */
+export function bytesToBase64(bytes: ArrayBuffer | Uint8Array): string {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const SLICE = 0x8000;
+  let binary = "";
+  for (let i = 0; i < view.length; i += SLICE) binary += String.fromCharCode(...view.subarray(i, i + SLICE));
+  return btoa(binary);
+}
+
+/**
+ * Reads `file` as base64, for `content_base64` (binary formats such as PDF): FileReader's
+ * `readAsDataURL` encodes natively and asynchronously (no main-thread loop over the bytes, no
+ * intermediate binary string), and the `data:…;base64,` prefix is cut off.
+ */
+export function readFileAsBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = typeof reader.result === "string" ? reader.result : "";
+      const comma = url.indexOf(",");
+      if (comma < 0 || !url.slice(0, comma).endsWith(";base64")) {
+        reject(new Error("The file could not be read"));
+        return;
+      }
+      resolve(url.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("The file could not be read"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** How many bytes standard base64 `value` decodes to (padding counted). Arithmetic only: no copy of
+ * the string (FileReader's base64 has no whitespace). */
+export function base64DecodedLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
+}
+
+/** The upload body for a file of `format`: `content_base64` for a binary format, else UTF-8 `content`.
+ * With `format.mimeType`, refused with ContentMismatchError as the API would: a text file whose
+ * bytes start with a binary signature, or a PDF with no `%PDF-` in its first 1 KiB. */
+export async function readUploadContent(
+  file: Blob,
+  format: Pick<UploadFormat, "binary"> & { mimeType?: string },
+): Promise<Pick<DocumentPut, "content" | "content_base64">> {
+  if (!format.binary) return { content: await readFileAsText(file, format.mimeType) };
+  if (format.mimeType && uploadFormatForMime(format.mimeType)?.format === "pdf") await checkPdfSignature(file, format.mimeType);
+  return { content_base64: await readFileAsBase64(file) };
+}
+
+/** "Text up to 5 MiB, YAML and JSON up to 2 MiB, PDF up to 25 MiB." (the upload Sheet's hint). */
+export function uploadCapsText(caps: UploadCaps = DEFAULT_UPLOAD_CAPS): string {
+  const structured = capFor({ capClass: "structured" }, caps);
+  return `Text up to ${mibLabel(caps.text)} MiB, YAML and JSON up to ${mibLabel(structured)} MiB, PDF up to ${mibLabel(caps.binary)} MiB.`;
+}
+
+/** Why a file is refused before it is read: its chip in the upload list says which. */
+export type UploadRefusal = "unsupported_type" | "empty" | "too_large" | "bad_key";
+
+export type UploadCheck =
+  | { ok: true; mimeType: string; key: string; title: string; binary: boolean; maxBytes: number }
+  | { ok: false; reason: string; code: UploadRefusal };
 
 function mib(bytes: number): number {
   return Math.round(bytes / (1024 * 1024));
 }
 
+/** "5", "2", "25", or "0.5" below 1 MiB. */
+function mibLabel(bytes: number): string {
+  const value = bytes / (1024 * 1024);
+  return value >= 1 ? String(mib(bytes)) : String(Math.round(value * 10) / 10);
+}
+
 /**
- * Whether a picked or dropped file can be uploaded, and as what. The size test here is only a
- * pre-check (content alone over the cap can never fit); the real check is `documentPutProblem` on
- * the encoded body, made once the file is read.
+ * Whether a picked or dropped file can be uploaded, and as what, with its format's cap (text 5 MiB,
+ * YAML and JSON 2 MiB, PDF 25 MiB by default). `maxBytes` overrides the text cap (EAP_KB_MAX_DOCUMENT_BYTES),
+ * which also bounds YAML and JSON. The size test here is only a pre-check; the real check is
+ * `documentPutProblem` on the encoded body, made once the file is read, and the API's own.
  */
-export function checkUploadFile(file: { name: string; size: number }, maxBytes: number = DEFAULT_MAX_DOCUMENT_BYTES): UploadCheck {
-  const mimeType = mimeTypeForFile(file.name);
-  if (!mimeType) return { ok: false, reason: "Unsupported file type: upload .md, .txt or .html files." };
-  if (file.size === 0) return { ok: false, reason: "The file is empty." };
-  if (file.size > maxBytes) return { ok: false, reason: `The file is larger than ${mib(maxBytes)} MiB.` };
+export function checkUploadFile(file: { name: string; size: number }, maxBytes: number = DEFAULT_MAX_DOCUMENT_BYTES, caps: UploadCaps = DEFAULT_UPLOAD_CAPS): UploadCheck {
+  const format = uploadFormatForFile(file.name);
+  if (!format) return { ok: false, code: "unsupported_type", reason: `Unsupported file type: upload ${UPLOAD_EXTENSIONS_TEXT} files.` };
+  if (file.size === 0) return { ok: false, code: "empty", reason: "The file is empty." };
+  const cap = capFor(format, { ...caps, text: maxBytes });
+  if (file.size > cap) return { ok: false, code: "too_large", reason: `The file is larger than ${mibLabel(cap)} MiB.` };
   const key = documentKeyFrom(file.name);
-  if (!key) return { ok: false, reason: "The file name cannot be used as a document key." };
-  return { ok: true, mimeType, key, title: titleFromFileName(file.name) };
+  if (!key) return { ok: false, code: "bad_key", reason: "The file name cannot be used as a document key." };
+  return { ok: true, mimeType: format.mimeType, key, title: titleFromFileName(file.name), binary: format.binary, maxBytes: cap };
 }
 
 /**
@@ -625,15 +996,155 @@ const INGEST_ERROR_MESSAGES: Record<string, string> = {
   internal_error: "The ingest failed with an internal error.",
 };
 
+/**
+ * The extraction failure reasons (eap_schemas.knowledge.EXTRACTION_ERROR_MESSAGES): a document's
+ * `error_reason`, whose fixed message is the rest of its `extraction_failed: …` error.
+ */
+export const EXTRACTION_ERROR_MESSAGES: Readonly<Record<string, string>> = {
+  extract_failed: "The document could not be extracted.",
+  extract_timeout: "Extraction took too long and was stopped.",
+  extract_memory: "Extraction ran out of memory.",
+  extract_limit: "The document is over an extraction limit (pages, nodes, nesting or image size).",
+  extract_output_too_large: "The extracted text is too large.",
+  document_encrypted: "The PDF is encrypted with a password.",
+  no_extractable_text: "No text could be extracted from the document.",
+  no_text_layer: "Image-only PDF with no text layer: it needs image extraction (re-extract once it is available).",
+  unsupported_content: "The file's content does not match its declared type.",
+  image_model_required: "Images need an image-capable embedding model.",
+};
+
 /** A document's or knowledge base's `error` ("<code>: detail") as readable text. */
 export function describeIngestError(error: string | null | undefined): string {
   if (!error) return "The ingest failed.";
   const match = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(error.trim());
   if (match && INGEST_ERROR_MESSAGES[match[1]]) {
     const detail = match[2]?.trim();
+    // An extraction failure's detail is the reason's fixed message: shown on its own.
+    if (match[1] === "extraction_failed" && detail && Object.values(EXTRACTION_ERROR_MESSAGES).includes(detail)) return detail;
     return detail ? `${INGEST_ERROR_MESSAGES[match[1]]} (${detail})` : INGEST_ERROR_MESSAGES[match[1]];
   }
   return error;
+}
+
+/** A document's failure as readable text: its `error_reason`'s fixed message when the API named one, else `describeIngestError`. */
+export function describeDocumentError(document: Pick<KnowledgeDocument, "error" | "error_reason">): string {
+  const reason = document.error_reason ? EXTRACTION_ERROR_MESSAGES[document.error_reason] : undefined;
+  return reason ?? describeIngestError(document.error);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Extraction (RAG P1)
+
+/** The extractor ids' names (EXTRACTOR_VERSIONS keys). */
+export const EXTRACTOR_LABELS: Readonly<Record<string, string>> = {
+  rst: "reStructuredText",
+  pdf: "PDF",
+  yaml: "YAML",
+  json: "JSON",
+  "markdown-doxygen": "Doxygen Markdown",
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+}
+
+/** True when the document was extracted by an older version of its extractor than the current one. */
+export function extractionOutdated(extraction: Pick<DocumentExtraction, "extractor_version" | "current_version"> | null | undefined): boolean {
+  return !!extraction && typeof extraction.current_version === "number" && extraction.extractor_version < extraction.current_version;
+}
+
+/** "PDF extractor v1 · 212 pages · 340 sections · 3 warnings" for the document Sheet. */
+export function extractionSummary(extraction: DocumentExtraction): string {
+  const parts = [`${EXTRACTOR_LABELS[extraction.extractor] ?? extraction.extractor} extractor v${extraction.extractor_version}`];
+  if (typeof extraction.pages === "number") parts.push(plural(extraction.pages, "page"));
+  if (typeof extraction.sections === "number") parts.push(plural(extraction.sections, "section"));
+  if (typeof extraction.conditions === "number" && extraction.conditions > 0) parts.push(plural(extraction.conditions, "condition"));
+  if (typeof extraction.warnings === "number" && extraction.warnings > 0) parts.push(plural(extraction.warnings, "warning"));
+  return parts.join(" · ");
+}
+
+/** Why an empty document of each extractor is expected (the second sentence of its note). */
+const EMPTY_EXTRACTION_CAUSES: Readonly<Record<string, string>> = {
+  rst: "Expected for a page with only toctree or include directives.",
+  yaml: "Expected for a YAML file with no values, or only a licence header.",
+  json: "Expected for a JSON file with no values.",
+  "markdown-doxygen": "Expected for a page with only Doxygen commands and no prose.",
+};
+
+/** The note for an empty document (ready, 0 chunks: `empty_reason`), or null for any other one;
+ * its second sentence depends on the extractor (none for an unknown one).
+ * PDFs are never empty: an image-only PDF fails `no_text_layer` (re-extract picks it up). */
+export function emptyExtractionText(
+  extraction: (Pick<DocumentExtraction, "empty_reason"> & { extractor?: string | null }) | null | undefined,
+): string | null {
+  if (!extraction?.empty_reason) return null;
+  const cause = extraction.extractor ? EMPTY_EXTRACTION_CAUSES[extraction.extractor] : undefined;
+  return cause ? `No extractable text: nothing is indexed. ${cause}` : "No extractable text: nothing is indexed.";
+}
+
+/** "3 pages have no text: scanned?" for a PDF's image-only pages, or null when there are none. */
+export function imageOnlyPagesText(pages: readonly number[] | null | undefined): string | null {
+  if (!pages || pages.length === 0) return null;
+  return pages.length === 1 ? "1 page has no text: scanned?" : `${pages.length.toLocaleString("en-US")} pages have no text: scanned?`;
+}
+
+/** "p. 3, 7, 12" (at most `max` page numbers, then "…"). */
+export function pageListText(pages: readonly number[], max = 12): string {
+  const shown = pages.slice(0, max).join(", ");
+  return `${pages.length === 1 ? "p." : "pp."} ${shown}${pages.length > max ? ", …" : ""}`;
+}
+
+/** The knowledge base's chunker version (`chunking.chunker_version`; 1 when it is not recorded). */
+export function chunkerVersionOf(kb: Pick<KnowledgeBase, "chunking"> | null | undefined): number {
+  const value = (kb?.chunking as { chunker_version?: unknown } | undefined)?.chunker_version;
+  return typeof value === "number" ? value : 1;
+}
+
+/** The "Advanced extraction" fields of the create dialog, as typed. */
+export interface ExtractForm {
+  /** "" leaves it unset (Markdown stays on the API path). */
+  markdownFlavor: "" | MarkdownFlavor;
+  /** One `NAME: value` per line (ifconfig names). */
+  rstConfig: string;
+  /** Tags for `only`, separated by commas, spaces or new lines. */
+  rstTags: string;
+  /** "" leaves it unset (outline, falling back to font). */
+  pdfHeadings: "" | PdfHeadings;
+}
+
+export const EMPTY_EXTRACT_FORM: Readonly<ExtractForm> = { markdownFlavor: "", rstConfig: "", rstTags: "", pdfHeadings: "" };
+
+const RST_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const MAX_RST_ENTRIES = 64;
+
+/**
+ * `chunking.extract` from the form: only the fields that are set (an empty form → null, so the
+ * request carries no `extract` at all). Names follow the API's rule (`[A-Za-z_][A-Za-z0-9_]{0,63}`,
+ * at most 64 config keys and 64 tags).
+ */
+export function buildExtractConfig(form: ExtractForm): { ok: true; value: ExtractConfig | null } | { ok: false; reason: string } {
+  const out: ExtractConfig = {};
+  if (form.markdownFlavor) out.markdown_flavor = form.markdownFlavor;
+  if (form.pdfHeadings) out.pdf_headings = form.pdfHeadings;
+  const config: Record<string, MetadataValue> = {};
+  for (const line of form.rstConfig.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    const match = /^([^:=]+?)\s*[:=]\s*(.*)$/.exec(line);
+    if (!match) return { ok: false, reason: `rst config: "${line}" is not NAME: value.` };
+    const name = match[1].trim();
+    if (!RST_NAME.test(name)) return { ok: false, reason: `rst config: "${name}" is not a valid name (a letter or _, then letters, digits or _; up to 64).` };
+    config[name] = scalar(match[2].trim());
+  }
+  const configKeys = Object.keys(config);
+  if (configKeys.length > MAX_RST_ENTRIES) return { ok: false, reason: `rst config: at most ${MAX_RST_ENTRIES} names.` };
+  if (configKeys.length) out.rst_config = config;
+  const tags = form.rstTags.split(/[\s,]+/).filter(Boolean);
+  for (const tag of tags) {
+    if (!RST_NAME.test(tag)) return { ok: false, reason: `rst tags: "${tag}" is not a valid tag (a letter or _, then letters, digits or _; up to 64).` };
+  }
+  const unique = Array.from(new Set(tags));
+  if (unique.length > MAX_RST_ENTRIES) return { ok: false, reason: `rst tags: at most ${MAX_RST_ENTRIES} tags.` };
+  if (unique.length) out.rst_tags = unique;
+  return { ok: true, value: Object.keys(out).length ? out : null };
 }
 
 export const DOCUMENT_STATUS_LABELS: Record<DocumentStatus, string> = {

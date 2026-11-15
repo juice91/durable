@@ -100,3 +100,25 @@ def test_a_json_file_with_a_duplicate_key_is_a_422(api):
     body = b'{"cases": [{"name": "a", "inputs": "i", "inputs": "j"}]}'
     r = client.post(f"{API}/eval-suites/{suite_id}/import?format=json", content=body, headers=h)
     assert r.status_code == 422 and "duplicate key 'inputs'" in r.json()["detail"], r.text
+
+
+NON_STRING_KEYS = {"int": "1", "bool": "true", "null": "null", "float": "1.5"}
+
+
+@pytest.mark.parametrize("name", sorted(NON_STRING_KEYS))
+def test_a_non_string_mapping_key_is_a_422_and_a_quoted_one_imports(api, name):
+    # Final review MINOR 2: `1: x` used to pass the key check (and `1:` plus `'1':` both loaded).
+    client, _, tenant_of = api
+    _, h = tenant_of()
+    agent_id = _agent(client, h)
+    suite_id = _suite(client, h, agent_id, cases=())
+    key = NON_STRING_KEYS[name]
+    body = f"cases:\n  - name: n\n    inputs: i\n    metadata: {{{key}: x}}\n"
+    r = client.post(f"{API}/eval-suites/{suite_id}/import", content=body.encode(), headers=h)
+    assert r.status_code == 422, r.text
+    assert "cases[0].metadata" in r.json()["detail"] and "mapping key must be text" in r.json()["detail"]
+    quoted = f"cases:\n  - name: n\n    inputs: i\n    metadata: {{'{key}': x}}\n"
+    r = client.post(f"{API}/eval-suites/{suite_id}/import", content=quoted.encode(), headers=h)
+    assert r.status_code == 200, r.text
+    (case,) = client.get(f"{API}/eval-suites/{suite_id}/cases", headers=h).json()["items"]
+    assert case["metadata"] == {key: "x"}

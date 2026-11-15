@@ -24,6 +24,18 @@ members = [
 ]
 
 [[package]]
+name = "ag-ui-protocol"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/92/d88fdc7f4648dc38d3d54c595066bb3e63a4c091884ffb2f98272c33eef8/ag_ui_protocol-1.0.0.tar.gz", hash = "sha256:cfebecef2e7bc942cc8a52d908a4ea86a98f631d2ffdc6ec5812bb843eac74fb", size = 30759, upload-time = "2026-09-17T18:31:19.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/b0/850be4576e6443dc575daa54188d8136ae2b2eca3f19e098e7a088fc9ebc/ag_ui_protocol-1.0.0-py3-none-any.whl", hash = "sha256:0058eaf0522201089d444e430fc35180bc8ad0222cae39e8568b313e8105d9e6", size = 36842, upload-time = "2026-09-17T18:31:18.471Z" },
+]
+
+[[package]]
 name = "aiofile"
 version = "3.12.3"
 source = { registry = "https://pypi.org/simple" }
@@ -533,6 +545,15 @@ wheels = [
 ]
 
 [[package]]
+name = "docutils"
+version = "0.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/a4/5180d9afc57e8fca05601dd652bdff19604c218814037fe90ffc7625a50a/docutils-0.23.tar.gz", hash = "sha256:746f5060322511280a1e50eb76846ed6bf2342984b2ac04dc42caa1a8d78799e", size = 2303823, upload-time = "2026-05-27T17:41:06.934Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/91/30151a39f7570f448ed84529390628a651d7f27c87d73c9b887f8189695e/docutils-0.23-py3-none-any.whl", hash = "sha256:25d013af9bf23bc1c7b2b093dff4208166c53a94786c9e447808335ef1185fea", size = 634701, upload-time = "2026-05-27T17:40:58.442Z" },
+]
+
+[[package]]
 name = "eap-agent-runtime"
 version = "0.1.0"
 source = { editable = "packages/agent-runtime" }
@@ -552,6 +573,7 @@ name = "eap-api"
 version = "0.1.0"
 source = { editable = "apps/api" }
 dependencies = [
+    { name = "ag-ui-protocol" },
     { name = "dbos" },
     { name = "eap-db" },
     { name = "eap-knowledge" },
@@ -581,6 +603,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ag-ui-protocol", specifier = "==1.0.0" },
     { name = "dbos", specifier = ">=3.5.0" },
     { name = "eap-db", editable = "packages/db" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
@@ -632,14 +655,22 @@ name = "eap-knowledge"
 version = "0.1.0"
 source = { editable = "packages/knowledge" }
 dependencies = [
+    { name = "cryptography" },
+    { name = "docutils" },
     { name = "eap-schemas" },
     { name = "markdown-it-py" },
+    { name = "pypdf" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = "==50.0.2" },
+    { name = "docutils", specifier = "==0.23" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
     { name = "markdown-it-py", specifier = "==4.3.0" },
+    { name = "pypdf", specifier = "==6.21.4" },
+    { name = "pyyaml", specifier = "==6.0.3" },
 ]
 
 [[package]]
@@ -721,11 +752,15 @@ name = "eap-schemas"
 version = "0.1.0"
 source = { editable = "packages/shared-schemas" }
 dependencies = [
+    { name = "jsonschema" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2" }]
+requires-dist = [
+    { name = "jsonschema", specifier = ">=4.20" },
+    { name = "pydantic", specifier = ">=2" },
+]
 
 [[package]]
 name = "eap-secrets"
@@ -773,6 +808,8 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ag-ui-protocol" },
+    { name = "eap-api" },
     { name = "fastmcp-slim", extra = ["server"] },
     { name = "uvicorn" },
 ]
@@ -801,6 +838,8 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ag-ui-protocol", specifier = "==1.0.0" },
+    { name = "eap-api", editable = "apps/api" },
     { name = "fastmcp-slim", extras = ["server"], specifier = ">=3.3.0,<5" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
@@ -2082,6 +2121,15 @@ wheels = [
 [package.optional-dependencies]
 crypto = [
     { name = "cryptography" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.21.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/e1/ec8f4d155c997c45917153a5521e60d6ee6389d68abdcbc8e44e564caffc/pypdf-6.21.4.tar.gz", hash = "sha256:c8817e3f888d47a087872ded69812c1ef30cacb871d6e053e0c00bbaf0bc2163", size = 7109255, upload-time = "2026-10-28T17:00:54.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/4b/77e8ad4ac42c9d93600f40541a50e9feb3a61d2bbee2d76f659346072051/pypdf-6.21.4-py3-none-any.whl", hash = "sha256:33e4fb41ca352810eb4e9838aa0d82d6888a5f8bf682f43e99cce5faa666255c", size = 410430, upload-time = "2026-10-28T17:00:53.146Z" },
 ]
 
 [[package]]

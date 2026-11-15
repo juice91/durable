@@ -48,6 +48,7 @@ from eap_observability.logcontext import (
     log_context,
     reset_log_context,
 )
+from eap_observability.http import install_access_logging, server_request_hook
 from eap_observability.redaction import (
     LOCAL_ONLY_LOG_ATTRIBUTE,
     RedactingLogProcessor,
@@ -181,7 +182,8 @@ def instrument_fastapi(app: Any, tracer_provider: TracerProvider | None = None) 
         return
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-    FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
+    # url.path / http.target become the route template (no raw resource ids; P1.C2).
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=provider, server_request_hook=server_request_hook)
 
 
 def dbos_otel_config(otlp_endpoint: str | None) -> dict[str, Any]:
@@ -394,6 +396,7 @@ __all__ = [
     "current_trace_id",
     "dbos_otel_config",
     "dbos_trace_attributes",
+    "install_access_logging",
     "instrument_fastapi",
     "ITERATION_SPAN_ATTRIBUTES",
     "ITERATION_SPAN_NAME",

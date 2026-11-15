@@ -155,6 +155,12 @@ describe("results and labels", () => {
   it("says why a case did not pass: agent error, failed assertion with its (judge) reason, evaluator failure", () => {
     expect(failureReason(result({ status: "passed" }))).toBeNull();
     expect(failureReason(result({ status: "error", error_code: "output_invalid" }))).toBe("Agent run failed: output_invalid");
+    // A case stopped because its agent was archived never ran: no child run, not an agent failure.
+    expect(failureReason(result({ status: "error", error_code: "agent_archived", child_run_id: null }))).toBe(
+      "Not run: the agent was archived during the eval run",
+    );
+    // A child run that failed with that code (the agent archived under it) did run.
+    expect(failureReason(result({ status: "error", error_code: "agent_archived", child_run_id: "r1" }))).toBe("Agent run failed: agent_archived");
     expect(failureReason(result({ assertions: { equals_expected: { value: true }, llm_judge: { value: false, reason: "No MUST_CONTAIN:ok marker" } } }))).toBe(
       "llm_judge: No MUST_CONTAIN:ok marker",
     );

@@ -1,0 +1,21 @@
+{
+  "name": "eap-ag-ui-smoke",
+  "private": true,
+  "description": "AG-UI smoke test (AGUI.14): @ag-ui/client 1.0.3 against a running PydanticOS API and worker.",
+  "type": "module",
+  "scripts": {
+    "smoke": "tsx smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3",
+    "rxjs": "7.8.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2"
+  }
+}

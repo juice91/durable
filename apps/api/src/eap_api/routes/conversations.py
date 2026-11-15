@@ -34,10 +34,12 @@ unknown, another tenant's, malformed or already deleted id (a repeated delete ch
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from eap_observability import current_trace_context
 
@@ -52,10 +54,12 @@ from eap_api.routes.runs import (
     _get_run_or_404,
     _run_json,
     launch_recorded_run,
+    lock_agent,
     started_response,
 )
-from eap_api.run_options import resolve_run_options, same_options
+from eap_api.run_options import RunOptions, resolve_run_options, same_options
 from eap_api.schemas import ConversationCreate, ConversationRename, ErrorDetail, TurnCreate
+from eap_schemas import ModelRef
 from eap_run_store import (
     ConversationCursor,
     ConversationIdConflict,
@@ -139,6 +143,89 @@ def _conversation_or_404(run_store: RunStore, tenant_id: str, conversation_id: u
     if conv is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     return conv
+
+
+def turn_in_progress_409(busy: TurnInProgress) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"The previous turn (run {busy.run_id}) is still {busy.status}; wait for it to finish",
+    )
+
+
+DIFFERENT_RUN_REQUEST = "run_id is already used by a different run request"
+
+
+def new_turn_options(
+    db: Session,
+    tenant_id: str,
+    agent: AgentModel,
+    *,
+    version: int | str | None,
+    request_context: dict[str, Any] | None,
+    model: ModelRef | None,
+    input_text: str,
+) -> RunOptions:
+    """A new turn's validated options: 409 AGENT_ARCHIVED for an archived agent (a recorded turn
+    is replayed, never refused; eap_api.agent_archive), then resolve_run_options (404/409/422/413)."""
+    refuse_if_archived(agent)
+    return resolve_run_options(
+        db, tenant_id, agent, version=version, request_context=request_context, model=model, input_text=input_text
+    )
+
+
+def record_and_launch_turn(
+    db: Session,
+    launcher: RunLauncher,
+    run_store: RunStore,
+    tenant_id: str,
+    conversation_id: uuid.UUID | str,
+    *,
+    run_id: uuid.UUID | str,
+    new_options: Callable[[], RunOptions] | RunOptions,
+    input_text: str,
+    same_request: Callable[[dict[str, Any]], bool],
+    conflict_detail: str = DIFFERENT_RUN_REQUEST,
+    client_tools: list[dict[str, Any]] | None = None,
+    client_tool_results: list[dict[str, Any]] | None = None,
+    ag_ui_run: Any = None,
+) -> tuple[dict[str, Any], bool]:
+    """The shared run-start path of a conversation turn (POST /conversations/{id}/runs and the
+    AG-UI agent route): record the turn idempotently on `run_id`, then hand it off.
+
+    - `run_id` already recorded for the tenant: no option is validated; `same_request(run)` must
+      hold (else 409 `conflict_detail`), and the recorded run is launched again, so a crash
+      between insert and enqueue heals on a retry (launch_recorded_run).
+    - New: `new_options` (a RunOptions, or a callable building it: new_turn_options, which refuses
+      an archived agent) validates the turn, then RunStore.create_turn inserts it with the trace
+      context and the extra columns (`client_tools`, `client_tool_results`, `ag_ui_run`: an
+      AgUiRunWrite recorded in the turn's transaction). A concurrent insert of the same run_id
+      (created False) is compared with `same_request` like a retry.
+
+    Returns (run as it stands after the hand-off, created). Raises 404 for an unknown
+    conversation, 409 for another tenant's run_id or a different request, 503 when the enqueue
+    fails, and **TurnInProgress** (not mapped: the caller decides; turn_in_progress_409) while the
+    latest turn is not terminal.
+    """
+    tenant_run = run_store.get_run(tenant_id, uuid.UUID(str(run_id)))
+    created = False
+    if tenant_run is None:
+        options = new_options() if callable(new_options) else new_options
+        # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
+        trace_id, traceparent = current_trace_context()
+        try:
+            recorded_id, created = run_store.create_turn(
+                tenant_id, conversation_id, options.target.version, input_text, uuid.UUID(str(run_id)),
+                trace_id=trace_id, traceparent=traceparent, **options.store_kwargs(),
+                client_tools=client_tools, client_tool_results=client_tool_results, ag_ui_run=ag_ui_run,
+            )
+        except ConversationNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+        except RunIdConflict:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
+        tenant_run = _get_run_or_404(run_store, tenant_id, recorded_id)
+    if not created and not same_request(tenant_run):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=conflict_detail)
+    return launch_recorded_run(db, launcher, run_store, tenant_id, tenant_run, created), created
 
 
 @router.post(
@@ -269,56 +356,30 @@ def start_turn(
     run_store, _ = stores
     tenant_id = principal.tenant_id
     conv = _conversation_or_404(run_store, tenant_id, conversation_id)
-    agent_id = conv["agent_id"]
-    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
-    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
-    agent = (
-        db.query(AgentModel)
-        .filter(AgentModel.id == agent_id, AgentModel.tenant_id == tenant_id)
-        .with_for_update(read=True)
-        .first()
-    )
-    if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    agent = lock_agent(db, tenant_id, conv["agent_id"])
 
-    # A retry of a recorded turn is compared with the row (below) and relaunched as recorded; only a
-    # new turn validates its options (each turn has its own context, model and version or draft).
-    run = run_store.get_run(tenant_id, body.run_id)
-    created = False
-    if run is None:
-        refuse_if_archived(agent)  # a new turn only; a recorded one is replayed (eap_api.agent_archive)
-        options = resolve_run_options(
-            db, tenant_id, agent,
-            version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
-        )
-        # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
-        trace_id, traceparent = current_trace_context()
-        try:
-            run_id, created = run_store.create_turn(
-                tenant_id, conversation_id, options.target.version, body.input, body.run_id,
-                trace_id=trace_id, traceparent=traceparent, **options.store_kwargs(),
-            )
-        except ConversationNotFound:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-        except RunIdConflict:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-        except TurnInProgress as busy:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"The previous turn (run {busy.run_id}) is still {busy.status}; wait for it to finish",
-            )
-        run = _get_run_or_404(run_store, tenant_id, run_id)
-
-    if not created and (
-        run["conversation_id"] != conv["id"]
-        or run["input"] != body.input
-        or not same_options(db, run, version=body.version, request_context=body.request_context, model=body.model)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
+    # A retry of a recorded turn is compared with the row and relaunched as recorded; only a new
+    # turn validates its options (each turn has its own context, model and version or draft).
+    def same_request(run: dict[str, Any]) -> bool:
+        return (
+            run["conversation_id"] == conv["id"]
+            and run["input"] == body.input
+            and same_options(db, run, version=body.version, request_context=body.request_context, model=body.model)
         )
 
-    run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
+    try:
+        run, created = record_and_launch_turn(
+            db, launcher, run_store, tenant_id, conversation_id,
+            run_id=body.run_id,
+            new_options=lambda: new_turn_options(
+                db, tenant_id, agent,
+                version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
+            ),
+            input_text=body.input,
+            same_request=same_request,
+        )
+    except TurnInProgress as busy:
+        raise turn_in_progress_409(busy)
     return started_response(run, created, {"conversation_id": run["conversation_id"], "turn": run["turn"]})
 
 

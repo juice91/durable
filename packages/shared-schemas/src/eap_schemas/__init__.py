@@ -476,6 +476,15 @@ RunEventType = Literal[
     "tool_denied",  # API (or the worker in eval runs, decided_by "eval"), same key
     "tool_approval_timed_out",  # written by the worker on the deadline, same key (first writer wins)
     "eval_case_result",  # eval runs, key `case:{case_id}`: status, counts, cost; no text
+    # The reflector's input was capped (EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS): the oldest active
+    # observations were left out of it. {dropped, kept_tokens, ...}: counts only, key `memory:reflect:{turn}:trimmed`.
+    "memory_observe_trimmed",
+    # The post-turn memory steps of a completed turn have reported, key `memory:post_turn:{turn}`:
+    # {observe: created|skipped|failed|off, index: done|skipped|failed|off}. No text.
+    "post_turn_done",
+    # RAG P1: a worker-extracted document version was extracted and chunked (eap.kb_extract_chunk),
+    # key `extract:{doc_version}`, data `eap_schemas.knowledge.ExtractedEventData`. No text.
+    "extracted",
     # Workflow loops milestone (eap_schemas.workflow_scope). Data carries step and loop ids, the
     # scope `[{loop, index}]`, statuses and codes; never item or output values.
     "loop_iteration_started",  # key `loop:{S}:started`: {step_id, scope, index}

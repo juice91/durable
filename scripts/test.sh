@@ -22,6 +22,13 @@ if docker info >/dev/null 2>&1; then
 else
     echo "== SKIP tests/scripts/pgvector-upgrade-test.sh (Docker is not running)"
 fi
+# AG-UI smoke (AGUI.14): @ag-ui/client 1.0.3 against a throwaway Postgres, API and worker
+# (ports 54349, 8200, 8209; never the dev stack), removed afterwards; needs Docker.
+if docker info >/dev/null 2>&1; then
+    run timeout 600 bash tests/ag-ui-smoke/run.sh
+else
+    echo "== SKIP tests/ag-ui-smoke/run.sh (Docker is not running)"
+fi
 
 if [ "$status" -ne 0 ]; then echo "SOME SUITES FAILED"; else echo "ALL SUITES PASSED"; fi
 exit "$status"

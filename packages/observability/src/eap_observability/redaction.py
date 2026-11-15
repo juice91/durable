@@ -12,7 +12,8 @@ apart from any other text. So exported telemetry never carries exception message
   local-only records are dropped, `exception.message` and `exception.stacktrace` are removed
   (`exception.type` stays), and the body and string attributes pass through `redact`.
 - `RedactingSpanExporter` does the same for spans: exception events keep only the type, DBOS's
-  step-retry `error` attribute is removed, string attributes are redacted, and an error status
+  step-retry `error` attribute and Pydantic AI's tool definitions (`model_request_parameters`,
+  `gen_ai.tool.definitions`: client-chosen schemas for AG-UI frontend tools) are removed, string attributes are redacted, and an error status
   description is reduced to its leading exception type (else "error").
 
 `redact` scrubs credentials (bearer/basic tokens, `sk-` API keys, URL user:password, and values of
@@ -33,6 +34,7 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status, StatusCode
 
+from eap_observability.http import template_route_attributes
 from eap_observability.logcontext import RUN_LOG_ATTRIBUTE, TENANT_LOG_ATTRIBUTE
 
 REDACTED = "[REDACTED]"
@@ -53,6 +55,9 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{4,}"), r"\1 " + REDACTED),
     # OpenAI-style keys (sk-..., sk-proj-...), wherever they appear.
     (re.compile(r"\bsk-[A-Za-z0-9_-]{6,}"), REDACTED),
+    # PydanticOS tenant API keys (pos_<24 hex id>_<secret>; eap_run_store.api_keys), wherever they
+    # appear. The whole key goes, the id too: a partial key would still name the row.
+    (re.compile(r"\bpos_[0-9a-f]{24}_[A-Za-z0-9_-]+"), REDACTED),
     # user:password@ in any URL (postgresql://, https://, ...).
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]*@"), r"\1" + REDACTED + "@"),
     # key=value, key: value, "key": "value" for credential-like keys (query strings, headers, JSON).
@@ -64,7 +69,12 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 _STATUS_TYPE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]{0,99})(?::|$)")
 # Attributes whose value is exception or error text: never exported.
-_DROPPED_ATTRIBUTES = frozenset({"exception.message", "exception.stacktrace", "error"})
+# Pydantic AI's chat spans also carry the request's tool definitions (names, descriptions, JSON
+# schemas). An AG-UI client's frontend tools are client-chosen text (AGUI.7: schemas never reach
+# spans), so the definitions are dropped for every request; tool names stay on the tool spans.
+_DROPPED_ATTRIBUTES = frozenset({
+    "exception.message", "exception.stacktrace", "error", "model_request_parameters", "gen_ai.tool.definitions",
+})
 # Ids the logs API filters on: never redacted (a tenant id such as `sk-abcdef` would otherwise become
 # [REDACTED] and that tenant's logs unsearchable). They come from the principal or the run row.
 _ID_ATTRIBUTES = frozenset({TENANT_LOG_ATTRIBUTE, RUN_LOG_ATTRIBUTE})
@@ -214,7 +224,8 @@ def _clean_span(span: ReadableSpan) -> ReadableSpan:
         context=span.context,
         parent=span.parent,
         resource=span.resource,
-        attributes=_clean_attributes(span.attributes),
+        # P1.C2: a matched route's path attributes become its template (eap_observability.http).
+        attributes=_clean_attributes(template_route_attributes(span.attributes)),
         events=[Event(e.name, _clean_attributes(e.attributes), e.timestamp) for e in span.events],
         links=span.links,
         kind=span.kind,

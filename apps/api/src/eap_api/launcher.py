@@ -19,6 +19,7 @@ from eap_observability import dbos_trace_attributes
 # The DBOS topic an agent run's gated tool calls wait on, `tool_approval:{run_id}`: defined in
 # eap_run_store.approvals so the API's wake-up and the worker's wait (AC.6) share one builder.
 from eap_run_store.approvals import tool_approval_topic
+from eap_schemas.knowledge import kb_ingest_partition_key
 from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
@@ -31,15 +32,23 @@ TOOL_WORKFLOW_NAME = "eap.tool_run"
 WORKFLOW_RUN_NAME = "eap.workflow_run"
 # Knowledge base ingest runs (RAG and memory milestone, RM.7 enqueues, RM.10 implements):
 # `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)` on its own queue,
-# KB_INGEST_QUEUE_NAME (`eap-kb-ingest`), so a large ingest or reindex never holds agent-run
+# KB_INGEST_QUEUE_NAME (partitioned, see below), so a large ingest or reindex never holds agent-run
 # concurrency slots (checkpoint review, 2026-11-14), workflow_id = run_id. All four arguments are strings. `input_json` is the run's stored `input`, canonical JSON
 # (sorted keys, no spaces), in one of two modes:
 #   ingest:  {"doc_version":<int>,"document_id":"<uuid>"}  ingest that version of the document
 #   reindex: {"reindex":<int>}                             embed the knowledge base's pending
 #                                                          generation <int> (model and dimensions
 #                                                          are the knowledge base's pending_* columns)
+#
+# The queue is partitioned (RAG P1 follow-up): every run is enqueued with the partition key
+# `eap_schemas.knowledge.kb_ingest_partition_key(tenant_id, knowledge_base_id)`, so the worker
+# draws fairly from every knowledge base with queued runs instead of one FIFO line where a bulk
+# import starves single uploads. A DBOS queue is either partitioned or not, so the partitioned one
+# has a new name; the worker still registers LEGACY_KB_INGEST_QUEUE_NAME (`eap-kb-ingest`,
+# unpartitioned) so runs enqueued there before the upgrade still run (apps/worker/README.md).
 KB_INGEST_WORKFLOW_NAME = "eap.kb_ingest"
-KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
+KB_INGEST_QUEUE_NAME = "eap-kb-ingest-fair"
+LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 # Eval runs (agent capabilities milestone; AC.12 enqueues, AC.11 implements):
 # `eap.eval_run(run_id, tenant_id, input_json)` on the agent-run queue, workflow_id = run_id, where
 # `input_json` is the run's stored `input`: the suite snapshot's canonical JSON
@@ -141,7 +150,7 @@ class RunLauncher(Protocol):
 
 class DBOSRunLauncher:
     """Enqueues `eap.agent_run`, `eap.tool_run`, `eap.workflow_run` and `eap.eval_run` on `eap-agent-runs`, and
-    `eap.kb_ingest` on `eap-kb-ingest`. The DBOSClient is created on first use."""
+    `eap.kb_ingest` on the partitioned `eap-kb-ingest-fair` (keyed by tenant and knowledge base). The DBOSClient is created on first use."""
 
     def __init__(self, settings: LauncherSettings, client: Any | None = None) -> None:
         self.settings = settings
@@ -214,6 +223,7 @@ class DBOSRunLauncher:
         """Enqueue `eap.kb_ingest(run_id, tenant_id, knowledge_base_id, input_json)`, workflow_id = run_id
         (see KB_INGEST_WORKFLOW_NAME for the input modes)."""
         options = self._options(KB_INGEST_WORKFLOW_NAME, run_id, traceparent, queue_name=KB_INGEST_QUEUE_NAME)
+        options["queue_partition_key"] = kb_ingest_partition_key(tenant_id, str(knowledge_base_id))
         self._get_client().enqueue(options, str(run_id), tenant_id, str(knowledge_base_id), input_json)
 
     def launch_eval(

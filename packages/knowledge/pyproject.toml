@@ -9,10 +9,17 @@ description = "Pure, deterministic document extraction and heading-aware chunkin
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "docutils==0.23",
     "eap-schemas",
     # Chunk boundaries feed hash-based idempotency, so the Markdown parser is pinned exactly: a
     # parser upgrade that moves a heading boundary is a chunker_version bump, not a silent change.
     "markdown-it-py==4.3.0",
+    # PDF text, outlines and encryption detection (RAG P1, formats/pdf.py; BSD-3-Clause, pure Python).
+    "pypdf==6.21.4",
+    # pypdf's AES decryption (an empty-password encrypted PDF). Apache-2.0 OR BSD-3-Clause; pinned to
+    # the version the lock already had through other dependencies.
+    "cryptography==50.0.2",
+    "pyyaml==6.0.3",
 ]
 
 [tool.uv.sources]

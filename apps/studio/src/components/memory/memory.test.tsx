@@ -391,6 +391,53 @@ describe("useMemoryActivity", () => {
     expect(result.current.revision).toBe(1);
   });
 
+  it("stops as soon as post_turn_done arrives, on a quiet turn and while a reflection is due (P1.C1)", async () => {
+    vi.useFakeTimers();
+    let served: unknown[] = [];
+    answer = (url) =>
+      url.pathname.endsWith("/memory/observations")
+        ? json({ items: [obsRow("o1", 5000), obsRow("o2", 5000)], covered_to_turn: 4 })
+        : json(served);
+    const features = { observational: true, semanticRecall: true, reflectAfterTokens: 8000 };
+    const { result, rerender } = renderHook(({ t }) => useMemoryActivity(t, features, { pollMs: 100, timeoutMs: 20_000, conversationId: "c1" }), {
+      initialProps: { t: turn("running") },
+    });
+    rerender({ t: turn("completed", [{ seq: 3, type: "run_completed", data: {} }]) });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.updating).toBe(true);
+    // The observe leaves a reflection due (10000 > 8000), so without the marker the poll would go on.
+    served = [{ seq: 4, type: "memory_updated", data: { stage: "observe" } }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.updating).toBe(true);
+    served = [{ seq: 5, type: "post_turn_done", data: { observe: "created", index: "done" } }];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.updating).toBe(false);
+    const reads = calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(calls.length).toBe(reads); // well before the 20 s timeout, nothing more is read
+  });
+
+  it("a quiet turn ends at post_turn_done instead of the timeout", async () => {
+    vi.useFakeTimers();
+    answer = () => json([{ seq: 4, type: "post_turn_done", data: { observe: "skipped", index: "off" } }]);
+    const features = { observational: true, semanticRecall: false };
+    const { result, rerender } = renderHook(({ t }) => useMemoryActivity(t, features, { pollMs: 100, timeoutMs: 20_000 }), { initialProps: { t: turn("running") } });
+    rerender({ t: turn("completed") });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.updating).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
   const obsRow = (id: string, tokens: number, extra: Record<string, unknown> = {}) => ({
     id, agent_id: "a1", conversation_id: "c1", kind: "observation", covers_from_turn: 1, covers_to_turn: 2,
     content: "note", approx_tokens: tokens, run_id: "r1", superseded_by: null, created_at: "2026-11-14T00:00:00Z", ...extra,
@@ -567,8 +614,8 @@ describe("memory rules and routes", () => {
     expect(routes.agentMemory("a1", { resource: "alice@example.com" })).toBe("/agents/a1/memory?resource=alice%40example.com");
     expect(routes.agentTab("a1", "memory")).toBe("/agents/a1/memory");
     expect(agentTabOf("/agents/a1/memory")).toBe("memory");
-    expect(visibleTabs(false, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor"]);
-    expect(visibleTabs(true, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "memory"]);
+    expect(visibleTabs(false, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "tests"]);
+    expect(visibleTabs(true, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "memory", "tests"]);
     expect(visibleTabs(false, "memory").map((t) => t.id)).toContain("memory");
   });
 });

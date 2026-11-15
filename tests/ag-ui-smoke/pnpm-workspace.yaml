@@ -1,0 +1,4 @@
+# Its own workspace root, so this package has its own lockfile and is not part of the repo's
+# pnpm workspace (apps/*, packages/*). Install with `pnpm -C tests/ag-ui-smoke install --frozen-lockfile`.
+packages:
+  - "."

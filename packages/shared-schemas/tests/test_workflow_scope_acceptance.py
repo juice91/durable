@@ -399,14 +399,16 @@ def test_loop_error_codes_do_not_clash_with_existing_codes():
     assert "run_budget_exceeded" not in ws.LOOP_ERROR_CODES  # AC.5's code is reused (D11)
 
 
-# RunEventType before the loops milestone (recorded from HEAD 7960175), in order.
+# RunEventType before the loops milestone (recorded from HEAD 7960175), in order. The RAG P1 /
+# memory-trimmed trio landed on main between the loops branch cut and the merge back, so it belongs
+# to the "existing" block as far as the loop-additions check is concerned.
 _RECORDED_EVENT_TYPES = [
     "run_started", "text_delta", "model_message", "tool_call", "tool_result", "run_completed",
     "run_failed", "processor_result", "step_started", "step_waiting", "step_approved",
     "step_rejected", "step_timed_out", "step_completed", "step_failed", "ingest_progress",
     "embedding", "memory_observe_failed", "memory_updated", "output_retry",
     "tool_approval_waiting", "tool_approved", "tool_denied", "tool_approval_timed_out",
-    "eval_case_result",
+    "eval_case_result", "memory_observe_trimmed", "post_turn_done", "extracted",
 ]
 _LOOP_EVENT_TYPES = ["loop_iteration_started", "loop_iteration_completed", "loop_iteration_failed", "cancel_requested"]
 

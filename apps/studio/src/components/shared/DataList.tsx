@@ -440,7 +440,10 @@ export function DataList<Row>({
           <EmptyState compact title={empty?.title ?? "Nothing here yet"} description={empty?.description} action={empty?.action} />
         </div>
       ) : (
-        <div className="min-w-0 overflow-x-auto rounded-lg border border-border bg-surface">
+        // `relative` makes this wrapper the containing block of absolutely positioned children
+        // (an `sr-only` header such as DocumentsTab's "Actions"): without it they escape the
+        // overflow clip and widen the page past a phone's viewport (browser check, 471 px at 375).
+        <div data-testid="datalist-scroll" className="relative min-w-0 overflow-x-auto rounded-lg border border-border bg-surface">
           <table aria-label={label} aria-busy={loading || undefined} className="w-full border-collapse text-label">
             <thead>
               <tr className="h-table-header border-b border-border">

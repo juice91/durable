@@ -205,6 +205,18 @@ def _empty(value: Any) -> bool:
 # --------------------------------------------------------------------------- 1. cross-tenant calls
 
 
+def _b_finishes_a_run(tenant_b: str, a: World) -> Callable[[Any, Any], Any]:
+    """write_search_result's `write` for tenant B aimed at tenant A's run: A's knowledge base is not
+    visible to B, and set_status_in_session raises RunNotFound for A's run."""
+    from eap_run_store import set_status_in_session
+
+    def write(session, live):
+        assert live is None, live  # A's knowledge base and documents are invisible to B
+        set_status_in_session(session, tenant_b, a.run1, "completed", f"{a.marker} overwritten", None)
+
+    return write
+
+
 def _cross_tenant_calls(a: World, b: World, ks: KnowledgeStore, ms: MemoryStore) -> dict[str, Callable[[], Any]]:
     B = b.tenant
     return {
@@ -216,6 +228,11 @@ def _cross_tenant_calls(a: World, b: World, ks: KnowledgeStore, ms: MemoryStore)
         "get_document": lambda: ks.get_document(B, a.kb_id, "d1", include_content=True),
         "get_document_by_id": lambda: ks.get_document_by_id(B, a.doc_id, include_content=True),
         "get_ingest_source": lambda: ks.get_ingest_source(B, a.doc_id, a.doc_version),
+        # RAG P1.A4 reads: B sees neither A's extraction record nor A's outdated documents.
+        "latest_extraction": lambda: ks.latest_extraction(B, a.kb_id, a.doc_id),
+        "outdated_extraction_documents": lambda: ks.outdated_extraction_documents(
+            B, a.kb_id, {"text/markdown": ("markdown-doxygen", 1)}
+        ),
         "next_unembedded_batch": lambda: ks.next_unembedded_batch(B, a.kb_id, a.generation),
         "search": lambda: ks.search(B, [a.kb_id], vec(1), embedding_model=MODEL, top_k=10),
         "search_with_filter": lambda: ks.search(B, [a.kb_id], vec(1), embedding_model=MODEL, top_k=10,
@@ -226,7 +243,13 @@ def _cross_tenant_calls(a: World, b: World, ks: KnowledgeStore, ms: MemoryStore)
         "update_knowledge_base": lambda: ks.update_knowledge_base(B, a.kb_id, name="pwned"),
         "delete_knowledge_base": lambda: ks.delete_knowledge_base(B, a.kb_id),
         "delete_document": lambda: ks.delete_document(B, a.kb_id, "d1"),
+        # P1.C4: the search tester's guarded result write. B sees A's knowledge base as gone
+        # (live is None) and cannot finish A's run (RunNotFound): nothing of A's changes.
+        "write_search_result": lambda: ks.write_search_result(B, a.kb_id, [a.doc_id], _b_finishes_a_run(B, a)),
         "request_reingest": lambda: ks.request_reingest(B, a.kb_id, "d1"),
+        # RAG P1.A4 writes: neither a new version of A's document nor A's bulk re-extract or chunker switch.
+        "new_document_version": lambda: ks.new_document_version(B, a.kb_id, "d1", run_id=str(uuid.uuid4())),
+        "start_reextract": lambda: ks.start_reextract(B, a.kb_id, document_ids=None, chunker_version=2),
         "mark_document_ingesting": lambda: ks.mark_document_ingesting(B, a.doc_id, a.doc_version, str(uuid.uuid4())),
         "mark_document_failed": lambda: ks.mark_document_failed(B, a.doc_id, a.doc_version, "x"),
         "upsert_chunks": lambda: ks.upsert_chunks(

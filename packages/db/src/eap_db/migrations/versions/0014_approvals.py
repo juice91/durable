@@ -33,7 +33,12 @@ Lock footprint: `lock_timeout` is 5 s for the migration's transaction (a busy `r
 upgrade fast instead of queueing every run write behind it). The new table and its backfill come
 first; `runs` is altered last, so its ACCESS EXCLUSIVE lock is held only briefly: the column has no
 default (a catalog-only change) and `ck_runs_output_format` is added NOT VALID (no table scan; the
-column is all NULL, and new writes are checked).
+column is all NULL, and new writes are checked). The ACCESS EXCLUSIVE lock is not the whole
+footprint, though: `create_table` with foreign keys to `runs` takes SHARE ROW EXCLUSIVE on `runs`
+and holds it to commit, through the backfill, which scans `execution_events` for `step_waiting`
+(no index on `type` alone). On a large event table `runs` writes wait for that scan; harmless
+under the drain the deploy notes require (apps/worker/README.md), and `lock_timeout` bounds only
+the lock waits, not the scan.
 
 Every check text is inline (same texts as eap_run_store.approvals and eap_run_store.store).
 

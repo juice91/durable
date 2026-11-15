@@ -8,8 +8,10 @@ import { applySidebarAttribute, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
 import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
+import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
+import { useChatProtocol, type ChatProtocol } from "@/components/chat/chatProtocol";
 import { Button } from "@/components/ui/Button";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { toast } from "@/components/ui/Toaster";
@@ -62,6 +64,28 @@ function AppearanceSection() {
     <Section id="appearance" testId="settings-appearance" title="Appearance" description="System follows your operating system's light or dark setting.">
       <div data-testid="settings-theme">
         <SegmentedControl<ThemePreference> label="Theme" options={THEME_OPTIONS} value={theme} onValueChange={setTheme} />
+      </div>
+    </Section>
+  );
+}
+
+const CHAT_PROTOCOL_OPTIONS: { value: ChatProtocol; label: string }[] = [
+  { value: "agui", label: "AG-UI" },
+  { value: "native", label: "Native" },
+];
+
+/** The agent Chat tab's protocol (AGUI.12, Q6): AG-UI by default, the native stream as a fallback. */
+function ChatSection() {
+  const [protocol, setProtocol] = useChatProtocol();
+  return (
+    <Section
+      id="chat"
+      testId="settings-chat"
+      title="Chat"
+      description="How the agent Chat tab streams its answers. AG-UI is the default; Native uses Studio's own run stream. Every other screen is unaffected."
+    >
+      <div data-testid="settings-chat-protocol">
+        <SegmentedControl<ChatProtocol> label="Chat protocol" options={CHAT_PROTOCOL_OPTIONS} value={protocol} onValueChange={setProtocol} />
       </div>
     </Section>
   );
@@ -185,9 +209,11 @@ export function SettingsSections() {
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6">
       <AppearanceSection />
+      <ChatSection />
       <Section id="shortcuts" testId="settings-shortcuts" title="Keyboard shortcuts" description="Single keys work when focus is not in a text field. Press ? anywhere to see this list.">
         <ShortcutTable headingLevel={3} />
       </Section>
+      <ApiKeysSection />
       <BrowserDataSection />
       <AboutSection />
     </div>

@@ -49,6 +49,9 @@ result, exactly what the `tool_call` span showed before (the model's query and t
   zero length, under its tool call: scope, format, version and the changed keys (schema names).
 - `ingest`: the `chunked` and `finalized` phases of a kb_ingest run (zero length): generation,
   embedded, total, pending tokens, document id and version.
+- No span: `post_turn_done` (`memory:post_turn:{turn}`, P1.C1) is a marker on its run span,
+  attribute `post_turn` = {observe, index, done_at}; `memory_observe_trimmed` (P1.C6, the reflector
+  input cap) is skipped. Neither is the start of the next span.
 
 Agent capability spans (AC.17). Attributes never carry error, tool argument or output text:
 - `model_request` attributes add `answering_model` (every request since AC.5) and, for a request on
@@ -155,6 +158,7 @@ query runs under a statement timeout (STATEMENT_TIMEOUT_MS): TraceQueryTimeout, 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -660,6 +664,9 @@ OBSERVER_ATTRIBUTES = (
     "stage", "covers_from_turn", "covers_to_turn", "approx_tokens", "notes", "redacted", "prompt_version",
     "superseded", "error_code",
 )
+# `post_turn_done` (P1.C1): shown as the run span's `post_turn` attribute (no span of its own).
+POST_TURN_ATTRIBUTES = ("observe", "index")
+_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed"})
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
@@ -759,6 +766,8 @@ class _Builder:
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
             "model_id": run.get("model_id"),
+            # The model that answered (a fallback model, when one did); `model_id` is the one asked.
+            "answering_model_id": answering_model_id(rd.requests),
             "input_tokens": run.get("input_tokens"),
             "output_tokens": run.get("output_tokens"),
             # The run's own requests split by operation: `chat_*` is the agent's model (`model_id`)
@@ -779,6 +788,14 @@ class _Builder:
                 attributes["failed_step_id"] = data.get("step_id")
         if rd.events_truncated:
             attributes["events_truncated"] = True
+        post_turn = next((e for e in events if e["type"] == "post_turn_done"), None)
+        if post_turn is not None:
+            # P1.C1: a marker on the run span, not a span: the post-turn memory steps have reported.
+            pdata = post_turn.get("data") or {}
+            attributes["post_turn"] = {
+                **{k: pdata[k] for k in POST_TURN_ATTRIBUTES if isinstance(pdata.get(k), str)},
+                "done_at": ts.isoformat() if hasattr(ts := post_turn["ts"], "isoformat") else str(ts),
+            }
         run_input: Any = run.get("input")
         if start_event is not None and "input" in (start_event.get("data") or {}):
             run_input = start_event["data"]["input"]
@@ -890,6 +907,10 @@ class _Builder:
                 self._eval_case(rd, event, run_span)
             elif etype == "run_failed" and data.get("error_code") == "fallback_exhausted":
                 self._exhausted(rd, event, previous, run_span)
+            # Markers without a span (P1.C1 `post_turn_done`, P1.C6 `memory_observe_trimmed`, written
+            # right before the reflection's own event) never start the next span.
+            if etype in _MARKER_EVENTS:
+                continue
             # An output processor checks a response before its model:{n}:final is written: the model
             # request's span must not start at it (it would collapse to the checks' duration).
             if not (etype == "processor_result" and key.startswith("processor:output:")):
@@ -1582,6 +1603,24 @@ def _run_usage_split(rd: RunData) -> dict[str, Any]:
     for request_key in keys | set(rd.requests):
         split.add(request_key, rd.requests.get(request_key))
     return {**split.totals(cost=False), "embedding_input_tokens": split.embedding_input_tokens()}
+
+
+_ANSWER_KEY = re.compile(r"^model:([0-9]{1,18})$")
+
+
+def answering_model_id(requests: dict[str, dict[str, Any]]) -> str | None:
+    """The model that answered the run's last chat request: the `model_id` of the `model:{n}`
+    usage row with the highest n (a failed fallback attempt's `model:{n}:failed:{k}` row is not
+    an answer); None without one. RunStore.chat_usage's `answering_model_id` uses the same rule."""
+    best: tuple[int, str] | None = None
+    for key, row in requests.items():
+        match = _ANSWER_KEY.match(key)
+        if match is None or (row.get("operation") or "chat") != "chat" or not row.get("model_id"):
+            continue
+        n = int(match.group(1))
+        if best is None or n > best[0]:
+            best = (n, row["model_id"])
+    return best[1] if best else None
 
 
 def _run_name(run: dict[str, Any]) -> str:

@@ -112,6 +112,9 @@ export interface RunEvent {
     | "processor_result"
     // RAG and memory (RM.10 to RM.14; rows in RM.19): counts, ids, model and cost, never text.
     | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed"
+    // P1.C: the reflector's input was capped (counts only), and the end of a completed turn's
+    // post-turn memory steps ({observe, index} status words).
+    | "memory_observe_trimmed" | "post_turn_done"
     // Agent capabilities (AC.4, AC.6): a rejected structured-output candidate, and tool approvals.
     | "output_retry"
     | "tool_approval_waiting" | "tool_approved" | "tool_denied" | "tool_approval_timed_out"

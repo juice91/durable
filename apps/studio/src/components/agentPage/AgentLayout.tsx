@@ -17,6 +17,7 @@ import { IconButton } from "@/components/ui/IconButton";
 import { toast } from "@/components/ui/Toaster";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
+import { ConnectAgUiAction } from "@/components/apiKeys/ConnectAgUiSheet";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
@@ -339,6 +340,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
         data-testid="agent-config-toggle"
       />
       <IconButton label="Copy link" size="sm" onClick={copyLink} icon={icon(Link2)} data-testid="agent-copy-link" />
+      <ConnectAgUiAction target={{ kind: "agent", id: agentId }} name={agent?.name ?? null} />
       {agent ? <AgentArchiveMenu agent={agent} onChanged={setAgent} /> : null}
       <span role="status" className="sr-only">
         {copyStatus}

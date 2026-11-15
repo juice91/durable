@@ -1,15 +1,16 @@
 """AC.18 compatibility: specs and DBOS checkpoints recorded by the build BEFORE the agent capabilities
-milestone (commit 3369526, the last commit before it), recovered and re-run by this build.
+milestone (commit 8acdda2: main as deployed when the milestone landed), recovered and re-run by this build.
 
-Nothing here is simulated. The previous build is `git archive 3369526` in a temp directory with its
+Nothing here is simulated. The previous build is `git archive 8acdda2` in a temp directory with its
 own virtualenv (`uv sync --all-packages --frozen`, about 2 s from the uv cache). Each test:
 
 1. creates an app schema migrated BY THE PREVIOUS BUILD to its head (`0013_semantic_recall`), and a
    private DBOS system schema;
-2. starts the previous build's API (`tests/recovery/api_server.py` of the archive) and worker, creates
+2. starts the previous build's API (its own `eap_api`, served by THIS tree's launcher
+   `tests/recovery/api_server.py`: see `API_LAUNCHER`) and worker, creates
    and publishes agents and workflows over HTTP, and starts runs and turns with them;
 3. stops (or crash-kills, at the previous build's own `EAP_CRASH_AT` points) the previous build,
-   upgrades the schema with THIS build's migrations to head (0014_approvals, 0015_evals: exactly what a
+   upgrades the schema with THIS build's migrations to head (0014_approvals to 0017_api_keys: exactly what a
    deploy does), and starts this build's API and worker with the same application version and
    executor id, so the new worker recovers the old workflows.
 
@@ -41,10 +42,20 @@ import pytest
 
 from conftest import APP_DB_URL, DBOS_DB_URL, REPO_ROOT, WorkerProcess, _libpq, read_sse, wait_for
 
-PREVIOUS_COMMIT = "3369526"  # the last commit before the agent capabilities milestone
+# main as deployed when the agent capabilities milestone merged (RAG P1 included; the first
+# baseline was 3369526, the commit before the milestone branched). Still at 0013_semantic_recall.
+PREVIOUS_COMMIT = "8acdda2"
 PREVIOUS_HEAD = "0013_semantic_recall"
 OBSERVER = {"provider": "test", "name": "observer"}
 TERMINAL = {"completed", "failed", "needs_attention"}
+# Both builds' APIs are launched by THIS tree's harness script, run by each build's own interpreter
+# from its own directory, so the app code is still the build's own (`eap_api` comes from its venv).
+# The previous build's copy announced `EAP_API_READY port=<n>` with print(), which writes the text
+# and its newline separately: the API's access-log line for the /healthz probe (another thread)
+# could land in between and glue its timestamp onto the port (`port=511002026`), and connecting to
+# that port fails in getaddrinfo with "[Errno 8] nodename nor servname provided". This tree's
+# launcher writes the line and its newline in one call.
+API_LAUNCHER = REPO_ROOT / "tests" / "recovery" / "api_server.py"
 
 
 # --------------------------------------------------------------------------- the previous build
@@ -86,7 +97,8 @@ class BuildProcess(WorkerProcess):
 
     @property
     def base_url(self) -> str:
-        match = re.search(r"EAP_API_READY port=(\d+)", self.log())
+        # The whole line, so a glued announcement fails here with the log, not as a bogus port.
+        match = re.search(r"^EAP_API_READY port=(\d{1,5})$", self.log(), re.MULTILINE)
         assert match, self.log()[-4000:]
         return f"http://127.0.0.1:{match.group(1)}"
 
@@ -174,7 +186,7 @@ class World:
         import httpx2
 
         api = BuildProcess(self._process_env(), self.tmp_path / f"{self.build}-api.log",
-                           [self._python(), str(self._root() / "tests/recovery/api_server.py")], self._root(),
+                           [self._python(), str(API_LAUNCHER)], self._root(),
                            "EAP_API_READY")
         self.procs.append(api)
         api.wait_ready()
@@ -207,7 +219,7 @@ class World:
                 command.upgrade(alembic_config(conn), "head")
         finally:
             migrator.dispose()
-        assert self.revision() == "0015_evals"
+        assert self.revision() == "0017_api_keys"
         self.build = "this"
 
     def close(self) -> None:
@@ -311,6 +323,13 @@ def world(previous_build: Path, tmp_path: Path) -> Iterator[World]:
 _ID = re.compile(r"^(tool|embed:retrieve|memory:wm):[^:]+(:|$)")
 
 
+# The previous build (8acdda2) already has main's P1.C1: a completed conversation turn of a spec
+# with `memory.semantic_recall` and/or `memory.observational` ends with its post-turn marker
+# (`memory:post_turn:{turn}`, `post_turn_done`) on both builds, so the layouts and stories compare
+# as recorded. (Against the first baseline, 3369526, this build's extra marker step was added to
+# the old build's lists before comparing.)
+
+
 def story(events: list[tuple[int, str, str, dict[str, Any]]]) -> list[tuple[str, str]]:
     """(event_key with tool call ids normalised, type), in seq order."""
     return [(_ID.sub(lambda m: f"{m.group(1)}:<id>{m.group(2)}", key), typ) for _seq, key, typ, _ in events]
@@ -406,13 +425,14 @@ def test_g1_every_pre_milestone_spec_shape_keeps_its_steps_story_and_hash(world:
             conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": w.tenant})
     w.start_api()
     w.start_worker("worker")
-    for name, (_s, input_text, turn) in shapes(kb_id).items():
+    for name, (agent_spec, input_text, turn) in shapes(kb_id).items():
         new = run_shape(w, agents[name], input_text, turn)
         before = old[name]
         assert new["row"]["status"] == "completed", (name, new["row"], w.logs())
-        assert new["steps"] == before["steps"], (name, before["steps"], new["steps"])
+        steps, events = before["steps"], before["story"]
+        assert new["steps"] == steps, (name, steps, new["steps"])
         assert new["observer_steps"] == before["observer_steps"], name
-        assert new["story"] == before["story"], (name, before["story"], new["story"])
+        assert new["story"] == events, (name, events, new["story"])
         assert ticketless(new["row"]["output"]) == ticketless(before["row"]["output"]), name
         # The old run reads back through this build's API, as text (no output_json).
         body = w.get(f"/runs/{before['run_id']}")
@@ -501,8 +521,10 @@ def test_in_flight_run_of_the_previous_build_recovers_on_this_build(world: World
     events = w.events(run_id)
     assert_gap_free(events)
     assert events[: len(before)] == before, "an event the previous build stored changed on recovery"
-    assert story(events) == reference["story"], (story(events), reference["story"])
-    assert w.steps(run_id) == reference["steps"], (w.steps(run_id), reference["steps"])
+    # The recovered run's layout and story equal a clean run of the previous build.
+    ref_steps, ref_story = reference["steps"], reference["story"]
+    assert story(events) == ref_story, (story(events), ref_story)
+    assert w.steps(run_id) == ref_steps, (w.steps(run_id), ref_steps)
     assert w.steps(observer) == reference["observer_steps"]
     assert w.workflow_status(run_id) == ["SUCCESS"]
     row = w.run_row(run_id)

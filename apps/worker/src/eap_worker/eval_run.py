@@ -22,6 +22,8 @@ Step layout (DBOS steps and child workflows):
     eap.append_event   start            run_started {kind: eval, agent_id, agent_version | draft,
                                         suite_id, suite_hash, cases, max_concurrency}
     per batch of `max_concurrency` cases (snapshot order: position, then id):
+      eap.eval_agent_archived           whether the agent is archived now (recorded, so a replay
+                                        takes the same branch); when it is, see "Archived" below
       eap.eval_create_children          the batch's child agent run rows (idempotent)
       child workflows eap.agent_run     started in case order, workflow id = child run id
                                         = uuid5(EVAL_NS, f"{run_id}:{case_id}"); no conversation (so no
@@ -44,7 +46,17 @@ is keyed `(run_id, case_id)`, written once (a replayed record step returns the f
 A case whose agent fails (an agent error, a limit, output_invalid, ...) is `status: error` with the
 child's error code; its evaluators do not run. It never fails the eval run. The eval run itself
 fails only when it cannot run at all: `eval_agent_not_found`, `eval_suite_invalid`,
-`eval_suite_mismatch`.
+`eval_suite_mismatch`, or `eval_agent_archived` (below).
+
+Archived agent (follow-up to AC.11/AC.12): archiving stops new work on an agent
+(eap_api.agent_archive). A new eval run of an archived agent is refused by the API; one already
+running checks `agents.archived` once per batch, before the batch's children start. When the agent
+is archived, no further child run starts: `eap.eval_stop_cases` records every case not yet started
+as a result with status `error`, error_code `agent_archived` and no child run (one step,
+idempotent per case like `eap.eval_record_case`), and the eval run fails `eval_agent_archived`
+(a partial eval is not a measurement of the version). Cases of a batch already started run to the
+end and keep their results. The eval otherwise runs the version and spec pinned at creation:
+archiving changes neither, so the check is only about stopping new work.
 
 Judge (`eap-judge`): a third generic agent like `eap-moderator`, constructed at import (before
 DBOS.launch()) with ResolveModelId (allowlist re-checked at call time, no fallback) and
@@ -108,6 +120,11 @@ JUDGE_NAME = "eap-judge"
 
 # Child run ids: uuid5(EVAL_NS, f"{run_id}:{case_id}") (stable across replays).
 EVAL_NS = uuid.UUID("3c9e4f1a-8b2d-4e6f-a1c7-5d0e9b8f2a61")
+
+_AGENT_ARCHIVED = text("SELECT archived FROM agents WHERE id = :a AND tenant_id = :t")
+
+# A stopped case's error_code (eap.eval_stop_cases); the eval run then fails `eval_agent_archived`.
+CASE_AGENT_ARCHIVED = "agent_archived"
 
 _AGENT_VERSION = text(
     "SELECT spec FROM agent_versions WHERE agent_id = :a AND tenant_id = :t AND version = :v"
@@ -235,6 +252,37 @@ def _duration_ms(run: dict[str, Any]) -> int | None:
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return None
     return max(0, int(round((end - start).total_seconds() * 1000)))
+
+
+@DBOS.step(name="eap.eval_agent_archived")
+async def eval_agent_archived_step(tenant_id: str, agent_id: str) -> bool:
+    """Whether the eval run's agent is archived now (False for an agent row that is gone: the
+    child runs then fail on their own, as before)."""
+    rt = get_runtime()
+
+    def work() -> bool:
+        with rt.engine.connect() as conn:
+            archived = conn.execute(_AGENT_ARCHIVED, {"a": agent_id, "t": tenant_id}).scalar_one_or_none()
+        return bool(archived)
+
+    return await asyncio.to_thread(work)
+
+
+@DBOS.step(name="eap.eval_stop_cases")
+async def eval_stop_cases_step(run_id: str, tenant_id: str, cases: list[dict[str, Any]]) -> int:
+    """Record each case not started (`cases`: [{case_id, case_name, position}]) as status `error`,
+    error_code `agent_archived`, without a child run. Idempotent per case (a replay records
+    nothing twice). Returns how many were recorded."""
+
+    def work() -> int:
+        store = _eval_store()
+        for case in cases:
+            store.record_case_result(
+                tenant_id, run_id, CaseResultWrite(**case, status="error", error_code=CASE_AGENT_ARCHIVED)
+            )
+        return len(cases)
+
+    return await asyncio.to_thread(work)
 
 
 @DBOS.step(name="eap.eval_score")
@@ -376,7 +424,15 @@ async def _run_cases(
     draft = bool(link.get("is_draft"))
     version = DRAFT_VERSION if draft else int(link["agent_version"])
     output_schema = _output_schema(spec)
-    for batch in _batches(snapshot.ordered_cases(), snapshot.max_concurrency):
+    batches = _batches(snapshot.ordered_cases(), snapshot.max_concurrency)
+    for index, batch in enumerate(batches):
+        if await eval_agent_archived_step(tenant_id, link["agent_id"]):
+            remaining = [case for later in batches[index:] for case in later]
+            await eval_stop_cases_step(
+                run_id, tenant_id,
+                [{"case_id": str(c.id), "case_name": c.name, "position": c.position} for c in remaining],
+            )
+            raise EvalRunError("eval_agent_archived")
         children = await create_children_step(
             run_id, tenant_id, link["agent_id"], None if draft else version, spec if draft else None,
             [{"id": str(c.id), "input": c.input} for c in batch], link.get("traceparent"),
@@ -464,6 +520,7 @@ async def _eval_body(run_id: str, tenant_id: str, input_json: str, link: dict[st
 
 __all__ = [
     "EVAL_NS",
+    "CASE_AGENT_ARCHIVED",
     "EVAL_WORKFLOW_NAME",
     "JUDGE_NAME",
     "eval_child_run_id",
