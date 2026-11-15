@@ -406,11 +406,14 @@ _JSON_TAGS = frozenset(
     f"tag:yaml.org,2002:{t}" for t in ("str", "int", "float", "bool", "null", "seq", "map")
 )
 _MERGE_TAG = "tag:yaml.org,2002:merge"
+_STR_TAG = "tag:yaml.org,2002:str"
 
 
 def _check_nodes(root: Any) -> None:
     """Refuse, with the path, what JSON cannot hold: a tag outside the JSON types (timestamps,
-    `!!binary`, `!!set`, local tags, ...), a merge key (`<<`), a non-scalar key, a duplicate key."""
+    `!!binary`, `!!set`, local tags, ...), a merge key (`<<`), a key that is not a string (a
+    collection, or a scalar that resolves to a number, bool or null: `1:`, `true:`, `null:`; quote
+    it), a duplicate key."""
     stack: list[tuple[Any, str]] = [(root, "")]
     while stack:
         node, path = stack.pop()
@@ -424,8 +427,8 @@ def _check_nodes(root: Any) -> None:
             for key, value in node.value:
                 if key.tag == _MERGE_TAG:
                     raise EvalFormatError("YAML merge keys (<<) are not supported", path)
-                if not isinstance(key, yaml.ScalarNode):
-                    raise EvalFormatError("a mapping key must be text", path)
+                if not isinstance(key, yaml.ScalarNode) or key.tag != _STR_TAG:
+                    raise EvalFormatError("a mapping key must be text (quote a number, bool or null key)", path)
                 where = f"{path}.{key.value[:100]}" if path else key.value[:100]
                 if (key.tag, key.value) in seen:
                     raise EvalFormatError(f"duplicate key {key.value[:100]!r}", where)

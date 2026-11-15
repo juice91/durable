@@ -327,6 +327,50 @@ step layouts:
 
 ### Agent capabilities milestone (AC, 2026-11)
 
-- **Drain before deploying.** Structured output (AC.4), limits and fallback (AC.5) and tool approvals (AC.6) add durable steps to the agent loop for specs that use them, so let in-flight agent runs finish first. A run recorded under the old worker and replayed under the new one could hit DBOS nondeterminism. Agent specs that use none of these features keep their step layout, which the golden test pins. AC.4 and AC.9 ship in one deploy.
-- **Migrations:** run `0014_approvals` and `0015_evals` before starting the new API or worker.
-- **Approvals:** a gated tool call waits up to the agent's `approvals.timeout_hours` (default 24, at most 168) hours; an hour is `EAP_WORKFLOW_HOUR_SECONDS` (default 3600 s, so 24 h by default), the same knob as workflow approval steps. Decisions are woken through `tool_approval:{run_id}` and also re-read every `EAP_APPROVAL_POLL_SECONDS` (default 3600 s) as a backstop for a lost wake-up. Both knobs are recorded by `eap.start_run`, so changing them never affects a run already started.
+Deploy the API and the worker together, in this order:
+
+1. **Drain in-flight runs, then stop every old worker.** Stop new runs (or stop the API), wait until
+   no run is `queued` or `running`, then stop the old workers. Structured output (AC.4), limits
+   and fallback (AC.5) and tool approvals (AC.6) add durable steps to the agent loop, but only for
+   specs that use them; specs without the new fields keep their exact step layout (pinned by
+   `worker_tests/test_step_layout_ac.py` and `tests/recovery/test_ac_compat.py`, which replays old
+   checkpoints on this build). Draining is therefore a precaution, not a known replay break. An old
+   worker given a new spec fails closed: `AgentSpec` forbids unknown keys, so it never runs a gated
+   tool unapproved. AC.4 and AC.9 ship in one deploy.
+2. **Migrate only after the old workers have stopped:** `0014_approvals`, then `0015_evals`, before
+   the new API or worker starts. 0014 backfills the `pending_approvals` inbox from the workflow
+   `step_waiting` events open at migration time. An old worker still running after the migration
+   writes `step_waiting` without an inbox row, so that approval never shows in `GET /approvals` or
+   the sidebar badge (deciding it by id still works). 0014 creates its table with foreign keys to
+   `runs`, which holds a SHARE ROW EXCLUSIVE lock on `runs` through the backfill's scan of
+   `execution_events` (no index on `type` alone): on a large event table, `runs` writes wait for
+   the whole scan, which is harmless while drained. 0015's downgrade deletes every eval suite,
+   case, result and eval run, and detaches the eval runs' child agent runs (they stay as
+   standalone runs).
+3. **Install the new dependency:** `pydantic-evals==2.67.0` (worker), with
+   `uv sync --all-packages --frozen`.
+4. **Start the new workers, then the new API.** `eap.eval_run` is a new workflow on the
+   `eap-agent-runs` queue. An old worker that claims one fails with
+   `DBOSWorkflowFunctionNotFoundError`, which is not dead-lettered: the run stays `queued` forever.
+   So every worker must run this version before any API accepts `POST /agents/{id}/evals/runs`
+   (as for `eap-memory-observe` in the RM notes above).
+
+Operating notes:
+
+- **Approvals.** A gated tool call waits up to the agent's `approvals.timeout_hours` (default 24, at
+  most 168) hours; an hour is `EAP_WORKFLOW_HOUR_SECONDS` (default 3600 s, so 24 h by default), the
+  same knob as workflow approval steps. Decisions are woken through `tool_approval:{run_id}` and also
+  re-read every `EAP_APPROVAL_POLL_SECONDS` (default 3600 s) as a backstop for a lost wake-up. Both
+  knobs are recorded by `eap.start_run`, so changing them never affects a run already started.
+- **Judge models must be allowed.** An eval's `llm_judge` model is checked against
+  `EAP_ALLOWED_MODELS` by the API when an eval run starts (refused there) and again by the
+  worker's resolver at call time: a judge model missing from the WORKER's allowlist makes each of
+  its judge calls an `evaluator_failures` entry. Keep the API's and the workers' lists in step.
+- **Eval concurrency.** One eval run drives up to `max_concurrency` (default 4, at most 8) child
+  agent runs at once, in-process inside the `eap.eval_run` workflow, outside the
+  `eap-agent-runs` queue's concurrency limit. Size workers (and the model provider's rate limits)
+  for that on top of the queue's own runs.
+- **Cost caps need real prices.** The shipped `config/model-prices.json` prices `litellm:*` (and
+  `test:*`) at 0, so `limits.max_cost_usd` never trips with it: publishing warns
+  (`cost_cap_unpriced_model`, which covers zero-priced models), but the run is not capped. Point
+  `EAP_MODEL_PRICES_FILE` at a file with the provider's real prices before relying on cost caps.
