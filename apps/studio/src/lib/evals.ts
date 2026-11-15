@@ -528,12 +528,20 @@ export function assertionCounts(result: Pick<EvalCaseResult, "assertions">): { p
   return { passed: values.filter((a) => a.value === true).length, total: values.length };
 }
 
+/** A case's error_code when it was stopped, never run, because its agent was archived during the
+ * eval run (the worker's CASE_AGENT_ARCHIVED; the eval run then fails `eval_agent_archived`). */
+export const CASE_AGENT_ARCHIVED = "agent_archived";
+
 /**
- * Why a case did not pass, in one line: the agent's error code, the first failed assertion (with
- * its reason, which for a judge is the judge's reason), or the first evaluator failure.
+ * Why a case did not pass, in one line: that it was not run because the agent was archived, the
+ * agent's error code, the first failed assertion (with its reason, which for a judge is the
+ * judge's reason), or the first evaluator failure.
  */
 export function failureReason(result: EvalCaseResult): string | null {
   if (result.status === "passed") return null;
+  if (result.status === "error" && result.error_code === CASE_AGENT_ARCHIVED && !result.child_run_id) {
+    return "Not run: the agent was archived during the eval run";
+  }
   if (result.status === "error") return result.error_code ? `Agent run failed: ${result.error_code}` : "Agent run failed";
   for (const [name, outcome] of Object.entries(result.assertions ?? {})) {
     if (outcome.value !== true) return outcome.reason ? `${name}: ${outcome.reason}` : `${name} failed`;

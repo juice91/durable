@@ -142,14 +142,39 @@ export async function getApproval(runId: string, kind: ApprovalKind, key: string
 }
 
 /**
- * The approval a Sheet id names. The id has no kind, but a run holds approvals of one kind only
- * (tool calls on agent runs, steps on workflow runs), so both are asked and the one found wins.
- * Null when neither exists (or it is another tenant's); errors other than 404 are thrown.
+ * The approval a Sheet id names. With a known `kind` (the inbox row, or the item just decided) it
+ * is one request for that kind. A Sheet id from a URL has no kind: a run holds approvals of one
+ * kind only (steps on workflow runs, tool calls on agent runs, including a workflow agent step's
+ * child run), so the run's own kind (`GET /runs/{id}`) picks the route, and the other kind's
+ * route is never asked (it would answer 404). Null when the run or the approval does not exist
+ * (or is another tenant's); other errors are thrown.
  */
-export async function findApproval(runId: string, key: string, options: { signal?: AbortSignal } = {}): Promise<Approval | null> {
-  const [tool, step] = await Promise.all(APPROVAL_KINDS.map((kind) => getApproval(runId, kind, key, options)));
-  return tool ?? step ?? null;
+export async function findApproval(
+  runId: string,
+  key: string,
+  { kind, signal }: { kind?: ApprovalKind; signal?: AbortSignal } = {},
+): Promise<Approval | null> {
+  const resolved = kind ?? (await approvalKindOfRun(runId, signal));
+  if (resolved === null) return null;
+  return getApproval(runId, resolved, key, { signal });
 }
+
+/** The approval kind a run holds: `step` on a workflow run, else `tool`; null for an unknown run. */
+async function approvalKindOfRun(runId: string, signal?: AbortSignal): Promise<ApprovalKind | null> {
+  const response = await fetch(`${BASE_URL}/api/v1/runs/${encodeURIComponent(runId)}`, { headers: apiHeaders(), signal });
+  // 404 an unknown (or another tenant's) run; 422 a malformed run id.
+  if (response.status === 404 || response.status === 422) return null;
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  const run: { kind?: string | null } = await response.json();
+  return run.kind === "workflow" ? "step" : "tool";
+}
+
+/** How often an open Sheet re-reads a decided approval until its run ends (as the trace Sheet). */
+export const APPROVAL_FOLLOW_POLL_MS = 3_000;
+/** A failed re-read waits twice as long as the last one, up to this. */
+export const APPROVAL_FOLLOW_MAX_DELAY_MS = 30_000;
+/** Consecutive failed re-reads after which the Sheet stops following and says so. */
+export const APPROVAL_FOLLOW_MAX_FAILURES = 3;
 
 export interface ToolApprovalDecisionResult {
   run_id: string;

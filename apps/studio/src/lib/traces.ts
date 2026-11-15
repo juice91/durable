@@ -216,7 +216,11 @@ export interface TraceLimits {
 
 /** Run JSON with the usage fields added in P0.1 and the draft flag of P0.8. */
 export type TraceRun = Run & {
+  /** The requested model (the agent's, or a per-run override). */
   model_id?: string | null;
+  /** The model that answered the run's last chat request: a fallback model when one did. Null
+   * before any chat request is recorded (and from an older API). */
+  answering_model_id?: string | null;
   model_overridden?: boolean;
   input_tokens?: number | null;
   output_tokens?: number | null;
@@ -534,4 +538,16 @@ export async function listTraceRuns(
   const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders(), signal });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
+}
+
+/**
+ * A run's model as Studio shows it (the Traces lists and the run span's Run usage): the model that
+ * answered, and the requested one only where they differ (a fallback model answered). Without an
+ * answering model (no request recorded yet, an older API) it is the requested model alone.
+ */
+export function runModels(source: { model_id?: unknown; answering_model_id?: unknown }): { model: string | null; requested: string | null } {
+  const requested = typeof source.model_id === "string" && source.model_id ? source.model_id : null;
+  const answering = typeof source.answering_model_id === "string" && source.answering_model_id ? source.answering_model_id : null;
+  if (!answering) return { model: requested, requested: null };
+  return { model: answering, requested: requested && requested !== answering ? requested : null };
 }

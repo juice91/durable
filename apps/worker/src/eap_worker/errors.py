@@ -276,6 +276,9 @@ EVAL_FAILURES: dict[str, tuple[str, str]] = {
     # code: (status, message)
     "eval_agent_not_found": ("failed", "the agent version (or draft) of the eval run was not found"),
     "eval_suite_mismatch": ("failed", "the eval run's input is not the suite snapshot it was created with"),
+    # The agent was archived while the eval run ran: the cases not yet started were stopped (each a
+    # result with status `error` and error_code `agent_archived`); unarchive the agent to run it again.
+    "eval_agent_archived": ("failed", "the agent was archived during the eval run; its remaining cases were stopped"),
 }
 
 

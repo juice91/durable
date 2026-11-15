@@ -137,13 +137,56 @@ describe("approval API calls", () => {
     await expect(getApproval(RUN, "step", "s")).rejects.toMatchObject({ status: 500 });
   });
 
-  it("finds an approval of either kind", async () => {
+  it("finds an approval through its run's kind, never asking the other kind's route", async () => {
+    // A workflow run holds steps: GET /runs/{id} first, then only the step route.
     fetchMock.mockImplementation(async (url: string) =>
-      String(url).includes("/step/") ? jsonResponse(approval({ kind: "step", step_id: "s" })) : jsonResponse({ detail: "Approval not found" }, 404),
+      String(url).endsWith(`/api/v1/runs/${RUN}`)
+        ? jsonResponse({ run_id: RUN, kind: "workflow" })
+        : String(url).includes("/step/")
+          ? jsonResponse(approval({ kind: "step", step_id: "s" }))
+          : jsonResponse({ detail: "Approval not found" }, 404),
     );
     expect(await findApproval(RUN, "s")).toMatchObject({ kind: "step" });
-    fetchMock.mockImplementation(async () => jsonResponse({ detail: "Approval not found" }, 404));
-    expect(await findApproval(RUN, "s")).toBeNull();
+    let urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain(`/api/v1/approvals/${RUN}/step/s`);
+    expect(urls.some((url) => url.includes("/tool/"))).toBe(false);
+
+    // An agent run (or a workflow agent step's child run) holds tool calls: only the tool route.
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).endsWith(`/api/v1/runs/${RUN}`)
+        ? jsonResponse({ run_id: RUN, kind: "agent", parent_run_id: ROOT })
+        : String(url).includes("/tool/")
+          ? jsonResponse(approval())
+          : jsonResponse({ detail: "Approval not found" }, 404),
+    );
+    expect(await findApproval(RUN, "c1")).toMatchObject({ kind: "tool" });
+    urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain(`/api/v1/approvals/${RUN}/tool/c1`);
+    expect(urls.some((url) => url.includes("/step/"))).toBe(false);
+  });
+
+  it("asks only the given kind's route when the kind is known", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(approval()));
+    expect(await findApproval(RUN, "c1", { kind: "tool" })).toMatchObject({ kind: "tool" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`/api/v1/approvals/${RUN}/tool/c1`);
+  });
+
+  it("finds nothing for an unknown or malformed run, and throws on other failures", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "Run not found" }, 404));
+    expect(await findApproval(RUN, "c1")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: [{ msg: "bad uuid" }] }, 422));
+    expect(await findApproval("not-a-uuid", "c1")).toBeNull();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "boom" }, 500));
+    await expect(findApproval(RUN, "c1")).rejects.toMatchObject({ status: 500 });
+    // The approval itself missing on its run's kind is null too.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: RUN, kind: "agent" }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "Approval not found" }, 404));
+    expect(await findApproval(RUN, "gone")).toBeNull();
   });
 
   it("decides a tool call with a trimmed comment, and throws ApiError with the status", async () => {

@@ -6,6 +6,7 @@ import { buildTraceLink } from "@/lib/grafana";
 import {
   KIND_LABELS,
   formatDuration,
+  runModels,
   spanLabel,
   usageSplit,
   type NameMaps,
@@ -21,7 +22,7 @@ import { CAPABILITY_SHOWN, CAPABILITY_USAGE_KINDS, CapabilitySpanSection } from 
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
-  "usage", "model_id", "provider_model_name", "cost_usd", "price_source", "error", "error_code",
+  "usage", "model_id", "answering_model_id", "provider_model_name", "cost_usd", "price_source", "error", "error_code",
   "input_tokens", "output_tokens", "approval", "decision",
   // The run span's usage split (shown in Run usage).
   "chat_requests", "chat_input_tokens", "chat_output_tokens", "memory_input_tokens", "memory_output_tokens",
@@ -88,14 +89,17 @@ function RunUsageSection({ span }: { span: TraceSpan }) {
   const tokensIn = typeof a.input_tokens === "number" ? a.input_tokens : null;
   const tokensOut = typeof a.output_tokens === "number" ? a.output_tokens : null;
   const cost = formatCost(str(a.cost_usd));
-  if (!str(a.model_id) && tokensIn === null && tokensOut === null && cost === null) return null;
+  const models = runModels(a);
+  if (!models.model && tokensIn === null && tokensOut === null && cost === null) return null;
   const split = usageSplit(a);
   const show = (v: number | null) => (v === null ? "not recorded" : formatTokens(v));
   return (
     <section aria-label="Run usage" data-testid="span-usage">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Run usage</h4>
       <dl className="mt-1 text-sm">
-        {str(a.model_id) ? <Row label="Model">{a.model_id as string}</Row> : null}
+        {/* The model that answered; the requested one too where a fallback model answered. */}
+        {models.model ? <Row label="Model" testId="span-run-model">{models.model}</Row> : null}
+        {models.requested ? <Row label="Requested model" testId="span-run-requested-model">{models.requested}</Row> : null}
         {split ? (
           <>
             {/* Next to the chat model: its own tokens only (older responses: the combined count). */}

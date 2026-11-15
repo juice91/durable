@@ -1300,7 +1300,13 @@ class RunStore:
         too). For each run with any usage row or such event: `chat_input_tokens`,
         `chat_output_tokens` (null when the run had chat requests but none was recorded; 0 when it
         had none) and `chat_cost_usd` (a decimal string; null when a chat request had no price or
-        no usage row). Runs with neither are absent (the caller reports null: not recorded)."""
+        no usage row). Runs with neither are absent (the caller reports null: not recorded).
+
+        `answering_model_id`: the model that answered the run's last chat request (the usage row
+        of `model:{n}` with the highest n; a failed fallback attempt's `model:{n}:failed:{k}` row
+        is not an answer). It differs from the run's `model_id` (the requested model) when a
+        fallback model answered. Null when no chat request has a usage row yet; the same rule as
+        the trace's run span (eap_run_store.trace.answering_model_id)."""
         ids = [str(r) for r in run_ids]
         if not ids:
             return {}
@@ -1325,11 +1331,18 @@ class RunStore:
             "   AND NOT " + not_chat_key.format(k="k.key") + ""
             "   AND NOT EXISTS (SELECT 1 FROM run_model_requests q"
             "                   WHERE q.tenant_id = e.tenant_id AND q.run_id = e.run_id AND q.request_key = k.key)"
-            "  GROUP BY e.run_id)"
+            "  GROUP BY e.run_id),"
+            " answering AS ("
+            "  SELECT DISTINCT ON (q.run_id) q.run_id, q.model_id"
+            "  FROM run_model_requests q"
+            "  WHERE q.tenant_id = :t AND q.run_id = ANY(:ids) AND q.operation = 'chat'"
+            "   AND q.request_key ~ '^model:[0-9]{1,18}$'"
+            "  ORDER BY q.run_id, split_part(q.request_key, ':', 2)::bigint DESC)"
             " SELECT coalesce(rows.run_id, unrecorded.run_id) AS run_id, rows.inp, rows.outp, rows.cost,"
             "  coalesce(rows.recorded, 0) AS recorded, coalesce(rows.unpriced, 0) AS unpriced,"
-            "  coalesce(unrecorded.n, 0) AS unrecorded"
+            "  coalesce(unrecorded.n, 0) AS unrecorded, answering.model_id AS answering_model_id"
             " FROM rows FULL JOIN unrecorded ON unrecorded.run_id = rows.run_id"
+            " LEFT JOIN answering ON answering.run_id = coalesce(rows.run_id, unrecorded.run_id)"
         )
         out: dict[str, dict[str, Any]] = {}
         with self.Session() as session:
@@ -1343,6 +1356,7 @@ class RunStore:
                     "chat_cost_usd": None
                     if missing_cost
                     else format(Decimal(row.cost) if row.cost is not None else Decimal(0), "f"),
+                    "answering_model_id": row.answering_model_id,
                 }
         return out
 

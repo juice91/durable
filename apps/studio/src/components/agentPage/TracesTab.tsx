@@ -8,6 +8,7 @@ import { EMPTY_FILTERS, formatDuration, listTraceRuns, runDurationMs, traceFilte
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { Button } from "@/components/ui/Button";
+import { RunModel } from "@/components/traces/RunModel";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 
@@ -78,8 +79,8 @@ export function TracesTab({ agentId }: { agentId: string }) {
       className: "hidden md:table-cell",
       headerClassName: "hidden md:table-cell",
       cell: (run) => (
-        <span className="font-mono text-caption">
-          {run.model_id ?? <span className={dim}>-</span>}
+        <span className="font-mono text-caption" data-testid="agent-trace-row-model">
+          <RunModel run={run} />
           {run.model_overridden ? <span className={`ml-1 ${dim}`}>(override)</span> : null}
         </span>
       ),

@@ -25,7 +25,8 @@ beforeEach(() => {
     if (pathname.endsWith(`/approvals/${RUN}/tool/call_old`)) return jsonResponse(old);
     if (pathname.endsWith(`/approvals/${WF_RUN}/step/review`)) return jsonResponse(stepItem);
     if (pathname.includes("/approvals/")) return jsonResponse({ detail: "Approval not found" }, 404);
-    if (pathname.endsWith(`/runs/${RUN}`)) return jsonResponse({ id: RUN, conversation_id: "CONV1" });
+    if (pathname.endsWith(`/runs/${RUN}`)) return jsonResponse({ id: RUN, kind: "agent", conversation_id: "CONV1" });
+    if (pathname.endsWith(`/runs/${WF_RUN}`)) return jsonResponse({ id: WF_RUN, kind: "workflow", conversation_id: null });
     return jsonResponse({ items: [toolItem], next_cursor: null });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -37,17 +38,27 @@ afterEach(() => {
 });
 
 describe("approval Sheet", () => {
-  it("a deep link opens the Sheet and fetches the single item from both kinds", async () => {
+  it("a deep link opens the Sheet and fetches the single item from its run's kind only", async () => {
     nextRouter.reset([routes.approval(RUN, "call_old")]);
     render(<ApprovalsPage />);
     const sheet = await screen.findByTestId("approval-sheet");
     expect(await within(sheet).findByTestId("approval-sheet-status")).toHaveTextContent("Approved");
     expect(within(sheet).getByTestId("approval-sheet-decided")).toHaveTextContent("by alice");
     expect(urls()).toContain(`/api/v1/approvals/${RUN}/tool/call_old`);
-    expect(urls()).toContain(`/api/v1/approvals/${RUN}/step/call_old`);
+    // An agent run holds tool calls: the step route is never asked (it would answer 404).
+    expect(urls()).not.toContain(`/api/v1/approvals/${RUN}/step/call_old`);
   });
 
-  it("an unknown item shows the not-found state (404 from both kinds)", async () => {
+  it("a workflow step's deep link asks the step route only", async () => {
+    nextRouter.reset([routes.approval(WF_RUN, "review")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    expect(await within(sheet).findByText("Workflow step: review")).toBeInTheDocument();
+    expect(urls()).toContain(`/api/v1/approvals/${WF_RUN}/step/review`);
+    expect(urls().some((p) => p.includes(`/approvals/${WF_RUN}/tool/`))).toBe(false);
+  });
+
+  it("an unknown item shows the not-found state (a 404 for its run's kind)", async () => {
     nextRouter.reset([routes.approval(RUN, "nope")]);
     render(<ApprovalsPage />);
     expect(await screen.findByTestId("approval-sheet-missing")).toBeInTheDocument();
