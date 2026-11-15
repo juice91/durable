@@ -7,6 +7,7 @@ import json
 
 from sqlalchemy import text
 
+from eap_knowledge import EXTRACTOR_VERSIONS
 from eap_schemas.knowledge import EXTRACTION_ERROR_MESSAGES
 
 from .run_helpers import requires_pg
@@ -85,7 +86,7 @@ def test_a_v1_yaml_document_is_selected_by_bulk_reextract_since_the_version_bump
     old = _put(client, h, kb["id"], "old.yaml", content=YAML, mime_type="application/yaml").json()["document"]
     new = _put(client, h, kb["id"], "new.yaml", content=YAML, mime_type="application/yaml").json()["document"]
     _activate(pg, old["id"], "yaml", 1)
-    _activate(pg, new["id"], "yaml", 2)
+    _activate(pg, new["id"], "yaml", EXTRACTOR_VERSIONS["yaml"])  # current (3 since the title/preamble fix)
     dry = client.post(f"{API}/knowledge-bases/{kb['id']}/reextract", json={"dry_run": True, "formats": ["yaml"]}, headers=h)
     assert dry.status_code == 200, dry.text
     assert [d["document_key"] for d in dry.json()["documents"]] == ["old.yaml"]

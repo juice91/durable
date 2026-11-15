@@ -25,8 +25,10 @@ CapClass = Literal["text", "structured", "binary"]
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "rst": 1,
     "pdf": 1,
-    "yaml": 2,  # 2: comments kept (the leading block as a preamble, the rest on their keys)
-    "json": 1,
+    "yaml": 3,  # 2: comments kept (the leading block as a preamble, the rest on their keys);
+    # 3: a short preamble opens the first content section. (The title fallback added with it never
+    # changes a stored document: the API always passes a title, so only the preamble move counts.)
+    "json": 1,  # 1 still: JSON output only differs in the title fallback, which API uploads never reach
     "markdown-doxygen": 1,
 }  # keys: eap_schemas.knowledge.EXTRACTOR_IDS, in the same order (a contract test checks it)
 

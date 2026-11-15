@@ -15,8 +15,8 @@ def secs(text: str, **kw):
 def test_top_inline_between_and_list_comments_with_exact_text_and_order():
     got = secs("# top\n# more\n\na: 1 # inline\n# between\nb:\n  - x # in list\n  # list c\n  - y\n")
     assert got == [
-        (0, "", "top\nmore"),
-        (1, "a", "# inline\na: 1"),
+        (0, "", ""),  # yaml 3: the short preamble opens the first section
+        (1, "a", "top\nmore\n\n# inline\na: 1"),
         (1, "b", "# between\n# in list\n# list c\nb:\n- x\n- y"),
     ]
 
@@ -46,7 +46,7 @@ def test_comment_on_an_alias_key_line_is_kept_and_the_alias_expands():
 
 def test_licence_lines_do_not_leak_but_description_does():
     got = secs("# SPDX-License-Identifier: Apache-2.0\n# Copyright (c) 2020 TI\n# The real description\n\na: 1\n")
-    assert got[0] == (0, "", "The real description")
+    assert got[:2] == [(0, "", ""), (1, "a", "The real description\n\na: 1")]
 
 
 def test_version_bump_makes_re_extract_pick_old_docs():
