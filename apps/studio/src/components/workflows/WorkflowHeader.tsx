@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { ConnectAgUiAction } from "@/components/apiKeys/ConnectAgUiSheet";
 import { PageHeader } from "@/components/frame/PageHeader";
 import type { LinkTab } from "@/components/ui/Tabs";
 import { navCrumb } from "@/lib/nav";
@@ -45,7 +46,8 @@ export interface WorkflowHeaderProps {
 
 /**
  * The workflow pages' header: Workflows › {name} (the h1, with a "Switch workflow" combobox that
- * keeps the current tab), the page actions and the Graph · Runs · Traces tabs.
+ * keeps the current tab), the page actions, Connect (AG-UI), and the Graph · Runs · Traces tabs.
+ * Needs a `<Suspense>` boundary above it (the Connect Sheet reads the URL).
  */
 export function WorkflowHeader({ workflowId, name, tab, actions }: WorkflowHeaderProps) {
   const options = useWorkflowOptions();
@@ -60,7 +62,12 @@ export function WorkflowHeader({ workflowId, name, tab, actions }: WorkflowHeade
         },
       ]}
       documentTitle={name ? `${name}${tab === "graph" ? "" : ` · ${tab === "runs" ? "Runs" : "Traces"}`}` : "Workflow"}
-      actions={actions}
+      actions={
+        <>
+          {actions}
+          <ConnectAgUiAction target={{ kind: "workflow", id: workflowId }} name={name} />
+        </>
+      }
       tabs={workflowTabs(workflowId, tab)}
       tabsLabel="Workflow sections"
     />

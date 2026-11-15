@@ -8,6 +8,7 @@ import { applySidebarAttribute, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
 import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
+import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { Button } from "@/components/ui/Button";
@@ -188,6 +189,7 @@ export function SettingsSections() {
       <Section id="shortcuts" testId="settings-shortcuts" title="Keyboard shortcuts" description="Single keys work when focus is not in a text field. Press ? anywhere to see this list.">
         <ShortcutTable headingLevel={3} />
       </Section>
+      <ApiKeysSection />
       <BrowserDataSection />
       <AboutSection />
     </div>

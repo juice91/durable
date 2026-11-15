@@ -75,5 +75,26 @@ UI still uses (installed versions):
 | react-markdown | 10.1.0 | MIT | Rendering Markdown in chat messages and run event details. |
 | remark-gfm | 4.0.1 | MIT | GitHub-flavoured Markdown (tables, task lists) for react-markdown. |
 
+## AG-UI (milestone AG-UI, AGUI.4, AGUI.10, AGUI.11)
+
+Added by the milestone, pinned exactly. Versions are the installed ones; the licences are from each
+package's metadata and its `LICENSE` file (`LICENSE.txt` for rxjs).
+
+| Package | Version | Licence | Used for |
+|---|---|---|---|
+| @ag-ui/client | 1.0.3 | MIT | `HttpAgent`, the base of Studio's `ResumableHttpAgent`. |
+| @ag-ui/core | 1.0.3 | MIT | AG-UI event and message types. |
+| @assistant-ui/react-ag-ui | 0.1.1 | MIT | `useAgUiRuntime` for the agent Chat tab ("Copyright (c) 2026 AgentbaseAI Inc."). |
+| rxjs | 7.8.1 | Apache-2.0 | The Observable stream `@ag-ui/client` agents return. |
+
+The API (`apps/api`, Python) also depends on:
+
+| Package | Version | Licence | Used for |
+|---|---|---|---|
+| ag-ui-protocol (Python, `apps/api` only) | 1.0.0 | MIT | AG-UI 1.0 models and the SSE `EventEncoder` in `eap_api.ag_ui` ("Copyright (c) 2025 Tawkit Inc., Copyright (c) 2025 Markus Ecker"). |
+
+rxjs is distributed under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+and is used unmodified as a dependency.
+
 Every licence in this file is MIT, ISC, Apache-2.0 or OFL-1.1, except axe-core (MPL-2.0), which
 is a development and test dependency only and is not shipped in the Studio build.
