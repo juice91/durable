@@ -283,6 +283,25 @@ def test_read_outputs_and_tree_cost_are_tenant_scoped(run_store, event_log, tena
     assert run_store.run_tree_cost("intruder_" + tenant, root) == Decimal(0)
 
 
+def test_dropped_append_keeps_ac5_row_lists(run_store, event_log, tenant, engine):
+    """Merge of AC.5 into loops: a dropped-after-end append with AC.5's row list (the answering
+    model's row plus failed fallback attempts) keeps every row, and run_tree_cost agrees with
+    recorded_cost_usd (eap.check_budget's quantity) on a run without children."""
+    run_id = _workflow(run_store, tenant)
+    event_log.append(tenant, run_id, "end", "run_failed", {"status": "cancelled"})
+    rows = [_usage("model:3", "0.5"), _usage("model:3:failed:0", "0.125"), _usage("model:3:failed:1", None)]
+    dropped = event_log.append(tenant, run_id, "model:3:final", "model_message", {}, rows)
+    assert dropped.dropped
+    with engine.connect() as conn:
+        keys = set(conn.execute(
+            text("SELECT request_key FROM run_model_requests WHERE tenant_id = :t AND run_id = :r"),
+            {"t": tenant, "r": str(run_id)},
+        ).scalars())
+    assert keys == {"model:3", "model:3:failed:0", "model:3:failed:1"}
+    assert run_store.recorded_cost_usd(tenant, run_id) == Decimal("0.625")
+    assert run_store.run_tree_cost(tenant, run_id) == run_store.recorded_cost_usd(tenant, run_id)
+
+
 # ------------------------------------------------------------------ review fixes (LP.4 review)
 
 

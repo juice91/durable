@@ -486,7 +486,8 @@ def test_a_workflow_agent_step_on_a_structured_agent_returns_the_object(worker, 
         assert row["status"] == "completed", row["error"]
         events = event_rows(worker.engine, run_id)
         [step] = [d for _, k, _, d in events if k == "step:ask:completed"]
-        assert step["output"] == CANON, step["output"]  # the step gets the canonical text today (AC.9 moves to output_json)
+        # AC.9: a structured agent step's output is the validated object (output_json), not its text.
+        assert step["output"] == {"answer": "x", "score": 1}, step["output"]
         assert json.loads(row["output"]) == {"answer": "x", "score": 1}  # validated against the output schema
         child = worker.run_store.get_run(tenant, uuid.UUID(by_type(events, "step_started")[0]["child_run_id"]))
         assert child["status"] == "completed" and child["output_format"] == "json" and child["output"] == CANON

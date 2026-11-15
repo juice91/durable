@@ -256,11 +256,25 @@ def judge_model_problems(spec: WorkflowSpec) -> list[str]:
     return problems
 
 
-def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str) -> list[str]:
+def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str, *, lock: bool = False) -> list[str]:
     """What a spec points at that this tenant cannot run, one message per problem, naming the step:
     agent and tool steps at every depth (loop bodies included), judge models, and the loop caps.
 
-    Another tenant's agent reads exactly like a missing one, so nothing about it leaks."""
+    Another tenant's agent reads exactly like a missing one, so nothing about it leaks. With `lock`
+    (publish), the referenced agent rows (at every depth) are first locked FOR SHARE until the
+    transaction ends, in id order (no deadlock between two publishes): an archive (FOR NO KEY
+    UPDATE) of one of them waits for the publish, whose step then shows in the archive's
+    referencing workflows, or this check sees `archived`."""
+    if lock:
+        agent_ids = sorted({str(step.agent_id) for _, step in walk_steps(spec.steps) if isinstance(step, AgentStep)})
+        if agent_ids:
+            (
+                db.query(AgentModel.id)
+                .filter(AgentModel.id.in_(agent_ids), AgentModel.tenant_id == tenant_id)
+                .order_by(AgentModel.id)
+                .with_for_update(read=True)
+                .all()
+            )
     problems: list[str] = runtime_pending_problems(spec)
     problems += loop_limit_problems(spec)
     allowed_tools = _allowed_tool_ids()
@@ -685,7 +699,7 @@ def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db
     except ValidationError as exc:
         messages = "; ".join(err["msg"].removeprefix("Value error, ") for err in exc.errors())
         raise HTTPException(status_code=422, detail=f"draft spec is invalid: {messages}") from None
-    problems = reference_problems(db, spec, principal.tenant_id)
+    problems = reference_problems(db, spec, principal.tenant_id, lock=True)
     ref_problems, warnings = output_ref_checks(db, spec, principal.tenant_id)
     problems += ref_problems
     warnings += loop_agent_approval_warnings(db, spec, principal.tenant_id)

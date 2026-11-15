@@ -186,4 +186,140 @@ def test_unreadable_prices_file_prices_nothing(tmp_path, monkeypatch, caplog, ex
     with caplog.at_level("ERROR", logger="eap_worker"):
         assert price("openai:gpt-4o", Usage(1000, 100), AT) == (None, None)
     assert "cannot access the file (PermissionError)" in caplog.text
-    assert "recorded without a price" in caplog.text
+    assert "the price file prices nothing" in caplog.text
+
+
+# ----------------------------------------------------------------------------- impossible streamed usage
+
+
+def _response(text: str = "", tool_args: dict | None = None):
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
+
+    parts: list = [ThinkingPart(content="x" * 4000)]  # thinking is covered by reasoning_tokens
+    if text:
+        parts.append(TextPart(content=text))
+    if tool_args is not None:
+        parts.append(ToolCallPart(tool_name="lookup", args=tool_args, tool_call_id="c1"))
+    return ModelResponse(parts=parts, model_name="qwen3.8-thinking")
+
+
+def _usage(output_tokens: int, reasoning: int, *, details_only: bool = False):
+    from pydantic_ai.usage import RequestUsage
+
+    if details_only:
+        return RequestUsage(input_tokens=100, output_tokens=output_tokens, details={"reasoning_tokens": reasoning})
+    return RequestUsage(input_tokens=100, output_tokens=output_tokens, output_reasoning_tokens=reasoning,
+                        details={"reasoning_tokens": reasoning})
+
+
+def test_streamed_usage_output_below_reasoning_is_corrected_and_logged(caplog, prices_file):
+    from eap_schemas.knowledge import approx_tokens
+
+    prices_file({"litellm:*": [{"effective_from": "2026-01-01", "input_per_mtok": "0", "output_per_mtok": "1"}]})
+    text = "Paris is the capital of France. " * 10
+    args = {"city": "Paris", "country": "France"}
+    response = _response(text, args)
+    with caplog.at_level("WARNING", logger="eap_worker"):
+        usage = request_usage_input("litellm:qwen3.8-thinking", response.model_name, _usage(2, 300),
+                                    streamed_response=response)
+    expected = 300 + approx_tokens(text) + approx_tokens(json.dumps(args, separators=(",", ":")))
+    assert usage["output_tokens"] == expected and usage["usage_estimated"] is True
+    assert usage["input_tokens"] == 100 and usage["usage_measured"] is True
+    records = [r for r in caplog.records if getattr(r, "code", None) == pricing.USAGE_OUTPUT_BELOW_REASONING]
+    assert len(records) == 1
+    r = records[0]
+    assert (r.reported_output_tokens, r.reasoning_tokens, r.estimated_output_tokens) == (2, 300, expected)
+    assert "Paris" not in r.getMessage() and "Paris" not in str(r.__dict__)  # counts only, no text
+    # The corrected count is what is recorded and priced, and the event marks it as estimated.
+    row, fields = usage_record("model:0", usage, AT)
+    assert row["output_tokens"] == expected and fields["usage"]["output_tokens"] == expected
+    assert fields["usage"]["estimated"] is True
+    assert row["cost_usd"] == (Decimal(expected) / Decimal(10**6)).quantize(Decimal("1e-10"))
+
+
+def test_streamed_usage_reasoning_only_in_details_is_corrected():
+    response = _response("ok")
+    usage = request_usage_input("litellm:q", None, _usage(1, 50, details_only=True), streamed_response=response)
+    assert usage["output_tokens"] == 51 and usage["usage_estimated"] is True
+
+
+def test_streamed_correct_usage_is_unchanged(caplog):
+    response = _response("Paris.")
+    with caplog.at_level("WARNING", logger="eap_worker"):
+        for out, reasoning in ((300, 300), (350, 300), (5, 0)):
+            usage = request_usage_input("litellm:q", None, _usage(out, reasoning), streamed_response=response)
+            assert usage == request_usage_input("litellm:q", None, _usage(out, reasoning))
+            assert usage["output_tokens"] == out and "usage_estimated" not in usage
+            _row, fields = usage_record("model:0", usage, AT)
+            assert "estimated" not in fields["usage"]
+    assert not [r for r in caplog.records if getattr(r, "code", None) == pricing.USAGE_OUTPUT_BELOW_REASONING]
+
+
+def test_non_streamed_usage_is_unchanged(caplog):
+    # Processors, observers and the judge call models without streaming: never corrected.
+    with caplog.at_level("WARNING", logger="eap_worker"):
+        usage = request_usage_input("litellm:q", None, _usage(2, 300))
+    assert usage["output_tokens"] == 2 and "usage_estimated" not in usage
+    assert not [r for r in caplog.records if getattr(r, "code", None) == pricing.USAGE_OUTPUT_BELOW_REASONING]
+
+
+def test_streamed_unmeasured_usage_is_unchanged():
+    from pydantic_ai.usage import RequestUsage
+
+    usage = request_usage_input("litellm:q", None, RequestUsage(unmeasured_requests=1), streamed_response=_response("hi"))
+    assert usage["usage_measured"] is False and usage["output_tokens"] == 0 and "usage_estimated" not in usage
+
+
+def _xai_style_usage(completion: int, reasoning: int):
+    """What pydantic_ai.models.xai builds: completion_tokens EXCLUDING reasoning as output_tokens,
+    reasoning only in details (total = prompt + completion + reasoning)."""
+    from pydantic_ai.usage import RequestUsage
+
+    return RequestUsage(input_tokens=100, output_tokens=completion, details={"reasoning_tokens": reasoning})
+
+
+def _litellm_style_usage(completion: int, reasoning: int):
+    """What pydantic_ai.models.openai builds for the LiteLLM gateway: completion_tokens (which
+    INCLUDES reasoning under OpenAI semantics) as output_tokens, completion_tokens_details in details."""
+    from pydantic_ai.usage import RequestUsage
+
+    return RequestUsage(input_tokens=100, output_tokens=completion,
+                        details={"reasoning_tokens": reasoning, "accepted_prediction_tokens": 0})
+
+
+@pytest.mark.parametrize("completion,reasoning", [(9, 300), (400, 50)])
+def test_xai_style_streamed_usage_is_unchanged(caplog, completion, reasoning):
+    # xAI: a short answer after long reasoning is an exact count, never "impossible".
+    response = _response("Paris.")
+    with caplog.at_level("WARNING", logger="eap_worker"):
+        usage = request_usage_input("xai:grok-3-mini", "grok-3-mini", _xai_style_usage(completion, reasoning),
+                                    streamed_response=response)
+    assert usage["output_tokens"] == completion and "usage_estimated" not in usage
+    assert usage == request_usage_input("xai:grok-3-mini", "grok-3-mini", _xai_style_usage(completion, reasoning))
+    assert not [r for r in caplog.records if getattr(r, "code", None) == pricing.USAGE_OUTPUT_BELOW_REASONING]
+
+
+@pytest.mark.parametrize("provider", ["google-gla", "anthropic", "groq", "mistral"])
+def test_other_providers_are_never_corrected(provider):
+    usage = request_usage_input(f"{provider}:m", None, _xai_style_usage(2, 300), streamed_response=_response("hi"))
+    assert usage["output_tokens"] == 2 and "usage_estimated" not in usage
+
+
+@pytest.mark.parametrize("provider", sorted(pricing.REASONING_INCLUSIVE_PROVIDERS))
+def test_litellm_style_streamed_usage_is_corrected(caplog, provider):
+    from eap_schemas.knowledge import approx_tokens
+
+    text = "Paris is the capital of France."
+    with caplog.at_level("WARNING", logger="eap_worker"):
+        usage = request_usage_input(f"{provider}:qwen3.8-thinking", None, _litellm_style_usage(2, 300),
+                                    streamed_response=_response(text))
+    assert usage["output_tokens"] == 300 + approx_tokens(text) and usage["usage_estimated"] is True
+    assert len([r for r in caplog.records if getattr(r, "code", None) == pricing.USAGE_OUTPUT_BELOW_REASONING]) == 1
+
+
+def test_memory_scrub_keeps_usage_estimated():
+    from eap_run_store.memory import _scrub_usage
+
+    usage = {"input_tokens": 1, "output_tokens": 310, "measured": True, "estimated": True, "text": "x"}
+    assert _scrub_usage(usage) == {"input_tokens": 1, "output_tokens": 310, "measured": True, "estimated": True}
+    assert "estimated" not in _scrub_usage({"estimated": "yes"})

@@ -4,6 +4,7 @@ import React from "react";
 import { ContextFieldsEditor } from "../ContextFieldsEditor";
 import { placeholders, stepForErrorMessage, stepStatus } from "../specSections";
 import type { EditorStepDefinition, StepProps } from "./types";
+import { readableError } from "@/components/agents/readableError";
 
 /** Step 4: the request context fields (values are set per run, in the chat's context popover). */
 export function RequestContextStep({ draft, onChange, errors, services }: StepProps) {
@@ -13,7 +14,7 @@ export function RequestContextStep({ draft, onChange, errors, services }: StepPr
       onChange={(contextFields) => onChange({ contextFields })}
       usedNames={placeholders(draft.instructions)}
       onInsertPlaceholder={services.insertPlaceholder}
-      sectionError={errors.target?.kind === "context_fields" ? errors.serverError : null}
+      sectionError={errors.target?.kind === "context_fields" && errors.serverError ? readableError(errors.serverError) : null}
     />
   );
 }

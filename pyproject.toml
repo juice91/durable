@@ -21,7 +21,7 @@ members = ["packages/*", "apps/api", "apps/worker"]
 eap-schemas = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -51,7 +51,7 @@ forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
 [[tool.importlinter.contracts]]
 name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
 forbidden_modules = ["opentelemetry"]
 # Direct imports only: the sanctioned path is eap_api/eap_worker -> eap_observability -> opentelemetry.
 # Every other root package is a source here, so any indirect chain must still end in a direct
@@ -89,6 +89,19 @@ forbidden_modules = [
     "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
     "eap_processors", "fastapi", "starlette", "sqlalchemy", "psycopg", "pgvector", "pydantic_ai", "fastmcp",
     "mcp", "dbos", "httpx", "httpx2", "opentelemetry", "tiktoken", "bs4", "anthropic", "openai",
+]
+
+[[tool.importlinter.contracts]]
+name = "Pricing imports only the standard library, eap_schemas, pydantic and genai_prices"
+type = "forbidden"
+source_modules = ["eap_pricing"]
+# Shared by the API (reindex estimate, price_known) and the worker (request costs): no platform
+# package and no I/O library. genai-prices (a bundled price snapshot; eap_pricing never calls its
+# network updater) is allowed so the API's price_known and the worker's pricing are one lookup.
+forbidden_modules = [
+    "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
+    "eap_processors", "eap_knowledge", "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai",
+    "fastmcp", "mcp", "dbos", "httpx", "opentelemetry", "anthropic", "openai",
 ]
 
 [[tool.importlinter.contracts]]

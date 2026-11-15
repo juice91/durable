@@ -13,6 +13,7 @@ import { PublishWarnings } from "@/components/agents/PublishWarnings";
 import { AgentVersionsPanel, useVersionRestore } from "@/components/agents/AgentVersionsPanel";
 import { canonicalJson, errorTarget } from "@/components/agents/specSections";
 import { stepForError } from "@/components/agents/stepper/registry";
+import { readableError } from "@/components/agents/readableError";
 import { CompareSheet } from "@/components/agents/stepper/CompareSheet";
 import { useRestoreFocus } from "./restoreFocus";
 import { useEditorLayout } from "@/components/agents/stepper/useEditorLayout";
@@ -212,7 +213,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
       {/* Errors a step owns show in that step instead (inline, or at the top of the step). */}
       {saveError && !errorTarget(saveError) && !stepForError(saveError) ? (
         <div role="alert" data-testid="agent-save-error" className={`${notice} border-destructive/40 bg-destructive/10 text-destructive-text`}>
-          {saveError}
+          {readableError(saveError)}
         </div>
       ) : null}
       {lastPublishResult?.type === "success" ? (

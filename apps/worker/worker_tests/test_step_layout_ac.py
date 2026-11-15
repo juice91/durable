@@ -189,3 +189,75 @@ def test_structured_memory_turns_keep_the_memory_step_slots(worker, client, sche
     assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN_OUTPUT["memory_observational"]
     # The observer child workflow's own steps are unchanged by structured output.
     assert step_names(schema, observer_workflow_id(str(run_id))) == OBSERVER_STEPS_BELOW_THRESHOLD
+
+
+# --------------------------------------------------------------------------- AC.5: limits and fallback
+
+# Native limits and fallback models add NO step (usage_limits is an argument; the fallback chain lives
+# inside the model step), so those shapes keep their GOLDEN lists exactly. Only `limits.max_cost_usd`
+# adds `eap.check_budget`, before every model request n >= 1 (after the previous response's tool
+# results are recorded), inside _drive_agent. Recorded with AC.5.
+CHECK_BUDGET = "eap.check_budget"
+GOLDEN_COST_CAP: dict[str, list[str]] = {
+    "plain": GOLDEN["plain"],  # one model request: never checked
+    "tool": BASELINE["ticket"][:10] + [CHECK_BUDGET] + BASELINE["ticket"][10:],
+    "knowledge": BASELINE["ticket"][:10] + [CHECK_BUDGET] + BASELINE["ticket"][10:],
+}
+
+
+def with_limits_and_fallback(spec: dict[str, Any], **limits: Any) -> dict[str, Any]:
+    """Native limits (generous: never reached) plus a fallback model that is never needed."""
+    primary = spec["model"]["name"]
+    fallback = "history" if primary != "history" else "echo"
+    return {
+        **spec,
+        "limits": limits or {"max_requests": 20, "max_tool_calls": 20, "max_total_tokens": 1_000_000},
+        "fallback_models": [{"provider": "test", "name": fallback}],
+    }
+
+
+def test_limits_and_fallback_keep_the_golden_steps(worker, client, schema, kb_tenant):
+    tenant = kb_tenant
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(ticket_spec(tools=(), model="echo")), "hi")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["plain"]
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(ticket_spec()), "Laptop broken")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["tool"]
+    spec = with_limits_and_fallback(echo_spec(input_processors=[PII], output_processors=[PII, moderation()]))
+    run_id, row = run(worker, client, tenant, spec, "mail ada@example.com")
+    assert row["status"] == "completed", row
+    assert step_names(schema, run_id) == GOLDEN["processors"]
+    kb = make_kb(worker, tenant)
+    ingest(worker, tenant, kb, "printer.md", PRINTER)
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(rag_spec({"id": kb["id"]})), "toner light")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["knowledge"]
+
+
+def test_limits_and_fallback_keep_the_memory_step_slots(worker, client, schema, mem_tenant):
+    conv = conversation(worker, mem_tenant)
+    spec = with_limits_and_fallback(memory_spec(model="echo", history={"last_turns": 5}))
+    run_id, row = turn(worker, client, mem_tenant, conv, "hi", spec)
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["memory_history"]
+
+    conv = conversation(worker, mem_tenant)
+    run_id, row = turn(worker, client, mem_tenant, conv, "hi", with_limits_and_fallback(recall_spec(model="echo")))
+    wait_workflow(schema, run_id)
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["memory_recall"]
+
+    conv = conversation(worker, mem_tenant)
+    run_id, row = turn(worker, client, mem_tenant, conv, "hi", with_limits_and_fallback(obs_spec()))
+    wait_workflow(schema, run_id)
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["memory_observational"]
+    assert step_names(schema, observer_workflow_id(str(run_id))) == OBSERVER_STEPS_BELOW_THRESHOLD
+
+
+def test_cost_cap_adds_check_budget_inside_the_agent_loop(worker, client, schema, kb_tenant):
+    tenant = kb_tenant
+    cap = {"max_cost_usd": "100"}
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(ticket_spec(tools=(), model="echo"), **cap), "hi")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN_COST_CAP["plain"]
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(ticket_spec(), **cap), "Laptop broken")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN_COST_CAP["tool"]
+    kb = make_kb(worker, tenant)
+    ingest(worker, tenant, kb, "printer.md", PRINTER)
+    run_id, row = run(worker, client, tenant, with_limits_and_fallback(rag_spec({"id": kb["id"]}), **cap), "toner light")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN_COST_CAP["knowledge"]

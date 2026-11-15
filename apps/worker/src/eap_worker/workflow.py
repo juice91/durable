@@ -179,6 +179,33 @@ ends it `output_mode_unsupported`; a processed object that breaks the schema end
 `output_blocked` with reason `schema_invalid_after_processing`. Memory consumes the canonical JSON
 text (eap.memory_index) and the observer renders the object as the answer (observational.turn_text).
 
+Limits and fallback (AC.5): only for a spec with `limits` or `fallback_models`. Native limits
+(`max_requests`, `max_tool_calls`, token caps) go to the run as `usage_limits` (no argument without
+them, so Pydantic AI's default of 50 requests stays); a breach ends the run `usage_limit_exceeded`
+with `{limit, value}`. `limits.max_cost_usd` adds one step before every model request n >= 1:
+
+    eap.check_budget                    SUM(cost_usd) of the run's recorded run_model_requests rows
+                                        (unpriced = 0); at or over the cap: run_budget_exceeded
+    eap-agent__model.request_stream     model request n
+
+Fallback adds no step: the resolver builds a FallbackModel inside the model step (every request
+starts at the primary). The fallback models are re-checked against the allowlist at run start. A
+per-run model override disables fallback (`run_started.fallback: "disabled_by_override"`). The
+`model_message` event of a request on a chain adds `requested_model_id`, `fallback_index` and
+`failed_attempts: [{model_id, outcome, error_type}]`; its usage row is the ANSWERING model's, and
+failed attempts that reported usage get rows `model:{n}:failed:{k}` in the same transaction. Every
+model failing ends the run `fallback_exhausted` (`cause`: the first failure's code). A failed
+attempt's error text is reduced to its type and HTTP status (pricing.safe_attempt_error) in every
+event and in runs.messages; spans keep only the type (instrumentation without content, plus the
+redacting exporter). The one place it stays verbatim is the model step's own DBOS checkpoint in
+the system database (the recorded ModelResponse, like the model's output itself), which is
+operator-only and never served to tenants. Token caps (`max_input_tokens`, `max_output_tokens`,
+`max_total_tokens`) are checked by the workflow on each response, before its output processors run
+(so a response over a cap never triggers a billed moderation request); the run fails right after
+the response's model_message event and usage row are written (so a billed request is never lost)
+and before its tools run. With output processors that event carries no text (`"withheld":
+"usage_limit_exceeded"`), since the processors never checked it.
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -190,6 +217,7 @@ import asyncio
 import json
 import logging
 import os
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -197,7 +225,7 @@ from dbos import DBOS
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import ResolveModelId
 from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -214,6 +242,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.usage import UsageLimits
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolset
 from pydantic_core import to_jsonable_python
 
@@ -221,6 +250,7 @@ from eap_observability import log_context, log_failure, run_span, set_run_outcom
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
 from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
 from eap_schemas import AgentSpec
+from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
@@ -229,6 +259,8 @@ from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import (
     SCHEMA_INVALID_AFTER_PROCESSING,
+    describe_usage_limit,
+    token_limit_breach,
     InputBlocked,
     OutputBlocked,
     OutputModeUnsupported,
@@ -250,8 +282,15 @@ from eap_worker.memory import (
 from eap_worker.observational import observe_after_turn
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
-from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
-from eap_worker.pricing import request_usage_input, usage_record
+from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
+from eap_worker.pricing import (
+    failed_attempt_rows,
+    fallback_usage,
+    request_usage_input,
+    scrub_failed_attempts,
+    scrub_failed_attempts_message,
+    usage_record,
+)
 from eap_worker.processors import (
     ChainRun,
     describe,
@@ -359,7 +398,8 @@ agent: Agent[WorkerDeps, str] = Agent(
     toolsets=[DynamicToolset(_toolset_for_run, id=TOOLSET_ID)],
     model_settings=ModelSettings(max_retries=0),
     capabilities=[
-        ResolveModelId(make_resolver(lambda: get_runtime().settings)),
+        # AC.5: the spec's fallback chain for requests to its primary model (eap_worker.models).
+        ResolveModelId(make_resolver(lambda: get_runtime().settings, fallback=True)),
         # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
         RetrieveNumbering(),
         # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
@@ -503,14 +543,19 @@ async def append_event_step(
     the request is priced here, the price and tokens are added to the event's data, and its
     run_model_requests row is written in the event's transaction (first write wins, so a
     re-executed step never re-prices). Same step, same position: a run without usage and a
-    checkpoint recorded before usage existed replay unchanged."""
+    checkpoint recorded before usage existed replay unchanged. AC.5: `usage["failed"]` (from
+    pricing.fallback_usage) adds a row per failed fallback attempt that reported usage
+    (`{request_key}:failed:{k}`), in the same transaction."""
     rt = get_runtime()
-    row = None
+    rows: list[dict[str, Any]] | dict[str, Any] | None = None
     if usage is not None:
-        row, fields = usage_record(request_key or event_key.removesuffix(":final"), usage)
+        key = request_key or event_key.removesuffix(":final")
+        row, fields = usage_record(key, usage)
         data = {**data, **fields}
+        failed = usage.get("failed") or []
+        rows = [row, *failed_attempt_rows(key, failed, row["created_at"])] if failed else row
     event, _created = await asyncio.to_thread(
-        rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, row
+        rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, rows
     )
     crash_point("after_event_write", event_key=event_key)
     return event.seq
@@ -532,6 +577,20 @@ async def finish_run_step(
     await asyncio.to_thread(
         rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages, output_format
     )
+
+
+@DBOS.step(name="eap.check_budget")
+async def check_budget_step(run_id: str, tenant_id: str, n: int, cap_usd: str) -> str:
+    """AC.5: before model request n >= 1 of a spec with `limits.max_cost_usd`. Reads the run's
+    recorded cost (every run_model_requests row of THIS run so far: chat, failed fallback attempts,
+    moderation, in-turn embeddings; unpriced rows count 0) and raises RunBudgetExceeded (pickle-safe,
+    recorded by DBOS, so a replay decides identically) when it is at or over the cap. Returns the
+    spent amount as a decimal string."""
+    rt = get_runtime()
+    spent = await asyncio.to_thread(rt.run_store.recorded_cost_usd, tenant_id, UUID(run_id))
+    if spent >= Decimal(cap_usd):
+        raise RunBudgetExceeded(spent, cap_usd)
+    return format(spent, "f")
 
 
 async def _heartbeat(run_id: str, tenant_id: str) -> None:
@@ -676,6 +735,40 @@ def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
         return None
 
 
+# Token caps are enforced by the workflow itself (check_token_limits), not by Pydantic AI: its check
+# runs after a response but before the response is handed back, so the billed request would get no
+# model_message event and no usage row.
+TOKEN_LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens", "max_total_tokens")
+
+
+def usage_limits_for(spec: AgentSpec) -> UsageLimits | None:
+    """AC.5: Pydantic AI's UsageLimits for the spec's request and tool-call caps, or None (no
+    argument: the default UsageLimits, 50 requests, applies as before). An unset max_requests keeps
+    50. Token caps are not passed (see token_limits_for)."""
+    if spec.limits is None:
+        return None
+    kwargs = {
+        kwarg: value
+        for kwarg, value in spec.limits.usage_limits_kwargs().items()
+        if kwarg in ("request_limit", "tool_calls_limit")
+    }
+    return UsageLimits(**kwargs) if kwargs else None
+
+
+def token_limits_for(spec: AgentSpec) -> dict[str, int]:
+    """AC.5: the spec's token caps `{field: cap}` (empty without any), checked by check_token_limits."""
+    if spec.limits is None:
+        return {}
+    return {name: getattr(spec.limits, name) for name in TOKEN_LIMIT_FIELDS if getattr(spec.limits, name) is not None}
+
+
+def fallback_disabled_by_override(spec: AgentSpec | None, link: dict[str, Any]) -> bool:
+    """A spec with fallback models whose run has another (overridden) model: no fallback (AC.5)."""
+    if spec is None or not spec.fallback_models:
+        return False
+    return len(fallback_chain(spec, effective_model_id(spec, link))) == 1
+
+
 def effective_model_id(spec: AgentSpec, link: dict[str, Any]) -> str:
     """The run's model: the recorded `model_id` from eap.start_run, else (a checkpoint recorded
     before run options, or a row without one) the spec's model."""
@@ -766,11 +859,14 @@ async def _record_output_retry(
     return errors
 
 
-async def _blocked_response(run_id: str, tenant_id: str, n: int, usage: Any, chain: ChainRun) -> None:
-    """A blocked (or failed) response: keep the request's usage, never its content; then fail."""
+async def _blocked_response(
+    run_id: str, tenant_id: str, n: int, usage: Any, chain: ChainRun, extra: dict[str, Any] | None = None
+) -> None:
+    """A blocked (or failed) response: keep the request's usage, never its content; then fail.
+    `extra` (AC.5): the fallback fields (requested_model_id, fallback_index, failed_attempts)."""
     await append_event_step(
         run_id, tenant_id, f"model:{n}:final", "model_message",
-        {"model_request": n, "text": "", "blocked": True}, usage=usage,
+        {"model_request": n, "text": "", "blocked": True, **(extra or {})}, usage=usage,
     )
     raise chain.error if chain.error is not None else _blocked_error(chain, "output")
 
@@ -785,6 +881,7 @@ async def _process_structured_response(
     output_calls: list[ToolCallPart],
     candidate: bool,
     usage: Any,
+    extra: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Output processors over one response of a structured spec (AC.4), before anything of it is
     stored: the deterministic processors on every string leaf of each output candidate (tool
@@ -804,7 +901,7 @@ async def _process_structured_response(
             chain = await run_chain(run_id, tenant_id, "output", processors, _args_text(call), moderation=False)
         await _record_processor_results(run_id, tenant_id, chain, key)
         if chain.text is None:
-            await _blocked_response(run_id, tenant_id, n, usage, chain)
+            await _blocked_response(run_id, tenant_id, n, usage, chain, extra)
         message = processed_output_call(message, call.tool_call_id, chain.text)
     if not text:
         return message, text
@@ -818,7 +915,7 @@ async def _process_structured_response(
         chain = await run_chain(run_id, tenant_id, "output", processors, text, moderation=False)
     await _record_processor_results(run_id, tenant_id, chain, key)
     if chain.text is None:
-        await _blocked_response(run_id, tenant_id, n, usage, chain)
+        await _blocked_response(run_id, tenant_id, n, usage, chain, extra)
     text = canonical_json(chain.text) if value is not None else chain.text
     return processed_message(message, text), text
 
@@ -867,6 +964,14 @@ async def _drive_agent(
     run_options: dict[str, Any] = {}
     if structured:
         run_options = {"output_type": output_type_for(spec), "retries": retries_for(spec)}
+    # AC.5: only a spec with native limits passes usage_limits; the cost cap is ours (check_budget).
+    limits = usage_limits_for(spec)
+    if limits is not None:
+        run_options["usage_limits"] = limits
+    token_caps = token_limits_for(spec)
+    cap_usd = spec.limits.max_cost_usd if spec.limits is not None else None
+    # (model_id,) without fallback or with an override. Not `chain`: that name is a ChainRun below.
+    model_chain = fallback_chain(spec, model_id)
     # RM.12: a memory turn stores no copy of the note (eap_worker.memory.scrub_memory_messages).
     memory = memory_of(deps)
     n = 0
@@ -876,6 +981,7 @@ async def _drive_agent(
     candidates: dict[int, Any] = {}  # structured: n -> its raw candidate (for output_retry paths)
     awaiting_retry: int | None = None  # structured: the response whose retry (if any) comes next
     final_text: str | None = None
+    active_run: Any = None  # AC.5: the run, for the limit a UsageLimitExceeded broke
     try:
         async with agent.iter(
             input_text,
@@ -885,6 +991,7 @@ async def _drive_agent(
             model_settings=settings,
             **run_options,
         ) as run:
+            active_run = run
             async for node in run:
                 request_parts = list(node.request.parts) if Agent.is_model_request_node(node) else []
                 if pending:
@@ -896,6 +1003,10 @@ async def _drive_agent(
                     )
                 if Agent.is_model_request_node(node) or Agent.is_call_tools_node(node):
                     awaiting_retry = None
+                if cap_usd is not None and n >= 1 and Agent.is_model_request_node(node):
+                    # AC.5: before model request n (the node runs when the loop advances).
+                    await check_budget_step(run_id, tenant_id, n, format(cap_usd, "f"))
+                    crash_point("after_check_budget", event_key=f"budget:{n}")
                 if Agent.is_call_tools_node(node):
                     # The model request that produced this response is already checkpointed.
                     response: ModelResponse = node.model_response
@@ -908,15 +1019,43 @@ async def _drive_agent(
                     candidate = bool(output_calls) or (structured and mode != "tool" and not calls and bool(text))
                     if candidate:
                         candidates[n] = _candidate_value(spec, output_calls, text)
-                    usage = request_usage_input(model_id, response.model_name, response.usage)
-                    message = _message_json(response)
+                    fallback_data: dict[str, Any] = {}
+                    if len(model_chain) > 1:
+                        # AC.5: priced as the model that answered; failed attempts with usage get rows.
+                        # Streamed (model.request_stream): the answering model's impossible usage
+                        # is corrected by the guard (request_usage_input).
+                        usage, fallback_data, failed_usage = fallback_usage(
+                            model_chain, response, streamed_response=response
+                        )
+                        if failed_usage:
+                            usage["failed"] = failed_usage
+                    else:
+                        # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
+                        usage = request_usage_input(
+                            model_id, response.model_name, response.usage, streamed_response=response
+                        )
+                    # AC.5: a fallback attempt's error text (provider body, request) is never stored.
+                    message = scrub_failed_attempts_message(_message_json(response))
                     message = scrub_memory_message(message, memory)
+                    # AC.5: token caps, from the run's recorded usage (this response included), decided
+                    # BEFORE the output processors, so a response over a cap never triggers their
+                    # (billed) moderation request. Its usage row is still written below.
+                    breach = token_limit_breach(token_caps, run.usage) if token_caps else None
+                    if breach is not None and spec.output_processors:
+                        # The text was never checked by the processors: never stored. Usage kept.
+                        await append_event_step(
+                            run_id, tenant_id, f"model:{n}:final", "model_message",
+                            {"model_request": n, "text": "", "withheld": "usage_limit_exceeded", **fallback_data},
+                            usage=usage,
+                        )
+                        raise breach
                     if spec.output_processors:
                         # Thinking is model text no processor checks: never stored, for every response.
                         message = strip_thinking(message)
                     if spec.output_processors and structured:
                         message, text = await _process_structured_response(
-                            run_id, tenant_id, spec, n, message, text, output_calls, candidate, usage
+                            run_id, tenant_id, spec, n, message, text, output_calls, candidate, usage,
+                            fallback_data,
                         )
                         stored[n] = message
                     elif spec.output_processors and text:
@@ -930,17 +1069,21 @@ async def _drive_agent(
                         await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
                         if chain.text is None:
                             # Blocked (or failed): keep the request's usage, never its text.
-                            await _blocked_response(run_id, tenant_id, n, usage, chain)
+                            await _blocked_response(run_id, tenant_id, n, usage, chain, fallback_data)
                         text = chain.text
                         message = processed_message(message, text)
                         processed[n] = text
                         if final:
                             final_text = text
-                    data: dict[str, Any] = {"model_request": n, "text": text, "message": message}
+                    data: dict[str, Any] = {"model_request": n, "text": text, "message": message, **fallback_data}
                     if candidate:
                         data["output_candidate"] = True
                         crash_point("output_candidate", event_key=f"model:{n}:final")
                     await append_event_step(run_id, tenant_id, f"model:{n}:final", "model_message", data, usage=usage)
+                    if breach is not None:
+                        # AC.5: raised HERE, after the billed response and its usage row are recorded
+                        # (Pydantic AI would raise before either), and before its tools run.
+                        raise breach
                     for call in calls:
                         await append_event_step(
                             run_id,
@@ -963,10 +1106,14 @@ async def _drive_agent(
                 await _record_tool_results(run_id, tenant_id, pending, _all_parts(run.all_messages()))
             assert run.result is not None
             new_messages = scrub_memory_messages(
-                ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json"), memory
+                scrub_failed_attempts(ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")),
+                memory,
             )
             result_output = run.result.output
     except Exception as exc:
+        if isinstance(exc, UsageLimitExceeded) and active_run is not None:
+            # AC.5: name the limit from the run's own counters, not from the message text.
+            describe_usage_limit(exc, spec.limits, active_run.usage)
         if spec.output is not None:
             if isinstance(exc, UnexpectedModelBehavior) and "output retries" in str(exc):
                 # Retries exhausted: the last candidate's error paths only, never its values.
@@ -1049,6 +1196,8 @@ async def _run_body(
         # or message ever holds text they redact or block. Their events follow `start`.
         pre: ChainRun | None = None
         pre_spec = _spec_or_none(spec_json)
+        if fallback_disabled_by_override(pre_spec, link):
+            started["fallback"] = "disabled_by_override"  # AC.5: the caller chose this model
         if pre_spec is not None and pre_spec.input_processors:
             pre = await run_chain(run_id, tenant_id, "input", pre_spec.input_processors, input_text)
             started["input"] = pre.text if pre.text is not None else WITHHELD_INPUT
@@ -1078,6 +1227,10 @@ async def _run_body(
         model_id = effective_model_id(spec, link)
         provider, _, model_name = model_id.partition(":")
         rt.settings.allowed_models.check(provider, model_name)
+        for member in fallback_chain(spec, model_id)[1:]:
+            # AC.5: a fallback removed from the allowlist after publish fails closed here.
+            fallback_provider, _, fallback_name = member.partition(":")
+            rt.settings.allowed_models.check(fallback_provider, fallback_name)
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
         check_spec_tools(spec, rt.registry, rt.allowed_tools)
         request_context = link.get("request_context") or None
@@ -1108,6 +1261,8 @@ async def _run_body(
         )
         heartbeat.cancel()
         failed: dict[str, Any] = {"status": status, "error": failure.error, "error_code": failure.code}
+        if failure.data:
+            failed.update(failure.data)  # AC.5: {limit, value} / {limit, value, spent_usd} / {cause}
         if failure.reason is not None:
             failed["reason"] = failure.reason  # AC.4: e.g. output_blocked schema_invalid_after_processing
         await append_event_step(run_id, tenant_id, "end", "run_failed", failed)

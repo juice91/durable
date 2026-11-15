@@ -26,6 +26,8 @@ export interface Agent {
   name: string;
   draft_spec: AgentSpec;
   latest_version: number | null;
+  /** Archived agents are hidden from `list`, and refuse new runs, conversations and publishes (409). */
+  archived?: boolean;
 }
 
 export interface AgentVersion {
@@ -86,6 +88,37 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
   return new ApiError(response.status, message, details);
 }
 
+/** A published workflow that runs an agent as a step (POST /agents/{id}/archive's 409). */
+export interface ReferencingWorkflow {
+  workflow_id: string;
+  workflow_name: string;
+  versions: number[];
+  latest_version: number;
+}
+
+/** Archive refused (409): published workflows run the agent; `force` archives anyway. */
+export class AgentArchiveBlocked extends ApiError {
+  constructor(message: string, public workflows: ReferencingWorkflow[]) {
+    super(409, message);
+    this.name = "AgentArchiveBlocked";
+  }
+}
+
+async function archiveAgent(id: string, force: boolean): Promise<Agent> {
+  const response = await fetch(`${BASE_URL}/api/v1/agents/${encodeURIComponent(id)}/archive${force ? "?force=true" : ""}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...apiHeaders() },
+  });
+  if (response.status === 409) {
+    const data = await response.clone().json().catch(() => null);
+    if (data && Array.isArray(data.workflows)) {
+      throw new AgentArchiveBlocked(typeof data.detail === "string" ? data.detail : "Published workflows run this agent", data.workflows);
+    }
+  }
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${BASE_URL}${path}`;
   const headers: HeadersInit = {
@@ -109,6 +142,12 @@ export const api = {
     create: (spec: AgentSpec) => request<Agent>("/api/v1/agents", { method: "POST", body: JSON.stringify({ spec }) }),
     get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
     update: (id: string, spec: AgentSpec) => request<Agent>(`/api/v1/agents/${id}`, { method: "PATCH", body: JSON.stringify({ spec }) }),
+    /** The archived agents only (`GET /agents?archived=true`). */
+    listArchived: (init?: RequestInit) => request<Agent[]>("/api/v1/agents?archived=true", init),
+    /** Idempotent; answers the agent with its new `archived` flag. Throws AgentArchiveBlocked
+     * (409, with the workflows) when published workflows run it, unless `force`. */
+    archive: (id: string, options: { force?: boolean } = {}) => archiveAgent(id, options.force === true),
+    unarchive: (id: string) => request<Agent>(`/api/v1/agents/${encodeURIComponent(id)}/unarchive`, { method: "POST" }),
   },
   versions: {
     list: (agentId: string) => request<AgentVersion[]>(`/api/v1/agents/${agentId}/versions`),

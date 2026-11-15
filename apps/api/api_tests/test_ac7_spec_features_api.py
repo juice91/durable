@@ -16,7 +16,10 @@ from datetime import date
 import pytest
 from sqlalchemy import text
 
-from eap_api.routes import PRICE_NONE, PRICE_SET, PRICE_ZERO, _fixed_string_paths, _override_price, publish_warnings
+from eap_api.routes import PRICE_UNUSABLE, _fixed_string_paths, _price_status, publish_warnings
+from eap_pricing import PRICE_PRICED as PRICE_SET
+from eap_pricing import PRICE_UNPRICED as PRICE_NONE
+from eap_pricing import PRICE_ZERO
 from eap_api.routes.runs import _output_json
 from eap_api.version_diff import compare_specs
 from eap_schemas import AgentSpec, canonical_spec_hash
@@ -234,16 +237,38 @@ def test_no_cost_warning_without_a_cost_cap(tmp_path, monkeypatch):
     assert publish_warnings(spec) == []
 
 
-def test_genai_priced_providers_get_no_api_warning(tmp_path, monkeypatch):
-    # openai models are priced by genai-prices in the worker, which the API cannot consult.
+def test_genai_priced_model_gets_no_warning(tmp_path, monkeypatch):
+    # No override entry: openai:gpt-4 is priced by genai-prices (eap_pricing.price_known, the
+    # worker's own lookup), so its requests count toward the cap.
     _prices(tmp_path, monkeypatch, {})
+    assert _price_status("openai:gpt-4", date(2026, 11, 15)) == PRICE_SET
     spec = AgentSpec.model_validate({**FULL_SPEC, "model": {"provider": "openai", "name": "gpt-4"}, "fallback_models": []})
     assert publish_warnings(spec) == []
 
 
+def test_unknown_direct_provider_model_is_warned_about(tmp_path, monkeypatch):
+    # Neither the override file nor genai-prices knows it: the worker records no cost, so the cap
+    # would never trip. Before eap_pricing the API could not tell, and said nothing.
+    _prices(tmp_path, monkeypatch, {})
+    unknown = "no-such-model-zz9"
+    assert _price_status(f"openai:{unknown}", date(2026, 11, 15)) == PRICE_NONE
+    spec = AgentSpec.model_validate({
+        **FULL_SPEC, "model": {"provider": "openai", "name": "gpt-4"},
+        "fallback_models": [{"provider": "openai", "name": unknown}],
+    })
+    [warning] = publish_warnings(spec)
+    assert warning["code"] == "cost_cap_unpriced_model" and warning["path"] == "fallback_models[0]"
+    assert f"'openai:{unknown}' has no price in the model price override file or genai-prices" in warning["message"]
+
+
+def test_unusable_price_file_status(tmp_path, monkeypatch):
+    _prices(tmp_path, monkeypatch, None, raw="{not json")
+    assert _price_status("openai:gpt-4", date(2026, 11, 15)) == PRICE_UNUSABLE
+
+
 def test_future_price_period_does_not_count(tmp_path, monkeypatch):
     _prices(tmp_path, monkeypatch, {"test:a": [{"effective_from": "2099-01-01", "input_per_mtok": "1", "output_per_mtok": "1"}]})
-    assert _override_price("test:a", date(2026, 11, 15)) == PRICE_NONE
+    assert _price_status("test:a", date(2026, 11, 15)) == PRICE_NONE
 
 
 ZERO = [{"effective_from": "2026-01-01", "input_per_mtok": "0", "output_per_mtok": "0"}]
@@ -273,11 +298,11 @@ def test_zero_price_lookup_follows_the_worker_rules(tmp_path, monkeypatch):
         "test:*": ZERO, "test:exact": PERIOD, "test:later": later_zero, "test:half": half_zero,
         "test:future": future_zero, "openai:gpt-4": ZERO,
     })
-    assert _override_price("test:other", day) == PRICE_ZERO  # wildcard
-    assert _override_price("test:exact", day) == PRICE_SET  # the exact key wins over a $0 wildcard
-    assert _override_price("test:later", day) == PRICE_ZERO  # the latest period in effect
-    assert _override_price("test:half", day) == PRICE_SET  # only input free: still priced
-    assert _override_price("test:future", day) == PRICE_SET  # a future $0 period is not in effect
+    assert _price_status("test:other", day) == PRICE_ZERO  # wildcard
+    assert _price_status("test:exact", day) == PRICE_SET  # the exact key wins over a $0 wildcard
+    assert _price_status("test:later", day) == PRICE_ZERO  # the latest period in effect
+    assert _price_status("test:half", day) == PRICE_SET  # only input free: still priced
+    assert _price_status("test:future", day) == PRICE_SET  # a future $0 period is not in effect
     # A $0 override wins over genai-prices in the worker, so a direct provider is warned about too.
     spec = AgentSpec.model_validate({**FULL_SPEC, "model": {"provider": "openai", "name": "gpt-4"}, "fallback_models": []})
     [warning] = publish_warnings(spec)

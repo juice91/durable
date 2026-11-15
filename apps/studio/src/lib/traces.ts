@@ -352,7 +352,8 @@ export function spanLabel(
     }
     const id = str(a.agent_id);
     const name = id ? (agentNames[id] ?? short(id)) : "unknown";
-    let label = `Agent: ${name}${a.agent_version != null ? ` v${a.agent_version}` : ""}`;
+    // A draft run has no version (follow-up 1c): "Draft" where the version would be.
+    let label = `Agent: ${name}${a.draft === true ? " · Draft" : a.agent_version != null ? ` v${a.agent_version}` : ""}`;
     if (a.turn != null) label += ` (turn ${a.turn})`;
     return label;
   }
