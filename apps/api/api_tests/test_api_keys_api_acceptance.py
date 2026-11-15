@@ -317,14 +317,13 @@ def test_without_dev_mode_a_key_works_but_the_dev_bearer_and_management_do_not(c
     monkeypatch.delenv("EAP_AUTH_MODE")
     assert c.get(_agent_url(agent_id), headers=_bearer(k["key"])).status_code == 200
     assert c.get(_agent_url(agent_id), headers=_dev(tenant)).status_code == 401
-    # Management stays dev-only (Q2): with dev mode off current_principal fails closed (the existing
-    # configuration RuntimeError, a 500), for the dev bearer and for a key alike; never a 2xx.
-    from starlette.testclient import TestClient
-
-    quiet = TestClient(c.app, raise_server_exceptions=False)
+    # Management stays dev-only (Q2): with dev mode off current_principal fails closed with 401
+    # (AGUI.9; before it, the configuration RuntimeError, a 500), for the dev bearer and for a key
+    # alike; never a 2xx.
     for headers in (_dev(tenant), _bearer(k["key"])):
-        assert quiet.get(KEYS, headers=headers).status_code == 500
-        assert quiet.post(KEYS, json={"name": "x"}, headers=headers).status_code == 500
+        for response in (c.get(KEYS, headers=headers), c.post(KEYS, json={"name": "x"}, headers=headers)):
+            assert response.status_code == 401
+            assert response.json() == {"detail": "dev bearer authentication is not enabled"}
     # A bad key is still 401 with the key message, not the dev-mode one.
     bad = c.get(_agent_url(agent_id), headers=_bearer(f"pos_{'a' * 24}_{'B' * 43}"))
     assert bad.status_code == 401 and bad.json() == {"detail": "Invalid API key"}

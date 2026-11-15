@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import CheckConstraint, DateTime, Index, PrimaryKeyConstraint, String, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
 from eap_run_store.store import Base
 
@@ -179,6 +179,9 @@ def normalize_origin(origin: str) -> str:
     credentials (ValueError otherwise). A default port is dropped, as browsers send it."""
     if not isinstance(origin, str) or not origin or len(origin) > API_KEY_ORIGIN_MAX_CHARS:
         raise ValueError("an origin is a non-empty string of at most 255 characters")
+    if "*" in origin:
+        # No wildcard origins, in any position: an allowlist names each origin exactly (D17).
+        raise ValueError(f"wildcards are not allowed in an origin; list each origin: {origin!r}")
     try:
         parts = urlsplit(origin.strip())
         port = parts.port
@@ -196,6 +199,12 @@ def normalize_origin(origin: str) -> str:
     ):
         raise ValueError(f"not an origin (scheme://host[:port]): {origin!r}")
     host = parts.hostname.lower()
+    if not host.isascii():
+        # Browsers send an internationalized host in its punycode (A-label) form.
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise ValueError(f"not an origin (bad internationalized host): {origin!r}") from None
     if ":" in host:  # IPv6 literal
         host = f"[{host}]"
     default = 443 if scheme == "https" else 80
@@ -257,6 +266,20 @@ def _active_clause(now: Any):
     return (ApiKeyModel.revoked_at.is_(None)) & (
         ApiKeyModel.expires_at.is_(None) | (ApiKeyModel.expires_at > now)
     )
+
+
+def _touch(session: Session, key_id: str) -> datetime | None:
+    """`last_used_at = now()` unless it was set less than LAST_USED_THROTTLE_SECONDS ago."""
+    return session.execute(
+        update(ApiKeyModel)
+        .where(
+            ApiKeyModel.id == key_id,
+            ApiKeyModel.last_used_at.is_(None)
+            | (ApiKeyModel.last_used_at < func.now() - text(f"interval '{LAST_USED_THROTTLE_SECONDS} seconds'")),
+        )
+        .values(last_used_at=func.now())
+        .returning(ApiKeyModel.last_used_at)
+    ).scalar_one_or_none()
 
 
 class ApiKeyStore:
@@ -382,10 +405,12 @@ class ApiKeyStore:
             ).scalar_one_or_none()
             return None if row is None else _record(row)
 
-    def authenticate(self, token: str) -> ApiKeyRecord | None:
+    def authenticate(self, token: str, *, touch: bool = True) -> ApiKeyRecord | None:
         """The active key `token` names, else None: one answer for malformed, unknown, wrong-secret,
         revoked and expired keys. Constant-time hash comparison on every path. On success,
-        `last_used_at` is updated at most once per LAST_USED_THROTTLE_SECONDS."""
+        `last_used_at` is updated at most once per LAST_USED_THROTTLE_SECONDS; `touch=False`
+        leaves it to a later `touch_last_used` (a caller that may still refuse the request, e.g.
+        for its scope or origin, so a refused request does not look like a use)."""
         parsed = parse_api_key(token)
         if parsed is None:
             hmac.compare_digest(hash_secret("0" * 24, "x"), _DUMMY_HASH)
@@ -400,16 +425,13 @@ class ApiKeyStore:
             record = _record(row)
             if record.status() != "active":
                 return None
-            touched = session.execute(
-                update(ApiKeyModel)
-                .where(
-                    ApiKeyModel.id == key_id,
-                    ApiKeyModel.last_used_at.is_(None)
-                    | (ApiKeyModel.last_used_at < func.now() - text(f"interval '{LAST_USED_THROTTLE_SECONDS} seconds'")),
-                )
-                .values(last_used_at=func.now())
-                .returning(ApiKeyModel.last_used_at)
-            ).scalar_one_or_none()
+            touched = _touch(session, key_id) if touch else None
             if touched is not None:
                 record = replace(record, last_used_at=touched)
             return record
+
+    def touch_last_used(self, key_id: str) -> datetime | None:
+        """Record a use of the key (throttled like `authenticate`); the new `last_used_at`, or None
+        when the throttle skipped it or the key is gone."""
+        with self.Session() as session, session.begin():
+            return _touch(session, key_id)

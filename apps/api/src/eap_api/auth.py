@@ -5,7 +5,7 @@ import re
 from typing import Annotated, Literal
 
 from eap_observability import bind_log_context
-from eap_run_store import ApiKeyStore, looks_like_api_key
+from eap_run_store import ApiKeyStore, looks_like_api_key, normalize_origin
 from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -21,14 +21,41 @@ class Principal(BaseModel):
 # Regex for tenant/user: non-empty, [A-Za-z0-9_-]+
 TENANT_USER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 AUTH_CONFIGURATION_ERROR = (
-    "no production authentication is configured; set EAP_AUTH_MODE=dev for local development only"
+    "no production authentication is configured; set EAP_AUTH_MODE=dev for local development only, "
+    "or EAP_AUTH_MODE=api_key to serve only the AG-UI routes (/api/v1/ag-ui/*) to tenant API keys"
 )
+# One answer, wherever the dev bearer is refused because dev mode is off.
+DEV_AUTH_DISABLED_DETAIL = "dev bearer authentication is not enabled"
+
+# EAP_AUTH_MODE (Q2 of the AG-UI plan, AGUI.9). Exact, case-sensitive values; anything else
+# (unset included) refuses to start, so a misconfigured deploy never comes up half-open.
+#   dev      the forgeable local bearer `dev:<tenant>:<user>` on every route, plus API keys on
+#            /api/v1/ag-ui/* (Studio, tests, local development);
+#   api_key  production for third-party frontends: tenant API keys on /api/v1/ag-ui/* are the only
+#            credential. Every other route answers 401 (the dev bearer is off, and a key is never
+#            accepted outside /ag-ui/*). Key management (/api/v1/api-keys) stays dev-only until
+#            enterprise auth, so keys are created by a dev-mode API on the same database.
+AUTH_MODE_DEV = "dev"
+AUTH_MODE_API_KEY = "api_key"
+AUTH_MODES = (AUTH_MODE_DEV, AUTH_MODE_API_KEY)
 
 
-def require_dev_auth_mode() -> None:
-    """Refuse to expose the forgeable local auth scheme unless explicitly enabled."""
-    if os.environ.get("EAP_AUTH_MODE") != "dev":
+def auth_mode() -> str | None:
+    """The configured EAP_AUTH_MODE when it is one of AUTH_MODES, else None."""
+    mode = os.environ.get("EAP_AUTH_MODE")
+    return mode if mode in AUTH_MODES else None
+
+
+def dev_auth_enabled() -> bool:
+    return os.environ.get("EAP_AUTH_MODE") == AUTH_MODE_DEV
+
+
+def require_auth_configured() -> str:
+    """create_app's check: start only with an explicit auth mode (RuntimeError otherwise)."""
+    mode = auth_mode()
+    if mode is None:
         raise RuntimeError(AUTH_CONFIGURATION_ERROR)
+    return mode
 
 
 async def current_principal(
@@ -38,9 +65,15 @@ async def current_principal(
     Parse Authorization header: Bearer dev:<tenant>:<user>.
     
     Returns Principal with tenant_id and user_id.
-    Raises 401 if missing or malformed.
+    Raises 401 if missing or malformed, and 401 `dev bearer authentication is not enabled` when
+    EAP_AUTH_MODE is not dev (the api_key mode: no route outside /ag-ui/* has a credential).
     """
-    require_dev_auth_mode()
+    if not dev_auth_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=DEV_AUTH_DISABLED_DETAIL,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     if authorization is None:
         raise HTTPException(
@@ -94,7 +127,7 @@ async def current_principal(
 
 # One answer for a malformed, unknown, wrong-secret, revoked or expired key.
 INVALID_API_KEY_DETAIL = "Invalid API key"
-DEV_AUTH_DISABLED_DETAIL = "dev bearer authentication is not enabled"
+ORIGIN_NOT_ALLOWED_DETAIL = "Origin not allowed for this API key"
 AGUI_RUN_SCOPE = "agui:run"
 MISSING_SCOPE_DETAIL = f"API key lacks the {AGUI_RUN_SCOPE} scope"
 AGENT_NOT_FOUND_DETAIL = "Agent not found"
@@ -186,11 +219,16 @@ async def agui_principal(
     scheme, _, credential = authorization.partition(" ")
     credential = credential.strip()
     if scheme.lower() == "bearer" and looks_like_api_key(credential):
-        record = await run_in_threadpool(get_api_key_store(request).authenticate, credential)
+        store = get_api_key_store(request)
+        # last_used_at is recorded only once the request passes the scope and origin checks, so a
+        # copied key that a foreign page keeps using (always 403) does not look recently used.
+        record = await run_in_threadpool(store.authenticate, credential, touch=False)
         if record is None:
             raise _unauthorized(INVALID_API_KEY_DETAIL)
         if AGUI_RUN_SCOPE not in record.scopes:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MISSING_SCOPE_DETAIL)
+        require_allowed_origin(record.allowed_origins, request.headers.get("origin"))
+        await run_in_threadpool(store.touch_last_used, record.id)
         bind_log_context(tenant_id=record.tenant_id)
         return AgUiPrincipal(
             tenant_id=record.tenant_id,
@@ -201,10 +239,38 @@ async def agui_principal(
             workflow_ids=record.workflow_ids,
             allowed_origins=record.allowed_origins,
         )
-    if os.environ.get("EAP_AUTH_MODE") != "dev":
+    if not dev_auth_enabled():
         raise _unauthorized(DEV_AUTH_DISABLED_DETAIL)
     dev = await current_principal(authorization)
     return AgUiPrincipal(tenant_id=dev.tenant_id, kind="dev", user_id=dev.user_id, scopes=(AGUI_RUN_SCOPE,))
+
+
+def _normalized_origins(origins: tuple[str, ...]) -> set[str]:
+    """A key's stored origins, normalized again (they are normalized on write; a hand-edited row
+    may not be). An entry that is not an origin matches nothing."""
+    out: set[str] = set()
+    for entry in origins:
+        try:
+            out.add(normalize_origin(entry))
+        except ValueError:
+            continue
+    return out
+
+
+def require_allowed_origin(allowed_origins: tuple[str, ...] | None, origin: str | None) -> None:
+    """The per-key origin check (D17; the AGUI.3 review obligation), after authentication and
+    before any stream, on every /ag-ui/* request: a present `Origin` not in a non-NULL
+    `allowed_origins` (both sides normalized by `eap_run_store.normalize_origin`) is 403. No
+    `Origin` header (a server-side caller) passes, and a NULL list allows any origin. An `Origin`
+    that is not an http(s) origin (`null`, from a sandboxed frame or a file) never matches."""
+    if allowed_origins is None or origin is None:
+        return
+    try:
+        normalized = normalize_origin(origin)
+    except ValueError:
+        normalized = None
+    if normalized is None or normalized not in _normalized_origins(allowed_origins):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ORIGIN_NOT_ALLOWED_DETAIL)
 
 
 def require_agui_agent(principal: AgUiPrincipal, agent_id: str) -> None:
