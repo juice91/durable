@@ -179,3 +179,20 @@ the database. A replay from before `run_completed` ends there; post-turn events 
 Not here: Studio checks (RM.16 to RM.19 are deferred until after the Studio redesign). The
 release note on draining in-flight runs before deploying this milestone is in
 `apps/worker/README.md` ("Upgrading").
+
+## AG-UI streams across killed processes (AGUI.15)
+
+`test_agui_crash.py` runs the API in its own process and reads an AG-UI stream
+(`POST /api/v1/ag-ui/...`) in a background thread while a worker or the API itself dies, so each
+test sees what a connected client sees. The isolation and security half of AGUI.15 (route sweeps,
+forged ids, hostile bodies, prompt injection, spans and logs) is
+`apps/api/api_tests/test_agui15_security.py`.
+
+| Scenario | Crash | Proves |
+|---|---|---|
+| 1 | `model_request` (test:ticket, request 1) | the stream stays open, `CUSTOM pydanticos.status recovering` (heartbeat backdated past 20 s), one RUN_FINISHED, a MESSAGES_SNAPSHOT corrects the crashed attempt's text, one ticket |
+| 2 | `after_event_write` `tool:*:call` / `end`, then `tool:*:result` of turn 2 (test:frontend_tool) | one pending end naming the call, never executed server side; the result turn answers once |
+| 3 | `tool_approval_waiting`, then `after_event_write` `tool:*:result` of the resume | the interrupt reaches the client although the worker died; the resume decides once, the ticket is created once; a re-POSTed resume decides nothing |
+| 4 | `workflow_waiting` `step:approve:waiting`, then `after_child_run_insert` `step:done:child` | the interrupt reaches the client; the resumed stream stays open across the kill; one decision, one child per agent step |
+| 5 | `model_request` inside the `ask` child of a workflow | the workflow stream stays open; no message starts twice; each child's answer appears once, undoubled |
+| 6 | the worker (`model_request`), then the API process (SIGKILL) mid-stream | the D7 client protocol (ResumableHttpAgent's: frames up to the last full `id:`, identical re-POST with `Last-Event-ID` to a new API) splices to exactly the server's messages, from that cut and from every other frame id; a runId with `%` is addressable over real HTTP |
