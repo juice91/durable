@@ -567,8 +567,8 @@ describe("memory rules and routes", () => {
     expect(routes.agentMemory("a1", { resource: "alice@example.com" })).toBe("/agents/a1/memory?resource=alice%40example.com");
     expect(routes.agentTab("a1", "memory")).toBe("/agents/a1/memory");
     expect(agentTabOf("/agents/a1/memory")).toBe("memory");
-    expect(visibleTabs(false, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor"]);
-    expect(visibleTabs(true, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "memory"]);
+    expect(visibleTabs(false, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "tests"]);
+    expect(visibleTabs(true, "chat").map((t) => t.id)).toEqual(["chat", "traces", "editor", "memory", "tests"]);
     expect(visibleTabs(false, "memory").map((t) => t.id)).toContain("memory");
   });
 });
