@@ -1,0 +1,81 @@
+{
+  "description": "Poll an export job until it is done or failed, at most three times, then escalate if it never finished. on_max_iterations \"exit\" ends the loop normally at the bound, so the branch after it can read why the loop stopped. The scripted status model (test:structured) always answers the first enum value, \"running\", so the loop reaches its bound and the run escalates.",
+  "agents": {
+    "status": {
+      "name": "Export status",
+      "instructions": "Report the status of the export job.",
+      "model": {"provider": "test", "name": "structured"},
+      "output": {
+        "json_schema": {
+          "type": "object",
+          "properties": {
+            "status": {"type": "string", "enum": ["running", "done", "failed"]},
+            "detail": {"type": "string"}
+          },
+          "required": ["status", "detail"],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "input": {"job_id": "export-42"},
+  "spec": {
+    "name": "Wait for an export",
+    "input_schema": {
+      "type": "object",
+      "properties": {"job_id": {"type": "string"}},
+      "required": ["job_id"]
+    },
+    "start": "poll",
+    "steps": [
+      {
+        "id": "poll",
+        "type": "loop",
+        "max_iterations": 3,
+        "on_max_iterations": "exit",
+        "until": {
+          "any": [
+            {"op": "eq", "left": {"$ref": "steps.check.output.status"}, "right": "done"},
+            {"op": "eq", "left": {"$ref": "steps.check.output.status"}, "right": "failed"}
+          ]
+        },
+        "state": {"last_status": "unknown"},
+        "carry": {"last_status": {"$ref": "steps.check.output.status"}},
+        "body": {
+          "start": "now",
+          "steps": [
+            {"id": "now", "type": "tool", "tool_id": "clock.now", "input": {}, "next": "check"},
+            {
+              "id": "check",
+              "type": "agent",
+              "agent_id": "${agents.status}",
+              "version": 1,
+              "input": {
+                "job_id": {"$ref": "input.job_id"},
+                "attempt": {"$ref": "loop.poll.index"},
+                "previous": {"$ref": "loop.poll.state.last_status"},
+                "checked_at": {"$ref": "steps.now.output"}
+              }
+            }
+          ]
+        },
+        "next": "outcome"
+      },
+      {
+        "id": "outcome",
+        "type": "branch",
+        "cases": [
+          {"when": {"op": "eq", "left": {"$ref": "steps.poll.output.exited"}, "right": "condition"}, "next": "finished"}
+        ],
+        "default": "escalate"
+      },
+      {"id": "finished", "type": "tool", "tool_id": "clock.now", "input": {}},
+      {
+        "id": "escalate",
+        "type": "tool",
+        "tool_id": "tickets.create",
+        "input": {"title": "Export did not finish", "body": {"$ref": "input.job_id"}}
+      }
+    ]
+  }
+}

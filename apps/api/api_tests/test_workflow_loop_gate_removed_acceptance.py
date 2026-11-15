@@ -1,4 +1,5 @@
-"""LP.11 acceptance (tester): the loops preview gate is gone; only `evaluate` stays refused."""
+"""LP.11 acceptance (tester): the loops preview gate is gone. Since LP.16 (the runtime gate removed)
+`evaluate` publishes too, whatever the old flag says."""
 
 from __future__ import annotations
 
@@ -57,13 +58,13 @@ def test_loops_and_foreach_publish_and_start_by_default(api, fake, monkeypatch, 
 
 
 @pytest.mark.parametrize("value", [None, "1", "garbage"])
-def test_evaluate_stays_gated_whatever_the_flag_says(client, auth_header, monkeypatch, value):
+def test_evaluate_publishes_whatever_the_flag_says(client, auth_header, monkeypatch, value):
     if value is None:
         monkeypatch.delenv(FLAG, raising=False)
     else:
         monkeypatch.setenv(FLAG, value)
     resp = _publish(client, auth_header, EVALUATE)
-    assert resp.status_code == 422 and "evaluate step" in resp.json()["detail"], resp.text
+    assert resp.status_code == 201, resp.text
 
 
 def test_the_app_starts_with_a_garbage_flag(monkeypatch):

@@ -1,0 +1,96 @@
+{
+  "description": "Triage every ticket of a batch with an agent, four at a time, and open an escalation ticket for urgent ones. A failed item becomes an error entry instead of failing the run. The scripted triage model (test:structured) answers the first enum value, \"normal\", so only a ticket marked p1 is escalated.",
+  "agents": {
+    "triage": {
+      "name": "Ticket triage",
+      "instructions": "Read the ticket. Rate its urgency and summarise it in one sentence.",
+      "model": {"provider": "test", "name": "structured"},
+      "output": {
+        "json_schema": {
+          "type": "object",
+          "properties": {
+            "urgency": {"type": "string", "enum": ["normal", "high", "low"]},
+            "summary": {"type": "string"}
+          },
+          "required": ["urgency", "summary"],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "input": {
+    "tickets": [
+      {"title": "Checkout is down", "body": "Every payment fails with a 502.", "priority": "p1"},
+      {"title": "Export is slow", "body": "The CSV export takes ten minutes."},
+      {"title": "Typo on the pricing page", "body": "\"Anual\" should be \"Annual\".", "priority": "p3"}
+    ]
+  },
+  "spec": {
+    "name": "Ticket triage",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "tickets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {"type": "string"},
+              "body": {"type": "string"},
+              "priority": {"type": "string"}
+            },
+            "required": ["title", "body"]
+          }
+        }
+      },
+      "required": ["tickets"]
+    },
+    "start": "each",
+    "steps": [
+      {
+        "id": "each",
+        "type": "foreach",
+        "items": {"$ref": "input.tickets"},
+        "max_items": 20,
+        "concurrency": 4,
+        "on_item_error": "collect",
+        "body": {
+          "start": "triage",
+          "steps": [
+            {
+              "id": "triage",
+              "type": "agent",
+              "agent_id": "${agents.triage}",
+              "version": 1,
+              "input": {"title": {"$ref": "loop.each.item.title"}, "body": {"$ref": "loop.each.item.body"}},
+              "next": "route"
+            },
+            {
+              "id": "route",
+              "type": "branch",
+              "cases": [
+                {
+                  "when": {
+                    "any": [
+                      {"op": "eq", "left": {"$ref": "steps.triage.output.urgency"}, "right": "high"},
+                      {"op": "eq", "left": {"$ref": "loop.each.item.priority"}, "right": "p1"}
+                    ]
+                  },
+                  "next": "escalate"
+                }
+              ],
+              "default": "file"
+            },
+            {
+              "id": "escalate",
+              "type": "tool",
+              "tool_id": "tickets.create",
+              "input": {"title": {"$ref": "loop.each.item.title"}, "body": {"$ref": "steps.triage.output.summary"}}
+            },
+            {"id": "file", "type": "tool", "tool_id": "clock.now", "input": {}}
+          ]
+        }
+      }
+    ]
+  }
+}

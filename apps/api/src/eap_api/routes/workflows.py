@@ -33,6 +33,9 @@ warning `path` is `steps[<i>].body.steps[<j>]`.
   agent step output it lists, and the path is checked under that array's `items` schema.
 - A pinned body agent whose version has an approval policy gives the warning
   `loop_agent_approvals_denied` (D8a): inside a loop its gated tool calls are denied.
+- With `limits.max_cost_usd`, an `llm_judge` model whose requests count as $0 (no price, a $0
+  price, or no usable price file) gives the agent publish's warning `cost_cap_unpriced_model`
+  (LP.16), path `steps[<i>].evaluators[<k>]`.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -54,10 +58,12 @@ from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.request_guard import guarded_json_route, schema_checks_storable
+from eap_api.routes import WARNING_COST_CAP_UNPRICED, cost_cap_zero_reason
 from eap_api.routes.tools import _allowed_tool_ids
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
+from eap_schemas import AgentSpec
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.tools import TOOL_DECLARATIONS
 from eap_schemas.workflow_scope import LOOP_ERROR_MESSAGES
@@ -145,23 +151,6 @@ def _version_response(version: WorkflowVersionModel) -> dict:
         "created_at": version.created_at.isoformat(),
         "created_by": version.created_by,
     }
-
-
-LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed for it (LP.14)"
-
-
-def runtime_pending_problems(spec: WorkflowSpec) -> list[str]:
-    """Spec features the schema accepts but the platform does not run yet (workflow loops
-    milestone, a temporary gate removed kind by kind as the runtime lands): evaluate steps (LP.14)
-    at any depth. Open for good since LP.11, with the loop tick's cost cap and cooperative cancel:
-    `loop` and `foreach` steps and `limits` (the run tree's `max_cost_usd`). all/any/not branch
-    conditions are open since LP.7. Refused at publish and at run start, so a run never reaches
-    the worker with them. Drafts may still be saved with them."""
-    return [
-        f"step '{step.id}': the {step.type} step {LOOP_RUNTIME_PENDING}"
-        for _, step in walk_steps(spec.steps)
-        if step.type == "evaluate"
-    ]
 
 
 # Environment caps of loop specs (LP.5, D7a, D10): (variable, default). Read at every publish and
@@ -271,8 +260,7 @@ def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str, *, lock:
                 .with_for_update(read=True)
                 .all()
             )
-    problems: list[str] = runtime_pending_problems(spec)
-    problems += loop_limit_problems(spec)
+    problems: list[str] = loop_limit_problems(spec)
     allowed_tools = _allowed_tool_ids()
     for _, step in walk_steps(spec.steps):
         if isinstance(step, AgentStep):
@@ -586,6 +574,74 @@ def loop_agent_approval_warnings(db: Session, spec: WorkflowSpec, tenant_id: str
     return warnings
 
 
+def judge_cost_cap_warnings(spec: WorkflowSpec, today: date | None = None) -> list[dict[str, str]]:
+    """With `limits.max_cost_usd`, one `cost_cap_unpriced_model` warning per `llm_judge` evaluator
+    (at any depth) whose model's requests count as $0 toward the cap (no price, a $0 price, or no
+    usable price file): the run tree's cost then misses those judge calls, so the cap may not stop
+    the run. The lookup and the reason are the agent publish warning's (cost_cap_zero_reason).
+    `path` is the step's path plus `.evaluators[<k>]`. A warning, never a 422."""
+    if spec.limits is None or spec.limits.max_cost_usd is None:
+        return []
+    day = today or datetime.now(timezone.utc).date()
+    warnings: list[dict[str, str]] = []
+    for where, _, step in _walk_with_paths(spec.steps):
+        if not isinstance(step, EvaluateStep):
+            continue
+        for k, evaluator in enumerate(step.evaluators):
+            if evaluator.kind != "llm_judge":
+                continue
+            reason = cost_cap_zero_reason(evaluator.model.provider, evaluator.model.name, day)
+            if reason is None:
+                continue
+            warnings.append({
+                "code": WARNING_COST_CAP_UNPRICED,
+                "path": f"{where}.evaluators[{k}]",
+                "message": (
+                    f"step '{step.id}': evaluators.{k} (llm_judge): {reason} toward limits.max_cost_usd, "
+                    "so the cost limit may not stop the run"
+                ),
+            })
+    return warnings
+
+
+def agent_step_cost_cap_warnings(db: Session, spec: WorkflowSpec, tenant_id: str,
+                                 today: date | None = None) -> list[dict[str, str]]:
+    """With `limits.max_cost_usd`, one `cost_cap_unpriced_model` warning per model of an agent
+    step's agent (primary, then fallbacks; the pinned version, else the latest one, at any depth)
+    whose requests count as $0: a child agent run's cost counts in the run tree's cost, so a $0
+    model escapes the workflow's cap the same way an unpriced judge does. The reason is the agent
+    publish warning's (cost_cap_zero_reason). `path` is the step's path. Unresolved agents and
+    unreadable agent specs are left to reference_problems. A warning, never a 422."""
+    if spec.limits is None or spec.limits.max_cost_usd is None:
+        return []
+    day = today or datetime.now(timezone.utc).date()
+    warnings: list[dict[str, str]] = []
+    for where, _, step in _walk_with_paths(spec.steps):
+        if not isinstance(step, AgentStep):
+            continue
+        row = _agent_version(db, tenant_id, str(step.agent_id), step.version)
+        if row is None:
+            continue
+        try:
+            agent = AgentSpec.model_validate(row.spec or {})
+        except ValidationError:
+            continue
+        chain = [("model", agent.model)] + [(f"fallback_models[{i}]", m) for i, m in enumerate(agent.fallback_models)]
+        for chain_path, model in chain:
+            reason = cost_cap_zero_reason(model.provider, model.name, day)
+            if reason is None:
+                continue
+            warnings.append({
+                "code": WARNING_COST_CAP_UNPRICED,
+                "path": where,
+                "message": (
+                    f"step '{step.id}': agent '{step.agent_id}' version {row.version} {chain_path}: {reason} "
+                    "toward limits.max_cost_usd, so the cost limit may not stop the run"
+                ),
+            })
+    return warnings
+
+
 @router.get(
     "/agent-output-schema",
     response_class=JSONResponse,
@@ -686,7 +742,8 @@ def patch_workflow(
 def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     """Publish the draft as the next immutable version (409 when it equals the latest one): 201 with
     the version and `warnings` (AC.9: refs into unpinned or text agents' output; LP.5: pinned loop
-    body agents with an approval policy)."""
+    body agents with an approval policy; LP.16: `cost_cap_unpriced_model` for an llm_judge model,
+    or an agent step's agent model, that counts as $0 toward `limits.max_cost_usd`)."""
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
     if workflow.draft_spec is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workflow has no draft spec")
@@ -699,6 +756,8 @@ def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db
     ref_problems, warnings = output_ref_checks(db, spec, principal.tenant_id)
     problems += ref_problems
     warnings += loop_agent_approval_warnings(db, spec, principal.tenant_id)
+    warnings += judge_cost_cap_warnings(spec)
+    warnings += agent_step_cost_cap_warnings(db, spec, principal.tenant_id)
     if problems:
         raise HTTPException(status_code=422, detail="; ".join(problems))
 

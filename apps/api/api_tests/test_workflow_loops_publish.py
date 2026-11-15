@@ -1,9 +1,8 @@
 """LP.5: workflow publish checks loop specs: environment caps, body references, judge models, the
 D8a approval warning and `loop.<L>.item` field refs.
 
-The loops runtime gate (`runtime_pending_problems`) refuses evaluate steps at publish until LP.14
-(loop and foreach steps are open since LP.11); these tests switch it off to reach the LP.5 checks
-behind it.
+Loop and foreach steps publish since LP.11 and evaluate steps since LP.14 (LP.16 removed the
+runtime gate), so these tests reach the LP.5 checks directly.
 """
 
 from __future__ import annotations
@@ -62,11 +61,6 @@ def _wf(*steps: dict[str, Any]) -> dict[str, Any]:
 
 def _auth() -> dict[str, str]:
     return get_auth_header(*TENANT_USER)
-
-
-@pytest.fixture
-def no_runtime_gate(monkeypatch):
-    monkeypatch.setattr(workflow_routes, "runtime_pending_problems", lambda spec: [])
 
 
 # --- pure caps ---------------------------------------------------------------------------------
@@ -176,14 +170,14 @@ def _publish(client, spec):
 
 @requires_pg
 def test_the_gate_lets_loops_through(client, monkeypatch):
-    """Since LP.11 a foreach publishes with no preview flag (the gate refuses only evaluate steps)."""
+    """Since LP.11 a foreach publishes with no preview flag."""
     monkeypatch.delenv("EAP_WORKFLOW_LOOPS_PREVIEW", raising=False)
     resp = _publish(client, _wf(_foreach([_tool("x")])))
     assert resp.status_code == 201, resp.text
 
 
 @requires_pg
-def test_draft_accepts_over_cap_but_publish_refuses(client, no_runtime_gate, monkeypatch):
+def test_draft_accepts_over_cap_but_publish_refuses(client, monkeypatch):
     monkeypatch.setenv("EAP_WORKFLOW_MAX_LOOP_ITERATIONS", "10")
     workflow_id = _create(client, _wf(_foreach([_tool("x")], max_items=11)))
     resp = client.post(f"{BASE}/{workflow_id}/versions", headers=_auth())
@@ -191,7 +185,7 @@ def test_draft_accepts_over_cap_but_publish_refuses(client, no_runtime_gate, mon
 
 
 @requires_pg
-def test_missing_body_agent_and_tool(client, no_runtime_gate):
+def test_missing_body_agent_and_tool(client):
     missing = str(uuid.uuid4())
     body = [_agent_step("a", missing, None, "t"), {**_tool("t"), "tool_id": "no.such_tool"}]
     resp = _publish(client, _wf(_foreach(body)))
@@ -202,7 +196,7 @@ def test_missing_body_agent_and_tool(client, no_runtime_gate):
 
 
 @requires_pg
-def test_loop_spec_publishes_and_get_is_identical(client, no_runtime_gate):
+def test_loop_spec_publishes_and_get_is_identical(client):
     agent_id = _agent(client)
     resp = _publish(client, _wf(_foreach([_agent_step("a", agent_id, 1, q=_ref("loop.each.item"))])))
     assert resp.status_code == 201, resp.text
@@ -214,7 +208,7 @@ def test_loop_spec_publishes_and_get_is_identical(client, no_runtime_gate):
 
 
 @requires_pg
-def test_pinned_body_agent_with_approvals_warns(client, no_runtime_gate):
+def test_pinned_body_agent_with_approvals_warns(client):
     agent_id = _agent(client, approvals=True)
     resp = _publish(client, _wf(_tool("first", "each"), _foreach([_agent_step("a", agent_id, 1)])))
     assert resp.status_code == 201, resp.text
@@ -236,7 +230,7 @@ def _item_workflow(agent_id: str, version: int | None, field: str) -> dict[str, 
 
 
 @requires_pg
-def test_loop_item_field_check(client, no_runtime_gate):
+def test_loop_item_field_check(client):
     agent_id = _agent(client, schema=TICKETS)
     ok = _publish(client, _item_workflow(agent_id, 1, "urgency"))
     assert ok.status_code == 201, ok.text
@@ -257,7 +251,7 @@ def test_loop_item_field_check(client, no_runtime_gate):
 
 
 @requires_pg
-def test_nested_loop_item_field_check(client, no_runtime_gate):
+def test_nested_loop_item_field_check(client):
     schema = {"type": "object", "additionalProperties": False, "properties": {"groups": {
         "type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {
             "members": {"type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -276,7 +270,7 @@ def test_nested_loop_item_field_check(client, no_runtime_gate):
 
 
 @requires_pg
-def test_body_ref_into_a_body_agent_is_checked(client, no_runtime_gate):
+def test_body_ref_into_a_body_agent_is_checked(client):
     agent_id = _agent(client, schema=TICKETS)
     body = [_agent_step("a", agent_id, 1, "x"), _tool("x", None, t=_ref("steps.a.output.tikets"))]
     resp = _publish(client, _wf(_foreach(body)))
@@ -284,7 +278,7 @@ def test_body_ref_into_a_body_agent_is_checked(client, no_runtime_gate):
 
 
 @requires_pg
-def test_loop_item_over_a_non_list_says_so(client, no_runtime_gate):
+def test_loop_item_over_a_non_list_says_so(client):
     agent_id = _agent(client, schema=TICKETS)
     spec = _wf(
         _agent_step("triage", agent_id, 1, "each"),

@@ -427,6 +427,29 @@ def _price_status(model_id: str, today: date) -> str:
     return price_known(model_id, today, overrides)
 
 
+def cost_cap_zero_reason(provider: str, name: str, day: date) -> str | None:
+    """Why requests of `provider:name` count as $0 toward a cost cap on `day` (no usable price
+    file, a $0 price, or no price at all), None when the worker prices them above $0. The shared
+    reason of the agent and workflow publish warnings `cost_cap_unpriced_model`."""
+    model_id = f"{provider}:{name}"
+    status_ = _price_status(model_id, day)
+    if status_ == PRICE_UNUSABLE:
+        return (
+            "the model price override file is unreadable, invalid or missing, so no model has a price; "
+            "its requests count as $0"
+        )
+    if status_ == PRICE_ZERO:
+        return f"'{model_id}' is priced at $0, so its requests count as $0"
+    if status_ == PRICE_UNPRICED:
+        where = (
+            "the model price override file"
+            if provider in OVERRIDE_ONLY_PROVIDERS
+            else "the model price override file or genai-prices"
+        )
+        return f"'{model_id}' has no price in {where}; its requests count as $0"
+    return None
+
+
 def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[str, str]]:
     """With `limits.max_cost_usd`, one warning per model of the chain (primary, then fallbacks)
     whose requests will count as $0 toward the cap: recorded without a price, or priced at $0 (the
@@ -442,23 +465,8 @@ def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[
     chain = [("model", spec.model)] + [(f"fallback_models[{i}]", ref) for i, ref in enumerate(spec.fallback_models)]
     warnings: list[dict[str, str]] = []
     for path, ref in chain:
-        model_id = f"{ref.provider}:{ref.name}"
-        status_ = _price_status(model_id, day)
-        if status_ == PRICE_UNUSABLE:
-            reason = (
-                "the model price override file is unreadable, invalid or missing, so no model has a price; "
-                "its requests count as $0"
-            )
-        elif status_ == PRICE_ZERO:
-            reason = f"'{model_id}' is priced at $0, so its requests count as $0"
-        elif status_ == PRICE_UNPRICED:
-            where = (
-                "the model price override file"
-                if ref.provider in OVERRIDE_ONLY_PROVIDERS
-                else "the model price override file or genai-prices"
-            )
-            reason = f"'{model_id}' has no price in {where}; its requests count as $0"
-        else:
+        reason = cost_cap_zero_reason(ref.provider, ref.name, day)
+        if reason is None:
             continue
         warnings.append(PublishWarning(
             code=WARNING_COST_CAP_UNPRICED,

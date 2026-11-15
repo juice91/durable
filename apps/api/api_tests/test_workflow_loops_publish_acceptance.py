@@ -54,11 +54,6 @@ def _wf(*steps) -> dict[str, Any]:
     return {"name": "Loops", "input_schema": {"type": "object"}, "start": steps[0]["id"], "steps": list(steps)}
 
 
-@pytest.fixture
-def no_gate(monkeypatch):
-    monkeypatch.setattr(wr, "runtime_pending_problems", lambda spec: [])
-
-
 def _agent(client, *, schema=None, approvals=False, tenant=TENANT, tools=None) -> str:
     spec: dict[str, Any] = {"name": "A", "model": {"provider": "test", "name": "structured"}}
     if schema is not None:
@@ -88,7 +83,7 @@ def _publish(client, spec, tenant=TENANT):
 
 @requires_pg
 @pytest.mark.parametrize("n,code", [(10, 201), (11, 422)])
-def test_iteration_cap_boundary_foreach_and_loop(client, no_gate, monkeypatch, n, code):
+def test_iteration_cap_boundary_foreach_and_loop(client, monkeypatch, n, code):
     monkeypatch.setenv(ITER, "10")
     r = _publish(client, _wf(_foreach([_tool("x")], max_items=n)))
     assert r.status_code == code, r.text
@@ -101,7 +96,7 @@ def test_iteration_cap_boundary_foreach_and_loop(client, no_gate, monkeypatch, n
 
 @requires_pg
 @pytest.mark.parametrize("cap,code", [(11, 201), (10, 422)])
-def test_execution_cap_boundary(client, no_gate, monkeypatch, cap, code):
+def test_execution_cap_boundary(client, monkeypatch, cap, code):
     # one foreach, 10 items, one body step: 1 + 10 * 1 = 11 executions
     monkeypatch.setenv(EXEC, str(cap))
     r = _publish(client, _wf(_foreach([_tool("x")], max_items=10)))
@@ -113,7 +108,7 @@ def test_execution_cap_boundary(client, no_gate, monkeypatch, cap, code):
 
 @requires_pg
 @pytest.mark.parametrize("cap,code", [(6, 201), (5, 422)])
-def test_concurrency_cap_boundary(client, no_gate, monkeypatch, cap, code):
+def test_concurrency_cap_boundary(client, monkeypatch, cap, code):
     inner = _foreach([_tool("x")], items="loop.outer.item", sid="inner", max_items=2, concurrency=2)
     spec = _wf(_foreach([inner], sid="outer", max_items=2, concurrency=3))
     monkeypatch.setenv(CONC, str(cap))
@@ -124,7 +119,7 @@ def test_concurrency_cap_boundary(client, no_gate, monkeypatch, cap, code):
 
 
 @requires_pg
-def test_draft_save_accepts_over_cap_specs(client, no_gate, monkeypatch):
+def test_draft_save_accepts_over_cap_specs(client, monkeypatch):
     monkeypatch.setenv(ITER, "2")
     wid = _create(client, _wf(_foreach([_tool("x")], max_items=50)))
     got = client.get(f"{BASE}/{wid}", headers=_h())
@@ -132,7 +127,7 @@ def test_draft_save_accepts_over_cap_specs(client, no_gate, monkeypatch):
 
 
 @requires_pg
-def test_all_three_caps_reported_together(client, no_gate, monkeypatch):
+def test_all_three_caps_reported_together(client, monkeypatch):
     for v in (ITER, EXEC, CONC):
         monkeypatch.setenv(v, "1")
     inner = _foreach([_tool("x")], items="loop.outer.item", sid="inner", max_items=2, concurrency=2)
@@ -155,7 +150,7 @@ def _run_ready(api, spec):
 
 
 @requires_pg
-def test_cap_lowered_after_publish_refuses_run_start(api, fake, no_gate, monkeypatch):
+def test_cap_lowered_after_publish_refuses_run_start(api, fake, monkeypatch):
     client, headers, wid = _run_ready(api, _wf(_foreach([_tool("x")], max_items=10)))
     ok = client.post(f"{BASE}/{wid}/runs", json={"input": {"items": [1]}}, headers=headers)
     assert ok.status_code == 202, ok.text
@@ -169,7 +164,7 @@ def test_cap_lowered_after_publish_refuses_run_start(api, fake, no_gate, monkeyp
 
 @requires_pg
 @pytest.mark.parametrize("var,low,word", [(EXEC, "10", "workflow_too_many_executions"), (CONC, "2", "workflow_concurrency_exceeded")])
-def test_run_start_refuses_lowered_execution_and_concurrency_caps(api, fake, no_gate, monkeypatch, var, low, word):
+def test_run_start_refuses_lowered_execution_and_concurrency_caps(api, fake, monkeypatch, var, low, word):
     spec = _wf(_foreach([_tool("x")], max_items=10, concurrency=3))
     client, headers, wid = _run_ready(api, spec)
     monkeypatch.setenv(var, low)
@@ -186,7 +181,7 @@ def _nested(*inner) -> dict[str, Any]:
 
 
 @requires_pg
-def test_nested_body_unknown_agent_and_tool_refused(client, no_gate):
+def test_nested_body_unknown_agent_and_tool_refused(client):
     missing = str(uuid.uuid4())
     r = _publish(client, _wf(_nested(_agent_step("a", missing, None, "t"), _tool("t", tool="no.such_tool"))))
     d = r.json()["detail"]
@@ -195,13 +190,13 @@ def test_nested_body_unknown_agent_and_tool_refused(client, no_gate):
 
 
 @requires_pg
-def test_until_loop_body_is_walked_too(client, no_gate):
+def test_until_loop_body_is_walked_too(client):
     r = _publish(client, _wf(_until([_tool("t", tool="no.such_tool")])))
     assert r.status_code == 422 and "step 't': tool 'no.such_tool' does not exist" in r.json()["detail"]
 
 
 @requires_pg
-def test_foreign_tenant_agent_in_nested_body_reads_like_missing(client, no_gate):
+def test_foreign_tenant_agent_in_nested_body_reads_like_missing(client):
     theirs = _agent(client, tenant=OTHER)
     r = _publish(client, _wf(_nested(_agent_step("a", theirs, 1))))
     assert r.status_code == 422 and f"step 'a': agent '{theirs}' was not found" in r.json()["detail"]
@@ -210,7 +205,7 @@ def test_foreign_tenant_agent_in_nested_body_reads_like_missing(client, no_gate)
 
 
 @requires_pg
-def test_archived_body_agent_refused(client, no_gate):
+def test_archived_body_agent_refused(client):
     aid = _agent(client)
     with client.app.state.database_engine.begin() as conn:
         conn.execute(text("UPDATE agents SET archived = true WHERE id = :i"), {"i": aid})
@@ -219,7 +214,7 @@ def test_archived_body_agent_refused(client, no_gate):
 
 
 @requires_pg
-def test_tool_allowlist_applies_inside_bodies(client, no_gate, monkeypatch):
+def test_tool_allowlist_applies_inside_bodies(client, monkeypatch):
     monkeypatch.setenv("EAP_ALLOWED_TOOLS", "clock.now")
     r = _publish(client, _wf(_foreach([_tool("t", tool="tickets.create", title="x", body="y")])))
     assert r.status_code == 422 and "step 't': tool 'tickets.create' is not allowed on this platform" in r.json()["detail"]
@@ -232,7 +227,7 @@ def _judge(model: dict[str, str]) -> dict[str, Any]:
 
 
 @requires_pg
-def test_disallowed_judge_model_in_nested_body_refused_allowed_ok(client, no_gate, monkeypatch):
+def test_disallowed_judge_model_in_nested_body_refused_allowed_ok(client, monkeypatch):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*")
     bad = _publish(client, _wf(_nested(_tool("x", "ev"), _judge({"provider": "openai", "name": "gpt-x"}))))
     assert bad.status_code == 422
@@ -242,7 +237,7 @@ def test_disallowed_judge_model_in_nested_body_refused_allowed_ok(client, no_gat
 
 
 @requires_pg
-def test_judge_model_checked_at_top_level_and_non_judge_evaluators_ignored(client, no_gate, monkeypatch):
+def test_judge_model_checked_at_top_level_and_non_judge_evaluators_ignored(client, monkeypatch):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*")
     top = _wf(_tool("x", "ev"), _judge({"provider": "openai", "name": "gpt-x"}))
     assert _publish(client, top).status_code == 422
@@ -262,7 +257,7 @@ def test_judge_model_checked_at_top_level_and_non_judge_evaluators_ignored(clien
 
 
 @requires_pg
-def test_d8a_warns_once_per_step_for_pinned_body_agents_and_never_blocks(client, no_gate):
+def test_d8a_warns_once_per_step_for_pinned_body_agents_and_never_blocks(client):
     aid = _agent(client, approvals=True)
     spec = _wf(_foreach([_agent_step("a", aid, 1, "b"), _agent_step("b", aid, 1)]))
     r = _publish(client, spec)
@@ -274,7 +269,7 @@ def test_d8a_warns_once_per_step_for_pinned_body_agents_and_never_blocks(client,
 
 
 @requires_pg
-def test_d8a_nested_path_innermost_loop_and_single_warning_with_refs(client, no_gate):
+def test_d8a_nested_path_innermost_loop_and_single_warning_with_refs(client):
     schema = {"type": "object", "properties": {"k": {"type": "string"}}, "additionalProperties": False}
     aid = _agent(client, schema=schema, approvals=True)
     body = [_agent_step("a", aid, 1, "t"), _tool("t", None, v=_ref("steps.a.output.k"), w=_ref("steps.a.output.k"))]
@@ -286,7 +281,7 @@ def test_d8a_nested_path_innermost_loop_and_single_warning_with_refs(client, no_
 
 
 @requires_pg
-def test_d8a_not_for_policyless_unpinned_or_top_level_agents(client, no_gate):
+def test_d8a_not_for_policyless_unpinned_or_top_level_agents(client):
     plain, gated = _agent(client), _agent(client, approvals=True)
     spec = _wf(_agent_step("top", gated, 1, "each"),
                _foreach([_agent_step("a", plain, 1, "b"), _agent_step("b", gated, None)]))
@@ -295,7 +290,7 @@ def test_d8a_not_for_policyless_unpinned_or_top_level_agents(client, no_gate):
 
 
 @requires_pg
-def test_d8a_lists_every_gated_tool(client, no_gate):
+def test_d8a_lists_every_gated_tool(client):
     aid = _agent(client, approvals=True, tools=["tickets.create", "clock.now"])
     w = _publish(client, _wf(_foreach([_agent_step("a", aid, 1)]))).json()["warnings"]
     assert "'tickets.create', 'clock.now'" in w[0]["message"]
@@ -320,7 +315,7 @@ def _items_wf(aid, field: str, version: int | None = 1, schema_items="steps.tria
 
 @requires_pg
 @pytest.mark.parametrize("field", ["urgency", "who", "who.id"])
-def test_item_valid_paths_publish_clean(client, no_gate, field):
+def test_item_valid_paths_publish_clean(client, field):
     r = _publish(client, _items_wf(_agent(client, schema=CLOSED), field))
     assert r.status_code == 201, r.text
     assert r.json()["warnings"] == []
@@ -328,7 +323,7 @@ def test_item_valid_paths_publish_clean(client, no_gate, field):
 
 @requires_pg
 @pytest.mark.parametrize("field", ["urgncy", "who.name", "urgency.deep"])
-def test_item_invalid_paths_are_422_with_via_note(client, no_gate, field):
+def test_item_invalid_paths_are_422_with_via_note(client, field):
     r = _publish(client, _items_wf(_agent(client, schema=CLOSED), field))
     assert r.status_code == 422, r.text
     d = r.json()["detail"]
@@ -336,7 +331,7 @@ def test_item_invalid_paths_are_422_with_via_note(client, no_gate, field):
 
 
 @requires_pg
-def test_whole_item_and_non_agent_items_are_not_checked(client, no_gate):
+def test_whole_item_and_non_agent_items_are_not_checked(client):
     aid = _agent(client, schema=CLOSED)
     whole = _wf(_agent_step("triage", aid, 1, "each"),
                 _foreach([_tool("x", None, u=_ref("loop.each.item"))], items="steps.triage.output.tickets"))
@@ -346,7 +341,7 @@ def test_whole_item_and_non_agent_items_are_not_checked(client, no_gate):
 
 
 @requires_pg
-def test_item_open_object_warns_unlisted_field_and_never_blocks(client, no_gate):
+def test_item_open_object_warns_unlisted_field_and_never_blocks(client):
     r = _publish(client, _items_wf(_agent(client, schema=OPEN), "other"))
     assert r.status_code == 201, r.text
     [w] = r.json()["warnings"]
@@ -355,7 +350,7 @@ def test_item_open_object_warns_unlisted_field_and_never_blocks(client, no_gate)
 
 
 @requires_pg
-def test_item_text_agent_warns_text_output_ref(client, no_gate):
+def test_item_text_agent_warns_text_output_ref(client):
     r = _publish(client, _items_wf(_agent(client), "urgency"))
     assert r.status_code == 201, r.text
     codes = {(w["code"], w["path"]) for w in r.json()["warnings"]}
@@ -363,7 +358,7 @@ def test_item_text_agent_warns_text_output_ref(client, no_gate):
 
 
 @requires_pg
-def test_item_unpinned_warns_pinned_blocks_same_spec(client, no_gate):
+def test_item_unpinned_warns_pinned_blocks_same_spec(client):
     aid = _agent(client, schema=CLOSED)
     un = _publish(client, _items_wf(aid, "urgncy", version=None))
     assert un.status_code == 201
@@ -372,7 +367,7 @@ def test_item_unpinned_warns_pinned_blocks_same_spec(client, no_gate):
 
 
 @requires_pg
-def test_item_versions_are_checked_against_the_pinned_version(client, no_gate):
+def test_item_versions_are_checked_against_the_pinned_version(client):
     aid = _agent(client, schema=CLOSED)
     spec = {"name": "A", "model": {"provider": "test", "name": "structured"},
             "output": {"json_schema": {**CLOSED, "properties": {**CLOSED["properties"], "extra": {"type": "string"}}}}}
@@ -385,7 +380,7 @@ def test_item_versions_are_checked_against_the_pinned_version(client, no_gate):
 
 
 @requires_pg
-def test_body_agent_output_refs_valid_invalid_and_until_exit_refs(client, no_gate):
+def test_body_agent_output_refs_valid_invalid_and_until_exit_refs(client):
     aid = _agent(client, schema=CLOSED)
 
     def spec(path: str) -> dict[str, Any]:
@@ -403,7 +398,7 @@ def test_body_agent_output_refs_valid_invalid_and_until_exit_refs(client, no_gat
 
 
 @requires_pg
-def test_nested_loops_item_over_item_and_warning_paths(client, no_gate):
+def test_nested_loops_item_over_item_and_warning_paths(client):
     schema = {"type": "object", "additionalProperties": False, "properties": {"groups": {
         "type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {
             "members": {"type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -424,7 +419,7 @@ def test_nested_loops_item_over_item_and_warning_paths(client, no_gate):
 
 
 @requires_pg
-def test_item_ref_over_input_items_ignores_same_named_agent_step(client, no_gate):
+def test_item_ref_over_input_items_ignores_same_named_agent_step(client):
     # items come from input.*, so there is no agent schema to check the item field against
     aid = _agent(client, schema=CLOSED)
     spec = _wf(_agent_step("triage", aid, 1, "each"),
@@ -436,7 +431,7 @@ def test_item_ref_over_input_items_ignores_same_named_agent_step(client, no_gate
 
 
 @requires_pg
-def test_tenant_isolation_publish_and_run_start(api, fake, no_gate):
+def test_tenant_isolation_publish_and_run_start(api, fake):
     client, _, tenant_of = api
     _, mine = tenant_of()
     _, theirs = tenant_of()
@@ -454,7 +449,7 @@ def test_tenant_isolation_publish_and_run_start(api, fake, no_gate):
 
 
 @requires_pg
-def test_d8a_only_reads_the_callers_agent_versions(client, no_gate):
+def test_d8a_only_reads_the_callers_agent_versions(client):
     mine_plain = _agent(client)
     theirs_gated = _agent(client, approvals=True, tenant=OTHER)
     r = _publish(client, _wf(_foreach([_agent_step("a", mine_plain, 1)])))
@@ -506,8 +501,7 @@ def test_loop_free_warning_shapes_match_ac9(client):
 
 
 @requires_pg
-def test_loop_free_still_gated_message_unchanged_and_get_identical(client):
-    # the runtime gate only concerns loop specs; a loop-free spec publishes without the monkeypatch
+def test_loop_free_publish_unchanged_and_get_identical(client):
     r = _publish(client, _wf(_tool("a", "b"), _tool("b")))
     assert r.status_code == 201 and r.json()["warnings"] == []
     first = client.get(f"{BASE}/{r.json()['workflow_id']}/versions/1", headers=_h())
