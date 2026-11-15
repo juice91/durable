@@ -42,6 +42,10 @@ MAX_CLIENT_TOOL_DESCRIPTION_CHARS = 4096
 MAX_CLIENT_TOOL_SCHEMA_BYTES = 64 * 1024  # one tool's parameters (canonical JSON, UTF-8)
 MAX_CLIENT_TOOL_SCHEMAS_BYTES = 64 * 1024  # all tools' parameters together
 MAX_CLIENT_TOOL_SCHEMA_DEPTH = 32  # objects/arrays; the AG-UI body itself is capped at 64
+# JSON objects in parameters, all tools together (so per tool too). Meta-validation costs about
+# 0.1 ms per subschema, so this bounds one run's schema work to well under 100 ms; the byte caps
+# alone (64 KiB of tiny properties is ~1,500 subschemas) do not.
+MAX_CLIENT_TOOL_SCHEMA_NODES = 256
 MAX_TOOL_CALL_ID_CHARS = 256
 MAX_CLIENT_TOOL_RESULT_BYTES = 32 * 1024  # content + error, UTF-8
 MAX_AGUI_INPUT_BYTES = 32 * 1024  # the new user input of one AG-UI run (as RunCreate.input)
@@ -98,6 +102,56 @@ def _iter_refs(schema: Any) -> Iterable[tuple[str, str]]:
             stack.extend(item for item in node if isinstance(item, (dict, list)))
 
 
+# Stands for a client-chosen name (a property, a `$defs` member, any other object key of the
+# schema) in an error's subschema path: error messages name keywords and indexes only.
+SCHEMA_NAME_PLACEHOLDER = "*"
+
+
+def _schema_keywords() -> frozenset[str]:
+    import jsonschema
+
+    return frozenset(jsonschema.Draft202012Validator.VALIDATORS) | {
+        "$schema", "$defs", "definitions", "$id", "$anchor", "$comment", "title", "description", "default",
+        "examples", "deprecated", "readOnly", "writeOnly", "format", "contentMediaType", "contentEncoding",
+        "contentSchema",
+    }
+
+
+def _safe_schema_path(parts: Iterable[Any]) -> list[str]:
+    """A path into the client's schema with every client-chosen name replaced by
+    SCHEMA_NAME_PLACEHOLDER: indexes and JSON Schema keywords are kept, except a member name of a
+    name-keyed keyword (`properties`, `$defs`...), which is always a placeholder."""
+    keywords = _schema_keywords()
+    out: list[str] = []
+    previous: Any = None
+    for part in parts:
+        if isinstance(part, int):
+            out.append(str(part))
+        elif part in keywords and previous not in _SCHEMA_MAP_KEYWORDS:
+            out.append(part)
+        else:
+            out.append(SCHEMA_NAME_PLACEHOLDER)
+        previous = part
+    return out
+
+
+def schema_node_count(value: Any, limit: int | None = None) -> int:
+    """The number of JSON objects in `value` (iterative). With `limit`, stops early and returns
+    limit + 1 once the count exceeds it."""
+    count = 0
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            count += 1
+            if limit is not None and count > limit:
+                return limit + 1
+            stack.extend(v for v in node.values() if isinstance(v, (dict, list)))
+        elif isinstance(node, list):
+            stack.extend(v for v in node if isinstance(v, (dict, list)))
+    return count
+
+
 def _check_parameters_schema(schema: Any) -> dict[str, Any]:
     if not isinstance(schema, dict):
         raise _schema_error("client_tool_schema_not_object", "parameters must be a JSON Schema object")
@@ -105,6 +159,11 @@ def _check_parameters_schema(schema: Any) -> dict[str, Any]:
         raise _schema_error(
             "client_tool_schema_too_deep",
             f"parameters nests deeper than {MAX_CLIENT_TOOL_SCHEMA_DEPTH} levels",
+        )
+    if schema_node_count(schema, MAX_CLIENT_TOOL_SCHEMA_NODES) > MAX_CLIENT_TOOL_SCHEMA_NODES:
+        raise _schema_error(
+            "client_tool_schema_too_complex",
+            f"parameters may hold at most {MAX_CLIENT_TOOL_SCHEMA_NODES} JSON objects",
         )
     try:
         # Strict JSON: NaN and Infinity are not JSON, and must never reach the stored row or the wire.
@@ -133,7 +192,7 @@ def _check_parameters_schema(schema: Any) -> dict[str, Any]:
     try:
         jsonschema.Draft202012Validator.check_schema(schema)
     except jsonschema.SchemaError as err:
-        where = "/".join(str(p)[:64] for p in err.absolute_path) or "(root)"
+        where = "/".join(_safe_schema_path(err.absolute_path)) or "(root)"
         raise _schema_error(
             "client_tool_schema_invalid",
             f"parameters is not a valid JSON Schema (Draft 2020-12) at {where}: '{err.validator}' keyword",
@@ -176,7 +235,8 @@ def _check_refs_and_keywords(root: dict[str, Any]) -> None:
         for keyword in _SCHEMA_MAP_KEYWORDS:
             members = node.get(keyword)
             if isinstance(members, dict):
-                stack.extend((sub, f"{path}/{keyword}/{str(name)[:64]}") for name, sub in members.items())
+                # Member names are the client's: never part of an error message.
+                stack.extend((sub, f"{path}/{keyword}/{SCHEMA_NAME_PLACEHOLDER}") for sub in members.values())
         for keyword in _SCHEMA_LIST_KEYWORDS:
             members = node.get(keyword)
             if isinstance(members, list):
@@ -258,7 +318,9 @@ class ClientToolsInvalid(ValueError):
 
 def check_client_tools(tools: Sequence[ClientToolDecl]) -> None:
     """The list rules for one run's client tools: at most MAX_CLIENT_TOOLS, unique names, and the
-    parameters schemas at most MAX_CLIENT_TOOL_SCHEMAS_BYTES together."""
+    parameters schemas at most MAX_CLIENT_TOOL_SCHEMAS_BYTES and MAX_CLIENT_TOOL_SCHEMA_NODES
+    together. A caller holding raw input should apply the two totals before building the decls
+    (eap_api.ag_ui.input does), so the per-tool JSON Schema work is bounded too."""
     if len(tools) > MAX_CLIENT_TOOLS:
         raise ClientToolsInvalid("client_tools_too_many", f"at most {MAX_CLIENT_TOOLS} client tools are allowed")
     seen: set[str] = set()
@@ -271,6 +333,11 @@ def check_client_tools(tools: Sequence[ClientToolDecl]) -> None:
         raise ClientToolsInvalid(
             "client_tools_schemas_too_large",
             f"client tool parameters must be at most {MAX_CLIENT_TOOL_SCHEMAS_BYTES} bytes in total",
+        )
+    if sum(schema_node_count(tool.parameters) for tool in tools) > MAX_CLIENT_TOOL_SCHEMA_NODES:
+        raise ClientToolsInvalid(
+            "client_tools_schemas_too_complex",
+            f"client tool parameters may hold at most {MAX_CLIENT_TOOL_SCHEMA_NODES} JSON objects in total",
         )
 
 
@@ -320,6 +387,7 @@ __all__ = [
     "CLIENT_TOOL_NAME_PATTERN",
     "LOCAL_REF_PATTERN",
     "MAX_VERSION",
+    "SCHEMA_NAME_PLACEHOLDER",
     "TOOL_CALL_ID_PATTERN",
     "ClientToolDecl",
     "ClientToolResult",
@@ -331,7 +399,9 @@ __all__ = [
     "MAX_CLIENT_TOOL_SCHEMAS_BYTES",
     "MAX_CLIENT_TOOL_SCHEMA_BYTES",
     "MAX_CLIENT_TOOL_SCHEMA_DEPTH",
+    "MAX_CLIENT_TOOL_SCHEMA_NODES",
     "MAX_TOOL_CALL_ID_CHARS",
     "check_client_tools",
     "client_tool_clashes",
+    "schema_node_count",
 ]

@@ -321,3 +321,65 @@ def test_errors_never_echo_input():
             attempt()
         assert secret not in str(info.value)
         assert secret not in repr(info.value)
+
+
+# --------------------------------------------------------------------------- AGUI.5 review (M2, B1)
+
+_SECRET = "SECRETPROP-4b2c"
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"type": "object", "properties": {_SECRET: {"pattern": "a"}}},
+        {"type": "object", "properties": {_SECRET: {"$ref": "#/$defs/nope"}}},
+        {"type": "object", "properties": {_SECRET: {"type": 5}}},
+        {"type": "object", "properties": {"a": {"items": {"properties": {_SECRET: {"minimum": "x"}}}}}},
+        {"type": "object", "$defs": {_SECRET: {"format": "regex"}}},
+        {"type": "object", "properties": {"type": {"properties": {_SECRET: {"$anchor": "x"}}}}},
+    ],
+)
+def test_schema_errors_never_name_client_keys(parameters: dict) -> None:
+    from pydantic import ValidationError
+
+    from eap_schemas.client_tools import SCHEMA_NAME_PLACEHOLDER, ClientToolDecl
+
+    with pytest.raises(ValidationError) as exc:
+        ClientToolDecl(name="t", parameters=parameters)
+    text = str(exc.value) + repr(exc.value.errors(include_input=False))
+    assert _SECRET not in text
+    assert SCHEMA_NAME_PLACEHOLDER in exc.value.errors()[0]["msg"]
+
+
+def test_safe_schema_path_keeps_keywords_and_indexes_only() -> None:
+    from eap_schemas.client_tools import _safe_schema_path
+
+    assert _safe_schema_path(["properties", "type", "anyOf", 0, "minimum"]) == ["properties", "*", "anyOf", "0", "minimum"]
+    assert _safe_schema_path(["const", "secret"]) == ["const", "*"]
+
+
+def test_schema_node_budget() -> None:
+    from pydantic import ValidationError
+
+    from eap_schemas.client_tools import (
+        MAX_CLIENT_TOOL_SCHEMA_NODES,
+        ClientToolDecl,
+        ClientToolsInvalid,
+        check_client_tools,
+        schema_node_count,
+    )
+
+    def schema(props: int) -> dict:
+        return {"type": "object", "properties": {f"p{i}": {"type": "integer"} for i in range(props)}}
+
+    assert schema_node_count(schema(MAX_CLIENT_TOOL_SCHEMA_NODES - 2)) == MAX_CLIENT_TOOL_SCHEMA_NODES
+    ClientToolDecl(name="t", parameters=schema(MAX_CLIENT_TOOL_SCHEMA_NODES - 2))
+    with pytest.raises(ValidationError) as exc:
+        ClientToolDecl(name="t", parameters=schema(MAX_CLIENT_TOOL_SCHEMA_NODES - 1))
+    assert exc.value.errors()[0]["type"] == "client_tool_schema_too_complex"
+    assert schema_node_count(schema(10_000), limit=5) == 6
+    half = ClientToolDecl(name="a", parameters=schema(MAX_CLIENT_TOOL_SCHEMA_NODES // 2 - 2))
+    check_client_tools([half, half.model_copy(update={"name": "b"})])
+    with pytest.raises(ClientToolsInvalid) as invalid:
+        check_client_tools([half, half.model_copy(update={"name": "b"}), ClientToolDecl(name="c", parameters={"type": "object"})])
+    assert invalid.value.code == "client_tools_schemas_too_complex"
