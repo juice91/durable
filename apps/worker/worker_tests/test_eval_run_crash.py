@@ -5,16 +5,29 @@ per key and a gap-free seq on the eval run. Real subprocesses, always stopped in
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
 from dbos import DBOSClient
 
+from eap_run_store.evals import EvalStore
 from worker_tests.conftest import DBOS_DB_URL, event_rows, wait_terminal
-from worker_tests.eval_run_helpers import JUDGE, cleanup_evals, create_suite, results, start_eval, usage_keys
+from worker_tests.eval_run_helpers import (
+    JUDGE,
+    child_runs,
+    cleanup_evals,
+    create_suite,
+    results,
+    start_eval,
+    usage_keys,
+)
 from worker_tests.test_crash_recovery import APP_VERSION as CRASH_APP_VERSION
 from worker_tests.test_crash_recovery import WorkerProcess, _env, crash_schema  # noqa: F401 - fixture
 from worker_tests.workflow_run_helpers import agent_spec, cleanup_definitions, publish_agent
+
+
+SLOW_ROUNDS = 30  # c1's tool-calling requests (31 model requests; below Pydantic AI's default 50)
 
 
 @pytest.fixture
@@ -33,8 +46,13 @@ def defs(worker, tenant):
     ],
 )
 def test_crash_then_recover_records_each_case_once(worker, tenant, defs, crash_schema, tmp_path, crash):
-    agent_id = publish_agent(worker.engine, tenant, agent_spec("echo"))
-    cases = [{"name": f"c{i}", "input": f"word{i}"} for i in range(3)]
+    # test:priced echoes at once, or with prompt JSON {"rounds": k} first makes k tool-calling
+    # requests: case c1 (the second child of the first batch) is slow, so it is still running when
+    # the worker dies right after c0's result (mid-batch), which the test asserts below.
+    agent_id = publish_agent(worker.engine, tenant, agent_spec("priced", tools=("clock.now",)))
+    cases = [{"name": "c0", "input": "word0"},
+             {"name": "c1", "input": json.dumps({"rounds": SLOW_ROUNDS, "text": "word1"})},
+             {"name": "c2", "input": "word2"}]
     evaluators = [{"kind": "contains", "value": "Echo:"},
                   {"kind": "llm_judge", "rubric": "MUST_CONTAIN:word", "model": JUDGE}]
     suite_id = create_suite(worker.engine, tenant, agent_id, cases, evaluators)
@@ -51,6 +69,13 @@ def test_crash_then_recover_records_each_case_once(worker, tenant, defs, crash_s
         assert crashing.wait_exit() == 137, (tmp_path / "worker-crash.log").read_text()
         assert worker.run_store.get_run(tenant, run_id)["status"] == "running"
         recorded_before = len(results(worker.engine, tenant, run_id))
+        at_kill = {r.parent_step_id: r.status for r in child_runs(worker.engine, run_id)}
+        if crash["EAP_CRASH_AT"] == "eval_child_done":
+            # Killed mid-batch: c0's child is done, c1's (same batch) was still running, c2 not created.
+            case_ids = {c.name: str(c.id) for c in EvalStore(worker.engine).list_cases(tenant, suite_id)}
+            assert at_kill[f"case:{case_ids['c0']}"] == "completed"
+            assert at_kill[f"case:{case_ids['c1']}"] == "running"
+            assert f"case:{case_ids['c2']}" not in at_kill and recorded_before == 0
         recovering = WorkerProcess(_env(crash_schema, executor_id), tmp_path / "worker-recover.log")
         procs.append(recovering)
         run = wait_terminal(worker.run_store, tenant, run_id, timeout=120)

@@ -45,19 +45,37 @@ def launch(api, worker, tenant, agent_id, suite_id, **body):
     return run_id, r.json()
 
 
-def test_invalid_regex_is_accepted_by_the_api_and_is_a_runtime_evaluator_failure(api, worker, etenant):
-    """The plan has no publish-time regex syntax check (eap_schemas.evals' docstring says the API checks RE2
-    syntax, but only length is validated): an invalid or non-RE2 pattern becomes an evaluator_failures entry."""
+def test_invalid_regex_is_refused_by_the_api_and_valid_ones_run(api, worker, etenant):
+    """AC.11 review: the API refuses a pattern RE2 does not compile (422 naming the evaluator path,
+    the pattern never echoed); RE2-valid patterns are stored and evaluated by the real eap.eval_run."""
     agent_id = make_agent(api, etenant, agent_spec("echo"))
-    evaluators = [{"kind": "regex", "pattern": "(unclosed", "name": "bad"}, {"kind": "regex", "pattern": "a(?=b)", "name": "lookahead"},
-                  {"kind": "regex", "pattern": "^Echo", "name": "good"}]
+    for pattern in ("(unclosed", "a(?=b)"):  # a syntax error, and a lookahead RE2 does not support
+        r = api.post(f"{V1}/agents/{agent_id}/eval-suites", headers=auth(etenant),
+                     json={"name": "bad", "evaluators": [{"kind": "regex", "pattern": pattern, "name": "bad"}]})
+        assert r.status_code == 422 and "evaluators.0.pattern" in r.json()["detail"], r.text
+        assert pattern not in r.text
+    evaluators = [{"kind": "regex", "pattern": "^Echo", "name": "good"}, {"kind": "regex", "pattern": "nope", "name": "miss"}]
     suite_id = build_suite(api, etenant, agent_id, evaluators, [{"name": "c", "input": "x"}])
     run_id, _ = launch(api, worker, etenant, agent_id, suite_id, version=1)
     (item,) = api.get(f"{V1}/agents/{agent_id}/evals/runs/{run_id}/results", headers=auth(etenant)).json()["items"]
-    assert item["status"] == "failed" and item["assertions"]["good"]["value"] is True
-    assert [(f["name"], f["error"]) for f in item["evaluator_failures"]] == [
-        ("bad", "the evaluator raised an error"), ("lookahead", "the evaluator raised an error")]
-    assert "unclosed" not in json.dumps(item["evaluator_failures"])
+    assert item["status"] == "failed" and item["evaluator_failures"] == []
+    assert item["assertions"]["good"]["value"] is True and item["assertions"]["miss"]["value"] is False
+
+
+def test_archived_agent_cannot_start_an_eval_run_through_the_api(api, worker, etenant):
+    """POST /agents/{id}/evals/runs reaches the real eap.eval_run (completed, with results); once the
+    agent is archived a new one is a 409 and creates no run."""
+    agent_id = make_agent(api, etenant, agent_spec("echo"))
+    suite_id = build_suite(api, etenant, agent_id, [{"kind": "contains", "value": "Echo:"}], [{"name": "c", "input": "x"}])
+    run_id, _ = launch(api, worker, etenant, agent_id, suite_id, version=1)
+    (item,) = api.get(f"{V1}/agents/{agent_id}/evals/runs/{run_id}/results", headers=auth(etenant)).json()["items"]
+    assert item["status"] == "passed"
+    assert api.post(f"{V1}/agents/{agent_id}/archive", headers=auth(etenant)).status_code == 200
+    new = str(uuid.uuid4())
+    r = api.post(f"{V1}/agents/{agent_id}/evals/runs", json={"run_id": new, "suite_id": suite_id, "version": 1},
+                 headers=auth(etenant))
+    assert r.status_code == 409 and "archived" in r.json()["detail"]
+    assert worker.run_store.get_run(etenant, uuid.UUID(new)) is None
 
 
 def test_end_to_end_version_and_draft_runs_with_results_aggregates_and_compare(api, worker, etenant):

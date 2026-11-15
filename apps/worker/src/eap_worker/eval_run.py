@@ -11,7 +11,9 @@ already stores the workflow's arguments, so reading the argument costs nothing m
 and is the same on every replay. Reading `runs.input` inside a step instead would store the whole
 snapshot (up to ~32 MiB) a second time as that step's checkpointed output. `eap.start_eval_run`
 returns the row's `eval_suite_hash`, and the workflow fails `eval_suite_mismatch` unless the
-argument hashes to it, so the argument can never differ from the run's recorded suite.
+argument hashes to it, so the argument can never differ from the run's recorded suite. A row
+without a hash (NULL) also fails `eval_suite_mismatch`: RunStore.create_eval_run always records it,
+and the `eval` kind and the column arrived together (0015_evals), so no legitimate row lacks one.
 
 Step layout (DBOS steps and child workflows):
 
@@ -432,7 +434,10 @@ async def _eval_body(run_id: str, tenant_id: str, input_json: str, link: dict[st
             from eap_schemas.evals import EvalSuiteInvalid
 
             raise EvalSuiteInvalid("the run input is not a suite snapshot")
-        if link.get("suite_hash") is not None and link["suite_hash"] != snapshot.suite_hash():
+        # Fail closed: every eval run row records its hash at creation (RunStore.create_eval_run;
+        # the `eval` kind and the column were added together in 0015_evals, so no older eval run
+        # exists). A row without one was not made by that path and is never run unchecked.
+        if link.get("suite_hash") is None or link["suite_hash"] != snapshot.suite_hash():
             raise EvalRunError("eval_suite_mismatch")
         await _run_cases(run_id, tenant_id, link, snapshot)
         aggregates = await eval_aggregates_step(run_id, tenant_id)

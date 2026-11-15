@@ -9,10 +9,9 @@ import pytest
 
 from eap_schemas.evals import Contains, EqualsExpected, FieldEquals, LlmJudge, Regex
 from eap_worker.evaluators import (
-    NO_CONTAINS_VALUE,
     NO_COST,
     NO_DURATION,
-    NO_EXPECTED_OUTPUT,
+    REGEX_INVALID,
     JUDGE_INSTRUCTIONS,
     CaseOutcome,
     add_verdict,
@@ -93,8 +92,7 @@ def test_schema_valid_fails_for_a_text_agent_without_a_schema_and_for_non_json_t
 @pytest.mark.parametrize(
     "spec,kwargs,message",
     [
-        ({"kind": "equals_expected"}, {}, NO_EXPECTED_OUTPUT),
-        ({"kind": "contains"}, {}, NO_CONTAINS_VALUE),
+        ({"kind": "regex", "pattern": "a("}, {}, REGEX_INVALID),
         ({"kind": "max_duration", "seconds": 1}, {"duration_s": None}, NO_DURATION),
         ({"kind": "max_cost", "usd": "1"}, {"cost": None}, NO_COST),
     ],
@@ -109,9 +107,46 @@ def test_unavailable_evaluators_are_failures_and_fail_the_case(spec, kwargs, mes
 
 
 def test_one_failing_evaluator_does_not_stop_the_others():
-    outcome = score([{"kind": "equals_expected"}, {"kind": "contains", "value": "x"}], "x")
+    outcome = score([{"kind": "max_cost", "usd": "1"}, {"kind": "contains", "value": "x"}], "x", cost=None)
     assert outcome.assertions["contains"]["value"] is True
-    assert [f["name"] for f in outcome.evaluator_failures] == ["equals_expected"]
+    assert [f["name"] for f in outcome.evaluator_failures] == ["max_cost"]
+
+
+@pytest.mark.parametrize("spec", [{"kind": "equals_expected"}, {"kind": "contains"}])
+def test_expected_output_evaluators_are_skipped_without_an_expected_output(spec):
+    """As pydantic_evals' EqualsExpected ({} without an expected output): no assertion, no failure,
+    so a suite-level evaluator leaves the cases without an expected output alone."""
+    outcome = score([spec], "anything", expected=None)
+    assert outcome.assertions == {} and outcome.evaluator_failures == []
+    assert outcome.passed() is True
+    # With its own value, contains still runs on such a case.
+    assert score([{"kind": "contains", "value": "any"}], "anything").assertions["contains"]["value"] is True
+
+
+@pytest.mark.parametrize(
+    "output,expected,result",
+    [
+        ('{"label": "bug"}', {"label": "bug"}, True),  # a text agent answering JSON text
+        ('{"label": "bug"}', {"label": "question"}, False),
+        ("[1, 2.0]", [1, 2], True),
+        ("true", True, True),
+        ("1", True, False),  # a boolean is never a number
+        ("not json", {"label": "bug"}, False),
+        ('"bug"', "bug", False),  # a string expected value compares with the text itself
+        ("bug", "bug", True),
+    ],
+)
+def test_equals_expected_parses_json_text_output(output, expected, result):
+    outcome = score([{"kind": "equals_expected"}], output, expected=expected)
+    assert outcome.assertions["equals_expected"]["value"] is result and outcome.evaluator_failures == []
+
+
+def test_regex_uses_the_processors_compile_and_writes_nothing_to_stderr(capfd):
+    outcome = score([{"kind": "regex", "pattern": "a(b"}], "ab")
+    assert outcome.evaluator_failures[0]["error"] == REGEX_INVALID
+    assert "a(b" not in str(outcome.as_json())
+    captured = capfd.readouterr()
+    assert "a(b" not in captured.err and "a(b" not in captured.out
 
 
 def test_judge_prompt_escapes_blocks_and_the_scripted_judge_reads_it():

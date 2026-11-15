@@ -16,7 +16,14 @@ import pytest
 from sqlalchemy import text
 
 from eap_run_store.evals import EvalStore
-from eap_worker.evaluators import EVALUATOR_RAISED, NO_COST, NO_DURATION, plan_evaluators, score_deterministic
+from eap_worker.evaluators import (
+    EVALUATOR_RAISED,
+    NO_COST,
+    NO_DURATION,
+    REGEX_INVALID,
+    plan_evaluators,
+    score_deterministic,
+)
 from worker_tests.conftest import APP_VERSION, event_rows, wait_terminal
 from worker_tests.eval_run_helpers import JUDGE, child_runs, cleanup_evals, create_suite, results, start_eval, usage_keys
 from worker_tests.test_conversation import step_names
@@ -55,21 +62,21 @@ def test_every_deterministic_evaluator_passes_and_fails(spec, good, bad, expecte
 
 def test_every_evaluator_error_is_a_failure_entry_with_a_fixed_message():
     cases = [
-        (score({"kind": "equals_expected"}, "x"), "EvaluatorUnavailable"),
-        (score({"kind": "contains"}, "x"), "EvaluatorUnavailable"),
-        (score({"kind": "max_duration", "seconds": 1}, "x", duration_s=None), "EvaluatorUnavailable"),
-        (score({"kind": "max_cost", "usd": "1"}, "x", cost=None), "EvaluatorUnavailable"),
-        (score({"kind": "regex", "pattern": "(unclosed"}, "x"), None),  # RE2 compile error at run time
+        (score({"kind": "max_duration", "seconds": 1}, "x", duration_s=None), "EvaluatorUnavailable", NO_DURATION),
+        (score({"kind": "max_cost", "usd": "1"}, "x", cost=None), "EvaluatorUnavailable", NO_COST),
+        # A pattern RE2 refuses (the API refuses it too; a stored one fails here, never echoed).
+        (score({"kind": "regex", "pattern": "(unclosed"}, "x"), "EvaluatorUnavailable", REGEX_INVALID),
     ]
-    for outcome, error_type in cases:
+    for outcome, error_type, message in cases:
         [failure] = outcome.evaluator_failures
         assert outcome.assertions == {} and not outcome.passed()
-        assert failure["error"] in {EVALUATOR_RAISED, NO_COST, NO_DURATION} or "expected output" in failure["error"] \
-            or "value to look for" in failure["error"]
+        assert failure["error"] == message and failure["error_type"] == error_type
         assert "unclosed" not in json.dumps(failure)  # never exception text
-        if error_type:
-            assert failure["error_type"] == error_type
-    assert cases[-1][0].evaluator_failures[0]["error"] == EVALUATOR_RAISED
+    # Evaluators that compare with the expected output are skipped without one (pydantic_evals).
+    for spec in ({"kind": "equals_expected"}, {"kind": "contains"}):
+        skipped = score(spec, "x")
+        assert skipped.assertions == {} and skipped.evaluator_failures == [] and skipped.passed()
+    assert EVALUATOR_RAISED  # still the message of an evaluator that raises unexpectedly
 
 
 def test_non_string_and_structured_outputs():
@@ -271,6 +278,36 @@ def test_max_concurrency_batches_and_results_keep_case_order(worker, client, wor
     assert [e[1] for e in case_events] == [f"case:{r.case_id}" for r in rows]
     assert event_rows(worker.engine, run_id)[0][3]["max_concurrency"] == size
     assert len(child_runs(worker.engine, run_id)) == 5
+    # At most `size` children at once: a batch's child rows are only created after every child of
+    # the previous batch finished, and no more than `size` child runs ever overlap in time.
+    timing = child_timing(worker.engine, run_id, rows)
+    for b in range(1, batches):
+        previous = [t for t in timing if t["position"] // size == b - 1]
+        current = [t for t in timing if t["position"] // size == b]
+        assert min(t["created_at"] for t in current) >= max(t["finished_at"] for t in previous)
+    assert max_overlap(timing) <= size
+
+
+def child_timing(engine, run_id, rows) -> list[dict]:
+    position = {f"case:{r.case_id}": r.position for r in rows}
+    with engine.connect() as conn:
+        found = conn.execute(
+            text("SELECT parent_step_id, created_at, started_at, finished_at FROM runs WHERE parent_run_id = :r"),
+            {"r": str(run_id)},
+        ).fetchall()
+    return [{"position": position[f.parent_step_id], "created_at": f.created_at, "started_at": f.started_at,
+             "finished_at": f.finished_at} for f in found]
+
+
+def max_overlap(timing: list[dict]) -> int:
+    """The largest number of child runs running at one instant ([started_at, finished_at])."""
+    points = sorted([(t["started_at"], 1) for t in timing] + [(t["finished_at"], -1) for t in timing],
+                    key=lambda p: (p[0], p[1]))  # an end before a start at the same instant
+    running = peak = 0
+    for _, delta in points:
+        running += delta
+        peak = max(peak, running)
+    return peak
 
 
 def test_six_case_suite_of_structured_and_echo_agents_with_aggregates(worker, client, tenant, defs):

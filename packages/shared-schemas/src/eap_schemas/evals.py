@@ -5,8 +5,10 @@ Declared here so the API validates suites, cases and evaluators without importin
 
 - `equals_expected`: deep JSON equality with the case's expected output (numbers by value);
 - `contains {value?, case_sensitive}`: the output contains `value` (default: the expected output);
-- `regex {pattern}`: RE2 pattern (at most 200 characters; RE2 syntax is checked by the API with
-  eap_processors, the worker matches with RE2);
+- `regex {pattern}`: RE2 pattern (at most 200 characters). This contract checks only the length
+  (eap_schemas imports no eap_processors); the API refuses a pattern RE2 does not compile (422 at
+  `<path>.pattern`, fixed message) on every suite and case write and on import, and the worker
+  compiles with the same `eap_processors.compile_re2`;
 - `schema_valid {json_schema?}`: the output validates against the schema (default: the agent
   version's output schema);
 - `field_equals {path, value}`: the structured output's value at `path` (dotted segments, a digit

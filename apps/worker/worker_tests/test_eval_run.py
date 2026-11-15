@@ -166,7 +166,31 @@ def test_draft_target(worker, client, tenant, defs):
     child = worker.run_store.get_run(tenant, row.child_run_id)
     assert child["draft_spec"] == draft and child["agent_version"] is None
     assert event_rows(worker.engine, run_id)[0][3]["draft"] is True
-    assert row.evaluator_failures[0]["error"] == "the case has no expected output"
+    # No expected output: equals_expected is skipped (as pydantic_evals), so the case passes.
+    assert row.assertions == {} and row.evaluator_failures == [] and row.status == "passed"
+
+
+def test_a_row_without_a_suite_hash_fails_closed(worker, client, tenant, defs):
+    from sqlalchemy import text
+
+    agent_id = publish_agent(worker.engine, tenant, agent_spec("echo"))
+    suite_id = create_suite(worker.engine, tenant, agent_id, [{"name": "a", "input": "one"}], [])
+    from eap_run_store.evals import EvalStore
+
+    snapshot_json = EvalStore(worker.engine).snapshot(tenant, suite_id, agent_id=agent_id).canonical_json()
+    import uuid
+
+    run_id = uuid.uuid4()
+    worker.run_store.create_eval_run(tenant, agent_id, 1, suite_id, snapshot_json, run_id)
+    with worker.engine.begin() as conn:  # a row not made by create_eval_run
+        conn.execute(text("UPDATE runs SET eval_suite_hash = NULL WHERE id = :r"), {"r": str(run_id)})
+    client.enqueue({"queue_name": "eap-agent-runs", "workflow_name": "eap.eval_run", "workflow_id": str(run_id),
+                    "app_version": APP_VERSION}, str(run_id), tenant, snapshot_json)
+    run = wait_terminal(worker.run_store, tenant, run_id, timeout=60)
+    assert run["status"] == "failed"
+    end = event_rows(worker.engine, run_id)[-1]
+    assert end[2] == "run_failed" and end[3]["error_code"] == "eval_suite_mismatch"
+    assert child_runs(worker.engine, run_id) == []
 
 
 def test_suite_edits_after_creation_do_not_change_the_run(worker, client, tenant, defs):

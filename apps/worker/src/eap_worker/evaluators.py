@@ -6,10 +6,12 @@ Each spec evaluator (eap_schemas.evals) becomes a `pydantic_evals` evaluator, us
 
 | spec kind         | evaluator                                                                  |
 |-------------------|----------------------------------------------------------------------------|
-| `equals_expected` | `JsonEqualsExpected` (a `pydantic_evals` `EqualsExpected` with JSON rules)  |
+| `equals_expected` | `JsonEqualsExpected` (a `pydantic_evals` `EqualsExpected` with JSON rules;  |
+|                   | a text output is also compared parsed as JSON)                             |
 | `contains`        | `pydantic_evals` `Contains` (value default: the case's expected output)    |
 | `max_duration`    | `pydantic_evals` `MaxDuration`                                             |
-| `regex`           | ours, `Regex`: RE2 search on the output text (canonical JSON if structured) |
+| `regex`           | ours, `Regex`: RE2 search (eap_processors.compile_re2) on the output text   |
+|                   | (canonical JSON if structured)                                             |
 | `schema_valid`    | ours, `SchemaValid` (default schema: the agent's `output.json_schema`)     |
 | `field_equals`    | ours, `FieldEquals` (eap_schemas.evals.field_path_value)                   |
 | `max_cost`        | ours, `MaxCost`: the child run's recorded cost (agent only, judge excluded) |
@@ -19,9 +21,15 @@ Each spec evaluator (eap_schemas.evals) becomes a `pydantic_evals` evaluator, us
 All of them run with `evaluate_async` inside the `eap.eval_score` DBOS step, so a replay reads the
 recorded outcome. Results map as in `pydantic_evals`: a bool is an assertion, a number a score, a
 string a label, an `EvaluationReason` by its value's type (with its reason), a mapping per key.
-An evaluator that raises (or cannot run: no expected output, no recorded duration or cost) is an
-`evaluator_failures` entry `{name, kind, error_type, error}` with a fixed message, never exception
-text. A case passes when every assertion is true and no evaluator failed.
+An evaluator that raises (or cannot run: no recorded duration or cost, a pattern RE2 refuses) is
+an `evaluator_failures` entry `{name, kind, error_type, error}` with a fixed message, never
+exception text. A case passes when every assertion is true and no evaluator failed.
+
+As in `pydantic_evals` (`EqualsExpected` returns `{}` without an expected output), an evaluator that
+compares with the case's expected output is SKIPPED (no assertion, no failure) on a case that has
+none: `equals_expected`, and `contains` without its own `value`. So a suite-level
+`equals_expected` applies to the cases that have an expected output and leaves the others alone;
+a case whose only evaluators are skipped passes with no assertions.
 
 Evaluator names: the spec's `name`, else its `kind`; a default name that is already taken gets
 `_2`, `_3`, ... (explicit names are reserved first). Indexes run over the suite's evaluators, then
@@ -52,6 +60,7 @@ from pydantic_evals.evaluators import (
 from pydantic_evals.otel import SpanTreeRecordingError
 
 from eap_observability import exception_type
+from eap_processors import Re2PatternError, compile_re2
 from eap_schemas.evals import EvaluatorSpec, LlmJudge, field_path_value
 from eap_worker.capabilities import schema_errors
 
@@ -73,12 +82,19 @@ MAX_REASON_CHARS = 2000
 MAX_SCHEMA_REASONS = 5
 
 # Fixed evaluator failure messages (stored, shown in Studio; never exception text).
-NO_EXPECTED_OUTPUT = "the case has no expected output"
-NO_CONTAINS_VALUE = "no value to look for: set `value` or the case's expected output"
 NO_DURATION = "the case's run duration was not recorded"
 NO_COST = "the case's run cost is unknown (a model without a price)"
 EVALUATOR_RAISED = "the evaluator raised an error"
+REGEX_INVALID = "pattern is not valid RE2 syntax or is too complex"
 JUDGE_FAILED = "the judge request failed"
+
+
+class EvaluatorSkipped(Exception):
+    """The evaluator does not apply to this case (it compares with an expected output the case
+    does not have): no result and no failure, as pydantic_evals' EqualsExpected. Pickle-safe."""
+
+    def __init__(self) -> None:
+        super().__init__()
 
 
 class EvaluatorUnavailable(Exception):
@@ -183,8 +199,12 @@ class JsonEqualsExpected(EqualsExpected):
 
     def evaluate(self, ctx: EvaluatorContext[object, object, object]) -> EvaluationReason:  # type: ignore[override]
         if ctx.expected_output is None:
-            raise EvaluatorUnavailable(NO_EXPECTED_OUTPUT)
+            raise EvaluatorSkipped()
         equal = json_equal(ctx.output, ctx.expected_output)
+        if not equal and isinstance(ctx.output, str) and not isinstance(ctx.expected_output, str):
+            # A text agent answering JSON text (as schema_valid and field_equals read it).
+            ok, parsed = _parsed(ctx.output)
+            equal = ok and json_equal(parsed, ctx.expected_output)
         return EvaluationReason(value=equal, reason=None if equal else "the output differs from the expected output")
 
 
@@ -195,9 +215,13 @@ class Regex(Evaluator[object, object, object]):
     pattern: str
 
     def evaluate(self, ctx: EvaluatorContext[object, object, object]) -> EvaluationReason:
-        import re2
-
-        found = re2.search(self.pattern, output_text(ctx.output)) is not None
+        # The processors' compile (cached, max_mem, program-size bound, log_errors off, so RE2 never
+        # writes the pattern to stderr). A refused pattern raises Re2PatternError: a failure entry.
+        try:
+            regexp = compile_re2(self.pattern, allow_empty_match=True)
+        except Re2PatternError:
+            raise EvaluatorUnavailable(REGEX_INVALID) from None
+        found = regexp.search(output_text(ctx.output)) is not None
         return EvaluationReason(value=found, reason=None if found else "the output does not match the pattern")
 
 
@@ -263,7 +287,7 @@ def build_evaluator(spec: Mapping[str, Any], expected_output: Any) -> Evaluator[
     if kind == "contains":
         value = parsed.value if parsed.value is not None else expected_output
         if value is None:
-            raise EvaluatorUnavailable(NO_CONTAINS_VALUE)
+            raise EvaluatorSkipped()
         return Contains(value=value, case_sensitive=parsed.case_sensitive)
     if kind == "max_duration":
         return MaxDuration(seconds=parsed.seconds)
@@ -379,6 +403,8 @@ async def score_deterministic(
             built = build_evaluator(evaluator.spec, case.get("expected_output"))
             result = await built.evaluate_async(ctx)
             outcome.add(evaluator.name, result)
+        except EvaluatorSkipped:
+            continue
         except Exception as exc:  # noqa: BLE001 - an evaluator failure is a result entry, never a crash
             outcome.add_failure(evaluator, exc, EVALUATOR_RAISED)
     return outcome
@@ -423,6 +449,7 @@ def add_verdict(outcome: CaseOutcome, evaluator: PlannedEvaluator, verdict: Mapp
 __all__ = [
     "CaseOutcome",
     "EVALUATOR_RAISED",
+    "EvaluatorSkipped",
     "EvaluatorUnavailable",
     "FieldEquals",
     "JUDGE_FAILED",
@@ -430,11 +457,10 @@ __all__ = [
     "JUDGE_PROMPT_VERSION",
     "JsonEqualsExpected",
     "MaxCost",
-    "NO_CONTAINS_VALUE",
     "NO_COST",
     "NO_DURATION",
-    "NO_EXPECTED_OUTPUT",
     "PlannedEvaluator",
+    "REGEX_INVALID",
     "Regex",
     "SchemaValid",
     "add_verdict",
