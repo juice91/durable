@@ -9,7 +9,7 @@ test_rm_crash_matrix.assert_recovered_once.
 
 | # | What | Proves |
 |---|------|--------|
-| H1 | The hostile corpus (PDF: corrupt, encrypted, image-only, nested arrays, a flate bomb; rst: deep nesting, a huge line, `include` / `raw :file:` / `csv-table :url:`; YAML: billion laughs, a python tag; JSON: deep nesting, malformed) uploaded over the API between good Markdown, PDF and YAML documents, with OTLP export on | each hostile document fails with its extraction code (run, `run_failed` event, document `error_code` / `error_reason`), or for a file-reading directive ingests without the file; PNG bytes as a PDF and a PDF as rst are refused at the API (415 `unsupported_content`); the worker and the API stay up, the good documents are `ready` and searchable; the search tester keeps the tool-run step list; another tenant gets 404 on every route of the knowledge base; no document text (in any encoding) in the API log, the worker log or any OTLP span or log export, nor in the runs' events and errors |
+| H1 | The hostile corpus (PDF: corrupt, encrypted, image-only, nested arrays, a flate bomb; rst: deep nesting, a huge line, `include` / `raw :file:` / `csv-table :url:`; YAML: billion laughs, a python tag; JSON: deep nesting, malformed) uploaded over the API between good Markdown, PDF and YAML documents, with OTLP export on | a toctree-only rst page is `ready` and empty (0 chunks, `extraction.empty_reason`); each hostile document fails with its extraction code (run, `run_failed` event, document `error_code` / `error_reason`), or for a file-reading directive ingests without the file; PNG bytes as a PDF and a PDF as rst are refused at the API (415 `unsupported_content`); the worker and the API stay up, the good documents are `ready` and searchable; the search tester keeps the tool-run step list; another tenant gets 404 on every route of the knowledge base; no document text (in any encoding) in the API log, the worker log or any OTLP span or log export, nor in the runs' events and errors |
 | X1 | kill -9 at `kb_extract_sandbox` / `kb_extract_chunk` during an API upload of a PDF, and at `kb_extract_chunk` for an rst file | recovery parses again or finds the committed rows; one `extracted` event; no duplicate chunk rows; the split embed steps (the API set the flag); RM.20 invariants; page citations on the API search |
 | E1 | kill -9 at `kb_embed_after_call`, `kb_batch_before_commit`, `kb_batch_after_commit` on `embed:batch:1` during an API upload of Markdown | the call step re-calls the provider exactly once more after a kill inside it; a kill inside the write never calls the provider again (the `embedding call` log lines per batch key); one usage row per batch; RM.20 invariants |
 """
@@ -119,7 +119,8 @@ def hostile_corpus(mark: str) -> dict[str, tuple[str, str | bytes, tuple[str, ..
         "corrupt.pdf": ("application/pdf", f"%PDF-1.7\n<html><script>{mark}</script></html>".encode(), ("extract_failed",)),
         "encrypted.pdf": ("application/pdf", build_pdf([[(f"{mark} secret page", 10), *body_lines(0)]], encrypt="pw"),
                           ("document_encrypted",)),
-        "image-only.pdf": ("application/pdf", build_pdf([[], []], image_pages={0, 1}), ("no_extractable_text",)),
+        # Failed, not empty: the pages have content an image extractor can read later (re-extract).
+        "image-only.pdf": ("application/pdf", build_pdf([[], []], image_pages={0, 1}), ("no_text_layer",)),
         "nested.pdf": ("application/pdf", raw_pdf([CATALOG, ONE_PAGE, page, b"[" * 300_000 + b"]" * 300_000, FONT]),
                        ("extract_limit",)),
         "flate-bomb.pdf": ("application/pdf", flate_bomb_pdf(), ("extract_limit", "extract_memory", "extract_timeout")),
@@ -185,6 +186,9 @@ def test_h1_hostile_corpus_end_to_end(p1: Harness, other_tenant: dict[str, str],
             [[(f"The {good} manual explains the boot switches.", 10), *body_lines(0)], body_lines(1)]))
         uploads["after.yaml"] = put_ok(h, kb_id, "after.yaml", "application/yaml",
                                        f"title: {good} UART binding\nproperties:\n  reg:\n    maxItems: 1\n")
+        # A text document with no extractable text is an empty document, not a failure: ready, 0 chunks.
+        uploads["toctree.rst"] = put_ok(h, kb_id, "toctree.rst", "text/x-rst",
+                                        ".. toctree::\n   :maxdepth: 2\n\n   linux/index\n")
 
         # Refused at the API, before any run: the bytes do not match the declared type.
         png = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 17
@@ -223,6 +227,12 @@ def test_h1_hostile_corpus_end_to_end(p1: Harness, other_tenant: dict[str, str],
         for line in passwd:
             assert line not in directives, "an include / raw :file: directive read /etc/passwd"
         assert get_doc(h, kb_id, "after.pdf")["extraction"]["pages"] == 2
+        for key in ("toctree.rst",):
+            assert runs[key]["status"] == "completed", (key, runs[key]["error"])
+            doc = get_doc(h, kb_id, key)
+            assert doc["status"] == "ready" and doc["chunk_count"] == 0 and doc["error"] is None, (key, doc)
+            assert doc["extraction"]["empty_reason"] == "no_extractable_text", (key, doc)
+            assert chunk_contents(h, uploads[key][0]) == [], key
 
         # The search tester over the knowledge base: good documents only, and the tool-run layout.
         r = h.client.post(f"{API}/knowledge-bases/{kb_id}/search", json={"query": "manual boot switches handbook", "top_k": 20},

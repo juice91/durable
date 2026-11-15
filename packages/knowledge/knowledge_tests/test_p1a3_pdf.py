@@ -202,8 +202,10 @@ def test_broken_xref_extracts_or_fails_cleanly():
         assert "paragraph explains" in doc.sections[0].text
 
 
-def test_no_text_at_all_fails_no_extractable_text():
-    assert _codes(lambda: extract_pdf(build_pdf([[], []], image_pages={0}))) == "no_extractable_text"
+def test_no_text_at_all_fails_no_text_layer_with_image_pages_else_no_extractable_text():
+    # Quality fix: an image-only (scanned) PDF has its own code, so it stays failed and re-extractable.
+    assert _codes(lambda: extract_pdf(build_pdf([[], []], image_pages={0}))) == "no_text_layer"
+    assert _codes(lambda: extract_pdf(build_pdf([[], []]))) == "no_extractable_text"  # blank pages, no images
 
 
 def test_control_characters_are_removed():

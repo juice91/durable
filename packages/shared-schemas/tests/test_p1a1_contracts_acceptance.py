@@ -156,8 +156,20 @@ def test_main_run_event_types_are_all_still_there(tmp_path):
     old = json.loads(subprocess.run([sys.executable, "-c", script, str(src)], capture_output=True, text=True, check=True).stdout)
     from typing import get_args
     from eap_schemas import RunEventType
-    assert set(old) <= set(get_args(RunEventType)) and "extracted" not in old
-    assert [t for t in get_args(RunEventType) if t in old] == old  # order of the old ones kept
+    # Main's event set as of the P1 part 1 merge (2026-11-15): main may only grow from here.
+    assert set(MAIN_RUN_EVENT_TYPES) <= set(old), "an event type disappeared from main"
+    assert [t for t in old if t in MAIN_RUN_EVENT_TYPES] == list(MAIN_RUN_EVENT_TYPES)
+    # Nothing main has is gone from this branch, and the order of main's ones is kept.
+    assert set(old) <= set(get_args(RunEventType))
+    assert [t for t in get_args(RunEventType) if t in old] == old
+
+
+MAIN_RUN_EVENT_TYPES = (
+    "run_started", "text_delta", "model_message", "tool_call", "tool_result", "run_completed", "run_failed",
+    "processor_result", "step_started", "step_waiting", "step_approved", "step_rejected", "step_timed_out",
+    "step_completed", "step_failed", "ingest_progress", "embedding", "memory_observe_failed", "memory_updated",
+    "memory_observe_trimmed", "post_turn_done", "extracted",
+)
 
 
 # --- the reserved key "eap" ------------------------------------------------------------------------
@@ -218,6 +230,7 @@ EXPECTED_MESSAGES = {
     "extract_output_too_large": "The extracted text is too large.",
     "document_encrypted": "The PDF is encrypted with a password.",
     "no_extractable_text": "No text could be extracted from the document.",
+    "no_text_layer": "Image-only PDF with no text layer: it needs image extraction (re-extract once it is available).",
     "unsupported_content": "The file's content does not match its declared type.",
     "image_model_required": "Images need an image-capable embedding model.",
 }

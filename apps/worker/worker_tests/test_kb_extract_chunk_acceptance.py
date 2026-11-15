@@ -188,7 +188,7 @@ def test_an_image_only_new_version_fails_closed_and_keeps_the_active_version(cli
     image_only = build_pdf([[], []], image_pages={0, 1})
     _, v2, r2, run2 = go(client, worker, store, kb_tenant, kb_id, pdf=image_only)
     assert run2["status"] == "failed"
-    assert event_rows(worker.engine, r2)[-1][3]["extraction_code"] == "no_extractable_text"
+    assert event_rows(worker.engine, r2)[-1][3]["extraction_code"] == "no_text_layer"
     doc = store.get_document_by_id(kb_tenant, doc_id)
     assert doc["active_version"] == v1
     stats = [s for s in chunk_stats(worker.engine, kb_tenant, doc_id) if s["doc_version"] == v1]

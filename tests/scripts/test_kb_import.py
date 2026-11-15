@@ -1060,3 +1060,81 @@ def test_a_fifo_swapped_in_after_the_scan_does_not_block(tree: Path) -> None:
     t.join(5)
     assert not t.is_alive(), "load_file blocked on a FIFO"
     assert "changed after the scan" in result["error"]
+
+
+# ------------------------------------------------------------------- --report-json (quality fix 3)
+
+
+def test_report_json_in_a_missing_directory_is_refused_before_any_upload(tree: Path, tmp_path: Path) -> None:
+    """The TI quality check: `--report-json nonexistent-dir/x.json` uploaded everything, then died
+    with a FileNotFoundError traceback and lost the report. It is a usage error (exit 2) up front."""
+    api = FakeApi()
+    code, out, err = run_cli([str(tree), "--kb", KB, "--report-json", str(tmp_path / "nope" / "x.json")], api)
+    assert code == 2
+    assert "--report-json: the directory" in err and "does not exist" in err
+    assert not any(m in ("PUT", "DELETE") for m, *_ in api.requests) and not api.docs
+    assert not (tmp_path / "nope").exists()  # never created
+
+
+def test_report_json_that_is_a_directory_is_refused(tree: Path, tmp_path: Path) -> None:
+    api = FakeApi()
+    code, _, err = run_cli([str(tree), "--kb", KB, "--report-json", str(tmp_path)], api)
+    assert code == 2 and "is a directory" in err
+    assert not api.docs
+
+
+def test_report_json_parent_that_is_a_file_is_not_a_directory(tree: Path, tmp_path: Path) -> None:
+    api = FakeApi()
+    (tmp_path / "f").write_text("x")
+    code, _, err = run_cli([str(tree), "--kb", KB, "--report-json", str(tmp_path / "f" / "r.json")], api)
+    assert code == 2 and "is not a directory" in err and "does not exist" not in err
+    assert not any(m in ("PUT", "DELETE") for m, *_ in api.requests) and not api.docs
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+def test_report_json_unwritable_directory_is_refused_before_any_upload(tree: Path, tmp_path: Path) -> None:
+    api = FakeApi()
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        code, _, err = run_cli([str(tree), "--kb", KB, "--report-json", str(ro / "r.json")], api)
+        dry, _, dry_err = run_cli([str(tree), "--kb", KB, "--dry-run", "--report-json", str(ro / "r.json")], api)
+    finally:
+        ro.chmod(0o700)
+    assert code == 2 and "the directory" in err and "is not writable" in err
+    assert dry == 2 and "is not writable" in dry_err
+    assert not any(m in ("PUT", "DELETE") for m, *_ in api.requests) and not api.docs
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+def test_report_json_existing_read_only_file_is_refused(tree: Path, tmp_path: Path) -> None:
+    api = FakeApi()
+    target = tmp_path / "r.json"
+    target.write_text("{}")
+    target.chmod(0o400)
+    try:
+        code, _, err = run_cli([str(tree), "--kb", KB, "--report-json", str(target)], api)
+    finally:
+        target.chmod(0o600)
+    assert code == 2 and "exists and is not writable" in err and not api.docs
+
+
+def test_report_json_write_failure_after_upload_is_reported_not_a_traceback(
+    tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory checks out, but the write still fails (removed mid-run, read-only): the text
+    report is printed, an error names the path, and the run exits 1, without a traceback."""
+    api = FakeApi()
+    report_path = tmp_path / "out" / "report.json"
+    report_path.parent.mkdir()
+
+    def boom(self: Path, *a: object, **k: object) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    code, out, err = run_cli([str(tree), "--kb", KB, "--report-json", str(report_path)], api)
+    assert code == 1
+    assert "created" in out and api.docs  # the uploads happened and the text report printed
+    assert "the JSON report could not be written" in err and "Permission denied" in err
+    assert "Traceback" not in err

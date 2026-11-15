@@ -208,6 +208,65 @@ def test_outdated_extraction_revives_a_pending_document_with_no_live_run(store, 
     assert keys == ["enqueue-failed.rst", "orphan.rst", "queued.rst"]
 
 
+def test_outdated_extraction_reads_the_active_versions_extraction_record(store, engine, tenant, other_tenant):
+    """P1 quality fix: an empty-ready document (0 chunks, `extracted` event with empty_reason) is
+    judged on its active version's `extracted` event, not on chunks it does not have. At the current
+    extractor version it is not selected; at an older one it is. The event decides over chunk
+    metadata; a failed never-active document stays selected; another tenant's run never counts."""
+    from eap_run_store import RunStore
+
+    runs = RunStore(engine)
+    kb = make_kb(store, tenant)
+
+    def with_event(key, mime, eap, *, version=1, chunks=None, tenant_of_run=None, empty=True):
+        if chunks is None:
+            doc = _put(store, tenant, kb, key, mime=mime)
+        else:
+            doc, _ = ingest(store, tenant, kb, key, chunks, hot=[len(key)])
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE kb_documents SET mime_type = :m WHERE id = :id"), {"m": mime, "id": doc["id"]})
+            _record(engine, doc["id"], chunks_eap.get(key, eap))
+        run_id = uuid.uuid4()
+        owner = tenant_of_run or tenant
+        if owner == tenant:
+            runs.create_kb_ingest_run(tenant, kb["id"], json.dumps({"document_id": doc["id"], "doc_version": version}), run_id)
+        else:  # a run row of another tenant naming this document: must not count
+            other_kb = make_kb(store, owner, name="Foreign")
+            runs.create_kb_ingest_run(owner, other_kb["id"], json.dumps({"document_id": doc["id"], "doc_version": version}), run_id)
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO execution_events (tenant_id, run_id, seq, event_key, type, data, ts)"
+                              " VALUES (:t, :r, 1, :k, 'extracted', CAST(:d AS jsonb), now())"),
+                         {"t": owner, "r": str(run_id), "k": f"extract:{version}",
+                          "d": json.dumps({**eap, "sections": 1, "chars": 0, **({"empty_reason": "no_extractable_text"} if empty else {})})})
+            if chunks is None:
+                conn.execute(text("UPDATE kb_documents SET active_version = :v, latest_version = :v, status = 'ready',"
+                                  " chunk_count = 0 WHERE id = :id"), {"v": version, "id": doc["id"]})
+        return doc
+
+    chunks_eap = {"event-wins.rst": {"extractor": "rst", "extractor_version": 0}}
+    with_event("empty-current.rst", "text/x-rst", {"extractor": "rst", "extractor_version": 1})
+    with_event("empty-old.yaml", "application/yaml", {"extractor": "yaml", "extractor_version": 1})
+    with_event("empty-other.rst", "text/x-rst", {"extractor": "markdown-doxygen", "extractor_version": 1})
+    with_event("empty-stale-key.rst", "text/x-rst", {"extractor": "rst", "extractor_version": 1}, version=2)
+    # The event is for v2 but the active version is v1 below: no record for the active version.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET active_version = 1 WHERE tenant_id = :t AND document_key = 'empty-stale-key.rst'"),
+                     {"t": tenant})
+    with_event("event-wins.rst", "text/x-rst", {"extractor": "rst", "extractor_version": 1}, chunks=["body ew"], empty=False)
+    with_event("foreign-run.rst", "text/x-rst", {"extractor": "rst", "extractor_version": 1}, tenant_of_run=other_tenant)
+    failed = _put(store, tenant, kb, "failed.pdf", mime="application/pdf")
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE kb_documents SET status = 'failed', error = 'extraction_failed: x' WHERE id = :id"),
+                     {"id": failed["id"]})
+    current = {**RST_MAP, "application/pdf": ("pdf", 1)}
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], current)]
+    assert keys == ["empty-old.yaml", "empty-other.rst", "empty-stale-key.rst", "failed.pdf", "foreign-run.rst"]
+    # The knowledge base's flavour went back to the API path (extractor None): a worker record counts.
+    api_path = {"text/x-rst": (None, 1)}
+    keys = [d["document_key"] for d in store.outdated_extraction_documents(tenant, kb["id"], api_path)]
+    assert keys == ["empty-current.rst", "empty-other.rst", "event-wins.rst"]
+
+
 def test_latest_extraction_is_the_active_versions(store, engine, tenant):
     from eap_run_store import RunStore
 

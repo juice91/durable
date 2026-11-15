@@ -215,7 +215,7 @@ def test_extracted_event_type_and_data():
 def test_extraction_error_codes():
     assert EXTRACTION_ERROR_CODES == (
         "extract_failed", "extract_timeout", "extract_memory", "extract_limit", "extract_output_too_large",
-        "document_encrypted", "no_extractable_text", "unsupported_content", "image_model_required",
+        "document_encrypted", "no_extractable_text", "no_text_layer", "unsupported_content", "image_model_required",
     )
     assert all(msg and msg.endswith(".") for msg in EXTRACTION_ERROR_MESSAGES.values())
     assert extraction_error_message("document_encrypted") == "The PDF is encrypted with a password."

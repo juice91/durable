@@ -544,6 +544,50 @@ def _extraction_failure(exc: Any) -> dict[str, Any]:
     return {**_failure("extraction_failed", "ExtractionFailed", exc.user_message), "reason": exc.code}
 
 
+# The extraction code that ends an ingest as an EMPTY document rather than a failure (RAG P1
+# quality fix): the document is 'ready' with 0 chunks, and its `extracted` event carries
+# `empty_reason` so Studio and the API show why.
+EMPTY_REASON = "no_extractable_text"
+
+
+def _finish_empty(
+    run_id: str, tenant_id: str, kb_id: str, document_id: str, doc_version: int, extractor: str,
+    base: dict[str, Any], key: str, limit: int, result: Any = None,
+) -> dict[str, Any]:
+    """kb_extract_chunk's outcome for a version with no extractable text, on a document with no
+    active chunks: the `extracted` event (counts only, `empty_reason`), no rows, and the usual "ok"
+    counts (all 0). The workflow then embeds nothing and finalize switches to the empty version:
+    status 'ready', chunk_count 0, no error. Idempotent: the event is keyed, and a re-execution
+    (there are no rows to find) parses again and writes nothing new."""
+    from eap_schemas.knowledge import ExtractedEventData
+
+    rt = get_runtime()
+    store = _store()
+    document = result.document if result is not None else None
+    data = ExtractedEventData(
+        extractor=extractor,
+        extractor_version=_extractor_version(extractor),
+        sections=len(document.sections) if document is not None else 0,
+        chars=document.extracted_chars if document is not None else 0,
+        pages=result.pages if result is not None else None,
+        warnings=(len(document.warnings) or None) if document is not None else None,
+        empty_reason=EMPTY_REASON,
+    ).model_dump(mode="json")
+    rt.event_log.append(tenant_id, UUID(str(run_id)), key, "extracted", data)
+    progress = store.embedding_progress(
+        tenant_id, kb_id, base["generation"], document_id=document_id, doc_version=doc_version
+    )
+    return {
+        **base,
+        "status": "ok",
+        "total": progress.total,
+        "embedded": progress.embedded,
+        "pending_tokens": progress.pending_tokens,
+        "limit": limit,
+        "inserted": 0,
+    }
+
+
 def _extracted_event_data(extractor: str, result: Any, chunks: list[Any]) -> dict[str, Any]:
     from eap_schemas.knowledge import MAX_IMAGE_ONLY_PAGES_LISTED, ExtractedEventData
 
@@ -638,6 +682,11 @@ async def kb_extract_chunk_step(
             config = ChunkingConfig.model_validate(source["chunking"])
         except (InvalidChunkingConfig, ValidationError):
             return _failure("extraction_failed", "InvalidChunkingConfig", "the knowledge base's chunking config is invalid")
+        # A version may become an empty one (no extractable text) only while the document has no
+        # searchable text to lose: never switch away from an active version with chunks.
+        # PDFs never become empty: a PDF with no text has pages (images) that a later image extractor
+        # can read, so it stays failed and a re-extract selects it.
+        may_be_empty = extractor != "pdf" and not (doc["active_version"] is not None and (doc["chunk_count"] or 0) > 0)
         try:
             result = await extract_sandbox.extract_in_sandbox(
                 extractor,
@@ -649,6 +698,9 @@ async def kb_extract_chunk_step(
             )
         except ExtractionFailed as exc:
             log.info("kb_ingest run %s extraction failed: %s", run_id, exc.code)
+            if exc.code == EMPTY_REASON and may_be_empty:
+                return await asyncio.to_thread(_finish_empty, run_id, tenant_id, kb_id, document_id, doc_version,
+                                               extractor, base, key, limit)
             return _extraction_failure(exc)
         del source, doc
         crash_point("kb_extract_sandbox")
@@ -657,8 +709,13 @@ async def kb_extract_chunk_step(
         except InvalidChunkingConfig:
             return _failure("extraction_failed", "InvalidChunkingConfig", "the knowledge base's chunking config is invalid")
         if result.document.extracted_chars == 0 or not chunks:
+            if may_be_empty:
+                # A toctree- or include-only rst page, an empty YAML file: ready with 0 chunks, the
+                # `extracted` event saying why. Not a failure.
+                return await asyncio.to_thread(_finish_empty, run_id, tenant_id, kb_id, document_id, doc_version,
+                                               extractor, base, key, limit, result)
             # Fail closed: never switch to an empty version (that would delete the active one's chunks).
-            return _extraction_failure(ExtractionFailed("no_extractable_text"))
+            return _extraction_failure(ExtractionFailed(EMPTY_REASON))
         event_data = _extracted_event_data(extractor, result, chunks)
         records = _chunk_extract_metadata(extractor, chunks)
 

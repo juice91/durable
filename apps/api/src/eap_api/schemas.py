@@ -499,7 +499,7 @@ class KnowledgeDocumentResponse(BaseModel):
 class DocumentExtraction(BaseModel):
     """The `extracted` event of the document's active version (counts only, never text), plus `doc_version`,
     `run_id` and `current_version` (the extractor's current version; lower `extractor_version`
-    means a re-extract would use a newer extractor)."""
+    means a re-extract would use a newer extractor). `empty_reason` marks an empty document."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -514,6 +514,8 @@ class DocumentExtraction(BaseModel):
     image_only_pages: list[int] | None = None
     conditions: int | None = None
     warnings: int | None = None
+    # "no_extractable_text" when the active version extracted no text: ready with 0 chunks, not failed.
+    empty_reason: str | None = None
 
 
 KnowledgeDocumentResponse.model_rebuild()

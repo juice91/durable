@@ -17,6 +17,7 @@ import {
   documentPutBytes,
   documentPutProblem,
   EMPTY_EXTRACT_FORM,
+  emptyExtractionText,
   extractionOutdated,
   extractionSummary,
   formatLabel,
@@ -210,6 +211,16 @@ describe("extraction and errors", () => {
     expect(pageListText([3, 7, 9])).toBe("pp. 3, 7, 9");
     expect(pageListText([4])).toBe("p. 4");
     expect(pageListText([1, 2, 3, 4], 2)).toBe("pp. 1, 2, …");
+  });
+
+  it("an empty document (ready, 0 chunks) explains itself", () => {
+    expect(emptyExtractionText({ empty_reason: "no_extractable_text", extractor: "rst" })).toBe(
+      "No extractable text: nothing is indexed. Expected for a page with only toctree or include directives.",
+    );
+    expect(emptyExtractionText({ empty_reason: "no_extractable_text" })).toBe("No extractable text: nothing is indexed.");
+    expect(emptyExtractionText({ empty_reason: null })).toBeNull();
+    expect(emptyExtractionText({})).toBeNull();
+    expect(emptyExtractionText(null)).toBeNull();
   });
 
   it("an extraction failure shows its fixed reason", () => {

@@ -25,7 +25,7 @@ CapClass = Literal["text", "structured", "binary"]
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "rst": 1,
     "pdf": 1,
-    "yaml": 1,
+    "yaml": 2,  # 2: comments kept (the leading block as a preamble, the rest on their keys)
     "json": 1,
     "markdown-doxygen": 1,
 }  # keys: eap_schemas.knowledge.EXTRACTOR_IDS, in the same order (a contract test checks it)

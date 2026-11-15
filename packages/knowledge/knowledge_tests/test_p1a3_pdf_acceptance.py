@@ -118,8 +118,8 @@ def test_pages_without_text_and_without_an_image_are_not_flagged():
     assert result.image_only_pages == ()
 
 
-def test_all_image_pages_is_no_extractable_text():
-    assert code_of(build_pdf([[], [], []], image_pages={0, 1, 2})) == "no_extractable_text"
+def test_all_image_pages_is_no_text_layer():
+    assert code_of(build_pdf([[], [], []], image_pages={0, 1, 2})) == "no_text_layer"
 
 
 # ------------------------------------------------------------------------------- encryption

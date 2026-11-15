@@ -1316,6 +1316,15 @@ class KnowledgeStore:
         knowledge base's flavour went back to plain. One with no active version is not selected
         (an upload or reingest starts its run; there is no stale extraction to replace).
 
+        The record that decides is the active version's extraction record when there is one: the
+        newest `extracted` event (key `extract:{active_version}`) of the document's kb_ingest
+        runs, which carries `extractor` / `extractor_version` (what `latest_extraction` returns).
+        That covers a document that is ready with 0 chunks (`empty_reason`, e.g. a toctree-only
+        page): at the current version it is not selected again by every bulk re-extract, at an
+        older version it is. Chunk metadata decides only when the active version has no such
+        event (older rows, the API path). A failed document with no active version has no record
+        and no chunks, so it stays selected.
+
         A document whose latest version is in flight is not selected: status `pending` or
         `ingesting` with that version not active (never ingested, or a newer version over the
         active one) AND a live run. That covers a re-extract started by an earlier call (so a double
@@ -1338,12 +1347,33 @@ class KnowledgeStore:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    f"SELECT {', '.join('d.' + c.strip() for c in _DOC_COLUMNS.split(','))}"
+                    # The active version's extraction record, newest per document. Driven from this
+                    # knowledge base's kb_ingest runs (ix_runs_tenant_kb_created) of a document's
+                    # active version (the run input's document_id / doc_version: a run writes only
+                    # `extract:{its doc_version}`), hash-joined to this KB's documents; each run then
+                    # probes its one event by index (ix_execution_events_tenant_run / uq_run_event_key).
+                    # The LIMIT keeps that probe a per-run LATERAL (Postgres does not flatten it), so
+                    # the scan never reaches the tenant's other `extracted` events (other knowledge
+                    # bases, older versions), however many there are.
+                    "WITH ev AS MATERIALIZED (SELECT DISTINCT ON (rd.doc_id) rd.doc_id, x.data"
+                    "   FROM (SELECT r.id AS run_id, CAST(d2.id AS text) AS doc_id,"
+                    "       'extract:' || d2.active_version AS event_key"
+                    "     FROM runs r JOIN kb_documents d2 ON d2.tenant_id = r.tenant_id AND d2.kb_id = r.knowledge_base_id"
+                    "       AND CAST(d2.id AS text) = CAST(r.input AS jsonb) ->> 'document_id'"
+                    "       AND CAST(d2.active_version AS text) = CAST(r.input AS jsonb) ->> 'doc_version'"
+                    "     WHERE r.tenant_id = :t AND r.knowledge_base_id = :kb AND r.kind = 'kb_ingest'"
+                    "     AND d2.active_version IS NOT NULL) rd"
+                    "   CROSS JOIN LATERAL (SELECT e.data, e.ts, e.seq FROM execution_events e"
+                    "     WHERE e.run_id = rd.run_id AND e.event_key = rd.event_key"
+                    "     AND e.tenant_id = :t AND e.type = 'extracted' LIMIT 1) x"
+                    "   ORDER BY rd.doc_id, x.ts DESC, x.seq DESC)"
+                    f" SELECT {', '.join('d.' + c.strip() for c in _DOC_COLUMNS.split(','))}"
                     " FROM kb_documents d"
                     " JOIN knowledge_bases kb ON kb.tenant_id = d.tenant_id AND kb.id = d.kb_id"
                     " JOIN unnest(CAST(:mimes AS text[]), CAST(:exts AS text[]), CAST(:vers AS int[]))"
                     "   AS cur(mime, extractor, version)"
                     "   ON cur.mime = lower(btrim(split_part(d.mime_type, ';', 1)))"
+                    " LEFT JOIN ev ON ev.doc_id = CAST(d.id AS text)"
                     " WHERE d.tenant_id = :t AND d.kb_id = :kb"
                     " AND NOT (d.status IN ('pending', 'ingesting')"
                     "   AND (d.active_version IS NULL OR d.latest_version > d.active_version)"
@@ -1351,7 +1381,13 @@ class KnowledgeStore:
                     "       AND r.status NOT IN ('completed', 'failed', 'needs_attention'))"
                     "     OR (NOT EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id)"
                     "       AND d.updated_at > now() - make_interval(secs => :orphan))))"
-                    " AND CASE WHEN cur.extractor IS NULL THEN EXISTS (SELECT 1 FROM kb_chunks c"
+                    " AND CASE WHEN ev.data IS NOT NULL THEN (CASE WHEN cur.extractor IS NULL"
+                    "   THEN ev.data ->> 'extractor' IS NOT NULL"
+                    "   ELSE NOT (ev.data ->> 'extractor' IS NOT DISTINCT FROM cur.extractor"
+                    "     AND CASE WHEN jsonb_typeof(ev.data -> 'extractor_version') = 'number'"
+                    "       THEN CAST(ev.data ->> 'extractor_version' AS numeric) >= cur.version"
+                    "       ELSE false END) END)"
+                    " WHEN cur.extractor IS NULL THEN EXISTS (SELECT 1 FROM kb_chunks c"
                     "   WHERE c.tenant_id = d.tenant_id AND c.document_id = d.id"
                     "   AND c.doc_version = d.active_version AND c.generation = kb.active_generation"
                     "   AND c.metadata -> 'eap' ->> 'extractor' IS NOT NULL)"

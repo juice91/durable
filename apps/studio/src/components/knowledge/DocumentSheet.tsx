@@ -10,6 +10,7 @@ import { ApiError } from "@/lib/api";
 import {
   deleteDocument,
   describeDocumentError,
+  emptyExtractionText,
   extractionOutdated,
   extractionSummary,
   formatLabel,
@@ -299,6 +300,11 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns
                       <dt className="text-muted-foreground">Extraction</dt>
                       <dd className="flex min-w-0 flex-col items-start gap-1">
                         <span className="break-words" data-testid="knowledge-document-extractor">{extractionSummary(extraction)}</span>
+                        {emptyExtractionText(extraction) ? (
+                          <span className="break-words text-caption text-muted-foreground" data-testid="knowledge-document-empty">
+                            {emptyExtractionText(extraction)}
+                          </span>
+                        ) : null}
                         {extractionOutdated(extraction) ? (
                           <span className="text-caption text-warning-text" data-testid="knowledge-document-extractor-outdated">
                             Extractor v{extraction.current_version} is available. Re-extract to use it.
