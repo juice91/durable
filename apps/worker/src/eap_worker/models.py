@@ -103,6 +103,15 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  fail (0.0); also a fail without a marker. `reason` names the marker. Calls the output tool with
                  `{"reason", "pass", "score"}` when offered, else answers that JSON as text. Fixed
                  usage of 200 input and 50 output tokens; priced in the test price file.
+- `test:refine` (LP.14) a structured generator for refine loops. Its prompt JSON is
+                 `{"attempt": <int>, "feedback": <string>}` (missing: 0 and ""); it answers
+                 `{"draft": "attempt <attempt + 1>", "after": <feedback>}`, through the output tool
+                 when one is offered, else as JSON text (`after` is left out when the output schema
+                 forbids extra properties and does not declare it). The feedback is echoed in its own
+                 field, never inside `draft`: the scripted judge's failing reason names its marker
+                 (`... MUST_CONTAIN marker "attempt 3".`), so a draft quoting the feedback would
+                 contain the marker one attempt early. Fixed usage REFINE_USAGE (100 input, 20 output
+                 tokens per request), priced by the test price file's `test:*` row.
 - `test:text-tool` (AC.5) answers request 0 with text `Let me check.` AND a call of the first
                  offered tool with `{}` (one response); after the return it answers `Done.`. Without
                  tools: `Done.`. Proves a response with text and a tool call (output processors run
@@ -1037,6 +1046,47 @@ def scripted_priced_model() -> FunctionModel:
     )
 
 
+REFINE_USAGE = (100, 20)  # (input_tokens, output_tokens) of every `test:refine` request
+
+
+def scripted_refine_answer(prompt: str, schema: Any = None) -> dict[str, Any]:
+    """`test:refine`'s answer to `prompt` (see the module docstring); `schema` is the output schema,
+    whose `additionalProperties: false` without an `after` property drops `after`."""
+    try:
+        request = json.loads(prompt)
+    except ValueError:
+        request = {}
+    request = request if isinstance(request, dict) else {}
+    attempt = request.get("attempt")
+    attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else 0
+    feedback = request.get("feedback")
+    feedback = feedback if isinstance(feedback, str) else ""
+    answer: dict[str, Any] = {"draft": f"attempt {attempt + 1}", "after": feedback}
+    if isinstance(schema, dict) and schema.get("additionalProperties") is False:
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        answer = {k: v for k, v in answer.items() if k in properties or k == "draft"}
+    return answer
+
+
+def _refine_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    params = info.model_request_parameters
+    if info.output_tools:
+        tool = info.output_tools[0]
+        return "tool", (tool.name, scripted_refine_answer(_last_prompt(messages), tool.parameters_json_schema))
+    schema = params.output_object.json_schema if params.output_object is not None else None
+    return "json", json.dumps(scripted_refine_answer(_last_prompt(messages), schema), sort_keys=True)
+
+
+def scripted_refine_model() -> FunctionModel:
+    """`test:refine`: see the module docstring. Fixed usage REFINE_USAGE on every request."""
+    return _planned_model(
+        _refine_plan,
+        "scripted-refine",
+        cls=FixedUsageFunctionModel,
+        usage=RequestUsage(input_tokens=REFINE_USAGE[0], output_tokens=REFINE_USAGE[1]),
+    )
+
+
 JUDGE_MARKER = "MUST_CONTAIN:"
 JUDGE_USAGE = (200, 50)  # (input_tokens, output_tokens) of every `test:judge` request
 JUDGE_NO_OUTPUT_REASON = "The judge input has no <output> block."
@@ -1264,6 +1314,8 @@ def make_resolver(settings_getter: Any, *, fallback: bool = False):
                 return scripted_priced_model()
             if name == "judge":
                 return scripted_judge_model()
+            if name == "refine":
+                return scripted_refine_model()
             if name == "text-tool":
                 return scripted_text_tool_model()
             return scripted_echo_model()

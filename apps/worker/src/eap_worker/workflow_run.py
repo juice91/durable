@@ -24,6 +24,11 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
       tool:     eap.check_tool, eap.workflow_tool_call   (side effects under `{run_id}:{id}`)
       branch:   nothing durable: conditions are evaluated over recorded data
       parallel: one child workflow eap.workflow_branch per branch, id `{run_id}:{id}:{branch}`
+      evaluate: (LP.14, loops D15) eap.workflow_evaluate_score (only with a deterministic
+                evaluator), then per `llm_judge` in spec order the judge's model step
+                `eap-judge__model.request`, then eap.workflow_judge_usage (only when a judge
+                request reported usage): its rows on THIS run, operation `chat`, request key
+                `judge:{id}:{k}` (`judge:{S}:{id}:{k}` in a body; k = the evaluator's index)
       approval: eap.append_event step_waiting `step:{id}:waiting`, then a loop of
                 eap.workflow_approval_decision / eap.workflow_clock / DBOS.recv(`approval:{id}`)
       loop:     per iteration i (LP.7, loops D5): eap.workflow_loop_tick (LP.11), child workflow
@@ -77,7 +82,7 @@ structured output (AC.9) the validated object (`agent_run`'s `output_json`), so
 result; branch -> {"case": <index of the matching case, or null for default>, "next": <target>};
 parallel -> none (its step_completed carries `output: null` and `steps.<parallel>.output` is not
 readable, per eap_schemas.workflows; from the join on, the steps its branches ran are); approval -> {"approved": true, "decided_by",
-"comment"}. An agent step's input mapping becomes its prompt: the single value if the mapping has
+"comment"}; evaluate -> {passed, score, reason, results} (`evaluate_output`). An agent step's input mapping becomes its prompt: the single value if the mapping has
 exactly one string value, else the mapping as canonical JSON.
 
 A branch condition `$ref` into a field of an agent step's structured output that resolves to
@@ -100,6 +105,17 @@ once inside eap.workflow_approval_begin. A worker restarted with other values ne
 path of a run already started. A non-finite number in the run input (the API refuses it) fails
 the run with `input_invalid` before any step, and run_started then carries `input: null`.
 
+Evaluate (LP.14, D2, D15): the step's `value` (and a `$ref` `expected`) resolved over its scope
+(not resolving: `evaluate_failed`) is scored by AC.11's evaluators (eap_worker.evaluators) and its
+durable judge (`eap-judge`, eap_worker.eval_run.run_judge), exactly as an eval case is: an
+evaluator that raises, or a judge request that fails or does not validate, is a failed result
+entry, never a step failure; a failed verdict (`passed: false`) is an ordinary output, which a
+refine loop's `until` reads. An `llm_judge` with `include_input` sees the run's input. The judge's
+cost is on the workflow run's own rows, so it counts in run_tree_cost and the cost cap (D11): a
+refine loop stops at the tick before the attempt that would start at or over the cap. Crash point
+`after_judge_call` (event key `step:{id}:judge_{k}`, scoped in a body) sits between a judge's
+recorded model step and its usage row: recovery replays the response and writes the row once.
+
 The loop tick (LP.11, D10-D12; `eap.workflow_loop_tick`, recorded): before every iteration starts
 (one tick for a foreach's initial window, whose items start back to back), and with `limits` before every top-level agent and evaluate step (a parallel branch's included),
 it reads the clock, whether the run has its `cancel_requested` event, and with
@@ -109,9 +125,10 @@ judge rows on the run, AC.5's sum). The step about to start then fails, in this 
 max_run_seconds), `run_budget_exceeded` (cost >= the cap; RunBudgetExceeded, so step_failed and
 run_failed carry AC.5's {limit: "max_cost_usd", value, spent_usd}). A foreach whose tick stops it
 starts no more items, awaits the started ones, then fails; a tick failure (those three codes,
-or the tick step itself raising, e.g. a lost DB connection: `internal_error`) is never collected
-as an error entry under `on_item_error: collect`, so a foreach never completes with items
-missing. Concurrent iterations can overshoot the cap by what is already in flight (each child
+or the tick step itself raising, e.g. a lost DB connection: `internal_error`, marked run-level by
+LoopTickFailed) is never collected as an error entry under `on_item_error: collect`, also when the
+tick belongs to a loop nested inside one of the foreach's items, so a foreach never completes with
+items missing. Concurrent iterations can overshoot the cap by what is already in flight (each child
 agent is bounded by its own AC.5 cap). The tick runs between iterations only: a cooperative
 cancel written while an iteration runs lets that iteration's remaining body steps (tool side
 effects included) run to its end; no further iteration starts. The API's cancel also DBOS-cancels
@@ -187,7 +204,7 @@ from eap_observability import (
     set_iteration_outcome,
     set_run_outcome,
 )
-from eap_run_store import CANCEL_EVENT_KEY, END_EVENT_KEY, ParentRunStopped
+from eap_run_store import CANCEL_EVENT_KEY, END_EVENT_KEY, ParentRunStopped, RunNotFound, insert_usage_in_session
 from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.workflow_scope import (
     CHILD_RUN_NAMESPACE,
@@ -204,6 +221,7 @@ from eap_schemas.workflow_scope import (
     scoped_child_run_id,
     scoped_event_key,
     scoped_guard_key,
+    scoped_judge_key,
     scoped_parent_step_id,
     scoped_tool_call_id,
     status_for_end,
@@ -213,6 +231,7 @@ from eap_schemas.workflows import (
     AgentStep,
     ApprovalStep,
     BranchStep,
+    EvaluateStep,
     ForeachStep,
     LoopStep,
     MAX_STEPS,
@@ -234,7 +253,18 @@ from eap_worker.config import (
     WORKFLOW_RUN_NAME,
 )
 from eap_worker.crash import crash_point
-from eap_worker.errors import RunFailure, WorkflowStepError, classify
+from eap_worker.eval_run import run_judge
+from eap_worker.evaluators import (
+    JUDGE_FAILED,
+    MAX_REASON_CHARS,
+    CaseOutcome,
+    PlannedEvaluator,
+    add_verdict,
+    plan_evaluators,
+    score_deterministic,
+)
+from eap_worker.pricing import usage_record
+from eap_worker.errors import LoopTickFailed, RunFailure, WorkflowStepError, classify
 from eap_worker.runtime import get_runtime
 from eap_worker.tool_run import _REJECTIONS, call_tool_guarded, check_tool_step
 from eap_worker.workflow import _heartbeat, agent_run, append_event_step, finish_run_step
@@ -437,6 +467,48 @@ async def loop_tick_step(run_id: str, tenant_id: str, scope_text: str, step_id: 
             "cancel_requested": cancel is not None and cancel.type == "cancel_requested",
             "cost_usd": None if cost is None else format(cost, "f"),
         }
+
+    return await asyncio.to_thread(work)
+
+
+@DBOS.step(name="eap.workflow_evaluate_score")
+async def evaluate_score_step(planned: list[dict[str, Any]], case: dict[str, Any], value: Any) -> dict[str, Any]:
+    """An evaluate step's deterministic evaluators (LP.14; AC.11's `score_deterministic`, as
+    `eap.eval_score` runs them for an eval case) on the step's value. Returns CaseOutcome JSON
+    (`assertions`, `scores`, `labels`, `evaluator_failures`); an evaluator that raises is a
+    failure entry with a fixed message, never a step failure. Recorded, so a replay (or a worker
+    with other evaluator code) reads the same outcome."""
+    outcome = await score_deterministic(
+        [PlannedEvaluator.from_json(p) for p in planned], case, value,
+        duration_s=None, cost_usd=None, output_schema=None,
+    )
+    return outcome.as_json()
+
+
+_LOCK_RUN = text("SELECT id FROM runs WHERE tenant_id = :t AND id = :r FOR UPDATE")
+
+
+@DBOS.step(name="eap.workflow_judge_usage")
+async def judge_usage_step(run_id: str, tenant_id: str, usage: list[dict[str, Any]]) -> int:
+    """Record an evaluate step's judge requests on the workflow run (loops D15, LP.14): one
+    `run_model_requests` row per judge call, `request_key` `judge:{S}:{step_id}:{k}` (scoped_judge_key)
+    and operation `chat`, exactly as AC.11 writes an eval case's judge rows. `usage`: [{"request_key",
+    "usage": pricing.request_usage_input}], priced here. Written under the run's row lock, first write
+    wins per key (a re-executed step adds nothing), and also after the run's `end` (the cost is real).
+    The rows count in RunStore.run_tree_cost, so the next tick sees the judge's cost. Returns the
+    number of rows passed."""
+    rt = get_runtime()
+
+    def work() -> int:
+        rows = [usage_record(item["request_key"], item["usage"])[0] for item in usage]
+        with rt.run_store.Session() as session:
+            if session.execute(_LOCK_RUN, {"t": tenant_id, "r": run_id}).first() is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
+            for row in rows:
+                insert_usage_in_session(session, tenant_id, run_id, row)
+            session.commit()
+        return len(rows)
 
     return await asyncio.to_thread(work)
 
@@ -851,7 +923,12 @@ class _Interpreter:
         (`run_budget_exceeded`, data {limit: "max_cost_usd", value, spent_usd}, D11). `at` is the
         iteration about to start, or the empty scope before a top-level agent or evaluate step."""
         scope_text = scope_string(at)
-        tick = await loop_tick_step(self.run_id, self.tenant_id, scope_text, step_id, self.cap_usd is not None)
+        try:
+            tick = await loop_tick_step(self.run_id, self.tenant_id, scope_text, step_id, self.cap_usd is not None)
+        except Exception as exc:  # noqa: BLE001 - the tick step itself failed (e.g. a lost DB connection)
+            # Run-level at any depth (RunFailure.run_level): a foreach never collects it, even when
+            # this tick belongs to a loop nested inside one of its items.
+            raise LoopTickFailed() from exc
         crash_point(
             "after_loop_tick",
             event_key=f"loop:{scope_text}:tick" if at else scoped_event_key(self.scope, step_id, "tick"),
@@ -886,9 +963,54 @@ class _Interpreter:
             return await self._parallel(step)
         if isinstance(step, ApprovalStep):
             return await self._approval(step)
-        # evaluate (LP.14) is refused at publish until its runtime lands; a version that has one
-        # anyway fails like a spec an old worker cannot run.
+        if isinstance(step, EvaluateStep):
+            return await self._evaluate(step)
         raise WorkflowStepError("workflow_spec_invalid", step.id)
+
+    # ------------------------------------------------------------------ evaluate (LP.14)
+
+    async def _evaluate(self, step: EvaluateStep) -> dict[str, Any]:
+        """Score `value` with the step's evaluators (D2, D15; AC.11's evaluators and `eap-judge`).
+        `value` and a `$ref` `expected` are resolved over the step's scope; either not resolving
+        fails the step `evaluate_failed`. The deterministic evaluators run in one
+        `eap.workflow_evaluate_score` step (only when there is one), then each `llm_judge` in spec
+        order (the judge's model step), then `eap.workflow_judge_usage` records every judge request
+        that reported usage (only when there is one). A judge whose answer did not validate, or
+        that failed, is an evaluator failure with its classified code, as in AC.11; its request is
+        still recorded when it was billed. Output: `evaluate_output`."""
+        context = self.context()
+        value = resolve_ref(context, step.value[REF_KEY])
+        if value is MISSING:
+            raise WorkflowStepError("evaluate_failed", step.id)
+        expected: Any = None
+        if step.expected is not None:
+            expected = _resolve_operand(step.expected, context)
+            if expected is MISSING:
+                raise WorkflowStepError("evaluate_failed", step.id)
+        planned = plan_evaluators(step.evaluators, ())
+        case = {"name": step.id, "input": _judge_input(self.input), "expected_output": expected, "metadata": {}}
+        outcome = CaseOutcome()
+        deterministic = [p.as_json() for p in planned if not p.is_judge]
+        if deterministic:
+            outcome = CaseOutcome.from_json(await evaluate_score_step(deterministic, case, value))
+        usage: list[dict[str, Any]] = []
+        for evaluator in planned:
+            if not evaluator.is_judge:
+                continue
+            verdict, used, failure = await run_judge(evaluator, case, value)
+            if used is not None:
+                usage.append({"request_key": scoped_judge_key(self.scope, step.id, evaluator.index), "usage": used})
+            # After the judge's model step is recorded, before its usage row: recovery replays the
+            # recorded response, so the row is written once, with the same price.
+            crash_point("after_judge_call", event_key=self.key(step.id, f"judge_{evaluator.index}"))
+            if verdict is not None:
+                add_verdict(outcome, evaluator, verdict)
+            else:
+                code = classify(failure).code if failure is not None else "internal_error"
+                outcome.add_failure(evaluator, failure, JUDGE_FAILED, error_code=code)
+        if usage:
+            await judge_usage_step(self.run_id, self.tenant_id, usage)
+        return evaluate_output(planned, outcome, step.pass_)
 
     async def _agent(self, step: AgentStep, resolved: dict[str, Any]) -> Any:
         prompt = _agent_prompt(resolved)
@@ -1081,7 +1203,7 @@ class _Interpreter:
                 cancelled = cancelled or result
             elif (
                 step.on_item_error == "collect" and result.get("status") != "needs_attention"
-                and result.get("error_code") not in _RUN_LEVEL_CODES
+                and result.get("error_code") not in _RUN_LEVEL_CODES and not result.get("run_level")
             ):
                 entries.append(("error", {"error_code": result["error_code"], "error": result["error"]}))
             else:
@@ -1270,6 +1392,71 @@ class _Interpreter:
         raise WorkflowStepError("approval_timeout", step.id)
 
 
+def _resolve_operand(value: Any, context: dict[str, Any]) -> Any:
+    """A literal as is, a `{"$ref": path}` resolved (MISSING when it does not resolve)."""
+    if isinstance(value, dict) and set(value) == {REF_KEY} and isinstance(value[REF_KEY], str):
+        return resolve_ref(context, value[REF_KEY])
+    return value
+
+
+def _judge_input(run_input: Any) -> str:
+    """What an `llm_judge` with `include_input` sees as the input of an evaluate step: the run's
+    input (a string as is, anything else as canonical JSON)."""
+    if run_input is None:
+        return ""
+    return run_input if isinstance(run_input, str) else canonical_json(run_input)
+
+
+def evaluate_output(planned: list[PlannedEvaluator], outcome: CaseOutcome, mode: str) -> dict[str, Any]:
+    """An evaluate step's output `{passed, score, reason, results}` (D3) from its evaluators'
+    outcome. Pure.
+
+    - `results`: one entry per evaluator in spec order, `{name, kind, passed, score, reason}`.
+      `passed` is the evaluator's assertion; `score` the judge's score, else 1.0 or 0.0 from
+      `passed`. A failed evaluator (it raised, or its judge request failed) has `passed` false,
+      `score` null, its fixed message as `reason`, and `error_type` (plus `error_code` for a
+      judge). An evaluator that does not apply (it compares with an `expected` that is null) has
+      `passed` and `score` null and `skipped` true, and is left out of the verdict.
+    - `passed`: `mode` "all": every applying evaluator passed (true when none applies); "any": at
+      least one did.
+    - `score`: the mean of the non-null scores, null without any.
+    - `reason`: the reasons of the evaluators whose `passed` equals the verdict (the failing ones
+      of a failed step, so a refine loop's `carry` hands the judge's reason to the next attempt
+      verbatim), joined by newlines, at most MAX_REASON_CHARS characters; null without any."""
+    failures = {f["name"]: f for f in outcome.evaluator_failures}
+    results: list[dict[str, Any]] = []
+    for evaluator in planned:
+        entry: dict[str, Any] = {"name": evaluator.name, "kind": evaluator.kind}
+        failed = failures.get(evaluator.name)
+        assertion = outcome.assertions.get(evaluator.name)
+        scored = outcome.scores.get(evaluator.name)
+        if failed is not None:
+            entry.update(passed=False, score=None, reason=failed.get("error"), error_type=failed.get("error_type"))
+            if failed.get("error_code"):
+                entry["error_code"] = failed["error_code"]
+        elif assertion is None and scored is None:
+            entry.update(passed=None, score=None, reason=None, skipped=True)
+        else:
+            passed = None if assertion is None else bool(assertion["value"])
+            if scored is not None:
+                score: float | None = float(scored["value"])
+            else:
+                score = None if passed is None else (1.0 if passed else 0.0)
+            reason = (assertion or scored or {}).get("reason")
+            entry.update(passed=passed, score=score, reason=reason)
+        results.append(entry)
+    decided = [r for r in results if r["passed"] is not None]
+    verdict = all(r["passed"] for r in decided) if mode == "all" else any(r["passed"] for r in decided)
+    scores = [r["score"] for r in results if r["score"] is not None]
+    reasons = [r["reason"] for r in decided if r["passed"] is verdict and r["reason"]]
+    return {
+        "passed": verdict,
+        "score": sum(scores) / len(scores) if scores else None,
+        "reason": "\n".join(reasons)[:MAX_REASON_CHARS] or None,
+        "results": results,
+    }
+
+
 def _missing_last(step_id: str) -> WorkflowStepError:
     """A loop's `last_key` names an event that is not there (D6: impossible unless the event log
     lost a row): an internal error, so the run fails instead of reporting a wrong (null) output."""
@@ -1281,7 +1468,8 @@ def _missing_last(step_id: str) -> WorkflowStepError:
 def _result_failure(result: dict[str, Any]) -> RunFailure:
     """The RunFailure of a failed child result ({status, error, error_code, data?, ...})."""
     return RunFailure(
-        result["status"], result["error_code"], *_split_error(result["error"]), data=result.get("data") or None
+        result["status"], result["error_code"], *_split_error(result["error"]), data=result.get("data") or None,
+        run_level=bool(result.get("run_level")),
     )
 
 
@@ -1293,6 +1481,8 @@ def _failure_result(failure: RunFailure, step_id: str | None) -> dict[str, Any]:
                               "step_id": step_id}
     if failure.data:
         result["data"] = failure.data
+    if failure.run_level:
+        result["run_level"] = True  # LP.14: a failed loop tick, never collected by a foreach
     return result
 
 
@@ -1670,7 +1860,7 @@ async def _run_cancel_requested(run_id: str, tenant_id: str) -> bool:
         cancel = await asyncio.to_thread(get_runtime().event_log.get_event, tenant_id, run_id, CANCEL_EVENT_KEY)
     except Exception:  # noqa: BLE001 - best effort, the iteration is already stopping
         return False
-    return cancel is not None
+    return cancel is not None and cancel.type == "cancel_requested"
 
 
 async def _iteration_run(
@@ -1762,6 +1952,7 @@ __all__ = [
     "approval_topic",
     "branch_workflow_id",
     "child_run_id",
+    "evaluate_output",
     "final_output",
     "side_effect_key",
     "tool_call_id_for",

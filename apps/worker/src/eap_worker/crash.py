@@ -42,6 +42,11 @@
   evaluate step). Filtered by `EAP_CRASH_EVENT_KEY` against `loop:{S}:tick` (S: the iteration about
   to start, e.g. `loop:lp.2:tick`) or `step:{step_id}:tick` before a top-level step. Recovery
   replays the recorded tick, so the run decides identically.
+- `after_judge_call` (LP.14): in a workflow evaluate step, right after an `llm_judge`'s model step
+  (`eap-judge__model.request`) was checkpointed and before `eap.workflow_judge_usage` writes its
+  usage row. Filtered by `EAP_CRASH_EVENT_KEY` against `step:{step_id}:judge_{k}` (scoped in a
+  loop body, e.g. `loop:refine.1:step:judge:judge_0`). Recovery replays the recorded response, so
+  each judge key gets exactly one row.
 - `workflow_waiting`: in a workflow approval step, right after its `step_waiting` event is
   recorded and before the workflow starts waiting for the decision. Filtered by
   `EAP_CRASH_EVENT_KEY` against `step:{step_id}:waiting`.
