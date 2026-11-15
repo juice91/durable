@@ -1,14 +1,15 @@
 "use client";
 
 import React, { createContext, useContext } from "react";
-import { useAuiState, type DataMessagePartProps } from "@assistant-ui/react";
-import { RotateCcw, ShieldCheck, ShieldX } from "lucide-react";
+import { type DataMessagePartProps } from "@assistant-ui/react";
+import { RotateCcw } from "lucide-react";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { ApprovalCard } from "@/components/approvals/ApprovalCard";
 import { StructuredOutputView } from "./StructuredOutput";
-import { useTurnSources } from "./messageParts";
-import { messageRunId, toolCallInfoKey } from "./toolCalls";
-import { DECISION_LABELS, outputRetryOf, outputRetryText, type ToolApprovalState } from "./turnCapabilities";
+import { ToolDecisionView } from "./ToolDecisionView";
+import { useMessageRunId, useTurnSources } from "./messageParts";
+import { toolCallInfoKey } from "./toolCalls";
+import { outputRetryOf, outputRetryText, type ToolApprovalState } from "./turnCapabilities";
 
 // The chat's data parts for the agent capabilities milestone (thread.ts emits them): the structured
 // answer, a rejected-candidate marker, and the inline tool approval card of a waiting turn.
@@ -26,7 +27,7 @@ export interface ChatRunActions {
 
 export const ChatRunActionsContext = createContext<ChatRunActions>({ refreshRun: async () => undefined });
 
-export const LOST_RACE_MESSAGE = "Your decision was not recorded: this call had already been decided.";
+export { LOST_RACE_MESSAGE } from "./ToolDecisionView";
 
 /** The validated object of a structured turn, with `[n]` linked to the turn's retrieve sources. */
 export function StructuredOutputPart({ data }: DataMessagePartProps<{ value: unknown }>) {
@@ -55,38 +56,17 @@ export function OutputRetryPart({ data }: DataMessagePartProps<Record<string, un
 /** A gated tool call of the turn: the shared ApprovalCard while it waits, its decision after. */
 export function ToolApprovalPart({ data: raw }: DataMessagePartProps<ToolApprovalState>) {
   const data = raw as ToolApprovalState | undefined;
-  const messageId = useAuiState((s) => s.message.id);
-  const runId = messageRunId(messageId);
+  const runId = useMessageRunId();
   const { refreshRun, lostRaces, noteLostRace } = useContext(ChatRunActionsContext);
   if (!data || runId === null) return null;
   if (data.decision) {
-    const approved = data.decision.kind === "approved";
-    const Icon = approved ? ShieldCheck : ShieldX;
     return (
-      <div
-        data-testid="tool-approval-decision"
-        data-decision={data.decision.kind}
-        data-tool-call-id={data.toolCallId}
-        className="my-2 flex min-w-0 items-start gap-2 rounded-md border border-border bg-surface px-3 py-2 text-caption"
-      >
-        <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" className={approved ? "mt-0.5 size-icon shrink-0 text-success-text" : "mt-0.5 size-icon shrink-0 text-warning-text"} />
-        <div className="min-w-0 break-words">
-          <p className="text-foreground">
-            <span className="font-mono">{data.toolName}</span>: {DECISION_LABELS[data.decision.kind]}
-            {data.decision.decidedBy && data.decision.kind !== "timed_out" ? (
-              <>
-                {" "}by <span className="font-mono">{data.decision.decidedBy}</span>
-              </>
-            ) : null}
-          </p>
-          {data.decision.comment ? <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">{data.decision.comment}</p> : null}
-          {lostRaces?.has(toolCallInfoKey(runId, data.toolCallId)) ? (
-            <p role="status" data-testid="tool-approval-lost-race" className="mt-0.5 text-warning-text">
-              {LOST_RACE_MESSAGE}
-            </p>
-          ) : null}
-        </div>
-      </div>
+      <ToolDecisionView
+        toolName={data.toolName}
+        toolCallId={data.toolCallId}
+        decision={data.decision}
+        lostRace={Boolean(lostRaces?.has(toolCallInfoKey(runId, data.toolCallId)))}
+      />
     );
   }
   return (

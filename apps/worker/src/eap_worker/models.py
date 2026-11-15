@@ -107,6 +107,18 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  offered tool with `{}` (one response); after the return it answers `Done.`. Without
                  tools: `Done.`. Proves a response with text and a tool call (output processors run
                  on its text) is handled like any other.
+- `test:frontend_tool` (AGUI.7) calls the first client (frontend, `external`) tool offered with
+                 `schema_instance(<its parameters>)`; after the client's result (the last request
+                 holds the call's return) it answers `tool said: <content>`, or `tool said: error:
+                 <message>` for an error the client reported (or the "not executed by the client"
+                 result); a result counts as the client's when it names no server tool of the run. An argument retry (eap_worker.client_tools.ARGS_RETRY_HEADING) makes it
+                 call again. Prompt JSON: `{"tool": <name>}` picks the client tool; `{"args": {...}}`
+                 sends these arguments on every attempt (valid or not); `{"bad_first": true}` makes the
+                 first attempt violate the schema (`schema_violation`); `{"with": <server tool>,
+                 "with_args": {...}}` also calls that server tool, first, in the same response (as
+                 `test:approval` names it). With an output tool or native/prompted output, the
+                 answer is `schema_instance(<output schema>, text=<answer>)`. `No client tool
+                 offered.` without client tools.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
@@ -917,6 +929,67 @@ def scripted_approval_model() -> FunctionModel:
     return _planned_model(_approval_plan, "scripted-approval")
 
 
+def _frontend_answer(answer: str, info: AgentInfo) -> tuple[str, Any]:
+    """A final answer in the run's output form: the output tool, native/prompted JSON, or text."""
+    if info.output_tools:
+        return _as_output("text", answer, info)
+    params = info.model_request_parameters
+    if params.output_mode in ("native", "prompted") and params.output_object is not None:
+        return "text", json.dumps(schema_instance(params.output_object.json_schema, text=answer), sort_keys=True)
+    return "text", answer
+
+
+def _frontend_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    """`test:frontend_tool`: see the module docstring."""
+    from eap_worker.client_tools import ARGS_RETRY_HEADING
+
+    client = [t for t in info.function_tools if t.kind == "external"]
+    # A client tool's result: any return for a tool that is not a server tool of this run (a REST
+    # turn declares no client tools, yet answers the previous turn's pending calls).
+    server = {t.name for t in info.function_tools if t.kind != "external"} | {t.name for t in info.output_tools}
+    last = messages[-1] if messages else None
+    parts = list(last.parts) if isinstance(last, ModelRequest) else []
+    for part in parts:
+        if not isinstance(part, (ToolReturnPart, RetryPromptPart)) or not part.tool_name or part.tool_name in server:
+            continue
+        content = part.content if isinstance(part.content, str) else _content_text(part.content)
+        retried = isinstance(part, RetryPromptPart) or part.outcome in ("retried", "failed")
+        if not retried:
+            return _frontend_answer(f"tool said: {content}", info)
+        if not content.startswith(ARGS_RETRY_HEADING):
+            return _frontend_answer(f"tool said: error: {content}", info)
+    if not client:
+        return _frontend_answer("No client tool offered.", info)
+    request = _prompt_json(messages)
+    tool = next((t for t in client if t.name == request.get("tool")), client[0])
+    attempts = sum(
+        1
+        for m in _turn_messages(messages)
+        if isinstance(m, ModelRequest)
+        for p in m.parts
+        if (isinstance(p, RetryPromptPart) or (isinstance(p, ToolReturnPart) and p.outcome == "retried"))
+        and p.tool_name == tool.name
+    )
+    if "args" in request:
+        args: Any = request["args"]
+    elif request.get("bad_first") and attempts == 0:
+        args = schema_violation(tool.parameters_json_schema)
+    else:
+        args = schema_instance(tool.parameters_json_schema)
+    calls: list[tuple[str, Any]] = []
+    server = request.get("with")
+    if isinstance(server, str):
+        offered = [t.name for t in info.function_tools if t.kind != "external"]
+        calls.append((_offered_tool(server, offered), request.get("with_args") or {}))
+    calls.append((tool.name, args))
+    return "tools", calls
+
+
+def scripted_frontend_tool_model() -> FunctionModel:
+    """`test:frontend_tool`: see the module docstring."""
+    return _planned_model(_frontend_plan, "scripted-frontend-tool")
+
+
 TEXT_TOOL_PREFIX = "Let me check."
 
 
@@ -1266,6 +1339,8 @@ def make_resolver(settings_getter: Any, *, fallback: bool = False):
                 return scripted_judge_model()
             if name == "text-tool":
                 return scripted_text_tool_model()
+            if name == "frontend_tool":
+                return scripted_frontend_tool_model()
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())

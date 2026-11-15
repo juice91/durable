@@ -124,6 +124,7 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agents list view | `studio.agents.view` | List or Compact. | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
 | Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |
+| Chat protocol | `studio.chat.protocol` | AG-UI or Native, for the agent Chat tab (Settings → Chat; AG-UI when unset). | Layout |
 | Last agent | `studio.lastAgent` | The agent the playground reopens. | Layout |
 | Request-context presets | `studio.requestContextPresets.v1.<credential scope>:<agentId>`, `eap.requestContext.v1:…` | Named request-context presets for each agent (and the single saved value they were migrated from). | Presets |
 

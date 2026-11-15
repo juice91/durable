@@ -169,6 +169,21 @@ def check_payload_size(db: Session, agent_id: uuid.UUID | str, version: int, inp
     check_spec_payload_size(version_row.spec, input_text)
 
 
+def lock_agent(db: Session, tenant_id: str, agent_id: uuid.UUID | str) -> AgentModel:
+    """The tenant's agent, or 404 `Agent not found` (another tenant's agent included), locked FOR
+    SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish) waits
+    for a run being recorded, or the request sees `archived` (eap_api.agent_archive)."""
+    agent = (
+        db.query(AgentModel)
+        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
+        .with_for_update(read=True)
+        .first()
+    )
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    return agent
+
+
 def launch_recorded_run(
     db: Session, launcher: RunLauncher, run_store: RunStore, tenant_id: str, run: dict[str, Any], created: bool
 ) -> dict[str, Any]:
@@ -278,16 +293,7 @@ def start_run(
     """
     run_store, _ = stores
     tenant_id = principal.tenant_id
-    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
-    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
-    agent = (
-        db.query(AgentModel)
-        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
-        .with_for_update(read=True)
-        .first()
-    )
-    if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    agent = lock_agent(db, tenant_id, agent_id)
 
     # A retry of a recorded run is compared with the row (below) and relaunched as recorded; only a
     # new run validates its options (a draft run against the live draft, then snapshotted).

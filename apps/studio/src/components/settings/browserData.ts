@@ -11,6 +11,7 @@ import {
 } from "@/components/agentPage/agentPageModel";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
 import { MEMORY_CARD_KEY } from "@/components/memory/memoryModel";
+import { CHAT_PROTOCOL_EVENT, CHAT_PROTOCOL_STORAGE_KEY } from "@/components/chat/chatProtocol";
 
 /**
  * What Studio keeps in this browser's localStorage, for the Settings "Data in this browser"
@@ -94,6 +95,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     clearGroup: "layout",
   },
   {
+    id: "chat-protocol",
+    label: "Chat protocol",
+    description: "AG-UI or Native, for the agent Chat tab (Settings → Chat).",
+    keys: [CHAT_PROTOCOL_STORAGE_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
     id: "last-agent",
     label: "Last agent",
     description: "The agent the chat reopens.",
@@ -147,6 +156,17 @@ export interface ClearResult {
   failed: string[];
 }
 
+/** Tell this tab's open listeners about cleared keys they follow (the `storage` event reaches only
+ * other tabs): the Chat protocol switch and the Chat tab re-read their now-default value. */
+function notifyCleared(removed: readonly string[]): void {
+  if (!removed.includes(CHAT_PROTOCOL_STORAGE_KEY) || typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new CustomEvent(CHAT_PROTOCOL_EVENT, { detail: null }));
+  } catch {
+    // No CustomEvent: the next mount reads storage.
+  }
+}
+
 /**
  * Removes every stored key of the entries in `group` and nothing else, one key at a time. If
  * storage throws partway, it stops there and reports what was removed and what was not. Null when
@@ -160,9 +180,11 @@ export function clearBrowserData(group: ClearGroup, storage: Storage | null = br
     try {
       storage.removeItem(keys[index]);
     } catch {
+      notifyCleared(removed);
       return { removed, failed: keys.slice(index) };
     }
     removed.push(keys[index]);
   }
+  notifyCleared(removed);
   return { removed, failed: [] };
 }

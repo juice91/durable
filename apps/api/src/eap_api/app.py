@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 
 from eap_observability import install_access_logging, instrument_fastapi, setup_logging, setup_telemetry
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 
 @asynccontextmanager
@@ -29,9 +28,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         eap_db.SchemaNotAtHead: the database is not at the latest Alembic migration. The API never
             creates or alters tables; `uv run alembic -c packages/db/alembic.ini upgrade head` does.
     """
-    from eap_api.auth import require_dev_auth_mode
+    from eap_api.auth import AUTH_MODE_API_KEY, require_auth_configured
+    from eap_api.cors import PathScopedCORSMiddleware, agui_cors_origins_from_env
 
-    require_dev_auth_mode()
+    # EAP_AUTH_MODE must be `dev` (the local bearer everywhere) or `api_key` (tenant API keys on
+    # /api/v1/ag-ui/* are the only credential; every other route is 401). See eap_api.auth (Q2).
+    mode = require_auth_configured()
+    # A malformed EAP_AGUI_CORS_ORIGINS fails startup here (AGUI.9, D17).
+    agui_cors_origins = agui_cors_origins_from_env()
 
     # Traces and logs over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a no-op. The
     # request span's traceparent is stored on each run so the worker joins the same trace.
@@ -49,6 +53,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         # not a redirect that fetch follows with the same method onto the knowledge base itself
         # (RAG milestone checkpoint review, 2026-11-14).
         redirect_slashes=False,
+        # In api_key mode nothing but /healthz and /api/v1/ag-ui/* answers without the dev bearer,
+        # so the schema and docs pages are off (AGUI.9 review); dev mode keeps them.
+        **({"openapi_url": None, "docs_url": None, "redoc_url": None} if mode == AUTH_MODE_API_KEY else {}),
         # FastAPI's native OpenTelemetry follows any global provider; pin it to ours, or off.
         telemetry=(
             {"tracer_provider": tracer_provider}
@@ -57,14 +64,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         ),
     )
     
-    # CORS: the local Studio dev server, by either loopback name (no other origin is allowed).
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS: the local Studio dev server, by either loopback name, on every route; on
+    # /api/v1/ag-ui/* only, also the EAP_AGUI_CORS_ORIGINS allowlist (eap_api.cors, AGUI.9).
+    app.add_middleware(PathScopedCORSMiddleware, agui_origins=agui_cors_origins)
     
     # Import and register routes
     from eap_api.routes import router as agents_router
@@ -135,6 +137,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.memory import router as memory_router
 
     app.include_router(memory_router, prefix="/api/v1")
+    from eap_api.routes.api_keys import router as api_keys_router  # AGUI.3
+
+    app.include_router(api_keys_router, prefix="/api/v1")
+    from eap_api.routes.ag_ui import router as ag_ui_router  # AGUI.6: /ag-ui/agents/...
+
+    app.include_router(ag_ui_router, prefix="/api/v1")
+    from eap_api.routes.ag_ui_workflows import router as ag_ui_workflows_router  # AGUI.8: /ag-ui/workflows/...
+
+    app.include_router(ag_ui_workflows_router, prefix="/api/v1")
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

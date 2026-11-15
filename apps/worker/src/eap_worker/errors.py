@@ -33,6 +33,7 @@ from eap_schemas.evals import EvalSuiteInvalid
 from eap_schemas.limits import USAGE_LIMIT_KWARGS, RunBudgetExceeded
 from eap_schemas.models_policy import ModelNotAllowed
 from eap_schemas.output import OutputInvalid
+from eap_worker.client_tools import ClientToolArgsInvalid
 from eap_worker.mcp import McpToolUnavailable
 
 _MAX_FIELD = 200
@@ -113,6 +114,8 @@ class OutputModeUnsupported(Exception):
 # Pydantic AI's fixed UserError text when NativeOutput meets a model without JSON-schema output.
 _NATIVE_UNSUPPORTED = "Native structured output is not supported by this model"
 
+
+CLIENT_TOOL_ARGS_INVALID_MESSAGE = "the model's arguments for a client tool kept failing the tool's schema"
 
 # The fixed, user-safe messages of a blocked turn (stored as runs.error and in run_failed).
 INPUT_BLOCKED_MESSAGE = "the message was blocked by this agent's input processors"
@@ -354,6 +357,8 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
         lambda e: f"MCP tool '{_field(e, 'server')}/{_field(e, 'tool')}' is unavailable ({_field(e, 'code')})",
     ),
     (RunBudgetExceeded, "failed", "run_budget_exceeded", lambda e: RUN_BUDGET_EXCEEDED_MESSAGE),
+    # AGUI.7: the model kept breaking a client tool's schema. Before UnexpectedModelBehavior.
+    (ClientToolArgsInvalid, "failed", "client_tool_args_invalid", lambda e: CLIENT_TOOL_ARGS_INVALID_MESSAGE),
     # AC.11: an eval run's snapshot that does not validate, and its other fixed failures.
     (EvalSuiteInvalid, "failed", "eval_suite_invalid", lambda e: EVAL_SUITE_INVALID_MESSAGE),
     # AC.5: every model of a fallback chain failed. Before ModelHTTPError, its members.
@@ -501,6 +506,7 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
 
 
 __all__ = [
+    "CLIENT_TOOL_ARGS_INVALID_MESSAGE",
     "describe_fallback_exhausted",
     "EVAL_FAILURES",
     "EVAL_SUITE_INVALID_MESSAGE",

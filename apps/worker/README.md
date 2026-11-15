@@ -379,3 +379,61 @@ Operating notes:
   `test:*`) at 0, so `limits.max_cost_usd` never trips with it: publishing warns
   (`cost_cap_unpriced_model`, which covers zero-priced models), but the run is not capped. Point
   `EAP_MODEL_PRICES_FILE` at a file with the provider's real prices before relying on cost caps.
+
+### AG-UI milestone (AGUI, 2026-11)
+
+Deploy the API and the worker together, in this order:
+
+1. **Drain first.** Stop new runs (or stop the API) and wait until no run is `queued` or
+   `running`.
+   - `0016_ag_ui` adds a per-root commit order: every event append locks the ROOT run's row, then
+     the child's, and stamps `execution_events.root_order` from a counter on the root row
+     (`runs.event_order_next`). AG-UI workflow streams and their run boundaries are built on that
+     order.
+   - An old-code worker still appending after the migration has its rows stamped by the insert
+     trigger `trg_execution_events_root_order`, so the order stays correct. But it takes the
+     root lock after the child's, the reverse of new code, so an old and a new writer on one
+     workflow tree can deadlock. Postgres aborts one and the DBOS step retries; drain rather
+     than rely on that.
+   - Client tools (AGUI.7) also change a turn's step layout for specs that declare them.
+2. **Migrate:** `uv run alembic -c packages/db/alembic.ini upgrade head` applies `0016_ag_ui` and
+   `0017_api_keys`.
+   - 0016 takes `conversations`, then `runs`, then `execution_events`, the order the running code
+     uses, with `lock_timeout` 5 s.
+   - Its column adds are catalog-only.
+   - `ix_execution_events_run_root_order` is built with a plain CREATE INDEX while ACCESS
+     EXCLUSIVE is held. CONCURRENTLY cannot run inside the migration's transaction. The index
+     itself is empty (partial on `root_order IS NOT NULL`, and every existing row is NULL), but
+     the build scans all of `execution_events`, and appends wait for that scan. On a large table,
+     migrate in a quiet window, which the drain already gives you.
+   - Rows from before 0016 keep a NULL `root_order` and are read first, in (ts, run_id, seq)
+     order.
+3. **Configure the API** (all optional, defaults in code; see `.dev.env.example`):
+   - `EAP_AUTH_MODE`: `dev` (the dev bearer on every route plus API keys on `/api/v1/ag-ui/*`) or
+     `api_key` (tenant API keys on `/api/v1/ag-ui/*` are the only credential; every other route
+     is 401 and the OpenAPI docs are off). Any other value, unset included, refuses to start.
+   - `EAP_AGUI_CORS_ORIGINS`: extra browser origins for `/api/v1/ag-ui/*` only
+     (comma-separated, `*` refused, default none). Server-side callers need no entry.
+   - `EAP_AGUI_MAX_BODY_BYTES`: the AG-UI request body cap (default 2 MiB).
+   - `EAP_AGUI_PREVIOUS_TURN_WAIT_S`: how long a new turn waits for the thread's previous turn
+     (default 120 s).
+4. **Deploy the workers, then the API.**
+5. **API keys for an `api_key` deployment.**
+   - The key management routes (`/api/v1/api-keys`) take the dev bearer, so they work only in
+     `dev` mode.
+   - Create keys with a separate dev-mode API process on the same database. The dev bearer is
+     forgeable (anyone who can reach that process can act as any tenant), so bind it to loopback
+     (or a private admin network), run it only while you create or revoke keys, and stop it
+     afterwards. Never expose it.
+   - A key's plaintext is shown once, at creation. Revocation takes effect on the next request,
+     and an open stream ends within 60 s.
+
+Operational notes:
+- **Throughput:** one tree (a workflow run and its agent steps; an eval run and its cases) now
+  appends one transaction at a time.
+  - Measured locally: about 110–220 appends/s per tree, against 400–475 before. Different roots
+    do not contend; kb_ingest, memory and conversation runs are roots.
+  - Never hold a child run's append transaction open across slow work.
+- **Autovacuum:** each append also UPDATEs its root's `runs` row (`event_order_next`), so busy
+  trees add row versions to `runs`. They can be HOT updates (the column is not indexed), but watch
+  `runs` bloat and autovacuum on high-traffic deployments.

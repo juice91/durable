@@ -565,8 +565,9 @@ def mcp_toolset_for_run(engine: Engine, tenant_id: str, refs: Sequence[McpToolRe
 
 
 class RunToolset(AbstractToolset[Any]):
-    """The run's built-in tools plus its MCP tools (`mcp`) and its platform tools (`platform`,
-    eap_worker.platform_tools: retrieve, ...); either may be None. Unlike CombinedToolset, rebuilding
+    """The run's built-in tools plus its MCP tools (`mcp`), its platform tools (`platform`,
+    eap_worker.platform_tools: retrieve, ...) and, for an AG-UI turn that declares them, its client
+    tools (`client`, eap_worker.client_tools: `external`, never called here); any may be None. Unlike CombinedToolset, rebuilding
     a tool from a recorded definition (the call step) routes by name, so it never lists the MCP
     server's tools or reads the platform tools' data again. Names never clash: AgentSpec validation
     and the reserved platform tool names prevent it, and get_tools refuses it anyway."""
@@ -576,17 +577,19 @@ class RunToolset(AbstractToolset[Any]):
         builtin: AbstractToolset[Any],
         mcp: McpToolset | None = None,
         platform: Any | None = None,  # eap_worker.platform_tools.PlatformToolset (imported lazily)
+        client: Any | None = None,  # eap_worker.client_tools.ClientToolset (AGUI.7; imported lazily)
     ) -> None:
         self.builtin = builtin
         self.mcp = mcp
         self.platform = platform
+        self.client = client
 
     @property
     def id(self) -> str | None:
         return None
 
     def _members(self) -> list[AbstractToolset[Any]]:
-        return [t for t in (self.builtin, self.mcp, self.platform) if t is not None]
+        return [t for t in (self.builtin, self.mcp, self.platform, self.client) if t is not None]
 
     async def __aenter__(self) -> RunToolset:
         await self.builtin.__aenter__()
@@ -610,6 +613,8 @@ class RunToolset(AbstractToolset[Any]):
             return await self.mcp.get_tool_for_tool_def(tool_def, ctx)
         if self.platform is not None and tool_def.name in self.platform.names:
             return await self.platform.get_tool_for_tool_def(tool_def, ctx)
+        if self.client is not None and tool_def.name in self.client.names:
+            return await self.client.get_tool_for_tool_def(tool_def, ctx)
         return await self.builtin.get_tool_for_tool_def(tool_def, ctx)
 
     async def call_tool(

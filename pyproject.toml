@@ -94,6 +94,18 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Only eap_api.ag_ui may import the AG-UI protocol package (ag_ui)"
+type = "forbidden"
+# D19: ag-ui-protocol is used only inside eap_api.ag_ui; data reaching the run row and the worker
+# uses eap_schemas.client_tools. Direct imports only: the rest of eap_api reaches ag_ui through
+# eap_api.ag_ui (the sanctioned path), and the other roots may not import eap_api at all.
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
+forbidden_modules = ["ag_ui"]
+ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
+unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
 name = "The API and the run store never import a document parser"
 type = "forbidden"
 source_modules = ["eap_api", "eap_run_store"]

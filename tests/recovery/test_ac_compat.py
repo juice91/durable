@@ -10,7 +10,7 @@ own virtualenv (`uv sync --all-packages --frozen`, about 2 s from the uv cache).
    `tests/recovery/api_server.py`: see `API_LAUNCHER`) and worker, creates
    and publishes agents and workflows over HTTP, and starts runs and turns with them;
 3. stops (or crash-kills, at the previous build's own `EAP_CRASH_AT` points) the previous build,
-   upgrades the schema with THIS build's migrations to head (0014_approvals, 0015_evals: exactly what a
+   upgrades the schema with THIS build's migrations to head (0014_approvals to 0017_api_keys: exactly what a
    deploy does), and starts this build's API and worker with the same application version and
    executor id, so the new worker recovers the old workflows.
 
@@ -219,7 +219,7 @@ class World:
                 command.upgrade(alembic_config(conn), "head")
         finally:
             migrator.dispose()
-        assert self.revision() == "0015_evals"
+        assert self.revision() == "0017_api_keys"
         self.build = "this"
 
     def close(self) -> None:

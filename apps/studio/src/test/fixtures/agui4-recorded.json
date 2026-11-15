@@ -1,0 +1,1568 @@
+{
+ "plain": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {
+     "input": "hi"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "Echo: hi",
+     "message": {}
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "run_completed",
+    "data": {
+     "output": "Echo: hi"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m0",
+     "delta": "Echo: hi"
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ],
+  "resume_after_1": [
+   {
+    "id": null,
+    "event": {
+     "type": "MESSAGES_SNAPSHOT",
+     "messages": [
+      {
+       "id": "agui-run-m0",
+       "role": "assistant",
+       "content": "Echo: hi"
+      }
+     ]
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ },
+ "tool_chain": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {
+     "input": "x"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "Let me check.",
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "text",
+        "content": "Let me check."
+       },
+       {
+        "part_kind": "tool-call",
+        "tool_name": "lookup",
+        "tool_call_id": "c1",
+        "args": {}
+       },
+       {
+        "part_kind": "tool-call",
+        "tool_name": "lookup",
+        "tool_call_id": "c2",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "tool_call",
+    "data": {
+     "tool_call_id": "c1",
+     "tool_name": "lookup",
+     "args": {
+      "q": 1
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 3,
+    "type": "tool_call",
+    "data": {
+     "tool_call_id": "c2",
+     "tool_name": "lookup",
+     "args": {
+      "q": 2
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 4,
+    "type": "tool_result",
+    "data": {
+     "tool_call_id": "c1",
+     "tool_name": "lookup",
+     "status": "ok",
+     "content": {
+      "hit": 1
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 5,
+    "type": "tool_result",
+    "data": {
+     "tool_call_id": "c2",
+     "tool_name": "lookup",
+     "status": "error",
+     "content": "boom"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 6,
+    "type": "model_message",
+    "data": {
+     "model_request": 1,
+     "text": "Done",
+     "message": {}
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 7,
+    "type": "run_completed",
+    "data": {
+     "output": "Done"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m0",
+     "delta": "Let me check."
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "c1",
+     "toolCallName": "lookup",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "c1",
+     "delta": "{\"q\":1}"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "c1"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "c2",
+     "toolCallName": "lookup",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "c2",
+     "delta": "{\"q\":2}"
+    }
+   },
+   {
+    "id": "agui-run:3",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "c2"
+    }
+   },
+   {
+    "id": "agui-run:4",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-c1",
+     "toolCallId": "c1",
+     "content": "{\"hit\":1}",
+     "role": "tool"
+    }
+   },
+   {
+    "id": "agui-run:5",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-c2",
+     "toolCallId": "c2",
+     "content": "boom",
+     "role": "tool"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m1",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m1",
+     "delta": "Done"
+    }
+   },
+   {
+    "id": "agui-run:6",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m1"
+    }
+   },
+   {
+    "id": "agui-run:7",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ],
+  "resume_after_1": [
+   {
+    "id": null,
+    "event": {
+     "type": "MESSAGES_SNAPSHOT",
+     "messages": [
+      {
+       "id": "agui-run-m0",
+       "role": "assistant",
+       "content": "Let me check."
+      }
+     ]
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "c1",
+     "toolCallName": "lookup",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "c1",
+     "delta": "{\"q\":1}"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "c1"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "c2",
+     "toolCallName": "lookup",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "c2",
+     "delta": "{\"q\":2}"
+    }
+   },
+   {
+    "id": "agui-run:3",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "c2"
+    }
+   },
+   {
+    "id": "agui-run:4",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-c1",
+     "toolCallId": "c1",
+     "content": "{\"hit\":1}",
+     "role": "tool"
+    }
+   },
+   {
+    "id": "agui-run:5",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-c2",
+     "toolCallId": "c2",
+     "content": "boom",
+     "role": "tool"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m1",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m1",
+     "delta": "Done"
+    }
+   },
+   {
+    "id": "agui-run:6",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m1"
+    }
+   },
+   {
+    "id": "agui-run:7",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ },
+ "retrieve": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {},
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "embedding",
+    "data": {
+     "model_id": "test:hash",
+     "inputs": 1,
+     "input_tokens": 4,
+     "cost_usd": 0
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "",
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "tool-call",
+        "tool_name": "retrieve",
+        "tool_call_id": "r1",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 3,
+    "type": "tool_call",
+    "data": {
+     "tool_call_id": "r1",
+     "tool_name": "retrieve",
+     "args": {
+      "query": "jam"
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 4,
+    "type": "tool_result",
+    "data": {
+     "tool_call_id": "r1",
+     "tool_name": "retrieve",
+     "status": "ok",
+     "content": "[1] Open tray two.",
+     "sources": [
+      {
+       "n": 1,
+       "url": "https://x.test/a",
+       "text": "sk-live-SECRETVALUE-123"
+      }
+     ]
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 5,
+    "type": "model_message",
+    "data": {
+     "model_request": 1,
+     "text": "Open tray two [1].",
+     "message": {}
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 6,
+    "type": "run_completed",
+    "data": {
+     "output": "Open tray two [1]."
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "r1",
+     "toolCallName": "retrieve",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "r1",
+     "delta": "{\"query\":\"jam\"}"
+    }
+   },
+   {
+    "id": "agui-run:3",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "r1"
+    }
+   },
+   {
+    "id": "agui-run:4",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-r1",
+     "toolCallId": "r1",
+     "content": "[1] Open tray two.",
+     "role": "tool"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m1",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m1",
+     "delta": "Open tray two [1]."
+    }
+   },
+   {
+    "id": "agui-run:5",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m1"
+    }
+   },
+   {
+    "id": "agui-run:6",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ },
+ "structured": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {},
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "",
+     "output_candidate": true,
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "tool-call",
+        "tool_name": "final_result",
+        "tool_call_id": "o1",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "output_retry",
+    "data": {
+     "model_request": 0,
+     "errors": [
+      "/age"
+     ],
+     "cause": "sk-live-SECRETVALUE-123"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 3,
+    "type": "model_message",
+    "data": {
+     "model_request": 1,
+     "text": "",
+     "output_candidate": true,
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "tool-call",
+        "tool_name": "final_result",
+        "tool_call_id": "o2",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 4,
+    "type": "run_completed",
+    "data": {
+     "output": "{\"age\":3}",
+     "output_json": {
+      "age": 3
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.output_retry",
+     "value": {
+      "model_request": 0,
+      "errors": [
+       "/age"
+      ]
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m1",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m1",
+     "delta": "{\"age\":3}"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m1"
+    }
+   },
+   {
+    "id": "agui-run:4",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "result": {
+      "age": 3
+     },
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ },
+ "needs_attention": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {},
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "",
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "tool-call",
+        "tool_name": "unsafe",
+        "tool_call_id": "u1",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "tool_call",
+    "data": {
+     "tool_call_id": "u1",
+     "tool_name": "unsafe",
+     "args": {}
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 3,
+    "type": "run_failed",
+    "data": {
+     "status": "needs_attention",
+     "error": "Needs attention.",
+     "error_code": "needs_attention"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "u1",
+     "toolCallName": "unsafe",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "u1",
+     "delta": "{}"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "u1"
+    }
+   },
+   {
+    "id": "agui-run:3",
+    "event": {
+     "type": "RUN_ERROR",
+     "message": "The run stopped with an outcome that needs an operator to check it; it was not completed.",
+     "code": "needs_attention"
+    }
+   }
+  ]
+ },
+ "fallback": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {},
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "Hi",
+     "message": {},
+     "model_id": "anthropic:b",
+     "requested_model_id": "openai:a",
+     "fallback_index": 1,
+     "failed_attempts": [
+      {
+       "model_id": "openai:a",
+       "outcome": "error",
+       "error_type": "RateLimit",
+       "message": "sk-live-SECRETVALUE-123"
+      }
+     ]
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "run_completed",
+    "data": {
+     "output": "Hi"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "frames": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.model",
+     "value": {
+      "model_request": 0,
+      "model_id": "anthropic:b",
+      "requested_model_id": "openai:a",
+      "fallback_index": 1,
+      "failed_attempts": [
+       {
+        "model_id": "openai:a",
+        "outcome": "error",
+        "error_type": "RateLimit"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m0",
+     "delta": "Hi"
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ },
+ "approval": {
+  "native": [
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 0,
+    "type": "run_started",
+    "data": {},
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 1,
+    "type": "model_message",
+    "data": {
+     "model_request": 0,
+     "text": "",
+     "message": {
+      "kind": "response",
+      "parts": [
+       {
+        "part_kind": "tool-call",
+        "tool_name": "pay",
+        "tool_call_id": "g1",
+        "args": {}
+       }
+      ]
+     }
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 2,
+    "type": "tool_approval_waiting",
+    "data": {
+     "tool_call_id": "g1",
+     "tool_name": "pay",
+     "args": {
+      "amount": 5
+     },
+     "deadline": "2026-11-16T00:00:00+00:00",
+     "workflow_id": "7d1e0000-0000-4000-8000-0000000000a1",
+     "batch": [
+      "g1"
+     ]
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 3,
+    "type": "tool_approved",
+    "data": {
+     "tool_call_id": "g1",
+     "decided_by": "user-secret",
+     "comment": "sk-live-SECRETVALUE-123"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 4,
+    "type": "tool_result",
+    "data": {
+     "tool_call_id": "g1",
+     "tool_name": "pay",
+     "status": "ok",
+     "content": "r-g1"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 5,
+    "type": "model_message",
+    "data": {
+     "model_request": 1,
+     "text": "Done",
+     "message": {}
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   },
+   {
+    "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+    "seq": 6,
+    "type": "run_completed",
+    "data": {
+     "output": "Done"
+    },
+    "ts": "2026-11-15T00:00:00Z"
+   }
+  ],
+  "waiting": 2,
+  "first": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "g1",
+     "toolCallName": "pay",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "g1",
+     "delta": "{\"amount\":5}"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "g1"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.approval_required",
+     "value": {
+      "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+      "kind": "tool",
+      "key": "g1",
+      "tool_name": "pay",
+      "deadline": "2026-11-16T00:00:00+00:00"
+     }
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "interrupt",
+      "interrupts": [
+       {
+        "id": "approval:7d1e0000-0000-4000-8000-0000000000a1:tool:g1",
+        "reason": "tool_call",
+        "message": "Approve pay({\"amount\":5})?",
+        "toolCallId": "g1",
+        "responseSchema": {
+         "type": "object",
+         "properties": {
+          "approved": {
+           "type": "boolean"
+          },
+          "reason": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "approved"
+         ]
+        },
+        "expiresAt": "2026-11-16T00:00:00+00:00",
+        "metadata": {
+         "pydanticos": {
+          "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+          "tool_name": "pay"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "full": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m0",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_START",
+     "toolCallId": "g1",
+     "toolCallName": "pay",
+     "parentMessageId": "agui-run-m0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_ARGS",
+     "toolCallId": "g1",
+     "delta": "{\"amount\":5}"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TOOL_CALL_END",
+     "toolCallId": "g1"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.approval_required",
+     "value": {
+      "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+      "kind": "tool",
+      "key": "g1",
+      "tool_name": "pay",
+      "deadline": "2026-11-16T00:00:00+00:00"
+     }
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "interrupt",
+      "interrupts": [
+       {
+        "id": "approval:7d1e0000-0000-4000-8000-0000000000a1:tool:g1",
+        "reason": "tool_call",
+        "message": "Approve pay({\"amount\":5})?",
+        "toolCallId": "g1",
+        "responseSchema": {
+         "type": "object",
+         "properties": {
+          "approved": {
+           "type": "boolean"
+          },
+          "reason": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "approved"
+         ]
+        },
+        "expiresAt": "2026-11-16T00:00:00+00:00",
+        "metadata": {
+         "pydanticos": {
+          "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+          "tool_name": "pay"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "rest": [
+   {
+    "id": null,
+    "event": {
+     "type": "MESSAGES_SNAPSHOT",
+     "messages": [
+      {
+       "id": "agui-run-m0",
+       "role": "assistant",
+       "toolCalls": [
+        {
+         "id": "g1",
+         "type": "function",
+         "function": {
+          "name": "pay",
+          "arguments": "{\"amount\":5}"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "interrupt",
+      "interrupts": [
+       {
+        "id": "approval:7d1e0000-0000-4000-8000-0000000000a1:tool:g1",
+        "reason": "tool_call",
+        "message": "Approve pay({\"amount\":5})?",
+        "toolCallId": "g1",
+        "responseSchema": {
+         "type": "object",
+         "properties": {
+          "approved": {
+           "type": "boolean"
+          },
+          "reason": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "approved"
+         ]
+        },
+        "expiresAt": "2026-11-16T00:00:00+00:00",
+        "metadata": {
+         "pydanticos": {
+          "run_id": "7d1e0000-0000-4000-8000-0000000000a1",
+          "tool_name": "pay"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "resume": [
+   {
+    "id": null,
+    "event": {
+     "type": "RUN_STARTED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "protocolVersion": "1.0"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.status",
+     "value": {
+      "display_status": "completed"
+     }
+    }
+   },
+   {
+    "id": "agui-run:1",
+    "event": {
+     "type": "CUSTOM",
+     "name": "pydanticos.approval_decided",
+     "value": {
+      "kind": "tool",
+      "key": "g1",
+      "decision": "approved"
+     }
+    }
+   },
+   {
+    "id": "agui-run:2",
+    "event": {
+     "type": "TOOL_CALL_RESULT",
+     "messageId": "agui-run-t-g1",
+     "toolCallId": "g1",
+     "content": "paid",
+     "role": "tool"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_START",
+     "messageId": "agui-run-m1",
+     "role": "assistant"
+    }
+   },
+   {
+    "id": null,
+    "event": {
+     "type": "TEXT_MESSAGE_CONTENT",
+     "messageId": "agui-run-m1",
+     "delta": "Done"
+    }
+   },
+   {
+    "id": "agui-run:3",
+    "event": {
+     "type": "TEXT_MESSAGE_END",
+     "messageId": "agui-run-m1"
+    }
+   },
+   {
+    "id": "agui-run:4",
+    "event": {
+     "type": "RUN_FINISHED",
+     "threadId": "thread-x",
+     "runId": "agui-run",
+     "outcome": {
+      "type": "success"
+     }
+    }
+   }
+  ]
+ }
+}
