@@ -94,9 +94,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     check_workflow_configuration()
     app.include_router(workflows_router, prefix="/api/v1")
     # Workflow runs and approval decisions (task 3.8): POST /workflows/{id}/runs, .../approve|reject.
-    from eap_api.routes.workflow_runs import router as workflow_runs_router
+    from eap_api.routes.workflow_runs import cancel_router as run_cancel_router, router as workflow_runs_router
 
     app.include_router(workflow_runs_router, prefix="/api/v1")
+    # POST /runs/{id}/cancel (loops D12, LP.8): a workflow run and its whole tree.
+    app.include_router(run_cancel_router, prefix="/api/v1")
     # Approvals inbox and tool-approval decisions (AC.8): GET /approvals, .../tool-approvals/....
     from eap_api.routes.approvals import router as approvals_router
 

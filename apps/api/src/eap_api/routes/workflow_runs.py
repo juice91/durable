@@ -12,6 +12,20 @@ transaction), through the shared helper eap_api.approvals.decide, then wakes the
 durable before the wake-up is sent; if the send fails the answer is still 200 with
 `"notified": false`, and the worker picks the decision up at its next poll
 (EAP_APPROVAL_POLL_SECONDS, default one hour).
+
+`POST /runs/{run_id}/cancel` (loops D12, LP.8; `cancel_router`, mounted without the /workflows
+prefix) cancels a workflow run and its whole tree in three steps, none of them holding a lock
+across another:
+1. the durable request: `cancel_requested` (key `cancel`, `{requested_by}`) in its own short
+   transaction; an existing `cancel` is reused, and a run that already has its `end` (and no
+   `cancel`) is 409;
+2. the cascade: `RunLauncher.cancel_workflow_tree` (DBOSClient.cancel_workflow(...,
+   cancel_children=True)), with no eap_app transaction open, because a worker's event append
+   takes the run-row lock (m7);
+3. the guarded terminal write: `RunStore.cancel_run_tree` (an `end` run_failed `run_cancelled`
+   for every run of the tree that has none, the status from `end`, the open approvals closed).
+A failure after step 1 answers 503 and leaves the durable request: the scheduled
+`eap.cancel_reconcile` (worker) re-runs steps 2 and 3 for it, and a retried POST does so at once.
 """
 
 from __future__ import annotations
@@ -36,10 +50,10 @@ from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.routes.runs import StoresDep
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.workflows import reference_problems
-from eap_api.schemas import ErrorDetail
+from eap_api.schemas import CancelNotSupportedDetail, ErrorDetail, RunCancelResponse
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability import current_trace_context, log_failure
-from eap_run_store import ENQUEUE_FAILED_ERROR, RunIdConflict
+from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, RunIdConflict
 from eap_schemas.workflows import STEP_ID_PATTERN, WorkflowSpec
 
 log = logging.getLogger("eap_api")
@@ -395,3 +409,99 @@ def reject_step(
     """Reject a waiting approval step (the run then fails with `approval_rejected`); same answers
     as approve."""
     return _decide("rejected", run_id, step_id, principal, body, stores, launcher)
+
+
+# --------------------------------------------------------------------------- cancel (loops D12)
+
+CANCEL_NOT_SUPPORTED = "cancel_not_supported"
+CANCEL_NOT_SUPPORTED_DETAIL = "only workflow runs can be cancelled"
+ALREADY_ENDED_DETAIL = "the run has already ended"
+CANCEL_PENDING_DETAIL = (
+    "cancel recorded but not finished; it completes automatically, or retry the request"
+)
+
+# POST /runs/{run_id}/cancel: no /workflows prefix (D12 names the route by run). No body is read.
+cancel_router = APIRouter(tags=["workflow runs"], route_class=WorkflowRunRoute)
+
+
+def _cascade(launcher: RunLauncher, run_id: uuid.UUID) -> None:
+    """D12 step 2 (a seam the tests replace): cancel the run's DBOS workflow tree. The run's DBOS
+    workflow id is its run id."""
+    launcher.cancel_workflow_tree(workflow_id=str(run_id))
+
+
+def _finish_cancel(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> Any:
+    """D12 step 3 (a seam the tests replace to inject a crash after the cascade)."""
+    return run_store.cancel_run_tree(tenant_id, run_id)
+
+
+@cancel_router.post(
+    "/runs/{run_id}/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=RunCancelResponse,
+    responses={
+        404: {"model": ErrorDetail},
+        409: {"model": CancelNotSupportedDetail | ErrorDetail},
+        503: {"model": ErrorDetail},
+    },
+)
+def cancel_run(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    stores: StoresDep,
+    launcher: LauncherDep,
+) -> JSONResponse:
+    """Cancel a workflow run and its whole tree (branch and iteration workflows, child agent runs).
+
+    202 RunCancelResponse: the run ended `failed` (or `needs_attention` when a side effect was
+    still reserved) with `run_cancelled`; idempotent, so a retry answers 202 again with the same
+    status (a run that ended by itself between the request and the terminal write keeps its own
+    outcome, `cancelled` False). 404 unknown run or another tenant's. 409 `{detail, code:
+    "cancel_not_supported"}` for a run that is not a workflow run (agent, tool, ingest, eval; a
+    workflow's child agent run is cancelled with its workflow); 409 `{detail}` when the run had
+    already ended before any cancel was requested. 503 when the request is recorded but the
+    cascade or the terminal write failed: the reconciler finishes it, a retry finishes it at once.
+    """
+    run_store, event_log = stores
+    tenant_id = principal.tenant_id
+    run = run_store.get_run(tenant_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.get("kind") != "workflow":
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": CANCEL_NOT_SUPPORTED_DETAIL, "code": CANCEL_NOT_SUPPORTED},
+        )
+    # Step 1, its own transaction (EventLog.append commits before returning): under the run-row
+    # lock, an existing `cancel` is returned as it is, and after `end` a new key is dropped.
+    requested = event_log.append(
+        tenant_id, run_id, CANCEL_EVENT_KEY, "cancel_requested", {"requested_by": principal.user_id}
+    )
+    if requested.dropped:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ALREADY_ENDED_DETAIL)
+    try:
+        _cascade(launcher, run_id)  # step 2: no eap_app lock or transaction is held here
+        result = _finish_cancel(run_store, tenant_id, run_id)  # step 3
+    except Exception as exc:  # noqa: BLE001 - the durable request stands; the reconciler finishes it
+        log_failure(
+            log, "cancel not finished", exc, code="cancel_incomplete", level=logging.ERROR,
+            run_id=str(run_id), tenant_id=tenant_id,
+        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=CANCEL_PENDING_DETAIL)
+    end = event_log.get_event(tenant_id, run_id, "end")
+    error_code = (end.data or {}).get("error_code") if end is not None else None
+    current = run_store.get_run(tenant_id, run_id) or run
+    log.info("workflow run %s cancel: tenant=%s status=%s", run_id, tenant_id, result.status)
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=RunCancelResponse(
+            run_id=str(run_id),
+            kind="workflow",
+            status=result.status or current["status"],
+            display_status=current["display_status"],
+            error_code=error_code,
+            cancelled=error_code == "run_cancelled",
+            requested_by=(requested.event.data or {}).get("requested_by"),
+            approvals_closed=result.approvals_closed,
+        ).model_dump(),
+    )

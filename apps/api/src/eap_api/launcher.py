@@ -134,6 +134,8 @@ class RunLauncher(Protocol):
         self, *, run_id: str, tool_call_id: str, decision: str, workflow_id: str | None = None
     ) -> None: ...
 
+    def cancel_workflow_tree(self, *, workflow_id: str) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -245,6 +247,18 @@ class DBOSRunLauncher:
             {"tool_call_id": tool_call_id, "decision": decision},
             tool_approval_topic(str(run_id)),
         )
+
+    def cancel_workflow_tree(self, *, workflow_id: str) -> None:
+        """Cancel a run's DBOS workflow and, level by level, every child workflow under it (loops
+        D12 step 2): parallel branch workflows, iteration workflows and child agent runs.
+        `DBOSClient.cancel_workflow(workflow_id, cancel_children=True)` (DBOS 3.5
+        `SystemDatabase.cancel_workflows`: one short system-DB transaction per tree level, which
+        sets every not yet finished workflow CANCELLED and clears its queue and owner; a finished
+        one is left alone). The caller holds no eap_app lock across this call (m7): a worker's
+        event append takes the run-row lock. Idempotent; an unknown workflow id is a no-op.
+        DBOS fences a cancelled workflow at its next operation only, so the guarded terminal write
+        (RunStore.cancel_run_tree) follows."""
+        self._get_client().cancel_workflow(workflow_id, cancel_children=True)
 
     def _options(
         self, workflow_name: str, run_id: UUID, traceparent: str | None, *, queue_name: str = QUEUE_NAME
