@@ -29,6 +29,7 @@ from pydantic_ai.exceptions import (
 
 from eap_observability import exception_type
 from eap_runtime import SideEffectOutcomeUnknown, ToolNotAllowedError, UnknownToolError
+from eap_schemas.evals import EvalSuiteInvalid
 from eap_schemas.limits import USAGE_LIMIT_KWARGS, RunBudgetExceeded
 from eap_schemas.models_policy import ModelNotAllowed
 from eap_schemas.output import OutputInvalid
@@ -268,6 +269,28 @@ class WorkflowStepError(Exception):
         return f"workflow step {self.step_id!r} failed: {self.code}"
 
 
+# Eval runs (AC.11, eap_worker.eval_run): an eval run's own failure (never a case's: a failing case
+# is a result with status `error`). Fixed messages, no text from the suite or the agent.
+EVAL_SUITE_INVALID_MESSAGE = "the eval run's test suite snapshot is invalid"
+EVAL_FAILURES: dict[str, tuple[str, str]] = {
+    # code: (status, message)
+    "eval_agent_not_found": ("failed", "the agent version (or draft) of the eval run was not found"),
+    "eval_suite_mismatch": ("failed", "the eval run's input is not the suite snapshot it was created with"),
+}
+
+
+class EvalRunError(Exception):
+    """An eval run failed with a known code from EVAL_FAILURES. Pickle-safe (may be raised inside a
+    DBOS step): the code is the only constructor argument and the message is built in __str__."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+    def __str__(self) -> str:
+        return EVAL_FAILURES.get(self.code, ("failed", "the eval run failed"))[1]
+
+
 @dataclass(frozen=True)
 class RunFailure:
     status: str  # failed | needs_attention
@@ -328,6 +351,8 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
         lambda e: f"MCP tool '{_field(e, 'server')}/{_field(e, 'tool')}' is unavailable ({_field(e, 'code')})",
     ),
     (RunBudgetExceeded, "failed", "run_budget_exceeded", lambda e: RUN_BUDGET_EXCEEDED_MESSAGE),
+    # AC.11: an eval run's snapshot that does not validate, and its other fixed failures.
+    (EvalSuiteInvalid, "failed", "eval_suite_invalid", lambda e: EVAL_SUITE_INVALID_MESSAGE),
     # AC.5: every model of a fallback chain failed. Before ModelHTTPError, its members.
     (FallbackExceptionGroup, "failed", "fallback_exhausted", lambda e: FALLBACK_EXHAUSTED_MESSAGE),
     (ModelHTTPError, "failed", "model_http_error", _http_message),
@@ -361,6 +386,11 @@ def classify(exc: BaseException) -> RunFailure:
     for cur in chain:
         if isinstance(cur, WorkflowStepError) or type(cur).__name__ == "WorkflowStepError":
             return _workflow_failure(cur)
+    for cur in chain:
+        if isinstance(cur, EvalRunError) or type(cur).__name__ == "EvalRunError":
+            code = str(getattr(cur, "code", "internal_error"))[:_MAX_FIELD]
+            status, message = EVAL_FAILURES.get(code, ("failed", "the eval run failed"))
+            return RunFailure(status, code, "EvalRunError", message)
     for cls, status, code, message in _KNOWN:
         for cur in chain:
             # By name too: a step's recorded exception may come back as a re-created class.
@@ -415,6 +445,9 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
 
 
 __all__ = [
+    "EVAL_FAILURES",
+    "EVAL_SUITE_INVALID_MESSAGE",
+    "EvalRunError",
     "INPUT_BLOCKED_MESSAGE",
     "OUTPUT_BLOCKED_MESSAGE",
     "OUTPUT_INVALID_MESSAGE",

@@ -105,6 +105,14 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Only eap_worker imports pydantic_evals"
+type = "forbidden"
+# AC.11: the eval runtime uses pydantic_evals' evaluator classes standalone. The API validates suites
+# with eap_schemas.evals and reads and writes the dataset file format itself, without the library.
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
+forbidden_modules = ["pydantic_evals"]
+
+[[tool.importlinter.contracts]]
 name = "eap_worker must not import eap_api"
 type = "forbidden"
 source_modules = ["eap_worker"]

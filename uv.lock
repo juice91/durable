@@ -763,9 +763,11 @@ dependencies = [
     { name = "eap-secrets" },
     { name = "fastmcp-slim", extra = ["client"] },
     { name = "genai-prices" },
+    { name = "google-re2" },
     { name = "httpx2" },
     { name = "jsonschema" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "dbos", "openai"] },
+    { name = "pydantic-evals" },
     { name = "referencing" },
 ]
 
@@ -789,9 +791,11 @@ requires-dist = [
     { name = "eap-secrets", editable = "packages/secrets" },
     { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3.0,<5" },
     { name = "genai-prices", specifier = ">=0.2.3" },
+    { name = "google-re2", specifier = "==1.1.20251105" },
     { name = "httpx2", specifier = ">=2.16" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "dbos", "openai"], specifier = ">=2.67.0" },
+    { name = "pydantic-evals", specifier = "==2.67.0" },
     { name = "referencing", specifier = ">=0.30" },
 ]
 
@@ -1985,6 +1989,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/3a/d405a50e02ea81cd95e93fc97f43d351eeaa1707c28aa6fb58a9f1c1efa9/pydantic_core-2.50.4-graalpy313-graalpy253_313_native-macosx_11_0_arm64.whl", hash = "sha256:71e03d2ea1a221d020cfc5b6cc8bbbedef23a06704c70fcf4d0afb42965b22d1", size = 2049324, upload-time = "2026-11-05T09:15:02.379Z" },
     { url = "https://files.pythonhosted.org/packages/8f/3b/03e7992115e17cae4131ecd71aadb8fd5e4a04cc2aead72c3c27e9b453d1/pydantic_core-2.50.4-graalpy313-graalpy253_313_native-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:09450778e3ab58d3f565899fcfbf6c82926e31af29e28e799d1d50941316e0cb", size = 2119802, upload-time = "2026-11-05T09:15:03.901Z" },
     { url = "https://files.pythonhosted.org/packages/e3/d5/b76fc647e473377ca6e693c21549ee3a4a7677e4962c28ae4659337c5114/pydantic_core-2.50.4-graalpy313-graalpy253_313_native-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:4eb15be588407148ef5937dc8d9256a71f6b115e6cddadb7aa20b6ee384680dc", size = 2280639, upload-time = "2026-11-05T09:15:05.374Z" },
+]
+
+[[package]]
+name = "pydantic-evals"
+version = "2.67.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "logfire-api" },
+    { name = "pydantic" },
+    { name = "pydantic-ai-slim" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/95/40bd924b4894fd5a865b3ca25fc683078b9577e71e5e4c0d840ab3448bae/pydantic_evals-2.67.0.tar.gz", hash = "sha256:a260d064174f7af061d58ca3260c1624fa25d2fa6fb2a39f4838efa6b3aa415d", size = 102323, upload-time = "2026-11-11T00:23:48.861Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/2e/c19f91a50922e9e925f2aec5c2b842f7cd6cf911289e0ae9c11e2c096190/pydantic_evals-2.67.0-py3-none-any.whl", hash = "sha256:da363e84c41752bdb601a11418059a1d15fe4dc9385fcd5f118fdff945bcf892", size = 118222, upload-time = "2026-11-11T00:23:38.068Z" },
 ]
 
 [[package]]
