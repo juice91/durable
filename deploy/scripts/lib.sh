@@ -77,7 +77,13 @@ canonical_path() {
     printf '%s\n' "$path"
     return
   fi
-  printf '%s/%s\n' "$(canonical_path "$parent")" "$base"
+  parent=$(canonical_path "$parent")
+  # Avoid "//name" when the parent is the root: "//Users" would not match the "/Users" refusal.
+  if [[ "$parent" == "/" ]]; then
+    printf '/%s\n' "$base"
+  else
+    printf '%s/%s\n' "$parent" "$base"
+  fi
 }
 
 # Create PYDANTICOS_DATA_DIR (default ~/pydanticos-data) mode 700, or refuse.
