@@ -12,7 +12,9 @@ run() { echo "== $*"; "$@" || status=1; }
 export EAP_AUTH_MODE="${EAP_AUTH_MODE:-dev}"
 
 run uv run lint-imports
-run timeout 1800 uv run pytest -q
+# The whole tree is ~8,600 tests; the worker suite alone takes ~31 min since the loops milestone
+# (LP.17 verification, 2026-11-16), so 30 min could never pass. Override with EAP_TEST_TIMEOUT.
+run timeout "${EAP_TEST_TIMEOUT:-5400}" uv run pytest -q
 run env EAP_TEST_DATABASE_URL="${EAP_TEST_DATABASE_URL:-postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app}" uv run pytest apps/api -q
 run pnpm -C apps/studio test
 run timeout 300 bash tests/scripts/dev-lifecycle-test.sh
