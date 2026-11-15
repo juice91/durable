@@ -30,6 +30,8 @@ dependencies = [
     "referencing>=0.30",
     # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
     "fastmcp-slim[client]>=3.3.0,<5",
+    # AG-UI 1.0 event models and encoder (D19); imported only inside eap_api.ag_ui.
+    "ag-ui-protocol==1.0.0",
 ]
 
 [dependency-groups]

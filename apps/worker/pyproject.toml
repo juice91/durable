@@ -38,6 +38,10 @@ dev = [
     # A local MCP server (FastMCP over Streamable HTTP) for the MCP tool tests.
     "fastmcp-slim[server]>=3.3.0,<5",
     "uvicorn>=0.34.0",
+    # AGUI.4 parity tests: the stock AG-UI adapter (pydantic_ai.ui.ag_ui needs ag_ui) against the
+    # API's translator (eap_api.ag_ui). Test-only: eap_worker itself never imports either.
+    "ag-ui-protocol==1.0.0",
+    "eap-api",
 ]
 
 [tool.uv.sources]
@@ -49,3 +53,4 @@ eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
+eap-api = { workspace = true }
