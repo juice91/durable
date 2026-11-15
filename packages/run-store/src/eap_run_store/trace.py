@@ -78,6 +78,37 @@ Agent capability spans (AC.17). Attributes never carry error, tool argument or o
 - Totals add `judge_requests`, `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`
   (request_operation `judge`), so `chat_*` stays the agent's model only.
 
+Workflow loop spans (LP.9, loops D4). Every body event is in the workflow run's own log under a
+scoped key; a scope `S` is the chain of `(loop, index)` frames (`each.3`, `outer.2/inner.0`):
+- `loop`: a `foreach` or `loop` step (`step_type` says which), at any depth, instead of a
+  `workflow_step` span, with the same id, start, end, status, input and output. Attributes add
+  `iterations_started`, `iterations_completed`, `iterations_failed` (from its iteration events),
+  `iterations_omitted` (past the span cap below), and for a `loop` step's output `iterations` and
+  `exited`.
+- `loop_iteration`: one iteration (`loop:{S}:started` → `loop:{S}:completed|failed`), id
+  `{run_id}:loop:{S}`, under its loop span; overlapping foreach iterations are siblings.
+  Attributes: `step_id` (the loop), `scope` (`S`), `index`, `iteration_status`, `error_code`,
+  `error`, `failed_step_id`, `until`, `last_key`. Input: the foreach item or the loop state the
+  iteration started with; output: a loop iteration's carried state.
+- A body step's span (`loop:{S}:step:{id}:started` → `...:completed|failed`) has id
+  `{run_id}:step:{instance_token(S, id)}` (`r1:step:each.3~triage`) and nests under its iteration;
+  its child run (parent_step_id `{S}/{id}`) nests under it. Top-level step ids are unchanged.
+- At most MAX_LOOP_ITERATION_SPANS iterations of each loop instance are shown (indices
+  0..MAX-1), and iterations are admitted in event order only while the run has kept fewer than
+  MAX_LOOP_TRACE_EVENTS loop-scoped events (so a 100x100 nested loop cannot use up
+  MAX_TRACE_EVENTS before the run's terminal events and the body child runs). Iterations left
+  out, their body spans, nested iterations and child runs are dropped while the events are read
+  (LoopEvents; a left-out iteration's events are never loaded with their payload, and its child
+  runs are not loaded), counted on the loop span (`iterations_omitted`) and in
+  `truncated.iterations`. The workflow run's log is scanned (keys only) up to
+  MAX_SCANNED_EVENTS_PER_RUN rows so these counts stay right past the kept events.
+- Scoped spans are never invented or re-hung: a `loop:` key whose scope does not parse is dropped;
+  an iteration or body step whose parent span is missing waits until the log is walked and is
+  dropped if the parent never appears; a body step's child run whose step span is missing is
+  dropped. An iteration that failed before writing `loop:{S}:started` (a missing workflow
+  version, an invalid spec) has no span: it shows only in the loop span's `iterations_failed`
+  and the loop step's error.
+
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
 (whose events are idempotent by key) never shows a duplicate span. Spans are listed parents first.
@@ -109,16 +140,29 @@ query runs under a statement timeout (STATEMENT_TIMEOUT_MS): TraceQueryTimeout, 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable
 from uuid import UUID
 
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import case, not_, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
+
+from eap_schemas.workflow_scope import (
+    EMPTY_SCOPE,
+    Scope,
+    ScopeFrame,
+    ScopeInvalid,
+    instance_token,
+    iteration_event_key,
+    parse_scope,
+    scope_string,
+    scoped_event_key,
+    scoped_parent_step_id,
+)
 
 from eap_run_store.store import (
     ExecutionEventModel,
@@ -140,6 +184,17 @@ PAYLOAD_BUDGET_BYTES = 2 * 1024 * 1024
 # The preview size once the payload budget is spent.
 MIN_PREVIEW_BYTES = 256
 STATEMENT_TIMEOUT_MS = 5000
+# LP.9: iterations shown per loop instance (the default EAP_WORKFLOW_MAX_LOOP_ITERATIONS); a loop
+# allowed more (up to the schema's 1,000) shows its first ones and counts the rest.
+MAX_LOOP_ITERATION_SPANS = 100
+# LP.9 review: loop-scoped events (`loop:{S}:...`) a trace keeps in all. Iterations are admitted in
+# event order while this budget lasts; later ones are left out and counted like those past
+# MAX_LOOP_ITERATION_SPANS, so a 100x100 nested loop cannot spend MAX_TRACE_EVENTS (and starve the
+# run's terminal events and the body child runs) before the per-instance cap applies.
+MAX_LOOP_TRACE_EVENTS = MAX_SPANS // 2
+# Rows of the workflow run's own event log scanned (key and type only, no payload) to keep loop
+# counts right past the kept events: bounds the cost of a 10k-iteration run.
+MAX_SCANNED_EVENTS_PER_RUN = 100_000
 
 SPAN_KINDS = (
     "run", "model_request", "tool_call", "processor", "workflow_step", "child_run",
@@ -147,6 +202,8 @@ SPAN_KINDS = (
     "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
     # AC.17
     "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
+    # LP.9
+    "loop", "loop_iteration",
 )
 SPAN_STATUSES = ("ok", "error", "running", "waiting", "incomplete")
 
@@ -181,6 +238,9 @@ class RunData:
     events: list[dict[str, Any]]
     requests: dict[str, dict[str, Any]]  # request_key -> run_model_requests row
     events_truncated: bool = False
+    # LP.9: which loop-scoped events were kept and every loop instance's iteration counts; None
+    # until filtered (build_trace filters `events` itself when the reader has not).
+    loops: "LoopEvents | None" = None
 
 
 @dataclass
@@ -191,6 +251,118 @@ class TraceInput:
     workflow_spec: dict[str, Any] | None = None
     # (agent_id, agent_version) -> the spec's knowledge base refs, for runs with a retrieve call.
     knowledge_refs: dict[tuple[str, int], list[dict[str, Any]]] = field(default_factory=dict)
+
+
+class LoopEvents:
+    """LP.9: which loop-scoped events (`loop:{S}:...`) of one run a trace keeps, decided as the
+    events go by in seq order, plus every shown loop instance's iteration counts.
+
+    An iteration is shown when its index is below MAX_LOOP_ITERATION_SPANS, every iteration around
+    it is shown, and when it is first seen the run has kept fewer than `budget` loop-scoped events.
+    The decision is made once, at the first event of the iteration's scope (its `started`, or a body
+    event that came before it), so every event inside an iteration follows it. Events of iterations
+    left out are dropped, but the `started|completed|failed` of an iteration directly under a
+    shown one is still counted. A `loop:` key whose scope does not parse is dropped (`malformed`).
+    """
+
+    def __init__(self, budget: int) -> None:
+        self.budget = budget
+        self.kept = 0
+        self.malformed = 0
+        self._shown: dict[str, bool] = {}
+        # (outer scope, loop id) -> index -> phases seen
+        self._iterations: dict[tuple[Scope, str], dict[int, set[str]]] = {}
+
+    def keep(self, key: str, etype: str) -> bool:
+        if not key.startswith("loop:"):
+            return True
+        parsed = _loop_key(key)
+        if parsed is None:
+            self.malformed += 1
+            return False
+        scope, rest = parsed
+        outer, frame = scope[:-1], scope[-1]
+        if etype in ITERATION_EVENT_TYPES and rest in ("started", "completed", "failed"):
+            if not outer or self._decide(outer):
+                self._iterations.setdefault((outer, frame.loop), {}).setdefault(frame.index, set()).add(rest)
+        if not self._decide(scope):
+            return False
+        self.kept += 1
+        return True
+
+    def _decide(self, scope: Scope) -> bool:
+        for i, frame in enumerate(scope):
+            text = scope_string(scope[: i + 1])
+            shown = self._shown.get(text)
+            if shown is None:
+                shown = frame.index < MAX_LOOP_ITERATION_SPANS and self.kept < self.budget
+                self._shown[text] = shown
+            if not shown:
+                return False
+        return True
+
+    def omitted(self, scope: Scope) -> bool:
+        """Whether `scope` is, or is inside, an iteration left out (read only)."""
+        for i, frame in enumerate(scope):
+            if frame.index >= MAX_LOOP_ITERATION_SPANS or self._shown.get(scope_string(scope[: i + 1])) is False:
+                return True
+        return False
+
+    def counts(self, outer: Scope, loop_id: str) -> dict[str, int]:
+        """Loop instance (`outer`, `loop_id`)'s iterations started, completed, failed and left out."""
+        iterations = self._iterations.get((outer, loop_id), {})
+        return {
+            "iterations_started": sum(1 for p in iterations.values() if "started" in p),
+            "iterations_completed": sum(1 for p in iterations.values() if "completed" in p),
+            "iterations_failed": sum(1 for p in iterations.values() if "failed" in p),
+            "iterations_omitted": sum(
+                1 for i, p in iterations.items()
+                if "started" in p and self.omitted((*outer, ScopeFrame(loop_id, i)))
+            ),
+        }
+
+    def omitted_total(self) -> int:
+        """Iterations left out whose loop instance is shown (nested ones inside them not again)."""
+        return sum(self.counts(outer, loop_id)["iterations_omitted"] for outer, loop_id in self._iterations)
+
+
+def _loop_key(key: str) -> tuple[Scope, str] | None:
+    """(scope, the rest of the key) of a `loop:{S}:...` key; None when `S` is empty or malformed."""
+    parts = key.split(":", 2)
+    if len(parts) < 3 or parts[0] != "loop":
+        return None
+    try:
+        scope = parse_scope(parts[1])
+    except ScopeInvalid:
+        return None
+    return (scope, parts[2]) if scope else None
+
+
+def _kept_body_steps(events: list[dict[str, Any]]) -> set[str]:
+    """`{S}/{id}` (a child run's parent_step_id) of every body step whose step_started was kept."""
+    steps = set()
+    for event in events:
+        if event["type"] != "step_started":
+            continue
+        parsed = _loop_key(event["event_key"])
+        if parsed is None:
+            continue
+        parts = parsed[1].split(":")
+        if len(parts) == 3 and parts[0] == "step" and parts[2] == "started":
+            steps.add(f"{scope_string(parsed[0])}/{parts[1]}")
+    return steps
+
+
+def _loops(rd: RunData) -> LoopEvents:
+    return rd.loops if rd.loops is not None else LoopEvents(MAX_LOOP_TRACE_EVENTS)
+
+
+def _filter_loops(rd: RunData) -> RunData:
+    if rd.loops is not None:
+        return rd
+    loops = LoopEvents(MAX_LOOP_TRACE_EVENTS)
+    events = [e for e in rd.events if loops.keep(e["event_key"], e["type"])]
+    return replace(rd, events=events, loops=loops)
 
 
 class TraceReader:
@@ -241,15 +413,35 @@ class TraceReader:
             ).first()
             if root is None:
                 return None
-            child_rows = conn.execute(
+            root_run = _run_dict(root[0], bool(root[1]))
+            # One event budget for the whole trace: the run's own events first, then each child's
+            # (creation order) while budget is left; children past it are not loaded at all.
+            budget = MAX_TRACE_EVENTS
+            root_data = self._events(
+                conn, tenant_id, root_run, min(MAX_EVENTS_PER_RUN, budget), scan=root_run["kind"] == "workflow"
+            )
+            budget -= len(root_data.events)
+            children_query = (
                 _run_select()
                 .where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id == run_id)
                 .order_by(RunModel.created_at, RunModel.id)
                 .limit(MAX_CHILD_RUNS + 1)
-            ).all()
+            )
+            if root_run["kind"] == "workflow":
+                # LP.9: a body step's child run (parent_step_id `{S}/{id}`) is loaded only when that
+                # step's events were kept, so left-out iterations do not use up MAX_CHILD_RUNS.
+                shown = sorted(_kept_body_steps(root_data.events))
+                children_query = children_query.where(
+                    or_(
+                        RunModel.parent_step_id.is_(None),
+                        not_(RunModel.parent_step_id.contains("/", autoescape=True)),
+                        RunModel.parent_step_id.in_(shown),
+                    )
+                )
+            child_rows = conn.execute(children_query).all()
             children_truncated = len(child_rows) > MAX_CHILD_RUNS
             child_rows = child_rows[:MAX_CHILD_RUNS]
-            runs = [_run_dict(root[0], bool(root[1]))] + [_run_dict(r[0], bool(r[1])) for r in child_rows]
+            runs = [root_run] + [_run_dict(r[0], bool(r[1])) for r in child_rows]
             ids = [r["id"] for r in runs]
             requests: dict[str, dict[str, dict[str, Any]]] = {i: {} for i in ids}
             for row in conn.execute(
@@ -258,43 +450,71 @@ class TraceReader:
                 )
             ).mappings():
                 requests[row["run_id"]][row["request_key"]] = dict(row)
-            loaded: list[RunData] = []
-            # One event budget for the whole trace: the run's own events first, then each child's
-            # (creation order) while budget is left; children past it are not loaded at all.
-            budget = MAX_TRACE_EVENTS
-            for run in runs:
+            root_data.requests = requests[root_run["id"]]
+            loaded: list[RunData] = [root_data]
+            for run in runs[1:]:
                 if budget <= 0:
                     children_truncated = True
                     break
-                limit = min(MAX_EVENTS_PER_RUN, budget)
-                events = [
-                    dict(e)
-                    for e in conn.execute(
-                        select(
-                            ExecutionEventModel.seq,
-                            ExecutionEventModel.event_key,
-                            ExecutionEventModel.type,
-                            ExecutionEventModel.data,
-                            ExecutionEventModel.ts,
-                        )
-                        .where(
-                            ExecutionEventModel.tenant_id == tenant_id,
-                            ExecutionEventModel.run_id == run["id"],
-                        )
-                        .order_by(ExecutionEventModel.seq)
-                        .limit(limit + 1)
-                    ).mappings()
-                ]
-                budget -= min(len(events), limit)
-                loaded.append(
-                    RunData(
-                        run=run,
-                        events=events[:limit],
-                        requests=requests[run["id"]],
-                        events_truncated=len(events) > limit,
-                    )
-                )
+                child = self._events(conn, tenant_id, run, min(MAX_EVENTS_PER_RUN, budget), scan=False)
+                child.requests = requests[run["id"]]
+                budget -= len(child.events)
+                loaded.append(child)
         return TraceInput(root=loaded[0], children=loaded[1:], children_truncated=children_truncated)
+
+    def _events(self, conn: Session, tenant_id: str, run: dict[str, Any], limit: int, *, scan: bool) -> RunData:
+        """Up to `limit` events of `run` in seq order, loop-scoped ones filtered by LoopEvents while
+        they stream (a loop-scoped row is read without its payload, which is fetched afterwards for
+        the kept rows only). With `scan` (the trace's own run) reading goes on past `limit`, up to
+        MAX_SCANNED_EVENTS_PER_RUN rows, so iteration counts stay right."""
+        loops = LoopEvents(MAX_LOOP_TRACE_EVENTS)
+        cap = MAX_SCANNED_EVENTS_PER_RUN if scan else limit
+        kept: list[dict[str, Any]] = []
+        truncated = False
+        scanned = 0
+        statement = (
+            select(
+                ExecutionEventModel.seq,
+                ExecutionEventModel.event_key,
+                ExecutionEventModel.type,
+                case(
+                    (ExecutionEventModel.event_key.startswith("loop:", autoescape=True), None),
+                    else_=ExecutionEventModel.data,
+                ).label("data"),
+                ExecutionEventModel.ts,
+            )
+            .where(ExecutionEventModel.tenant_id == tenant_id, ExecutionEventModel.run_id == run["id"])
+            .order_by(ExecutionEventModel.seq)
+            .limit(cap + 1)
+        )
+        for row in conn.execute(statement, execution_options={"yield_per": 2000}).mappings():
+            scanned += 1
+            if scanned > cap:
+                truncated = True
+                break
+            if not loops.keep(row["event_key"], row["type"]):
+                continue
+            if len(kept) >= limit:
+                # Past the run's event limit: keep counting iterations, admit no new ones.
+                truncated = True
+                loops.budget = 0
+                if not scan:
+                    break
+                continue
+            kept.append(dict(row))
+        payloads = [e["seq"] for e in kept if e["event_key"].startswith("loop:")]
+        if payloads:
+            by_seq = {e["seq"]: e for e in kept}
+            for i in range(0, len(payloads), 1000):
+                for row in conn.execute(
+                    select(ExecutionEventModel.seq, ExecutionEventModel.data).where(
+                        ExecutionEventModel.tenant_id == tenant_id,
+                        ExecutionEventModel.run_id == run["id"],
+                        ExecutionEventModel.seq.in_(payloads[i : i + 1000]),
+                    )
+                ):
+                    by_seq[row[0]]["data"] = row[1]
+        return RunData(run=run, events=kept, requests={}, events_truncated=truncated, loops=loops)
 
 
 def _has_retrieve(rd: RunData) -> bool:
@@ -436,6 +656,9 @@ class _Builder:
         for child in data.children:
             self.children_by_step.setdefault(child.run.get("parent_step_id") or "", []).append(child)
         self.placed_children: set[str] = set()
+        # LP.9: scoped spans (iterations, body steps) seen before their parent span, retried after
+        # the run's events are walked; those whose parent never appears are dropped.
+        self._pending: list[Callable[[], None]] = []
 
     # -- spans
 
@@ -557,6 +780,7 @@ class _Builder:
         events = rd.events
         by_key = {e["event_key"]: e for e in events}
         open_status = "incomplete" if terminal else "running"
+        saved_pending, self._pending = self._pending, []
         last_tool_results: list[dict[str, Any]] = []
         last_request: int | None = None  # the request that issued the tool calls that follow it
         previous: dict[str, Any] | None = None
@@ -634,6 +858,8 @@ class _Builder:
                 self._memory(rd, event, previous, run_span)
             elif etype == "step_started":
                 self._step(rd, event, by_key, run_span, open_status)
+            elif etype == "loop_iteration_started":
+                self._iteration(rd, event, by_key, open_status)
             elif etype in ("tool_approval_waiting", *TOOL_DECISION_TYPES):
                 self._tool_approval(rd, event, by_key, run_span, open_status)
             elif etype == "output_retry":
@@ -646,11 +872,23 @@ class _Builder:
             # request's span must not start at it (it would collapse to the checks' duration).
             if not (etype == "processor_result" and key.startswith("processor:output:")):
                 previous = event
+        # LP.9: retry scoped spans whose parent came later in the log, until no more can be placed.
+        pending = self._pending
+        while pending:
+            self._pending = []
+            for place in pending:
+                place()
+            if len(self._pending) == len(pending):
+                break
+            pending = self._pending
+        self._pending = saved_pending
         # Child runs whose step span is missing (cannot happen for a consistent log) hang off the run.
         if rd is self.data.root:
             for child in self.data.children:
                 if child.run["id"] not in self.placed_children:
                     self.placed_children.add(child.run["id"])
+                    if self._child_scoped(child):
+                        continue  # LP.9: a body step's child run never hangs off the run root
                     self.run(child, run_span, "child_run")
 
     def _processor(self, rd: RunData, event: dict[str, Any], run_span: str) -> None:
@@ -995,12 +1233,32 @@ class _Builder:
     ) -> None:
         rid = rd.run["id"]
         data = event.get("data") or {}
-        step_id = data.get("step_id") or event["event_key"].split(":")[1]
-        done = by_key.get(f"step:{step_id}:completed")
-        failed = by_key.get(f"step:{step_id}:failed")
-        waiting = by_key.get(f"step:{step_id}:waiting")
-        decision = by_key.get(f"step:{step_id}:decision")
+        parsed = _step_key_scope(event["event_key"])
+        if parsed is None:
+            return  # a `loop:` key whose scope does not parse: no span is invented for it
+        scope, key_step = parsed
+        step_id = data.get("step_id") or key_step
+        if not isinstance(step_id, str):
+            return
+        if scope and self._scope_omitted(rd, scope):
+            return  # an iteration left out (MAX_LOOP_ITERATION_SPANS, MAX_LOOP_TRACE_EVENTS)
+        phases = ("completed", "failed", "waiting", "decision")
+        try:
+            keys = {phase: scoped_event_key(scope, step_id, phase) for phase in phases}
+            token = instance_token(scope, step_id)
+        except ScopeInvalid:
+            if scope:
+                return  # a malformed body step id: nothing to name the span by
+            # A top-level id the helpers refuse (never written by a validated spec): read as before.
+            keys = {phase: f"step:{step_id}:{phase}" for phase in phases}
+            token = step_id
+        done = by_key.get(keys["completed"])
+        failed = by_key.get(keys["failed"])
+        waiting = by_key.get(keys["waiting"])
+        decision = by_key.get(keys["decision"])
         attrs: dict[str, Any] = {"step_id": step_id, "step_type": data.get("step_type")}
+        if scope:
+            attrs["scope"] = scope_string(scope)
         for k in ("agent_id", "agent_version", "child_run_id", "tool_id"):
             if k in data:
                 attrs[k] = data[k]
@@ -1033,19 +1291,103 @@ class _Builder:
                 "comment": ddata.get("comment"),
                 "at": _iso(decision["ts"]),
             }
-        parent = self.parents.get(step_id)
-        parent_span = f"{rid}:step:{parent}" if parent is not None else run_span
-        span_id = f"{rid}:step:{step_id}"
+        kind = "workflow_step"
+        if data.get("step_type") in LOOP_STEP_TYPES:
+            kind = "loop"
+            attrs.update(self._loop_attributes(rd, scope, step_id, output))
+        if scope:
+            parent_span = f"{rid}:loop:{scope_string(scope)}"
+            if parent_span not in self.ids:
+                # Its iteration's span is not there (yet): retried once the log is walked.
+                self._pending.append(lambda: self._step(rd, event, by_key, run_span, open_status))
+                return
+        else:
+            parent = self.parents.get(step_id)
+            parent_span = f"{rid}:step:{parent}" if parent is not None else run_span
+        span_id = f"{rid}:step:{token}"
         self.add(
-            span_id, parent_span, "workflow_step", step_id, event["ts"], end, status, attrs,
+            span_id, parent_span, kind, step_id, event["ts"], end, status, attrs,
             data.get("input"), output,
         )
         if span_id not in self.ids or rd is not self.data.root:
             return
-        for child in self.children_by_step.get(step_id, ()):
+        for child in self.children_by_step.get(scoped_parent_step_id(scope, step_id), ()):
             if child.run["id"] not in self.placed_children:
                 self.placed_children.add(child.run["id"])
                 self.run(child, span_id, "child_run")
+
+    # -- workflow loops (LP.9)
+
+    def _loop_attributes(self, rd: RunData, scope: Scope, step_id: str, output: Any) -> dict[str, Any]:
+        """A loop span's iteration counts (from its iteration events) and its output summary."""
+        attrs: dict[str, Any] = _loops(rd).counts(scope, step_id)
+        if isinstance(output, dict):
+            for k in ("iterations", "exited"):
+                if k in output:
+                    attrs[k] = output[k]
+        return attrs
+
+    def _iteration(self, rd: RunData, event: dict[str, Any], by_key: dict[str, Any], open_status: str) -> None:
+        """A `loop:{S}:started` event: one `loop_iteration` span under its loop step's span, from
+        it to `loop:{S}:completed|failed`. Iterations LoopEvents left out (past
+        MAX_LOOP_ITERATION_SPANS by index, or past MAX_LOOP_TRACE_EVENTS) and every iteration inside
+        one are not shown; their counts come from LoopEvents."""
+        rid = rd.run["id"]
+        parsed = _iteration_key_scope(event["event_key"])
+        if parsed is None or parsed[1] != "started":
+            return
+        scope = parsed[0]
+        outer, frame = scope[:-1], scope[-1]
+        text = scope_string(scope)
+        if self._scope_omitted(rd, scope):
+            return
+        parent_span = f"{rid}:step:{instance_token(outer, frame.loop)}"
+        if parent_span not in self.ids:
+            # Its loop step's span is not there (yet): retried once the log is walked.
+            self._pending.append(lambda: self._iteration(rd, event, by_key, open_status))
+            return
+        data = event.get("data") or {}
+        completed = by_key.get(iteration_event_key(scope, "completed"))
+        failed = by_key.get(iteration_event_key(scope, "failed"))
+        attrs: dict[str, Any] = {"step_id": frame.loop, "scope": text, "index": frame.index}
+        output = None
+        end = None
+        if completed is not None:
+            cdata = completed.get("data") or {}
+            status, end = "ok", completed["ts"]
+            attrs["iteration_status"] = "completed"
+            for k in ("until", "last_key"):
+                if k in cdata:
+                    attrs[k] = cdata[k]
+            output = cdata.get("state")
+        elif failed is not None:
+            fdata = failed.get("data") or {}
+            status, end = "error", failed["ts"]
+            attrs.update(
+                iteration_status=fdata.get("status"), error_code=fdata.get("error_code"), error=fdata.get("error"),
+                failed_step_id=fdata.get("failed_step_id"),
+            )
+        else:
+            status = open_status
+        iteration_input = data["item"] if "item" in data else data.get("state")
+        self.add(
+            f"{rid}:loop:{text}", parent_span, "loop_iteration",
+            f"{frame.loop} #{frame.index}", event["ts"], end, status, attrs, iteration_input, output,
+        )
+
+    def _scope_omitted(self, rd: RunData, scope: Scope) -> bool:
+        """Whether `scope` is, or is inside, an iteration left out."""
+        return _loops(rd).omitted(scope)
+
+    def _child_scoped(self, child: RunData) -> bool:
+        """Whether a child run belongs to a body step (its parent_step_id is `{S}/{id}`)."""
+        parent_step = child.run.get("parent_step_id")
+        if not isinstance(parent_step, str) or "/" not in parent_step:
+            return False
+        try:
+            return bool(parse_scope(parent_step.rsplit("/", 1)[0]))
+        except ScopeInvalid:
+            return False
 
     # -- totals
 
@@ -1246,6 +1588,36 @@ def _int_or(value: str, default: Any = 1 << 30) -> Any:
 
 
 TOOL_DECISION_TYPES = ("tool_approved", "tool_denied", "tool_approval_timed_out")
+LOOP_STEP_TYPES = ("loop", "foreach")
+ITERATION_EVENT_TYPES = ("loop_iteration_started", "loop_iteration_completed", "loop_iteration_failed")
+
+
+def _step_key_scope(key: str) -> tuple[Scope, str | None] | None:
+    """(scope, step id) of a step event key: `step:{id}:{phase}` (the empty scope) or
+    `loop:{S}:step:{id}:{phase}`; None for any other `loop:` key (a malformed or empty scope, or
+    not a step key), which must not be read as a top-level step."""
+    parts = key.split(":")
+    if parts[0] == "loop":
+        if len(parts) != 5 or parts[2] != "step":
+            return None
+        try:
+            scope = parse_scope(parts[1])
+        except ScopeInvalid:
+            return None
+        return (scope, parts[3]) if scope else None
+    return EMPTY_SCOPE, parts[1] if len(parts) > 1 else None
+
+
+def _iteration_key_scope(key: str) -> tuple[Scope, str] | None:
+    """(the iteration's scope, phase) of `loop:{S}:started|completed|failed`, else None."""
+    parts = key.split(":")
+    if len(parts) != 3 or parts[0] != "loop" or parts[2] not in ("started", "completed", "failed"):
+        return None
+    try:
+        scope = parse_scope(parts[1])
+    except ScopeInvalid:
+        return None
+    return (scope, parts[2]) if scope else None
 # model_message fields a request on a fallback chain carries (AC.5); `answering_model` is on every one.
 FALLBACK_ATTRIBUTES = ("answering_model", "requested_model_id", "fallback_index")
 
@@ -1308,6 +1680,9 @@ def _model_usage(
 
 def build_trace(data: TraceInput) -> dict[str, Any]:
     """The trace response body except `run`'s API shape: `run` is the store's run dict."""
+    # LP.9: loop-scoped events the reader has not filtered (TraceInput built in memory) go through
+    # the same LoopEvents filter.
+    data = replace(data, root=_filter_loops(data.root), children=[_filter_loops(c) for c in data.children])
     builder = _Builder(data)
     builder.run(data.root, None, "run")
     return {
@@ -1319,6 +1694,9 @@ def build_trace(data: TraceInput) -> dict[str, Any]:
             "events": data.root.events_truncated or any(c.events_truncated for c in data.children),
             "child_runs": data.children_truncated,
             "payload_fields": builder.budget.fields_truncated,
+            # LP.9: loop iterations left out (past max_loop_iteration_spans per loop instance, or
+            # past max_loop_trace_events in all), counted once per left-out iteration.
+            "iterations": _loops(data.root).omitted_total(),
         },
         "limits": {
             "max_spans": MAX_SPANS,
@@ -1327,6 +1705,8 @@ def build_trace(data: TraceInput) -> dict[str, Any]:
             "max_child_runs": MAX_CHILD_RUNS,
             "field_max_bytes": FIELD_MAX_BYTES,
             "payload_budget_bytes": PAYLOAD_BUDGET_BYTES,
+            "max_loop_iteration_spans": MAX_LOOP_ITERATION_SPANS,
+            "max_loop_trace_events": MAX_LOOP_TRACE_EVENTS,
         },
     }
 
@@ -1335,6 +1715,8 @@ __all__ = [
     "FIELD_MAX_BYTES",
     "MAX_CHILD_RUNS",
     "MAX_EVENTS_PER_RUN",
+    "MAX_LOOP_ITERATION_SPANS",
+    "MAX_LOOP_TRACE_EVENTS",
     "MAX_SPANS",
     "MAX_TRACE_EVENTS",
     "PAYLOAD_BUDGET_BYTES",

@@ -116,7 +116,7 @@ def test_agent_run_with_tools(engine, run_store, event_log, tenant):
     assert totals["model_requests"] == 2 and totals["tool_calls"] == 1
     assert (totals["input_tokens"], totals["output_tokens"], totals["cost_usd"]) == (30, 12, "0.0030000000")
     assert totals["duration_ms"] == 100_000
-    assert trace["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0}
+    assert trace["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0, "iterations": 0}
 
 
 def test_other_tenant_and_unknown_run_are_none(engine, run_store, event_log, tenant):
