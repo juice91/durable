@@ -92,6 +92,11 @@
   its `model:{n}:final` event is written. Filtered by `EAP_CRASH_EVENT_KEY` against
   `model:{n}:final`. Recovery replays the model step: one model_message event, the same object.
 
+- `tool_approval_waiting` (AC.6): in the agent workflow, right after a gated tool call's
+  `eap.tool_approval_begin` step (its `tool_approval_waiting` event and inbox row) is checkpointed
+  and before the wait starts. Filtered by `EAP_CRASH_EVENT_KEY` against
+  `tool:{tool_call_id}:approval:waiting`. Recovery replays the step (same deadline) and waits again.
+
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
 then recovers instead of crash-looping.
@@ -126,6 +131,7 @@ CRASH_POINTS = frozenset(
         "after_observation_write",
         "recall_embedding",
         "after_memory_index",
+        "tool_approval_waiting",
     }
 )
 

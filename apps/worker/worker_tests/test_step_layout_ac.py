@@ -261,3 +261,116 @@ def test_cost_cap_adds_check_budget_inside_the_agent_loop(worker, client, schema
     ingest(worker, tenant, kb, "printer.md", PRINTER)
     run_id, row = run(worker, client, tenant, with_limits_and_fallback(rag_spec({"id": kb["id"]}), **cap), "toner light")
     assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN_COST_CAP["knowledge"]
+
+
+# --------------------------------------------------------------------------- AC.6: tool approval
+
+# The approval wait sits inside _drive_agent: after the response's model_message and tool_call
+# events and the two event-handler steps of the gated call (its FunctionToolCallEvent and the
+# deferred batch), before the deferred results' handler step and any tool of the response. One
+# wait round here: the decision is recorded while the loop sleeps in its first `DBOS.recv` (whose
+# timeout is the durable `DBOS.sleep`), so the second `eap.tool_approval_decisions` finds it.
+# Recorded with AC.6.
+APPROVAL_WAIT = ["eap.tool_approval_begin", "eap.tool_approval_decisions", "eap.workflow_clock", "DBOS.recv",
+                 "DBOS.sleep", "eap.tool_approval_decisions"]
+TOOL_HEAD = BASELINE["ticket"][:7]  # start_run .. tool_call event, first handler step
+TOOL_TAIL = BASELINE["ticket"][9:]  # tool_result event .. finish_run
+GOLDEN_APPROVALS: dict[str, list[str]] = {
+    # approved: deferred-results handler, then call_tool and its handler step as without approvals.
+    "approve": TOOL_HEAD + [HANDLER, *APPROVAL_WAIT, HANDLER, CALL_TOOL, HANDLER] + TOOL_TAIL,
+    # denied: no call_tool; the denied return's result event comes through a handler step instead.
+    "deny": TOOL_HEAD + [HANDLER, *APPROVAL_WAIT, HANDLER, HANDLER] + TOOL_TAIL,
+    # an eval child (approval_mode deny): one deny step, no wait.
+    "eval_deny": TOOL_HEAD + [HANDLER, "eap.tool_approval_deny", HANDLER, HANDLER] + TOOL_TAIL,
+}
+MEMORY_TOOL_HEAD = MEMORY_TURN[:3] + TOOL_HEAD[2:]  # start_run, start, load_memory, get_tools ...
+
+
+def gated(spec: dict[str, Any], *gate: str, tools: tuple[str, ...] = ("tickets.create",)) -> dict[str, Any]:
+    return {**spec, "tools": list(tools), "approvals": {"tools": list(gate or tools)}}
+
+
+APPROVAL_PROMPT = json.dumps({"tool": "tickets.create", "args": {"title": "Laptop", "body": "Broken."}})
+
+
+def _waiting_call(worker, schema, run_id) -> str:
+    """The gated call's id, once the wait sleeps in its first DBOS.recv."""
+    from worker_tests.conftest import event_rows, wait_for
+
+    wait_for(lambda: "DBOS.sleep" in step_names(schema, run_id) or None, timeout=60, what="the approval wait")
+    (call_id,) = [d["tool_call_id"] for _s, _k, t, d in event_rows(worker.engine, run_id) if t == "tool_approval_waiting"]
+    return call_id
+
+
+def _decide(worker, client, tenant, run_id, call_id, approve: bool) -> None:
+    from eap_run_store.approvals import tool_approval_topic
+
+    outcome, _ = worker.event_log.append_tool_decision(
+        tenant, run_id, call_id, "tool_approved" if approve else "tool_denied",
+        {"tool_call_id": call_id, "decided_by": "alice", "comment": None},
+    )
+    assert outcome == "created"
+    client.send(str(run_id), {"tool_call_id": call_id}, tool_approval_topic(str(run_id)))
+
+
+def test_approval_specs_wait_inside_the_agent_loop(worker, client, schema, tenant):
+    spec = gated(ticket_spec(model="approval"))
+    for approve, shape in ((True, "approve"), (False, "deny")):
+        run_id = enqueue_run(client, worker.run_store, tenant_id=tenant, spec=spec, input_text=APPROVAL_PROMPT,
+                             app_version=APP_VERSION)
+        _decide(worker, client, tenant, run_id, _waiting_call(worker, schema, run_id), approve)
+        row = wait_terminal(worker.run_store, tenant, run_id)
+        assert row["status"] == "completed", row["error"]
+        assert step_names(schema, run_id) == GOLDEN_APPROVALS[shape], shape
+
+
+def test_eval_child_denies_without_a_wait(worker, client, schema, tenant):
+    from eap_run_store import EvalStore
+
+    agent_id = str(uuid.uuid4())
+    evals = EvalStore(worker.engine)
+    suite = evals.create_suite(tenant, agent_id, "layout", evaluators=[{"kind": "contains", "value": "x"}])
+    evals.add_case(tenant, suite.id, {"name": "c0", "input": "hi"})
+    parent, child = uuid.uuid4(), uuid.uuid4()
+    worker.run_store.create_eval_run(tenant, agent_id, 1, suite.id, evals.snapshot(tenant, suite.id).canonical_json(), parent)
+    worker.run_store.create_child_agent_run(tenant, agent_id, 1, APPROVAL_PROMPT, child, parent, "case")
+    enqueue_run(client, worker.run_store, tenant_id=tenant, spec=gated(ticket_spec(model="approval")),
+                input_text=APPROVAL_PROMPT, app_version=APP_VERSION, run_id=child, agent_id=uuid.UUID(agent_id),
+                create_row=False)
+    row = wait_terminal(worker.run_store, tenant, child)
+    assert row["status"] == "completed", row["error"]
+    assert step_names(schema, child) == GOLDEN_APPROVALS["eval_deny"]
+
+
+def test_approvals_without_a_gated_call_keep_the_golden_steps(worker, client, schema, tenant):
+    # The model calls only tickets.create; only clock.now is gated: nothing waits, no step is added.
+    spec = gated(ticket_spec(), "clock.now", tools=("tickets.create", "clock.now"))
+    run_id, row = run(worker, client, tenant, spec, "Laptop broken")
+    assert row["status"] == "completed", row["error"]
+    assert step_names(schema, run_id) == GOLDEN["tool"]
+    run_id, row = run(worker, client, tenant, gated(ticket_spec(tools=(), model="echo")), "hi")
+    assert row["status"] == "completed" and step_names(schema, run_id) == GOLDEN["plain"]
+
+
+def test_approval_memory_turns_run_post_turn_steps_after_the_wait(worker, client, schema, mem_tenant):
+    from worker_tests.test_conversation import start_turn
+
+    shapes = (
+        (memory_spec(model="approval", history={"last_turns": 5}), [], []),
+        (recall_spec(model="approval"), ["eap.memory_recall"], ["eap.memory_index"]),
+        (obs_spec(model="approval"), [], OBSERVE_RUN),
+    )
+    for base, pre, post in shapes:
+        conv = conversation(worker, mem_tenant)
+        run_id = start_turn(client, worker.run_store, mem_tenant, conv["id"], APPROVAL_PROMPT, spec=gated(base))
+        call_id = _waiting_call(worker, schema, run_id)
+        # While waiting: none of the post-turn steps.
+        assert not set(step_names(schema, run_id)) & {"eap.finish_run", "eap.memory_index", "eap.memory_observe_run"}
+        _decide(worker, client, mem_tenant, run_id, call_id, True)
+        row = wait_terminal(worker.run_store, mem_tenant, run_id)
+        assert row["status"] == "completed", row["error"]
+        if post:
+            wait_workflow(schema, run_id)
+        expected = (MEMORY_TOOL_HEAD[:3] + pre + MEMORY_TOOL_HEAD[3:]
+                    + [HANDLER, *APPROVAL_WAIT, HANDLER, CALL_TOOL, HANDLER] + TOOL_TAIL + post)
+        assert step_names(schema, run_id) == expected, base["memory"]

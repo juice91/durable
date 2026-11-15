@@ -413,16 +413,17 @@ def test_priced_rounds_call_a_tool_k_times_then_echo(streamed: bool) -> None:
 
 
 def test_test_price_file_prices_priced_and_judge(monkeypatch) -> None:
-    from eap_worker import pricing
+    import eap_pricing as pricing
+    from datetime import date
 
     path = Path(__file__).resolve().parents[3] / "config" / "model-prices.test.json"
     prices = pricing.parse_price_file(path.read_text(), str(path))
     usage = pricing.Usage(input_tokens=PRICED_USAGE[0], output_tokens=PRICED_USAGE[1])
-    period = pricing._override_period(prices, "test:priced", pricing.datetime.now(pricing.timezone.utc))
-    assert pricing._override_cost(period, usage) == Decimal("0.02")
+    period = pricing.override_period(prices, "test:priced", date.today())
+    assert pricing.override_cost(period, usage) == Decimal("0.02")
     judge = pricing.Usage(input_tokens=JUDGE_USAGE[0], output_tokens=JUDGE_USAGE[1])
-    period = pricing._override_period(prices, "test:judge", pricing.datetime.now(pricing.timezone.utc))
-    assert pricing._override_cost(period, judge) == Decimal("0.0004")
+    period = pricing.override_period(prices, "test:judge", date.today())
+    assert pricing.override_cost(period, judge) == Decimal("0.0004")
 
 
 # --------------------------------------------------------------------------------------- judge
