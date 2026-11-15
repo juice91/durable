@@ -41,6 +41,8 @@ export interface StepDetail {
   skipReason: "branch_not_taken" | "run_ended" | null;
   startedAt: string | null;
   endedAt: string | null;
+  /** AC.9: structured-field refs (paths, never values) that resolved to nothing in this step. */
+  unresolvedRefs?: string[];
 }
 
 export interface WorkflowRunView {
@@ -104,6 +106,7 @@ function emptyDetail(stepId: string, stepType: StepType | null): StepDetail {
     skipReason: null,
     startedAt: null,
     endedAt: null,
+    unresolvedRefs: [],
   };
 }
 
@@ -185,6 +188,9 @@ export function deriveRunView(
           d.output = data.output;
         }
         d.endedAt = event.ts ?? d.endedAt;
+        if (Array.isArray(data.unresolved_refs)) {
+          d.unresolvedRefs = data.unresolved_refs.filter((ref): ref is string => typeof ref === "string");
+        }
         const out = data.output as Record<string, unknown> | null | undefined;
         if (d.stepType === "branch" && out && typeof out === "object" && typeof out.next === "string") {
           chosen.set(stepId, out.next);

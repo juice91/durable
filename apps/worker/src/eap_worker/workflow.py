@@ -192,7 +192,9 @@ with `{limit, value}`. `limits.max_cost_usd` adds one step before every model re
 Fallback adds no step: the resolver builds a FallbackModel inside the model step (every request
 starts at the primary). The fallback models are re-checked against the allowlist at run start. A
 per-run model override disables fallback (`run_started.fallback: "disabled_by_override"`). The
-`model_message` event of a request on a chain adds `requested_model_id`, `fallback_index` and
+`model_message` event of EVERY model request carries `answering_model` (the `provider:name` id of
+the model that answered: the run's model without a chain); a request on a chain also adds
+`requested_model_id`, `fallback_index` and
 `failed_attempts: [{model_id, outcome, error_type}]`; its usage row is the ANSWERING model's, and
 failed attempts that reported usage get rows `model:{n}:failed:{k}` in the same transaction. Every
 model failing ends the run `fallback_exhausted` (`cause`: the first failure's code). A failed
@@ -227,6 +229,29 @@ logged and left to the append, so it never retries (re-bills) the model call.
   the step: their usage is provisional. Forward risk, if such a model is ever used: the completing
   request must record the real usage under `model:{n}`, which the append does today; recording the
   provisional one first would make the real one a no-op (first write wins).
+
+Tool approval (AC.6; eap_worker.capabilities): only for a spec with `approvals`, and only when the
+model calls a gated tool. SpecCapability marks the gated tools `unapproved`; Pydantic AI first runs the
+response's ungated tool calls as usual, then collects the gated ones, and the capability waits
+durably INSIDE `_drive_agent` (after the response's `model:{n}:final` and `tool:{id}:call` events
+and its ungated calls; before any gated call runs):
+
+    eap-agent__event_stream_handler     the gated call's FunctionToolCallEvent and the deferred batch
+    eap.tool_approval_begin             per gated call: deadline, `tool_approval_waiting`
+                                        (`tool:{id}:approval:waiting`) and its inbox row
+    eap.tool_approval_decisions         \
+    eap.workflow_clock                   } the batch loop, until all are decided or the deadline
+    DBOS.recv                           /  (then `tool_approval_timed_out` per undecided call)
+    eap-agent__event_stream_handler     the deferred results
+    eap-agent__dynamic_toolset__eap-spec-tools.call_tool   an approved call, as usual
+    eap.append_event   tool:{id}:result tool_result; `status: "denied"` and the denial text for a
+                                        denied or timed-out call (which never reaches the toolset)
+
+`eap.start_run` records `approval_mode` (`deny` for a child of an `eval` run, else `interactive`;
+absent in an older checkpoint: interactive) and `approval_timing` (hour and poll seconds). In deny
+mode a gated call is denied at once (`eap.tool_approval_deny`, no wait, no inbox row). The run stays
+`running` (display `waiting_approval`) and keeps heartbeating; no post-turn step runs before the
+wait resolves. A spec without `approvals` has no such step.
 
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
@@ -281,7 +306,17 @@ from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
-from eap_worker.capabilities import SpecCapability, error_paths, output_type_for, retries_for, schema_errors
+from eap_worker.capabilities import (
+    ApprovalSettings,
+    SpecCapability,
+    error_paths,
+    output_type_for,
+    read_approval_timing,
+    reset_approval_settings,
+    retries_for,
+    set_approval_settings,
+    schema_errors,
+)
 from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import (
@@ -397,7 +432,10 @@ def _request_usage(
     model_chain: tuple[str, ...] | list[str], model_id: str, response: ModelResponse
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """A model response's usage input for `eap.append_event` (`failed` rows included) and its
-    fallback fields: the one computation the workflow and the model step's usage write share."""
+    fallback fields (`answering_model` always; the fallback fields too with a chain): the one
+    computation the workflow's model_message append and the model step's usage write share, so
+    their rows agree. Both pass the response as `streamed_response`, so the streamed usage guard
+    (request_usage_input) corrects the same usage in both places."""
     fallback_data: dict[str, Any] = {}
     if len(model_chain) > 1:
         # AC.5: priced as the model that answered; failed attempts with usage get rows.
@@ -409,6 +447,7 @@ def _request_usage(
     else:
         # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
         usage = request_usage_input(model_id, response.model_name, response.usage, streamed_response=response)
+        fallback_data = {"answering_model": model_id}  # AC.5: on every model_message
     return usage, fallback_data
 
 
@@ -647,14 +686,17 @@ async def start_run_step(
     spec_json: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Returns {"conversation_id", "turn", "resource_id", "traceparent", "superseded", "model_id",
-    "request_context", "is_draft"}; conversation_id/turn/resource_id are None for a standalone run
+    "request_context", "is_draft", "approval_mode", "approval_timing"}; conversation_id/turn/resource_id are None for a standalone run
     (RM.12: the conversation row's resource_id, read only for a spec with `memory`; else None; it is
     informational: eap.load_memory's snapshot is authoritative for the working memory key, and RM.14's
     recall store calls read the resource from the conversation row themselves), traceparent
     is None when the API had telemetry off. `superseded` is True when this turn must not run (see
     mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
     the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
-    its validated context ({} when none), `is_draft` whether it is a draft test run."""
+    its validated context ({} when none), `is_draft` whether it is a draft test run. AC.6:
+    `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person),
+    else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
+    Both are recorded here, so a replay waits and denies exactly as the first attempt did."""
     rt = get_runtime()
 
     def work() -> dict[str, Any]:
@@ -684,6 +726,11 @@ async def start_run_step(
         if run.get("conversation_id") is not None and memory_spec is not None and memory_spec.memory is not None:
             conversation = rt.run_store.get_conversation(tenant_id, run["conversation_id"]) or {}
             resource_id = conversation.get("resource_id")
+        approval_mode = "interactive"
+        if run.get("parent_run_id") is not None:
+            parent = rt.run_store.get_run(tenant_id, UUID(str(run["parent_run_id"]))) or {}
+            if parent.get("kind") == "eval":
+                approval_mode = "deny"
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
@@ -693,6 +740,8 @@ async def start_run_step(
             "model_id": run.get("model_id"),
             "request_context": run.get("request_context") or {},
             "is_draft": run.get("draft_spec") is not None,
+            "approval_mode": approval_mode,
+            "approval_timing": read_approval_timing(),
         }
 
     return await asyncio.to_thread(work)
@@ -901,6 +950,9 @@ def _tool_sources(part: ToolReturnPart) -> list[Any] | None:
     return to_jsonable_python(sources, fallback=str) if isinstance(sources, list) else None
 
 
+_TOOL_RESULT_STATUS = {"failed": "error", "retried": "error", "denied": "denied"}
+
+
 async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCallPart], *sources: list[Any]) -> None:
     results = _find_tool_results({c.tool_call_id for c in calls}, *sources)
     for call in calls:
@@ -910,8 +962,9 @@ async def _record_tool_results(run_id: str, tenant_id: str, calls: list[ToolCall
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
                 # pydantic-ai 2.x returns a tool's ModelRetry / ToolFailed as a return with outcome
-                # 'retried' / 'failed'; other outcomes (denied, interrupted) stay "ok" as before.
-                "status": "error" if part.outcome in ("failed", "retried") else "ok",
+                # 'retried' / 'failed'. AC.6: a denied or timed-out approval is 'denied' (content: the
+                # denial message the model read). Other outcomes (interrupted) stay "ok" as before.
+                "status": _TOOL_RESULT_STATUS.get(part.outcome, "ok"),
                 "content": to_jsonable_python(part.content, fallback=str),
             }
             sources = _tool_sources(part)
@@ -1175,9 +1228,11 @@ async def _drive_agent(
     input_text: str,
     history: list[ModelMessage] | None = None,
     model_id: str | None = None,
+    approvals: ApprovalSettings | None = None,
 ) -> tuple[str, list[dict[str, Any]], Any]:
     """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
-    messages as JSON, output_json). For a structured spec (AC.4) `output_json` is the validated,
+    messages as JSON, output_json). `approvals` (AC.6): the run's recorded approval options, for
+    SpecCapability's wait (default: interactive). For a structured spec (AC.4) `output_json` is the validated,
     processed object and `output` its canonical JSON text; otherwise `output_json` is None."""
     spec = deps.spec
     tenant_id = deps.tenant_id
@@ -1219,6 +1274,8 @@ async def _drive_agent(
     awaiting_retry: int | None = None  # structured: the response whose retry (if any) comes next
     final_text: str | None = None
     active_run: Any = None  # AC.5: the run, for the limit a UsageLimitExceeded broke
+    # AC.6: the run's approval options for SpecCapability's hooks (reset when the agent run ends).
+    approval_token = set_approval_settings(approvals or ApprovalSettings())
     try:
         async with agent.iter(
             input_text,
@@ -1348,6 +1405,7 @@ async def _drive_agent(
                 raise OutputModeUnsupported(str(mode)) from None
         raise
     finally:
+        reset_approval_settings(approval_token)
         _MODEL_REQUEST.reset(request_token)
     if spec.output is not None:
         value = result_output
@@ -1478,7 +1536,9 @@ async def _run_body(
                     input_text, loaded,
                 )
             deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded, recall))
-        output, new_messages, output_json = await _drive_agent(run_id, deps, input_text, history, model_id)
+        output, new_messages, output_json = await _drive_agent(
+            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link)
+        )
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
         status = "needs_attention" if _is_side_effect_unknown(exc) else failure.status

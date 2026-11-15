@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, focusRing } from "@/components/ui/Button";
 import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
 import type { VersionRef } from "@/components/chat/runOptions";
+import type { RunStatus } from "@/lib/runs";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
 import { listKnowledgeBases } from "@/lib/knowledge";
@@ -34,6 +35,8 @@ export interface ConfigPanelProps {
   versions: AgentVersion[] | null;
   /** The version the chat targets; null: the latest published (the draft when none is). */
   versionRef?: VersionRef;
+  /** AC.14: the chat's latest turn status; "waiting_approval" shows a pill in the header. */
+  turnStatus?: RunStatus | null;
 }
 
 function Section({
@@ -81,7 +84,7 @@ const muted = "text-muted-foreground";
  * is made of, from the effective spec (latest published, or the draft with `?version=draft`). Each
  * section links to its editor step.
  */
-export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelProps) {
+export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = null }: ConfigPanelProps) {
   const config = effectiveConfig(agent, versions, versionRef);
   const spec = config.spec;
   const counts = configCounts(spec);
@@ -113,6 +116,12 @@ export function ConfigPanel({ agent, versions, versionRef = null }: ConfigPanelP
 
   return (
     <div data-testid="config-panel" className="min-w-0">
+      {turnStatus === "waiting_approval" ? (
+        <p role="status" data-testid="config-waiting-approval" className="flex items-center gap-2 border-b border-border px-3 py-2 text-caption">
+          <Badge variant="warning">Waiting for approval</Badge>
+          <span className={muted}>A tool call waits for a decision in the chat.</span>
+        </p>
+      ) : null}
       <Section id="version" title="Version" editHref={routes.agentEditor(agent.id)}>
         <p className="flex flex-wrap items-center gap-1.5">
           <span data-testid="config-version">{config.versionLabel}</span>

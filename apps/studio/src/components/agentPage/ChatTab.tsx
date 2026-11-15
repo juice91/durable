@@ -39,6 +39,15 @@ import {
   type VersionRef,
 } from "@/components/chat/runOptions";
 import { TurnStartError, startTurnWithOptions } from "@/components/chat/turnApi";
+import {
+  effectiveTurnStatus,
+  fallbackDisabledByOverride,
+  hasStructuredOutput,
+  turnCapabilityFailure,
+  turnFallback,
+  turnLooksStructured,
+  turnOutputJson,
+} from "@/components/chat/turnCapabilities";
 import { IDLE_VALIDATION, type ContextValidationState } from "@/components/requestContext";
 import { RequestContextPopover } from "@/components/requestContext/RequestContextPopover";
 import { StatusPill } from "@/components/runs/StatusPill";
@@ -323,6 +332,24 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     [],
   );
 
+  // AC.14: re-read one turn's events (the approval card, after a decision or a 409): anything the
+  // live stream has not delivered yet is merged in by seq.
+  const refreshRun = useCallback(
+    async (runId: string) => {
+      try {
+        const fresh = await listEvents(runId);
+        updateTurn(runId, (turn) => {
+          const seen = new Set(turn.events.map((item) => item.seq));
+          const added = fresh.filter((item) => !seen.has(item.seq));
+          return added.length === 0 ? turn : { ...turn, events: [...turn.events, ...added].sort((a, b) => a.seq - b.seq) };
+        });
+      } catch {
+        // The live stream still delivers the decision; nothing to show here.
+      }
+    },
+    [updateTurn],
+  );
+
   /**
    * Select an agent: the context this tab remembers for it, else its newest preset (reading the
    * presets migrates the old saved value into one named "Saved").
@@ -376,7 +403,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
                 : null);
             return { ...turn, events, partials, displayStatus, error, modelId };
           });
-          if (nextEvent.type === "run_failed" && turnBlock([nextEvent]) !== null) {
+          if (nextEvent.type === "run_failed" && (turnBlock([nextEvent]) !== null || turnCapabilityFailure([nextEvent]) !== null)) {
             setAnnounceRunId(runId);
           }
           if (nextEvent.type === "run_completed" || nextEvent.type === "run_failed") {
@@ -511,6 +538,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
 
   // The Config panel describes the version the chat targets.
   const setConfigVersion = page?.setConfigVersion;
+  const setChatStatus = page?.agentId === agentId ? page.setChatStatus : undefined;
   useEffect(() => {
     setConfigVersion?.(versionRef);
   }, [setConfigVersion, versionRef]);
@@ -879,7 +907,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     for (const [messageId, runId] of footerMessageIds(thread.messages)) {
       const turn = byRun.get(runId);
       if (!turn) continue;
-      const running = !TERMINAL_STATUSES.has(turn.displayStatus);
+      const shownStatus = effectiveTurnStatus(turn.displayStatus, turn.events);
+      const running = !TERMINAL_STATUSES.has(shownStatus);
       const liveText = turnLiveText(
         turn.liveText,
         turn,
@@ -888,9 +917,12 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         versions,
       );
       const block = turnBlock(turn.events);
+      const failure = turnCapabilityFailure(turn.events);
+      const turnTarget = targetSpec(turn.draft ? "draft" : turn.version, selectedAgent?.draft_spec, selectedAgent?.latest_version ?? null, versions);
+      const structured = hasStructuredOutput(turnTarget) || turnLooksStructured(turn.events);
       views.set(messageId, {
         runId,
-        status: turn.displayStatus,
+        status: shownStatus,
         modelId: turn.modelId ?? turnModelId(turn.events, turn.row),
         modelOverridden: turn.modelOverridden,
         draft: turn.draft,
@@ -900,16 +932,26 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         checking: running && !liveText,
         liveText,
         block,
-        announce: block !== null && announceRunId === runId,
+        announce: (block !== null || failure !== null) && announceRunId === runId,
+        generatingStructured: running && structured && shownStatus !== "waiting_approval" && turnOutputJson(turn.events) === undefined,
+        fallback: turnFallback(turn.events),
+        fallbackDisabled: fallbackDisabledByOverride(turn.events),
+        failure,
       });
     }
     return views;
   }, [announceRunId, selectedAgent, thread.messages, turns, versions]);
 
   const latest = turns.length > 0 ? turns[turns.length - 1] : null;
-  const status = latest?.displayStatus;
+  const status = latest ? effectiveTurnStatus(latest.displayStatus, latest.events) : undefined;
+  // The Config panel's header pill (AC.14) follows the open conversation's latest turn.
+  useEffect(() => {
+    setChatStatus?.(status ?? null);
+  }, [setChatStatus, status]);
+  useEffect(() => () => setChatStatus?.(null), [setChatStatus]);
   // A blocked turn explains itself under its message; other failures show here.
-  const latestBlocked = latest ? turnBlock(latest.events) !== null : false;
+  // So does a limit, cost-cap, fallback or structured-output failure (AC.14).
+  const latestBlocked = latest ? turnBlock(latest.events) !== null || turnCapabilityFailure(latest.events) !== null : false;
   const statusError =
     status === "needs_attention"
       ? latest?.error || "This run needs attention before it can continue."
@@ -1149,6 +1191,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             header={header}
             restoreDraft={restoreDraft}
             onDraftRestored={clearRestoreDraft}
+            onRefreshRun={refreshRun}
             composer={
               <Composer
                 chips={chips}

@@ -21,7 +21,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
-import { ApprovalCard, formatDateTime } from "./ApprovalCard";
+import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowFloatingPanel";
 import { TimelineDock } from "./TimelineDock";
@@ -257,10 +257,7 @@ export function WorkflowRunView({ runId, workflowId, tabs, collapsedLoops, onCol
       {view.waiting.map((id) => (
         <ApprovalCard
           key={id}
-          runId={runId}
-          stepId={id}
-          prompt={view.steps[id]?.prompt ?? null}
-          deadline={view.steps[id]?.deadline ?? null}
+          approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null }}
           onRefresh={refresh}
           onDecided={() => {
             refocusAfterDecision.current = true;

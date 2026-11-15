@@ -132,7 +132,7 @@ def test_answering_model_pricing_and_failed_attempts():
     usage, extra, failed = fallback_usage(chain, response)
     assert usage["model_id"] == "test:priced" and "price_source_override" not in usage
     assert extra == {
-        "requested_model_id": "test:fail-503", "fallback_index": 1,
+        "requested_model_id": "test:fail-503", "answering_model": "test:priced", "fallback_index": 1,
         "failed_attempts": [{"model_id": "test:fail-503", "outcome": "error", "error_type": "ModelHTTPError", "http_status": 503}],
     }
     assert [f["k"] for f in failed] == [0] and failed[0]["model_id"] == "test:fail-503"
@@ -502,3 +502,27 @@ def test_a_token_breach_never_runs_the_output_processors(worker, client, tenant)
     assert [r["request_key"] for r in usage_rows(worker.engine, run_id)] == ["model:0"]  # no moderation row
     steps = step_names(worker.settings.dbos_system_schema, run_id)
     assert "eap.output_processors" not in steps and "eap-moderator__model.request" not in steps
+
+
+# --------------------------------------------------------------------------- answering_model (AC.14 / AC.17)
+
+
+def test_every_model_message_names_its_answering_model(worker, client, tenant):
+    # fail-503 falls back to a second model: the event names the fallback as the answering model.
+    spec = spec_with(model="fail-503", fallback_models=fallbacks("fail-400", "priced"))
+    run_id, row = run(worker, client, tenant, spec, "hello")
+    assert row["status"] == "completed" and row["output"] == "Echo: hello", row
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["answering_model"] == "test:priced" == message["model_id"]
+    assert (message["requested_model_id"], message["fallback_index"]) == ("test:fail-503", 2)
+    assert [a["model_id"] for a in message["failed_attempts"]] == ["test:fail-503", "test:fail-400"]
+    assert [(r["request_key"], r["model_id"]) for r in usage_rows(worker.engine, run_id)] == [("model:0", "test:priced")]
+    # Without a chain (no fallback, and an override): the run's model, no chain fields.
+    run_id, _row = run(worker, client, tenant, spec_with(model="echo"), "hi")
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["answering_model"] == "test:echo" and "fallback_index" not in message
+    # A blocked fallback answer carries it too.
+    spec = {**echo_spec(output_processors=[moderation()], model="fail-503"), "fallback_models": fallbacks("echo")}
+    run_id, _row = run(worker, client, tenant, spec, "FLAG_ME")
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["blocked"] is True and message["answering_model"] == "test:echo"

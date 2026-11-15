@@ -819,7 +819,8 @@ describe("no hard-coded colours in the workflow code", () => {
     expect(files.some((f) => f.endsWith("WorkflowFloatingPanel.tsx"))).toBe(true);
     expect(files.some((f) => f.endsWith("TimelineDock.tsx"))).toBe(true);
     expect(files.some((f) => f.endsWith(path.join("[id]", "traces", "page.tsx")))).toBe(true);
-    expect(files.length).toBeGreaterThanOrEqual(15);
+    // 14 since AC.14 moved ApprovalCard to components/approvals/.
+    expect(files.length).toBeGreaterThanOrEqual(14);
   });
 
   it("finds no hex, rgb/hsl, Tailwind palette or arbitrary colour in components/workflows or app/workflows", () => {

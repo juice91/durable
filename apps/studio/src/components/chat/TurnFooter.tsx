@@ -5,6 +5,7 @@ import { formatTokens, formatUsd } from "@/lib/format";
 import type { RunStatus } from "@/lib/runs";
 import { versionLabel, type BlockCode, type TurnUsage } from "./runOptions";
 import { TraceLink } from "@/components/traces/TraceLink";
+import { attemptText, type CapabilityFailure, type TurnFallback } from "./turnCapabilities";
 
 /** What the thread shows under one turn's last message. */
 export interface TurnView {
@@ -22,6 +23,14 @@ export interface TurnView {
   liveText: boolean;
   /** The block happened while the page watched (not on reload or a thread switch): announce it. */
   announce: boolean;
+  /** AC.14: the target returns structured output and the object has not arrived yet. */
+  generatingStructured?: boolean;
+  /** AC.14: requests answered by a fallback model, and the failed attempts (AC.5). */
+  fallback?: TurnFallback | null;
+  /** AC.14: the turn's model override switched fallback off. */
+  fallbackDisabled?: boolean;
+  /** AC.14: a usage-limit, cost-cap, fallback or structured-output failure, in words. */
+  failure?: CapabilityFailure | null;
 }
 
 const BLOCK_TITLES: Record<BlockCode, string> = {
@@ -69,6 +78,27 @@ export function TurnFooter({ turn }: { turn: TurnView }) {
           The output is being checked before display.
         </div>
       )}
+      {turn.generatingStructured && !turn.checking && (
+        <div
+          role="status"
+          data-testid="turn-generating-structured"
+          className="flex items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground"
+        >
+          <span aria-hidden="true" className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary motion-reduce:animate-none" />
+          Generating structured output…
+        </div>
+      )}
+      {turn.failure && (
+        <div
+          role={turn.announce ? "alert" : undefined}
+          data-testid="turn-capability-error"
+          data-code={turn.failure.code}
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-text"
+        >
+          <p className="font-medium">{turn.failure.title}</p>
+          <p>{turn.failure.message}</p>
+        </div>
+      )}
       {turn.block && (
         <div
           role={turn.announce ? "alert" : undefined}
@@ -90,6 +120,24 @@ export function TurnFooter({ turn }: { turn: TurnView }) {
         {turn.modelOverridden && (
           <span className="rounded-full bg-accent px-2 py-0.5 text-accent-foreground">override</span>
         )}
+        {turn.fallback && (
+          <span
+            data-testid="turn-badge-fallback"
+            className="rounded-full bg-warning/10 px-2 py-0.5 text-warning-text"
+            title={turn.fallback.attempts.length > 0 ? `Failed: ${turn.fallback.attempts.map(attemptText).join("; ")}` : undefined}
+          >
+            {turn.fallback.answeredByFallback > 0
+              ? turn.fallback.answeringModel
+                ? `fallback: ${turn.fallback.answeringModel}`
+                : "fallback"
+              : "retried"}
+          </span>
+        )}
+        {turn.fallbackDisabled && (
+          <span data-testid="turn-badge-fallback-off" className="rounded-full border border-border px-2 py-0.5">
+            fallback off (override)
+          </span>
+        )}
         {version && (
           <span data-testid="turn-badge-version" className="rounded-full border border-border px-2 py-0.5">
             {version}
@@ -101,6 +149,17 @@ export function TurnFooter({ turn }: { turn: TurnView }) {
           Open trace
         </TraceLink>
       </div>
+      {turn.fallback && turn.fallback.attempts.length > 0 && (
+        <p data-testid="turn-fallback-attempts" className="text-xs text-muted-foreground">
+          {turn.fallback.attempts.length === 1 ? "1 failed attempt" : `${turn.fallback.attempts.length} failed attempts`}:{" "}
+          <span className="break-words font-mono">{turn.fallback.attempts.map(attemptText).join("; ")}</span>
+          {turn.fallback.answeredByFallback > 0
+            ? turn.fallback.answeringModel
+              ? ` · answered by ${turn.fallback.answeringModel}`
+              : " · answered by a fallback model"
+            : ""}
+        </p>
+      )}
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import { createContext, useContext } from "react";
 import type { Agent, AgentVersion } from "@/lib/api";
 import type { VersionRef } from "@/components/chat/runOptions";
+import type { RunStatus } from "@/lib/runs";
 
 /**
  * What `app/agents/[id]/layout.tsx` (through `AgentLayout`) shares with its tabs: the agent, loaded
@@ -21,6 +22,9 @@ export interface AgentPageValue {
   /** The version the chat targets; the Config panel describes it. Null: the latest. */
   configVersion: VersionRef;
   setConfigVersion: (ref: VersionRef) => void;
+  /** AC.14: the chat's latest turn status (null: none); the Config panel shows "Waiting for approval". */
+  chatStatus?: RunStatus | null;
+  setChatStatus?: (status: RunStatus | null) => void;
   /**
    * Threads pane, the user's choice: expanded (wide screens) or its Sheet open (below 1024 px). What
    * the pane shows is `threadsOpen && !threadsAutoCollapsed`.

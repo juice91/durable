@@ -6,6 +6,7 @@ const wfMock = vi.hoisted(() => ({ decideApproval: vi.fn() }));
 vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal<object>()), ...wfMock }));
 
 import { ApprovalCard } from "./ApprovalCard";
+const step = { kind: "step" as const, runId: "run-1", stepId: "gate", prompt: "?", deadline: null };
 
 function deferred() {
   let resolve!: () => void;
@@ -25,7 +26,7 @@ describe("ApprovalCard", () => {
   it("stays disabled after a decision until the refresh finishes", async () => {
     const refresh = deferred();
     const onRefresh = vi.fn(() => refresh.promise);
-    render(<ApprovalCard runId="run-1" stepId="gate" prompt="?" deadline={null} onRefresh={onRefresh} />);
+    render(<ApprovalCard approval={step} onRefresh={onRefresh} />);
     const approve = screen.getByRole("button", { name: "Approve" });
     fireEvent.click(approve);
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
@@ -47,7 +48,7 @@ describe("ApprovalCard", () => {
   it("does not update state after it unmounts mid-refresh", async () => {
     const refresh = deferred();
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { unmount } = render(<ApprovalCard runId="run-1" stepId="gate" prompt="?" deadline={null} onRefresh={() => refresh.promise} />);
+    const { unmount } = render(<ApprovalCard approval={step} onRefresh={() => refresh.promise} />);
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(wfMock.decideApproval).toHaveBeenCalledTimes(1));
     unmount();
@@ -61,7 +62,7 @@ describe("ApprovalCard", () => {
 
   it("still accepts a void onRefresh", async () => {
     const onRefresh = vi.fn();
-    render(<ApprovalCard runId="run-1" stepId="gate" prompt="?" deadline={null} onRefresh={onRefresh} />);
+    render(<ApprovalCard approval={step} onRefresh={onRefresh} />);
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());

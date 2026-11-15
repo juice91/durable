@@ -196,6 +196,16 @@ function respond(url: URL): unknown {
   if (/^\/runs\/[^/]+\/events$/.test(p)) return [];
   if (/^\/runs\/[^/]+$/.test(p)) return run(p.split("/").pop()!);
   if (p === "/logs") return LOGS;
+  if (p === "/approvals") {
+    return {
+      items: [{
+        run_id: "r1", kind: "tool", approval_key: "call_1", tool_call_id: "call_1", step_id: null, root_run_id: "r1", agent_id: "a1",
+        workflow_id: null, tool_name: "send_email", args: { to: "a@example.test" }, prompt: null, status: "pending", requested_at: T0,
+        deadline: T1, decided_at: null, decision: null, decided_by: null, run_status: "running",
+      }],
+      next_cursor: null,
+    };
+  }
   if (p === "/metrics/summary") return summaryFixture({ runs: 12, failed: 1 });
   if (p === "/metrics/timeseries") return timeseriesFixture([{ runs: 4 }, { runs: 8, failed: 1 }]);
   if (p === "/metrics/breakdown") {
@@ -264,6 +274,7 @@ const PAGES: PageCase[] = [
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },
   { name: "traces", path: "/traces", load: () => import("@/app/traces/page"), h1: "Traces", shows: "#trace-row" },
   { name: "logs", path: "/logs", load: () => import("@/app/logs/page"), h1: "Logs", shows: "tool failed" },
+  { name: "approvals", path: "/approvals", load: () => import("@/app/approvals/page"), h1: "Approvals", shows: "send_email" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
 ];
 

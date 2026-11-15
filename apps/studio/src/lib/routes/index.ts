@@ -4,6 +4,7 @@
  * builder and the assertions that name it. One file per area; legacy redirects live in `legacy.ts`.
  */
 import { agentRoutes } from "./agents";
+import { approvalRoutes } from "./approvals";
 import { knowledgeRoutes } from "./knowledge";
 import { mcpRoutes } from "./mcp";
 import { observabilityRoutes } from "./observability";
@@ -15,6 +16,7 @@ import { workflowRoutes } from "./workflows";
 /** Each area's builders. Builder names must be unique across areas: a later spread would silently
  * replace an earlier builder of the same name (checked in routes.test.ts). */
 export const ROUTE_AREAS = {
+  approvals: approvalRoutes,
   agents: agentRoutes,
   workflows: workflowRoutes,
   tools: toolRoutes,
@@ -26,6 +28,7 @@ export const ROUTE_AREAS = {
 } as const;
 
 export const routes = {
+  ...approvalRoutes,
   ...agentRoutes,
   ...workflowRoutes,
   ...toolRoutes,
@@ -49,5 +52,6 @@ export type {
   RouteVersion,
 } from "./agents";
 export { agentChatPathState, agentTabOf } from "./agents";
+export { APPROVAL_SHEET_PARAM, type ApprovalsRouteOptions } from "./approvals";
 export type { KnowledgeBaseRouteOptions, KnowledgeTab } from "./knowledge";
 export { isSafeTarget, legacyTarget, LEGACY_RULES, type LegacyRule, type LegacySearchParams } from "./legacy";

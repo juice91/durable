@@ -8,7 +8,7 @@ import { getWorkflow, listWorkflowVersions, type Workflow, type WorkflowVersion 
 import { WorkflowCanvas, WorkflowStepList } from "@/components/workflows/WorkflowGraph";
 import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
-import { formatDateTime } from "@/components/workflows/ApprovalCard";
+import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
 import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
