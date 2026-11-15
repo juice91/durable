@@ -31,7 +31,7 @@ import { useNames, useTrace } from "./useTrace";
 import { copyText } from "@/lib/clipboard";
 
 const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", logs: "Logs" };
-const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run" };
+const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run", eval: "Eval run" };
 const icon = (Icon: typeof Copy) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
 
 export interface TraceSheetNavigation {

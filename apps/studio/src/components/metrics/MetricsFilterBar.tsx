@@ -172,6 +172,7 @@ export function MetricsFilterBar({
                 <option value="workflow">Workflow</option>
                 <option value="tool">Tool</option>
                 <option value="kb_ingest">Knowledge ingest</option>
+                <option value="eval">Eval</option>
               </select>
             </label>
             <label className={labelCls}>

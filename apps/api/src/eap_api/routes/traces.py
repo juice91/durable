@@ -3,7 +3,10 @@
 The trace is derived from the run's durable events and usage rows (eap_run_store.trace): one span
 per run, model request, tool call, processor result and workflow step, with a workflow's child
 agent runs nested under their step, plus the RAG and memory spans of RM.19 (retrieve, embedding,
-memory_recall, memory_index, observer, reflector, working_memory, ingest). Tenant-scoped like every run route: an unknown run, or another
+memory_recall, memory_index, observer, reflector, working_memory, ingest) and AC.17's agent
+capability spans (fallback_attempt under its model request, tool_approval under its tool call,
+output_retry, eval_case with its child run and judge requests). A run waiting for a tool approval
+has span status `waiting` and `display_status` `waiting_approval`. Tenant-scoped like every run route: an unknown run, or another
 tenant's, is a 404 (its child runs are read under the caller's tenant only). The DBOS and HTTP
 spans stay in Grafana (the run's `trace_id`).
 

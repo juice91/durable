@@ -17,6 +17,7 @@ import { STATUS_LABELS, STATUS_TEXT } from "./spanStyles";
 import type { TraceTab } from "@/lib/routes/observability";
 import { TraceLink } from "./TraceLink";
 import { KnowledgeBaseLink, RAG_SHOWN, RagSpanSection, USAGE_KINDS } from "./RagSpanSections";
+import { CAPABILITY_SHOWN, CAPABILITY_USAGE_KINDS, CapabilitySpanSection } from "./CapabilitySpanSections";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -25,6 +26,8 @@ const SHOWN = new Set([
   // The run span's usage split (shown in Run usage).
   "chat_requests", "chat_input_tokens", "chat_output_tokens", "memory_input_tokens", "memory_output_tokens",
   "moderation_input_tokens", "moderation_output_tokens", "embedding_input_tokens",
+  // AC.17: an eval run's judge usage (shown in Run usage).
+  "judge_requests", "judge_input_tokens", "judge_output_tokens",
 ]);
 
 function str(value: unknown): string | null {
@@ -77,6 +80,7 @@ const SPAN_GROUP_TEST_ID = {
   memory: { testId: "span-usage-memory" },
   moderation: { testId: "span-usage-moderation" },
   embedding: { testId: "span-usage-embedding" },
+  judge: { testId: "span-usage-judge" },
 } as const;
 
 function RunUsageSection({ span }: { span: TraceSpan }) {
@@ -178,13 +182,14 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
   const errorCode = str(a.error_code);
   const approval = a.approval as Record<string, unknown> | undefined;
   const decision = a.decision as Record<string, unknown> | undefined;
-  const ragShown = new Set(RAG_SHOWN[span.kind] ?? []);
+  const ragShown = new Set([...(RAG_SHOWN[span.kind] ?? []), ...(CAPABILITY_SHOWN[span.kind] ?? [])]);
   const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && !ragShown.has(k) && v !== null && v !== undefined);
   // A model request always shows its usage; the RAG and memory kinds and processors when they carry a model.
   // A moderation processor is a model call of its own (its model, not the agent's chat model).
   const showUsage =
     span.kind === "model_request" ||
-    ((USAGE_KINDS.has(span.kind) || span.kind === "processor") && (str(a.model_id) !== null || a.usage != null));
+    ((USAGE_KINDS.has(span.kind) || CAPABILITY_USAGE_KINDS.has(span.kind) || span.kind === "processor") &&
+      (str(a.model_id) !== null || a.usage != null));
 
   return (
     <aside aria-label="Span detail" data-testid="span-detail" className="space-y-4 rounded-md border border-border bg-card p-4">
@@ -211,6 +216,7 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
       ) : null}
 
       {showUsage ? <UsageSection span={span} /> : null}
+      <CapabilitySpanSection span={span} />
       <RagSpanSection span={span} names={names} />
       {span.kind === "run" || span.kind === "child_run" ? <RunUsageSection span={span} /> : null}
 

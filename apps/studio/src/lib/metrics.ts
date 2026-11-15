@@ -9,21 +9,23 @@ import type { TraceFilters } from "./traces";
 
 // ------------------------------------------------------------------------------------- types
 
-export type MetricsKind = "agent" | "tool" | "workflow" | "kb_ingest";
+/** Run kinds of the `kind` filter; `eval` (AC.17) counts an eval run and its case runs. */
+export type MetricsKind = "agent" | "tool" | "workflow" | "kb_ingest" | "eval";
 export type MetricsInterval = "hour" | "day";
 export type BreakdownBy = "agent" | "model" | "operation";
 
 /**
- * What a model request was for (RM.19; the API's `operation`). The first five partition the usage
+ * What a model request was for (RM.19; the API's `operation`). All but `memory` partition the usage
  * rows: `embedding` (knowledge base ingest, retrieve, the search tester, semantic recall and index),
- * and among chat requests `moderation`, `observer`, `reflector` and `chat` (every other model
- * request). `memory` is a filter only: observer, reflector and the recall and index embeddings.
+ * and among chat requests `moderation`, `observer`, `reflector`, `judge` (AC.17: an eval run's
+ * LLM-judge requests) and `chat` (every other model request, failed fallback attempts included).
+ * `memory` is a filter only: observer, reflector and the recall and index embeddings.
  */
-export type MetricsOperation = "chat" | "moderation" | "observer" | "reflector" | "embedding" | "memory";
+export type MetricsOperation = "chat" | "moderation" | "observer" | "reflector" | "embedding" | "judge" | "memory";
 
 /** The operations a `by=operation` breakdown returns (a partition of the requests). */
 export const BREAKDOWN_OPERATIONS: readonly Exclude<MetricsOperation, "memory">[] = [
-  "chat", "embedding", "observer", "reflector", "moderation",
+  "chat", "embedding", "observer", "reflector", "moderation", "judge",
 ];
 
 /** Filter order and labels. */
@@ -34,6 +36,7 @@ export const OPERATION_LABELS: Record<MetricsOperation, string> = {
   observer: "Observer",
   reflector: "Reflector",
   moderation: "Moderation",
+  judge: "Judge",
 };
 
 /** A breakdown row's name for an operation key (unknown keys as they are). */
@@ -67,6 +70,23 @@ export interface MetricValues {
   /** Summary periods only (RM.19; absent from older APIs): the usage of each operation (they sum
    * to the totals) and of `memory`. */
   operations?: Partial<Record<MetricsOperation, UsageValues>>;
+  /** Summary periods only (AC.17; absent from older APIs): requests not answered by the primary model. */
+  fallback?: FallbackValues;
+}
+
+/**
+ * AC.17 (definition from the review of 2026-11-15): out of every agent chat request in the period
+ * (`chat_requests`), `fell_back` were answered by a model other than the run's primary, and
+ * `exhausted_runs` failed because every model of the chain failed. `fallback_rate` =
+ * (fell_back + exhausted_runs) / (chat_requests + exhausted_runs), null when both are 0.
+ * `billed_failed_attempts`: failed attempts the provider billed (one that raised has no usage row).
+ */
+export interface FallbackValues {
+  chat_requests: number;
+  fell_back: number;
+  billed_failed_attempts: number;
+  exhausted_runs: number;
+  fallback_rate: number | null;
 }
 
 /** The usage half of the metrics (per operation in a summary). */
@@ -297,7 +317,7 @@ export const DEFAULT_PAGE_STATE: MetricsPageState = {
 
 type ParamReader = { get(name: string): string | null };
 
-const KINDS = new Set<string>(["agent", "tool", "workflow", "kb_ingest"]);
+const KINDS = new Set<string>(["agent", "tool", "workflow", "kb_ingest", "eval"]);
 const OPERATIONS = new Set<string>(Object.keys(OPERATION_LABELS));
 const RANGES = new Set<string>(["24h", "7d", "30d", "90d", "custom"]);
 

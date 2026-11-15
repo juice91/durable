@@ -14,7 +14,7 @@ inside DBOS's DBOSMaxStepRetriesExceeded) so a wrapped failure is classified by 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -406,8 +406,61 @@ def _data(code: str, exc: BaseException) -> dict[str, Any] | None:
     if code == "run_budget_exceeded":
         return budget_data(exc)
     if code == "fallback_exhausted":
-        return {"cause": _first_member_code(exc)}
+        data: dict[str, Any] = {"cause": _first_member_code(exc)}
+        described = getattr(exc, "eap_fallback", None)
+        if isinstance(described, dict):  # describe_fallback_exhausted (AC.17): no text, only ids
+            data.update(described)
+        return data
     return None
+
+
+def describe_fallback_exhausted(exc: BaseException, chain: Sequence[str], model_request: int) -> None:
+    """AC.17: give a FallbackExceptionGroup (every model of the chain failed on model request n) the
+    run_failed fields the trace shows as attempt spans: `{model_request, failed_attempts: [{model_id,
+    outcome, error_type, http_status?, timestamp?, duration_ms?}]}`. Built from structured fields only
+    (the exception class, its HTTP status, the attempt's timing), never the provider's error text, as
+    pricing.fallback_usage does for a request that fell back. Uses the group's `attempts` when it
+    carries them (they have timing), else its member exceptions; a group nested in another exception
+    is found by its chain. Pure and called in workflow code on the recorded exception."""
+    from eap_worker.pricing import _error_type, _http_status, attempt_model_id
+
+    group = next((c for c in _chain(exc) if type(c).__name__ == FallbackExceptionGroup.__name__), None)
+    if group is None or len(chain) < 2:
+        return
+    attempts = list(getattr(group, "attempts", None) or ())
+    entries: list[dict[str, Any]] = []
+    if attempts:
+        for k, attempt in enumerate(attempts):
+            error = getattr(attempt, "error", None)
+            entry: dict[str, Any] = {
+                "model_id": attempt_model_id(chain, k, getattr(attempt, "model_name", None)),
+                "outcome": getattr(attempt, "outcome", "error"),
+                "error_type": _error_type(error),
+            }
+            status = _http_status(error)
+            if status is not None:
+                entry["http_status"] = status
+            started = getattr(attempt, "timestamp", None)
+            took = getattr(attempt, "duration", None)
+            if started is not None and took is not None:
+                entry["timestamp"] = started.isoformat()
+                entry["duration_ms"] = int(took.total_seconds() * 1000)
+            entries.append(entry)
+    else:
+        for k, member in enumerate(getattr(group, "exceptions", ()) or ()):
+            entry = {
+                "model_id": attempt_model_id(chain, k, getattr(member, "model_name", None)),
+                "outcome": "error",
+                "error_type": exception_type(member),
+            }
+            status = getattr(member, "status_code", None)
+            if isinstance(status, int) and not isinstance(status, bool):
+                entry["http_status"] = status
+            entries.append(entry)
+    try:
+        group.eap_fallback = {"model_request": int(model_request), "failed_attempts": entries}  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover - exception classes accept attributes
+        pass
 
 
 def _first_member_code(exc: BaseException) -> str:
@@ -445,6 +498,7 @@ def _workflow_failure(exc: BaseException) -> RunFailure:
 
 
 __all__ = [
+    "describe_fallback_exhausted",
     "EVAL_FAILURES",
     "EVAL_SUITE_INVALID_MESSAGE",
     "EvalRunError",

@@ -21,7 +21,7 @@ export interface UsageByOperationProps {
 
 /**
  * RM.19: requests, tokens and cost per operation (chat, embedding, observer, reflector,
- * moderation; they sum to the KPI totals) from the summary's `operations` split, so it always
+ * moderation and, AC.17, judge; they sum to the KPI totals) from the summary's `operations` split, so it always
  * matches the Overview. A row's name narrows the Metrics page to that operation. Nothing when the
  * summary has no split (an API before RM.19).
  */
@@ -44,7 +44,8 @@ export function UsageByOperation({ summary, state, headingLevel = 2 }: UsageByOp
         <Heading id="usage-by-operation-title" className="text-sm font-semibold text-foreground">Usage by operation</Heading>
         <p className="mt-1 text-xs text-muted-foreground">
           Embedding covers knowledge base ingest, retrieval, semantic recall and indexing; observer and reflector are
-          observational memory. Select an operation to narrow these metrics to it.
+          observational memory; judge is the LLM judge of test suite runs. Select an operation to narrow these metrics
+          to it.
         </p>
       </div>
       <div className="overflow-x-auto">

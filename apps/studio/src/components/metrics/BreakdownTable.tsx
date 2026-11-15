@@ -119,6 +119,12 @@ export function BreakdownTable({
         </div>
       </div>
       {note && <p className="px-4 pb-2 text-xs text-muted-foreground">{note}</p>}
+      {by === "model" && !note ? (
+        // AC.17: every usage row names the model that answered (or, for a failed fallback attempt, failed).
+        <p className="px-4 pb-2 text-xs text-muted-foreground" data-testid="breakdown-model-note">
+          By the model that answered each request; failed fallback attempts count for the model that failed.
+        </p>
+      ) : null}
       {error ? (
         <p role="alert" className="mx-4 mb-4 rounded-md border border-destructive bg-destructive/10 p-3 text-sm text-foreground">{error}</p>
       ) : loading && !items ? (

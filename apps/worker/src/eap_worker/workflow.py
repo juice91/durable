@@ -196,7 +196,9 @@ the model that answered: the run's model without a chain); a request on a chain 
 `requested_model_id`, `fallback_index` and
 `failed_attempts: [{model_id, outcome, error_type}]`; its usage row is the ANSWERING model's, and
 failed attempts that reported usage get rows `model:{n}:failed:{k}` in the same transaction. Every
-model failing ends the run `fallback_exhausted` (`cause`: the first failure's code). A failed
+model failing ends the run `fallback_exhausted` (`cause`: the first failure's code; AC.17 adds
+`model_request` and `failed_attempts: [{model_id, outcome, error_type, http_status?, timestamp?,
+duration_ms?}]`, no text, built in workflow code from the recorded exception: no new step). A failed
 attempt's error text is reduced to its type and HTTP status (pricing.safe_attempt_error) in every
 event and in runs.messages; spans keep only the type (instrumentation without content, plus the
 redacting exporter). The one place it stays verbatim is the model step's own DBOS checkpoint in
@@ -296,6 +298,7 @@ from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import (
     SCHEMA_INVALID_AFTER_PROCESSING,
+    describe_fallback_exhausted,
     describe_usage_limit,
     token_limit_breach,
     InputBlocked,
@@ -502,7 +505,9 @@ async def start_run_step(
         # running, clearing an ENQUEUE_FAILED_ERROR in the same statement: the API marks a run failed
         # when its enqueue raised, yet DBOS may have accepted it, and then this workflow runs it.
         # A turn that a later turn has overtaken meanwhile stays failed and is not run (False).
-        started = rt.run_store.mark_running(tenant_id, UUID(run_id))
+        # AC.17 review: a child run (workflow step, eval case) has no recorded model; record the spec's,
+        # which is what effective_model_id uses without one (so the run behaves the same).
+        started = rt.run_store.mark_running(tenant_id, UUID(run_id), model_id=_spec_model_id(spec_json))
         if started:
             rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
@@ -1197,6 +1202,9 @@ async def _drive_agent(
         if isinstance(exc, UsageLimitExceeded) and active_run is not None:
             # AC.5: name the limit from the run's own counters, not from the message text.
             describe_usage_limit(exc, spec.limits, active_run.usage)
+        if len(model_chain) > 1:
+            # AC.17: the exhausted request and its attempts (ids only) for run_failed and the trace.
+            describe_fallback_exhausted(exc, model_chain, n)
         if spec.output is not None:
             if isinstance(exc, UnexpectedModelBehavior) and "output retries" in str(exc):
                 # Retries exhausted: the last candidate's error paths only, never its values.
