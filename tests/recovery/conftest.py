@@ -612,6 +612,9 @@ class Harness:
                 for table in (
                     "memory_observations", "message_embeddings", "memory_forget_watermarks",
                     "working_memories", "knowledge_bases",
+                    # Agent capabilities (AC.18): eval suites cascade to their cases and results;
+                    # pending_approvals cascade from runs.
+                    "eval_suites",
                 ):
                     if conn.execute(text("SELECT to_regclass(:t)"), {"t": table}).scalar():
                         conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": self.tenant})
