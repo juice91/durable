@@ -47,6 +47,25 @@ from eap_schemas.processors import (
     ProcessorSpec,
 )
 from eap_schemas.request_context import MAX_CONTEXT_FIELDS, ContextField
+from eap_schemas.workflow_scope import (
+    LOOP_ERROR_CODES,
+    LOOP_ERROR_MESSAGES,
+    LOOP_WORKFLOW_FAILURES,
+    Scope,
+    ScopeFrame,
+    ScopeInvalid,
+    instance_token,
+    iteration_event_key,
+    iteration_workflow_id,
+    scoped_judge_key,
+    scope_string,
+    scoped_child_run_id,
+    scoped_event_key,
+    scoped_guard_key,
+    scoped_parent_step_id,
+    scoped_tool_call_id,
+    status_for_end,
+)
 from eap_schemas.tools import (
     RESERVED_TOOL_NAMES,
     RETRIEVE_TOOL_NAME,
@@ -102,6 +121,24 @@ __all__ = (
     "ToolDeclaration",
     "canonical_spec_hash",
     "mcp_tool_name",
+    # Workflow loops (eap_schemas.workflow_scope, LP.2)
+    "LOOP_ERROR_CODES",
+    "LOOP_ERROR_MESSAGES",
+    "LOOP_WORKFLOW_FAILURES",
+    "Scope",
+    "ScopeFrame",
+    "ScopeInvalid",
+    "instance_token",
+    "iteration_event_key",
+    "iteration_workflow_id",
+    "scoped_judge_key",
+    "scope_string",
+    "scoped_child_run_id",
+    "scoped_event_key",
+    "scoped_guard_key",
+    "scoped_parent_step_id",
+    "scoped_tool_call_id",
+    "status_for_end",
 )
 
 
@@ -433,6 +470,12 @@ RunEventType = Literal[
     "tool_denied",  # API (or the worker in eval runs, decided_by "eval"), same key
     "tool_approval_timed_out",  # written by the worker on the deadline, same key (first writer wins)
     "eval_case_result",  # eval runs, key `case:{case_id}`: status, counts, cost; no text
+    # Workflow loops milestone (eap_schemas.workflow_scope). Data carries step and loop ids, the
+    # scope `[{loop, index}]`, statuses and codes; never item or output values.
+    "loop_iteration_started",  # key `loop:{S}:started`: {step_id, scope, index}
+    "loop_iteration_completed",  # key `loop:{S}:completed`: {step_id, scope, index, ...}
+    "loop_iteration_failed",  # key `loop:{S}:failed`: {step_id, scope, index, error_code, error}
+    "cancel_requested",  # written by the API (POST /runs/{id}/cancel), key `cancel`: {requested_by}
 ]
 
 
