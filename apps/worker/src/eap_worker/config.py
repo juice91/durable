@@ -134,3 +134,17 @@ def embedding_endpoint_problem(settings: WorkerSettings) -> str | None:
 def kb_ingest_concurrency() -> int:
     """At most this many eap.kb_ingest runs at once per worker process (EAP_KB_INGEST_CONCURRENCY, default 2)."""
     return _positive_int(KB_INGEST_CONCURRENCY_ENV, DEFAULT_KB_INGEST_CONCURRENCY)
+
+
+# RAG P1 (P1.A3): the extraction sandbox (eap_worker.extract_sandbox). Its limits are the shared
+# EAP_KB_* extraction settings (eap_knowledge.ExtractLimits: CPU seconds, memory MB, concurrency,
+# PDF pages, the YAML/JSON cap), read here once per call so tests can change them.
+# The child's JSON result is read up to this many bytes; more kills it (extract_output_too_large).
+EXTRACT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+def extract_limits():  # -> eap_knowledge.ExtractLimits
+    """The extraction limits from the environment (ValueError naming a bad variable)."""
+    from eap_knowledge import ExtractLimits
+
+    return ExtractLimits.from_env(os.environ)

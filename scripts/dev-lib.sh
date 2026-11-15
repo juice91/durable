@@ -401,7 +401,7 @@ start_standalone_service() {
             ;;
         api)
             start_process_group "$service" "$log_file" "$REPO_ROOT/apps/api" \
-                uv run --with uvicorn uvicorn eap_api.app:create_app --factory --host 127.0.0.1 --port 8000
+                uv run --with uvicorn uvicorn eap_api.app:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log
             ;;
         studio)
             start_process_group "$service" "$log_file" "$REPO_ROOT/apps/studio" pnpm dev

@@ -1,5 +1,6 @@
 """Shared test fixtures."""
 
+import sys
 import uuid
 
 import pytest
@@ -82,3 +83,24 @@ def publish_version(client, agent_id: str, tenant: str, user_id: str) -> dict:
     )
     assert response.status_code == 201
     return response.json()
+
+
+# RAG P1: the API never imports a document parser (uploads are parsed only in the worker's sandbox
+# child). Checked once the session ends, so any import an API test triggered counts. Only for a
+# session of API tests alone: a mixed run also imports the worker and its parsers in this process.
+PARSER_MODULES = (
+    "docutils", "pypdf", "pypdfium2", "PIL", "eap_knowledge.sandbox", "eap_knowledge.formats.rst",
+    "eap_knowledge.formats.structured", "eap_knowledge.formats.doxygen", "eap_knowledge.formats.pdf",
+)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    items = getattr(session, "items", None) or []
+    if not items or any("api_tests" not in str(item.path) for item in items):
+        return
+    loaded = [name for name in PARSER_MODULES if name in sys.modules]
+    if loaded:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(f"API test session imported document parsers: {', '.join(loaded)}", red=True)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

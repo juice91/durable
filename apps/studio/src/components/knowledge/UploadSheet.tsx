@@ -15,14 +15,16 @@ import {
   documentPutProblem,
   parseMetadata,
   putDocument,
-  readFileAsText,
+  readUploadContent,
   UPLOAD_ACCEPT,
+  UPLOAD_EXTENSIONS_TEXT,
+  uploadCapsText,
   type DocumentPutResult,
   type MetadataValue,
 } from "@/lib/knowledge";
 import { alertClass, fieldClass, hintClass, labelClass } from "./knowledgeUi";
 
-type ItemStatus = "refused" | "ready" | "uploading" | "started" | "unchanged" | "failed";
+type ItemStatus = "refused" | "ready" | "reading" | "uploading" | "started" | "unchanged" | "failed";
 
 interface UploadItem {
   id: number;
@@ -31,6 +33,8 @@ interface UploadItem {
   key: string | null;
   title: string;
   mimeType: string | null;
+  /** Sent as `content_base64` (PDF). */
+  binary: boolean;
   status: ItemStatus;
   message: string | null;
 }
@@ -38,6 +42,7 @@ interface UploadItem {
 const STATUS_LABEL: Record<ItemStatus, string> = {
   refused: "Not supported",
   ready: "Ready",
+  reading: "Reading file…",
   uploading: "Uploading…",
   started: "Ingest started",
   unchanged: "Unchanged",
@@ -47,16 +52,21 @@ const STATUS_LABEL: Record<ItemStatus, string> = {
 const STATUS_VARIANT: Record<ItemStatus, BadgeProps["variant"]> = {
   refused: "destructive",
   ready: "neutral",
+  reading: "info",
   uploading: "info",
   started: "success",
   unchanged: "neutral",
   failed: "destructive",
 };
 
+// The text formats (a PDF is uploaded as a file only).
 const PASTE_FORMATS = [
   { value: "text/markdown", label: "Markdown" },
   { value: "text/plain", label: "Plain text" },
   { value: "text/html", label: "HTML" },
+  { value: "text/x-rst", label: "reStructuredText" },
+  { value: "application/yaml", label: "YAML" },
+  { value: "application/json", label: "JSON" },
 ] as const;
 
 let itemCounter = 0;
@@ -71,9 +81,11 @@ export interface UploadSheetProps {
 }
 
 /**
- * Upload documents: a drop zone (and file picker) for several .md, .txt or .html files at once, or
- * pasted text. Files are read as UTF-8 in the browser and sent one by one (PUT …/documents/{key});
- * the document key is the file name. Unsupported files are refused here with the reason.
+ * Upload documents: a drop zone (and file picker) for several files at once (Markdown, text, HTML,
+ * reStructuredText, PDF, YAML, JSON), or pasted text. Text files are read as UTF-8 and PDFs as
+ * base64 in the browser, and sent one by one (PUT …/documents/{key}); the document key is the file
+ * name. Unsupported or oversized files (per-type caps) are refused here with the reason; the API's
+ * own refusal (413, 415 "unsupported_content", 422) is shown on the file's row.
  */
 export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: UploadSheetProps) {
   const id = useId();
@@ -128,8 +140,8 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
       const check = checkUploadFile(file);
       itemCounter += 1;
       return check.ok
-        ? { id: itemCounter, name: file.name, file, key: check.key, title: check.title, mimeType: check.mimeType, status: "ready", message: null }
-        : { id: itemCounter, name: file.name, file: null, key: null, title: file.name, mimeType: null, status: "refused", message: check.reason };
+        ? { id: itemCounter, name: file.name, file, key: check.key, title: check.title, mimeType: check.mimeType, binary: check.binary, status: "ready", message: null }
+        : { id: itemCounter, name: file.name, file: null, key: null, title: file.name, mimeType: null, binary: false, status: "refused", message: check.reason };
     });
     setItems((current) => [...current, ...added]);
   };
@@ -160,11 +172,13 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
         if (signal.aborted) return;
         if (item.status !== "ready" && item.status !== "failed") continue;
         if (!item.file || !item.key || !item.mimeType) continue;
-        update(item.id, { status: "uploading", message: null });
+        // "Reading file…" while the browser reads (and, for a PDF, base64-encodes) it, then "Uploading…".
+        update(item.id, { status: "reading", message: null });
         try {
-          const content = await readFileAsText(item.file);
+          const content = await readUploadContent(item.file, { binary: item.binary });
           if (signal.aborted) return;
-          const result = await send(item.key, { title: item.title, content, mime_type: item.mimeType, metadata: metadata.value }, signal);
+          update(item.id, { status: "uploading" });
+          const result = await send(item.key, { title: item.title, ...content, mime_type: item.mimeType, metadata: metadata.value }, signal);
           update(item.id, result.unchanged ? { status: "unchanged", message: "Same content as the stored version; nothing to do." } : { status: "started", message: null });
         } catch (reason: unknown) {
           if (signal.aborted || isAbort(reason)) return;
@@ -221,7 +235,7 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
     <Sheet open={open} onOpenChange={(next) => { if (!busy) onOpenChange(next); }}>
       {open ? (
         <SheetContent size="md" data-testid="knowledge-upload-sheet">
-          <SheetHeader title="Upload documents" description={`To ${kbName}. Markdown, text or HTML, read as UTF-8; re-uploading a key replaces that document.`} />
+          <SheetHeader title="Upload documents" description={`To ${kbName}. Markdown, text, HTML, reStructuredText, PDF, YAML or JSON; re-uploading a key replaces that document.`} />
           <SheetBody>
             <Tabs defaultValue="files" className="flex min-w-0 flex-col gap-4">
               <TabsList aria-label="Upload source">
@@ -249,7 +263,8 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
                   )}
                 >
                   <Upload className="size-6 text-muted-foreground" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                  <p className="text-body text-foreground">Drop .md, .txt or .html files here</p>
+                  <p className="text-body text-foreground">Drop files here</p>
+                  <p className={hintClass} data-testid="knowledge-upload-formats">{UPLOAD_EXTENSIONS_TEXT}. {uploadCapsText()}</p>
                   <input
                     ref={inputRef}
                     id={`${id}-files`}

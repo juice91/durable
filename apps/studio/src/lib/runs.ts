@@ -108,7 +108,10 @@ export interface RunEvent {
     // reason, categories; never the processed or matched text.
     | "processor_result"
     // RAG and memory (RM.10 to RM.14; rows in RM.19): counts, ids, model and cost, never text.
-    | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed";
+    | "embedding" | "ingest_progress" | "memory_updated" | "memory_observe_failed"
+    // P1.C: the reflector's input was capped (counts only), and the end of a completed turn's
+    // post-turn memory steps ({observe, index} status words).
+    | "memory_observe_trimmed" | "post_turn_done";
   data: RunEventData;
   ts: string;
 }

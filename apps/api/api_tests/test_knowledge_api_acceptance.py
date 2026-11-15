@@ -187,7 +187,7 @@ def test_unchanged_reupload_noop_then_changes_make_versions(pg, tenant_of, fake_
         run_id = r.json()["run_id"]
         assert options["workflow_id"] == run_id and options["workflow_name"] == "eap.kb_ingest"
         doc_id = r.json()["document"]["id"]
-        want = json.dumps({"doc_version": n, "document_id": doc_id}, separators=(",", ":"))
+        want = json.dumps({"doc_version": n, "document_id": doc_id, "embed_split": True}, separators=(",", ":"))  # P1.C5
         assert args == (run_id, tenant, kb["id"], want)
     assert len(_runs(client, h)) == 4 and len({r["run_id"] for r in _runs(client, h)}) == 4
 
@@ -314,7 +314,7 @@ def test_reindex_retry_after_failure_rules(pg, tenant_of, fake_dbos, kb_cleanup)
     assert retry.status_code == 202 and retry.json()["run_id"] == rid != first
     assert retry.json()["knowledge_base"]["pending_generation"] == 2  # same generation, not a new one
     options, args = fake_dbos.calls[-1]
-    assert options["workflow_id"] == rid and args == (rid, tenant, kb["id"], '{"reindex":2}')
+    assert options["workflow_id"] == rid and args == (rid, tenant, kb["id"], '{"embed_split":true,"reindex":2}')
     assert len({r["run_id"] for r in _runs(client, h)}) == 2
     # Cancel after the failed state also clears it.
     assert client.delete(url, headers=h).status_code == 204

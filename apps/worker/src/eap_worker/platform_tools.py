@@ -78,7 +78,7 @@ from eap_observability import log_failure
 from eap_run_store import KnowledgeStore, MemoryStore, SearchHit, SearchResult
 from eap_runtime import RunDeps, ToolRegistry, UnknownToolError
 from eap_schemas import AgentSpec, EmbeddingDimensionMismatch, EmbeddingModelNotAllowed, KnowledgeBaseNotFound
-from eap_schemas.knowledge import MAX_RETRIEVE_RESULT_BYTES
+from eap_schemas.knowledge import MAX_RETRIEVE_RESULT_BYTES, RESERVED_METADATA_KEY
 from eap_schemas.tools import (
     HIDDEN_TOOL_DECLARATIONS,
     KNOWLEDGE_SEARCH_DECLARATION,
@@ -405,10 +405,28 @@ _LINE_BREAKS = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 SOURCE_NUMBERING = "run"
 
 
+def source_pages(hit: SearchHit) -> dict[str, int]:
+    """`page` and `page_end` of a PDF section, from its chunk's `metadata.eap` (RAG P1): each only when
+    it is a positive integer, and `page_end` only when it is after `page`. Empty for other chunks, so
+    their source shape is unchanged."""
+    eap = hit.metadata.get(RESERVED_METADATA_KEY) if isinstance(hit.metadata, dict) else None
+    if not isinstance(eap, dict):
+        return {}
+    page, end = eap.get("page"), eap.get("page_end")
+
+    def positive(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+    if not positive(page):
+        return {}
+    return {"page": page, "page_end": end} if positive(end) and end > page else {"page": page}
+
+
 def source_record(n: int, hit: SearchHit, *, run_numbered: bool = True) -> dict[str, Any]:
     """The structured source of `[n]` (tool_result event `sources`; no section text). `n` is the
     number the model sees, unique across the run (`numbering: "run"`; left out for the search
-    tester's single search, `run_numbered=False`)."""
+    tester's single search, `run_numbered=False`). A PDF section adds `page` (and `page_end` when it
+    spans pages), from `source_pages`."""
     record: dict[str, Any] = {"n": n}
     if run_numbered:
         record["numbering"] = SOURCE_NUMBERING
@@ -422,7 +440,7 @@ def source_record(n: int, hit: SearchHit, *, run_numbered: bool = True) -> dict[
         "chunk_id": hit.chunk_id,
         "doc_version": hit.doc_version,
         "score": round(hit.score, 6),
-    }
+    } | source_pages(hit)
 
 
 def format_results(

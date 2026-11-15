@@ -89,12 +89,13 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
 def validate_startup(settings: WorkerSettings) -> None:
     """Fail at start (before DBOS launches or recovers anything) on settings that would otherwise
     first fail inside a step: the ingest caps, the ingest queue's concurrency, the exact-search
-    fallback cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
+    fallback cap, the reflector input cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
     from eap_run_store.knowledge import check_exact_search_max_chunks
 
     from eap_worker.config import embedding_endpoint_problem
 
     _kb_ingest.validate_settings()
+    _observational.max_active_observation_tokens()
     check_exact_search_max_chunks()
     kb_ingest_concurrency()
     _retention.RetentionConfig.from_env()

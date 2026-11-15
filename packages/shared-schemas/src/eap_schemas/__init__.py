@@ -337,6 +337,15 @@ RunEventType = Literal[
     "embedding",  # one per embedding call, key = request key: {model_id, inputs, input_tokens, cost_usd}
     "memory_observe_failed",  # the post-turn observer failed; the run status is unchanged
     "memory_updated",  # working memory or observations changed (Studio "memory updating")
+    # The reflector's input was capped (EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS): the oldest active
+    # observations were left out of it. {dropped, kept_tokens, ...}: counts only, key `memory:reflect:{turn}:trimmed`.
+    "memory_observe_trimmed",
+    # The post-turn memory steps of a completed turn have reported, key `memory:post_turn:{turn}`:
+    # {observe: created|skipped|failed|off, index: done|skipped|failed|off}. No text.
+    "post_turn_done",
+    # RAG P1: a worker-extracted document version was extracted and chunked (eap.kb_extract_chunk),
+    # key `extract:{doc_version}`, data `eap_schemas.knowledge.ExtractedEventData`. No text.
+    "extracted",
 ]
 
 

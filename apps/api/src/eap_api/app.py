@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 
-from eap_observability import instrument_fastapi, setup_logging, setup_telemetry
+from eap_observability import install_access_logging, instrument_fastapi, setup_logging, setup_telemetry
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -163,5 +163,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.delta_source = PostgresDeltaSource(conninfo)
 
     instrument_fastapi(app)  # the request server span; no-op when telemetry is off
+    # One access line per request with the route template, never a raw path parameter (resource ids
+    # may be emails) nor a query string (P1.C2). uvicorn's own access log is off (--no-access-log).
+    install_access_logging(app)
 
     return app

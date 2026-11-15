@@ -49,6 +49,9 @@ result, exactly what the `tool_call` span showed before (the model's query and t
   zero length, under its tool call: scope, format, version and the changed keys (schema names).
 - `ingest`: the `chunked` and `finalized` phases of a kb_ingest run (zero length): generation,
   embedded, total, pending tokens, document id and version.
+- No span: `post_turn_done` (`memory:post_turn:{turn}`, P1.C1) is a marker on its run span,
+  attribute `post_turn` = {observe, index, done_at}; `memory_observe_trimmed` (P1.C6, the reflector
+  input cap) is skipped. Neither is the start of the next span.
 
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
@@ -384,6 +387,9 @@ OBSERVER_ATTRIBUTES = (
     "stage", "covers_from_turn", "covers_to_turn", "approx_tokens", "notes", "redacted", "prompt_version",
     "superseded", "error_code",
 )
+# `post_turn_done` (P1.C1): shown as the run span's `post_turn` attribute (no span of its own).
+POST_TURN_ATTRIBUTES = ("observe", "index")
+_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed"})
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
@@ -498,6 +504,14 @@ class _Builder:
                 attributes["failed_step_id"] = data.get("step_id")
         if rd.events_truncated:
             attributes["events_truncated"] = True
+        post_turn = next((e for e in events if e["type"] == "post_turn_done"), None)
+        if post_turn is not None:
+            # P1.C1: a marker on the run span, not a span: the post-turn memory steps have reported.
+            pdata = post_turn.get("data") or {}
+            attributes["post_turn"] = {
+                **{k: pdata[k] for k in POST_TURN_ATTRIBUTES if isinstance(pdata.get(k), str)},
+                "done_at": ts.isoformat() if hasattr(ts := post_turn["ts"], "isoformat") else str(ts),
+            }
         run_input: Any = run.get("input")
         if start_event is not None and "input" in (start_event.get("data") or {}):
             run_input = start_event["data"]["input"]
@@ -590,6 +604,10 @@ class _Builder:
                 self._memory(rd, event, previous, run_span)
             elif etype == "step_started":
                 self._step(rd, event, by_key, run_span, open_status)
+            # Markers without a span (P1.C1 `post_turn_done`, P1.C6 `memory_observe_trimmed`, written
+            # right before the reflection's own event) never start the next span.
+            if etype in _MARKER_EVENTS:
+                continue
             # An output processor checks a response before its model:{n}:final is written: the model
             # request's span must not start at it (it would collapse to the checks' duration).
             if not (etype == "processor_result" and key.startswith("processor:output:")):

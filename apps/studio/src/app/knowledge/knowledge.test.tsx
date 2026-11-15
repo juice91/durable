@@ -249,7 +249,7 @@ describe("/knowledge/:id", () => {
       new File(["# Guide\n\nHello"], "guide.md", { type: "text/markdown" }),
       new File(["<h1>Page</h1>"], "page.html", { type: "text/html" }),
       new File(["same"], "same.md"),
-      new File(["%PDF"], "manual.pdf", { type: "application/pdf" }),
+      new File(["PK"], "manual.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
     ];
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), { dataTransfer: { files } });
     expect(within(sheet).getByTestId("knowledge-upload-refused")).toHaveTextContent(/Unsupported file type/);
@@ -544,7 +544,7 @@ describe("/knowledge/:id sheets (milestone browser check, item 3)", () => {
     fireEvent.click(screen.getByTestId("knowledge-upload"));
     let sheet = await screen.findByTestId("knowledge-upload-sheet");
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), {
-      dataTransfer: { files: [new File(["# Guide"], "guide.md", { type: "text/markdown" }), new File(["%PDF"], "x.pdf", { type: "application/pdf" })] },
+      dataTransfer: { files: [new File(["# Guide"], "guide.md", { type: "text/markdown" }), new File(["PK"], "x.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })] },
     });
     fireEvent.change(within(sheet).getByTestId("knowledge-upload-metadata"), { target: { value: "lang: en" } });
     fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));

@@ -94,7 +94,8 @@ value stops the worker instead of failing each run.
 | `EAP_RECALL_TIMEOUT_S` | 8 | Deadline of each pre-turn recall query attempt |
 | `EAP_KB_INGEST_CONCURRENCY` | 2 | `eap.kb_ingest` runs at once per worker, on the `eap-kb-ingest` queue |
 | `EAP_KB_MAX_INGEST_TOKENS` | 2000000 | Per-run budget of un-cached approximate embedding tokens (`ingest_budget_exceeded` before any provider call) |
-| `EAP_KB_EMBED_BATCH_CHUNKS` | 64 | Un-embedded chunks per `eap.kb_embed_batch` step |
+| `EAP_KB_EMBED_BATCH_CHUNKS` | 64 (max 128) | Un-embedded chunks per batch (`eap.kb_embed_call` + `eap.kb_embed_write`, or `eap.kb_embed_batch` for runs enqueued before P1.C5); the cap bounds the call step's checkpoint of float32 vectors (128 x 1536 x 4 bytes) |
+| `EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS` | 32000 (min 1000) | Reflector input cap (P1.C6), never below 2 x the spec's `reflect_after_tokens` nor `reflect_after_tokens` + the largest active row, so a normal reflection is never cut. Past it (a backlog left by failing reflections), only the newest active observations within the cap are sent, and the reflection **removes the older ones from the agent's memory** (they stay in the table as superseded rows), with one `memory_observe_trimmed` event (counts only). Lowering it discards memory content sooner. A bad value stops the worker at start |
 | `EAP_MEMORY_RETENTION_DAYS` | unset | Retention in days (1 to 36500) of message embeddings and observations (by `created_at`) and conversation working memory (by `updated_at`); `off` removes the shared schedule. Unset on this worker: it schedules nothing and leaves another worker's schedule alone |
 | `EAP_MEMORY_RETENTION_EMBEDDING_DAYS`, `_OBSERVATION_DAYS`, `_WORKING_MEMORY_DAYS` | `EAP_MEMORY_RETENTION_DAYS` | Per-kind override: days (1 to 36500) or `keep` |
 | `EAP_MEMORY_RETENTION_RESOURCE_WORKING_MEMORY_DAYS` | unset (kept) | Opt-in retention of resource working memory, by `updated_at` |
@@ -170,3 +171,97 @@ Deploy the API and the worker together, in this order:
    `EAP_EMBEDDING_QUERY_INSTRUCTIONS`, `EAP_KB_*`, the `EAP_LITELLM_EMBEDDING_*` pair, and
    `EAP_AUDIT_HASH_SALT` (set it per deployment so the forget audit log's resource hash cannot be
    looked up offline).
+
+### RAG P1.C hardening (deploy note)
+
+Drain in-flight runs before deploying (step 1 above still applies). What changes in the recorded
+step layouts:
+
+- **`post_turn_done` (P1.C1).** A completed conversation turn of a spec with
+  `memory.semantic_recall` and/or `memory.observational` records one more `eap.append_event`
+  (`memory:post_turn:{turn}`, `post_turn_done` {observe, index}) after its last post-turn step
+  (`eap.memory_index`, or the observer's `DBOS.getResult`). It is appended after the recorded
+  prefix, so an older run recovers, but drain anyway. Specs without those features are unchanged.
+- **Reflection growth guard (P1.C6).** No new step. `eap.memory_observe` and
+  `eap.memory_observe_write` now return ids and counts only (no rendered prompt); the observer and
+  reflector prompts are rendered inside the model-request step. A plan recorded before the deploy
+  still carries its prompt and is used as is, so a pending `eap.memory_observe_run` recovers.
+  `eap.memory_reflect` may append a `memory_observe_trimmed` event
+  (`EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS`): only when failed reflections left a backlog past
+  the cap (never below 2 x `reflect_after_tokens`), the oldest active observations are left out of
+  the reflector's input AND superseded by the reflection, so they leave the agent's memory (the
+  rows stay, with `superseded_by`). A render that finds its rows gone answers without a provider
+  call (`memory_observe_failed` `observer_input_changed`).
+- **Embed split (P1.C5).** Ingest and reindex runs created by the new API carry
+  `"embed_split": true` in their input and embed each batch with `eap.kb_embed_call` then
+  `eap.kb_embed_write` (instead of `eap.kb_embed_batch`), so a deadlock retry of the write never
+  calls the provider again. Runs created before (no flag) keep `eap.kb_embed_batch` and recover
+  unchanged. Do not mix versions: an old worker ignores the flag and records
+  `eap.kb_embed_batch`, which a new worker could not replay for a flagged run, so drain and
+  switch the API and workers together.
+- **Access logs (P1.C2).** Run the API with `--no-access-log` (scripts/dev-lib.sh does): the API
+  logs its own access line (`eap.access`) with the route template instead of the raw path, and
+  never a query string.
+
+### RAG P1.A uploads (deploy note)
+
+- **Pre-deploy check: the reserved metadata key `eap` (P1.A1/P1.A4).** The new code rejects a
+  document metadata key or an agent's knowledge base filter key named `eap` on write (upload, agent
+  save and publish, 422) and also when stored rows are read back, so check that no stored row uses
+  it before deploying. Every count must be 0 (`kb_chunks` only before the first P1 deploy: after it,
+  worker-extracted chunks record their extractor there):
+
+  ```sql
+  SELECT count(*) FROM kb_documents WHERE metadata ? 'eap';
+  SELECT count(*) FROM kb_chunks WHERE metadata ? 'eap';
+  SELECT count(*) FROM agent_versions v CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(v.spec -> 'knowledge_bases') = 'array' THEN v.spec -> 'knowledge_bases' ELSE '[]'::jsonb END) r WHERE r -> 'filter' ? 'eap';
+  SELECT count(*) FROM agents a CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(a.draft_spec -> 'knowledge_bases') = 'array' THEN a.draft_spec -> 'knowledge_bases' ELSE '[]'::jsonb END) r WHERE r -> 'filter' ? 'eap';
+  ```
+- **New knowledge bases use chunker v2** (`chunking.chunker_version` 2, `min_tokens` 64 unless
+  given); existing ones keep their stored config until `POST /knowledge-bases/{id}/reextract
+  {"chunker_version": 2}`. The ingest run input is unchanged (`document_id`, `doc_version`,
+  `embed_split`): the worker picks `eap.kb_extract_chunk` from the document's MIME type and the
+  knowledge base's `chunking.extract`.
+- **Uploads.** MIME types are stored canonical (`text/x-markdown` → `text/markdown`), so the first
+  re-upload of an older document stored under an alias or with parameters makes one new version.
+  The upload route's body guard grows to `max(EAP_KB_MAX_DOCUMENT_BYTES, ceil(EAP_KB_MAX_BINARY_BYTES
+  × 4/3) + 64 KiB)` (about 33.4 MiB by default) for base64 PDFs; text uploads keep their body cap.
+  `EAP_KB_BINARY_UPLOAD_CONCURRENCY` (default 4) bounds the binary uploads one API process decodes
+  at once.
+- **Changed 422 text for HTML that cannot be extracted.** The detail used to be
+  `document extraction failed: <reason>`; it is now the fixed message plus the code and reason,
+  e.g. `The document could not be extracted. (extract_failed: too_many_attributes)`. Clients
+  matching the old text must switch to the new one (the status code is unchanged).
+
+### RAG P1.A3 extraction sandbox (deploy note)
+
+- Worker-extracted documents (rst, PDF, YAML, JSON, Doxygen Markdown) are parsed in a child process,
+  `python -I -B -m eap_knowledge.sandbox` (`eap_worker/extract_sandbox.py`): empty environment
+  (`PATH=/usr/bin:/bin`, `LANG=C.UTF-8`); the child sets its own limits before reading the payload:
+  `RLIMIT_CPU` = `EAP_KB_EXTRACT_CPU_SECONDS`, `RLIMIT_AS` = `EAP_KB_EXTRACT_MEMORY_MB` (Linux only),
+  `RLIMIT_FSIZE` 0 (no file can grow), 32 open files; wall timeout 2 x CPU; at most
+  `EAP_KB_EXTRACT_CONCURRENCY` children per worker process; 64 MiB of output.
+- An audit hook in the child refuses sockets and every resolver call (`getaddrinfo`,
+  `gethostbyname`, `gethostbyaddr`, `getnameinfo`), process starts (including
+  `_posixsubprocess.fork_exec`, which has no audit event: it is replaced and cannot be reloaded),
+  signals (`os.kill`), native loaders (`ctypes`, `sqlite3` and `load_extension`), opening any file
+  for writing, creating or truncating, and file-system changes (remove, rename, mkdir, rmdir,
+  symlink, link, chmod, truncate, utime, `shutil.*`; `mkfifo` and `mknod` are removed). This
+  is in-interpreter defence in depth, NOT OS isolation: native parser code could bypass it. It is
+  enough for part 1's pure-Python parsers (pypdf, docutils, PyYAML); before Pillow or pypdfium2
+  land (part 2), run the worker with OS-level network isolation (see the RAG P1 plan, P1.B1).
+- The step is `eap.kb_extract_chunk`, in `eap.kb_chunk`'s slot, only for runs whose input has
+  `embed_split: true` and whose document is worker-extracted (recorded in `eap.start_ingest`'s
+  output as `extractor`). Runs enqueued before the deploy, Markdown/HTML/text documents and reindex
+  keep their exact step layout. **Drain and do not mix worker versions** (as for P1.C5 above):
+  an old worker given a flagged run records `eap.kb_chunk` and the new API's PDF/rst/YAML/JSON
+  documents fail there (`extraction_failed`), and a new worker could not replay that record. Stop
+  the old workers, drain, then switch the API and workers together.
+- A failed extraction ends the run `extraction_failed`; the document's error is
+  `extraction_failed: <fixed message>` and `run_failed` carries `extraction_code`
+  (`document_encrypted`, `extract_limit`, `extract_timeout`, ...).
+- **Search tester writes (P1.C4 follow-up).** No new step: a `knowledge.search` tool run's
+  `tool:tool_run:result` and `end` events and its `eap.finish_run` take FOR SHARE locks on the
+  knowledge base and the hits' documents in their own transaction and leave out deleted documents'
+  hits; a deleted knowledge base ends the run `failed` (`knowledge_base_deleted`, no content).
+  Ordinary tool runs are unchanged.

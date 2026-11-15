@@ -2,6 +2,18 @@
 
 Every step is a pure function of the document and the config, so identical input gives identical
 chunks, texts and hashes on every host (the hash-based embedding reuse depends on it).
+
+Two algorithm versions, chosen by ``config.chunker_version``; version 1's output never changes.
+
+- **v1**: a section under ``min_tokens`` merges into the NEXT section (the last one into the
+  previous).
+- **v2** (RAG P1, the default for new knowledge bases): a short section merges into its PARENT
+  heading's section when it has one, else into its previous same-level sibling, only while no text
+  has followed that group (document order is kept; otherwise it stays on its own), and never into
+  the next unrelated section, so a heading with one command keeps its context. A code-only group (at least
+  80 % of its non-space characters in fenced code) gets the nearest preceding prose paragraph
+  (at most 300 characters) as a ``context:`` line in its embed text, never in its stored text.
+  Splitting, overlap and the embed-text prefix are v1's.
 """
 
 from __future__ import annotations
@@ -37,20 +49,26 @@ _LEVELS = (
 
 def chunk(document: Document, config: ChunkingConfigLike = DEFAULT_CHUNKING) -> list[Chunk]:
     """Chunk ``document``; an empty document (or one with only headings) gives ``[]``."""
-    max_tokens, overlap_tokens, min_tokens = _validate(config)
+    max_tokens, overlap_tokens, min_tokens, version = _validate(config)
     max_chars = max_tokens * CHARS_PER_TOKEN
     doc_title = _clip(document.title, MAX_HEADING_CHARS)
-    # A section with no body is dropped, unless its heading was clipped: then its full heading line
-    # is the body, so the clipped-away text still reaches the chunks.
-    sections = [s for s in document.sections if s.text.strip() or len(s.heading) > MAX_HEADING_CHARS]
+    groups: list[tuple[Section, str]]
+    if version == 1:
+        # A section with no body is dropped, unless its heading was clipped: then its full heading
+        # line is the body, so the clipped-away text still reaches the chunks.
+        sections = [s for s in document.sections if _has_body(s)]
+        groups = [(section, "") for section in _merge_small(sections, min_tokens)]
+    else:
+        groups = _merge_small_v2(list(document.sections), min_tokens)
     chunks: list[Chunk] = []
-    for section in _merge_small(sections, min_tokens):
+    for section, context in groups:
         path = tuple(_clip(h, MAX_HEADING_CHARS) for h in section.heading_path)
         title = _clip(section.heading, MAX_HEADING_CHARS) if section.heading else doc_title
         prefix = _embed_prefix(doc_title, path, title, max_chars // PREFIX_SHARE)
+        context_line = _context_line(context, max_chars // PREFIX_SHARE)
         anchor = _anchor_url(document.source_url, section.anchor)
-        for text, overlap in _split(section.text, max_chars - len(prefix), overlap_tokens):
-            embed_text = prefix + text
+        for text, overlap in _split(section.text, max_chars - len(prefix) - len(context_line), overlap_tokens):
+            embed_text = prefix + context_line + text
             chunks.append(
                 Chunk(
                     ordinal=len(chunks),
@@ -62,12 +80,19 @@ def chunk(document: Document, config: ChunkingConfigLike = DEFAULT_CHUNKING) -> 
                     approx_tokens=approx_tokens(embed_text),
                     anchor=anchor,
                     overlap=overlap,
+                    page=section.page,
+                    page_end=section.page_end,
+                    condition=section.condition,
                 )
             )
     return chunks
 
 
-def _validate(config: ChunkingConfigLike) -> tuple[int, int, int]:
+def _has_body(section: Section) -> bool:
+    return bool(section.text.strip()) or len(section.heading) > MAX_HEADING_CHARS
+
+
+def _validate(config: ChunkingConfigLike) -> tuple[int, int, int, int]:
     values = {}
     for field in ("max_tokens", "overlap_tokens", "min_tokens", "chunker_version"):
         value = getattr(config, field, None)
@@ -84,7 +109,7 @@ def _validate(config: ChunkingConfigLike) -> tuple[int, int, int]:
         raise InvalidChunkingConfig("overlap_tokens", overlap, "must be at least 0 and below max_tokens")
     if not 0 <= min_tokens <= max_tokens:
         raise InvalidChunkingConfig("min_tokens", min_tokens, "must be between 0 and max_tokens")
-    return max_tokens, overlap, min_tokens
+    return max_tokens, overlap, min_tokens, values["chunker_version"]
 
 
 def _join(*parts: str) -> str:
@@ -107,7 +132,9 @@ def _merge_small(sections: list[Section], min_tokens: int) -> list[Section]:
     carried into it) joins the previous one with its heading line.
     """
     out: list[Section] = []
+    out_members: list[list[Section]] = []
     first: Section | None = None
+    members: list[Section] = []
     as_head = ""  # the group's text with `first` as the title
     as_tail = ""  # the group's text when it joins the previous section (first heading line kept)
     last = len(sections) - 1
@@ -119,14 +146,184 @@ def _merge_small(sections: list[Section], min_tokens: int) -> list[Section]:
             as_head, as_tail = _join(long_line, section.text), piece
         else:
             as_head, as_tail = _join(as_head, piece), _join(as_tail, piece)
+        members.append(section)
         if approx_tokens(as_head) >= min_tokens or (i == last and not out):
-            out.append(replace(first, text=as_head))
+            out.append(_with_meta(replace(first, text=as_head), members))
+            out_members.append(members)
         elif i < last:
             continue
         else:  # a tiny last group joins the previous section
-            out[-1] = replace(out[-1], text=_join(out[-1].text, as_tail))
-        first, as_head, as_tail = None, "", ""
+            out_members[-1] = out_members[-1] + members
+            out[-1] = _with_meta(replace(out[-1], text=_join(out[-1].text, as_tail)), out_members[-1])
+        first, members, as_head, as_tail = None, [], "", ""
     return out
+
+
+def _with_meta(section: Section, members: list[Section]) -> Section:
+    """``section`` with the pages and conditions of every merged member (text untouched).
+
+    ``page`` is the first page, ``page_end`` the last one when it differs, and ``condition`` the
+    members' distinct conditions in order, joined with ``"; "`` and clipped to MAX_CONDITION_CHARS.
+    """
+    if len(members) == 1:
+        only = members[0]
+        return replace(section, page=only.page, page_end=only.page_end, condition=only.condition)
+    pages = [m.page for m in members if m.page is not None]
+    ends = [m.page_end if m.page_end is not None else m.page for m in members if m.page is not None]
+    page = min(pages) if pages else None
+    page_end = max(ends) if ends else None
+    conditions = list(dict.fromkeys(m.condition for m in members if m.condition))
+    condition = _clip("; ".join(conditions), MAX_CONDITION_CHARS) if conditions else None
+    return replace(
+        section, page=page, page_end=page_end if page_end != page else None, condition=condition
+    )
+
+
+# --- chunker v2 ----------------------------------------------------------------------------------
+
+# A condition recorded on a chunk is at most this long (eap_schemas.knowledge.MAX_CONDITION_CHARS).
+MAX_CONDITION_CHARS = 200
+# v2's code context: a group whose non-space characters are at least this share fenced code gets the
+# nearest preceding prose paragraph, clipped to CODE_CONTEXT_CHARS, in its embed text.
+CODE_SHARE = 0.8
+CODE_CONTEXT_CHARS = 300
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+class _Group:
+    __slots__ = ("first", "parts", "members", "index", "position")
+
+    def __init__(self, first: Section, index: int, position: int) -> None:
+        self.first = first
+        long_line = _heading_line(first) if len(first.heading) > MAX_HEADING_CHARS else ""
+        self.parts = [long_line, first.text]
+        self.members = [first]
+        self.index = index  # the position of `first` in the document's sections
+        self.position = position  # this group's position in the output order
+
+    def text(self) -> str:
+        return _join(*self.parts)
+
+
+def _merge_small_v2(sections: list[Section], min_tokens: int) -> list[tuple[Section, str]]:
+    """v2 grouping: ``(section with the group's text, code context or "")`` per group, in order.
+
+    Every section with a heading takes a place in the heading tree (a stack of levels). A section
+    whose body is under ``min_tokens`` is appended, with its heading line, to the group that holds
+    its parent heading's content, else to the group of its previous sibling (the last section at
+    the same level under the same parent), but only to a group that no text has followed yet, so
+    the text stays in document order: once a longer sibling (or anything else) has started a group
+    with text, a short section joins that sibling's group when it is the latest one, and otherwise
+    stays on its own. It never joins the next section. A heading with no body still opens a group,
+    so its short children gather under its title; a group left without text is dropped. The
+    preamble (level 0) is never a parent.
+    """
+    groups: list[_Group] = []
+    stack: list[tuple[int, _Group]] = []  # (heading level, group holding that section's content)
+    last_text = -1  # position in `groups` of the latest group holding text
+    for index, section in enumerate(sections):
+        level = section.level
+        popped: list[tuple[int, _Group]] = []
+        if level:
+            while stack and stack[-1][0] >= level:
+                popped.append(stack.pop())
+        parent = stack[-1][1] if level and stack else None
+        sibling = next((group for lv, group in popped if lv == level), None)
+        body = section.text.strip()
+        target: _Group | None = None
+        if body and approx_tokens(section.text) < min_tokens and len(section.heading) <= MAX_HEADING_CHARS:
+            target = next((g for g in (parent, sibling) if g is not None and g.position >= last_text), None)
+        if target is not None:
+            target.parts.append(_join(_heading_line(section), section.text))
+            target.members.append(section)
+            home = target
+            last_text = target.position
+        else:
+            home = _Group(section, index, len(groups))
+            groups.append(home)
+            if home.text().strip():
+                last_text = home.position
+        if level:
+            stack.append((level, home))
+    prose_before = _prose_before(sections)
+    out: list[tuple[Section, str]] = []
+    for group in groups:
+        text = group.text()
+        if not text.strip():
+            continue
+        context = prose_before[group.index] if _is_code_only(text) else ""
+        out.append((_with_meta(replace(group.first, text=text), group.members), context))
+    return out
+
+
+def _prose_before(sections: list[Section]) -> list[str]:
+    """For each section, the last prose paragraph (outside fenced code) of the sections before it."""
+    out: list[str] = []
+    last = ""
+    for section in sections:
+        out.append(last)
+        paragraph = _last_prose_paragraph(section.text)
+        if paragraph:
+            last = paragraph
+    return out
+
+
+def _fenced_lines(text: str) -> list[tuple[str, bool]]:
+    """Each line of ``text`` with whether it belongs to fenced code (fence lines included)."""
+    out: list[tuple[str, bool]] = []
+    fence = ""
+    for line in text.split("\n"):
+        match = _FENCE.match(line)
+        if fence:
+            out.append((line, True))
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) and not line.strip()[len(match.group(1)):].strip():
+                fence = ""
+        elif match:
+            fence = match.group(1)
+            out.append((line, True))
+        else:
+            out.append((line, False))
+    return out
+
+
+def _is_code_only(text: str) -> bool:
+    code = total = 0
+    for line, in_code in _fenced_lines(text):
+        n = len("".join(line.split()))
+        total += n
+        if in_code:
+            code += n
+    return total > 0 and code >= CODE_SHARE * total
+
+
+def _last_prose_paragraph(text: str) -> str:
+    paragraph: list[str] = []
+    last = ""
+    for line, in_code in _fenced_lines(text) + [("", False)]:
+        if in_code or not line.strip():
+            if paragraph:
+                last = " ".join(paragraph)
+                paragraph = []
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#"):  # a merged heading line is not prose
+            continue
+        paragraph.append(stripped)
+    return _WS.sub(" ", last).strip()
+
+
+_WS = re.compile(r"\s+")
+
+
+def _context_line(context: str, cap: int) -> str:
+    """``"context: <paragraph>\\n\\n"``, at most ``cap`` characters, or ``""``."""
+    if not context:
+        return ""
+    overhead = len("context: \n\n")
+    room = min(CODE_CONTEXT_CHARS, cap - overhead)
+    if room < 16:
+        return ""
+    return f"context: {_clip(context, room)}\n\n"
 
 
 def _clip(text: str, limit: int) -> str:

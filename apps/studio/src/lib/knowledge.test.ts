@@ -57,17 +57,21 @@ afterEach(() => {
 });
 
 describe("upload helpers", () => {
-  it("maps .md/.markdown, .txt/.text and .html/.htm (any case) to the API's MIME types and refuses the rest", () => {
+  it("maps every registry extension (any case) to the API's MIME types and refuses the rest", () => {
     expect(mimeTypeForFile("a.md")).toBe("text/markdown");
     expect(mimeTypeForFile("A.MARKDOWN")).toBe("text/markdown");
     expect(mimeTypeForFile("notes.txt")).toBe("text/plain");
     expect(mimeTypeForFile("page.HTM")).toBe("text/html");
-    for (const name of ["manual.pdf", "doc.docx", "README", "archive.md.zip", "image.png"]) expect(mimeTypeForFile(name), name).toBeNull();
+    expect(mimeTypeForFile("manual.PDF")).toBe("application/pdf");
+    expect(mimeTypeForFile("intro.rst")).toBe("text/x-rst");
+    expect(mimeTypeForFile("binding.yml")).toBe("application/yaml");
+    expect(mimeTypeForFile("data.json")).toBe("application/json");
+    for (const name of ["doc.docx", "README", "archive.md.zip", "image.png"]) expect(mimeTypeForFile(name), name).toBeNull();
   });
 
   it("checkUploadFile: key from the file name, title without the extension; refuses type, empty and oversized files", () => {
-    expect(checkUploadFile({ name: "Getting started.md", size: 10 })).toEqual({ ok: true, mimeType: "text/markdown", key: "Getting started.md", title: "Getting started" });
-    expect(checkUploadFile({ name: "x.pdf", size: 10 })).toMatchObject({ ok: false, reason: expect.stringMatching(/Unsupported file type/) });
+    expect(checkUploadFile({ name: "Getting started.md", size: 10 })).toEqual({ ok: true, mimeType: "text/markdown", key: "Getting started.md", title: "Getting started", binary: false, maxBytes: 5 * 1024 * 1024 });
+    expect(checkUploadFile({ name: "x.docx", size: 10 })).toMatchObject({ ok: false, reason: expect.stringMatching(/Unsupported file type/) });
     expect(checkUploadFile({ name: "x.md", size: 0 })).toMatchObject({ ok: false, reason: "The file is empty." });
     expect(checkUploadFile({ name: "x.md", size: 6 * 1024 * 1024 })).toMatchObject({ ok: false, reason: expect.stringMatching(/larger than 5 MiB/) });
     expect(checkUploadFile({ name: "x.md", size: 200 }, 100)).toMatchObject({ ok: false });

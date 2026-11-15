@@ -152,6 +152,16 @@ A recall or index failure (embedding model no longer allowed, provider error, re
 text-free `embedding` event `embed:{recall|index}:{turn}:failed` and never fails the turn. Without
 `memory.semantic_recall` the layout is the RM.12 / RM.13 one exactly.
 
+The end of the post-turn steps (P1.C1; eap_worker.post_turn): for a spec with `semantic_recall`
+and/or `observational` and a completed conversation turn, after the steps above (index first, then
+the observer workflow and its getResult), ONE more event:
+
+    eap.append_event   memory:post_turn:{turn}   post_turn_done {observe: created|skipped|failed|off,
+                                                 index: done|skipped|failed|off}; no text
+
+It is appended after the last existing post-turn step (recorded prefixes still match; the deploy
+still drains in-flight runs as a precaution). A spec without either feature keeps its exact layout.
+
 Failures: exception text never leaves the worker. `eap_worker.errors.classify` turns the exception
 into a stable code and a fixed user-safe message (stored as runs.error and in run_failed); logs and
 the run span get only the code, the exception type and the run/tenant ids.
@@ -190,7 +200,7 @@ from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR, KnowledgeStore, MemoryStore
+from eap_run_store import ENQUEUE_FAILED_ERROR, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore
 from eap_schemas import AgentSpec
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
@@ -209,6 +219,7 @@ from eap_worker.memory import (
     with_memory,
 )
 from eap_worker.observational import observe_after_turn
+from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, make_resolver, model_id_for
@@ -448,6 +459,8 @@ async def append_event_step(
     data: dict[str, Any],
     usage: dict[str, Any] | None = None,
     request_key: str | None = None,
+    conversation: tuple[str, str] | None = None,
+    search_guard: dict[str, Any] | None = None,
 ) -> int:
     """Write one durable event (idempotent per key). `usage` (pricing.request_usage_input) is given
     only for a model request's `model:{n}:final` event, or a moderation outcome's `processor_result`
@@ -455,8 +468,40 @@ async def append_event_step(
     the request is priced here, the price and tokens are added to the event's data, and its
     run_model_requests row is written in the event's transaction (first write wins, so a
     re-executed step never re-prices). Same step, same position: a run without usage and a
-    checkpoint recorded before usage existed replay unchanged."""
+    checkpoint recorded before usage existed replay unchanged.
+
+    `conversation` (agent_id, conversation_id), for a post-turn event (`post_turn_done`, P1.C1):
+    the event is appended with the conversation row held `FOR KEY SHARE`
+    (MemoryStore.append_conversation_event), so nothing is appended to a run whose conversation was
+    deleted; then nothing is written and -1 is returned.
+
+    `search_guard` ({kb_id, document_ids}), for a `knowledge.search` tester run's result events
+    (P1.C4, eap_worker.search_guard): the event is written in one transaction with FOR SHARE locks on
+    the knowledge base and the hits' documents, without the hits of deleted documents (a deleted
+    knowledge base makes it an error / run_failed event)."""
     rt = get_runtime()
+    if search_guard is not None:
+        from eap_worker.search_guard import append_guarded
+
+        seq = await asyncio.to_thread(append_guarded, rt.engine, tenant_id, run_id, event_key, type, data, search_guard)
+        crash_point("after_event_write", event_key=event_key)
+        return seq
+    if conversation is not None:
+        agent_id, conversation_id = conversation
+        memory_event = MemoryEvent(run_id=run_id, event_key=event_key, type=type, data=dict(data))
+
+        def guarded() -> int:
+            store = MemoryStore(rt.engine)
+            try:
+                store.append_conversation_event(tenant_id, agent_id, str(conversation_id), memory_event)
+            except ConversationNotFound:
+                return -1
+            found = rt.event_log.get_event(tenant_id, run_id, event_key)
+            return found.seq if found is not None else -1
+
+        seq = await asyncio.to_thread(guarded)
+        crash_point("after_event_write", event_key=event_key)
+        return seq
     row = None
     if usage is not None:
         row, fields = usage_record(request_key or event_key.removesuffix(":final"), usage)
@@ -476,9 +521,19 @@ async def finish_run_step(
     output: str | None,
     error: str | None,
     messages: list[dict[str, Any]] | None = None,
-) -> None:
+    search_guard: dict[str, Any] | None = None,
+) -> str | None:
+    """Set the run's status (and output, error, messages). With `search_guard` (a `knowledge.search`
+    tester run, P1.C4): in one transaction with the guard's FOR SHARE locks, the output without
+    deleted documents' hits, or `failed` when the knowledge base is gone; returns the status
+    written (None otherwise, as before)."""
     rt = get_runtime()
+    if search_guard is not None:
+        from eap_worker.search_guard import finish_guarded
+
+        return await asyncio.to_thread(finish_guarded, rt.engine, tenant_id, run_id, output, search_guard)
     await asyncio.to_thread(rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages)
+    return None
 
 
 async def _heartbeat(run_id: str, tenant_id: str) -> None:
@@ -865,15 +920,19 @@ async def _run_body(
     # complete event log.
     await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output})
     await finish_run_step(run_id, tenant_id, "completed", output, None, new_messages)
-    if spec.memory is not None and spec.memory.semantic_recall is not None and link.get("conversation_id") is not None:
+    if link.get("conversation_id") is None or not has_post_turn_steps(spec):
+        return {"status": "completed", "output": output}
+    conversation_id, turn = str(link["conversation_id"]), int(link["turn"])
+    indexed = observed = None
+    if spec.memory.semantic_recall is not None:
         # RM.14: post-turn index of the processed input and final answer (never fails the turn).
-        await index_after_turn(
-            run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec, input_text, output
-        )
-    if spec.memory is not None and spec.memory.observational is not None and link.get("conversation_id") is not None:
+        indexed = await index_after_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec, input_text, output)
+    if spec.memory.observational is not None:
         # RM.13: post-turn observational memory, after the run is completed (never delays the answer,
         # never fails the turn).
-        await observe_after_turn(run_id, tenant_id, agent_id, str(link["conversation_id"]), int(link["turn"]), spec)
+        observed = await observe_after_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec)
+    # P1.C: the post-turn steps have reported (`post_turn_done`, Studio stops "Memory updating").
+    await finish_post_turn(run_id, tenant_id, agent_id, conversation_id, turn, spec, indexed, observed)
     return {"status": "completed", "output": output}
 
 

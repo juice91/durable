@@ -14,6 +14,7 @@ import {
   noteText,
   observerProgress,
   parseNoteText,
+  postTurnDone,
   postTurnReported,
   putWorkingMemory,
   recallSummary,
@@ -225,6 +226,17 @@ describe("what a turn's events say about memory", () => {
 
   it("counts memory writes", () => {
     expect(memoryWrites([ev(1, "memory_updated", { tool_call_id: "t" }), ev(2, "tool_result"), ev(3, "memory_observe_failed")])).toBe(2);
+  });
+
+  it("post_turn_done ends the post-turn steps whatever the features (P1.C1)", () => {
+    const done = ev(7, "post_turn_done", { observe: "skipped", index: "done" });
+    expect(postTurnDone([done])).toBe(true);
+    expect(postTurnDone([ev(6, "memory_updated", { stage: "observe" })])).toBe(false);
+    // A quiet turn (no observer event at all) is reported by the marker alone.
+    expect(postTurnReported([done], { observational: true, semanticRecall: true })).toBe(true);
+    // Even while a reflection would otherwise be awaited after the observe.
+    expect(postTurnReported([ev(6, "memory_updated", { stage: "observe" }), done], { observational: true, semanticRecall: false }, { awaitReflection: true })).toBe(true);
+    expect(postTurnReported([ev(6, "memory_updated", { stage: "observe" })], { observational: true, semanticRecall: false }, { awaitReflection: true })).toBe(false);
   });
 
   it("post-turn steps report: the observer with observational memory, else the recall index", () => {

@@ -33,6 +33,7 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status, StatusCode
 
+from eap_observability.http import template_route_attributes
 from eap_observability.logcontext import RUN_LOG_ATTRIBUTE, TENANT_LOG_ATTRIBUTE
 
 REDACTED = "[REDACTED]"
@@ -214,7 +215,8 @@ def _clean_span(span: ReadableSpan) -> ReadableSpan:
         context=span.context,
         parent=span.parent,
         resource=span.resource,
-        attributes=_clean_attributes(span.attributes),
+        # P1.C2: a matched route's path attributes become its template (eap_observability.http).
+        attributes=_clean_attributes(template_route_attributes(span.attributes)),
         events=[Event(e.name, _clean_attributes(e.attributes), e.timestamp) for e in span.events],
         links=span.links,
         kind=span.kind,

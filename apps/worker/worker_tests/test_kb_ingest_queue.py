@@ -105,7 +105,9 @@ def test_at_most_two_ingests_run_at_once(client, worker, store, kb_tenant, monke
             state["active"] += 1
             state["max"] = max(state["max"], state["active"])
         try:
-            await asyncio.sleep(0.8)
+            # Long enough that two runs overlap even when a loaded machine dequeues slowly (the
+            # queue polls every 0.2 s); 0.8 s read max=1 under load (P1.A3 re-review).
+            await asyncio.sleep(2.0)
             return await _REAL_EMBED(settings, **kw)
         finally:
             with lock:

@@ -25,6 +25,9 @@ write with `observation_conflict`). The child workflow runs these steps:
                                          `reflect_after_tokens` (retry of a reflection that failed
                                          at an earlier turn);
                                        - else nothing (no further step).
+                                       Returns ids, turn numbers and counts only (P1.C): the prompt
+                                       is rendered inside the model-request step (prompt_ref), so
+                                       no checkpoint holds turn or observation text.
     eap-observer__model.request        the observer's model request (DBOSDurability step), with the
                                        model passed per call and resolved inside the step through the
                                        chat resolver, so the allowlist is checked AT CALL TIME
@@ -39,6 +42,20 @@ write with `observation_conflict`). The child workflow runs these steps:
     eap.memory_reflect                 redact, then ONE transaction: the reflection row replacing the
                                        active rows (`superseded_by`), its `memory_updated` event (key
                                        `memory:reflect:{turn}`) and usage row (`memory:reflect:{turn}`)
+
+Reflection growth guard (P1.C). When reflection keeps failing, the active observations keep
+growing. The reflector's input is capped at EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS (default 32000,
+never below 2 x `reflect_after_tokens` nor `reflect_after_tokens` + the largest active row, so a
+normal reflection is never trimmed: reflect_input_cap): only the newest active rows within the cap are sent
+(reflect_input), the reflection still supersedes every active row (the store requires exactly the
+active set), so the older rows leave memory, and `eap.memory_reflect` appends one
+`memory_observe_trimmed` warning event (key `memory:reflect:{turn}:trimmed`; counts only: dropped,
+kept_tokens, dropped_tokens, observations, max_tokens) whatever the reflection's outcome.
+Plans carry ids and counts only; the prompts are rendered from one snapshot inside the
+model-request step (render_prompt_ref; a row gone by then, a deleted conversation or a redaction
+that cannot finish answers a placeholder response without a provider call, recorded as
+`memory_observe_failed` `observer_input_changed`, never retried). The step layout is unchanged; a plan
+checkpointed before P1.C still has its "prompt" and is used as is, so in-flight runs replay.
 
 Failure handling. The user's turn never fails here: the run stays `completed`. A failed observer
 (model error after the step's retries, a model removed from the allowlist since publish, an
@@ -92,7 +109,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Literal
 
 from dbos import DBOS, SetEnqueueOptions, SetWorkflowID
@@ -100,7 +119,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import ResolveModelId
 from pydantic_ai.durable_exec.dbos import DBOSDurability
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestParameters, ModelResolutionContext
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
@@ -124,6 +143,22 @@ OBSERVE_STEP = "eap.memory_observe"
 OBSERVE_WRITE_STEP = "eap.memory_observe_write"
 REFLECT_STEP = "eap.memory_reflect"
 FAILED_EVENT = "memory_observe_failed"
+TRIMMED_EVENT = "memory_observe_trimmed"
+
+# The reflector's input cap (P1.C growth guard): when reflection keeps failing, the active
+# observations keep growing; only the newest whose approx_tokens sum stays within this cap (at least
+# one, and never below the spec's reflect_after_tokens) are sent to the reflector. The reflection
+# still supersedes every active row, so the older ones are dropped from memory, with one
+# `memory_observe_trimmed` warning event (counts only).
+MAX_ACTIVE_OBSERVATION_TOKENS_ENV = "EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS"
+DEFAULT_MAX_ACTIVE_OBSERVATION_TOKENS = 32_000
+MIN_MAX_ACTIVE_OBSERVATION_TOKENS = 1_000
+
+# The observer and reflector prompts are rendered INSIDE the model-request step (from the ids and
+# turn numbers the plan records), so no DBOS checkpoint holds turn or observation text. The agent is
+# given this reference instead of the text; _ObserverModel expands it. A plan recorded before this
+# change still carries its "prompt", which is used as is.
+PROMPT_REF_PREFIX = "eap-observer-input:"
 
 # Bounds of one observer request (and of the DBOS checkpoint holding its prompt).
 MAX_OBSERVE_TURNS = 50
@@ -135,6 +170,13 @@ MAX_NOTE_CHARS = 2_000
 # Failure codes of `memory_observe_failed` (besides eap_worker.errors.classify codes such as
 # `model_not_allowed` for a request that raised).
 OUTPUT_INVALID = "observer_output_invalid"
+# The rows a plan names changed before its prompt was rendered (ObserverInputChanged), or the
+# conversation is gone, or its redaction could not finish: no request was made.
+INPUT_CHANGED = "observer_input_changed"
+# The model name of the placeholder response _ObserverModel returns for such a render failure:
+# returned (and checkpointed) instead of raised, so the model step's retry policy never repeats a
+# deterministic failure; no provider call, no usage.
+_INPUT_CHANGED_MODEL = "eap-observer-input-unavailable"
 REDACTION_FAILED = "memory_redaction_failed"
 OBSERVATION_CONFLICT = "observation_conflict"
 
@@ -171,6 +213,12 @@ class _ObserverModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        try:
+            messages = await expand_prompt_refs(messages)
+        except (ObserverInputChanged, ConversationNotFound, MemoryRedactionFailed):
+            # Deterministic: answered (not raised), so the step is not retried; _request turns it into
+            # `observer_input_changed` (memory_observe_failed, no usage).
+            return ModelResponse(parts=[TextPart(content="")], model_name=_INPUT_CHANGED_MODEL)
         response = await super().request(messages, model_settings, model_request_parameters)
         crash_point("observer_request")
         return response
@@ -392,16 +440,142 @@ def reflect_prompt(observations: Sequence[Any]) -> str:
     return "\n".join(parts)
 
 
+def max_active_observation_tokens() -> int:
+    """EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS (default 32000, at least 1000). Raises ValueError."""
+    raw = os.environ.get(MAX_ACTIVE_OBSERVATION_TOKENS_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_MAX_ACTIVE_OBSERVATION_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < MIN_MAX_ACTIVE_OBSERVATION_TOKENS:
+        raise ValueError(
+            f"{MAX_ACTIVE_OBSERVATION_TOKENS_ENV} must be an integer of at least {MIN_MAX_ACTIVE_OBSERVATION_TOKENS}, got {raw!r}"
+        )
+    return value
+
+
+def reflect_input_cap(observations: Sequence[Any], config: ObservationalMemoryConfig) -> int:
+    """The reflector's input cap: EAP_MEMORY_MAX_ACTIVE_OBSERVATION_TOKENS, but never below
+    `2 x reflect_after_tokens` nor `reflect_after_tokens` + the largest active row. A normal
+    reflection follows a turn whose active rows held at most reflect_after_tokens before one new
+    observation was added, so it always fits and is never trimmed: only a backlog left by failed
+    reflections (rows piling up past the threshold turn after turn) is cut."""
+    largest = max((int(o.approx_tokens) for o in observations), default=0)
+    floor = max(2 * config.reflect_after_tokens, config.reflect_after_tokens + largest)
+    return max(max_active_observation_tokens(), floor)
+
+
+def reflect_input(observations: Sequence[Any], cap: int) -> tuple[list[Any], list[Any]]:
+    """(kept, dropped) of the active rows (oldest first): the newest rows whose approx_tokens sum
+    stays within `cap` are kept (always at least the newest one); the older rest is dropped."""
+    kept: list[Any] = []
+    total = 0
+    for o in reversed(observations):
+        tokens = int(o.approx_tokens)
+        if kept and total + tokens > cap:
+            break
+        kept.append(o)
+        total += tokens
+    kept.reverse()
+    return kept, list(observations[: len(observations) - len(kept)])
+
+
 def _reflect_plan(observations: Sequence[Any], config: ObservationalMemoryConfig) -> dict[str, Any] | None:
-    """A reflection over the active rows when they exceed reflect_after_tokens (at least two rows)."""
+    """A reflection over the active rows when they exceed reflect_after_tokens (at least two rows).
+    Ids and counts only (no text): `supersede_ids` (every active row), `input_ids` (the rows sent
+    to the reflector, at most the input cap's tokens, see reflect_input), and the dropped count."""
     if len(observations) < 2 or sum(o.approx_tokens for o in observations) <= config.reflect_after_tokens:
         return None
+    cap = reflect_input_cap(observations, config)
+    kept, dropped = reflect_input(observations, cap)
     return {
         "supersede_ids": [o.id for o in observations],
+        "input_ids": [o.id for o in kept],
         "covers_from_turn": min(o.covers_from_turn for o in observations),
         "covers_to_turn": max(o.covers_to_turn for o in observations),
-        "prompt": reflect_prompt(observations),
+        "observations": len(observations),
+        "kept_tokens": sum(int(o.approx_tokens) for o in kept),
+        "dropped": len(dropped),
+        "dropped_tokens": sum(int(o.approx_tokens) for o in dropped),
+        "max_tokens": cap,
     }
+
+
+class ObserverInputChanged(Exception):
+    """The rows a plan names are no longer there when its prompt is rendered (a deleted conversation
+    or turn, or a superseded observation). Pickle-safe (DBOS steps)."""
+
+    def __init__(self, stage: str, missing: int) -> None:
+        super().__init__(stage, missing)
+        self.stage = stage
+        self.missing = missing
+
+    def __str__(self) -> str:
+        return f"observer {self.stage} input changed: {self.missing} row(s) missing"
+
+
+def prompt_ref(
+    stage: Literal["observe", "reflect"], plan: Mapping[str, Any], *, tenant_id: str, agent_id: str,
+    conversation_id: str, redact_json: dict[str, Any] | None,
+) -> str:
+    """What the observer agent is given for `plan`: the plan's own "prompt" when it was recorded
+    with one (a checkpoint from before P1.C), else a reference that _ObserverModel expands into the
+    prompt inside the model-request step (ids and turn numbers only: no text in any checkpoint)."""
+    if isinstance(plan.get("prompt"), str):
+        return plan["prompt"]
+    ref: dict[str, Any] = {
+        "stage": stage, "tenant_id": tenant_id, "agent_id": agent_id, "conversation_id": str(conversation_id),
+        "covers_to_turn": int(plan["covers_to_turn"]),
+    }
+    if stage == "observe":
+        ref["turns"] = [int(t) for t in plan["turn_numbers"]]
+        ref["redact"] = redact_json
+    else:
+        ref["ids"] = [str(i) for i in plan["input_ids"]]
+    return PROMPT_REF_PREFIX + json.dumps(ref, separators=(",", ":"))
+
+
+def render_prompt_ref(ref_text: str) -> str:
+    """The observer or reflector prompt a prompt_ref names, from one snapshot of the conversation.
+    Raises ConversationNotFound, ObserverInputChanged, MemoryRedactionFailed."""
+    ref = json.loads(ref_text[len(PROMPT_REF_PREFIX):])
+    snapshot = _store().load_snapshot(
+        ref["tenant_id"], ref["agent_id"], ref["conversation_id"], before_turn=int(ref["covers_to_turn"]) + 1,
+        observations=True, history=None,
+    )
+    if ref["stage"] == "observe":
+        by_turn = {int(t["turn"]): t for t in snapshot.turns}
+        turns = [by_turn[n] for n in ref["turns"] if n in by_turn]
+        if len(turns) != len(ref["turns"]):
+            raise ObserverInputChanged("observe", len(ref["turns"]) - len(turns))
+        redact = None if ref.get("redact") is None else PiiRedactConfig.model_validate(ref["redact"])
+        return observe_prompt(turns, redact)
+    by_id = {str(o.id): o for o in snapshot.observations}
+    rows = [by_id[i] for i in ref["ids"] if i in by_id]
+    if len(rows) != len(ref["ids"]):
+        raise ObserverInputChanged("reflect", len(ref["ids"]) - len(rows))
+    return reflect_prompt(rows)
+
+
+async def expand_prompt_refs(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """`messages` with each prompt_ref user prompt replaced by its rendered prompt (a copy; the
+    caller's messages are not changed). Runs inside the model-request step."""
+    out: list[ModelMessage] = []
+    for message in messages:
+        if isinstance(message, ModelRequest) and any(
+            isinstance(p, UserPromptPart) and isinstance(p.content, str) and p.content.startswith(PROMPT_REF_PREFIX)
+            for p in message.parts
+        ):
+            parts = []
+            for p in message.parts:
+                if isinstance(p, UserPromptPart) and isinstance(p.content, str) and p.content.startswith(PROMPT_REF_PREFIX):
+                    p = replace(p, content=await asyncio.to_thread(render_prompt_ref, p.content))
+                parts.append(p)
+            message = replace(message, parts=parts)
+        out.append(message)
+    return out
 
 
 # --------------------------------------------------------------------------- steps
@@ -420,6 +594,11 @@ def failed_event_key(turn: int, stage: str = "observe") -> str:
     return f"memory:{stage}:{turn}:failed"
 
 
+def trimmed_event_key(turn: int) -> str:
+    """The `memory_observe_trimmed` warning of a turn's reflection (the growth guard)."""
+    return f"memory:reflect:{turn}:trimmed"
+
+
 @DBOS.step(name=OBSERVE_STEP)
 async def memory_observe_step(
     run_id: str, tenant_id: str, agent_id: str, conversation_id: str, turn: int, memory_json: dict[str, Any],
@@ -427,9 +606,11 @@ async def memory_observe_step(
 ) -> dict[str, Any]:
     """Decide the post-turn work of turn `turn` from one snapshot. Returns {"action": "none" |
     "observe" | "reflect" | "failed", "reason", ...}: for observe, "covers_from_turn",
-    "covers_to_turn", "turns" (count), "approx_tokens" and "prompt" (turn text redacted with
-    `redact_json`); for reflect, the _reflect_plan fields; for failed (the redaction could not
-    finish), "error_code" and the covered turns, and no prompt."""
+    "covers_to_turn", "turns" (count), "turn_numbers" and "approx_tokens"; for reflect, the
+    _reflect_plan fields; for failed (the redaction could not finish), "error_code" and the covered
+    turns. Ids, turn numbers and counts only: the prompt is rendered inside the model-request step
+    (prompt_ref), so this checkpoint never holds turn or observation text. (A plan recorded before
+    P1.C has a "prompt" instead; it is still used.)"""
     config = MemoryConfig.model_validate(memory_json).observational
     assert config is not None
     redact = None if redact_json is None else PiiRedactConfig.model_validate(redact_json)
@@ -455,12 +636,16 @@ async def memory_observe_step(
                 "covers_from_turn": snapshot.covered_to_turn + 1,
                 "covers_to_turn": int(candidates[-1]["turn"]),
                 "turns": len(candidates),
+                "turn_numbers": [int(t["turn"]) for t in candidates],
                 "approx_tokens": sum(int(t["approx_tokens"]) for t in candidates),
             }
             try:
-                return {**observe, "prompt": observe_prompt(candidates, redact)}
+                # Checked here, so a redaction that cannot finish never makes a request; the prompt
+                # itself is rendered again (deterministically) inside the request step.
+                observe_prompt(candidates, redact)
             except MemoryRedactionFailed:
                 return {**observe, "action": "failed", "error_code": REDACTION_FAILED}
+            return observe
         plan = _reflect_plan(snapshot.observations, config)
         if plan is not None:
             return {"action": "reflect", "reason": "threshold", **plan}
@@ -532,6 +717,24 @@ def _write(
                     covers["covers_from_turn"], covers["covers_to_turn"])
         return {"status": "failed", "error_code": code, "reflect": None}
 
+    if stage == "reflect" and int(plan.get("dropped") or 0) > 0:
+        # The growth guard left the oldest rows out of the reflector's input: one warning event
+        # (counts only), whatever the reflection's outcome. Idempotent by key.
+        trimmed = MemoryEvent(
+            run_id=run_id, event_key=trimmed_event_key(turn), type=TRIMMED_EVENT,
+            data={
+                "stage": stage, **covers, "observations": int(plan.get("observations") or 0),
+                "dropped": int(plan["dropped"]), "dropped_tokens": int(plan.get("dropped_tokens") or 0),
+                "kept_tokens": int(plan.get("kept_tokens") or 0),
+                "max_tokens": int(plan.get("max_tokens") or 0),
+            },
+        )
+        try:
+            store.append_conversation_event(tenant_id, agent_id, conversation_id, trimmed)
+        except ConversationNotFound:
+            return gone()
+        log.warning("run %s: memory reflect input capped: dropped=%d tokens=%d", run_id, int(plan["dropped"]),
+                    int(plan.get("dropped_tokens") or 0))
     if error_code is not None:
         return fail(error_code)
     if notes is None:
@@ -633,6 +836,8 @@ async def reflect_step(
 async def _request(prompt: str, model_id: str) -> tuple[list[dict[str, Any]] | None, str | None, dict[str, Any] | None]:
     """(notes or None, error code or None, usage input or None) of one observer request."""
     response, error = await ask_observer(prompt, model_id)
+    if response is not None and response.model_name == _INPUT_CHANGED_MODEL:
+        return None, INPUT_CHANGED, None
     if error is not None or response is None:
         code = classify(error).code if error is not None else OUTPUT_INVALID
         return None, code, None
@@ -702,7 +907,9 @@ async def memory_observe_run(
             )
             summary["observe"] = out["status"]
         elif plan["action"] == "observe":
-            notes, code, usage = await _request(plan["prompt"], model_id)
+            ref = prompt_ref("observe", plan, tenant_id=tenant_id, agent_id=agent_id, conversation_id=conv,
+                             redact_json=redact_json)
+            notes, code, usage = await _request(ref, model_id)
             out = await observe_write_step(
                 run_id, tenant_id, agent_id, conv, int(turn), _without_prompt(plan), notes, code, usage,
                 redact_json, memory_json,
@@ -712,7 +919,9 @@ async def memory_observe_run(
         elif plan["action"] == "reflect":
             reflect_plan = plan
         if reflect_plan is not None:
-            notes, code, usage = await _request(reflect_plan["prompt"], model_id)
+            ref = prompt_ref("reflect", reflect_plan, tenant_id=tenant_id, agent_id=agent_id, conversation_id=conv,
+                             redact_json=redact_json)
+            notes, code, usage = await _request(ref, model_id)
             out = await reflect_step(
                 run_id, tenant_id, agent_id, conv, int(turn), _without_prompt(reflect_plan), notes, code, usage,
                 redact_json, memory_json,
@@ -728,13 +937,26 @@ async def memory_observe_run(
 
 
 def _without_prompt(plan: Mapping[str, Any]) -> dict[str, Any]:
-    """The plan as the write step needs it (the prompt is already in the request's checkpoint)."""
+    """The plan as the write step needs it (a pre-P1.C plan's prompt is left out)."""
     return {k: v for k, v in plan.items() if k != "prompt"}
 
 
 __all__ = [
     "FAILED_EVENT",
+    "INPUT_CHANGED",
     "OBSERVATION_CONFLICT",
+    "DEFAULT_MAX_ACTIVE_OBSERVATION_TOKENS",
+    "PROMPT_REF_PREFIX",
+    "MAX_ACTIVE_OBSERVATION_TOKENS_ENV",
+    "TRIMMED_EVENT",
+    "ObserverInputChanged",
+    "expand_prompt_refs",
+    "prompt_ref",
+    "reflect_input",
+    "reflect_input_cap",
+    "max_active_observation_tokens",
+    "render_prompt_ref",
+    "trimmed_event_key",
     "OBSERVER_INSTRUCTIONS",
     "OBSERVER_NAME",
     "OBSERVER_PROMPT_VERSION",

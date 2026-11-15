@@ -298,18 +298,18 @@ describe("upload: size and type refusals follow the API's caps", () => {
     expect(checkUploadFile({ name: "a.md", size: DEFAULT_MAX_DOCUMENT_BYTES + 1 })).toEqual({ ok: false, reason: "The file is larger than 5 MiB." });
   });
 
-  it("accepts .md .markdown .txt .text .html .htm in any case (their MIME types); refuses the rest by name", async () => {
+  it("accepts .md .markdown .txt .text .html .htm .pdf in any case (their MIME types); refuses the rest by name", async () => {
     on("PUT", /\/documents\/[^/]+$/, (url) => accepted(decodeURIComponent(url.pathname.split("/").pop()!)));
     const sheet = await openUpload();
     drop(sheet, [fileOf("A.MD"), fileOf("b.markdown"), fileOf("c.txt"), fileOf("d.text"), fileOf("e.HTML"), fileOf("f.htm"), fileOf("g.pdf"), fileOf("h.docx"), fileOf("noext"), fileOf("i.png")]);
-    expect(statuses(sheet)).toEqual(["ready", "ready", "ready", "ready", "ready", "ready", "refused", "refused", "refused", "refused"]);
-    expect(within(sheet).getAllByTestId("knowledge-upload-refused")).toHaveLength(4);
-    expect(within(sheet).getByTestId("knowledge-upload-submit")).toHaveTextContent("Upload 6 files");
+    expect(statuses(sheet)).toEqual(["ready", "ready", "ready", "ready", "ready", "ready", "ready", "refused", "refused", "refused"]);
+    expect(within(sheet).getAllByTestId("knowledge-upload-refused")).toHaveLength(3);
+    expect(within(sheet).getByTestId("knowledge-upload-submit")).toHaveTextContent("Upload 7 files");
     fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));
-    await waitFor(() => expect(sent("PUT", /\/documents\//)).toHaveLength(6), { timeout: 5000 });
-    await waitFor(() => expect(statuses(sheet).slice(0, 6).every((status) => status === "started")).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(sent("PUT", /\/documents\//)).toHaveLength(7), { timeout: 5000 });
+    await waitFor(() => expect(statuses(sheet).slice(0, 7).every((status) => status === "started")).toBe(true), { timeout: 5000 });
     const mimes = Object.fromEntries(sent("PUT", /\/documents\//).map((r) => [putKey(r), (r.body as { mime_type: string }).mime_type]));
-    expect(mimes).toEqual({ "A.MD": "text/markdown", "b.markdown": "text/markdown", "c.txt": "text/plain", "d.text": "text/plain", "e.HTML": "text/html", "f.htm": "text/html" });
+    expect(mimes).toEqual({ "A.MD": "text/markdown", "b.markdown": "text/markdown", "c.txt": "text/plain", "d.text": "text/plain", "e.HTML": "text/html", "f.htm": "text/html", "g.pdf": "application/pdf" });
   });
 
   it("an oversized file and an empty file are refused with the reason, before any request", async () => {
@@ -321,10 +321,10 @@ describe("upload: size and type refusals follow the API's caps", () => {
     expect(sent("PUT", /\/documents\//)).toHaveLength(0);
   });
 
-  it("a PDF is refused with the supported types named", async () => {
+  it("an unsupported type is refused with the supported types named", async () => {
     const sheet = await openUpload();
-    drop(sheet, [fileOf("manual.pdf", "%PDF")]);
-    expect(within(sheet).getByTestId("knowledge-upload-refused")).toHaveTextContent("Unsupported file type: upload .md, .txt or .html files.");
+    drop(sheet, [fileOf("manual.docx", "PK")]);
+    expect(within(sheet).getByTestId("knowledge-upload-refused")).toHaveTextContent("Unsupported file type: upload .md, .txt, .html, .rst, .pdf, .yaml, .yml or .json files.");
   });
 
   it("the file picker adds files the same way, and Remove drops one that has not been sent", async () => {
@@ -1520,7 +1520,7 @@ describe.each(["light", "dark"] as const)("accessibility (%s theme)", (theme) =>
 
   it("the upload Sheet with a ready and a refused file, and its paste form", async () => {
     const sheet = await openUpload();
-    drop(sheet, [fileOf("ok.md"), fileOf("scan.pdf")]);
+    drop(sheet, [fileOf("ok.md"), fileOf("scan.docx")]);
     await check();
     fireEvent.mouseDown(within(sheet).getByTestId("knowledge-upload-tab-paste"));
     await screen.findByTestId("knowledge-upload-paste");
