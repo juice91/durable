@@ -49,7 +49,7 @@ describe("the run's model in Run usage and the Traces lists", () => {
   it("the list cell reads the same way as Run usage", () => {
     render(<RunModel run={{ model_id: "test:fail-503", answering_model_id: "test:priced" }} testId="m" />);
     expect(screen.getByTestId("m")).toHaveTextContent(/^test:priced\(requested test:fail-503\)$/);
-    expect(screen.getByTestId("m-requested")).toHaveAttribute("title", expect.stringContaining("fallback"));
+    expect(screen.getByTestId("m")).toContainElement(screen.getByTitle(/fallback model answered/));
     cleanup();
     render(<RunModel run={{ model_id: null }} testId="m" />);
     expect(screen.getByTestId("m")).toHaveTextContent("-");
