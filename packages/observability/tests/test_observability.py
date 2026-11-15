@@ -206,6 +206,16 @@ def test_redact_scrubs_tokens_keys_and_url_credentials():
     assert len(obs.redact("x" * 10_000, max_length=200)) <= 200 + len("…[truncated]")
 
 
+
+def test_redact_masks_a_bare_api_key():
+    """A tenant API key (AGUI.3) is masked wherever it appears, in prose or JSON, the id included."""
+    key = "pos_0123456789abcdef01234567_" + "A-b_" * 10 + "xyz"
+    for text in (f"leaked {key} here", f'{{"name": "ci", "created": "{key}"}}', f"{key}-"):
+        out = obs.redact(text)
+        assert key not in out and "0123456789abcdef01234567" not in out and "[REDACTED]" in out
+    # Not a key: the prefix alone, or an id of the wrong shape.
+    assert obs.redact("pos_ and pos_xyz_abc stay") == "pos_ and pos_xyz_abc stay"
+
 def test_exception_type_name_is_bounded_and_safe():
     assert obs.exception_type(ValueError("SENTINEL")) == "ValueError"
     weird = type("Bad name; SENTINEL", (Exception,), {})

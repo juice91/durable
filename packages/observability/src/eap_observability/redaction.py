@@ -53,6 +53,9 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{4,}"), r"\1 " + REDACTED),
     # OpenAI-style keys (sk-..., sk-proj-...), wherever they appear.
     (re.compile(r"\bsk-[A-Za-z0-9_-]{6,}"), REDACTED),
+    # PydanticOS tenant API keys (pos_<24 hex id>_<secret>; eap_run_store.api_keys), wherever they
+    # appear. The whole key goes, the id too: a partial key would still name the row.
+    (re.compile(r"\bpos_[0-9a-f]{24}_[A-Za-z0-9_-]+"), REDACTED),
     # user:password@ in any URL (postgresql://, https://, ...).
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]*@"), r"\1" + REDACTED + "@"),
     # key=value, key: value, "key": "value" for credential-like keys (query strings, headers, JSON).

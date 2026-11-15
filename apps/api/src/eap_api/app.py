@@ -131,6 +131,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.memory import router as memory_router
 
     app.include_router(memory_router, prefix="/api/v1")
+    from eap_api.routes.api_keys import router as api_keys_router  # AGUI.3
+
+    app.include_router(api_keys_router, prefix="/api/v1")
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
