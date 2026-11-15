@@ -232,3 +232,137 @@ Run the same commands again after `git pull` in the repositories: unchanged page
 dropped (more than 50 pages needs `--max-delete N`, more than 20 % of the SDK's documents
 `--max-delete-percent P`). The key
 prefix keeps that deletion to this SDK's documents.
+
+## Runbook: the TI quality check (RAG P1 part 1, manual)
+
+This check is manual, and it runs against the live stack, so it is not in the automated suite
+(P1.A7). Run it once part 1 is deployed on the dev stack: the API on :8000, its worker, and the
+Studio LiteLLM gateway serving `Qwen3-VL-Embedding-8B-mlx-8bit`. It imports the four TI SDKs again
+with the native extractors (rst, PDF, Doxygen Markdown, YAML) into **new** knowledge bases, so the
+old pre-processed ones stay as the baseline. It then scores both with the 16-question set in
+`~/ti-rag/import/quality.py`. Each question scores 0, 1 or 2, so the maximum is 32.
+
+- **Baseline:** 26/32 (the knowledge bases imported by `~/ti-rag/import/ti_import.py`).
+- **Target:** ≥ 29/32, and no question that scored 2 on the baseline scores less.
+- **Misses** are listed in the part 1 PR.
+
+**0. One change to `quality.py` first.** Its source-page check reads `metadata.path`, which
+`ti_import.py` set and this importer does not. Every hit carries its `document_key`, which is the
+path with `/` written as `~` (see above), and the question regexes match it as is. In `rank_of`,
+replace
+
+```python
+text = h.get("content") or "" if field == "content" else (h.get("metadata") or {}).get("path", "")
+```
+
+with
+
+```python
+text = h.get("content") or "" if field == "content" else (
+    (h.get("metadata") or {}).get("path") or h.get("document_key") or "")
+```
+
+The baseline knowledge bases still score through `metadata.path`, so their numbers do not change.
+
+**1. Record the baseline** on the same stack, so both scores use the same gateway and model:
+
+```sh
+cd ~/ti-rag/import
+q() { uv run --no-project --python 3.13 --with docutils --with pypdf --with 'pydantic>=2' \
+        --with markdown-it-py==4.3.0 python quality.py "$@"; }
+q mcu processor c2000 zephyr | tee ~/ti-rag/import/logs/quality-baseline.md
+```
+
+**2. Create the four knowledge bases** with tenant `acme`, the tenant `quality.py` searches. Only
+the MCU+ one needs an extraction option:
+
+```sh
+export EAP_API_TOKEN=dev:acme:ti-import
+MODEL=litellm:Qwen3-VL-Embedding-8B-mlx-8bit
+kb() {  # kb <name> [chunking JSON] -> prints the id
+  curl -sf -X POST http://127.0.0.1:8000/api/v1/knowledge-bases \
+    -H "Authorization: Bearer $EAP_API_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"name\": \"$1\", \"embedding_model\": \"$MODEL\"${2:+, \"chunking\": $2}}" | jq -r .id
+}
+PROC=$(kb 'TI Processor SDK (P1 native)')
+MCU=$(kb 'TI MCU+ SDK (P1 native)' '{"extract": {"markdown_flavor": "doxygen"}}')
+C2K=$(kb 'TI C2000Ware (P1 native)')
+ZEP=$(kb 'TI SimpleLink Zephyr (P1 native)')
+echo "$PROC $MCU $C2K $ZEP"
+```
+
+New knowledge bases use chunker v2. Leave out `rst_config`, because the baseline kept every
+`ifconfig` variant too.
+
+**3. Import each SDK** from this repository's checkout on the dev stack. Use the maps from the
+example above for the Processor SDK and MCU+. C2000Ware needs a device map, because question
+c2000 #2 filters on `device: F2837xD`. Save it as `~/ti-rag/import/map-c2000.yaml`:
+
+```yaml
+"**/f280013x/**": {sdk_family: c2000ware, device: F280013x}
+"**/f280015x/**": {sdk_family: c2000ware, device: F280015x}
+"**/f28002x/**":  {sdk_family: c2000ware, device: F28002x}
+"**/f28003x/**":  {sdk_family: c2000ware, device: F28003x}
+"**/f28004x/**":  {sdk_family: c2000ware, device: F28004x}
+"**/f2802x/**":   {sdk_family: c2000ware, device: F2802x}
+"**/f2802x0/**":  {sdk_family: c2000ware, device: F2802x0}
+"**/f2803x/**":   {sdk_family: c2000ware, device: F2803x}
+"**/f2805x/**":   {sdk_family: c2000ware, device: F2805x}
+"**/f2806x/**":   {sdk_family: c2000ware, device: F2806x}
+"**/f2807x/**":   {sdk_family: c2000ware, device: F2807x}
+"**/f2823x/**":   {sdk_family: c2000ware, device: F2823x}
+"**/f2833x/**":   {sdk_family: c2000ware, device: F2833x}
+"**/f2837xd/**":  {sdk_family: c2000ware, device: F2837xD}
+"**/f2837xs/**":  {sdk_family: c2000ware, device: F2837xS}
+"**/f2838x/**":   {sdk_family: c2000ware, device: F2838x}
+"**/f28p55x/**":  {sdk_family: c2000ware, device: F28P55x}
+"**/f28p65x/**":  {sdk_family: c2000ware, device: F28P65x}
+"**":             {sdk_family: c2000ware}
+```
+
+Then import. Each command is first run with `--dry-run`, which checks the counts and uploads
+nothing:
+
+```sh
+cd ~/orca/projects/pydanticOS
+R=~/ti-rag/repos; M=~/ti-rag/import
+NOT_DOCS=(--exclude 'LICENSE*' --exclude 'CONTRIBUTING*' --exclude 'SECURITY*' --exclude 'CODE_OF_CONDUCT*')
+uv run python scripts/kb_import.py $R/processor-sdk-doc/source --kb $PROC --key-prefix 'processor-sdk~' \
+    --metadata-map $M/map-processor.yaml "${NOT_DOCS[@]}" --report-json $M/logs/p1-processor.json
+uv run python scripts/kb_import.py $R/mcupsdk-core/docs_src/docs --kb $MCU --key-prefix 'mcu~' \
+    --metadata-map $M/map-mcu.yaml "${NOT_DOCS[@]}" --report-json $M/logs/p1-mcu.json
+uv run python scripts/kb_import.py $R/c2000ware-core-sdk --kb $C2K --key-prefix 'c2000~' \
+    --metadata-map $M/map-c2000.yaml "${NOT_DOCS[@]}" --report-json $M/logs/p1-c2000.json
+uv run python scripts/kb_import.py $R/simplelink-zephyr --kb $ZEP --key-prefix 'zephyr~' \
+    "${NOT_DOCS[@]}" --report-json $M/logs/p1-zephyr.json
+```
+
+- **What is imported.** Only `mcupsdk-core`: the baseline left out `mcu_plus_sdk_am263x` (its
+  licence is not reviewed yet), so leave it out here too.
+- **Failures.** A document that fails (an extraction code in the report, or `error_code` /
+  `error_reason` on the document in Studio) is a finding. List it in the PR.
+- **Retries.** A transient failure, such as the gateway timing out, is retried with
+  `--retry-failed` on the same command.
+- **When to score.** Wait until each knowledge base's documents are all `ready` or `failed`, in
+  Studio or with `GET /knowledge-bases/{id}/documents`.
+
+**4. Score the new knowledge bases** one family at a time, each with `--kb` (`q` is the function
+from step 1):
+
+```sh
+cd ~/ti-rag/import
+for f in "processor:TI Processor SDK (P1 native)" "mcu:TI MCU+ SDK (P1 native)" \
+         "c2000:TI C2000Ware (P1 native)" "zephyr:TI SimpleLink Zephyr (P1 native)"; do
+  q "${f%%:*}" --kb "${f#*:}"
+done | tee ~/ti-rag/import/logs/quality-p1.md
+grep '^score' ~/ti-rag/import/logs/quality-baseline.md ~/ti-rag/import/logs/quality-p1.md
+```
+
+**5. Record the result in the PR:**
+
+- the four family scores and their sum (the target is ≥ 29/32);
+- each question whose score fell from the baseline (none is allowed for a question that scored 2);
+- every question below 2, with its top-5 row from `quality-p1.md` (path > heading).
+
+Delete the four `(P1 native)` knowledge bases afterwards, or keep them as the new baseline if they
+meet the target.
