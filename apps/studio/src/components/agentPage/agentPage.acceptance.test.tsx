@@ -468,8 +468,8 @@ describe("below 1024 px", () => {
       expect(Array.from(root.querySelectorAll<HTMLElement>("[style]")).filter((el) => Number.parseFloat(el.style.minWidth) > 375)).toEqual([]);
       // The tab strip stays reachable: it scrolls on its own instead of widening the page.
       const tabs = within(main()).getByRole("navigation", { name: "Agent sections" });
-      // Chat · Traces · Editor · Memory (the fixture agent has memory, RM.18).
-      expect(tabs.querySelectorAll("a")).toHaveLength(4);
+      // Chat · Traces · Editor · Memory (the fixture agent has memory, RM.18) · Tests (AC.16).
+      expect(tabs.querySelectorAll("a")).toHaveLength(5);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(document.documentElement.clientWidth || 375);
     } finally {
       Object.defineProperty(window, "innerWidth", { configurable: true, value: original });

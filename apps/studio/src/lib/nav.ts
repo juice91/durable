@@ -1,5 +1,6 @@
 import {
   AgentsIcon,
+  ApprovalsIcon,
   KnowledgeIcon,
   LogsIcon,
   McpIcon,
@@ -60,9 +61,20 @@ export interface NavItem {
   transitional?: boolean;
   /** Extra palette search words. */
   keywords?: readonly string[];
+  /**
+   * A live count shown next to the item (AC.15): the sidebar reads it from its source (see
+   * `useNavBadges` in `components/frame/Sidebar.tsx`), shows it in the expanded sidebar, as a dot in the 56 px rail
+   * and on the mobile menu button, and hides it at 0.
+   */
+  badge?: NavBadgeId;
 }
 
+/** The live counts a nav item can show. `approvals_pending`: `GET /approvals?status=pending`, polled every 30 s. */
+export type NavBadgeId = "approvals_pending";
+
 export const navItems: readonly NavItem[] = [
+  // Approvals (AC.15): the untitled top group
+  { id: "approvals", label: "Approvals", href: routes.approvals(), icon: ApprovalsIcon, group: "approvals", gKey: "i", badge: "approvals_pending", keywords: ["inbox", "pending", "human in the loop", "approve", "deny"] },
   // Primitives
   { id: "agents", label: "Agents", href: routes.agents(), icon: AgentsIcon, group: "primitives", gKey: "a", keywords: ["assistants"] },
   { id: "workflows", label: "Workflows", href: routes.workflows(), icon: WorkflowsIcon, group: "primitives", gKey: "w" },

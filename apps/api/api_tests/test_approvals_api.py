@@ -275,6 +275,52 @@ def test_inbox_hides_approvals_of_runs_that_ended(api, fake):
     assert client.get("/api/v1/approvals", headers=headers).json()["items"] == []
 
 
+def test_get_one_approval_of_either_kind_pending_or_decided(api, fake):
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    _other, other_headers = tenant_of("bob")
+    step_run = waiting_step(client, app, tenant, headers)
+    tool_run, agent_id = waiting_tool_call(client, app, tenant, headers, call_id="call:1.x", args={"to": "a@b.c"})
+    listed = {i["kind"]: i for i in client.get("/api/v1/approvals", headers=headers).json()["items"]}
+
+    r = client.get(f"/api/v1/approvals/{tool_run}/tool/call:1.x", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json() == listed["tool"]
+    assert r.json()["agent_id"] == agent_id and r.json()["tool_call_id"] == "call:1.x"
+    r = client.get(f"/api/v1/approvals/{step_run}/step/approve", headers=headers)
+    assert r.status_code == 200 and r.json() == listed["step"]
+
+    # Decided items stay readable, in the decided shape.
+    assert client.post(tool_url(tool_run, "call:1.x", "deny"), json={"comment": "no"}, headers=headers).status_code == 200
+    item = client.get(f"/api/v1/approvals/{tool_run}/tool/call:1.x", headers=headers).json()
+    assert (item["status"], item["decision"], item["decided_by"]) == ("decided", "denied", "alice") and item["decided_at"]
+
+    # The wrong kind, an unknown key or run, and another tenant: 404.
+    for url, h in (
+        (f"/api/v1/approvals/{tool_run}/step/call:1.x", headers),
+        (f"/api/v1/approvals/{tool_run}/tool/call_nope", headers),
+        (f"/api/v1/approvals/{uuid.uuid4()}/step/approve", headers),
+        (f"/api/v1/approvals/{step_run}/step/approve", other_headers),
+    ):
+        r = client.get(url, headers=h)
+        assert r.status_code == 404 and r.json()["detail"] == "Approval not found", url
+    # Malformed: 422; no credentials: 401.
+    for url in ("/api/v1/approvals/not-a-uuid/step/approve", f"/api/v1/approvals/{step_run}/other/approve",
+                f"/api/v1/approvals/{step_run}/step/a%20b", f"/api/v1/approvals/{step_run}/step/{'x' * 257}"):
+        assert client.get(url, headers=headers).status_code == 422, url
+    assert client.get(f"/api/v1/approvals/{step_run}/step/approve").status_code == 401
+
+
+def test_get_one_approval_of_an_ended_run_keeps_pending_with_the_run_status(api, fake):
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    run_id, _ = waiting_tool_call(client, app, tenant, headers)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET status = 'failed' WHERE id = :r"), {"r": str(run_id)})
+    item = client.get(f"/api/v1/approvals/{run_id}/tool/call_1", headers=headers).json()
+    assert (item["status"], item["run_status"]) == ("pending", "failed")
+
+
 # ------------------------------------------------------------------------------ workflow routes
 
 

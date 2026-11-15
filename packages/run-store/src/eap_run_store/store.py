@@ -1062,7 +1062,7 @@ class RunStore:
             {"status": "failed", "error": ENQUEUE_FAILED_ERROR, **_enqueue_failed_finish()},
         )
 
-    def mark_running(self, tenant_id: str, run_id: UUID) -> bool:
+    def mark_running(self, tenant_id: str, run_id: UUID, model_id: str | None = None) -> bool:
         """A workflow has started the run: status -> running, and an ENQUEUE_FAILED_ERROR left by a
         hand-off that raised although DBOS accepted it is cleared in the same statement (any other
         error is kept). RunNotFound for another tenant's or an unknown run. Returns True.
@@ -1074,7 +1074,12 @@ class RunStore:
         workflow run) never takes the lock and returns True, except a DETACHED turn: its
         conversation was deleted (delete_conversation set conversation_id, turn and input to NULL
         on a terminal run, e.g. a failed hand-off that DBOS accepted after all). It is left
-        unchanged and False is returned, so it can never run and write output again."""
+        unchanged and False is returned, so it can never run and write output again.
+
+        `model_id` (AC.17 review 2026-11-15): the spec's model, recorded as the run's effective model
+        when the row has none (workflow-step and eval-case child runs are created without run
+        options), so metrics can tell a fallback answer (a usage row of another model) on every run.
+        A recorded model (an API-created run, or an override) is never replaced."""
         if not tenant_id:
             raise ValueError("tenant_id is required")
         values = {
@@ -1090,6 +1095,8 @@ class RunStore:
                 for column in _ENQUEUE_FAILED_FINISH
             },
         }
+        if model_id is not None:
+            values["model_id"] = func.coalesce(RunModel.model_id, model_id)
         with self.Session() as session:
             run = session.execute(
                 select(RunModel.conversation_id, RunModel.turn, RunModel.input, RunModel.status)

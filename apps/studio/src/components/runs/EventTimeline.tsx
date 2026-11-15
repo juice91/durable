@@ -3,6 +3,14 @@ import { SafeMarkdown } from "@/components/markdown/SafeMarkdown";
 import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
 import { TraceLink } from "@/components/traces/TraceLink";
+import { StructuredOutputView } from "@/components/chat/StructuredOutput";
+import {
+  attemptText,
+  outputRetryOf,
+  outputRetryText,
+  turnCapabilityFailure,
+  turnFallback,
+} from "@/components/chat/turnCapabilities";
 
 interface EventItemProps {
   event: RunEvent;
@@ -258,10 +266,125 @@ function MemoryLine({ data, failed }: { data: RunEvent["data"]; failed: boolean 
   );
 }
 
+// ------------------------------------------------------------- agent capabilities rows (AC.14)
+
+/** A model response's fallback facts (AC.5): requested model, fallback index, failed attempts. */
+function FallbackFacts({ event }: { event: RunEvent }) {
+  const fallback = turnFallback([event]);
+  if (!fallback && typeof event.data.requested_model_id !== "string") return null;
+  const index = typeof event.data.fallback_index === "number" ? event.data.fallback_index : null;
+  return (
+    <span data-testid="event-fallback" className="mt-1 block break-words text-xs text-muted-foreground">
+      {[
+        typeof event.data.requested_model_id === "string" ? `requested: ${event.data.requested_model_id}` : null,
+        index !== null
+          ? index > 0
+            ? `answered by fallback #${index}${typeof event.data.answering_model === "string" && event.data.answering_model ? ` (${event.data.answering_model})` : ""}`
+            : "answered by the primary"
+          : null,
+        fallback && fallback.attempts.length > 0 ? `failed: ${fallback.attempts.map(attemptText).join("; ")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")}
+    </span>
+  );
+}
+
+const TOOL_DECISION_TITLES: Record<string, string> = {
+  tool_approved: "Tool call approved",
+  tool_denied: "Tool call denied",
+  tool_approval_timed_out: "Tool approval timed out (denied)",
+};
+
+function ToolDecisionLine({ event }: { event: RunEvent }) {
+  const by = factText(event.data.decided_by);
+  const comment = factText(event.data.comment);
+  return (
+    <div className="text-sm" data-testid="event-tool-decision" data-decision={event.type}>
+      <span className={event.type === "tool_approved" ? "font-semibold text-success-text" : "font-semibold text-warning-text"}>
+        {TOOL_DECISION_TITLES[event.type] ?? event.type}
+      </span>
+      <span className="mt-1 block break-words text-xs text-muted-foreground">
+        {[`call: ${factText(event.data.tool_call_id) ?? "?"}`, by && `by ${by}`].filter(Boolean).join(" · ")}
+      </span>
+      {comment ? <span className="mt-1 block whitespace-pre-wrap text-xs text-muted-foreground">{comment}</span> : null}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------- eval runs (AC.11)
+//
+// Status, counts, duration and cost only: the events never carry case input or output text.
+
+const EVAL_CASE_TITLES: Record<string, string> = { passed: "Case passed", failed: "Case failed", error: "Case error" };
+
+function EvalCaseLine({ data }: { data: RunEvent["data"] }) {
+  const status = factText(data.status);
+  const assertions = data.assertions && typeof data.assertions === "object" ? (data.assertions as Record<string, unknown>) : null;
+  const passed = assertions ? factNumber(assertions.passed) : null;
+  const total = assertions ? factNumber(assertions.total) : null;
+  return (
+    <Facts
+      testId="event-eval-case"
+      title={(status && EVAL_CASE_TITLES[status]) || "Case result"}
+      tone={status === "passed" ? "normal" : "error"}
+      facts={[
+        ["case", factText(data.case_id)],
+        ["position", factNumber(data.position)],
+        ["error", factText(data.error_code)],
+        ["assertions", passed !== null && total !== null ? `${passed} of ${total} passed` : null],
+        ["scores", factNumber(data.scores)],
+        ["labels", factNumber(data.labels)],
+        ["evaluator failures", data.evaluator_failures ? factNumber(data.evaluator_failures) : null],
+        ["duration", typeof data.duration_ms === "number" ? `${factNumber(data.duration_ms)} ms` : null],
+        ["cost", factCost(data.cost_usd)],
+      ]}
+    />
+  );
+}
+
+function EvalStartLine({ data }: { data: RunEvent["data"] }) {
+  return (
+    <Facts
+      testId="event-eval-start"
+      title="Eval run started"
+      facts={[
+        ["suite", factText(data.suite_id)],
+        ["agent version", data.draft === true ? "draft" : factNumber(data.agent_version)],
+        ["cases", factNumber(data.cases)],
+        ["concurrency", factNumber(data.max_concurrency)],
+        ["suite hash", factText(data.suite_hash)?.slice(0, 12) ?? null],
+      ]}
+    />
+  );
+}
+
+function EvalAggregatesLine({ data }: { data: Record<string, unknown> }) {
+  const rate = typeof data.pass_rate === "number" && Number.isFinite(data.pass_rate) ? `${Math.round(data.pass_rate * 1000) / 10}%` : null;
+  const scores = data.scores_avg && typeof data.scores_avg === "object" ? Object.entries(data.scores_avg as Record<string, unknown>) : [];
+  return (
+    <Facts
+      testId="event-eval-aggregates"
+      title="Eval run completed"
+      facts={[
+        ["cases", factNumber(data.cases)],
+        ["passed", factNumber(data.passed)],
+        ["failed", factNumber(data.failed)],
+        ["errors", factNumber(data.errors)],
+        ["pass rate", rate],
+        ["p50 duration", typeof data.duration_ms_p50 === "number" ? `${factNumber(data.duration_ms_p50)} ms` : null],
+        ["cost", factCost(data.cost_usd)],
+        ["avg scores", scores.length ? scores.map(([k, v]) => `${k} ${typeof v === "number" ? Math.round(v * 100) / 100 : "—"}`).join(", ") : null],
+      ]}
+    />
+  );
+}
+
 function EventItem({ event }: EventItemProps) {
   const renderContent = () => {
     switch (event.type) {
       case "run_started":
+        if (event.data.kind === "eval") return <EvalStartLine data={event.data} />;
         return (
           <div className="text-sm text-card-foreground/70">
             Run started
@@ -289,9 +412,20 @@ function EventItem({ event }: EventItemProps) {
         return (
           <div className="text-sm text-card-foreground">
             <span className="font-semibold">Model response:</span>
+            {event.data.output_candidate === true ? (
+              <span data-testid="event-output-candidate" className="ml-2 rounded-full bg-info/10 px-2 py-0.5 text-xs text-info-text">
+                output candidate
+              </span>
+            ) : null}
             <div className="mt-1">
-              <MarkdownContent text={event.data.text ?? ""} />
+              {event.data.output_candidate === true && event.data.text ? (
+                // Native or prompted mode: the candidate is raw JSON text, shown as such.
+                <JsonBlock value={event.data.text} label="Output candidate" />
+              ) : (
+                <MarkdownContent text={event.data.text ?? ""} />
+              )}
             </div>
+            <FallbackFacts event={event} />
           </div>
         );
       case "tool_call":
@@ -318,6 +452,11 @@ function EventItem({ event }: EventItemProps) {
                   </span>
                 )}
               </>
+            ) : event.data.status === "denied" ? (
+              <>
+                <span className="font-semibold text-warning-text">Tool denied:</span>
+                <JsonBlock value={event.data.content ?? null} label="Tool result" />
+              </>
             ) : (
               <>
                 <span className="font-semibold text-success">Tool result:</span>
@@ -327,11 +466,18 @@ function EventItem({ event }: EventItemProps) {
           </div>
         );
       case "run_completed":
+        if (event.data.aggregates && typeof event.data.aggregates === "object") {
+          return <EvalAggregatesLine data={event.data.aggregates as Record<string, unknown>} />;
+        }
         return (
           <div className="text-sm">
             <span className="text-success font-semibold">Run completed successfully</span>
             {/* A tool run's end event carries the tool result (any JSON value) */}
             {event.data.result !== undefined && <JsonBlock value={event.data.result} label="Run result" />}
+            {/* AC.4: a structured agent's validated object. */}
+            {event.data.output_json !== undefined && (
+              <StructuredOutputView value={event.data.output_json} label="Output JSON" testId="event-output-json" />
+            )}
           </div>
         );
       case "run_failed":
@@ -339,10 +485,39 @@ function EventItem({ event }: EventItemProps) {
           <div className="text-sm text-destructive-text font-semibold">
             {event.data.status === "needs_attention" ? "Needs attention" : "Run failed"}
             <span className="block mt-1 text-destructive-text">
-              {formatValue(event.data.error || "Unknown error")}
+              {turnCapabilityFailure([event])?.message ?? formatValue(event.data.error || "Unknown error")}
             </span>
+            {turnCapabilityFailure([event]) !== null ? (
+              <span data-testid="event-error-code" className="block mt-1 text-xs font-normal font-mono text-muted-foreground">
+                {String(event.data.error_code)}
+              </span>
+            ) : null}
           </div>
         );
+      case "eval_case_result":
+        return <EvalCaseLine data={event.data} />;
+      case "output_retry":
+        return (
+          <div className="text-sm" data-testid="event-output-retry">
+            <span className="font-semibold text-warning-text">Output retry</span>
+            <span className="mt-1 block break-words text-xs text-muted-foreground">{outputRetryText(outputRetryOf(event.data))}</span>
+          </div>
+        );
+      case "tool_approval_waiting":
+        return (
+          <div className="text-sm" data-testid="event-tool-approval-waiting">
+            <span className="font-semibold text-warning-text">Waiting for approval:</span>
+            <span className="ml-1 font-mono text-muted-foreground">{formatValue(event.data.tool_name ?? "tool")}</span>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Deadline: {factText(event.data.deadline) ? new Date(String(event.data.deadline)).toLocaleString() : "—"}
+            </span>
+            <JsonBlock value={event.data.args ?? {}} label="Tool arguments" />
+          </div>
+        );
+      case "tool_approved":
+      case "tool_denied":
+      case "tool_approval_timed_out":
+        return <ToolDecisionLine event={event} />;
       case "processor_result":
         return <ProcessorLine data={event.data} />;
       case "embedding":

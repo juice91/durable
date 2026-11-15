@@ -15,7 +15,8 @@ export function toolCallInfoKey(runId: string, toolCallId: string): string {
   return `${runId}:${toolCallId}`;
 }
 
-export type ToolCallStatus = "running" | "ok" | "error" | "no_result";
+/** `waiting`: a gated call waits for a person (AC.6); `denied`: denied or timed out, it never ran. */
+export type ToolCallStatus = "running" | "waiting" | "ok" | "error" | "no_result" | "denied";
 
 export interface ToolCallInfo {
   status: ToolCallStatus;
@@ -63,10 +64,24 @@ export function toolCallInfos(events: readonly RunEvent[], turnRunning: boolean)
       }
     } else if (event.type === "tool_result" && typeof event.data.tool_call_id === "string") {
       const raw = event.data.status;
-      const status: ToolCallStatus = raw === "error" ? "error" : raw === "no_result" ? "no_result" : "ok";
+      const status: ToolCallStatus = raw === "error" ? "error" : raw === "no_result" ? "no_result" : raw === "denied" ? "denied" : "ok";
       const retrieve = event.data.tool_name === RETRIEVE_TOOL_NAME || retrieveCalls.has(event.data.tool_call_id);
       const sources = retrieve ? parseSources(event.data.sources) : undefined;
       results.set(event.data.tool_call_id, { status, at: time(event.ts), ...(sources ? { sources } : {}) });
+    }
+  }
+  // AC.6: a call waiting for approval (no decision yet) is "waiting"; a denied one that has no
+  // result yet is "denied" already.
+  const awaiting = new Set<string>();
+  const refused = new Set<string>();
+  for (const event of events) {
+    const id = event.data.tool_call_id;
+    if (typeof id !== "string") continue;
+    if (event.type === "tool_approval_waiting") awaiting.add(id);
+    else if (event.type === "tool_approved") awaiting.delete(id);
+    else if (event.type === "tool_denied" || event.type === "tool_approval_timed_out") {
+      awaiting.delete(id);
+      refused.add(id);
     }
   }
   const infos = new Map<string, ToolCallInfo>();
@@ -74,7 +89,8 @@ export function toolCallInfos(events: readonly RunEvent[], turnRunning: boolean)
     const result = results.get(id);
     const start = started.get(id) ?? null;
     if (!result) {
-      infos.set(id, { status: turnRunning ? "running" : "no_result", durationMs: null, ...(retrieveCalls.has(id) ? { sources: [] } : {}) });
+      const pending: ToolCallStatus = refused.has(id) ? "denied" : awaiting.has(id) && turnRunning ? "waiting" : turnRunning ? "running" : "no_result";
+      infos.set(id, { status: pending, durationMs: null, ...(retrieveCalls.has(id) ? { sources: [] } : {}) });
       continue;
     }
     const duration = start !== null && result.at !== null && result.at >= start ? result.at - start : null;
@@ -88,6 +104,8 @@ export { formatDuration } from "@/lib/format";
 
 export const TOOL_STATUS_LABELS: Record<ToolCallStatus, string> = {
   running: "Running",
+  waiting: "Waiting for approval",
+  denied: "Denied",
   ok: "Done",
   error: "Failed",
   no_result: "No result",

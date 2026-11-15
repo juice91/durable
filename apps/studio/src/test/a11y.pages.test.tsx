@@ -171,6 +171,9 @@ function respond(url: URL): unknown {
   if (p === "/agents/a1") return AGENT;
   if (p === "/agents/a1/versions") return VERSIONS;
   if (/^\/agents\/a1\/versions\/\d+$/.test(p)) return VERSIONS[Number(p.split("/").pop()) - 1] ?? VERSIONS[1];
+  // AC.16: the Tests tab's suite list and eval runs.
+  if (p === "/agents/a1/eval-suites") return { items: [{ id: "s1", agent_id: "a1", name: "Refund suite", description: null, evaluators: [{ kind: "equals_expected" }], case_count: 2, archived: false, archived_at: null, created_at: T0, updated_at: T1 }] };
+  if (p === "/agents/a1/evals/runs") return { items: [], next_cursor: null };
   if (p === "/agents/a1/request-context") return { agent_id: "a1", version: 2, draft: false, fields: [], schema: { type: "object", properties: {} } };
   if (p === "/agents/a1/conversations" || p === "/conversations") return { items: [{ id: "c1", agent_id: "a1", title: "Refund question", turn_count: 2, created_at: T0, updated_at: T1 }], next_before: null };
   if (p === "/conversations/c1") return { id: "c1", agent_id: "a1", title: "Refund question", turn_count: 1, created_at: T0, updated_at: T1, runs: [run("r1", { conversation_id: "c1", turn: 1 })] };
@@ -196,6 +199,16 @@ function respond(url: URL): unknown {
   if (/^\/runs\/[^/]+\/events$/.test(p)) return [];
   if (/^\/runs\/[^/]+$/.test(p)) return run(p.split("/").pop()!);
   if (p === "/logs") return LOGS;
+  if (p === "/approvals") {
+    return {
+      items: [{
+        run_id: "r1", kind: "tool", approval_key: "call_1", tool_call_id: "call_1", step_id: null, root_run_id: "r1", agent_id: "a1",
+        workflow_id: null, tool_name: "send_email", args: { to: "a@example.test" }, prompt: null, status: "pending", requested_at: T0,
+        deadline: T1, decided_at: null, decision: null, decided_by: null, run_status: "running",
+      }],
+      next_cursor: null,
+    };
+  }
   if (p === "/metrics/summary") return summaryFixture({ runs: 12, failed: 1 });
   if (p === "/metrics/timeseries") return timeseriesFixture([{ runs: 4 }, { runs: 8, failed: 1 }]);
   if (p === "/metrics/breakdown") {
@@ -249,6 +262,7 @@ const PAGES: PageCase[] = [
   { name: "agent conversation", path: "/agents/a1/chat/c1", params: { id: "a1", conversationId: "c1" }, load: () => inAgentLayout(import("@/app/agents/[id]/chat/[conversationId]/page")), h1: "Support bot", shows: "hello" },
   { name: "agent traces", path: "/agents/a1/traces", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/traces/page")), h1: "Support bot", shows: "#agent-trace-row" },
   { name: "agent editor", path: "/agents/a1/editor", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/editor/page")), h1: "Support bot", shows: "Identity" },
+  { name: "agent tests", path: "/agents/a1/tests", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/tests/page")), h1: "Support bot", shows: "Refund suite" },
   { name: "agent memory", path: "/agents/a2/memory", params: { id: "a2" }, load: () => inAgentLayout(import("@/app/agents/[id]/memory/page")), h1: "Memory bot", shows: "#memory-resource-option" },
   { name: "workflows", path: "/workflows", load: () => import("@/app/workflows/page"), h1: "Workflows", shows: "Triage" },
   { name: "workflow graph", path: "/workflows/w1", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/page"), h1: "Triage", shows: "classify" },
@@ -264,6 +278,7 @@ const PAGES: PageCase[] = [
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },
   { name: "traces", path: "/traces", load: () => import("@/app/traces/page"), h1: "Traces", shows: "#trace-row" },
   { name: "logs", path: "/logs", load: () => import("@/app/logs/page"), h1: "Logs", shows: "tool failed" },
+  { name: "approvals", path: "/approvals", load: () => import("@/app/approvals/page"), h1: "Approvals", shows: "send_email" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
 ];
 

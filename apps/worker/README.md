@@ -195,3 +195,5 @@ Deploy the API and the worker together, in this order:
 - **Throughput:** one workflow tree (or eval run with its cases) now appends one transaction at a
   time: about 110-220 appends/s per tree in local measurements, against 400-475 before. Different
   roots do not contend. Never hold a child run's append transaction open across slow work.
+
+- **Approvals:** a gated tool call waits up to the agent's `approvals.timeout_hours` (default 24, at most 168) hours; an hour is `EAP_WORKFLOW_HOUR_SECONDS` (default 3600 s, so 24 h by default), the same knob as workflow approval steps. Decisions are woken through `tool_approval:{run_id}` and also re-read every `EAP_APPROVAL_POLL_SECONDS` (default 3600 s) as a backstop for a lost wake-up. Both knobs are recorded by `eap.start_run`, so changing them never affects a run already started.

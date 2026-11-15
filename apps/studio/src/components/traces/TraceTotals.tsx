@@ -17,6 +17,7 @@ const TOTALS_GROUP_TEST_ID = {
   memory: { testId: "totals-usage-memory" },
   moderation: { testId: "totals-usage-moderation" },
   embedding: { testId: "totals-usage-embedding" },
+  judge: { testId: "totals-usage-judge" },
 } as const;
 
 function groupLine(group: UsageGroup): string {
@@ -25,7 +26,7 @@ function groupLine(group: UsageGroup): string {
   return group.costUsd === undefined ? tokens : `${tokens}, ${formatCost(group.costUsd) ?? "no price"}`;
 }
 
-/** Memory, moderation and embedding usage, each on its own line (never added to the chat model's). */
+/** Memory, moderation, embedding and judge usage, each on its own line (never added to the chat model's). */
 function OtherUsage({ groups }: { groups: UsageGroup[] }) {
   return (
     <div className="col-span-full rounded-md border border-border bg-card px-3 py-2" data-testid="totals-other-usage">

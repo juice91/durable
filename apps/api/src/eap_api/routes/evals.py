@@ -51,6 +51,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.agent_archive import refuse_if_archived
 from eap_api.auth import Principal, current_principal
 from eap_api.eval_format import (
     MAX_IMPORT_BYTES,
@@ -93,6 +94,7 @@ from eap_run_store.evals import (
     MAX_LIST_RUNS,
     dump_evaluators,
 )
+from eap_processors import Re2PatternError, compile_re2
 from eap_schemas import AgentSpec
 from eap_schemas.evals import EvalSuiteInvalid, EvalSuiteSnapshot
 from eap_schemas.models_policy import ModelNotAllowed, ModelPolicy
@@ -268,6 +270,33 @@ def side_effect_warnings(spec: AgentSpec) -> list[dict[str, str]]:
     return warnings
 
 
+REGEX_INVALID = "pattern is not valid RE2 syntax or is too complex"
+
+
+def check_regex_evaluators(evaluators: Any, path: str) -> None:
+    """EvalSuiteInvalid (422) naming `path.<i>.pattern` for a `regex` evaluator whose pattern RE2
+    refuses (eap_processors.compile_re2, as the worker matches it). The message is fixed: the
+    pattern, which RE2's own error text quotes, is never echoed. Models or dicts."""
+    for index, evaluator in enumerate(evaluators or ()):
+        kind = evaluator.get("kind") if isinstance(evaluator, dict) else getattr(evaluator, "kind", None)
+        if kind != "regex":
+            continue
+        pattern = evaluator.get("pattern") if isinstance(evaluator, dict) else evaluator.pattern
+        if not isinstance(pattern, str):
+            continue  # the contract's own validation reports it
+        try:
+            compile_re2(pattern, allow_empty_match=True)
+        except Re2PatternError:
+            raise EvalSuiteInvalid(REGEX_INVALID, f"{path}.{index}.pattern") from None
+
+
+def _check_case_regexes(cases: Any, path: str = "cases") -> None:
+    for i, case in enumerate(cases or ()):
+        evaluators = case.get("evaluators") if isinstance(case, dict) else getattr(case, "evaluators", None)
+        name = case.get("name") if isinstance(case, dict) else getattr(case, "name", None)
+        check_regex_evaluators(evaluators, f"{path}.{name if isinstance(name, str) else i}.evaluators")
+
+
 def _check_judge_models(snapshot: EvalSuiteSnapshot) -> None:
     """422 when an llm_judge evaluator names a model outside the platform allowlist."""
     policy = ModelPolicy.from_env()
@@ -326,6 +355,7 @@ def create_suite(
     if existing is not None:
         return JSONResponse(status_code=status.HTTP_200_OK, content=suite_json(existing))
     try:
+        check_regex_evaluators(body.evaluators, "evaluators")
         suite = store.create_suite(
             tenant_id, agent_id, body.name, description=body.description, evaluators=body.evaluators,
             suite_id=body.suite_id,
@@ -385,6 +415,7 @@ def update_suite(
     if "archived" in fields and body.archived is not None:
         kwargs["archived"] = body.archived
     try:
+        check_regex_evaluators(kwargs.get("evaluators"), "evaluators")
         suite = store.update_suite(principal.tenant_id, suite_id, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
@@ -419,6 +450,7 @@ def add_case(suite_id: uuid.UUID, body: EvalCaseCreate, principal: PrincipalDep,
     invalid case or past the 500-case cap."""
     case = body.model_dump(exclude={"case_id", "position"})
     try:
+        check_regex_evaluators(body.evaluators, "case.evaluators")
         record = store.add_case(
             principal.tenant_id, suite_id, case, position=body.position, case_id=body.case_id
         )
@@ -447,6 +479,7 @@ def update_case(
     if kwargs.get("position", 0) is None:
         kwargs.pop("position")
     try:
+        check_regex_evaluators(kwargs.get("evaluators"), "case.evaluators")
         record = store.update_case(principal.tenant_id, case_id, suite_id=suite_id, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
@@ -502,6 +535,8 @@ def _import_sync(store: EvalStore, tenant_id: str, suite_id: uuid.UUID, text: st
     if issues:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=issues)
     cases, evaluators = read_dataset(data)
+    check_regex_evaluators(evaluators, "evaluators")
+    _check_case_regexes(cases)
     kwargs: dict[str, Any] = {} if evaluators is None else {"evaluators": evaluators}
     result = store.upsert_cases(tenant_id, suite_id, cases, **kwargs)
     suite = store.get_suite(tenant_id, suite_id)
@@ -609,6 +644,9 @@ def start_eval_run(
     run = run_store.get_run(tenant_id, body.run_id)
     created = False
     if run is None:
+        # As the run routes: a new eval run of an archived agent is a 409 (AGENT_ARCHIVED); a retry
+        # of a recorded one (same run_id) is answered and relaunched as recorded.
+        refuse_if_archived(agent)
         target = resolve_target(db, tenant_id, agent, body.version)
         try:
             snapshot = store.snapshot(tenant_id, body.suite_id, agent_id=agent_id, max_concurrency=body.max_concurrency)

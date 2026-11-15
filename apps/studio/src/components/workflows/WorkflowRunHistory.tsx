@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
-import { formatDateTime } from "./ApprovalCard";
+import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import type { Run } from "@/lib/runs";
 import { listWorkflowRuns } from "@/lib/workflows";
 import { isTerminal } from "@/lib/workflowRunState";

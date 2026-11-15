@@ -929,3 +929,67 @@ def test_run_list_and_results_paging(api):
     assert names == ["a", "b", "c", "d", "e"]
     assert client.get(f"{url}/{run_ids[0]}/results", params={"after": "!!"}, headers=h).status_code == 422
     assert client.get(f"{url}/{run_ids[0]}/results", params={"limit": 501}, headers=h).status_code == 422
+
+
+@pg
+def test_invalid_regex_is_refused_on_every_write_without_echoing_the_pattern(api):
+    """AC.11 review: a regex RE2 refuses is a 422 naming the evaluator path (fixed message, the
+    pattern never echoed) on suite create and update, case add and update, and import."""
+    from eap_api.routes.evals import REGEX_INVALID
+
+    client, _, tenant_of = api
+    _, h = tenant_of()
+    agent_id = _agent(client, h)
+    bad = [{"kind": "equals_expected"}, {"kind": "regex", "pattern": "zq("}]
+
+    def refused(r, path: str) -> None:
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail == f"the test suite is invalid at {path}: {REGEX_INVALID}"
+        assert "zq(" not in r.text
+
+    refused(client.post(f"{API}/agents/{agent_id}/eval-suites", json={"name": "s", "evaluators": bad}, headers=h),
+            "evaluators.1.pattern")
+    suite_id = _suite(client, h, agent_id, cases=("a",))
+    refused(client.patch(f"{API}/eval-suites/{suite_id}", json={"evaluators": bad}, headers=h), "evaluators.1.pattern")
+    refused(client.post(f"{API}/eval-suites/{suite_id}/cases", json={"name": "c", "input": "x", "evaluators": bad[1:]},
+                        headers=h), "case.evaluators.0.pattern")
+    case_id = client.get(f"{API}/eval-suites/{suite_id}", headers=h).json()["cases"][0]["id"]
+    refused(client.patch(f"{API}/eval-suites/{suite_id}/cases/{case_id}", json={"evaluators": bad[1:]}, headers=h),
+            "case.evaluators.0.pattern")
+    url = f"{API}/eval-suites/{suite_id}/import?format=yaml"
+    refused(client.post(url, content=b"cases:\n  - name: n\n    inputs: y\n    evaluators: [{Regex: 'zq('}]\n", headers=h),
+            "cases.n.evaluators.0.pattern")
+    refused(client.post(url, content=b"cases: []\nevaluators: [{Regex: 'zq('}]\n", headers=h), "evaluators.0.pattern")
+    # Nothing was written, and valid patterns (an empty-matching one included) are accepted.
+    suite = client.get(f"{API}/eval-suites/{suite_id}", headers=h).json()
+    assert [c["name"] for c in suite["cases"]] == ["a"] and suite["evaluators"] == [{"kind": "equals_expected"}]
+    ok = [{"kind": "regex", "pattern": "^h.*$"}, {"kind": "regex", "pattern": "x*", "name": "empty_ok"}]
+    assert client.patch(f"{API}/eval-suites/{suite_id}", json={"evaluators": ok}, headers=h).status_code == 200
+
+
+@pg
+def test_archived_agent_refuses_new_eval_runs_but_answers_a_recorded_one(api, fake):
+    """As the run routes (eap_api.agent_archive): a new eval run of an archived agent is a 409
+    AGENT_ARCHIVED and enqueues nothing; a retry of a run recorded before the archive is answered."""
+    from eap_api.agent_archive import AGENT_ARCHIVED
+
+    client, _, tenant_of = api
+    _, h = tenant_of()
+    agent_id = _agent(client, h)
+    suite_id = _suite(client, h, agent_id)
+    recorded = {"run_id": str(uuid.uuid4()), "suite_id": suite_id, "version": 1}
+    assert client.post(f"{API}/agents/{agent_id}/evals/runs", json=recorded, headers=h).status_code == 201
+    assert client.post(f"{API}/agents/{agent_id}/archive", headers=h).status_code == 200
+    before = len(fake.calls)
+    for version in (1, "draft", None):
+        body = {"run_id": str(uuid.uuid4()), "suite_id": suite_id, "version": version}
+        r = client.post(f"{API}/agents/{agent_id}/evals/runs", json=body, headers=h)
+        assert r.status_code == 409 and r.json()["detail"] == AGENT_ARCHIVED
+        assert client.get(f"{API}/runs/{body['run_id']}", headers=h).status_code == 404
+    assert len(fake.calls) == before
+    r = client.post(f"{API}/agents/{agent_id}/evals/runs", json=recorded, headers=h)
+    assert r.status_code == 200 and r.json()["run_id"] == recorded["run_id"]
+    assert client.post(f"{API}/agents/{agent_id}/unarchive", headers=h).status_code == 200
+    body = {"run_id": str(uuid.uuid4()), "suite_id": suite_id, "version": 1}
+    assert client.post(f"{API}/agents/{agent_id}/evals/runs", json=body, headers=h).status_code == 201

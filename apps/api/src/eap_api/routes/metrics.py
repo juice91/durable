@@ -7,9 +7,10 @@ counted twice). See eap_run_store.metrics for the exact definitions of every fil
 
 Common query parameters: `from`, `to` (ISO 8601; a value without an offset is UTC; default the last
 7 days ending now), `agent_id`, `model` (our id `provider:name`), `provider`, `kind`
-(`agent` | `tool` | `workflow` | `kb_ingest`), `operation` (RM.19: `chat` | `moderation` |
-`observer` | `reflector` | `embedding`, a partition of the model requests, or `memory` = observer,
-reflector and the semantic recall and index embeddings). Bounds: `from < to`, a range of at most 90 days, at most 400 time
+(`agent` | `tool` | `workflow` | `kb_ingest` | `eval`; AC.17 adds `eval`), `operation` (RM.19: `chat` |
+`moderation` | `observer` | `reflector` | `embedding` | `judge` (AC.17: an eval run's LLM-judge
+requests, `judge:` keys), a partition of the model requests, or `memory` = observer, reflector and
+the semantic recall and index embeddings). Bounds: `from < to`, a range of at most 90 days, at most 400 time
 buckets, at most 50 breakdown groups; all 422 with a fixed message. A query that exceeds the 5 s
 statement timeout answers 503. `cost_usd` is a decimal string (same form as the run API); latency
 is in milliseconds (float, null when no run in the period has finished); `error_rate` is
@@ -101,8 +102,8 @@ def metrics_query(
     agent_id: uuid.UUID | None = None,
     model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    kind: Literal["agent", "tool", "workflow", "kb_ingest"] | None = None,
-    operation: Literal["chat", "moderation", "observer", "reflector", "embedding", "memory"] | None = None,
+    kind: Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None = None,
+    operation: Literal["chat", "moderation", "observer", "reflector", "embedding", "judge", "memory"] | None = None,
 ) -> MetricsQuery:
     try:
         start, end = resolve_range(from_, to)
@@ -159,7 +160,10 @@ def metrics_summary(
     before it (`previous_from`, `previous_to`; `previous` is null without `compare`). Each period
     also has `operations` (RM.19): the usage metrics (requests, tokens, cost_usd, unpriced and
     unmeasured requests) of each operation (`chat`, `moderation`, `observer`, `reflector`,
-    `embedding`; they sum to the totals) and of `memory`."""
+    `embedding`, `judge`; they sum to the totals) and of `memory`. AC.17 (review 2026-11-15): `fallback`
+    is `{chat_requests, fell_back, billed_failed_attempts, exhausted_runs, fallback_rate}`, the share
+    of agent chat requests not answered by the primary model, exhausted runs counted (see
+    eap_run_store.metrics; `fallback_rate` null without agent chat requests or exhausted runs)."""
     result = _call(store.summary, q, compare_previous=compare == "previous")
     prev = q.previous()
     return JSONResponse(content={

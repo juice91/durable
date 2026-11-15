@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useId, useRef } from "react";
 import { usePathname } from "next/navigation";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Menu, Search, X } from "lucide-react";
@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { useFocusReturn } from "@/components/ui/focusReturn";
 import { useFrame } from "./FrameContext";
 import { MAIN_ID, PRODUCT_NAME } from "./brand";
-import { Monogram, SidebarNav } from "./Sidebar";
+import { Monogram, SidebarNav, useNavBadges } from "./Sidebar";
 
 export const MOBILE_NAV_ID = "studio-mobile-nav";
 
@@ -26,17 +26,29 @@ export function MobileTopBar() {
   const frame = useFrame();
   const chord = usePaletteChordLabel();
   const keyShortcuts = usePaletteKeyShortcuts();
+  // A nav badge (pending approvals, AC.15) shows as a dot on the menu button; the drawer shows the count.
+  const pending = useNavBadges().approvals_pending ?? null;
+  const pendingId = useId();
   return (
     <header data-testid="mobile-top-bar" className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-canvas px-2 lg:hidden">
-      <IconButton
-        label="Open navigation"
-        aria-expanded={frame?.navOpen ?? false}
-        aria-controls={MOBILE_NAV_ID}
-        tooltip={false}
-        onClick={() => frame?.setNavOpen(true)}
-        data-testid="mobile-nav-open"
-        icon={<Menu strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
-      />
+      <span className="relative inline-flex shrink-0">
+        <IconButton
+          label="Open navigation"
+          aria-expanded={frame?.navOpen ?? false}
+          aria-controls={MOBILE_NAV_ID}
+          aria-describedby={pending ? pendingId : undefined}
+          tooltip={false}
+          onClick={() => frame?.setNavOpen(true)}
+          data-testid="mobile-nav-open"
+          icon={<Menu strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
+        />
+        {pending ? (
+          <>
+            <span aria-hidden="true" data-testid="mobile-nav-badge-dot" className="pointer-events-none absolute right-1 top-1 size-2 rounded-full bg-warning ring-2 ring-canvas" />
+            <span id={pendingId} className="sr-only">{`${pending.spoken} approvals`}</span>
+          </>
+        ) : null}
+      </span>
       <Monogram />
       <span className="min-w-0 flex-1 truncate text-label font-semibold text-foreground">{PRODUCT_NAME}</span>
       {frame?.openPalette ? (

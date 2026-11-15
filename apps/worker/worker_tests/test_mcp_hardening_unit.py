@@ -110,7 +110,8 @@ def test_only_jsonrpc_rejections_are_definite(code, definite):
 
 
 @pytest.mark.parametrize("outcome,status", [("success", "ok"), ("failed", "error"), ("retried", "error"),
-                                            ("denied", "ok"), ("interrupted", "ok")])
+                                            # AC.6: a denied or timed-out approval is its own status.
+                                            ("denied", "denied"), ("interrupted", "ok")])
 def test_tool_result_status_by_outcome(monkeypatch, outcome, status):
     import asyncio
 

@@ -58,6 +58,15 @@ export interface AgentMemoryRouteOptions {
   resource?: string | null;
 }
 
+export interface AgentTestsRouteOptions {
+  /** The suite shown (AC.16); none lists the agent's suites. */
+  suite?: string | null;
+  /** An eval run of the suite: its results. */
+  run?: string | null;
+  /** Two eval runs compared, `base..target` (build with `runCompareParam` in lib/evals). */
+  compare?: string | null;
+}
+
 export interface RequestContextRouteOptions {
   agent?: string | null;
   version?: RouteVersion;
@@ -67,8 +76,9 @@ function versionParam(version: RouteVersion): string | undefined {
   return version === null || version === undefined ? undefined : String(version);
 }
 
-/** Paths of the agent page's tabs, in header order. `memory` is listed only for an agent with memory (RM.18). */
-export type AgentTab = "chat" | "traces" | "editor" | "memory";
+/** Paths of the agent page's tabs, in header order. `memory` is listed only for an agent with memory
+ * (RM.18); `tests` (AC.16) always. */
+export type AgentTab = "chat" | "traces" | "editor" | "memory" | "tests";
 
 export const agentRoutes = {
   /** `/agents[?view=archived]`: the agents list (the archived agents with `archived`). */
@@ -92,6 +102,9 @@ export const agentRoutes = {
   /** `/agents/:id/memory?resource=`: the agent's memory per user (RM.18; an agent without memory goes to Chat). */
   agentMemory: (id: string, opts: AgentMemoryRouteOptions = {}): string =>
     withQuery(`/agents/${seg(id)}/memory`, { resource: opts.resource }),
+  /** `/agents/:id/tests?suite=&run=&compare=` (keys in that order): the agent's test suites (AC.16). */
+  agentTests: (id: string, opts: AgentTestsRouteOptions = {}): string =>
+    withQuery(`/agents/${seg(id)}/tests`, { suite: opts.suite, run: opts.run, compare: opts.compare }),
   /** The same tab of an agent (the header's agent switcher keeps the tab). */
   agentTab: (id: string, tab: AgentTab): string =>
     tab === "chat"
@@ -100,7 +113,9 @@ export const agentRoutes = {
         ? agentRoutes.agentTraces(id)
         : tab === "memory"
           ? agentRoutes.agentMemory(id)
-          : agentRoutes.agentEditor(id),
+          : tab === "tests"
+            ? agentRoutes.agentTests(id)
+            : agentRoutes.agentEditor(id),
   /** `/playground?agent=&conversation=&version=&model=&context=` (keys in that order). A legacy URL since
    * SL.6: it redirects to `agentChat` (see `legacy.ts`). Kept for links that SL.10 retires. */
   playground: (opts: PlaygroundRouteOptions = {}): string =>
@@ -121,7 +136,7 @@ export const agentRoutes = {
 
 /** Which agent tab `pathname` shows (`/agents/a/chat/c` → "chat"), or null off the agent page. */
 export function agentTabOf(pathname: string | null | undefined): AgentTab | null {
-  const match = /^\/agents\/[^/]+\/(chat|traces|editor|memory)(?:\/|$)/.exec(pathname ?? "");
+  const match = /^\/agents\/[^/]+\/(chat|traces|editor|memory|tests)(?:\/|$)/.exec(pathname ?? "");
   return match ? (match[1] as AgentTab) : null;
 }
 

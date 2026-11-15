@@ -50,6 +50,34 @@ result, exactly what the `tool_call` span showed before (the model's query and t
 - `ingest`: the `chunked` and `finalized` phases of a kb_ingest run (zero length): generation,
   embedded, total, pending tokens, document id and version.
 
+Agent capability spans (AC.17). Attributes never carry error, tool argument or output text:
+- `model_request` attributes add `answering_model` (every request since AC.5) and, for a request on
+  a fallback chain, `requested_model_id`, `fallback_index` and `failed_attempts` ([{model_id,
+  outcome, error_type, http_status}]); `output_candidate: true` for a structured output candidate.
+- `fallback_attempt`: one per failed attempt k of request n (`{run_id}:model:{n}:failed:{k}`), under
+  its request, from the stored response's attempt timestamp for its duration (`timed: false` and
+  zero length at the request's start when the response was not stored); status `error`; usage and
+  cost from its `model:{n}:failed:{k}` row when the attempt reported usage.
+- An exhausted chain (run_failed `fallback_exhausted` with `model_request` and `failed_attempts`):
+  an error `model_request` span `{run_id}:model:{n}` (`exhausted: true`, no usage), from the
+  previous event to the failure, with its `fallback_attempt` spans (timed from the attempt's
+  `timestamp` / `duration_ms` when recorded). Totals still count recorded requests only.
+- `tool_approval`: a gated call's wait (`{run_id}:tool:{id}:approval`), under its tool call, from
+  `tool:{id}:approval:waiting` to `tool:{id}:approval:decision`: `waiting` while undecided in a
+  running run, `incomplete` once the run ended undecided, `error` on a timeout, else `ok`; tool
+  name, deadline and the decision (type, decided_by, comment, reason, at). A call denied without a
+  wait (eval runs, `decided_by: "eval"`) is zero length at its decision (`waited: false`). A denied
+  call's `tool_call` span is `ok` with `result_status: "denied"`.
+- `output_retry`: an `output:{n}:retry` event, zero length: model_request, the JSON paths of the
+  rejected candidate (`errors`, never values), `error_count`, cause.
+- `eval_case`: an eval run's `eval_case_result` event (`{run_id}:case:{case_id}`), from its case
+  run's start to the record; `ok` when the case passed, else `error`; status, counts, duration and
+  cost. The case's child run (parent_step_id `case:{case_id}`) nests under it, and each judge usage
+  row (`judge:{case_id}:{i}`) is a zero-length `judge` span at the record (the rows carry no timing).
+- A run with an open approval has `display_status: "waiting_approval"` and span status `waiting`.
+- Totals add `judge_requests`, `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`
+  (request_operation `judge`), so `chat_*` stays the agent's model only.
+
 Ids are stable strings (`run:{run_id}`, `{run_id}:model:{n}`, `{run_id}:tool:{call_id}`,
 `{run_id}:processor:{phase}:{i}`, `{run_id}:step:{step_id}`), so a run recovered after a crash
 (whose events are idempotent by key) never shows a duplicate span. Spans are listed parents first.
@@ -62,8 +90,8 @@ and reflector requests included (`memory_requests`). `input_tokens`, `output_tok
 requests) is `chat_requests`, `chat_input_tokens`, `chat_output_tokens`, `chat_cost_usd` (the
 agent's model only: what a chat turn shows), `memory_input_tokens`, `memory_output_tokens`,
 `memory_cost_usd` (observer and reflector), `moderation_input_tokens`, `moderation_output_tokens`,
-`moderation_cost_usd`, plus the embedding fields above; chat + memory + moderation + embedding
-input tokens equal `input_tokens`. A run span carries the same token split for its own requests.
+`moderation_cost_usd`, plus the embedding fields above and the judge fields (AC.17); chat + memory +
+moderation + embedding + judge input tokens equal `input_tokens`. A run span carries the same token split for its own requests.
 
 Status: `ok`, `error`, `running` (not finished yet), `waiting` (an approval step waiting for a
 decision) or `incomplete` (never finished, and the run has ended). Run spans keep the run's own
@@ -82,11 +110,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable
 from uuid import UUID
 
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -97,6 +126,7 @@ from eap_run_store.store import (
     RunModelRequestModel,
     TERMINAL_RUN_STATUSES,
     _run_dict,
+    _run_select,
 )
 
 MAX_SPANS = 2000
@@ -115,6 +145,8 @@ SPAN_KINDS = (
     "run", "model_request", "tool_call", "processor", "workflow_step", "child_run",
     # RM.19
     "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
+    # AC.17
+    "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
 )
 SPAN_STATUSES = ("ok", "error", "running", "waiting", "incomplete")
 
@@ -202,20 +234,22 @@ class TraceReader:
         with Session(self.engine) as conn:
             conn.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             conn.execute(text(f"SET LOCAL statement_timeout = {self.statement_timeout_ms}"))
-            root = conn.scalars(
-                select(RunModel).where(RunModel.tenant_id == tenant_id, RunModel.id == run_id)
+            # AC.17: with the open-approval flag, so a waiting run shows `waiting_approval` (as
+            # RunStore.get_run does).
+            root = conn.execute(
+                _run_select().where(RunModel.tenant_id == tenant_id, RunModel.id == run_id)
             ).first()
             if root is None:
                 return None
-            child_rows = conn.scalars(
-                select(RunModel)
+            child_rows = conn.execute(
+                _run_select()
                 .where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id == run_id)
                 .order_by(RunModel.created_at, RunModel.id)
                 .limit(MAX_CHILD_RUNS + 1)
             ).all()
             children_truncated = len(child_rows) > MAX_CHILD_RUNS
             child_rows = child_rows[:MAX_CHILD_RUNS]
-            runs = [_run_dict(root)] + [_run_dict(r) for r in child_rows]
+            runs = [_run_dict(root[0], bool(root[1]))] + [_run_dict(r[0], bool(r[1])) for r in child_rows]
             ids = [r["id"] for r in runs]
             requests: dict[str, dict[str, dict[str, Any]]] = {i: {} for i in ids}
             for row in conn.execute(
@@ -508,6 +542,8 @@ class _Builder:
             data = end_event.get("data") or {}
             run_output = data["result"] if "result" in data else data.get("output", run_output)
         status = _RUN_STATUS.get(run["status"], "running")
+        if run.get("display_status") == "waiting_approval":
+            status = "waiting"
         self.add(
             span_id, parent_id, kind, _run_name(run), start, end, status, attributes, run_input, run_output
         )
@@ -541,6 +577,9 @@ class _Builder:
                     if isinstance(p, dict) and p.get("part_kind") == "tool-call"
                 ]
                 attrs["tool_calls"] = len(calls)
+                if data.get("output_candidate") is True:
+                    attrs["output_candidate"] = True
+                attempts = _fallback_attributes(data, attrs)
                 model_input: Any = (
                     _run_input_text(rd) if n == 0 else {"tool_results": last_tool_results}
                 )
@@ -551,6 +590,8 @@ class _Builder:
                     start, event["ts"], "ok", attrs, model_input,
                     {"text": data.get("text"), "tool_calls": calls},
                 )
+                if attempts:
+                    self._fallback_attempts(rd, f"{rid}:model:{n}", request_key, n, start, attempts, message)
             elif etype == "tool_call":
                 call_id = data.get("tool_call_id") or key.split(":")[1]
                 result = by_key.get(f"tool:{call_id}:result")
@@ -565,7 +606,8 @@ class _Builder:
                     status, out = open_status, None
                 else:
                     attrs["result_status"] = rdata.get("status")
-                    status = {"ok": "ok", "error": "error"}.get(rdata.get("status"), "incomplete")
+                    # AC.17: a denied (or timed-out) gated call completed: the model read the denial.
+                    status = {"ok": "ok", "error": "error", "denied": "ok"}.get(rdata.get("status"), "incomplete")
                     out = rdata["content"] if "content" in rdata else None
                     for k in ("error", "error_code"):
                         if rdata.get(k) is not None:
@@ -592,6 +634,14 @@ class _Builder:
                 self._memory(rd, event, previous, run_span)
             elif etype == "step_started":
                 self._step(rd, event, by_key, run_span, open_status)
+            elif etype in ("tool_approval_waiting", *TOOL_DECISION_TYPES):
+                self._tool_approval(rd, event, by_key, run_span, open_status)
+            elif etype == "output_retry":
+                self._output_retry(rd, event, run_span)
+            elif etype == "eval_case_result":
+                self._eval_case(rd, event, run_span)
+            elif etype == "run_failed" and data.get("error_code") == "fallback_exhausted":
+                self._exhausted(rd, event, previous, run_span)
             # An output processor checks a response before its model:{n}:final is written: the model
             # request's span must not start at it (it would collapse to the checks' duration).
             if not (etype == "processor_result" and key.startswith("processor:output:")):
@@ -635,6 +685,183 @@ class _Builder:
             f"{rid}:{key}", run_span, "processor", str(data.get("processor_type") or data.get("type") or key),
             event["ts"], event["ts"], status, attrs,
         )
+
+    # -- agent capabilities (AC.17)
+
+    def _fallback_attempts(
+        self,
+        rd: RunData,
+        model_span: str,
+        request_key: str,
+        n: int | None,
+        start: datetime | None,
+        attempts: list[tuple[int, dict[str, Any]]],
+        message: dict[str, Any],
+    ) -> None:
+        """One `fallback_attempt` span per failed attempt of model request n, under its span: from
+        the stored response's `failed_attempts[k]` timestamp for its duration (a response that was
+        blocked or never stored has none: zero length at the request's start, `timed: false`);
+        usage and cost from its `model:{n}:failed:{k}` row when the attempt reported usage. `k` is
+        the attempt's raw position in the event's list, so a malformed entry never shifts timings."""
+        rid = rd.run["id"]
+        timings = message.get("failed_attempts") if isinstance(message.get("failed_attempts"), list) else []
+        for k, attempt in attempts:
+            timing = timings[k] if k < len(timings) and isinstance(timings[k], dict) else {}
+            began = _parse_datetime(timing.get("timestamp"))
+            took = _parse_duration(timing.get("duration"))
+            timed = began is not None and took is not None
+            attempt_start = began if timed else start
+            attempt_end = began + took if timed else start
+            key = f"{request_key}:failed:{k}"
+            attrs: dict[str, Any] = {
+                "request_key": key,
+                "model_request": n,
+                "fallback_position": k,
+                "model_id": attempt.get("model_id"),
+                "outcome": attempt.get("outcome"),
+                "error_type": attempt.get("error_type"),
+                "http_status": attempt.get("http_status"),
+                "timed": timed,
+            }
+            row = rd.requests.get(key)
+            if row is not None:
+                usage, model_attrs = _model_usage(row, {}, {})
+                attrs.update(**model_attrs, usage=usage)
+            else:
+                attrs["usage"] = None
+            self.add(
+                f"{rid}:model:{n}:failed:{k}", model_span, "fallback_attempt",
+                str(attempt.get("model_id") or f"attempt {k}"), attempt_start, attempt_end, "error", attrs,
+            )
+
+    def _exhausted(self, rd: RunData, event: dict[str, Any], previous: dict[str, Any] | None, run_span: str) -> None:
+        """An exhausted fallback chain (run_failed `fallback_exhausted` with `model_request` and
+        `failed_attempts`, AC.17): the request as an error `model_request` span (`exhausted: true`,
+        from the previous event to the failure, no usage: nothing answered) and one
+        `fallback_attempt` span per model, timed from the attempt's `timestamp` / `duration_ms` when
+        recorded. Older runs without `failed_attempts` show the failure on the run span only."""
+        data = event.get("data") or {}
+        if not isinstance(data.get("failed_attempts"), list):
+            return
+        rid = rd.run["id"]
+        n = data.get("model_request") if isinstance(data.get("model_request"), int) else None
+        request_key = f"model:{n}"
+        attrs: dict[str, Any] = {"request_key": request_key, "model_request": n, "exhausted": True}
+        attempts = _fallback_attributes(data, attrs)
+        first = next((a for _k, a in attempts), {})
+        attrs.update(model_id=None, requested_model_id=first.get("model_id"), usage=None, tool_calls=0)
+        start = (previous or event)["ts"]
+        span_id = f"{rid}:model:{n}"
+        self.add(span_id, run_span, "model_request", "model request (every model failed)", start, event["ts"], "error", attrs)
+        if span_id not in self.ids:
+            return
+        raw = data["failed_attempts"]
+        timings = {
+            "failed_attempts": [
+                {"timestamp": a.get("timestamp"), "duration": (a["duration_ms"] / 1000)
+                 if isinstance(a.get("duration_ms"), int) and not isinstance(a.get("duration_ms"), bool) else None}
+                if isinstance(a, dict) else None
+                for a in raw
+            ]
+        }
+        self._fallback_attempts(rd, span_id, request_key, n, start, attempts, timings)
+
+    def _tool_approval(
+        self, rd: RunData, event: dict[str, Any], by_key: dict[str, Any], run_span: str, open_status: str
+    ) -> None:
+        """A gated tool call's approval (`tool:{id}:approval:waiting` → `tool:{id}:approval:decision`)
+        as a `tool_approval` span under its tool call: `waiting` while undecided in a running run,
+        `incomplete` once the run ended undecided, `error` for a timeout, else `ok`. A call denied
+        without a wait (an eval run, an unaddressable id) is a zero-length span at its decision."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        parts = key.split(":")
+        call_id = data.get("tool_call_id") or (parts[1] if len(parts) > 1 else key)
+        waiting = by_key.get(f"tool:{call_id}:approval:waiting")
+        decision = by_key.get(f"tool:{call_id}:approval:decision")
+        if event["type"] != "tool_approval_waiting" and waiting is not None:
+            return  # the waiting event made the span
+        wdata = (waiting or {}).get("data") or {}
+        attrs: dict[str, Any] = {
+            "tool_call_id": call_id,
+            "tool_name": wdata.get("tool_name"),
+            "deadline": wdata.get("deadline"),
+            "waiting_since": _iso(waiting["ts"]) if waiting is not None else None,
+            "waited": waiting is not None,
+        }
+        if decision is not None:
+            ddata = decision.get("data") or {}
+            attrs["decision"] = {
+                "type": decision["type"],
+                "decided_by": ddata.get("decided_by"),
+                "comment": ddata.get("comment"),
+                "reason": ddata.get("reason"),
+                "at": _iso(decision["ts"]),
+            }
+            status = "error" if decision["type"] == "tool_approval_timed_out" else "ok"
+            end = decision["ts"]
+        else:
+            status = "waiting" if open_status == "running" else "incomplete"
+            end = None
+        start = (waiting or decision or event)["ts"]
+        parent = f"{rid}:tool:{call_id}"
+        name = f"approval {attrs['tool_name']}" if attrs["tool_name"] else "approval"
+        self.add(
+            f"{rid}:tool:{call_id}:approval", parent if parent in self.ids else run_span, "tool_approval",
+            name, start, end, status, attrs,
+        )
+
+    def _output_retry(self, rd: RunData, event: dict[str, Any], run_span: str) -> None:
+        """An `output_retry` event (`output:{n}:retry`): a zero-length marker; the JSON paths the
+        rejected candidate of model request n broke (never values)."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        n = data.get("model_request") if isinstance(data.get("model_request"), int) else _request_index(key)
+        errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+        attrs = {"event_key": key, "model_request": n, "errors": errors, "error_count": len(errors), "cause": data.get("cause")}
+        self.add(f"{rid}:{key}", run_span, "output_retry", "output retry", event["ts"], event["ts"], "ok", attrs)
+
+    def _eval_case(self, rd: RunData, event: dict[str, Any], run_span: str) -> None:
+        """An eval run's `eval_case_result` event (`case:{case_id}`): an `eval_case` span from its
+        child run's start to the record, the child run (parent_step_id `case:{case_id}`) under it,
+        and one zero-length `judge` span per judge usage row (`judge:{case_id}:{i}`)."""
+        rid = rd.run["id"]
+        key, data = event["event_key"], event.get("data") or {}
+        case_id = data.get("case_id") or key.removeprefix("case:")
+        children = self.children_by_step.get(f"case:{case_id}", []) if rd is self.data.root else []
+        child = children[0].run if children else None
+        start = (child or {}).get("started_at") or (child or {}).get("created_at") or event["ts"]
+        case_status = data.get("status")
+        attrs: dict[str, Any] = {"case_id": case_id, "case_status": case_status}
+        for k in ("position", "assertions", "scores", "labels", "evaluator_failures", "duration_ms", "cost_usd",
+                  "error_code", "child_run_id"):
+            if k in data:
+                attrs[k] = data[k]
+        span_id = f"{rid}:{key}"
+        self.add(
+            span_id, run_span, "eval_case", f"case {data.get('position', case_id)}", start, event["ts"],
+            "ok" if case_status == "passed" else "error", attrs,
+        )
+        if span_id not in self.ids:
+            return
+        prefix = f"judge:{case_id}:"
+        for request_key in sorted(
+            (k for k in rd.requests if k.startswith(prefix)), key=lambda k: _int_or(k[len(prefix):])
+        ):
+            row = rd.requests[request_key]
+            usage, model_attrs = _model_usage(row, {}, {})
+            jattrs = {
+                "request_key": request_key, "case_id": case_id,
+                "evaluator_index": _int_or(request_key[len(prefix):], None), **model_attrs, "usage": usage,
+            }
+            self.add(
+                f"{rid}:{request_key}", span_id, "judge", f"judge {model_attrs.get('model_id') or ''}".strip(),
+                event["ts"], event["ts"], "ok", jattrs,
+            )
+        for child_rd in children:
+            if child_rd.run["id"] not in self.placed_children:
+                self.placed_children.add(child_rd.run["id"])
+                self.run(child_rd, span_id, "child_run")
 
     # -- RAG and memory (RM.19)
 
@@ -895,6 +1122,8 @@ def request_operation(request_key: str, row: dict[str, Any] | None) -> str:
         return "observer"
     if request_key.startswith("memory:reflect:"):
         return "reflector"
+    if request_key.startswith("judge:"):
+        return "judge"
     return "chat"
 
 
@@ -903,12 +1132,12 @@ def request_operation(request_key: str, row: dict[str, Any] | None) -> str:
 # are never labelled with embedding or observer tokens. Every request is in exactly one group, so
 # chat + memory + moderation + embedding input tokens == input_tokens (and the same for output).
 _SPLIT_GROUPS = {"chat": "chat", "observer": "memory", "reflector": "memory", "moderation": "moderation",
-                 "embedding": "embedding"}
+                 "embedding": "embedding", "judge": "judge"}
 
 
 class _UsageSplit:
     def __init__(self) -> None:
-        self.tokens = {g: {"input": 0, "output": 0} for g in ("chat", "memory", "moderation", "embedding")}
+        self.tokens = {g: {"input": 0, "output": 0} for g in ("chat", "memory", "moderation", "embedding", "judge")}
         self.cost = {g: Decimal(0) for g in self.tokens}
         self.requests = {g: 0 for g in self.tokens}
         self.recorded = {g: 0 for g in self.tokens}
@@ -933,8 +1162,8 @@ class _UsageSplit:
         no usage row). Tokens are null when the group has requests but none was recorded. The
         embedding group's input tokens and cost are `embedding_input_tokens` / `embedding_cost_usd`
         (added by the caller; embeddings have no output tokens)."""
-        out: dict[str, Any] = {"chat_requests": self.requests["chat"]}
-        for g in ("chat", "memory", "moderation"):
+        out: dict[str, Any] = {"chat_requests": self.requests["chat"], "judge_requests": self.requests["judge"]}
+        for g in ("chat", "memory", "moderation", "judge"):
             none = self.requests[g] > 0 and self.recorded[g] == 0
             out[f"{g}_input_tokens"] = None if none else self.tokens[g]["input"]
             out[f"{g}_output_tokens"] = None if none else self.tokens[g]["output"]
@@ -985,6 +1214,59 @@ def _request_index(key: str) -> int | None:
         return int(parts[1])
     except (IndexError, ValueError):
         return None
+
+
+_DATETIME = TypeAdapter(datetime)
+_DURATION = TypeAdapter(timedelta)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = _DATETIME.validate_python(value)
+    except ValidationError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _parse_duration(value: Any) -> timedelta | None:
+    """A stored timedelta: Pydantic's JSON form (ISO 8601, e.g. `PT1.5S`) or seconds."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    try:
+        parsed = _DURATION.validate_python(value)
+    except ValidationError:
+        return None
+    return parsed if parsed >= timedelta(0) else None
+
+
+def _int_or(value: str, default: Any = 1 << 30) -> Any:
+    return int(value) if value.isdecimal() else default
+
+
+TOOL_DECISION_TYPES = ("tool_approved", "tool_denied", "tool_approval_timed_out")
+# model_message fields a request on a fallback chain carries (AC.5); `answering_model` is on every one.
+FALLBACK_ATTRIBUTES = ("answering_model", "requested_model_id", "fallback_index")
+
+
+def _fallback_attributes(data: dict[str, Any], attrs: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
+    """Copy a model_message's (or an exhausted run_failed's) answering model and fallback fields into
+    `attrs` (failed attempts as `{model_id, outcome, error_type, http_status}`, never error text);
+    returns the failed attempts with their raw positions (non-dict entries are skipped, never
+    renumbered)."""
+    for k in FALLBACK_ATTRIBUTES:
+        if k in data:
+            attrs[k] = data[k]
+    raw = data.get("failed_attempts")
+    attempts = [
+        (k, {f: a.get(f) for f in ("model_id", "outcome", "error_type", "http_status")})
+        for k, a in enumerate(raw if isinstance(raw, list) else ())
+        if isinstance(a, dict)
+    ]
+    if "failed_attempts" in data:
+        attrs["failed_attempts"] = [a for _k, a in attempts]
+    return attempts
 
 
 def _model_usage(

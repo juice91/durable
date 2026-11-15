@@ -4,6 +4,7 @@ import React from "react";
 import { BreakdownTable } from "../BreakdownTable";
 import { MetricsKpis } from "../MetricsKpis";
 import { OperationKpis } from "../OperationKpis";
+import { FallbackKpis } from "../FallbackKpis";
 import { RecentFailures } from "./RecentFailures";
 import { breakdownHref } from "../BreakdownTable";
 import {
@@ -87,6 +88,10 @@ export function MetricsOverview({
           one operation: the main KPIs are that operation then). */}
       {!summary.error && !state.operation ? (
         <OperationKpis summary={summary.data} loading={summary.loading} state={state} />
+      ) : null}
+      {/* AC.17: model fallback beside them (only the chat operation has fallback models). */}
+      {!summary.error && (!state.operation || state.operation === "chat") ? (
+        <FallbackKpis summary={summary.data} loading={summary.loading} />
       ) : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <RecentFailures

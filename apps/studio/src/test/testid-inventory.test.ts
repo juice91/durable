@@ -44,6 +44,7 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "workflow-run-row-": "WorkflowRunHistory row per run id",
   "workflow-timeline-row-": "TimelineDock row per step id (SL.14): workflow-timeline-row-<stepId>",
   "approval-": "ApprovalCard per step id: approval-, approval-prompt-, approval-error-, approval-deadline-<stepId>",
+  "nav-badge-": "Sidebar NavLink badge per nav item id: nav-badge-<id> (count) and nav-badge-dot-<id> (rail dot), AC.15",
   "processors-": "ProcessorsEditor section per phase (input or output)",
   "field-error-": "Agent editor field errors keyed by the spec field path",
   "console-": "ProcessorTestConsole idPrefix={`console-${step.key}`}: one form per processor step",

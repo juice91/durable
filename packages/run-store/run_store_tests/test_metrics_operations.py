@@ -110,7 +110,8 @@ def test_breakdown_by_operation_partitions_the_totals(engine, seeded):
     store = MetricsStore(engine)
     items = store.breakdown(_q(tenant), "operation", sort="requests", limit=10)
     by_key = {i["key"]: i for i in items}
-    assert set(by_key) == set(OPERATIONS)
+    # AC.17: OPERATIONS gained `judge`; this seed has no judge request, so no judge group.
+    assert set(by_key) == set(OPERATIONS) - {"judge"}
     total = store.summary(_q(tenant))["current"]
     assert sum(i["requests"] for i in items) == total["requests"]
     assert sum(i["input_tokens"] for i in items) == total["input_tokens"]

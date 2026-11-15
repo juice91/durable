@@ -17,6 +17,16 @@ import { focusRing } from "@/components/ui/Button";
 import { TurnFooter, type TurnView } from "@/components/chat/TurnFooter";
 import { MarkdownText, ToolCallCard, ToolCallInfoContext } from "@/components/chat/messageParts";
 import { messageRunId, type ToolCallInfo } from "@/components/chat/toolCalls";
+import {
+  ChatRunActionsContext,
+  OUTPUT_RETRY_PART,
+  OutputRetryPart,
+  STRUCTURED_OUTPUT_PART,
+  StructuredOutputPart,
+  TOOL_APPROVAL_PART,
+  ToolApprovalPart,
+  type ChatRunActions,
+} from "@/components/chat/capabilityParts";
 
 export { messageRunId };
 
@@ -48,6 +58,17 @@ export function turnStartMessageIds(messages: readonly { id: string }[]): Set<st
   return starts;
 }
 
+/** AC.14: the structured answer, the output retry marker and the inline tool approval card. */
+const DATA_PARTS = {
+  by_name: {
+    [STRUCTURED_OUTPUT_PART]: StructuredOutputPart,
+    [OUTPUT_RETRY_PART]: OutputRetryPart,
+    [TOOL_APPROVAL_PART]: ToolApprovalPart,
+  },
+};
+
+const NO_ACTIONS: ChatRunActions = { refreshRun: async () => undefined };
+
 function ChatMessage() {
   const messageId = useAuiState((s) => s.message.id);
   const turn = useContext(TurnViewsContext).get(messageId);
@@ -61,7 +82,7 @@ function ChatMessage() {
       </MessagePrimitive.If>
       <MessagePrimitive.If assistant>
         <div data-testid="chat-message-assistant" className="mr-auto w-full min-w-0 text-foreground">
-          <MessagePrimitive.Parts components={{ Text: MarkdownText, tools: { Fallback: ToolCallCard } }} />
+          <MessagePrimitive.Parts components={{ Text: MarkdownText, tools: { Fallback: ToolCallCard }, data: DATA_PARTS }} />
         </div>
       </MessagePrimitive.If>
       {turn ? <TurnFooter turn={turn} /> : null}
@@ -88,6 +109,8 @@ export interface ChatPaneProps {
   /** Called once `restoreDraft` is in the composer, so the caller drops it (a remount of the pane,
    * when the window crosses 1024 px, must not put old text back). */
   onDraftRestored?: () => void;
+  /** Re-read one turn's events (the approval card, after a decision or a 409; AC.14). */
+  onRefreshRun?: (runId: string) => Promise<void>;
 }
 
 /**
@@ -96,7 +119,15 @@ export interface ChatPaneProps {
  * grouped (space between turns, each turn's badge under its last message), and a "Scroll to bottom"
  * button appears once the transcript is scrolled up.
  */
-export function ChatPane({ messages, disabled, running, onNew, turnViews, toolInfos, landingTitle, landingDescription, header, composer, restoreDraft = null, onDraftRestored }: ChatPaneProps) {
+export function ChatPane({ messages, disabled, running, onNew, turnViews, toolInfos, landingTitle, landingDescription, header, composer, restoreDraft = null, onDraftRestored, onRefreshRun }: ChatPaneProps) {
+  // Lost approval races (409) of this page, kept while the pane lives: the inline card is gone by
+  // the time the refresh shows the recorded decision.
+  const [lostRaces, setLostRaces] = React.useState<ReadonlySet<string>>(() => new Set());
+  const noteLostRace = React.useCallback((key: string) => setLostRaces((current) => (current.has(key) ? current : new Set(current).add(key))), []);
+  const actions = React.useMemo<ChatRunActions>(
+    () => ({ refreshRun: onRefreshRun ?? NO_ACTIONS.refreshRun, lostRaces, noteLostRace }),
+    [onRefreshRun, lostRaces, noteLostRace],
+  );
   const runtime = useExternalStoreRuntime({
     messages,
     isDisabled: disabled,
@@ -119,6 +150,7 @@ export function ChatPane({ messages, disabled, running, onNew, turnViews, toolIn
       <TurnViewsContext.Provider value={turnViews}>
         <TurnStartsContext.Provider value={turnStarts}>
           <ToolCallInfoContext.Provider value={toolInfos}>
+          <ChatRunActionsContext.Provider value={actions}>
             <ThreadPrimitive.Root data-testid="chat-pane" data-empty={empty || undefined} className="flex min-h-0 min-w-0 flex-1 flex-col">
               {header ? <div className="mx-auto w-full min-w-0 max-w-3xl shrink-0 px-4 pt-3">{header}</div> : null}
               <ThreadPrimitive.Viewport className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4">
@@ -155,6 +187,7 @@ export function ChatPane({ messages, disabled, running, onNew, turnViews, toolIn
                 </ThreadPrimitive.ViewportFooter>
               </ThreadPrimitive.Viewport>
             </ThreadPrimitive.Root>
+          </ChatRunActionsContext.Provider>
           </ToolCallInfoContext.Provider>
         </TurnStartsContext.Provider>
       </TurnViewsContext.Provider>

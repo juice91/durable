@@ -21,6 +21,7 @@ import { ConnectAgUiAction } from "@/components/apiKeys/ConnectAgUiSheet";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
+import type { RunStatus } from "@/lib/runs";
 import { AgentArchiveMenu, ArchivedBanner } from "./AgentArchiveMenu";
 import { THREADS_TITLE } from "./AgentChatPanes";
 import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
@@ -42,6 +43,8 @@ const TABS: { id: AgentTab; label: string; testId: string }[] = [
   { id: "editor", label: "Editor", testId: "agent-tab-editor" },
   // RM.18: only for an agent with memory (its draft or latest version); see `visibleTabs`.
   { id: "memory", label: "Memory", testId: "agent-tab-memory" },
+  // AC.16: the agent's test suites, eval runs and compare (no Evaluation nav group).
+  { id: "tests", label: "Tests", testId: "agent-tab-tests" },
 ];
 
 /**
@@ -66,7 +69,7 @@ export interface AgentLayoutProps {
  * across tabs. Header: the agent crumb with a switcher (to the same tab of another agent), the
  * Conversations toggle (Chat tab), the Config toggle, Copy link and More actions (Archive / Unarchive,
  * with an archived banner under the header), and the Chat · Traces · Editor
- * tabs (· Memory for an agent with memory, RM.18). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
+ * tabs (· Memory for an agent with memory, RM.18; · Tests, AC.16). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
  * screens) when threads and chat fit beside it, a Sheet below 1024 px. Keys: `]` toggles Config, `{`
  * the conversations pane. Where Config does not leave room for both panes, the threads pane
  * collapses automatically while Config is open (chatFit.ts).
@@ -79,6 +82,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [configVersion, setConfigVersion] = useState<VersionRef>(null);
+  // AC.14: the chat's latest turn status, for the Config panel's waiting pill.
+  const [chatStatus, setChatStatus] = useState<RunStatus | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   // The chat's address while on this agent, so Chat → Traces → Chat returns to the same conversation.
   const [chatHref, setChatHref] = useState<string | null>(null);
@@ -276,6 +281,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       reload,
       configVersion,
       setConfigVersion,
+      chatStatus,
+      setChatStatus,
       threadsOpen,
       setThreadsOpen,
       requestThreadsOpen,
@@ -286,7 +293,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       chatHref,
       setChatHref,
     }),
-    [agentId, agent, versions, loadError, reload, configVersion, threadsOpen, setThreadsOpen, requestThreadsOpen, setThreadsCloseGuard, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
+    [agentId, agent, versions, loadError, reload, configVersion, chatStatus, threadsOpen, setThreadsOpen, requestThreadsOpen, setThreadsCloseGuard, isWide, autoCollapsed, threadsPaneExpanded, reportThreadsPane, chatHref],
   );
 
   const title = agent?.name ?? (loadError ? "Agent" : "Loading agent…");
@@ -376,6 +383,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
                 agent={agent}
                 versions={versions}
                 versionRef={tab === "chat" ? configVersion : null}
+                turnStatus={tab === "chat" ? chatStatus : null}
               />
             ) : (
               <p className="px-3 py-3 text-label text-muted-foreground">{loadError ?? "Loading configuration…"}</p>

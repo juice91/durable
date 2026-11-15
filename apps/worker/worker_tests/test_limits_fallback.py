@@ -132,7 +132,7 @@ def test_answering_model_pricing_and_failed_attempts():
     usage, extra, failed = fallback_usage(chain, response)
     assert usage["model_id"] == "test:priced" and "price_source_override" not in usage
     assert extra == {
-        "requested_model_id": "test:fail-503", "fallback_index": 1,
+        "requested_model_id": "test:fail-503", "answering_model": "test:priced", "fallback_index": 1,
         "failed_attempts": [{"model_id": "test:fail-503", "outcome": "error", "error_type": "ModelHTTPError", "http_status": 503}],
     }
     assert [f["k"] for f in failed] == [0] and failed[0]["model_id"] == "test:fail-503"
@@ -502,3 +502,65 @@ def test_a_token_breach_never_runs_the_output_processors(worker, client, tenant)
     assert [r["request_key"] for r in usage_rows(worker.engine, run_id)] == ["model:0"]  # no moderation row
     steps = step_names(worker.settings.dbos_system_schema, run_id)
     assert "eap.output_processors" not in steps and "eap-moderator__model.request" not in steps
+
+
+# --------------------------------------------------------------------------- answering_model (AC.14 / AC.17)
+
+
+def test_every_model_message_names_its_answering_model(worker, client, tenant):
+    # fail-503 falls back to a second model: the event names the fallback as the answering model.
+    spec = spec_with(model="fail-503", fallback_models=fallbacks("fail-400", "priced"))
+    run_id, row = run(worker, client, tenant, spec, "hello")
+    assert row["status"] == "completed" and row["output"] == "Echo: hello", row
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["answering_model"] == "test:priced" == message["model_id"]
+    assert (message["requested_model_id"], message["fallback_index"]) == ("test:fail-503", 2)
+    assert [a["model_id"] for a in message["failed_attempts"]] == ["test:fail-503", "test:fail-400"]
+    assert [(r["request_key"], r["model_id"]) for r in usage_rows(worker.engine, run_id)] == [("model:0", "test:priced")]
+    # Without a chain (no fallback, and an override): the run's model, no chain fields.
+    run_id, _row = run(worker, client, tenant, spec_with(model="echo"), "hi")
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["answering_model"] == "test:echo" and "fallback_index" not in message
+    # A blocked fallback answer carries it too.
+    spec = {**echo_spec(output_processors=[moderation()], model="fail-503"), "fallback_models": fallbacks("echo")}
+    run_id, _row = run(worker, client, tenant, spec, "FLAG_ME")
+    message = events_by_key(worker.engine, run_id)["model:0:final"][1]
+    assert message["blocked"] is True and message["answering_model"] == "test:echo"
+
+
+# --------------------------------------------------------------------------- token caps read recorded usage
+
+
+def test_recorded_tokens_sum_the_rows_including_failed_attempts():
+    from eap_worker.workflow import RecordedTokens
+
+    tokens = RecordedTokens()
+    tokens.add({"input_tokens": 100, "output_tokens": 20,
+                "failed": [{"k": 0, "input_tokens": 7, "output_tokens": 3}]})
+    tokens.add({"input_tokens": 1, "output_tokens": None})
+    assert (tokens.input_tokens, tokens.output_tokens, tokens.total_tokens) == (108, 23, 131)
+
+
+def test_token_cap_uses_the_guard_corrected_usage(worker, client, tenant, monkeypatch):
+    """A gateway reports output 2 < reasoning 300 on a stream; the usage guard records 300 + text
+    as the request's output tokens. max_output_tokens=100 must trip on that recorded count (the raw
+    count, 2, would pass), with the usage row still written."""
+    import dataclasses
+
+    from eap_schemas.models_policy import ModelPolicy
+    from eap_worker import models
+    from worker_tests.test_usage_guard_acceptance import _impossible_usage_model
+
+    monkeypatch.setattr(models, "litellm_model", lambda name, settings: _impossible_usage_model())
+    monkeypatch.setattr(worker, "settings", dataclasses.replace(
+        worker.settings, allowed_models=ModelPolicy.parse("litellm:fake-gateway")))
+    spec = spec_with(limits={"max_output_tokens": 100})
+    spec["model"] = {"provider": "litellm", "name": "fake-gateway"}
+    run_id, row = run(worker, client, tenant, spec)
+    assert row["status"] == "failed", row
+    ev = events_by_key(worker.engine, run_id)
+    end = ev["end"][1]
+    assert (end["error_code"], end["limit"], end["value"]) == ("usage_limit_exceeded", "max_output_tokens", 100)
+    recorded = ev["model:0:final"][1]["usage"]["output_tokens"]
+    assert recorded > 100
+    assert [r["request_key"] for r in usage_rows(worker.engine, run_id)] == ["model:0"]

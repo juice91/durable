@@ -24,6 +24,7 @@ from eap_worker import workflow_run as _workflow_run  # noqa: F401  (eap.workflo
 from eap_worker import kb_ingest as _kb_ingest  # noqa: F401  (eap.kb_ingest and its steps, RM.10)
 from eap_worker import observational as _observational  # noqa: F401  (eap-observer, eap.memory_observe*, RM.13)
 from eap_worker import retention as _retention  # noqa: F401  (eap.memory_retention and its steps, RM.15)
+from eap_worker import eval_run as _eval_run  # noqa: F401  (eap.eval_run, its steps and eap-judge, AC.11)
 
 APP_NAME = "eap-worker"
 

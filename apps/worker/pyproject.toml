@@ -33,6 +33,12 @@ dependencies = [
     "httpx2>=2.16",
     # Default model prices for usage cost (eap_worker.pricing); already pinned via pydantic-ai.
     "genai-prices>=0.2.3",
+    # Eval runtime (AC.11): evaluator classes used standalone (EqualsExpected, Contains, MaxDuration,
+    # EvaluatorContext); pins pydantic-ai-slim==2.67.0, so both move in lockstep. Only eap_worker
+    # imports it (import-linter contract in the root pyproject.toml).
+    "pydantic-evals==2.67.0",
+    # The `regex` evaluator matches with RE2 (linear time), as the processors do.
+    "google-re2==1.1.20251105",
 ]
 
 [dependency-groups]
