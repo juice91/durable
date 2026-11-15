@@ -33,6 +33,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.exc import IntegrityError
 
 from eap_run_store.cursor import ConversationCursor, RunCursor
 from sqlalchemy.orm import (
@@ -109,6 +110,9 @@ RUN_OUTPUT_FORMATS = ("text", "json")
 RESOURCE_ID_PATTERN = r"^[A-Za-z0-9_.:@-]{1,128}$"
 # Same text as migration 0012_memory.
 CONVERSATION_RESOURCE_ID_CHECK = "resource_id IS NULL OR resource_id ~ '^[A-Za-z0-9_.:@-]{1,128}$'"
+# Same texts as migration 0016_ag_ui.
+RUN_CLIENT_TOOLS_CHECK = "client_tools IS NULL OR jsonb_typeof(client_tools) = 'array'"
+RUN_CLIENT_TOOL_RESULTS_CHECK = "client_tool_results IS NULL OR jsonb_typeof(client_tool_results) = 'array'"
 
 
 class ConversationModel(Base):
@@ -130,6 +134,9 @@ class ConversationModel(Base):
     # The resource (user or entity) the conversation belongs to (0012_memory): set once at creation,
     # never changed. NULL for conversations created before 0012 (resource-scoped memory off).
     resource_id: Mapped[StrAnnotated | None] = mapped_column("resource_id", String, nullable=True)
+    # The raw AG-UI threadId a conversation was derived from (0016_ag_ui, D3): set once at creation,
+    # NULL for every other conversation. Unique per tenant and agent.
+    external_thread_id: Mapped[StrAnnotated | None] = mapped_column("external_thread_id", String, nullable=True)
 
     __table_args__ = (
         # Lets runs reference (tenant_id, conversation_id), so a run can only join its own tenant's thread.
@@ -146,6 +153,15 @@ class ConversationModel(Base):
             "tenant_id",
             "resource_id",
             postgresql_where=text("resource_id IS NOT NULL"),
+        ),
+        # One conversation per AG-UI thread of an agent (0016_ag_ui).
+        Index(
+            "uq_conversations_tenant_agent_external_thread",
+            "tenant_id",
+            "agent_id",
+            "external_thread_id",
+            unique=True,
+            postgresql_where=text("external_thread_id IS NOT NULL"),
         ),
     )
 
@@ -231,6 +247,11 @@ class RunModel(Base):
     # The snapshot's suite_hash (sha256 hex), recorded once at creation: compare uses it, never
     # re-validating an old snapshot.
     eval_suite_hash: Mapped[str | None] = mapped_column("eval_suite_hash", String, nullable=True)
+    # AG-UI client (frontend) tools (0016_ag_ui, D10): the turn's declarations (a JSON array of
+    # eap_schemas ClientToolDecl dumps) and the client's results for the previous turn's pending
+    # calls (a JSON array of ClientToolResult dumps). NULL for every other run.
+    client_tools: Mapped[list | None] = mapped_column("client_tools", JSONB, nullable=True)
+    client_tool_results: Mapped[list | None] = mapped_column("client_tool_results", JSONB, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -245,6 +266,8 @@ class RunModel(Base):
         CheckConstraint(RUN_KIND_TARGET_CHECK, name="ck_runs_kind_target"),
         CheckConstraint(RUN_PARENT_LINK_CHECK, name="ck_runs_parent_link"),
         CheckConstraint(RUN_OUTPUT_FORMAT_CHECK, name="ck_runs_output_format"),
+        CheckConstraint(RUN_CLIENT_TOOLS_CHECK, name="ck_runs_client_tools"),
+        CheckConstraint(RUN_CLIENT_TOOL_RESULTS_CHECK, name="ck_runs_client_tool_results"),
         ForeignKeyConstraint(
             ["tenant_id", "parent_run_id"], ["runs.tenant_id", "runs.id"], name="fk_runs_tenant_parent_run"
         ),
@@ -504,6 +527,7 @@ def _iso_conversation(
         "tenant_id": conv.tenant_id,
         "agent_id": conv.agent_id,
         "resource_id": conv.resource_id,
+        "external_thread_id": conv.external_thread_id,
         "title": conv.title,
         "created_at": conv.created_at,
         "updated_at": conv.updated_at,
@@ -605,6 +629,8 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "output_format": run.output_format,
         "eval_suite_id": run.eval_suite_id,
         "eval_suite_hash": run.eval_suite_hash,
+        "client_tools": run.client_tools,
+        "client_tool_results": run.client_tool_results,
     }
 
 
@@ -1250,6 +1276,7 @@ class RunStore:
         conversation_id: UUID | str | None = None,
         *,
         resource_id: str | None = None,
+        external_thread_id: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create a conversation; idempotent on a client-supplied `conversation_id`.
 
@@ -1258,6 +1285,11 @@ class RunStore:
         ConversationIdConflict if the id belongs to another tenant, and its subclass
         ConversationResourceConflict if the tenant's existing conversation has another resource_id
         (None and a value differ: a conversation created before 0012 cannot gain one).
+
+        `external_thread_id` (0016_ag_ui): the raw AG-UI threadId of a conversation derived from it,
+        stored once at creation. A re-create of an existing conversation must name the same value
+        (else ConversationIdConflict); another conversation of the tenant and agent already holding
+        it is a ConversationIdConflict too.
         """
         from sqlalchemy.dialects.postgresql import insert
 
@@ -1266,24 +1298,36 @@ class RunStore:
         validate_resource_id(resource_id)
         conv_id = str(conversation_id or uuid4())
         now = datetime.now(timezone.utc)
+        if external_thread_id is not None and not external_thread_id:
+            raise ValueError("external_thread_id must be non-empty")
         with self.Session() as session:
-            inserted = session.execute(
-                insert(ConversationModel)
-                .values(
-                    id=conv_id,
-                    tenant_id=tenant_id,
-                    agent_id=str(agent_id),
-                    title=title,
-                    resource_id=resource_id,
-                    created_at=now,
-                    updated_at=now,
-                )
-                .on_conflict_do_nothing(constraint="conversations_pkey")
-                .returning(ConversationModel.id)
-            ).fetchone()
-            session.commit()
+            try:
+                inserted = session.execute(
+                    insert(ConversationModel)
+                    .values(
+                        id=conv_id,
+                        tenant_id=tenant_id,
+                        agent_id=str(agent_id),
+                        title=title,
+                        resource_id=resource_id,
+                        external_thread_id=external_thread_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(constraint="conversations_pkey")
+                    .returning(ConversationModel.id)
+                ).fetchone()
+                session.commit()
+            except IntegrityError:
+                # uq_conversations_tenant_agent_external_thread (a non-arbiter index): either a
+                # concurrent identical create won the race (its row has this id, checked below like
+                # any existing row), or another conversation holds the thread (no row with this id).
+                session.rollback()
+                inserted = None
             existing = session.get(ConversationModel, conv_id)
             if existing is None or existing.tenant_id != tenant_id:
+                raise ConversationIdConflict(conv_id)
+            if existing.external_thread_id != external_thread_id:
                 raise ConversationIdConflict(conv_id)
             if existing.resource_id != resource_id:
                 raise ConversationResourceConflict(conv_id)
@@ -1404,6 +1448,9 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        client_tools: list[dict[str, Any]] | None = None,
+        client_tool_results: list[dict[str, Any]] | None = None,
+        ag_ui_run: Any = None,
     ) -> tuple[UUID, bool]:
         """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
 
@@ -1414,9 +1461,25 @@ class RunStore:
         if `run_id` belongs to another tenant.
         `trace_id`/`traceparent` and the run options (`request_context`, `draft_spec` with
         `agent_version` None for a draft turn, `model_id`, `model_overridden`) as in create_run.
+        `client_tools` / `client_tool_results` (0016_ag_ui): an AG-UI turn's client tool
+        declarations and its results for the previous turn's pending calls, JSON arrays stored
+        as given (the API validates them); None (the default) for every other turn.
+        `ag_ui_run` (an eap_run_store.ag_ui.AgUiRunWrite, scope `agent` of this conversation's
+        agent, else ValueError / AgUiScopeMismatch): the AG-UI run that starts this turn, written
+        in the turn's transaction (ON CONFLICT DO NOTHING), so the turn never exists without it.
+        When `run_id` already exists nothing is written (the caller reads the AG-UI row with
+        AgUiStore.get_ag_ui_run, or heals a turn recorded without one by record_ag_ui_run, and
+        compares fingerprints): the creator's row always wins a same-runId race.
         """
         from sqlalchemy.dialects.postgresql import insert
 
+        ag_ui_values = None
+        if ag_ui_run is not None:
+            from eap_run_store.ag_ui import AgUiScopeMismatch, validated_ag_ui_values
+
+            ag_ui_values = validated_ag_ui_values(tenant_id, str(run_id), ag_ui_run)
+            if ag_ui_values["scope_kind"] != "agent":
+                raise AgUiScopeMismatch(tenant_id, str(run_id), ag_ui_values["scope_kind"], ag_ui_values["scope_id"])
         conv_id = str(conversation_id)
         with self.Session() as session:
             conv = session.execute(
@@ -1427,6 +1490,11 @@ class RunStore:
             if conv is None:
                 session.rollback()
                 raise ConversationNotFound(tenant_id, conv_id)
+            if ag_ui_values is not None and ag_ui_values["scope_id"] != str(conv.agent_id):
+                session.rollback()
+                from eap_run_store.ag_ui import AgUiScopeMismatch
+
+                raise AgUiScopeMismatch(tenant_id, str(run_id), "agent", ag_ui_values["scope_id"])
 
             existing = session.get(RunModel, str(run_id))
             if existing is not None:
@@ -1459,6 +1527,9 @@ class RunStore:
                     trace_id=trace_id,
                     traceparent=traceparent,
                     **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+                    # SQL NULL explicitly (JSONB binds Python None as the JSON value `null`).
+                    client_tools=null() if client_tools is None else client_tools,
+                    client_tool_results=null() if client_tool_results is None else client_tool_results,
                 )
                 .on_conflict_do_nothing(constraint="runs_pkey")
                 .returning(RunModel.id)
@@ -1471,6 +1542,10 @@ class RunStore:
                 if raced is None:
                     raise RunIdConflict(run_id)
                 return UUID(raced["id"]), False
+            if ag_ui_values is not None:
+                from eap_run_store.ag_ui import insert_ag_ui_run_in_session
+
+                insert_ag_ui_run_in_session(session, ag_ui_values)
             conv.updated_at = now
             # Auto-title, once: only the first turn, only when the conversation has no title (one the
             # creator or a rename gave it), under the same row lock rename_conversation takes.

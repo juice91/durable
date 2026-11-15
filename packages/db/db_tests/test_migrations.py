@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_evals_revision():
-    assert head_revisions() == {"0015_evals"}
+def test_single_head_is_the_ag_ui_revision():
+    assert head_revisions() == {"0016_ag_ui"}
 
 
 @requires_schema

@@ -25,6 +25,15 @@ from eap_run_store.store import (
     get_side_effect_store,
     validate_resource_id,
 )
+from eap_run_store.ag_ui import (
+    AG_UI_SCOPE_KINDS,
+    AgUiRunModel,
+    AgUiRunRecord,
+    AgUiRunWrite,
+    AgUiScopeMismatch,
+    AgUiStore,
+    PendingClientToolCall,
+)
 from eap_run_store.approvals import (
     APPROVAL_ARGS_MAX_BYTES,
     APPROVAL_DECISIONS,
@@ -122,6 +131,13 @@ from eap_run_store.store import (
 )
 
 __all__ = [
+    "AG_UI_SCOPE_KINDS",
+    "AgUiRunModel",
+    "AgUiRunRecord",
+    "AgUiRunWrite",
+    "AgUiScopeMismatch",
+    "AgUiStore",
+    "PendingClientToolCall",
     "APPROVAL_ARGS_MAX_BYTES",
     "APPROVAL_DECISIONS",
     "APPROVAL_KINDS",
