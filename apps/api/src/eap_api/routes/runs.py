@@ -125,6 +125,9 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         "chat_input_tokens": (chat or {}).get("chat_input_tokens"),
         "chat_output_tokens": (chat or {}).get("chat_output_tokens"),
         "chat_cost_usd": (chat or {}).get("chat_cost_usd"),
+        # The model that answered the run's last chat request: a fallback model when one did, so
+        # it differs from `model_id` (the requested model). Null before any chat request is recorded.
+        "answering_model_id": (chat or {}).get("answering_model_id"),
         "started_at": iso(run.get("started_at")),
         "finished_at": iso(run.get("finished_at")),
         # Run options (P0.8): a draft test run has `version` null and `draft` true; the validated

@@ -336,7 +336,12 @@ Deploy the API and the worker together, in this order:
    `worker_tests/test_step_layout_ac.py` and `tests/recovery/test_ac_compat.py`, which replays old
    checkpoints on this build). Draining is therefore a precaution, not a known replay break. An old
    worker given a new spec fails closed: `AgentSpec` forbids unknown keys, so it never runs a gated
-   tool unapproved. AC.4 and AC.9 ship in one deploy.
+   tool unapproved. AC.4 and AC.9 ship in one deploy. **Eval runs must be drained** (no run of
+   kind `eval` `queued` or `running`, no `eap.eval_run` workflow PENDING or ENQUEUED): the eval
+   step layout gained a step before every batch (`eap.eval_agent_archived`, then
+   `eap.eval_stop_cases` when the agent was archived; see `eap_worker/eval_run.py`), so an eval run
+   started by a worker built from de38a5d or earlier would replay a different step name at a
+   recorded function id on this one.
 2. **Migrate only after the old workers have stopped:** `0014_approvals`, then `0015_evals`, before
    the new API or worker starts. 0014 backfills the `pending_approvals` inbox from the workflow
    `step_waiting` events open at migration time. An old worker still running after the migration

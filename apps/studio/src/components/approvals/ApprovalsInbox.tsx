@@ -4,6 +4,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import {
+  APPROVAL_FOLLOW_MAX_DELAY_MS,
+  APPROVAL_FOLLOW_MAX_FAILURES,
+  APPROVAL_FOLLOW_POLL_MS,
   APPROVAL_KIND_LABELS,
   APPROVAL_KINDS,
   applyDecision,
@@ -21,6 +24,7 @@ import {
   type ApprovalFilters,
   type ApprovalKind,
   type ApprovalStatus,
+  TERMINAL_RUN_STATUSES,
 } from "@/lib/approvals";
 import { routes } from "@/lib/routes";
 import { APPROVAL_SHEET_PARAM } from "@/lib/routes/approvals";
@@ -196,7 +200,7 @@ export function ApprovalsInbox() {
       setLookup((previous) => (previous && previous.approval && previous.id === id ? { ...previous, approval: applyDecision(previous.approval, decision) } : previous));
       void refreshPendingApprovals();
       // The card hands over only the decision: re-read the item for who decided and when.
-      findApproval(approval.run_id, approval.approval_key)
+      findApproval(approval.run_id, approval.approval_key, { kind: approval.kind })
         .then((fresh) => {
           if (fresh && fresh.decision !== null) putFresh(id, fresh);
         })
@@ -204,6 +208,64 @@ export function ApprovalsInbox() {
     },
     [putFresh],
   );
+
+  /**
+   * Follow a decided item while its Sheet is open and its run has not ended: the decision resumes
+   * the run, so the Sheet (and its row) re-read the item every APPROVAL_FOLLOW_POLL_MS until the
+   * run status is terminal, as the trace Sheet follows a running run. A copy without a decision
+   * (the projection not caught up yet) is not put in place, so the decision controls never return.
+   * An item without a run status (its run unknown) is not followed. It stops, with a notice, when
+   * the item is no longer found, or after APPROVAL_FOLLOW_MAX_FAILURES failed re-reads in a row
+   * (each waiting twice as long as the last, up to APPROVAL_FOLLOW_MAX_DELAY_MS). One request at a
+   * time: the next is scheduled only once the last has settled.
+   */
+  const followed =
+    selected && selected.status === "decided" && selected.run_status != null && !TERMINAL_RUN_STATUSES.has(selected.run_status) ? selected : null;
+  const followedRef = useRef<Approval | null>(followed);
+  useEffect(() => {
+    followedRef.current = followed;
+  });
+  const followId = followed ? approvalId(followed) : null;
+  useEffect(() => {
+    if (!followId) return;
+    const id = followId;
+    let live = true;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = (ms: number) => {
+      timer = setTimeout(tick, ms);
+    };
+    function tick() {
+      const current = followedRef.current;
+      if (!live || !current || approvalId(current) !== id) return;
+      findApproval(current.run_id, current.approval_key, { kind: current.kind })
+        .then((fresh) => {
+          if (!live) return;
+          failures = 0;
+          if (fresh === null) {
+            setNotice({ id: id, text: "This approval is no longer found, so the Sheet stopped following its run." });
+            return;
+          }
+          if (fresh.decision !== null) putFresh(id, fresh);
+          schedule(APPROVAL_FOLLOW_POLL_MS);
+        })
+        .catch((reason: unknown) => {
+          if (!live) return;
+          failures += 1;
+          if (failures >= APPROVAL_FOLLOW_MAX_FAILURES) {
+            const detail = reason instanceof Error && reason.message ? reason.message : "the approval could not be loaded";
+            setNotice({ id: id, text: `Stopped following the run: ${detail}. Reopen the Sheet to try again.` });
+            return;
+          }
+          schedule(Math.min(APPROVAL_FOLLOW_POLL_MS * 2 ** failures, APPROVAL_FOLLOW_MAX_DELAY_MS));
+        });
+    }
+    schedule(APPROVAL_FOLLOW_POLL_MS);
+    return () => {
+      live = false;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [followId, putFresh]);
 
   /**
    * The card lost a race (409). The Sheet stays on the same item: its fresh state (decided, timed
@@ -215,7 +277,7 @@ export function ApprovalsInbox() {
       const id = approvalId(approval);
       let fresh: Approval | null = null;
       try {
-        fresh = await findApproval(approval.run_id, approval.approval_key);
+        fresh = await findApproval(approval.run_id, approval.approval_key, { kind: approval.kind });
       } catch {
         fresh = null;
       }

@@ -142,3 +142,59 @@ def test_only_unrecorded_chat_requests_null_the_tokens_like_the_trace(client, te
     _a, other = _run_with_rows(client, tenant, MIXED)
     event_log.append(tenant, uuid.UUID(other), "moderation:output:0:model:0:final", "model_message", {})
     assert _run_chat(client, tenant, other) == _trace_chat(client, tenant, other) == (15, 5, "0.0012000000")
+
+
+# --------------------------------------------------------------------------- answering_model_id
+
+
+def _fallback_run(client, tenant: str) -> tuple[str, str]:
+    """A run asked for test:fail-503 whose requests were answered by the fallback test:priced: each
+    request's failed attempt row (`model:{n}:failed:0`, the primary) and its answer (`model:{n}`)."""
+    agent_id = create_agent(client, tenant, "alice")
+    publish_version(client, agent_id, tenant, "alice")
+    run_store, event_log = client.app.state.run_stores
+    run_id = uuid.uuid4()
+    run_store.create_run(tenant, uuid.UUID(agent_id), 1, "hi", run_id, model_id="test:fail-503")
+    rows = [
+        _row("model:0:failed:0", 1, 0, "0", model="test:fail-503"),
+        _row("model:0", 10, 2, "0.0010000000", model="test:priced"),
+        _row("moderation:input:0", 7, 1, "0.0000500000", model="test:mod"),
+        _row("model:1:failed:0", 1, 0, "0", model="test:fail-503"),
+        _row("model:1", 5, 3, "0.0002000000", model="test:priced"),
+        _row("memory:observe:0", 40, 9, "0.0030000000", model="test:obs"),
+    ]
+    for i, row in enumerate(rows):
+        event_log.append(tenant, run_id, f"{row['request_key']}:final", "model_message", {"model_request": i}, row)
+    return agent_id, str(run_id)
+
+
+def test_a_fallback_run_names_the_answering_model_beside_the_requested_one(client, tenant):
+    agent_id, run_id = _fallback_run(client, tenant)
+    run = _get(client, tenant, f"/runs/{run_id}")
+    assert (run["model_id"], run["answering_model_id"]) == ("test:fail-503", "test:priced")
+    listed = next(r for r in _get(client, tenant, "/runs", agent_id=agent_id)["items"] if r["run_id"] == run_id)
+    assert (listed["model_id"], listed["answering_model_id"]) == ("test:fail-503", "test:priced")
+    # The trace's run and its run span agree with the run JSON.
+    trace = _get(client, tenant, f"/runs/{run_id}/trace")
+    assert trace["run"]["answering_model_id"] == "test:priced"
+    (run_span,) = [s for s in trace["spans"] if s["kind"] == "run"]
+    assert (run_span["attributes"]["model_id"], run_span["attributes"]["answering_model_id"]) == ("test:fail-503", "test:priced")
+
+
+def test_the_answering_model_is_the_last_chat_requests(client, tenant):
+    # model:2 sorts before model:10 as text: the highest request NUMBER answers last.
+    _a, run_id = _run_with_rows(client, tenant, [
+        _row("model:2", 1, 1, "0", model="test:a"), _row("model:10", 1, 1, "0", model="test:b"),
+        _row("moderation:output:11", 1, 1, "0", model="test:mod"),
+    ])
+    assert _get(client, tenant, f"/runs/{run_id}")["answering_model_id"] == "test:b"
+    trace = _get(client, tenant, f"/runs/{run_id}/trace")
+    (run_span,) = [s for s in trace["spans"] if s["kind"] == "run"]
+    assert run_span["attributes"]["answering_model_id"] == "test:b"
+
+
+def test_no_answer_recorded_is_null(client, tenant):
+    # No rows at all; only non-chat rows; only a failed attempt (the request never answered).
+    for rows in ([], [_row("moderation:input:0", 7, 1, "0")], [_row("model:0:failed:0", 1, 0, "0", model="test:fail-503")]):
+        _a, run_id = _run_with_rows(client, tenant, rows)
+        assert _get(client, tenant, f"/runs/{run_id}")["answering_model_id"] is None, rows

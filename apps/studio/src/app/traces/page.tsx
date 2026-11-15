@@ -27,6 +27,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { navCrumb } from "@/lib/nav";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Button } from "@/components/ui/Button";
+import { RunModel } from "@/components/traces/RunModel";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { usePendingQuery } from "@/components/traces/usePendingQuery";
@@ -196,7 +197,7 @@ function TracesList() {
       header: "Model",
       cell: (run) => (
         <span className="font-mono text-caption" data-testid="trace-row-model">
-          {run.model_id ?? <span className={dim}>-</span>}
+          <RunModel run={run} />
           {run.model_overridden ? <span className={`ml-1 ${dim}`} title="Model overridden for this run">(override)</span> : null}
         </span>
       ),

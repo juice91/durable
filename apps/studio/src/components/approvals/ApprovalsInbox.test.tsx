@@ -28,6 +28,8 @@ vi.mock("@/lib/approvals", async (importOriginal) => ({
   findApproval: vi.fn(),
   decideToolApproval: vi.fn(),
   refreshPendingApprovals: vi.fn(async () => undefined),
+  // The Sheet follows a decided item's run quickly here (3 s in the app).
+  APPROVAL_FOLLOW_POLL_MS: 20,
 }));
 
 const toolItem: Approval = {
@@ -124,6 +126,109 @@ describe("Approvals inbox", () => {
     expect(refreshPendingApprovals).toHaveBeenCalled();
     // The row stays (no reload dropped it from the Pending list).
     expect(listApprovals).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads a decided item by its own kind, and follows its run until it ends", async () => {
+    vi.mocked(decideToolApproval).mockResolvedValue({ run_id: RUN, tool_call_id: "call_1", decision: "approved", decided_by: "u", comment: null, notified: true });
+    const decided = { ...toolItem, status: "decided" as const, decision: "approved" as const, decided_by: "u", decided_at: "2026-11-15T10:01:00+00:00" };
+    // The first re-reads still see the run going; then it completes.
+    vi.mocked(findApproval)
+      .mockResolvedValueOnce({ ...decided, run_status: "running" })
+      .mockResolvedValueOnce({ ...decided, run_status: "running" })
+      .mockResolvedValue({ ...decided, run_status: "completed" });
+    nextRouter.reset([routes.approval(RUN, "call_1")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    expect(await within(sheet).findByText("running")).toBeInTheDocument();
+    fireEvent.click(await within(sheet).findByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(within(sheet).getByText("completed")).toBeInTheDocument());
+    // Every re-read named the tool kind (no request to the step route for a tool call).
+    expect(findApproval).toHaveBeenCalled();
+    for (const call of vi.mocked(findApproval).mock.calls) expect(call).toEqual([RUN, "call_1", { kind: "tool" }]);
+    // Once the run has ended, the Sheet stops polling.
+    const calls = vi.mocked(findApproval).mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(vi.mocked(findApproval).mock.calls.length).toBe(calls);
+    expect(within(sheet).getByTestId("approval-sheet-status")).toHaveTextContent("Approved");
+  });
+
+  it("follows a decided workflow step by the step kind", async () => {
+    const decidedStep = { ...stepItem, status: "decided" as const, decision: "approved" as const, decided_by: "u", decided_at: "2026-11-15T10:01:00+00:00" };
+    vi.mocked(listApprovals).mockResolvedValue({ items: [toolItem, { ...decidedStep, run_status: "running" }], next_cursor: null });
+    vi.mocked(findApproval).mockResolvedValue({ ...decidedStep, run_status: "completed" });
+    nextRouter.reset([routes.approval(WF_RUN, "review")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    await waitFor(() => expect(within(sheet).getByText("completed")).toBeInTheDocument());
+    // The row is on the loaded page, so the only reads are the follow poll's, by the step kind.
+    expect(findApproval).toHaveBeenCalledWith(WF_RUN, "review", { kind: "step" });
+    for (const call of vi.mocked(findApproval).mock.calls) expect(call).toEqual([WF_RUN, "review", { kind: "step" }]);
+    const calls = vi.mocked(findApproval).mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(vi.mocked(findApproval).mock.calls.length).toBe(calls);
+  });
+
+  it("does not follow a decided item without a run status", async () => {
+    const decided = { ...toolItem, status: "decided" as const, decision: "approved" as const, decided_by: "u", decided_at: "2026-11-15T10:01:00+00:00", run_status: null };
+    vi.mocked(listApprovals).mockResolvedValue({ items: [decided], next_cursor: null });
+    nextRouter.reset([routes.approval(RUN, "call_1")]);
+    render(<ApprovalsPage />);
+    await screen.findByTestId("approval-sheet");
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(findApproval).not.toHaveBeenCalled();
+  });
+
+  it("stops following, with a notice, when the item is no longer found", async () => {
+    const decided = { ...toolItem, status: "decided" as const, decision: "approved" as const, decided_by: "u", decided_at: "2026-11-15T10:01:00+00:00" };
+    vi.mocked(listApprovals).mockResolvedValue({ items: [decided], next_cursor: null });
+    vi.mocked(findApproval).mockResolvedValue(null);
+    nextRouter.reset([routes.approval(RUN, "call_1")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    expect(await within(sheet).findByTestId("approval-sheet-notice")).toHaveTextContent("no longer found");
+    expect(findApproval).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(findApproval).toHaveBeenCalledTimes(1);
+    // The Sheet keeps the copy it had.
+    expect(within(sheet).getByTestId("approval-sheet-status")).toHaveTextContent("Approved");
+  });
+
+  it("backs off after a failed re-read and stops, with a notice, after three in a row", async () => {
+    const decided = { ...toolItem, status: "decided" as const, decision: "approved" as const, decided_by: "u", decided_at: "2026-11-15T10:01:00+00:00" };
+    vi.mocked(listApprovals).mockResolvedValue({ items: [decided], next_cursor: null });
+    // One failure, a good read (the run still going: the count starts again), then three failures.
+    vi.mocked(findApproval)
+      .mockRejectedValueOnce(new Error("Server error"))
+      .mockResolvedValueOnce({ ...decided, run_status: "running" })
+      .mockRejectedValue(new Error("Server error"));
+    const started = Date.now();
+    nextRouter.reset([routes.approval(RUN, "call_1")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    expect(await within(sheet).findByTestId("approval-sheet-notice", {}, { timeout: 3000 })).toHaveTextContent(
+      "Stopped following the run: Server error. Reopen the Sheet to try again.",
+    );
+    expect(findApproval).toHaveBeenCalledTimes(5);
+    // 20 + 40 (after a failure) + 20 + 40 + 80 ms at least: the delays grew after each failure.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(findApproval).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not follow a pending item, and keeps the controls when a re-read has no decision yet", async () => {
+    vi.mocked(decideToolApproval).mockResolvedValue({ run_id: RUN, tool_call_id: "call_1", decision: "approved", decided_by: "u", comment: null, notified: true });
+    nextRouter.reset([routes.approval(RUN, "call_1")]);
+    render(<ApprovalsPage />);
+    const sheet = await screen.findByTestId("approval-sheet");
+    await within(sheet).findByRole("button", { name: "Approve" });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(findApproval).not.toHaveBeenCalled();
+    // The projection lags: a re-read without a decision is not put in place.
+    vi.mocked(findApproval).mockResolvedValue({ ...toolItem });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(vi.mocked(findApproval).mock.calls.length).toBeGreaterThan(1));
+    expect(within(sheet).getByTestId("approval-sheet-status")).toHaveTextContent("Approved");
+    expect(within(sheet).queryByRole("button", { name: "Approve" })).toBeNull();
   });
 
   it("links a workflow step to the workflow run view", async () => {

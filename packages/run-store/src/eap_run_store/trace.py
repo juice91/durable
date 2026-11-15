@@ -112,6 +112,7 @@ query runs under a statement timeout (STATEMENT_TIMEOUT_MS): TraceQueryTimeout, 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -520,6 +521,8 @@ class _Builder:
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
             "model_id": run.get("model_id"),
+            # The model that answered (a fallback model, when one did); `model_id` is the one asked.
+            "answering_model_id": answering_model_id(rd.requests),
             "input_tokens": run.get("input_tokens"),
             "output_tokens": run.get("output_tokens"),
             # The run's own requests split by operation: `chat_*` is the agent's model (`model_id`)
@@ -1202,6 +1205,24 @@ def _run_usage_split(rd: RunData) -> dict[str, Any]:
     for request_key in keys | set(rd.requests):
         split.add(request_key, rd.requests.get(request_key))
     return {**split.totals(cost=False), "embedding_input_tokens": split.embedding_input_tokens()}
+
+
+_ANSWER_KEY = re.compile(r"^model:([0-9]{1,18})$")
+
+
+def answering_model_id(requests: dict[str, dict[str, Any]]) -> str | None:
+    """The model that answered the run's last chat request: the `model_id` of the `model:{n}`
+    usage row with the highest n (a failed fallback attempt's `model:{n}:failed:{k}` row is not
+    an answer); None without one. RunStore.chat_usage's `answering_model_id` uses the same rule."""
+    best: tuple[int, str] | None = None
+    for key, row in requests.items():
+        match = _ANSWER_KEY.match(key)
+        if match is None or (row.get("operation") or "chat") != "chat" or not row.get("model_id"):
+            continue
+        n = int(match.group(1))
+        if best is None or n > best[0]:
+            best = (n, row["model_id"])
+    return best[1] if best else None
 
 
 def _run_name(run: dict[str, Any]) -> str:
