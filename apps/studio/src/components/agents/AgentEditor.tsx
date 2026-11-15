@@ -9,6 +9,7 @@ import { checkExtraKeys, draftDiffers, draftFromSpec, draftToSpec, type EditorDr
 import type { EditorLayout } from "./stepper/editorFit";
 import { EDITOR_STEPS, missingFields, stepForError } from "./stepper/registry";
 import type { EditorStepDefinition, StepProps, StepServices } from "./stepper/types";
+import { readableError } from "@/components/agents/readableError";
 
 /** The stepped layout (SL.11): which step shows, and what goes around it. */
 export interface AgentEditorStepper {
@@ -171,7 +172,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
         </h2>
         {stepAlert && errorStep === step.id ? (
           <div role="alert" data-testid="agent-save-error" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-label text-destructive-text">
-            {stepAlert}
+            {readableError(stepAlert)}
           </div>
         ) : null}
         <step.Component {...stepProps} />

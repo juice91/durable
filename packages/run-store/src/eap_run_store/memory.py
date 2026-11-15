@@ -268,7 +268,8 @@ SCRUB_CONTENT_KEYS = frozenset({
     "args", "content", "delta", "error", "input", "messages_json", "output", "raw_args", "result",
     "text", "value",
 })
-# The `usage` object (pricing.usage_record): fixed keys, numbers, a bool and identifier strings.
+# The `usage` object (pricing.usage_record): fixed keys, numbers, bools (`measured`, `estimated`) and
+# identifier strings.
 _SCRUB_USAGE_NUMBER_KEYS = frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"})
 _SCRUB_USAGE_STRING_KEYS = frozenset({"provider_model_name", "price_source"})
 # `match_counts` (processor_result): count per PII kind or `pattern_<i>`; keys must look like one.
@@ -799,7 +800,7 @@ def _scrub_usage(value: Any) -> dict[str, Any] | None:
     for key, v in value.items():
         if key in _SCRUB_USAGE_NUMBER_KEYS and _is_number(v):
             out[key] = v
-        elif key == "measured" and isinstance(v, bool):
+        elif key in ("measured", "estimated") and isinstance(v, bool):
             out[key] = v
         elif key in _SCRUB_USAGE_STRING_KEYS and (v is None or (isinstance(v, str) and _IDENTIFIER.fullmatch(v))):
             out[key] = v

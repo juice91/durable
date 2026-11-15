@@ -12,6 +12,7 @@ import {
   type ProcessorCatalog,
 } from "../specSections";
 import type { EditorStepDefinition, StepProps } from "./types";
+import { readableError } from "@/components/agents/readableError";
 
 /** Step 5: input and output processors (guardrails). */
 export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
@@ -59,7 +60,7 @@ export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
   }, [serverError]);
 
   const pinnedErrors = (phase: "input" | "output"): Record<string, string> =>
-    pinned && pinned.phase === phase ? { [pinned.clientId]: pinned.message } : {};
+    pinned && pinned.phase === phase ? { [pinned.clientId]: readableError(pinned.message) } : {};
 
   return (
     <ProcessorsEditor
@@ -71,7 +72,7 @@ export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
       catalogError={catalogError}
       models={models}
       modelsError={modelsError}
-      sectionError={errors.target?.kind === "processors" ? serverError : null}
+      sectionError={errors.target?.kind === "processors" && serverError ? readableError(serverError) : null}
       inputErrors={pinnedErrors("input")}
       outputErrors={pinnedErrors("output")}
     />

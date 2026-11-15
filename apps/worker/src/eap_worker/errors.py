@@ -238,6 +238,7 @@ WORKFLOW_FAILURES: dict[str, tuple[str, str]] = {
     "approval_rejected": ("failed", "the approval was rejected"),
     "approval_timeout": ("failed", "the approval was not decided before its timeout"),
     "agent_not_found": ("failed", "the agent was not found or has no published version"),
+    "agent_archived": ("failed", "the step's agent is archived; unarchive it to run this workflow"),
     "input_invalid": ("failed", "the workflow input is not valid JSON (e.g. NaN or Infinity)"),
     "input_ref_missing": ("failed", "a $ref in the step input does not resolve"),
     "step_output_too_large": ("failed", "the step output exceeds the workflow output size limit"),

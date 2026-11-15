@@ -279,12 +279,18 @@ class AgentSpec(BaseModel):
 
         if not v:
             return ()
+        # A "before" validator sees raw input: anything but a list of strings is a ValueError (a 422
+        # at the API), never a TypeError from the regex (a 500). A bare string is not split into ids.
+        if isinstance(v, (str, bytes)) or not isinstance(v, (list, tuple)):
+            raise ValueError("tools must be a list of tool ids")
 
         tool_ids = list(v)
         seen = set()
         pattern = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
         for tool_id in tool_ids:
+            if not isinstance(tool_id, str):
+                raise ValueError(f"tool id must be a string, not {type(tool_id).__name__}")
             if not tool_id:
                 raise ValueError("tool id cannot be empty")
             if not pattern.fullmatch(tool_id):

@@ -1,4 +1,5 @@
 "use client";
+import { readableError } from "@/components/agents/readableError";
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
@@ -47,7 +48,7 @@ function NewAgentForm() {
           submitVariant: "primary",
           notices: error && !stepForError(error) ? (
             <div role="alert" data-testid="agent-create-error" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-label text-destructive-text">
-              {error}
+              {readableError(error)}
             </div>
           ) : undefined,
         }}

@@ -20,7 +20,7 @@ import {
   SEARCH_DEBOUNCE_MS,
   MAX_QUERY_TEXT,
   RANGE_PRESETS,
-  agentRunFilter,
+  runOptionLabel,
   isUuid,
   logFiltersProblem,
   logFiltersToParams,
@@ -49,21 +49,14 @@ const LEVEL_LABELS: Record<LogLevel, string> = {
   fatal: "Fatal only",
 };
 
-function runOptionLabel(run: TraceRun): string {
-  const when = new Date(run.created_at).toLocaleString();
-  return `${when} · ${run.display_status}`;
-}
-
 interface RunOptions {
   runs: TraceRun[];
   loading: boolean;
   failed: boolean;
-  /** The agent's run ids once loaded (null without an agent, while loading, or after a failure). */
-  agentRunIds: Set<string> | null;
 }
 
-/** The agent's most recent runs (for the agent filter), or recent runs of any kind (for the run
- * picker's suggestions). Re-fetched on Refresh (`nonce`); a response for a previous agent is dropped. */
+/** The run picker's suggestions: the agent's most recent runs, or recent runs of any kind.
+ * Re-fetched on Refresh (`nonce`); a response for a previous agent is dropped. */
 function useRunOptions(agentId: string | null, nonce: number): RunOptions {
   const [state, setState] = useState<{ agentId: string | null; runs: TraceRun[]; loading: boolean; failed: boolean }>({
     agentId, runs: [], loading: true, failed: false,
@@ -88,12 +81,7 @@ function useRunOptions(agentId: string | null, nonce: number): RunOptions {
     };
   }, [agentId, nonce]);
   const current = state.agentId === agentId;
-  const known = current && !state.failed && (!state.loading || state.runs.length > 0);
-  const agentRunIds = useMemo(
-    () => (agentId && known ? new Set(state.runs.map((r) => r.run_id)) : null),
-    [agentId, known, state.runs],
-  );
-  return { runs: current ? state.runs : [], loading: !current || state.loading, failed: current && state.failed, agentRunIds };
+  return { runs: current ? state.runs : [], loading: !current || state.loading, failed: current && state.failed };
 }
 
 function formatWindowTime(iso: string): string {
@@ -242,18 +230,14 @@ function LogsSearch() {
   const selected = useSelectedRun(!problem && autoRange ? filters.run_id : null, nonce);
   const run = selected.status === "ok" ? selected.run : null;
   const runKey = run ? [run.created_at, run.finished_at ?? "", run.updated_at ?? "", run.display_status ?? ""].join("|") : "";
-  // The agent is applied in the browser, so it is not part of the API query key.
-  const apiKey = logFiltersToParams({ ...filters, agent_id: null }).toString();
+  // The agent filter is the API's own (`agent_id`): it is part of the query key like the rest.
+  const apiKey = logFiltersToParams(filters).toString();
   const search = useLogSearch(
     problem || selected.status === "loading" ? null : `${apiKey}#${runKey}#${nonce}`,
     () => logsRequestParams(filters, Date.now(), undefined, run),
   );
-  const keep = useMemo(
-    () => agentRunFilter({ ...EMPTY_LOG_FILTERS, agent_id: filters.agent_id, run_id: filters.run_id }, runOptions.agentRunIds),
-    [filters.agent_id, filters.run_id, runOptions.agentRunIds],
-  );
-  const agentPending = !!keep && runOptions.agentRunIds === null && !runOptions.failed;
-  const items = useMemo(() => (keep ? search.items.filter(keep) : search.items), [keep, search.items]);
+  const items = search.items;
+  const agentRuns = filters.agent_id && !filters.run_id && !search.loading && !search.error ? search.agentRuns : null;
 
   const rangeValue = filters.from || filters.to ? "custom" : (filters.range ?? "auto");
   const onRangeChange = (value: string) => {
@@ -266,7 +250,7 @@ function LogsSearch() {
   };
 
   const anyFilter = logFiltersToParams(filters).toString() !== "";
-  const busy = search.loading || agentPending || selected.status === "loading";
+  const busy = search.loading || selected.status === "loading";
   const status = problem
     ? ""
     : busy
@@ -421,13 +405,13 @@ function LogsSearch() {
           {problem}
         </p>
       ) : null}
-      {keep ? (
+      {agentRuns ? (
         <p className="mb-3 text-xs text-muted-foreground" data-testid="logs-agent-note">
-          {runOptions.failed
-            ? "Could not load this agent's runs, so no records can be shown for it. Refresh to try again, or pick a run."
-            : agentPending
-            ? "Loading this agent's runs..."
-            : `Showing records of this agent's ${runOptions.agentRunIds?.size ?? 0} most recent run${runOptions.agentRunIds?.size === 1 ? "" : "s"} (at most ${AGENT_RUNS_LIMIT}); pick a run to search all of its logs.`}
+          {agentRuns.count === 0
+            ? "This agent has no runs in this time range."
+            : agentRuns.limited
+              ? `Searched this agent's ${agentRuns.count} most recent runs in this time range; pick a run to search an older one.`
+              : `Searched this agent's ${agentRuns.count} run${agentRuns.count === 1 ? "" : "s"} in this time range.`}
         </p>
       ) : null}
 
@@ -441,7 +425,7 @@ function LogsSearch() {
       ) : null}
 
       {problem ? null : search.error ? (
-        <LogsUnavailable error={search.error} onRetry={() => setNonce((n) => n + 1)} />
+        <LogsUnavailable error={search.error} onRetry={() => setNonce((n) => n + 1)} onClearAgent={() => setFilters({ agent_id: null })} />
       ) : busy && items.length === 0 ? (
         <p className="py-12 text-center text-sm text-muted-foreground">Searching logs...</p>
       ) : items.length === 0 ? (

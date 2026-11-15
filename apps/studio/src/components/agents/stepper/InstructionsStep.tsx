@@ -4,6 +4,7 @@ import React from "react";
 import { placeholderErrors, stepForErrorMessage, stepStatus } from "../specSections";
 import { fieldClass, labelClass } from "./fieldStyles";
 import type { EditorStepDefinition, StepProps } from "./types";
+import { readableError } from "@/components/agents/readableError";
 
 /** Step 2: the instructions, with `{{context.<name>}}` placeholder hints and checks. */
 export function InstructionsStep({ draft, onChange, errors, services }: StepProps) {
@@ -53,7 +54,7 @@ export function InstructionsStep({ draft, onChange, errors, services }: StepProp
       </div>
       {target?.kind === "instructions" && serverError && !problems.some((p) => serverError.endsWith(p)) ? (
         <p role="alert" data-testid="instructions-server-error" className="mt-1 text-caption text-destructive-text">
-          {serverError}
+          {readableError(serverError)}
         </p>
       ) : null}
     </div>

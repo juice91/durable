@@ -226,7 +226,7 @@ describe("turn badge data", () => {
   const usageEvent = (seq: number, cost: string | null, tokens: [number, number]) =>
     ev(seq, "model_message", { is_final: true, model_id: "test:echo", usage: { input_tokens: tokens[0], output_tokens: tokens[1] }, cost_usd: cost });
 
-  it("sums usage over model and moderation events", () => {
+  it("sums the chat model's requests only, before the run row has usage (moderation apart)", () => {
     const events = [
       ev(0, "run_started", {}),
       usageEvent(1, "0.001", [10, 2]),
@@ -234,8 +234,17 @@ describe("turn badge data", () => {
       ev(3, "model_message", { text: "no usage" }),
     ];
     const usage = turnUsage(events);
-    expect(usage).toMatchObject({ recorded: true, inputTokens: 15, outputTokens: 3 });
-    expect(usage.costUsd).toBeCloseTo(0.0015);
+    expect(usage).toMatchObject({ recorded: true, inputTokens: 10, outputTokens: 2 });
+    expect(usage.costUsd).toBeCloseTo(0.001);
+  });
+
+  it("prefers the run's chat_* fields over its combined totals (follow-up 3)", () => {
+    const row = { input_tokens: 100, output_tokens: 50, cost_usd: "0.5", chat_input_tokens: 60, chat_output_tokens: 20, chat_cost_usd: "0.25" };
+    expect(turnUsage([usageEvent(1, "1", [1, 1])], row)).toEqual({ recorded: true, inputTokens: 60, outputTokens: 20, costUsd: 0.25, measured: true });
+    expect(turnUsage([], { ...row, chat_cost_usd: null }).costUsd).toBeNull();
+    // Absent (older API) or null (nothing recorded yet): the totals, as before.
+    expect(turnUsage([], { input_tokens: 100, output_tokens: 50, cost_usd: "0.5" }).inputTokens).toBe(100);
+    expect(turnUsage([], { ...row, chat_input_tokens: null, chat_output_tokens: null }).inputTokens).toBe(100);
   });
 
   it("reports no price when any request is unpriced and nothing when no request was made", () => {

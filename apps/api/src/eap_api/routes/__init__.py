@@ -1,9 +1,7 @@
 """Route definitions for the control-plane API."""
 
-import json
 import logging
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -14,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 import uuid
 
+from eap_api.agent_archive import referencing_workflows, refuse_if_archived
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.mcp_servers.models import McpServerModel
@@ -22,6 +21,14 @@ from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, PublishWarning, VersionRestore
 from eap_api.version_diff import compare_specs
 from eap_observability import log_failure
+from eap_pricing import (
+    OVERRIDE_ONLY_PROVIDERS,
+    PRICE_UNPRICED,
+    PRICE_ZERO,
+    InvalidPriceFile,
+    load_overrides,
+    price_known,
+)
 from eap_processors import processor_errors
 from eap_run_store import KnowledgeStore
 from eap_schemas import AgentSpec, canonical_spec_hash, reserved_tool_name_conflicts
@@ -46,6 +53,7 @@ def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
         "name": agent.name,
         "draft_spec": agent.draft_spec,
         "latest_version": latest_version,
+        "archived": bool(agent.archived),
     }
 
 
@@ -92,6 +100,7 @@ def create_agent(
             "name": agent.name,
             "draft_spec": agent.draft_spec,
             "latest_version": None,
+            "archived": False,
         },
         status_code=201,
     )
@@ -105,11 +114,13 @@ def create_agent(
 def list_agents(
     principal: Annotated[Principal, Depends(current_principal)],
     db: SessionDep,
+    archived: bool = False,
 ) -> list[dict]:
-    """List agents for the current tenant (non-archived)."""
+    """List the current tenant's agents: the active ones, or with `?archived=true` the archived
+    ones only (see eap_api.agent_archive)."""
     agents = (
         db.query(AgentModel)
-        .filter(AgentModel.tenant_id == principal.tenant_id, AgentModel.archived == False)
+        .filter(AgentModel.tenant_id == principal.tenant_id, AgentModel.archived.is_(archived))
         .all()
     )
 
@@ -201,6 +212,76 @@ def patch_agent(
     )
 
     return JSONResponse(content=_agent_to_response(agent, latest))
+
+
+def _set_archived(
+    agent_id: uuid.UUID, principal: Principal, db: Session, archived: bool, force: bool = False
+) -> JSONResponse:
+    # Locked like publish and restore: a publish that already holds the row finishes first, and one
+    # that starts after this commit sees the new flag.
+    agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    if archived and not agent.archived and not force:
+        workflows = referencing_workflows(db, principal.tenant_id, agent.id)
+        if workflows:
+            db.rollback()
+            names = ", ".join(w["workflow_name"] for w in workflows[:5]) + (" …" if len(workflows) > 5 else "")
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "detail": (
+                        f"agent is a step of {len(workflows)} published workflow(s) ({names}); their runs "
+                        "would be refused. Remove the step, or archive with force=true"
+                    ),
+                    "workflows": workflows,
+                },
+            )
+    if agent.archived != archived:
+        agent.archived = archived
+        db.commit()
+        db.refresh(agent)
+    else:
+        db.rollback()
+    latest = (
+        db.query(func.max(AgentVersionModel.version))
+        .filter(AgentVersionModel.agent_id == str(agent_id))
+        .scalar()
+    )
+    return JSONResponse(content=_agent_to_response(agent, latest))
+
+
+@router.post(
+    "/agents/{agent_id}/archive",
+    response_class=JSONResponse,
+    tags=["agents"],
+    responses={404: {"model": ErrorDetail}, 409: {"description": "Published workflows run this agent"}},
+)
+def archive_agent(
+    agent_id: uuid.UUID,
+    principal: Annotated[Principal, Depends(current_principal)],
+    db: SessionDep,
+    force: bool = False,
+) -> dict:
+    """Archive the agent (idempotent; 200 with the agent, `archived: true`). New runs,
+    conversations, turns and publishes are then refused with 409; existing data stays readable.
+    409 `{detail, workflows: [{workflow_id, workflow_name, versions, latest_version}]}` when a
+    published version of a workflow runs it as a step, unless `force=true` (those workflows' runs
+    are then refused). See eap_api.agent_archive."""
+    return _set_archived(agent_id, principal, db, True, force)
+
+
+@router.post(
+    "/agents/{agent_id}/unarchive",
+    response_class=JSONResponse,
+    tags=["agents"],
+    responses={404: {"model": ErrorDetail}},
+)
+def unarchive_agent(
+    agent_id: uuid.UUID,
+    principal: Annotated[Principal, Depends(current_principal)],
+    db: SessionDep,
+) -> dict:
+    """Unarchive the agent (idempotent; 200 with the agent, `archived: false`)."""
+    return _set_archived(agent_id, principal, db, False)
 
 
 def _check_mcp_servers(db: Session, tenant_id: str, spec: AgentSpec) -> None:
@@ -330,49 +411,20 @@ WARNING_COST_CAP_UNPRICED = "cost_cap_unpriced_model"
 WARNING_REDACTION_FIXED_VALUES = "redaction_may_break_output_schema"
 
 
-# _override_price: what the operator price override file says about one model.
-PRICE_UNUSABLE = "unusable"  # unreadable, invalid, or named by the environment but missing
-PRICE_NONE = "none"  # no entry with a period in effect
-PRICE_ZERO = "zero"  # the period in effect prices input and output at 0
-PRICE_SET = "priced"
+# _price_status: what the worker's price lookup (eap_pricing) says about one model.
+PRICE_UNUSABLE = "unusable"  # the override file is unreadable, invalid, or named by the environment but missing
 
 
-def _override_price(model_id: str, today: date) -> str:
-    """What the operator price override file (EAP_MODEL_PRICES_FILE) says about `model_id`, with
-    the worker's lookup rules (eap_worker.pricing: the exact key, then `provider:*`; of that key's
-    periods, the latest one in effect today). PRICE_UNUSABLE when the file is unreadable or invalid,
-    or named by the environment but missing: the worker then prices nothing at all."""
-    from eap_api.routes.knowledge import _prices_file  # lazy: knowledge imports routes.runs
-
-    path, explicit = _prices_file()
-    try:
-        models = json.loads(path.read_text(encoding="utf-8"))["models"]
-        if not isinstance(models, dict):
-            return PRICE_UNUSABLE
-    except FileNotFoundError:
-        if explicit:
-            return PRICE_UNUSABLE
-        models = {}
-    except (OSError, ValueError, KeyError, TypeError):
+def _price_status(model_id: str, today: date) -> str:
+    """How the worker would price a request of `model_id` today: PRICE_UNUSABLE when the override
+    file (EAP_MODEL_PRICES_FILE) cannot be used, so the worker prices nothing at all; otherwise
+    eap_pricing.price_known's "priced", "zero" or "unpriced". The same lookup as the worker's
+    price() (eap_pricing.price_request: override file, then genai-prices for direct providers), so
+    the publish warning and the recorded cost can never disagree."""
+    overrides = load_overrides()
+    if isinstance(overrides, InvalidPriceFile):
         return PRICE_UNUSABLE
-    provider = model_id.partition(":")[0]
-    for key in (model_id, f"{provider}:*"):
-        periods = models.get(key)
-        if not isinstance(periods, list):
-            continue
-        in_effect = []
-        for period in periods:
-            try:
-                start = date.fromisoformat(str(period["effective_from"]))
-                prices = (Decimal(str(period["input_per_mtok"])), Decimal(str(period["output_per_mtok"])))
-            except (KeyError, TypeError, ValueError, InvalidOperation):
-                return PRICE_UNUSABLE
-            if start <= today:
-                in_effect.append((start, prices))
-        if in_effect:
-            _, (input_price, output_price) = max(in_effect, key=lambda p: p[0])
-            return PRICE_ZERO if input_price == 0 and output_price == 0 else PRICE_SET
-    return PRICE_NONE
+    return price_known(model_id, today, overrides)
 
 
 def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[str, str]]:
@@ -380,12 +432,10 @@ def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[
     whose requests will count as $0 toward the cap: recorded without a price, or priced at $0 (the
     repository's default price file prices `test:*` and `litellm:*` at 0).
 
-    The API reads only the override file. Providers outside it (`test`, `litellm`) are definitely
-    unpriced without an entry; other providers are priced by genai-prices in the worker, which the
-    API cannot consult, so they get no warning without an entry. An unusable override file prices
-    nothing, so then every model of the chain is warned about."""
-    from eap_api.routes.knowledge import OVERRIDE_ONLY_PROVIDERS  # lazy, as above
-
+    The lookup is the worker's (`_price_status`): a model with neither an override entry nor a
+    genai-prices price (genai-prices is never consulted for `test` and `litellm`) is unpriced, a
+    genai-priced model is not warned about, and an unusable override file prices nothing, so then
+    every model of the chain is warned about."""
     if spec.limits is None or spec.limits.max_cost_usd is None:
         return []
     day = today or datetime.now(timezone.utc).date()
@@ -393,16 +443,21 @@ def _cost_cap_warnings(spec: AgentSpec, today: date | None = None) -> list[dict[
     warnings: list[dict[str, str]] = []
     for path, ref in chain:
         model_id = f"{ref.provider}:{ref.name}"
-        price = _override_price(model_id, day)
-        if price == PRICE_UNUSABLE:
+        status_ = _price_status(model_id, day)
+        if status_ == PRICE_UNUSABLE:
             reason = (
                 "the model price override file is unreadable, invalid or missing, so no model has a price; "
                 "its requests count as $0"
             )
-        elif price == PRICE_ZERO:
+        elif status_ == PRICE_ZERO:
             reason = f"'{model_id}' is priced at $0, so its requests count as $0"
-        elif price == PRICE_NONE and ref.provider in OVERRIDE_ONLY_PROVIDERS:
-            reason = f"'{model_id}' has no price in the model price override file; its requests count as $0"
+        elif status_ == PRICE_UNPRICED:
+            where = (
+                "the model price override file"
+                if ref.provider in OVERRIDE_ONLY_PROVIDERS
+                else "the model price override file or genai-prices"
+            )
+            reason = f"'{model_id}' has no price in {where}; its requests count as $0"
         else:
             continue
         warnings.append(PublishWarning(
@@ -590,6 +645,7 @@ def publish_version(
     # restore discarded can never be published, and "no changes since latest" is judged on the state
     # the other request committed.
     agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    refuse_if_archived(agent)
 
     if agent.draft_spec is None:
         raise HTTPException(
@@ -778,6 +834,7 @@ def restore_version(
     # Lock the agent row: a concurrent draft edit cannot slip between the dirty-draft check and the
     # draft overwrite below.
     agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    refuse_if_archived(agent)
 
     source = (
         db.query(AgentVersionModel)

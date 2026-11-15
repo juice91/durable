@@ -1022,11 +1022,18 @@ async def _drive_agent(
                     fallback_data: dict[str, Any] = {}
                     if len(model_chain) > 1:
                         # AC.5: priced as the model that answered; failed attempts with usage get rows.
-                        usage, fallback_data, failed_usage = fallback_usage(model_chain, response)
+                        # Streamed (model.request_stream): the answering model's impossible usage
+                        # is corrected by the guard (request_usage_input).
+                        usage, fallback_data, failed_usage = fallback_usage(
+                            model_chain, response, streamed_response=response
+                        )
                         if failed_usage:
                             usage["failed"] = failed_usage
                     else:
-                        usage = request_usage_input(model_id, response.model_name, response.usage)
+                        # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
+                        usage = request_usage_input(
+                            model_id, response.model_name, response.usage, streamed_response=response
+                        )
                     # AC.5: a fallback attempt's error text (provider body, request) is never stored.
                     message = scrub_failed_attempts_message(_message_json(response))
                     message = scrub_memory_message(message, memory)

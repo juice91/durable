@@ -24,6 +24,8 @@ dependencies = [
     "eap-processors",
     # Knowledge base uploads are extracted once to reject unsupported or unsafe content early.
     "eap-knowledge",
+    # The model price override file and cost arithmetic (shared by the worker and the API).
+    "eap-pricing",
     # Workflow run input is checked against the version's input_schema, with an empty
     # referencing.Registry (no remote $ref is ever retrieved).
     "jsonschema>=4.20",
@@ -49,3 +51,4 @@ eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
+eap-pricing = { workspace = true }

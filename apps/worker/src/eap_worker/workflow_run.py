@@ -209,7 +209,9 @@ def read_limits() -> dict[str, Any]:
 # --------------------------------------------------------------------------- steps
 
 _VERSION = text("SELECT workflow_id, version, spec FROM workflow_versions WHERE id = :id AND tenant_id = :t")
-_AGENT = text("SELECT 1 FROM agents WHERE id = :a AND tenant_id = :t AND archived IS NOT TRUE")
+# The agent's archived flag (no row: not this tenant's agent). An archived agent is reported as such
+# (`agent_archived`), not as missing.
+_AGENT = text("SELECT archived FROM agents WHERE id = :a AND tenant_id = :t")
 _AGENT_VERSION = text(
     "SELECT version, spec FROM agent_versions WHERE agent_id = :a AND tenant_id = :t AND version = :v"
 )
@@ -273,8 +275,9 @@ async def resolve_agent_step(
     traceparent: str | None,
 ) -> dict[str, Any]:
     """Resolve the agent version ONCE (pinned, or the latest published when None) and create the
-    child agent run row. Returns {"found": False} or {"found": True, "version", "spec_json",
-    "child_run_id"}; checkpointed, so a replay never re-resolves 'latest'.
+    child agent run row. Returns {"found": False} (with "archived": True when the agent exists but
+    is archived) or {"found": True, "version", "spec_json", "child_run_id"}; checkpointed, so a
+    replay never re-resolves 'latest'.
 
     The agent must exist and not be archived only when the child row is CREATED. A re-executed
     step (killed after `after_child_run_insert`, before the checkpoint) finds the child row and
@@ -295,8 +298,11 @@ async def resolve_agent_step(
         if existing is not None:
             return pinned(existing.get("agent_version"))
         with rt.engine.connect() as conn:
-            if conn.execute(_AGENT, {"a": agent_id, "t": tenant_id}).fetchone() is None:
+            agent = conn.execute(_AGENT, {"a": agent_id, "t": tenant_id}).fetchone()
+            if agent is None:
                 return {"found": False}
+            if agent.archived:
+                return {"found": False, "archived": True}
             if version is None:
                 row = conn.execute(_AGENT_LATEST, {"a": agent_id, "t": tenant_id}).fetchone()
             else:
@@ -576,7 +582,7 @@ class _Interpreter:
             self.run_id, self.tenant_id, step.id, str(step.agent_id), step.version, prompt, self.traceparent
         )
         if not found.get("found"):
-            raise WorkflowStepError("agent_not_found", step.id)
+            raise WorkflowStepError("agent_archived" if found.get("archived") else "agent_not_found", step.id)
         child = found["child_run_id"]
         with SetWorkflowID(child):
             handle = await DBOS.start_workflow_async(

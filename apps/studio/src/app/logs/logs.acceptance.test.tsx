@@ -364,48 +364,48 @@ describe("stale responses and paging", () => {
   });
 });
 
-describe("agent filter", () => {
-  const runRow = (run_id: string) => ({ run_id, created_at: "2026-11-13T09:59:00Z", display_status: "completed" }) as never;
+describe("agent filter (follow-up 2: the API's agent_id)", () => {
+  const agentReply = (items: LogItem[], agent_runs: number, agent_runs_limited = false) => ({ ...reply(items), agent_runs, agent_runs_limited });
 
-  it("shows only the records of that agent's runs, with the note, and sends no agent param", async () => {
-    vi.mocked(listTraceRuns).mockResolvedValue({ items: [runRow(RUN)], next_before: null });
-    vi.mocked(searchLogs).mockResolvedValue(reply([log("mine"), log("theirs", RUN2), log("no run", null)]));
+  it("sends agent_id to the API and shows what it searched", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(agentReply([log("mine")], 3));
     startAt(`agent_id=${AGENT}`);
     expect(await screen.findByText("mine")).toBeInTheDocument();
-    expect(screen.queryByText("theirs")).toBeNull();
-    expect(screen.queryByText("no run")).toBeNull();
-    expect(screen.getAllByTestId("log-row")).toHaveLength(1);
-    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent(/most recent run/);
-    expect(calls()[0]).toEqual({ limit: 100 });
-    expect(vi.mocked(listTraceRuns).mock.calls.some(([f, o]) => f.agent_id === AGENT && o?.limit === 200)).toBe(true);
+    expect(calls()[0]).toEqual({ limit: 100, agent_id: AGENT });
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("Searched this agent's 3 runs in this time range.");
   });
 
-  it("is not applied when a run is picked (all of that run's logs show)", async () => {
-    vi.mocked(listTraceRuns).mockResolvedValue({ items: [runRow(RUN)], next_before: null });
-    vi.mocked(searchLogs).mockResolvedValue(reply([log("x", RUN2)]));
+  it("says when older runs were left out", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(agentReply([log("mine")], 200, true));
+    startAt(`agent_id=${AGENT}`);
+    expect(await screen.findByTestId("logs-agent-note")).toHaveTextContent("200 most recent runs");
+  });
+
+  it("with a run picked, sends both and shows no agent note", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(agentReply([log("x", RUN2)], 1));
     startAt(`agent_id=${AGENT}&run_id=${RUN2}`);
     expect(await screen.findByText("x")).toBeInTheDocument();
+    expect(calls()[0]).toMatchObject({ agent_id: AGENT, run_id: RUN2 });
     expect(screen.queryByTestId("logs-agent-note")).toBeNull();
   });
 
-  it("changing the agent re-filters without a new logs request and shows no note when none selected", async () => {
-    vi.mocked(listTraceRuns).mockResolvedValue({ items: [runRow(RUN)], next_before: null });
-    vi.mocked(searchLogs).mockResolvedValue(reply([log("mine"), log("theirs", RUN2)]));
+  it("changing the agent is a new logs request with the agent in the URL", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(reply([log("any")]));
     startAt();
-    await screen.findByText("theirs");
+    await screen.findByText("any");
     expect(screen.queryByTestId("logs-agent-note")).toBeNull();
+    vi.mocked(searchLogs).mockResolvedValue(agentReply([log("mine")], 1));
     fireEvent.change(await screen.findByLabelText("Agent"), { target: { value: AGENT } });
-    await waitFor(() => expect(screen.queryByText("theirs")).toBeNull());
-    expect(screen.getByText("mine")).toBeInTheDocument();
-    expect(searchLogs).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("logs-agent-note")).toBeVisible();
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(2));
+    expect(calls()[1]).toEqual({ limit: 100, agent_id: AGENT });
+    expect(await screen.findByTestId("logs-agent-note")).toHaveTextContent("1 run in this time range");
   });
 
-  it("an agent with no runs shows the empty state, not other agents' records", async () => {
-    vi.mocked(searchLogs).mockResolvedValue(reply([log("theirs", RUN2)]));
+  it("an agent with no runs in the window shows the empty state and says so", async () => {
+    vi.mocked(searchLogs).mockResolvedValue(agentReply([], 0));
     startAt(`agent_id=${AGENT}`);
     expect(await screen.findByTestId("logs-empty")).toBeInTheDocument();
-    expect(screen.queryByText("theirs")).toBeNull();
+    expect(screen.getByTestId("logs-agent-note")).toHaveTextContent("This agent has no runs in this time range.");
   });
 });
 

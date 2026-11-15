@@ -20,6 +20,7 @@ import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
+import { AgentArchiveMenu, ArchivedBanner } from "./AgentArchiveMenu";
 import { THREADS_TITLE } from "./AgentChatPanes";
 import { EDITOR_NAV_FIT_PX } from "@/components/agents/stepper/editorFit";
 import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoCollapsed, threadsShown } from "./chatFit";
@@ -62,7 +63,8 @@ export interface AgentLayoutProps {
 /**
  * The agent page's shared frame (`app/agents/[id]/layout.tsx`): loads the agent once and keeps it
  * across tabs. Header: the agent crumb with a switcher (to the same tab of another agent), the
- * Conversations toggle (Chat tab), the Config toggle and Copy link, and the Chat · Traces · Editor
+ * Conversations toggle (Chat tab), the Config toggle, Copy link and More actions (Archive / Unarchive,
+ * with an archived banner under the header), and the Chat · Traces · Editor
  * tabs (· Memory for an agent with memory, RM.18). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
  * screens) when threads and chat fit beside it, a Sheet below 1024 px. Keys: `]` toggles Config, `{`
  * the conversations pane. Where Config does not leave room for both panes, the threads pane
@@ -330,6 +332,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
         data-testid="agent-config-toggle"
       />
       <IconButton label="Copy link" size="sm" onClick={copyLink} icon={icon(Link2)} data-testid="agent-copy-link" />
+      {agent ? <AgentArchiveMenu agent={agent} onChanged={setAgent} /> : null}
       <span role="status" className="sr-only">
         {copyStatus}
       </span>
@@ -383,7 +386,10 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
               </p>
             </div>
           ) : (
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">{children}</div>
+            <>
+              {agent?.archived ? <ArchivedBanner agent={agent} onChanged={setAgent} /> : null}
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">{children}</div>
+            </>
           )}
         </div>
         </TraceSheetHost>
