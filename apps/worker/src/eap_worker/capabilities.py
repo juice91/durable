@@ -284,6 +284,14 @@ INVALID_ID_REASON = "invalid_tool_call_id"
 # Loops D8a: an agent step inside a workflow loop body never waits for an approval.
 LOOP_BODY_DENY_REASON = "loop_body"
 LOOP_BODY_DENIED_MESSAGE = "Tool approvals are not available inside loops; this tool call was not run."
+
+# A gated call whose id an EARLIER model request of this run already used for an approval: its old
+# decision must never authorise this (different) call, so it is denied at once (security).
+DUPLICATE_ID_MESSAGE = (
+    "This tool call reused the id of an earlier tool call of this run, so it could not be offered "
+    "for approval; it was not run."
+)
+DUPLICATE_ID_REASON = "duplicate_tool_call_id"
 EVAL_DECIDER = "eval"
 SYSTEM_DECIDER = "system"
 
@@ -379,23 +387,39 @@ async def tool_approval_begin_step(
     data: dict[str, Any],
     timeout_seconds: float,
     batch_deadline: float | None = None,
-) -> float:
+) -> dict[str, Any]:
     """Compute the deadline ONCE (now + timeout_seconds, epoch seconds; or `batch_deadline`, the
     batch's deadline recorded by its first call's step, so every call of a batch shows and times out
     at the same instant), write the `tool_approval_waiting` event carrying it and its open
-    pending_approvals row in one transaction (EventLog.append_approval_waiting), and return it. A
-    re-executed step finds the first event and returns ITS deadline (a repeated write adds nothing)."""
+    pending_approvals row in one transaction (EventLog.append_approval_waiting), and return
+    `{"deadline": <epoch>, "duplicate": False}`. A re-executed step finds the first event and
+    returns ITS deadline (a repeated write adds nothing).
+
+    Reused ids (security): `data["model_request"]` names the model response the call came from.
+    When the call's waiting event already exists for ANOTHER model request of this run (a provider
+    that numbers calls `call_0`, `call_1` per response), nothing is written and the step returns
+    `{"deadline": None, "duplicate": True}`: the caller denies the call, so the earlier call's
+    decision can never authorise it. A waiting event without `model_request` (written before this
+    rule) counts as this request, so an in-flight run replays as before."""
     rt = get_runtime()
-    deadline = batch_deadline if batch_deadline is not None else time.time() + timeout_seconds
-    payload = {**data, "deadline": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat()}
-    event, _created = await asyncio.to_thread(
-        rt.event_log.append_approval_waiting, tenant_id, run_id, "tool", tool_call_id, payload
-    )
-    crash_point("after_event_write", event_key=f"tool:{tool_call_id}:approval:waiting")
-    stored = event.data.get("deadline") if isinstance(event.data, dict) else None
-    if isinstance(stored, str):
-        deadline = datetime.fromisoformat(stored).timestamp()
-    return deadline
+    key = f"tool:{tool_call_id}:approval:waiting"
+
+    def work() -> dict[str, Any]:
+        existing = rt.event_log.get_event(tenant_id, run_id, key)
+        if existing is not None and isinstance(existing.data, dict):
+            earlier = existing.data.get("model_request")
+            if earlier is not None and earlier != data.get("model_request"):
+                return {"deadline": None, "duplicate": True}
+        deadline = batch_deadline if batch_deadline is not None else time.time() + timeout_seconds
+        payload = {**data, "deadline": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat()}
+        event, _created = rt.event_log.append_approval_waiting(tenant_id, run_id, "tool", tool_call_id, payload)
+        crash_point("after_event_write", event_key=key)
+        stored = event.data.get("deadline") if isinstance(event.data, dict) else None
+        if isinstance(stored, str):
+            deadline = datetime.fromisoformat(stored).timestamp()
+        return {"deadline": deadline, "duplicate": False}
+
+    return await asyncio.to_thread(work)
 
 
 @DBOS.step(name="eap.tool_approval_decisions")
@@ -426,12 +450,16 @@ async def tool_approval_decisions_step(
 
 
 @DBOS.step(name="eap.tool_approval_deny")
-async def tool_approval_deny_step(run_id: str, tenant_id: str, tool_call_id: str, data: dict[str, Any]) -> None:
+async def tool_approval_deny_step(
+    run_id: str, tenant_id: str, tool_call_id: str, data: dict[str, Any], event_key: str | None = None
+) -> None:
     """Deny a gated call at once, with no wait and no inbox row: the `tool_denied` event at its
-    decision key (idempotent per key). Eval runs (`decided_by: "eval"`) and tool call ids the API
-    could never address (`decided_by: "system"`)."""
+    decision key (idempotent per key), or at `event_key`. Eval runs (`decided_by: "eval"`), tool
+    call ids the API could never address and reused ids (`decided_by: "system"`; a reused id's event
+    is `tool:{id}:approval:duplicate:{model_request}`, since its decision key holds the earlier
+    call's decision)."""
     rt = get_runtime()
-    key = decision_event_key("tool", tool_call_id)
+    key = event_key or decision_event_key("tool", tool_call_id)
     await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), key, "tool_denied", data)
     crash_point("after_event_write", event_key=key)
 
@@ -448,6 +476,8 @@ def _result_for(decision: dict[str, Any] | None) -> ToolApproved | ToolDenied:
             return ToolDenied(INVALID_ID_MESSAGE)
         if data.get("reason") == LOOP_BODY_DENY_REASON:
             return ToolDenied(LOOP_BODY_DENIED_MESSAGE)
+        if data.get("reason") == DUPLICATE_ID_REASON:
+            return ToolDenied(DUPLICATE_ID_MESSAGE)
         comment = data.get("comment")
         return ToolDenied(denial_message(comment if isinstance(comment, str) else None))
     return ToolDenied(TIMED_OUT_MESSAGE)
@@ -459,6 +489,7 @@ async def wait_for_tool_approvals(
     calls: list[ToolCallPart],
     timeout_hours: int,
     settings: ApprovalSettings,
+    model_request: int | None = None,
 ) -> DeferredToolResults:
     """The durable wait for one batch of gated calls (see the module docstring). Workflow code:
     every read is a step and `recv` is recorded, so a replay takes the same path."""
@@ -489,6 +520,7 @@ async def wait_for_tool_approvals(
         timeout_seconds = timeout_hours * settings.hour_seconds
         batch = [c.tool_call_id for c in waiting]
         deadline: float | None = None
+        begun: list[str] = []
         for call in waiting:
             recorded = await tool_approval_begin_step(
                 run_id, tenant_id, call.tool_call_id,
@@ -500,13 +532,32 @@ async def wait_for_tool_approvals(
                     "workflow_id": DBOS.workflow_id,
                     # AG-UI (Q7): every waiting call of this deferred batch, for one interrupt per batch.
                     "batch": batch,
+                    # The model response it came from: a later reuse of this id is refused.
+                    "model_request": model_request,
                 },
                 timeout_seconds,
                 deadline,  # None for the first call; then the batch's recorded deadline
             )
+            # A checkpoint recorded before reuse detection holds the bare deadline.
+            info = recorded if isinstance(recorded, dict) else {"deadline": recorded, "duplicate": False}
+            if info.get("duplicate"):
+                data = {
+                    "tool_call_id": call.tool_call_id, "decided_by": SYSTEM_DECIDER, "comment": None,
+                    "reason": DUPLICATE_ID_REASON, "model_request": model_request,
+                }
+                await tool_approval_deny_step(
+                    run_id, tenant_id, call.tool_call_id, data,
+                    event_key=f"tool:{call.tool_call_id}:approval:duplicate:{model_request}",
+                )
+                decisions[call.tool_call_id] = {"type": "tool_denied", "data": data}
+                continue
+            begun.append(call.tool_call_id)
             # Equal for every call of the batch; min() only guards an event written before this rule.
-            deadline = recorded if deadline is None else min(deadline, recorded)
+            value = float(info["deadline"])
+            deadline = value if deadline is None else min(deadline, value)
             crash_point("tool_approval_waiting", event_key=f"tool:{call.tool_call_id}:approval:waiting")
+        batch = begun
+    if waiting and batch:
         assert deadline is not None
         topic = tool_approval_topic(run_id)
         while True:
@@ -554,6 +605,8 @@ class SpecCapability(AbstractCapability[Any]):
         results = await wait_for_tool_approvals(
             str(ctx.deps.run_id), ctx.deps.tenant_id, calls, spec.approvals.effective_timeout_hours(),
             current_approval_settings(),
+            # The response's model request n (run_step counts requests from 1), as in `model:{n}:final`.
+            model_request=ctx.run_step - 1,
         )
         check_approved_tool_calls(ctx, results)
         return results
@@ -601,6 +654,8 @@ def check_approved_tool_calls(ctx: RunContext[Any], results: DeferredToolResults
 __all__ = [
     "APPROVAL_MODES",
     "ApprovalSettings",
+    "DUPLICATE_ID_MESSAGE",
+    "DUPLICATE_ID_REASON",
     "INVALID_ID_MESSAGE",
     "INVALID_ID_REASON",
     "LOOP_BODY_DENIED_MESSAGE",

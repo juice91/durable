@@ -5,8 +5,10 @@ Declared here so the API validates suites, cases and evaluators without importin
 
 - `equals_expected`: deep JSON equality with the case's expected output (numbers by value);
 - `contains {value?, case_sensitive}`: the output contains `value` (default: the expected output);
-- `regex {pattern}`: RE2 pattern (at most 200 characters; RE2 syntax is checked by the API with
-  eap_processors, the worker matches with RE2);
+- `regex {pattern}`: RE2 pattern (at most 200 characters). This contract checks only the length
+  (eap_schemas imports no eap_processors); the API refuses a pattern RE2 does not compile (422 at
+  `<path>.pattern`, fixed message) on every suite and case write and on import, and the worker
+  compiles with the same `eap_processors.compile_re2`;
 - `schema_valid {json_schema?}`: the output validates against the schema (default: the agent
   version's output schema);
 - `field_equals {path, value}`: the structured output's value at `path` (dotted segments, a digit
@@ -35,7 +37,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal, Tuple, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, field_validator, model_validator
 
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid, json_size, validate_output_schema
 from eap_schemas.limits import COST_DECIMAL_PLACES, normalise_usd
@@ -345,7 +347,8 @@ class JudgeVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, serialize_by_alias=True)
 
     reason: str = Field(max_length=MAX_JUDGE_REASON_CHARS, description="Why the output passes or fails")
-    passed: bool = Field(alias="pass", description="Whether the output meets the rubric")
+    # Strict: only a JSON boolean is a verdict ("yes", "true", 1 are refused, never coerced).
+    passed: StrictBool = Field(alias="pass", description="Whether the output meets the rubric")
     score: float = Field(ge=0.0, le=1.0, description="How well the output meets the rubric, 0 to 1")
 
 

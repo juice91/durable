@@ -38,7 +38,7 @@ export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval"
  * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
  * `eap.kb_ingest` workflow): shown as "Knowledge ingest", linking to its knowledge base (RM.16).
  */
-export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest";
+export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest" | "eval";
 
 /** Run kinds for labels and the Traces kind filter, in filter order. */
 export const RUN_KIND_LABELS: Record<RunKind, string> = {
@@ -46,6 +46,8 @@ export const RUN_KIND_LABELS: Record<RunKind, string> = {
   workflow: "Workflow",
   tool: "Tool",
   kb_ingest: "Knowledge ingest",
+  // AC.17: an agent's test suite run (its case runs are child runs).
+  eval: "Eval",
 };
 
 export interface Run {

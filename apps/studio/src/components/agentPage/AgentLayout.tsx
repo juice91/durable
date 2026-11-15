@@ -42,6 +42,8 @@ const TABS: { id: AgentTab; label: string; testId: string }[] = [
   { id: "editor", label: "Editor", testId: "agent-tab-editor" },
   // RM.18: only for an agent with memory (its draft or latest version); see `visibleTabs`.
   { id: "memory", label: "Memory", testId: "agent-tab-memory" },
+  // AC.16: the agent's test suites, eval runs and compare (no Evaluation nav group).
+  { id: "tests", label: "Tests", testId: "agent-tab-tests" },
 ];
 
 /**
@@ -66,7 +68,7 @@ export interface AgentLayoutProps {
  * across tabs. Header: the agent crumb with a switcher (to the same tab of another agent), the
  * Conversations toggle (Chat tab), the Config toggle, Copy link and More actions (Archive / Unarchive,
  * with an archived banner under the header), and the Chat · Traces · Editor
- * tabs (· Memory for an agent with memory, RM.18). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
+ * tabs (· Memory for an agent with memory, RM.18; · Tests, AC.16). The read-only Config panel is the frame's side panel: open by default on the Chat tab (wide
  * screens) when threads and chat fit beside it, a Sheet below 1024 px. Keys: `]` toggles Config, `{`
  * the conversations pane. Where Config does not leave room for both panes, the threads pane
  * collapses automatically while Config is open (chatFit.ts).

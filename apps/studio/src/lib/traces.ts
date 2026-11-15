@@ -19,13 +19,33 @@ export type SpanKind =
   | "observer"
   | "reflector"
   | "working_memory"
-  | "ingest";
+  | "ingest"
+  // Agent capability spans (AC.17): see eap_run_store.trace. Never error, argument or output text.
+  | "fallback_attempt"
+  | "tool_approval"
+  | "output_retry"
+  | "eval_case"
+  | "judge";
 
 /** Every span kind, in legend order. */
 export const SPAN_KINDS: readonly SpanKind[] = [
   "run", "child_run", "model_request", "tool_call", "processor", "workflow_step",
   "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
+  "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
 ];
+
+/** The agent capability span kinds (AC.17). */
+export const CAPABILITY_SPAN_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>([
+  "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
+]);
+
+/** One failed attempt of a model request on a fallback chain (`attributes.failed_attempts`). */
+export interface FailedAttempt {
+  model_id?: string | null;
+  outcome?: string | null;
+  error_type?: string | null;
+  http_status?: number | null;
+}
 
 /** The RAG and memory span kinds (RM.19). */
 export const RAG_SPAN_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["retrieve", "embedding", "ingest"]);
@@ -122,11 +142,17 @@ export interface TraceTotals {
   moderation_input_tokens?: number | null;
   moderation_output_tokens?: number | null;
   moderation_cost_usd?: string | null;
+  /** AC.17 (absent from older APIs): an eval run's LLM-judge requests, apart from `chat_*`. */
+  judge_requests?: number;
+  judge_input_tokens?: number | null;
+  judge_output_tokens?: number | null;
+  judge_cost_usd?: string | null;
 }
 
-/** One non-chat group of a usage split (memory: observer and reflector; moderation; embedding). */
+/** One non-chat group of a usage split (memory: observer and reflector; moderation; embedding;
+ * judge: an eval run's LLM-judge requests, AC.17). */
 export interface UsageGroup {
-  id: "memory" | "moderation" | "embedding";
+  id: "memory" | "moderation" | "embedding" | "judge";
   label: string;
   inputTokens: number | null;
   /** Embeddings have no output tokens: null. */
@@ -141,7 +167,7 @@ export interface UsageSplit {
   others: UsageGroup[];
 }
 
-const GROUP_LABELS = { memory: "Memory (observer, reflector)", moderation: "Moderation", embedding: "Embedding" } as const;
+const GROUP_LABELS = { memory: "Memory (observer, reflector)", moderation: "Moderation", embedding: "Embedding", judge: "Judge" } as const;
 
 function tokenField(source: Record<string, unknown>, key: string): number | null {
   const value = source[key];
@@ -157,7 +183,7 @@ export function usageSplit(source: Record<string, unknown> | null | undefined): 
   if (!source || !("chat_input_tokens" in source)) return null;
   const cost = (key: string): string | null | undefined => (key in source ? (typeof source[key] === "string" ? (source[key] as string) : null) : undefined);
   const others: UsageGroup[] = [];
-  for (const id of ["memory", "moderation", "embedding"] as const) {
+  for (const id of ["memory", "moderation", "embedding", "judge"] as const) {
     const inputTokens = tokenField(source, `${id}_input_tokens`);
     const outputTokens = id === "embedding" ? null : tokenField(source, `${id}_output_tokens`);
     const costUsd = cost(`${id}_cost_usd`);
@@ -385,6 +411,24 @@ export function spanLabel(
     return `Working memory update${version !== null ? ` (v${version})` : ""}`;
   }
   if (span.kind === "ingest") return `Ingest: ${span.name}`;
+  if (span.kind === "fallback_attempt") {
+    const k = num(a.fallback_position);
+    return `Failed attempt${k !== null ? ` ${k + 1}` : ""}: ${str(a.model_id) ?? span.name}`;
+  }
+  if (span.kind === "tool_approval") return `Approval: ${str(a.tool_name) ?? "tool call"}`;
+  if (span.kind === "output_retry") {
+    const n = num(a.model_request);
+    const errors = num(a.error_count);
+    return `Output retry${n !== null ? ` after #${n}` : ""}${errors !== null ? ` (${errors} error${errors === 1 ? "" : "s"})` : ""}`;
+  }
+  if (span.kind === "eval_case") {
+    const position = num(a.position);
+    return `Case ${position !== null ? position + 1 : str(a.case_id) ?? ""}${str(a.case_status) ? `: ${a.case_status}` : ""}`.trim();
+  }
+  if (span.kind === "judge") {
+    const i = num(a.evaluator_index);
+    return `Judge${i !== null ? ` (evaluator ${i + 1})` : ""}: ${str(a.model_id) ?? "unknown model"}`;
+  }
   return span.name;
 }
 
@@ -403,6 +447,11 @@ export const KIND_LABELS: Record<SpanKind, string> = {
   reflector: "Reflector",
   working_memory: "Working memory",
   ingest: "Ingest phase",
+  fallback_attempt: "Fallback attempt",
+  tool_approval: "Tool approval",
+  output_retry: "Output retry",
+  eval_case: "Test case",
+  judge: "Judge request",
 };
 
 // ---------------------------------------------------------------------------- formatting
@@ -437,7 +486,7 @@ export const EMPTY_FILTERS: TraceFilters = {
   status: [], from: null, to: null, model: null, provider: null, agent_id: null, kind: null,
 };
 
-const KINDS: ReadonlySet<string> = new Set<RunKind>(["agent", "tool", "workflow", "kb_ingest"]);
+const KINDS: ReadonlySet<string> = new Set<RunKind>(["agent", "tool", "workflow", "kb_ingest", "eval"]);
 
 export function parseTraceFilters(params: URLSearchParams | { get(name: string): string | null; getAll?(name: string): string[] }): TraceFilters {
   const one = (name: string) => {

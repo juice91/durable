@@ -1,6 +1,11 @@
 import {
   Binary,
   Bot,
+  CircleAlert,
+  ClipboardCheck,
+  Gavel,
+  Hand,
+  RotateCcw,
   Brain,
   CirclePlay,
   DatabaseZap,
@@ -56,6 +61,11 @@ export const KIND_BADGE: Record<SpanKind, string> = {
   reflector: "MEM",
   working_memory: "MEM",
   ingest: "KB",
+  fallback_attempt: "FAIL",
+  tool_approval: "WAIT",
+  output_retry: "RETRY",
+  eval_case: "CASE",
+  judge: "JUDGE",
 };
 
 /** One icon per span kind (decorative: the badge and label carry the meaning). */
@@ -74,6 +84,11 @@ export const KIND_ICON: Record<SpanKind, LucideIcon> = {
   reflector: Sparkles,
   working_memory: NotebookPen,
   ingest: FileInput,
+  fallback_attempt: CircleAlert,
+  tool_approval: Hand,
+  output_retry: RotateCcw,
+  eval_case: ClipboardCheck,
+  judge: Gavel,
 };
 
 /**
@@ -98,4 +113,10 @@ export const KIND_TONE: Record<SpanKind, string> = {
   observer: "text-[color:var(--viz-series-2-color)]",
   reflector: "text-[color:var(--viz-series-2-color)]",
   working_memory: "text-[color:var(--viz-series-2-color)]",
+  // AC.17: the capability spans stay muted; their status bar and badge carry the meaning.
+  fallback_attempt: "text-muted-foreground",
+  tool_approval: "text-muted-foreground",
+  output_retry: "text-muted-foreground",
+  eval_case: "text-muted-foreground",
+  judge: "text-muted-foreground",
 };

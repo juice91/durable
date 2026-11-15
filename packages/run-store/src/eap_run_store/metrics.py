@@ -16,7 +16,7 @@ Filters:
 - `agent_id`: run counts are that agent's top-level runs; usage is every request made by that
   agent's runs, including those it made as a workflow step (the cost is the agent's).
 - `kind`: run counts by `runs.kind`; usage by the kind of the top-level run the request belongs to
-  (a workflow step's requests count as `workflow`).
+  (a workflow step's requests count as `workflow`, an eval case run's as `eval`; AC.17).
 - `model` (our id `provider:name`) / `provider`: usage by the request's model; a run matches when its
   recorded `model_id` matches or it (or, for a workflow run, one of its child runs) made a request
   with that model.
@@ -27,7 +27,27 @@ Filters:
   other model request). The filter also takes `memory`: observer, reflector and the semantic recall
   and index embeddings (`embed:recall:`, `embed:index:`). Usage by the request's operation; a run
   matches when it (or one of its child runs) made such a request (its recorded `model_id` alone
-  does not count).
+  does not count). AC.17 adds `judge` (`judge:`, an eval run's LLM-judge requests; operation column
+  `chat`), so `chat` no longer counts them. Failed fallback attempts (`model:{n}:failed:{k}`) stay
+  `chat`, attributed to the model that failed; every usage row's `model_id` is the model that
+  answered (or failed), so the model breakdown is usage by answering model.
+
+Fallback (AC.17, `summary`'s `fallback`; definition changed in the AC.17 review 2026-11-15): from
+`run_model_requests` joined to its run by primary key, and from `runs` (never `execution_events`,
+whose `model_message` rows carry the whole response and are too heavy to scan per tenant).
+`chat_requests`: the agents' chat requests (`model:{n}` keys; agent runs, workflow steps and eval
+cases included). `fell_back`: those answered by a model other than the run's effective model
+(`runs.model_id`, recorded at start for child runs created without one; a per-turn override
+disables fallback, so it never counts). `billed_failed_attempts`:
+`model:{n}:failed:{k}` rows (failed attempts the provider billed; an attempt that raised before a
+response has none). `exhausted_runs`: failed agent runs created in the window whose `runs.error`
+is FALLBACK_EXHAUSTED_RUN_ERROR (every model of the chain failed; such a request writes no usage
+row). `fallback_rate` = (fell_back + exhausted_runs) / (chat_requests + exhausted_runs), None at 0:
+the share of agent chat requests NOT answered by the primary model. The chain-only rate (out of
+requests on a fallback chain) is not derivable without a migration: a chain request the primary
+answered leaves a row identical to one of an agent without fallbacks. Filters: agent and kind as
+for usage; model / provider on the run's model (the primary); an operation other than `chat`
+gives zeros.
 
 Every query is filtered on the tenant first. Bounds: a range of at most MAX_RANGE, at most
 MAX_BUCKETS time buckets, at most MAX_GROUPS breakdown groups, and a per-transaction
@@ -62,7 +82,7 @@ Interval = Literal["hour", "day"]
 INTERVALS: dict[str, timedelta] = {"hour": timedelta(hours=1), "day": timedelta(days=1)}
 BreakdownBy = Literal["agent", "model", "operation"]
 # What a model request was for (RM.19): a partition of run_model_requests (see the module docstring).
-OPERATIONS = ("chat", "moderation", "observer", "reflector", "embedding")
+OPERATIONS = ("chat", "moderation", "observer", "reflector", "embedding", "judge")
 # Values the `operation` filter takes: every operation plus `memory` (observer, reflector, recall
 # and index embeddings), which overlaps the others and is never a breakdown group.
 OPERATION_FILTERS = (*OPERATIONS, "memory")
@@ -157,6 +177,7 @@ def operation_key(req: Any) -> Any:
         (_starts(req.request_key, "moderation:"), literal("moderation")),
         (_starts(req.request_key, "memory:observe:"), literal("observer")),
         (_starts(req.request_key, "memory:reflect:"), literal("reflector")),
+        (_starts(req.request_key, "judge:"), literal("judge")),
         else_=literal("chat"),
     )
 
@@ -239,10 +260,8 @@ def _usage_from(q: MetricsQuery) -> tuple[Any, Any, list[Any]]:
         conds.append(operation_match(req, q.operation))
     if q.agent_id is not None:
         conds.append(r.agent_id == q.agent_id)
-    if q.kind == "workflow":
-        conds.append(r.parent_run_id.is_not(None))
-    elif q.kind is not None:
-        conds.extend([r.kind == q.kind, r.parent_run_id.is_(None)])
+    if q.kind is not None:
+        conds.append(_top_kind_is(q, r))
     return req, r, conds
 
 
@@ -418,7 +437,56 @@ class MetricsStore:
         usage_row = session.execute(
             select(*_usage_columns(req)).select_from(_usage_source(q, req, rr)).where(*conds)
         ).one()
-        return {**_runs_dict(runs_row), **_usage_dict(usage_row), "operations": self._operations(session, q)}
+        return {
+            **_runs_dict(runs_row),
+            **_usage_dict(usage_row),
+            "operations": self._operations(session, q),
+            "fallback": self._fallback(session, q),
+        }
+
+    def _fallback(self, session: Any, q: MetricsQuery) -> dict[str, Any]:
+        """The fallback block (see the module docstring): run_model_requests joined to its run by
+        primary key, and the window's runs; never execution_events."""
+        if q.operation is not None and q.operation != "chat":
+            return _fallback_dict(0, 0, 0, 0)
+        req = aliased(RunModelRequestModel)
+        r = aliased(RunModel)
+        failed_row = req.request_key.like("model:%:failed:%")
+        answered_row = ~failed_row
+        conds = [
+            req.tenant_id == q.tenant_id,
+            req.created_at >= q.start,
+            req.created_at < q.end,
+            req.operation == "chat",
+            _starts(req.request_key, "model:"),
+            r.kind == "agent",
+            *_event_run_filters(q, r),
+        ]
+        if q.model is not None or q.provider is not None:
+            conds.append(_model_match(r.model_id, q.model, q.provider))
+        row = session.execute(
+            select(
+                func.count().filter(answered_row).label("chat_requests"),
+                func.count().filter(and_(answered_row, r.model_id.is_not(None), req.model_id != r.model_id)).label("fell_back"),
+                func.count().filter(failed_row).label("billed_failed_attempts"),
+            )
+            .select_from(orm_join(req, r, _usage_join(q, req, r)))
+            .where(*conds)
+        ).one()
+        fr = aliased(RunModel)
+        fconds = [
+            fr.tenant_id == q.tenant_id,
+            fr.created_at >= q.start,
+            fr.created_at < q.end,
+            fr.kind == "agent",
+            fr.status == "failed",
+            fr.error == FALLBACK_EXHAUSTED_RUN_ERROR,
+            *_event_run_filters(q, fr),
+        ]
+        if q.model is not None or q.provider is not None:
+            fconds.append(_model_match(fr.model_id, q.model, q.provider))
+        exhausted = session.execute(select(func.count()).select_from(fr).where(*fconds)).scalar_one()
+        return _fallback_dict(row.chat_requests, row.fell_back, row.billed_failed_attempts, exhausted)
 
     def _operations(self, session: Any, q: MetricsQuery) -> dict[str, dict[str, Any]]:
         """Usage per operation (every one of OPERATIONS, zero-filled; they sum to the totals) plus
@@ -602,6 +670,47 @@ class MetricsStore:
                 **_usage_dict(row),
             })
         return items
+
+
+# runs.error of a run whose whole fallback chain failed: the worker's fixed RunFailure text
+# (`FallbackExceptionGroup: ` + errors.FALLBACK_EXHAUSTED_MESSAGE; runs store no error code, only
+# the run_failed event does). Pinned by worker_tests/test_ac17_fallback_exhausted.py.
+FALLBACK_EXHAUSTED_RUN_ERROR = "FallbackExceptionGroup: every model of the agent's fallback chain failed"
+
+
+def _event_run_filters(q: MetricsQuery, r: Any) -> list[Any]:
+    """The agent and kind filters on a request's (or run's) run, as the usage side applies them to a request's
+    run (a workflow step's child run counts as `workflow`)."""
+    conds: list[Any] = []
+    if q.agent_id is not None:
+        conds.append(r.agent_id == q.agent_id)
+    if q.kind is not None:
+        conds.append(_top_kind_is(q, r))
+    return conds
+
+
+def _top_kind_is(q: MetricsQuery, r: Any) -> Any:
+    """SQL: the top-level run of `r` (itself, or its parent) is of kind `q.kind`. A workflow's agent
+    steps count as `workflow` and an eval run's case runs as `eval` (AC.17: before, every child run
+    counted as `workflow`, eval cases included). The parent lookup is a primary-key probe."""
+    parent = aliased(RunModel)
+    via_parent = (
+        select(literal(1))
+        .where(parent.tenant_id == q.tenant_id, parent.id == r.parent_run_id, parent.kind == q.kind)
+        .exists()
+    )
+    return or_(and_(r.parent_run_id.is_(None), r.kind == q.kind), and_(r.parent_run_id.is_not(None), via_parent))
+
+
+def _fallback_dict(chat_requests: int, fell_back: int, billed_failed_attempts: int, exhausted_runs: int) -> dict[str, Any]:
+    total = chat_requests + exhausted_runs
+    return {
+        "chat_requests": chat_requests,
+        "fell_back": fell_back,
+        "billed_failed_attempts": billed_failed_attempts,
+        "exhausted_runs": exhausted_runs,
+        "fallback_rate": None if total == 0 else (fell_back + exhausted_runs) / total,
+    }
 
 
 def _usage_order(req: Any, sort: str) -> Any:

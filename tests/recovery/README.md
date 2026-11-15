@@ -179,3 +179,53 @@ the database. A replay from before `run_completed` ends there; post-turn events 
 Not here: Studio checks (RM.16 to RM.19 are deferred until after the Studio redesign). The
 release note on draining in-flight runs before deploying this milestone is in
 `apps/worker/README.md` ("Upgrading").
+
+# Agent capabilities milestone (task AC.18): crash points and compatibility
+
+## `test_ac_crash_matrix.py`: the AC crash points through the API
+
+It reuses the harness above (in-process API, real worker subprocesses). Workers get the test price
+file, `EAP_ALLOWED_MODELS=test:*` and a 1 s approval poll. The worker-level crash tests in
+`apps/worker/worker_tests` (`test_structured_output.py`, `test_limits_fallback_crash.py`,
+`test_tool_approval_crash.py`, `test_eval_run_crash*.py`) enqueue through `DBOSClient` and decide in
+the store. This file adds the API hand-off: agents are published, approvals decided and eval suites
+built and run over HTTP. It takes about 35 s.
+
+Every scenario asserts:
+
+- one DBOS workflow in SUCCESS, recovered by the second worker;
+- contiguous `seq`, no duplicate `event_key`, and events stored before the crash unchanged;
+- one usage row per request key, with rows written before the crash unchanged;
+- run totals equal to the rows (an eval run's totals also count its child runs);
+- the SSE replay equal to the database.
+
+| # | Kill | Proves |
+|---|------|--------|
+| SO1 | `output_candidate` on `model:1:final` after a bad first candidate, tool and native mode | one `output:0:retry` and one `model:1:final`; `GET /runs/{id}` returns the same `output_json` |
+| LF1 | `model_request` inside the fallback attempt (primary `test:fail-503`) | `fallback_index` 1; one priced row for `test:priced` |
+| LF2 | `after_check_budget` on `budget:1` (cap 0.04) | the replayed decision refuses request 2: `run_budget_exceeded`, two usage rows |
+| TA1 / TA3 | `tool_approval_waiting`, or SIGKILL while the wait sleeps in recv; approve over HTTP while no worker runs | 200 with `notified`; recovery runs the tool once (1 ticket); a repeat decision is 409; the inbox moves the call to decided |
+| TA2 | `tool_approval_waiting`; deny over HTTP with a comment after the restart | no ticket and no side effect; the model reads the comment |
+| EV1 / EV2 | `eval_child_done` mid-batch on `position:0`, or `eval_case_scored` on `position:1`, of an eval started over HTTP | three results, all passed; one judge usage row per key; three `eval_case_result` events |
+
+## `test_ac_compat.py`: pre-milestone specs and DBOS checkpoints
+
+The previous build is a `git archive` of 3369526, the last commit before the milestone. It goes in
+a temp directory with its own venv (`uv sync --all-packages --frozen`, about 2 s from the uv cache).
+
+Each test runs in four steps:
+
+1. The previous build migrates a fresh app schema to its own head (`0013_semantic_recall`).
+2. The previous build's API (that archive's `tests/recovery/api_server.py`) and worker create, publish
+   and run agents and workflows.
+3. The previous build is stopped, or killed at one of its own crash points.
+4. This build's migrations upgrade the schema to head, as a deploy would. This build's API and
+   worker then start with the same application version and executor id.
+
+The schemas are dropped afterwards. The suite takes about 2.5 minutes.
+
+| # | What | Proves |
+|---|------|--------|
+| G1 | plain, tool, processors, knowledge and the memory shapes (history, working, recall, observational with its observer workflow), each run on the old build, then the same published version run on this one | identical DBOS step names and order (the golden list is the one the old build recorded), event story and output; stored specs and hashes unchanged and read back with no new keys |
+| C1 to C5 | the old worker is killed at `after_tool_call`, at `model_request`, or at `after_event_write`, on `model:0:final` of a processors run and on `end` of a recall turn and an observational turn | the new worker replays the old checkpoints: steps and story equal those of a clean old run, one ticket, and the post-turn `eap.memory_index` or observer workflow runs once on the new build |
+| C6 | the old worker is killed at `workflow_waiting` | 0014's backfill puts the open approval in the new inbox; deciding it on this build resumes the old workflow, which completes once (wait-poll rounds aside, the steps equal those of a clean old run) |

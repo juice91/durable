@@ -101,6 +101,13 @@
   and before the wait starts. Filtered by `EAP_CRASH_EVENT_KEY` against
   `tool:{tool_call_id}:approval:waiting`. Recovery replays the step (same deadline) and waits again.
 
+- `eval_child_done` (AC.11): in the eval workflow (eap_worker.eval_run), right after a case's
+  child agent run result was awaited (later children of the batch may still be running) and before
+  its `eap.eval_score` step. Filtered by `EAP_CRASH_EVENT_KEY` against `position:{case position}`.
+- `eval_case_scored` (AC.11): in the eval workflow, after a case's `eap.eval_score` step and judge
+  model steps were checkpointed and before its `eap.eval_record_case` step. Filtered like
+  `eval_child_done`. Recovery replays the recorded steps: one result row, one judge usage row per key.
+
 `EAP_CRASH_MARKER`, if set, is a file path: the hook fires only while that file does not exist
 and creates it before exiting, so a supervised worker that inherits the env crashes once and
 then recovers instead of crash-looping.
@@ -137,6 +144,8 @@ CRASH_POINTS = frozenset(
         "recall_embedding",
         "after_memory_index",
         "tool_approval_waiting",
+        "eval_child_done",
+        "eval_case_scored",
     }
 )
 

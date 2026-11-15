@@ -197,13 +197,17 @@ the model that answered: the run's model without a chain); a request on a chain 
 `requested_model_id`, `fallback_index` and
 `failed_attempts: [{model_id, outcome, error_type}]`; its usage row is the ANSWERING model's, and
 failed attempts that reported usage get rows `model:{n}:failed:{k}` in the same transaction. Every
-model failing ends the run `fallback_exhausted` (`cause`: the first failure's code). A failed
+model failing ends the run `fallback_exhausted` (`cause`: the first failure's code; AC.17 adds
+`model_request` and `failed_attempts: [{model_id, outcome, error_type, http_status?, timestamp?,
+duration_ms?}]`, no text, built in workflow code from the recorded exception: no new step). A failed
 attempt's error text is reduced to its type and HTTP status (pricing.safe_attempt_error) in every
 event and in runs.messages; spans keep only the type (instrumentation without content, plus the
 redacting exporter). The one place it stays verbatim is the model step's own DBOS checkpoint in
 the system database (the recorded ModelResponse, like the model's output itself), which is
 operator-only and never served to tenants. Token caps (`max_input_tokens`, `max_output_tokens`,
-`max_total_tokens`) are checked by the workflow on each response, before its output processors run
+`max_total_tokens`) are checked by the workflow on each response against the run's RECORDED token
+counts (the usage rows: the streamed usage guard's corrected count, failed fallback attempts with
+usage included; RecordedTokens), not the provider's raw RunUsage, before its output processors run
 (so a response over a cap never triggers a billed moderation request); the run fails right after
 the response's model_message event and usage row are written (so a billed request is never lost)
 and before its tools run. With output processors that event carries no text (`"withheld":
@@ -322,6 +326,7 @@ from eap_worker.config import WORKFLOW_NAME
 from eap_worker.crash import crash_point
 from eap_worker.errors import (
     SCHEMA_INVALID_AFTER_PROCESSING,
+    describe_fallback_exhausted,
     describe_usage_limit,
     token_limit_breach,
     InputBlocked,
@@ -718,7 +723,9 @@ async def start_run_step(
         # running, clearing an ENQUEUE_FAILED_ERROR in the same statement: the API marks a run failed
         # when its enqueue raised, yet DBOS may have accepted it, and then this workflow runs it.
         # A turn that a later turn has overtaken meanwhile stays failed and is not run (False).
-        started = rt.run_store.mark_running(tenant_id, UUID(run_id))
+        # AC.17 review: a child run (workflow step, eval case) has no recorded model; record the spec's,
+        # which is what effective_model_id uses without one (so the run behaves the same).
+        started = rt.run_store.mark_running(tenant_id, UUID(run_id), model_id=_spec_model_id(spec_json))
         if started:
             rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
@@ -1034,6 +1041,26 @@ def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
 TOKEN_LIMIT_FIELDS = ("max_input_tokens", "max_output_tokens", "max_total_tokens")
 
 
+class RecordedTokens:
+    """AC.5: running input / output / total token counts of a run's recorded usage rows, for the
+    token caps (errors.token_limit_breach reads `input_tokens`, `output_tokens`, `total_tokens`).
+    `add` takes one response's usage input (pricing.request_usage_input, with `failed`: the failed
+    fallback attempts' usage inputs), exactly what eap.append_event records as rows."""
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def add(self, usage: dict[str, Any]) -> None:
+        for item in [usage, *(usage.get("failed") or [])]:
+            self.input_tokens += int(item.get("input_tokens") or 0)
+            self.output_tokens += int(item.get("output_tokens") or 0)
+
+
 def usage_limits_for(spec: AgentSpec) -> UsageLimits | None:
     """AC.5: Pydantic AI's UsageLimits for the spec's request and tool-call caps, or None (no
     argument: the default UsageLimits, 50 requests, applies as before). An unset max_requests keeps
@@ -1283,6 +1310,11 @@ async def _drive_agent(
     awaiting_retry: int | None = None  # structured: the response whose retry (if any) comes next
     final_text: str | None = None
     active_run: Any = None  # AC.5: the run, for the limit a UsageLimitExceeded broke
+    # AC.5: the token counts the token caps are checked against: the RECORDED usage (what this run's
+    # run_model_requests rows hold: the streamed usage guard's corrected count, plus failed fallback
+    # attempts that reported usage), not Pydantic AI's raw RunUsage. Rebuilt from the checkpointed
+    # responses on replay, so deterministic.
+    recorded_tokens = RecordedTokens()
     # AC.6: the run's approval options for SpecCapability's hooks (reset when the agent run ends).
     approval_token = set_approval_settings(approvals or ApprovalSettings())
     try:
@@ -1327,10 +1359,12 @@ async def _drive_agent(
                     # AC.5: a fallback attempt's error text (provider body, request) is never stored.
                     message = scrub_failed_attempts_message(_message_json(response))
                     message = scrub_memory_message(message, memory)
-                    # AC.5: token caps, from the run's recorded usage (this response included), decided
+                    # AC.5: token caps, from the run's RECORDED usage (this response included, guard-
+                    # corrected, failed attempts too: recorded_tokens), decided
                     # BEFORE the output processors, so a response over a cap never triggers their
                     # (billed) moderation request. Its usage row is still written below.
-                    breach = token_limit_breach(token_caps, run.usage) if token_caps else None
+                    recorded_tokens.add(usage)
+                    breach = token_limit_breach(token_caps, recorded_tokens) if token_caps else None
                     if breach is not None and spec.output_processors:
                         # The text was never checked by the processors: never stored. Usage kept.
                         await append_event_step(
@@ -1405,6 +1439,9 @@ async def _drive_agent(
         if isinstance(exc, UsageLimitExceeded) and active_run is not None:
             # AC.5: name the limit from the run's own counters, not from the message text.
             describe_usage_limit(exc, spec.limits, active_run.usage)
+        if len(model_chain) > 1:
+            # AC.17: the exhausted request and its attempts (ids only) for run_failed and the trace.
+            describe_fallback_exhausted(exc, model_chain, n)
         if spec.output is not None:
             if isinstance(exc, UnexpectedModelBehavior) and "output retries" in str(exc):
                 # Retries exhausted: the last candidate's error paths only, never its values.

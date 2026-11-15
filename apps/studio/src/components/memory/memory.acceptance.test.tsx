@@ -965,7 +965,7 @@ describe("Memory tab: visibility", () => {
     openLayout("/agents/a1/chat");
     await screen.findByRole("heading", { level: 1, name: "Support bot" });
     await waitFor(() => expect(api.versions.list).toHaveBeenCalled());
-    expect(tabs().getAllByRole("link").map((link) => link.textContent)).toEqual(["Chat", "Traces", "Editor"]);
+    expect(tabs().getAllByRole("link").map((link) => link.textContent)).toEqual(["Chat", "Traces", "Editor", "Tests"]);
   });
 
   it.each([
@@ -977,7 +977,7 @@ describe("Memory tab: visibility", () => {
     openLayout("/agents/a1/chat");
     const link = await screen.findByRole("link", { name: "Memory" });
     expect(link).toHaveAttribute("href", "/agents/a1/memory");
-    expect(tabs().getAllByRole("link").map((item) => item.textContent)).toEqual(["Chat", "Traces", "Editor", "Memory"]);
+    expect(tabs().getAllByRole("link").map((item) => item.textContent)).toEqual(["Chat", "Traces", "Editor", "Memory", "Tests"]);
   });
 
   it("the tab page sends an agent without memory to Chat (replace, so Back does not loop) and shows no inspector", async () => {
