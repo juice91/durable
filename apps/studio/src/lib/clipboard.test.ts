@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { copyText } from "./clipboard";
+import { copyText, readText } from "./clipboard";
 
 const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
 afterEach(() => {
@@ -22,5 +22,19 @@ describe("copyText", () => {
     await expect(copyText("x")).resolves.toBe(false);
     setClipboard(undefined);
     await expect(copyText("x")).resolves.toBe(false);
+  });
+});
+
+describe("readText", () => {
+  it("returns the clipboard contents", async () => {
+    setClipboard({ readText: vi.fn(async () => "https://github.com/mcp/github") });
+    await expect(readText()).resolves.toBe("https://github.com/mcp/github");
+  });
+
+  it("resolves null (never throws) when the read is refused or there is no clipboard", async () => {
+    setClipboard({ readText: vi.fn(async () => { throw new Error("NotAllowedError"); }) });
+    await expect(readText()).resolves.toBeNull();
+    setClipboard(undefined);
+    await expect(readText()).resolves.toBeNull();
   });
 });
