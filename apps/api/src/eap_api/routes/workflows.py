@@ -26,7 +26,16 @@ from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
 from eap_schemas.tools import TOOL_DECLARATIONS
-from eap_schemas.workflows import MAX_SPEC_DEPTH, AgentStep, ToolStep, WorkflowSpec, canonical_workflow_hash
+from eap_schemas.workflows import (
+    MAX_SPEC_DEPTH,
+    AgentStep,
+    BranchStep,
+    Condition,
+    ToolStep,
+    WorkflowSpec,
+    canonical_workflow_hash,
+    walk_steps,
+)
 
 # A request body is {"spec": <spec>}: one level above the spec's own nesting cap.
 MAX_BODY_DEPTH = MAX_SPEC_DEPTH + 1
@@ -92,11 +101,30 @@ def _version_response(version: WorkflowVersionModel) -> dict:
     }
 
 
+LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed (LP.3/LP.7)"
+
+
+def runtime_pending_problems(spec: WorkflowSpec) -> list[str]:
+    """Spec features the schema accepts but the worker cannot run yet (workflow loops milestone,
+    temporary gate until LP.3/LP.7 ship the runtime): foreach, loop and evaluate steps, all/any/not
+    conditions and ``limits``. Refused at publish and at run start, so a run never reaches the
+    worker with them. Drafts may still be saved with them."""
+    problems: list[str] = []
+    for _, step in walk_steps(spec.steps):
+        if step.type in ("foreach", "loop", "evaluate"):
+            problems.append(f"step '{step.id}': the {step.type} step {LOOP_RUNTIME_PENDING}")
+        elif isinstance(step, BranchStep) and any(not isinstance(c.when, Condition) for c in step.cases):
+            problems.append(f"step '{step.id}': an all/any/not condition {LOOP_RUNTIME_PENDING}")
+    if spec.limits is not None and not spec.limits.is_empty():
+        problems.append(f"limits {LOOP_RUNTIME_PENDING}")
+    return problems
+
+
 def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str) -> list[str]:
     """What a spec points at that this tenant cannot run, one message per problem, naming the step.
 
     Another tenant's agent reads exactly like a missing one, so nothing about it leaks."""
-    problems: list[str] = []
+    problems: list[str] = runtime_pending_problems(spec)
     allowed_tools = _allowed_tool_ids()
     for step in spec.steps:
         if isinstance(step, AgentStep):
