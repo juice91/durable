@@ -78,6 +78,10 @@ class AgUiRunModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # Workflow AG-UI runs: where the run starts and ends in its root's commit order (`root_order`;
+    # NULL: the beginning / not ended yet). Recorded once, never re-derived (AGUI.8, D7).
+    from_order: Mapped[int | None] = mapped_column("from_order", BigInteger, nullable=True)
+    end_order: Mapped[int | None] = mapped_column("end_order", BigInteger, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -109,6 +113,8 @@ class AgUiRunRecord:
     fingerprint: str
     input_message_ids: tuple[str, ...]
     created_at: datetime
+    from_order: int | None = None
+    end_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,8 @@ def _record(row: AgUiRunModel) -> AgUiRunRecord:
         fingerprint=row.fingerprint,
         input_message_ids=tuple(row.input_message_ids or ()),
         created_at=row.created_at,
+        from_order=None if row.from_order is None else int(row.from_order),
+        end_order=None if row.end_order is None else int(row.end_order),
     )
 
 
@@ -262,6 +270,7 @@ class AgUiStore:
         fingerprint: str,
         from_seq: int = -1,
         input_message_ids: tuple[str, ...] | list[str] = (),
+        from_order: int | None = None,
     ) -> tuple[AgUiRunRecord, bool]:
         """Record the AG-UI run `(scope, threadId, runId)`; idempotent, the first writer wins.
 
@@ -288,6 +297,8 @@ class AgUiStore:
             input_message_ids=tuple(input_message_ids),
         )
         values = validated_ag_ui_values(tenant_id, run_id, write)
+        if from_order is not None:
+            values["from_order"] = int(from_order)
         key = _key_filter(tenant_id, scope_kind, str(scope_id), external_thread_id, external_run_id)
         with self.Session() as session:
             run = session.execute(
@@ -307,6 +318,22 @@ class AgUiStore:
                 raise
             row = session.execute(select(AgUiRunModel).where(*key)).scalar_one()
             return _record(row), inserted
+
+    def set_end_order(
+        self, tenant_id: str, *, scope_kind: AgUiScopeKind, scope_id: str, external_thread_id: str,
+        external_run_id: str, end_order: int,
+    ) -> int:
+        """Record where the AG-UI run ended in its root's commit order; the first value written
+        stands (it is derived from a committed, gapless prefix, so every writer computes the same).
+        Returns the recorded value."""
+        key = _key_filter(tenant_id, scope_kind, str(scope_id), external_thread_id, external_run_id)
+        with self.Session() as session:
+            row = session.execute(select(AgUiRunModel).where(*key).with_for_update()).scalar_one()
+            if row.end_order is None:
+                row.end_order = int(end_order)
+            value = int(row.end_order)
+            session.commit()
+            return value
 
     def get_ag_ui_run(
         self,

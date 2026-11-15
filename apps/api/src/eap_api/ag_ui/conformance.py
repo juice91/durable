@@ -114,7 +114,7 @@ def lifecycle_errors(
     a run already started (by `run_id`); `known_tool_calls`: calls shown earlier in that run;
     `known_open_steps`: steps the client saw start earlier in that run and not yet finish (a
     continuation may finish them). Message ids in a `MESSAGES_SNAPSHOT` count as started
-    messages (a tool call may name one as its parent)."""
+    messages (a tool call may name one as its parent), and its tool calls as seen calls."""
     errors: list[str] = []
     state: _RunState | None = _RunState(run_id) if continuation else None
     if state is not None:
@@ -153,7 +153,13 @@ def lifecycle_errors(
                     errors.append(f"{where}: frame id seq went back")
                 state.last_seq = seq
         if kind == "MESSAGES_SNAPSHOT":
-            state.seen_texts.update(m.get("id") for m in event.get("messages") or [] if isinstance(m, Mapping))
+            messages = [m for m in event.get("messages") or [] if isinstance(m, Mapping)]
+            state.seen_texts.update(m.get("id") for m in messages)
+            # The snapshot's tool calls are in the client's messages: an interrupt may name them,
+            # and a TOOL_CALL_START of one again is a duplicate (AGUI.8, Q5).
+            state.seen_tools.update(
+                c.get("id") for m in messages for c in m.get("toolCalls") or [] if isinstance(c, Mapping)
+            )
         elif kind == "TEXT_MESSAGE_START":
             mid = event.get("messageId")
             if mid in state.texts:

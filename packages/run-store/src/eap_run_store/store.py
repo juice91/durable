@@ -2,8 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from dataclasses import dataclass
 from typing import Any
 import json
+import logging
 import re
 from uuid import UUID, uuid4
 
@@ -45,6 +47,8 @@ from sqlalchemy.orm import (
 )
 
 from eap_schemas import RunEvent, RunEventType
+
+log = logging.getLogger("eap_run_store")
 
 # SQLAlchemy 2.x style type annotations
 StrAnnotated = str
@@ -252,6 +256,10 @@ class RunModel(Base):
     # calls (a JSON array of ClientToolResult dumps). NULL for every other run.
     client_tools: Mapped[list | None] = mapped_column("client_tools", JSONB, nullable=True)
     client_tool_results: Mapped[list | None] = mapped_column("client_tool_results", JSONB, nullable=True)
+    # 0016_ag_ui: the next `root_order` of the events of this run and its children (on a root run).
+    event_order_next: Mapped[int] = mapped_column(
+        "event_order_next", BigInteger, nullable=False, server_default=text("0")
+    )
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -306,6 +314,8 @@ class ExecutionEventModel(Base):
     type: Mapped[StrAnnotated] = mapped_column("type", String, nullable=False)
     data: Mapped[dict] = mapped_column("data", JSONB, nullable=False)
     ts: Mapped[datetime] = mapped_column("ts", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # 0016_ag_ui: the event's place in its root run's commit order (NULL before 0016).
+    root_order: Mapped[int | None] = mapped_column("root_order", BigInteger, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("run_id", "event_key", name="uq_run_event_key"),
@@ -315,6 +325,11 @@ class ExecutionEventModel(Base):
             name="fk_execution_events_tenant_run",
         ),
         Index("ix_execution_events_tenant_run", "tenant_id", "run_id"),
+        # 0016_ag_ui: a run's tail after a position (EventLog.list_root_events), as an index range.
+        Index(
+            "ix_execution_events_run_root_order", "run_id", "root_order",
+            postgresql_where=text("root_order IS NOT NULL"),
+        ),
         # One event type across the tenant's runs, by time (processor results).
         Index("ix_execution_events_tenant_type_ts", "tenant_id", "type", "ts"),
     )
@@ -412,6 +427,21 @@ def _run_event_from_model(model: ExecutionEventModel) -> RunEvent:
         type=model.type,  # type is already a string from the database
         data=model.data,
         ts=model.ts,
+    )
+
+
+@dataclass(frozen=True)
+class OrderedEvent:
+    """An event with its position in its root run's commit order (EventLog.list_root_events)."""
+
+    position: int
+    event: RunEvent
+
+
+def _ordered(row: Any, position: int) -> OrderedEvent:
+    return OrderedEvent(
+        position,
+        RunEvent(run_id=UUID(str(row.run_id)), seq=row.seq, type=row.type, data=row.data or {}, ts=row.ts),
     )
 
 
@@ -1687,6 +1717,61 @@ class RunStore:
             ]
 
 
+@dataclass(frozen=True)
+class LockedRun:
+    """A run locked for an append: its status, and its root (itself when it has no parent)."""
+
+    run_id: str
+    root_id: str
+    status: str
+
+
+def lock_run_for_append(session, tenant_id: str, run_id: UUID | str) -> LockedRun | None:
+    """Lock the tenant's run for an event append: its ROOT run's row first, then its own (one lock
+    order for every appender, so no two appenders deadlock). A run without `parent_run_id` is its
+    own root; `parent_run_id` never changes, so reading it before locking is safe. None for an
+    unknown run or another tenant's. Every path that appends an event takes the locks through this.
+
+    Throughput: the root lock is held from here until the append's transaction commits, so a whole
+    tree (a workflow run and its agent steps' child runs; an eval run and its case runs) appends one
+    transaction at a time. Measured on a local Postgres (AGUI.8 root-order review, 50 events with
+    usage rows per child): about 110-220 appends/s per tree, against about 400-475 without the root
+    lock. p50 latency is about 3x at 8-32 parallel children, and p99 2-4x. Separate roots do not
+    contend. That is ample for LLM-bound agent steps (deltas go over NOTIFY, not here). An eval run
+    with `max_concurrency` cases now serializes its cases' appends, plus record_case_result, on the
+    eval run's row. Never hold a child run's append transaction open across slow work (an embedding
+    call, a network request): it stalls every writer of the tree. kb_ingest, memory and
+    conversation runs are roots, so they are unaffected."""
+    found = session.execute(
+        text("SELECT parent_run_id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+    if found is None:
+        return None
+    root = str(found.parent_run_id) if found.parent_run_id else str(run_id)
+    if root != str(run_id):
+        session.execute(
+            text("SELECT id FROM runs WHERE id = :root AND tenant_id = :tenant_id FOR UPDATE"),
+            {"root": root, "tenant_id": tenant_id},
+        )
+    owned = session.execute(
+        text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+    if owned is None:
+        return None
+    return LockedRun(str(run_id), root, owned.status)
+
+
+def next_root_order(session, locked: LockedRun) -> int:
+    """The next `root_order` of the root's events (the caller holds the root's row lock until it
+    commits, so commit order is root_order order and the numbers have no gaps)."""
+    return session.execute(
+        text("UPDATE runs SET event_order_next = event_order_next + 1 WHERE id = :root RETURNING event_order_next - 1"),
+        {"root": locked.root_id},
+    ).scalar_one()
+
+
 def append_event_in_session(
     session,
     tenant_id: str,
@@ -1705,12 +1790,9 @@ def append_event_in_session(
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
     if not tenant_id:
         raise ValueError("tenant_id is required")
-    # Lock the tenant's runs row to ensure seq uniqueness (and prove ownership).
-    owned = session.execute(
-        text("SELECT id FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-        {"run_id": str(run_id), "tenant_id": tenant_id},
-    ).fetchone()
-    if owned is None:
+    # Lock the root's row, then the run's (seq uniqueness, the root's commit order, ownership).
+    locked = lock_run_for_append(session, tenant_id, run_id)
+    if locked is None:
         raise RunNotFound(tenant_id, run_id)
 
     existing_event = session.execute(
@@ -1736,6 +1818,7 @@ def append_event_in_session(
         type=type,
         data=data or {},
         ts=datetime.now(timezone.utc),
+        root_order=next_root_order(session, locked),
     )
     session.add(event_model)
     session.flush()
@@ -1929,10 +2012,7 @@ class EventLog:
         decision_key = approvals.decision_event_key(kind, approval_key)
         with self.Session() as session:
             try:
-                owned = session.execute(
-                    text("SELECT status FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
-                    {"run_id": str(run_id), "tenant_id": tenant_id},
-                ).fetchone()
+                owned = lock_run_for_append(session, tenant_id, run_id)  # the root first, then the run
                 if owned is None:
                     raise RunNotFound(tenant_id, run_id)
                 keys = set(
@@ -1966,6 +2046,7 @@ class EventLog:
                     type=type,
                     data=data or {},
                     ts=datetime.now(timezone.utc),
+                    root_order=next_root_order(session, owned),
                 )
                 session.add(event_model)
                 session.flush()
@@ -1985,6 +2066,50 @@ class EventLog:
                 raise
             session.commit()
             return "created", event
+
+    def list_root_events(self, tenant_id: str, root_run_id: UUID | str, after: int | None = None) -> list[OrderedEvent]:
+        """The events of a root run and of its children (a workflow's agent steps, an eval's
+        cases) in the root's commit order (`root_order`), after position `after` (None: from the
+        start). A reader always sees a gapless prefix, so a position, once seen, never has an
+        earlier event added. [] for another tenant's run.
+
+        The poll reads each run of the tree after `after` through
+        `ix_execution_events_run_root_order` (an index range per run), not the whole tree.
+
+        Rows without `root_order` (recorded before 0016) can only be placed approximately. A full
+        read (`after` None or negative) gives them negative positions in (ts, run_id, seq) order,
+        before every ordered row; an incremental read never returns them. The insert trigger of
+        0016 stamps every row written since, an old-code writer's included, so this set no longer
+        grows and the positions stay stable. Should unordered rows still appear after ordered ones
+        (a writer bypassing the trigger), they are logged and kept first."""
+        root = str(root_run_id)
+        with self.Session() as session:
+            ids = [str(i) for i in session.execute(
+                text("SELECT id FROM runs WHERE tenant_id = :t AND (id = :root OR parent_run_id = :root)"),
+                {"t": tenant_id, "root": root},
+            ).scalars()]
+            if not ids:
+                return []
+            cols = "SELECT run_id, seq, type, data, ts, root_order FROM execution_events"
+            params: dict[str, Any] = {"t": tenant_id, "ids": ids}
+            if after is not None and after >= 0:
+                rows = session.execute(
+                    text(cols + " WHERE tenant_id = :t AND run_id = ANY(:ids) AND root_order IS NOT NULL"
+                         " AND root_order > CAST(:after AS bigint) ORDER BY root_order"),
+                    {**params, "after": after},
+                ).all()
+                return [_ordered(r, int(r.root_order)) for r in rows]
+            rows = session.execute(text(cols + " WHERE tenant_id = :t AND run_id = ANY(:ids)"), params).all()
+        legacy = sorted((r for r in rows if r.root_order is None), key=lambda r: (r.ts, str(r.run_id), r.seq))
+        ordered = sorted((r for r in rows if r.root_order is not None), key=lambda r: r.root_order)
+        if legacy and ordered and legacy[-1].ts > ordered[0].ts:
+            log.warning(
+                "events without root_order written after ordered ones (an old writer?); placed first",
+                extra={"run_id": root},
+            )
+        out = [_ordered(r, i - len(legacy)) for i, r in enumerate(legacy)]
+        out += [_ordered(r, int(r.root_order)) for r in ordered]
+        return [o for o in out if after is None or o.position > after]
 
     def list_events(self, tenant_id: str, run_id: UUID, after_seq: int = -1) -> list[RunEvent]:
         """List events for a run after a given seq. Returns empty for another tenant's run."""

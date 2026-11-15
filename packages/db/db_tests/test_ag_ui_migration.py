@@ -88,6 +88,15 @@ def test_ag_ui_revision_round_trip_on_a_populated_0015_schema():
             assert conn.execute(text(
                 "SELECT count(*) FROM conversations WHERE external_thread_id IS NOT NULL"
             )).scalar_one() == 0
+            # The commit order: old events have no root_order (NULL), every run's counter starts at 0.
+            assert conn.execute(text("SELECT count(*) FROM execution_events WHERE root_order IS NOT NULL")).scalar_one() == 0
+            assert conn.execute(text("SELECT DISTINCT event_order_next FROM runs")).scalars().all() == [0]
+            assert {"from_order", "end_order"} <= _columns(conn, "ag_ui_runs")
+            assert conn.execute(text("SELECT to_regclass('ix_execution_events_run_root_order')")).scalar_one() is not None
+            assert conn.execute(text(
+                "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_execution_events_root_order'"
+                " AND tgrelid = to_regclass('execution_events')"
+            )).scalar_one() == 1
             # The runs checks are added NOT VALID (no scan of runs under its lock).
             validated = dict(conn.execute(text(
                 "SELECT conname, convalidated FROM pg_constraint"
@@ -145,7 +154,16 @@ def test_ag_ui_revision_round_trip_on_a_populated_0015_schema():
             command.downgrade(alembic_config(conn), "0015_evals")
         with engine.connect() as conn:
             assert conn.execute(text("SELECT to_regclass('ag_ui_runs')")).scalar_one() is None
-            assert not {"client_tools", "client_tool_results"} & _columns(conn, "runs")
+            assert not {"client_tools", "client_tool_results", "event_order_next"} & _columns(conn, "runs")
+            assert "root_order" not in _columns(conn, "execution_events")
+            assert conn.execute(text(
+                "SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_execution_events_root_order'"
+                " AND tgrelid = to_regclass('execution_events')"
+            )).scalar_one() == 0
+            assert conn.execute(text(
+                "SELECT count(*) FROM pg_proc WHERE proname = 'execution_events_root_order'"
+                " AND pronamespace = current_schema()::regnamespace"
+            )).scalar_one() == 0
             assert "external_thread_id" not in _columns(conn, "conversations")
             assert conn.execute(text("SELECT count(*) FROM runs")).scalar_one() == 2
             assert conn.execute(text("SELECT count(*) FROM conversations")).scalar_one() == 4

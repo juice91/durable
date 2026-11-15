@@ -47,9 +47,25 @@ def _run(run_store, tenant):
 KEY = dict(scope_kind="agent", scope_id="agent-1", external_thread_id="th", external_run_id="r1")
 
 
-def test_public_methods_are_exactly_the_three_tested_here():
+def test_public_methods_are_exactly_the_four_tested_here():
     public = {n for n, m in inspect.getmembers(AgUiStore, callable) if not n.startswith("_")}
-    assert public == {"record_ag_ui_run", "get_ag_ui_run", "pending_client_tool_calls"}
+    assert public == {"record_ag_ui_run", "get_ag_ui_run", "pending_client_tool_calls", "set_end_order"}
+
+
+def test_set_end_order_first_writer_wins_and_is_tenant_scoped(run_store, ag_ui, tenants):
+    """AGUI.8: a workflow AG-UI run's end (root_order) is recorded once and never re-derived."""
+    from sqlalchemy.exc import NoResultFound
+
+    a, b = tenants
+    r = _run(run_store, a)
+    ag_ui.record_ag_ui_run(a, run_id=r, fingerprint=_fp("1"), from_seq=3, from_order=7, **KEY)
+    assert ag_ui.get_ag_ui_run(a, **KEY).from_order == 7 and ag_ui.get_ag_ui_run(a, **KEY).end_order is None
+    assert ag_ui.set_end_order(a, end_order=12, **KEY) == 12
+    assert ag_ui.set_end_order(a, end_order=99, **KEY) == 12  # the first value stands
+    assert ag_ui.get_ag_ui_run(a, **KEY).end_order == 12
+    with pytest.raises(NoResultFound):
+        ag_ui.set_end_order(b, end_order=1, **KEY)  # another tenant never reaches A's row
+    assert ag_ui.get_ag_ui_run(a, **KEY).end_order == 12
 
 
 def test_repeat_returns_the_stored_row_and_a_different_fingerprint_does_not_overwrite(run_store, ag_ui, tenants):

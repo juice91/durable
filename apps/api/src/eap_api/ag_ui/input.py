@@ -510,7 +510,9 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
         raise _unprocessable(
             INPUT_TOO_LARGE, ["messages"], f"the new user input must be at most {MAX_AGUI_INPUT_BYTES} bytes in UTF-8"
         )
-    if not texts and not results and not resume:
+    if not texts and not results and not resume and not options.has_input:
+        # `forwardedProps.pydanticos.input` alone is a workflow run's input (D12, AGUI.8); the
+        # agent route refuses it like no input (`check_agent_input`).
         raise _unprocessable(
             NO_NEW_INPUT,
             ["messages"],
@@ -810,6 +812,16 @@ def check_resume_covers(
             )
 
 
+def check_agent_input(mapped: AgUiInput) -> None:
+    """422 no_new_input for an agent run whose only input is `forwardedProps.pydanticos.input`."""
+    if not mapped.input_text and not mapped.tool_results and not mapped.resume:
+        raise _unprocessable(
+            NO_NEW_INPUT,
+            ["messages"],
+            "no new input: send a user message, a tool result or a resume entry after the last assistant message",
+        )
+
+
 def workflow_input(mapped: AgUiInput) -> Any:
     """D12: a workflow run's input: `forwardedProps.pydanticos.input` when sent (even null), else the
     last user message parsed as JSON (422 workflow_input_invalid when there is none or it is not
@@ -845,6 +857,7 @@ __all__ = [
     "agui_max_body_bytes",
     "agui_route_class",
     "canonical_json",
+    "check_agent_input",
     "check_client_tool_clashes",
     "check_principal_options",
     "check_resume_covers",

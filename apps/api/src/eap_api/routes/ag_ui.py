@@ -34,9 +34,17 @@ The POST, in order, everything before the stream opens:
    checked against the spec's server tools (422), the thread resolved (D3: a conversation of this
    tenant and agent, else the derived one, created with its `resource_id`; another `resourceId`
    later is 409 resource_mismatch), tool results checked against the pending client calls (422),
-   `resume[]` checked against the thread's open and decided interrupts (422; deciding them is
-   AGUI.8, so a covering `resume[]` is 501 until then), then `record_and_launch_turn` with
-   `create_turn(ag_ui_run=AgUiRunWrite(...))`;
+   `resume[]` checked against the thread's open and decided interrupts (422), then
+   `record_and_launch_turn` with `create_turn(ag_ui_run=AgUiRunWrite(...))`;
+5a. (AGUI.8, D15) a `resume[]` (its payloads checked first: 422 `edited_args_unsupported`,
+   `resume_payload_invalid`; new user text or tool results beside it are 422
+   `resume_with_input`) decides the latest turn's interrupts through `eap_api.approvals.decide`
+   (an earlier decision wins and is shown), then records the AG-UI run on that same turn with
+   `from_seq` = the latest answered `tool_approval_waiting` seq, and streams the turn from there
+   (no new turn, no hand-off);
+5b. (AGUI.8, Q5) a new runId without `resume[]` while the latest turn has an open interrupt
+   records nothing: the stream sends `RUN_STARTED`, `CUSTOM pydanticos.run`, `MESSAGES_SNAPSHOT`
+   (with the gated calls) and the open interrupts again as `RUN_FINISHED{outcome: interrupt}`;
 6. the previous turn still running (TurnInProgress): the stream opens with `RUN_STARTED` and
    `CUSTOM pydanticos.waiting`, waits up to EAP_AGUI_PREVIOUS_TURN_WAIT_S (120 s) for it, then
    records the turn and sends `CUSTOM pydanticos.run` and `MESSAGES_SNAPSHOT` (with the answer the
@@ -57,6 +65,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -85,6 +94,7 @@ from eap_api.ag_ui.input import (
     NO_NEW_INPUT,
     RESOURCE_MISMATCH,
     agui_max_body_bytes,
+    check_agent_input,
     check_client_tool_clashes,
     check_principal_options,
     check_resume_covers,
@@ -98,8 +108,18 @@ from eap_api.ag_ui.input import (
     thread_key,
     thread_resource_id,
 )
+from eap_api.ag_ui.resume_entries import (
+    RESUME_WITH_INPUT,
+    ResumeDecision,
+    ThreadInterrupts,
+    apply_decisions,
+    open_approvals,
+    resume_decisions,
+    thread_interrupts,
+    waiting_seq,
+)
 from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
-from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext, tool_interrupt_id
+from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
 from eap_api.agent_archive import AGENT_ARCHIVED
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, get_api_key_store, require_agui_agent
 from eap_api.launcher import RunLauncher, get_run_launcher
@@ -146,7 +166,6 @@ DEFAULT_KEY_RECHECK_S = 60.0
 UNKNOWN_RUN_DETAIL = "Unknown runId"
 FINGERPRINT_CONFLICT_DETAIL = "runId was already used with a different input"
 STREAM_LIMIT_DETAIL = "Concurrent SSE stream limit reached; retry after another stream closes"
-RESUME_UNSUPPORTED = "resume_unsupported"
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 MAX_PATH_ID_CHARS = 256
@@ -458,15 +477,24 @@ def _thread_view(
     return view
 
 
+def _starter(c: _Ctx, record: AgUiRunRecord) -> _TurnRun:
+    """The AG-UI run that started the record's turn: the record itself, or for a resume run
+    (AGUI.8, from_seq > -1) the turn's first AG-UI run, whose ids the turn's messages keep."""
+    if record.from_seq < 0:
+        return _TurnRun(record.external_run_id, record.input_message_ids)
+    return _records_by_run(c, [record.run_id]).get(record.run_id) or _TurnRun(record.external_run_id, ())
+
+
 def _history(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord) -> list[dict[str, Any]]:
     """`AgUiStreamContext.history`: the thread's earlier turns (those this run regenerates left
     out, see _thread_view), then this run's user message."""
+    starter = _starter(c, record)
     out = _thread_view(
-        c, str(run["conversation_id"]), before_turn=run["turn"], later_ids=record.input_message_ids
+        c, str(run["conversation_id"]), before_turn=run["turn"], later_ids=starter.input_message_ids
     ).messages
     if run.get("input"):
-        client_id = record.input_message_ids[0] if record.input_message_ids else None
-        out.append(user_message(record.external_run_id, run["input"], client_id))
+        client_id = starter.input_message_ids[0] if starter.input_message_ids else None
+        out.append(user_message(starter.external_run_id, run["input"], client_id))
     return out
 
 
@@ -498,6 +526,10 @@ class _Prepared:
     history: list[dict[str, Any]]
     # A new run recorded for a re-POST with `{runId}:-1`: open as a continuation (no RUN_STARTED).
     opens_as_continuation: bool = False
+    # The D13 message-id prefix: the AG-UI runId that started the turn (None: the record's own).
+    prefix: str | None = None
+    # A whole stream computed up front (the Q5 re-send of the open interrupts): sent as is.
+    static_frames: list[str] | None = None
 
 
 @dataclass
@@ -535,7 +567,8 @@ def _prepare_known(c: _Ctx, record: AgUiRunRecord, *, same_fingerprint: bool, la
         run = launch_recorded_run(launch, c.launcher, c.run_store, c.tenant_id, run, False)
     upto = plan.after_seq if plan.mode == "continue" else record.from_seq
     return _Prepared(
-        plan=plan, run=run, record=record, prior=[e for e in events if e.seq <= upto], history=_history(c, run, record)
+        plan=plan, run=run, record=record, prior=[e for e in events if e.seq <= upto], history=_history(c, run, record),
+        prefix=_starter(c, record).external_run_id,
     )
 
 
@@ -551,7 +584,11 @@ def _fresh(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord, created: bool) -
             max_seq=None,
         )
     )
-    return _Prepared(plan=plan, run=run, record=record, prior=[], history=_history(c, run, record))
+    prior = c.event_log.list_events(c.tenant_id, uuid.UUID(record.run_id)) if record.from_seq >= 0 else []
+    return _Prepared(
+        plan=plan, run=run, record=record, prior=[e for e in prior if e.seq <= record.from_seq],
+        history=_history(c, run, record), prefix=_starter(c, record).external_run_id,
+    )
 
 
 @dataclass
@@ -605,19 +642,77 @@ def _deduped(body: Any, mapped: AgUiInput, recorded_runs: list[tuple[str, ...]])
         raise
 
 
-def _open_and_decided_interrupts(c: _Ctx, conversation_id: str) -> tuple[list[str], list[str]]:
-    """The interrupt ids of the thread's latest turn: open tool approvals, and decided ones."""
+def _latest_turn_id(c: _Ctx, conversation_id: str) -> str | None:
     turns = c.run_store.list_turns(c.tenant_id, conversation_id)
-    if not turns:
-        return [], []
-    latest = str(turns[-1]["id"])
-    open_ids: list[str] = []
-    decided: list[str] = []
-    for row in c.approvals.list_for_run(c.tenant_id, latest):
-        if row["kind"] != "tool" or row["run_id"] != latest:
-            continue
-        (open_ids if row["decided_at"] is None else decided).append(tool_interrupt_id(latest, row["approval_key"]))
-    return open_ids, decided
+    return str(turns[-1]["id"]) if turns else None
+
+
+def _open_and_decided_interrupts(c: _Ctx, latest: str | None) -> ThreadInterrupts:
+    """The interrupts of the thread's latest turn: open tool approvals (of a run that is not
+    terminal), and decided or otherwise known ones."""
+    if latest is None:
+        return ThreadInterrupts([], [], [])
+    rows = [r for r in c.approvals.list_for_run(c.tenant_id, latest) if r["run_id"] == latest]
+    return thread_interrupts(rows, kinds=("tool",))
+
+
+def _resume_turn(c: _Ctx, mapped: AgUiInput, fp: str, turn_id: str, decisions: list[ResumeDecision]) -> _Prepared:
+    """D15 for an agent thread: decide the entries (the decision event, then the wake-up; an
+    earlier decision wins), then record this AG-UI run on the same turn from the latest answered
+    waiting seq, and stream the turn from there. A crash after deciding: the identical re-POST
+    heals while the turn still waits on that batch (the ids are decided, check_resume_covers
+    accepts them, `decide` answers `exists`); once the woken turn has opened a new batch, it is 422
+    resume_missing_interrupt, and the client recovers through Q5 (a new runId without resume)."""
+    apply_decisions(c.event_log, c.launcher, c.tenant_id, decisions, c.principal.default_resource_id)
+    events = c.event_log.list_events(c.tenant_id, uuid.UUID(turn_id))
+    seqs = [s for d in decisions if (s := waiting_seq(events, "tool", d.ref.key)) is not None]
+    from_seq = max(seqs) if seqs else (events[-1].seq if events else -1)
+    try:
+        record, created = c.ag_ui.record_ag_ui_run(
+            c.tenant_id, **c.key(mapped.thread_id, mapped.run_id), run_id=turn_id, fingerprint=fp, from_seq=from_seq
+        )
+    except AgUiScopeMismatch:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another agent")
+    if not created and record.fingerprint != fp:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FINGERPRINT_CONFLICT_DETAIL)
+    run = c.run_store.get_run(c.tenant_id, uuid.UUID(turn_id))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
+    log.info("ag-ui resume %s recorded on run %s: %d decision(s)", mapped.run_id, turn_id, len(decisions))
+    return _fresh(c, run, record, created)
+
+
+def _reinterrupt(
+    c: _Ctx, mapped: AgUiInput, fp: str, turn_id: str, interrupts: ThreadInterrupts, *, continuation: bool
+) -> _Prepared:
+    """Q5 (D15): a new runId without `resume[]` while the latest turn waits for approvals. Nothing
+    is recorded; the stream is RUN_STARTED (unless the client holds it, `{runId}:-1`), CUSTOM run,
+    MESSAGES_SNAPSHOT (the turn so far, naming the gated calls), one CUSTOM approval_required per
+    open approval and RUN_FINISHED with all of them, in the order they were requested."""
+    run = c.run_store.get_run(c.tenant_id, uuid.UUID(turn_id))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
+    events = c.event_log.list_events(c.tenant_id, uuid.UUID(turn_id))
+    max_seq = events[-1].seq if events else -1
+    record = AgUiRunRecord(
+        tenant_id=c.tenant_id, scope_kind="agent", scope_id=c.agent_id, external_thread_id=mapped.thread_id,
+        external_run_id=mapped.run_id, run_id=turn_id, from_seq=max(max_seq, 0), fingerprint=fp,
+        input_message_ids=(), created_at=datetime.now(timezone.utc),
+    )
+    formatter = AgUiFormatter(
+        AgUiStreamContext(
+            thread_id=mapped.client_thread_id or mapped.thread_id, run_id=mapped.run_id, native_run_id=turn_id,
+            kind="agent", from_seq=max_seq, run_info=_run_info(run), history=_history(c, run, record),
+            prior_events=events, message_prefix=_starter(c, record).external_run_id,
+        )
+    )
+    approvals = open_approvals(c.event_log, c.tenant_id, interrupts.open_rows)
+    log.info("ag-ui run %s re-sends %d open interrupt(s) of run %s; nothing recorded",
+             mapped.run_id, len(approvals), turn_id)
+    return _Prepared(
+        plan=StreamPlan(status=200, mode="attach", after_seq=max_seq), run=run, record=record, prior=events,
+        history=[], static_frames=formatter.reinterrupt_frames(approvals, run_started=not continuation),
+    )
 
 
 def _ensure_conversation(c: _Ctx, thread: AgentThread, mapped: AgUiInput) -> None:
@@ -705,7 +800,9 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
     return _fresh(c, run, record, created)
 
 
-def _prepare_post(c: _Ctx, body: Any, mapped: AgUiInput, last_event_id: str | None) -> _Prepared | _Wait:
+def _prepare_post(
+    c: _Ctx, body: Any, mapped: AgUiInput, last_event_id: str | None, decisions: list[ResumeDecision] | None = None
+) -> _Prepared | _Wait:
     """Everything of the POST before the stream opens (see the module docstring)."""
     header = last_event_id.strip() if last_event_id else None
     fp = fingerprint(mapped)
@@ -759,19 +856,28 @@ def _prepare_post(c: _Ctx, body: Any, mapped: AgUiInput, last_event_id: str | No
             assert thread.conversation is not None
             check_thread_resource(thread.conversation, effective.options)
             pending = c.ag_ui.pending_client_tool_calls(c.tenant_id, thread.conversation_id, before_run_id=native_run_id)
-            open_ids, decided = _open_and_decided_interrupts(c, thread.conversation_id)
+            latest = _latest_turn_id(c, thread.conversation_id)
+            interrupts = _open_and_decided_interrupts(c, latest)
         else:
-            pending, open_ids, decided = [], [], []
+            pending, latest, interrupts = [], None, ThreadInterrupts([], [], [])
         check_tool_results(effective, [p.tool_call_id for p in pending])
-        check_resume_covers(effective, open_ids, decided)
-        if effective.resume:
-            # Deciding interrupts through resume[] (D15) is AGUI.8's; refuse rather than ignore it.
+        check_resume_covers(effective, interrupts.open, interrupts.decided)
+        if effective.resume and (effective.has_user_input or effective.tool_results):
             raise AgUiInputError(
-                status.HTTP_501_NOT_IMPLEMENTED, RESUME_UNSUPPORTED, ["resume"], "resume is not supported yet"
+                status.HTTP_422_UNPROCESSABLE_CONTENT, RESUME_WITH_INPUT, ["resume"],
+                "a run that answers interrupts may not carry a new user message or tool results",
             )
-        # Under the agent lock, so an archive cannot slip in between the check and the thread.
-        _ensure_conversation(c, thread, effective)
+        if not effective.resume and not interrupts.open:
+            # Under the agent lock, so an archive cannot slip in between the check and the thread.
+            _ensure_conversation(c, thread, effective)
         db.commit()  # release the agent lock; _record takes it again
+
+    if effective.resume:
+        assert latest is not None  # check_resume_covers accepted ids of the latest turn
+        return _resume_turn(c, mapped, fp, latest, decisions or resume_decisions(effective.resume))
+    if interrupts.open:
+        assert latest is not None
+        return _reinterrupt(c, mapped, fp, latest, interrupts, continuation=continuation)
 
     new = _NewTurn(
         mapped=mapped, effective=effective, conversation_id=thread.conversation_id,
@@ -813,8 +919,15 @@ class _StreamDeps:
     agui: AgUiRouteSettings
 
 
+async def static_stream(frames: list[str]) -> AsyncIterator[str]:
+    for frame in frames:
+        yield frame
+
+
 def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncIterator[str]:
     c = d.c
+    if p.static_frames is not None:
+        return static_stream(p.static_frames)
     native = uuid.UUID(p.record.run_id)
     items = run_items(
         run_id=p.record.run_id,
@@ -836,6 +949,7 @@ def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncI
             history=p.history,
             prior_events=p.prior,
             snapshot_on_start=p.plan.mode == "attach",
+            message_prefix=p.prefix,
         )
     )
     # After the previous-turn wait the client already holds RUN_STARTED: the continuation opening
@@ -941,11 +1055,13 @@ async def run_agent(
     agent = _agent_id_or_404(principal, agent_id)
     body = await _checked_json_body(request)
     mapped = await parse_run_agent_input_async(body)
+    check_agent_input(mapped)
     check_principal_options(mapped.options, is_api_key=principal.is_api_key)
+    decisions = resume_decisions(mapped.resume)  # the D15 payload rules: 422 before anything else
     c = _ctx(request, principal, agent, launcher)
     lease = _acquire(limiter, principal)
     try:
-        prepared = await run_in_threadpool(_prepare_post, c, body, mapped, last_event_id)
+        prepared = await run_in_threadpool(_prepare_post, c, body, mapped, last_event_id, decisions)
     except BaseException:
         lease.release()
         raise

@@ -75,7 +75,11 @@ export function ConnectAgUiBody({ target, name }: { target: ConnectTarget; name:
           multiline
           testId="connect-agui-curl"
           copiedMessage="Snippet copied"
-          hint={target.kind === "workflow" ? "The workflow's input goes in forwardedProps.pydanticos.input." : undefined}
+          hint={
+            target.kind === "workflow"
+              ? "The workflow's input goes in forwardedProps.pydanticos.input. A thread is one workflow run: start each new run under a new threadId; later runs of a thread only answer its approvals (resume)."
+              : undefined
+          }
         />
       </section>
 

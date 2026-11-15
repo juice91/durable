@@ -13,7 +13,18 @@ beyond the items comes in `AgUiStreamContext`:
 - `prior_events`: the durable events up to the resume point. Those with seq <= `from_seq` only
   seed state (a resumed workflow's steps); those after it are this run's events the client
   already holds (a continuation): they update state as if sent, so nothing is sent twice;
-- `snapshot_on_start`: attach from start (`MESSAGES_SNAPSHOT` after `RUN_STARTED`).
+- `snapshot_on_start`: attach from start (`MESSAGES_SNAPSHOT` after `RUN_STARTED`; a workflow
+  adds `STATE_SNAPSHOT`, and `MESSAGES_SNAPSHOT` when child runs were seeded);
+- `message_prefix` (AGUI.8): the prefix of D13 message ids when it is not `run_id`: a resumed
+  AG-UI run continues the turn the first AG-UI run started, so its messages keep that run's ids;
+- `answered_interrupts` (AGUI.8): the interrupts a workflow resume run answered; reaching their
+  waiting events again does not end it;
+- `prior_child_events` (AGUI.8): for a workflow, the events of agent steps' child runs started
+  before the resume point, per child (`ChildPrior`), seeded silently; the opening then carries
+  `MESSAGES_SNAPSHOT` with their messages. Events with seq <= `own_after` only seed state (an
+  earlier AG-UI run sent them, or they are shown by the snapshot); later ones are this AG-UI
+  run's own, already held by the client: they update state as if sent, and an interrupt among
+  them ends the run (its `RUN_FINISHED` is re-sent, without a frame id: child events carry none).
 
 Frames: every frame is one `data:` line with a standard AG-UI event. Of the frames one durable
 event yields, only the last carries `id: {runId}:{seq}`; frames from deltas, status, heartbeats
@@ -127,6 +138,61 @@ def tool_interrupt_id(run_id: str, tool_call_id: str) -> str:
     return f"approval:{run_id}:tool:{tool_call_id}"
 
 
+def tool_interrupt(native_run_id: str, call_id: str, data: Mapping[str, Any]) -> Interrupt:
+    """The interrupt of a gated tool call (D15) from its `tool_approval_waiting` data."""
+    name = str(data.get("tool_name") or "")
+    fields: dict[str, Any] = {
+        "id": tool_interrupt_id(native_run_id, call_id),
+        "reason": "tool_call",
+        "tool_call_id": call_id,
+        "message": f"Approve {name}({args_json(data.get('args'))})?",
+        "response_schema": json.loads(json.dumps(RESPONSE_SCHEMA)),
+        "metadata": {"pydanticos": {"run_id": native_run_id, "tool_name": name}},
+    }
+    if isinstance(data.get("deadline"), str):
+        fields["expires_at"] = data["deadline"]
+    return Interrupt(**fields)
+
+
+def step_interrupt(native_run_id: str, step_id: str, data: Mapping[str, Any]) -> Interrupt:
+    """The interrupt of a workflow approval step (D15) from its `step_waiting` data."""
+    prompt = data.get("prompt")
+    fields: dict[str, Any] = {
+        "id": step_interrupt_id(native_run_id, step_id),
+        "reason": "confirmation",
+        "message": prompt if isinstance(prompt, str) and prompt else f"Approve step {step_id}?",
+        "response_schema": json.loads(json.dumps(RESPONSE_SCHEMA)),
+    }
+    if isinstance(data.get("deadline"), str):
+        fields["expires_at"] = data["deadline"]
+    return Interrupt(**fields)
+
+
+@dataclass(frozen=True)
+class OpenApproval:
+    """An approval a run waits for: its run (a workflow run, an agent turn, or a workflow agent
+    step's child run), kind, key and its waiting event's data."""
+
+    run_id: str
+    kind: Literal["tool", "step"]
+    key: str
+    data: Mapping[str, Any]
+
+    def interrupt(self) -> Interrupt:
+        if self.kind == "tool":
+            return tool_interrupt(self.run_id, self.key, self.data)
+        return step_interrupt(self.run_id, self.key, self.data)
+
+    def required_value(self) -> dict[str, Any]:
+        """`CUSTOM pydanticos.approval_required`."""
+        value: dict[str, Any] = {"run_id": self.run_id, "kind": self.kind, "key": self.key}
+        if self.kind == "tool":
+            value["tool_name"] = str(self.data.get("tool_name") or "")
+        if self.data.get("deadline") is not None:
+            value["deadline"] = self.data.get("deadline")
+        return value
+
+
 def token_usage(rows: Sequence[Mapping[str, Any]]) -> list[TokenUsage]:
     """`RUN_FINISHED.usage`: one entry per answering model (first appearance order) from the run's
     `run_model_requests` rows. Only chat model requests (`request_key` `model:...`): embedding,
@@ -161,6 +227,15 @@ def token_usage(rows: Sequence[Mapping[str, Any]]) -> list[TokenUsage]:
 
 
 @dataclass(frozen=True)
+class ChildPrior:
+    """A workflow agent step's child run seeded into a stream (see AgUiStreamContext)."""
+
+    scope: ChildScope
+    events: Sequence[RunEvent] = ()
+    own_after: int = -1
+
+
+@dataclass(frozen=True)
 class AgUiStreamContext:
     thread_id: str
     run_id: str
@@ -171,6 +246,18 @@ class AgUiStreamContext:
     history: Sequence[Mapping[str, Any]] = ()
     prior_events: Sequence[RunEvent] = ()
     snapshot_on_start: bool = False
+    message_prefix: str | None = None
+    prior_child_events: Sequence[ChildPrior] = ()
+    # Interrupt ids this AG-UI run's own `resume[]` answered (a workflow resume run): reaching one
+    # of them again does not end the run (all of a batch's, for a gated batch).
+    answered_interrupts: frozenset[str] = frozenset()
+
+    def closes_on(self, interrupt_ids: Sequence[str]) -> bool:
+        return not interrupt_ids or not all(i in self.answered_interrupts for i in interrupt_ids)
+
+    @property
+    def prefix(self) -> str:
+        return self.message_prefix or self.run_id
 
 
 @dataclass
@@ -383,18 +470,7 @@ class _Turn:
         return events, _Interrupt(interrupts)
 
     def _tool_interrupt(self, call_id: str, data: Mapping[str, Any]) -> Interrupt:
-        name = str(data.get("tool_name") or "")
-        fields: dict[str, Any] = {
-            "id": tool_interrupt_id(self.native_run_id, call_id),
-            "reason": "tool_call",
-            "tool_call_id": call_id,
-            "message": f"Approve {name}({args_json(data.get('args'))})?",
-            "response_schema": json.loads(json.dumps(RESPONSE_SCHEMA)),
-            "metadata": {"pydanticos": {"run_id": self.native_run_id, "tool_name": name}},
-        }
-        if isinstance(data.get("deadline"), str):
-            fields["expires_at"] = data["deadline"]
-        return Interrupt(**fields)
+        return tool_interrupt(self.native_run_id, call_id, data)
 
     # ------------------------------------------------------------------ dispatch
 
@@ -461,12 +537,12 @@ class AgUiFormatter:
         self._shown_status: str | None = None
         self._order = itertools.count().__next__
         self._turn: _Turn | None = (
-            _Turn(ctx.run_id, ctx.native_run_id, self._all_messages, self._order) if ctx.kind == "agent" else None
+            _Turn(ctx.prefix, ctx.native_run_id, self._all_messages, self._order) if ctx.kind == "agent" else None
         )
         self._child_turns: dict[str, _Turn] = {}
         # The lifecycle event that already ended this AG-UI run inside `prior_events` (a
         # continuation at or after its interrupt or end event), and its seq: re-sent, then close.
-        self._ended: tuple[BaseEvent, int] | None = None
+        self._ended: tuple[BaseEvent, int | None] | None = None
         # Workflow state (D11) and the steps this AG-UI run has announced with STEP_STARTED.
         self._state: dict[str, Any] = {"status": "running", "steps": {}}
         self._open_steps: list[str] = []
@@ -492,7 +568,21 @@ class AgUiFormatter:
                 break
             self.closed = False
         self.closed = False
+        if self._ended is None:
+            self._seed_children()
         self._announced = list(self._open_steps)
+
+    def _seed_children(self) -> None:
+        """Feed `prior_child_events` silently (a workflow's open agent steps, AGUI.8)."""
+        for prior in self.ctx.prior_child_events:
+            self._child(prior.scope)
+            for event in prior.events:
+                events = self._on_durable(DurableEvent(event, prior.scope))
+                if self.closed and event.seq > prior.own_after:
+                    self._ended = (events[-1], None)
+                    self.closed = False
+                    return
+                self.closed = False
 
     # ------------------------------------------------------------------ helpers
 
@@ -507,7 +597,7 @@ class AgUiFormatter:
         turn = self._child_turns.get(scope.step_id)
         if turn is None or turn.native_run_id != scope.run_id:
             turn = self._child_turns[scope.step_id] = _Turn(
-                f"{self.ctx.run_id}-{scope.step_id}", scope.run_id, self._all_messages, self._order
+                f"{self.ctx.prefix}-{scope.step_id}", scope.run_id, self._all_messages, self._order
             )
         return turn
 
@@ -533,6 +623,44 @@ class AgUiFormatter:
 
     def _messages_snapshot(self) -> MessagesSnapshotEvent:
         return MessagesSnapshotEvent(messages=self._all_messages())
+
+    def state(self) -> dict[str, Any]:
+        """A copy of the workflow state (D11) as the events seen so far make it."""
+        return json.loads(json.dumps(self._state))
+
+    def messages(self) -> list[Mapping[str, Any]]:
+        """The stream's message list as the events seen so far make it (MESSAGES_SNAPSHOT)."""
+        return self._all_messages()
+
+    def reinterrupt_frames(self, approvals: Sequence[OpenApproval], *, run_started: bool = True) -> list[str]:
+        """Q5 (D15): a whole stream that shows the run as it stands (seeded with every event) and
+        ends with ALL its open approvals as one interrupt outcome, in the given order: RUN_STARTED
+        (unless the client holds it), CUSTOM run, STATE_SNAPSHOT (a workflow), MESSAGES_SNAPSHOT
+        (which names every gated call), STEP_STARTED of the open steps, one CUSTOM
+        approval_required each, then the open steps' STEP_FINISHED and RUN_FINISHED. No frame ids:
+        nothing of it is recorded."""
+        events: list[BaseEvent] = ([self._run_started()] if run_started else []) + self._run_custom()
+        if self.ctx.kind == "workflow":
+            events.append(StateSnapshotEvent(snapshot=self.state()))
+        events.append(self._messages_snapshot())
+        events += [StepStartedEvent(step_name=step_id) for step_id in self._announced]
+        events += [custom("approval_required", a.required_value()) for a in approvals]
+        events += self._interrupt(_Interrupt([a.interrupt() for a in approvals]))
+        return [encode(e) for e in events]
+
+    def interrupt_tail(self, approvals: Sequence[OpenApproval], shown: set[str], id_: str | None) -> list[str]:
+        """Frames that replace a stream's final interrupt `RUN_FINISHED` when more approvals are
+        open than it names (parallel branches): CUSTOM approval_required for the others,
+        MESSAGES_SNAPSHOT (naming every gated call), then RUN_FINISHED with all of them, in the
+        given order, carrying the replaced frame's id. This formatter must be seeded with every
+        event of the run."""
+        events: list[BaseEvent] = [
+            custom("approval_required", a.required_value()) for a in approvals if a.interrupt().id not in shown
+        ]
+        events.append(self._messages_snapshot())
+        events.append(self._finished(RunFinishedInterruptOutcome(interrupts=[a.interrupt() for a in approvals])))
+        self.closed = True
+        return with_frame_id([encode(e) for e in events], id_)
 
     def _resend_end(self) -> list[str]:
         """A stream of an AG-UI run that already ended: its end event again, then close."""
@@ -582,6 +710,9 @@ class AgUiFormatter:
         if self.ctx.kind == "workflow":
             if self._seeded or self.ctx.snapshot_on_start:
                 events.append(StateSnapshotEvent(snapshot=json.loads(json.dumps(self._state))))
+            if (self.ctx.snapshot_on_start or self.ctx.prior_child_events) and self._child_turns:
+                # Seeded child runs: the client's list is replaced by one with all their messages.
+                events.append(self._messages_snapshot())
             for step_id in self._announced:
                 events.append(StepStartedEvent(step_name=step_id))
         return self._frames(events) + self._resend_end()
@@ -592,6 +723,9 @@ class AgUiFormatter:
             events.append(self._messages_snapshot())
         else:
             events.append(StateSnapshotEvent(snapshot=json.loads(json.dumps(self._state))))
+            if self._child_turns:
+                # Child-run frames carry no id: the client may hold part of an open step's text.
+                events.append(self._messages_snapshot())
         return self._frames(events) + self._resend_end()
 
     def on_item(self, item: StreamItem) -> list[str]:
@@ -676,6 +810,8 @@ class AgUiFormatter:
         if event.type == "run_failed":
             return turn.close()
         events, interrupt = turn.on_event(event)
+        if interrupt is not None and not self.ctx.closes_on([i.id for i in interrupt.interrupts]):
+            return events
         if interrupt is not None:
             events += self._interrupt(interrupt)
         return events
@@ -698,20 +834,13 @@ class AgUiFormatter:
             return events + self._state_ops(ops)
         if kind == "step_waiting" and step_id:
             events = self._state_ops(self._step_status(step_id, "waiting"))
+            if not self.ctx.closes_on([step_interrupt_id(self.ctx.native_run_id, step_id)]):
+                return events  # this run's resume answered it already
             value: dict[str, Any] = {"run_id": self.ctx.native_run_id, "kind": "step", "key": step_id}
             if data.get("deadline") is not None:
                 value["deadline"] = data.get("deadline")
             events.append(custom("approval_required", value))
-            prompt = data.get("prompt")
-            fields: dict[str, Any] = {
-                "id": step_interrupt_id(self.ctx.native_run_id, step_id),
-                "reason": "confirmation",
-                "message": prompt if isinstance(prompt, str) and prompt else f"Approve step {step_id}?",
-                "response_schema": json.loads(json.dumps(RESPONSE_SCHEMA)),
-            }
-            if isinstance(data.get("deadline"), str):
-                fields["expires_at"] = data["deadline"]
-            return events + self._interrupt(_Interrupt([Interrupt(**fields)]))
+            return events + self._interrupt(_Interrupt([step_interrupt(self.ctx.native_run_id, step_id, data)]))
         if kind in STEP_DECISIONS and step_id:
             decision = STEP_DECISIONS[kind]
             events = self._state_ops(self._step_status(step_id, decision))

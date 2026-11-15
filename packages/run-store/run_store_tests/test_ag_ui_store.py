@@ -521,6 +521,7 @@ def test_tenant_b_calling_every_ag_ui_method_with_tenant_a_ids_sees_and_changes_
             other_tenant, **dict(key, external_run_id="R9"), run_id=a_run, fingerprint=_fp()
         ),
         "pending_client_tool_calls": lambda: ag_ui.pending_client_tool_calls(other_tenant, a_conv, before_run_id=a_run),
+        "set_end_order": lambda: ag_ui.set_end_order(other_tenant, **dict(key, external_run_id="R-a-only"), end_order=5),
     }
     public = {n for n in dir(AgUiStore) if not n.startswith("_") and callable(getattr(AgUiStore, n))}
     assert public == set(calls)  # a new method must be added here
@@ -532,6 +533,10 @@ def test_tenant_b_calling_every_ag_ui_method_with_tenant_a_ids_sees_and_changes_
     with pytest.raises(RunNotFound):
         calls["record_ag_ui_run"]()
     assert calls["pending_client_tool_calls"]() == []
+    from sqlalchemy.exc import NoResultFound
+
+    with pytest.raises(NoResultFound):  # B cannot record an end on A's AG-UI run
+        calls["set_end_order"]()
     # create_turn's AG-UI write: B cannot put a turn into A's conversation.
     from eap_run_store import ConversationNotFound
 

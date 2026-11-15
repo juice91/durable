@@ -176,3 +176,22 @@ Deploy the API and the worker together, in this order:
 - **Drain before deploying.** Structured output (AC.4), limits and fallback (AC.5) and tool approvals (AC.6) add durable steps to the agent loop for specs that use them, so let in-flight agent runs finish first. A run recorded under the old worker and replayed under the new one could hit DBOS nondeterminism. Agent specs that use none of these features keep their step layout, which the golden test pins. AC.4 and AC.9 ship in one deploy.
 - **Migrations:** run `0014_approvals` and `0015_evals` before starting the new API or worker.
 - **Approvals:** the tool approval wait defaults to a 3600 s timeout unless the agent's approval policy sets one. Decisions are woken through `tool_approval:{run_id}` and polled every `EAP_APPROVAL_POLL_SECONDS` as a backstop.
+
+### AG-UI milestone (AGUI, 2026-11)
+
+- **Drain workers before deploying AG-UI.** `0016_ag_ui` adds the per-root commit order:
+  - every event append takes the ROOT run's row lock, then the child's;
+  - it stamps `execution_events.root_order` from a counter on the root row;
+  - AG-UI workflow streams and their run boundaries are built on that order.
+
+  Old-code workers that keep appending after the migration take the child lock first. The insert
+  trigger `trg_execution_events_root_order` still stamps their rows, but it takes the root lock
+  after the child's, the reverse of new code. A writer of each version on one workflow tree can
+  then deadlock; Postgres aborts one, and the DBOS step retries. Stop new runs, let the queue
+  empty, migrate, then deploy the workers and the API. In-flight runs from before the migration
+  keep their earlier events unordered (NULL `root_order`); they are read first, in
+  (ts, run_id, seq) order.
+- **Migrations:** run `0016_ag_ui` and `0017_api_keys` before starting the new API or worker.
+- **Throughput:** one workflow tree (or eval run with its cases) now appends one transaction at a
+  time: about 110-220 appends/s per tree in local measurements, against 400-475 before. Different
+  roots do not contend. Never hold a child run's append transaction open across slow work.
