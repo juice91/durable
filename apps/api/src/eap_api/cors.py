@@ -22,8 +22,13 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 AGUI_CORS_ORIGINS_ENV = "EAP_AGUI_CORS_ORIGINS"
-# The local Studio dev server, by either loopback name.
-STUDIO_ORIGINS: tuple[str, ...] = ("http://localhost:3000", "http://127.0.0.1:3000")
+# The local Studio dev server and the documented private-deployment SSH tunnel, by either loopback name.
+STUDIO_ORIGINS: tuple[str, ...] = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:13000",
+    "http://127.0.0.1:13000",
+)
 AGUI_PATH_PREFIX = "/api/v1/ag-ui"
 AGUI_ALLOWED_METHODS: tuple[str, ...] = ("GET", "POST")
 AGUI_ALLOWED_HEADERS: tuple[str, ...] = ("Authorization", "Content-Type", "Accept", "Last-Event-ID")

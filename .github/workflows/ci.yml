@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      studio: ${{ steps.filter.outputs.studio }}
+      deploy: ${{ steps.filter.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select affected gates
+        id: filter
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          filters: |
+            python:
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'packages/**'
+              - 'apps/api/**'
+              - 'apps/worker/**'
+              - 'config/**'
+            studio:
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.npmrc'
+              - 'apps/studio/**'
+            deploy:
+              - '.github/**'
+              - 'deploy/**'
+              - 'tests/deploy/**'
+
+  python:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run lint-imports
+      - name: DB-free unit tests
+        run: >-
+          uv run pytest -p no:eap_db -q
+          packages/shared-schemas/tests
+          packages/agent-runtime/runtime_tests
+          packages/knowledge/knowledge_tests
+          packages/observability/tests
+          packages/pricing/pricing_tests
+          packages/processors/processors_tests
+          packages/secrets/secrets_tests
+
+  studio:
+    needs: changes
+    if: needs.changes.outputs.studio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -C apps/studio lint
+      - run: pnpm -C apps/studio exec tsc --noEmit
+      - run: pnpm -C apps/studio test
+
+  deploy-checks:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      KUBECONFORM_VERSION: v0.7.0
+      ACTIONLINT_VERSION: v1.7.7
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@b75a909f75acd358c2196fb9a5f1299a9a8868a4 # v6.7.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - name: Install manifest and workflow linters
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@"${KUBECONFORM_VERSION}"
+          go install github.com/rhysd/actionlint/cmd/actionlint@"${ACTIONLINT_VERSION}"
+      - name: Validate rendered manifests
+        run: kubectl kustomize deploy/k8s | kubeconform -strict -summary
+      - name: Shellcheck deployment scripts
+        run: shellcheck deploy/scripts/*.sh deploy/runner/*.sh
+      - name: Validate Actions workflows
+        run: actionlint
+      - name: Deployment tests without image builds
+        env:
+          PYTEST_ADDOPTS: --ignore=tests/deploy/test_images.py
+        run: uv run pytest tests/deploy -q

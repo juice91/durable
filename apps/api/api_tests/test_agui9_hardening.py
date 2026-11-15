@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from eap_api.app import create_app
 from eap_api.auth import require_allowed_origin
-from eap_api.cors import CorsConfigurationError, agui_cors_origins_from_env, is_agui_path
+from eap_api.cors import STUDIO_ORIGINS, CorsConfigurationError, agui_cors_origins_from_env, is_agui_path
 
 from .conftest import create_agent, get_auth_header
 
@@ -57,6 +57,11 @@ def test_cors_origins_refuse_wildcards_and_non_origins(bad):
 def test_is_agui_path():
     assert is_agui_path("/api/v1/ag-ui") and is_agui_path("/api/v1/ag-ui/agents/x")
     assert not is_agui_path("/api/v1/ag-uix") and not is_agui_path("/api/v1/agents")
+
+
+def test_private_deployment_tunnel_is_a_studio_origin():
+    assert "http://localhost:13000" in STUDIO_ORIGINS
+    assert "http://127.0.0.1:13000" in STUDIO_ORIGINS
 
 
 def test_require_allowed_origin_rules():

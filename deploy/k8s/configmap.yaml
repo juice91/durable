@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pydanticos-config
+data:
+  EAP_AUTH_MODE: dev
+  EAP_AGUI_CORS_ORIGINS: http://localhost:13000,http://127.0.0.1:13000
+  EAP_APP_VERSION: m1
+  EAP_DBOS_SYSTEM_SCHEMA: dbos
+  EAP_LITELLM_BASE_URL: http://host.lima.internal:4001
+  EAP_LITELLM_EMBEDDING_BASE_URL: http://host.lima.internal:4001
+  EAP_ALLOWED_MODELS: "litellm:*"
+  EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
+  EAP_ALLOWED_TOOLS: "ticket.create"
+  EAP_LOKI_URL: http://lgtm:3100
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+data:
+  01-setup-databases.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
+      --set=app_password="$EAP_APP_DATABASE_PASSWORD" \
+      --set=dbos_password="$EAP_DBOS_DATABASE_PASSWORD" <<'SQL'
+    SELECT format('CREATE ROLE eap_app WITH LOGIN PASSWORD %L', :'app_password')
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'eap_app') \gexec
+    SELECT format('CREATE ROLE eap_dbos WITH LOGIN PASSWORD %L', :'dbos_password')
+      WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'eap_dbos') \gexec
+    SELECT 'CREATE DATABASE eap_app OWNER eap_app'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'eap_app') \gexec
+    SELECT 'CREATE DATABASE eap_dbos OWNER eap_dbos'
+      WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'eap_dbos') \gexec
+    REVOKE CONNECT ON DATABASE eap_app FROM PUBLIC;
+    REVOKE CONNECT ON DATABASE eap_dbos FROM PUBLIC;
+    GRANT CONNECT ON DATABASE eap_app TO eap_app;
+    GRANT CONNECT ON DATABASE eap_dbos TO eap_dbos;
+    SQL
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname eap_app \
+      -c 'CREATE EXTENSION IF NOT EXISTS vector;'
