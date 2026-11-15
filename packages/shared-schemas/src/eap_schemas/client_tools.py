@@ -46,6 +46,10 @@ MAX_CLIENT_TOOL_SCHEMA_DEPTH = 32  # objects/arrays; the AG-UI body itself is ca
 # 0.1 ms per subschema, so this bounds one run's schema work to well under 100 ms; the byte caps
 # alone (64 KiB of tiny properties is ~1,500 subschemas) do not.
 MAX_CLIENT_TOOL_SCHEMA_NODES = 256
+# JSON objects with every `$ref` expanded (memoised per `$defs` member): what validation can visit.
+# The raw count alone misses a chain of defs that each `anyOf` two refs to the next (2^N work for
+# ~3N raw nodes); a `$ref` cycle (unbounded expansion, RecursionError in jsonschema) is refused.
+MAX_CLIENT_TOOL_SCHEMA_EXPANDED_NODES = 4096
 MAX_TOOL_CALL_ID_CHARS = 256
 MAX_CLIENT_TOOL_RESULT_BYTES = 32 * 1024  # content + error, UTF-8
 MAX_AGUI_INPUT_BYTES = 32 * 1024  # the new user input of one AG-UI run (as RunCreate.input)
@@ -152,6 +156,67 @@ def schema_node_count(value: Any, limit: int | None = None) -> int:
     return count
 
 
+def _raw_nodes_and_refs(value: Any, *, skip_root_defs: bool = False) -> tuple[int, list[str]]:
+    """(JSON objects in `value`, the root-`$defs` member names its `$ref`s name, with repeats),
+    iteratively. `skip_root_defs` leaves out the root's `$defs` (counted through the refs)."""
+    count = 0
+    refs: list[str] = []
+    stack = [value]
+    first = True
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            count += 1
+            ref = node.get("$ref")
+            if isinstance(ref, str) and LOCAL_REF_PATTERN.match(ref):
+                refs.append(ref[len("#/$defs/"):])
+            for key, child in node.items():
+                if first and skip_root_defs and key == "$defs":
+                    continue
+                if isinstance(child, (dict, list)):
+                    stack.append(child)
+        elif isinstance(node, list):
+            stack.extend(v for v in node if isinstance(v, (dict, list)))
+        first = False
+    return count, refs
+
+
+def expanded_node_count(schema: dict[str, Any], limit: int = MAX_CLIENT_TOOL_SCHEMA_EXPANDED_NODES) -> int:
+    """The JSON objects of `schema` with every `#/$defs/<name>` reference expanded, memoised per
+    member and saturating at limit + 1 (so the work is linear in the schema size). Raises
+    ValueError("cycle") for a `$ref` cycle. Iterative: no recursion depth to exhaust."""
+    defs = schema.get("$defs") if isinstance(schema.get("$defs"), dict) else {}
+    local: dict[str, tuple[int, list[str]]] = {}
+    memo: dict[str, int] = {}
+
+    def info(name: str) -> tuple[int, list[str]]:
+        if name not in local:
+            local[name] = _raw_nodes_and_refs(defs.get(name))
+        return local[name]
+
+    for start in dict.fromkeys(_raw_nodes_and_refs(schema, skip_root_defs=True)[1]):
+        if start in memo:
+            continue
+        visiting: set[str] = {start}
+        stack: list[str] = [start]
+        while stack:
+            name = stack[-1]
+            pending = [r for r in dict.fromkeys(info(name)[1]) if r not in memo]
+            cyclic = [r for r in pending if r in visiting]
+            if cyclic:
+                raise ValueError("cycle")
+            if pending:
+                stack.append(pending[0])
+                visiting.add(pending[0])
+                continue
+            raw, refs = info(name)
+            memo[name] = min(limit + 1, raw + sum(memo[r] for r in refs))
+            visiting.discard(name)
+            stack.pop()
+    raw, refs = _raw_nodes_and_refs(schema, skip_root_defs=True)
+    return min(limit + 1, raw + sum(memo[r] for r in refs))
+
+
 def _check_parameters_schema(schema: Any) -> dict[str, Any]:
     if not isinstance(schema, dict):
         raise _schema_error("client_tool_schema_not_object", "parameters must be a JSON Schema object")
@@ -186,6 +251,17 @@ def _check_parameters_schema(schema: Any) -> dict[str, Any]:
         raise _schema_error("client_tool_schema_remote_ref", "parameters may use local '#...' references only")
 
     _check_refs_and_keywords(schema)
+    try:
+        expanded = expanded_node_count(schema)
+    except ValueError:
+        raise _schema_error(
+            "client_tool_schema_too_complex", "parameters may not use '$ref' cycles (a definition that refers back to itself)"
+        ) from None
+    if expanded > MAX_CLIENT_TOOL_SCHEMA_EXPANDED_NODES:
+        raise _schema_error(
+            "client_tool_schema_too_complex",
+            f"parameters may expand to at most {MAX_CLIENT_TOOL_SCHEMA_EXPANDED_NODES} JSON objects with '$ref's resolved",
+        )
 
     import jsonschema
 
@@ -399,9 +475,11 @@ __all__ = [
     "MAX_CLIENT_TOOL_SCHEMAS_BYTES",
     "MAX_CLIENT_TOOL_SCHEMA_BYTES",
     "MAX_CLIENT_TOOL_SCHEMA_DEPTH",
+    "MAX_CLIENT_TOOL_SCHEMA_EXPANDED_NODES",
     "MAX_CLIENT_TOOL_SCHEMA_NODES",
     "MAX_TOOL_CALL_ID_CHARS",
     "check_client_tools",
+    "expanded_node_count",
     "client_tool_clashes",
     "schema_node_count",
 ]
