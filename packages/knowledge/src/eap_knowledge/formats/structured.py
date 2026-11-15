@@ -13,7 +13,14 @@
 - **Multi-document YAML streams** (``---``): each document becomes a level-1 section
   ``Document <n>`` (anchor ``doc-<n>``) holding its keys one level down. A document that is not a
   mapping (a list or a scalar) is one section without a heading.
-- **Title**: the ``title`` argument, else the first document's top-level ``title`` string.
+- **Title**, in order of precedence: (1) the ``title`` argument when it is not blank; (2) the
+  first document's first top-level ``title``, ``name`` or ``description`` (in that order of keys)
+  whose value is a one-line string of at most TITLE_MAX_CHARS characters (whitespace collapsed);
+  (3) the file name, the last path segment of ``source_url`` (percent-decoded, without query or
+  fragment, control characters stripped, whitespace collapsed, clipped to TITLE_MAX_CHARS);
+  (4) ``''``. The upload API passes ``body.title`` or else the document key, and re-extract passes
+  the stored title, so a stored document always takes (1): the fallbacks serve direct callers
+  only, and no extractor version was bumped for them (json stays 1).
 - **Comments** (YAML; extractor version 2): device-tree bindings often keep their only description
   in comments, so they are kept. The stream's leading comment block (the first run of consecutive
   comment lines, before any content) is the document-level preamble: the body of the level-0
@@ -25,6 +32,17 @@
   stream (recorded where PyYAML skips them), so nothing is parsed twice and every limit below
   applies unchanged; a comment on a block scalar's indicator line (``key: |  # c``) is not kept,
   nor are licence lines (``SPDX-License-Identifier:``, ``Copyright (c) ...``) or empty rules.
+- **A short preamble rides with the first section** (yaml 3): when the leading comment block is at
+  most ``max_tokens // PREAMBLE_SHARE`` tokens, its text opens the body of the first content section,
+  followed by a blank line, and the level-0 section's body is empty. The first content section is
+  the first leaf: the first section that has no subsections, so a heading-only section is skipped:
+  the first key's section, or that key's first child when the key splits one level deeper, and in
+  a multi-document stream the first key of ``Document 1`` (or ``Document 1`` itself when it is not
+  a mapping). So a short binding's header comment reaches the same
+  chunk as the facts it describes under either chunker version (chunker v2 never merges the
+  preamble). A longer block stays the level-0 section's body, a chunk of its own that the chunker
+  splits at ``max_tokens`` as usual. Which section a key splits into is decided before the preamble
+  is added, so the preamble never makes a section split.
 
 Safety: YAML is loaded with a ``SafeLoader`` subclass that counts composed nodes and the characters
 they hold, charging an alias the full size of the node it repeats (so a billion-laughs document, or
@@ -40,6 +58,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import unquote, urlsplit
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -64,6 +83,11 @@ YAML_EXPANSION_FACTOR = 4
 DEFAULT_STRUCTURED_CAP = ExtractLimits().max_structured_bytes  # 2 MiB
 MAX_YAML_EXPANDED_CHARS = YAML_EXPANSION_FACTOR * DEFAULT_STRUCTURED_CAP  # at the default cap
 MAX_NESTING = 64
+# A leading comment block of at most max_tokens // PREAMBLE_SHARE tokens joins the first section.
+PREAMBLE_SHARE = 4
+# The longest top-level `title` / `name` / `description` string used as the document title.
+TITLE_MAX_CHARS = 128
+_TITLE_KEYS = ("title", "name", "description")
 _DUMP_WIDTH = 100
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _WS = re.compile(r"\s+")
@@ -470,6 +494,8 @@ def _sections(loaded: _Loaded, max_tokens: int) -> list[_Raw]:
         per_doc[0] = before + per_doc[0]
     else:  # JSON: no source positions and no comments
         per_doc = [[] for _ in documents]
+    head = _plain(preamble)
+    short = bool(head) and approx_tokens(head) <= max_tokens // PREAMBLE_SHARE
     if len(documents) == 1:
         document, keys = documents[0], (spans[0][2] if spans else None)
         if isinstance(document, Mapping) and document:
@@ -477,10 +503,13 @@ def _sections(loaded: _Loaded, max_tokens: int) -> list[_Raw]:
             if raw:
                 level, heading, body, anchor = raw[0]
                 raw[0] = (level, heading, _with_comments(lead, body), anchor)
-            return [(0, "", _plain(preamble), None), *raw]
+                if short:
+                    _carry(raw, head)
+                    head = ""
+            return [(0, "", head, None), *raw]
         body = "" if document is None else _dump(document)
-        return [(0, "", _join(_plain(preamble), _plain(per_doc[0]), body), None)]
-    raw_all: list[_Raw] = [(0, "", _plain(preamble), None)]
+        return [(0, "", _join(head, _plain(per_doc[0]), body), None)]
+    raw_all: list[_Raw] = []
     for n, (document, (_, _, keys), doc_comments) in enumerate(zip(documents, spans, per_doc), 1):
         if isinstance(document, Mapping) and document:
             lead, raw = _mapping_sections(document, 2, f"doc-{n}.", max_tokens, keys or (), doc_comments)
@@ -489,14 +518,51 @@ def _sections(loaded: _Loaded, max_tokens: int) -> list[_Raw]:
         else:
             body = "" if document is None else _dump(document)
             raw_all.append((1, f"Document {n}", _join(_plain(doc_comments), body), f"doc-{n}"))
-    return raw_all
+    if short:
+        _carry(raw_all, head)
+        head = ""
+    return [(0, "", head, None), *raw_all]
 
 
-def _title(documents: list[Any]) -> str:
+def _carry(raw: list[_Raw], head: str) -> None:
+    """Open the first leaf section of ``raw`` (the first one the next section is not nested
+    under) with ``head``, so a heading-only section never holds the preamble alone."""
+    i = next(i for i in range(len(raw)) if i + 1 == len(raw) or raw[i + 1][0] <= raw[i][0])
+    level, heading, body, anchor = raw[i]
+    raw[i] = (level, heading, _join(head, body), anchor)
+
+
+def _short_line(value: Any) -> str:
+    """``value`` as a title: a one-line string of at most TITLE_MAX_CHARS characters once its
+    whitespace is collapsed, else ``''``."""
+    if not isinstance(value, str) or "\n" in value.strip():
+        return ""
+    line = _WS.sub(" ", _clean(_normalize(value))).strip()
+    return line if len(line) <= TITLE_MAX_CHARS else ""
+
+
+def _file_name(source_url: str | None) -> str:
+    """The last path segment of ``source_url``, percent-decoded, cleaned like any title and clipped
+    to TITLE_MAX_CHARS characters (``''`` when there is none)."""
+    if not source_url:
+        return ""
+    try:
+        path = urlsplit(source_url).path
+    except ValueError:  # an invalid URL (e.g. a bad IPv6 host): no file name
+        return ""
+    name = unquote(path.rstrip("/").rsplit("/", 1)[-1])
+    return _WS.sub(" ", _clean(_normalize(name))).strip()[:TITLE_MAX_CHARS].rstrip()
+
+
+def _title(documents: list[Any], source_url: str | None) -> str:
+    """The fallback title (see the module docstring): a short ``title``/``name``/``description``
+    of the first document, else the file name of ``source_url``."""
     first = documents[0] if documents else None
-    if isinstance(first, Mapping) and isinstance(first.get("title"), str):
-        return _WS.sub(" ", _clean(first["title"])).strip()
-    return ""
+    if isinstance(first, Mapping):
+        for key in _TITLE_KEYS:
+            if line := _short_line(first.get(key)):
+                return line
+    return _file_name(source_url)
 
 
 def _document(
@@ -505,7 +571,7 @@ def _document(
     documents = loaded.documents
     sections = _build(_sections(loaded, max_tokens))
     check_output_size(sections, input_chars, STRUCTURED_OUTPUT_FACTOR)
-    title = _WS.sub(" ", _clean(_normalize(title))).strip() or _title(documents)
+    title = _WS.sub(" ", _clean(_normalize(title))).strip() or _title(documents, source_url)
     return Document(
         title=title,
         source_url=source_url or None,
@@ -548,6 +614,8 @@ __all__ = [
     "MAX_YAML_EXPANDED_CHARS",
     "YAML_EXPANSION_FACTOR",
     "MAX_YAML_NODES",
+    "PREAMBLE_SHARE",
+    "TITLE_MAX_CHARS",
     "extract_json",
     "extract_yaml",
     "load_json",

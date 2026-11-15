@@ -1,0 +1,10 @@
+# Common fields for Acme Semiconductor ADS1x1x
+
+include: [adc-controller.yaml, i2c-device.yaml]
+
+properties:
+  "#io-channel-cells":
+    const: 1
+
+io-channel-cells:
+  - input

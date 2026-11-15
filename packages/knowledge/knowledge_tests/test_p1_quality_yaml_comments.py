@@ -44,15 +44,15 @@ def _sections(doc):
 
 
 def test_yaml_extractor_version_is_bumped_for_re_extract():
-    assert EXTRACTOR_VERSIONS["yaml"] == 2
-    assert EXTRACTOR_VERSIONS["json"] == 1  # JSON has no comments: unchanged
+    assert EXTRACTOR_VERSIONS["yaml"] == 3  # 3: short preamble opens the first section; title fallback
+    assert EXTRACTOR_VERSIONS["json"] == 1  # not bumped: the title fallback never changes a stored document
 
 
-def test_ads1x1x_base_keeps_its_header_comment_as_the_preamble():
+def test_ads1x1x_base_keeps_its_header_comment_with_the_first_section():
     doc = extract_yaml(ADS1X1X_BASE_YAML, source_url=URL)
     assert _sections(doc) == [
-        (0, "", "Common fields for Acme Semiconductor ADS1x1x"),
-        (1, "include", "include:\n- adc-controller.yaml\n- i2c-device.yaml"),
+        (0, "", ""),
+        (1, "include", "Common fields for Acme Semiconductor ADS1x1x\n\ninclude:\n- adc-controller.yaml\n- i2c-device.yaml"),
         (1, "properties", "properties:\n  '#io-channel-cells':\n    const: 1"),
         (1, "io-channel-cells", "io-channel-cells:\n- input"),
     ]
@@ -69,7 +69,7 @@ def test_ads1x1x_base_chunk_carries_the_description():
     assert len(chunks) == 1
     assert chunks[0].text == (
         "Common fields for Acme Semiconductor ADS1x1x\n\n"
-        "# include\n\ninclude:\n- adc-controller.yaml\n- i2c-device.yaml\n\n"
+        "include:\n- adc-controller.yaml\n- i2c-device.yaml\n\n"
         "# properties\n\nproperties:\n  '#io-channel-cells':\n    const: 1\n\n"
         "# io-channel-cells\n\nio-channel-cells:\n- input"
     )
@@ -104,8 +104,9 @@ b:
 def test_comments_attach_to_keys_above_inline_inside_and_trailing():
     doc = extract_yaml(COMMENTED)
     assert _sections(doc) == [
-        (0, "", "Header line 1\nHeader line 2"),  # the leading block; the bare "#" line is dropped
-        (1, "a", "# about a\n# inline a\na: 1"),
+        (0, "", ""),
+        # the leading block (the bare "#" line dropped), short, so it opens the first section
+        (1, "a", "Header line 1\nHeader line 2\n\n# about a\n# inline a\na: 1"),
         (1, "b", "# about b\n# about b.x\n# in y\n# trailing\nb:\n  x: 1\n  y:\n  - 1\n  - 2"),
     ]
 
@@ -122,17 +123,17 @@ def test_a_split_section_gives_comments_to_its_sub_keys():
 
 def test_a_comment_block_after_a_blank_line_goes_to_the_first_key_not_the_preamble():
     doc = extract_yaml("# file header\n\n# about a\na: 1\n")
-    assert _sections(doc)[:2] == [(0, "", "file header"), (1, "a", "# about a\na: 1")]
+    assert _sections(doc)[:2] == [(0, "", ""), (1, "a", "file header\n\n# about a\na: 1")]
 
 
 def test_a_header_directly_above_the_first_key_is_still_the_preamble():
     doc = extract_yaml("# Common fields\ninclude: base.yaml\n")
-    assert _sections(doc) == [(0, "", "Common fields"), (1, "include", "include: base.yaml")]
+    assert _sections(doc) == [(0, "", ""), (1, "include", "Common fields\n\ninclude: base.yaml")]
 
 
 def test_licence_lines_are_dropped():
     text = "# Copyright (c) 2024 Acme Semiconductor\n# SPDX-License-Identifier: Apache-2.0\n# Real text\n\na: 1\n"
-    assert _sections(extract_yaml(text))[0] == (0, "", "Real text")
+    assert _sections(extract_yaml(text))[:2] == [(0, "", ""), (1, "a", "Real text\n\na: 1")]
 
 
 def test_hash_inside_strings_and_block_scalars_is_not_a_comment():
@@ -148,9 +149,9 @@ def test_hash_inside_strings_and_block_scalars_is_not_a_comment():
 def test_multi_document_stream_comments():
     doc = extract_yaml("# top\n---\n# d1\na: 1\n---\n# d2\n- 1\n")
     assert _sections(doc) == [
-        (0, "", "top"),
+        (0, "", ""),
         (1, "Document 1", "d1"),
-        (2, "a", "a: 1"),
+        (2, "a", "top\n\na: 1"),  # yaml 3: the short preamble opens the first leaf section
         (1, "Document 2", "d2\n\n- 1"),
     ]
 
