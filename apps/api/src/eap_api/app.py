@@ -88,7 +88,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(tools_router, prefix="/api/v1")
 
-    # A malformed workflow loop cap (EAP_WORKFLOW_MAX_*, LP.5) fails startup here.
+    # A malformed workflow loop cap (EAP_WORKFLOW_MAX_*, LP.5) or loops preview flag
+    # (EAP_WORKFLOW_LOOPS_PREVIEW, LP.7) fails startup here.
     from eap_api.routes.workflows import check_workflow_configuration, router as workflows_router
 
     check_workflow_configuration()

@@ -32,6 +32,7 @@ from eap_runtime import SideEffectOutcomeUnknown, ToolNotAllowedError, UnknownTo
 from eap_schemas.limits import USAGE_LIMIT_KWARGS, RunBudgetExceeded
 from eap_schemas.models_policy import ModelNotAllowed
 from eap_schemas.output import OutputInvalid
+from eap_schemas.workflow_scope import LOOP_WORKFLOW_FAILURES
 from eap_worker.mcp import McpToolUnavailable
 
 _MAX_FIELD = 200
@@ -249,6 +250,8 @@ WORKFLOW_FAILURES: dict[str, tuple[str, str]] = {
     "workflow_version_not_found": ("failed", "the workflow version was not found"),
     "step_limit_exceeded": ("failed", "the workflow exceeded its step execution limit"),
     "workflow_deadline_exceeded": ("failed", "the workflow exceeded its maximum run time"),
+    # Workflow loops (LP.2's registered codes and messages, eap_schemas.workflow_scope).
+    **LOOP_WORKFLOW_FAILURES,
 }
 
 
@@ -359,7 +362,9 @@ def _chain(exc: BaseException) -> Iterator[BaseException]:
 def classify(exc: BaseException) -> RunFailure:
     chain = list(_chain(exc))
     for cur in chain:
-        if isinstance(cur, WorkflowStepError) or type(cur).__name__ == "WorkflowStepError":
+        # LoopItemsError (eap_worker.workflow_eval, a foreach's `items`): its `.code` is
+        # `loop_items_not_list` or `loop_items_exceeded`, a step failure like WorkflowStepError's.
+        if isinstance(cur, WorkflowStepError) or type(cur).__name__ in ("WorkflowStepError", "LoopItemsError"):
             return _workflow_failure(cur)
     for cls, status, code, message in _KNOWN:
         for cur in chain:

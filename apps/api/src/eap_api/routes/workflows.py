@@ -70,8 +70,6 @@ from eap_schemas.workflows import (
     REF_KEY,
     REF_PATTERN,
     AgentStep,
-    BranchStep,
-    Condition,
     EvaluateStep,
     ForeachStep,
     Step,
@@ -149,20 +147,44 @@ def _version_response(version: WorkflowVersionModel) -> dict:
     }
 
 
-LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed (LP.3/LP.7)"
+LOOP_RUNTIME_PENDING = "is not available yet: the workflow loops runtime has not landed for it (LP.10/LP.11/LP.14)"
+LOOP_PREVIEW_PENDING = (
+    "is not available yet: loop steps run without the cost cap and cooperative cancel until LP.11 "
+    "(set EAP_WORKFLOW_LOOPS_PREVIEW=1 to try them in development and tests)"
+)
+
+# The loops preview (LP.7): `loop` steps (while/until) run on the worker since LP.7, but the loop
+# tick (cost cap, deadline, cooperative cancel) is LP.11. Until then they publish and start only
+# with EAP_WORKFLOW_LOOPS_PREVIEW=1, a dev and test switch, default off. LP.11 removes the flag
+# and opens the gate for good. Unset, blank or "0" is off, "1" is on; any other value fails
+# startup (check_workflow_configuration).
+LOOPS_PREVIEW_ENV = "EAP_WORKFLOW_LOOPS_PREVIEW"
+
+
+def loops_preview_enabled() -> bool:
+    raw = (os.environ.get(LOOPS_PREVIEW_ENV) or "").strip()
+    if raw in ("", "0"):
+        return False
+    if raw == "1":
+        return True
+    raise ValueError(f"{LOOPS_PREVIEW_ENV} must be 0 or 1, got {raw!r}")
 
 
 def runtime_pending_problems(spec: WorkflowSpec) -> list[str]:
-    """Spec features the schema accepts but the worker cannot run yet (workflow loops milestone,
-    temporary gate until LP.3/LP.7 ship the runtime): foreach, loop and evaluate steps, all/any/not
-    conditions and ``limits``. Refused at publish and at run start, so a run never reaches the
-    worker with them. Drafts may still be saved with them."""
+    """Spec features the schema accepts but the platform does not run yet (workflow loops
+    milestone, a temporary gate removed kind by kind as the runtime lands): foreach (LP.10) and
+    evaluate (LP.14) steps at any depth and ``limits`` (the cost cap, LP.11), always; `loop` steps
+    unless the loops preview is on (EAP_WORKFLOW_LOOPS_PREVIEW=1; LP.11 removes the flag).
+    all/any/not conditions in branch steps are open since LP.7 (the worker evaluates them; they
+    need no loop runtime). Refused at publish and at run start, so a run never reaches the worker
+    with them. Drafts may still be saved with them."""
     problems: list[str] = []
+    preview = loops_preview_enabled()
     for _, step in walk_steps(spec.steps):
-        if step.type in ("foreach", "loop", "evaluate"):
+        if step.type in ("foreach", "evaluate"):
             problems.append(f"step '{step.id}': the {step.type} step {LOOP_RUNTIME_PENDING}")
-        elif isinstance(step, BranchStep) and any(not isinstance(c.when, Condition) for c in step.cases):
-            problems.append(f"step '{step.id}': an all/any/not condition {LOOP_RUNTIME_PENDING}")
+        elif step.type == "loop" and not preview:
+            problems.append(f"step '{step.id}': the loop step {LOOP_PREVIEW_PENDING}")
     if spec.limits is not None and not spec.limits.is_empty():
         problems.append(f"limits {LOOP_RUNTIME_PENDING}")
     return problems
@@ -197,10 +219,12 @@ def _env_cap(setting: tuple[str, int]) -> int:
 
 
 def check_workflow_configuration() -> None:
-    """Fail startup on a malformed EAP_WORKFLOW_MAX_LOOP_ITERATIONS, EAP_WORKFLOW_MAX_STEP_EXECUTIONS
-    or EAP_WORKFLOW_MAX_RUN_CONCURRENCY (ValueError), not at the first publish or run start."""
+    """Fail startup on a malformed EAP_WORKFLOW_MAX_LOOP_ITERATIONS, EAP_WORKFLOW_MAX_STEP_EXECUTIONS,
+    EAP_WORKFLOW_MAX_RUN_CONCURRENCY or EAP_WORKFLOW_LOOPS_PREVIEW (ValueError), not at the first
+    publish or run start."""
     for setting in (LOOP_ITERATIONS_ENV, STEP_EXECUTIONS_ENV, RUN_CONCURRENCY_ENV):
         _env_cap(setting)
+    loops_preview_enabled()
 
 
 def loop_limit_problems(spec: WorkflowSpec) -> list[str]:

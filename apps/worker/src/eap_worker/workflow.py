@@ -307,6 +307,7 @@ from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
 from eap_worker.capabilities import (
+    LOOP_BODY_DENY_REASON,
     ApprovalSettings,
     SpecCapability,
     error_paths,
@@ -694,8 +695,9 @@ async def start_run_step(
     mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
     the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
     its validated context ({} when none), `is_draft` whether it is a draft test run. AC.6:
-    `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person),
-    else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
+    `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person)
+    and, with `approval_deny_reason` "loop_body", for an agent step inside a workflow loop body
+    (loops D8a), else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
     Both are recorded here, so a replay waits and denies exactly as the first attempt did."""
     rt = get_runtime()
 
@@ -727,10 +729,16 @@ async def start_run_step(
             conversation = rt.run_store.get_conversation(tenant_id, run["conversation_id"]) or {}
             resource_id = conversation.get("resource_id")
         approval_mode = "interactive"
+        approval_deny_reason = None
         if run.get("parent_run_id") is not None:
             parent = rt.run_store.get_run(tenant_id, UUID(str(run["parent_run_id"]))) or {}
             if parent.get("kind") == "eval":
                 approval_mode = "deny"
+            elif parent.get("kind") == "workflow" and "/" in str(run.get("parent_step_id") or ""):
+                # Loops D8a: the agent step sits in a loop body (its parent_step_id is the scoped
+                # `{S}/{step_id}`; a top-level step id never contains `/`). It never waits.
+                approval_mode = "deny"
+                approval_deny_reason = LOOP_BODY_DENY_REASON
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
@@ -742,6 +750,7 @@ async def start_run_step(
             "is_draft": run.get("draft_spec") is not None,
             "approval_mode": approval_mode,
             "approval_timing": read_approval_timing(),
+            **({"approval_deny_reason": approval_deny_reason} if approval_deny_reason else {}),
         }
 
     return await asyncio.to_thread(work)
