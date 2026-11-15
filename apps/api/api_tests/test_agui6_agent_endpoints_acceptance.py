@@ -136,7 +136,7 @@ def test_resume_at_every_offset_is_a_suffix_of_the_full_stream(ag, tenant):
     payload = body("t", "r1", user("u1", "hello"))
     full = ok(client, agent, payload, h)
     full_ids = [f.id for f in full if f.id]
-    assert full_ids == ["r1:0", "r1:1", "r1:2"] or full_ids[-1] == "r1:2"
+    assert full_ids == ["r1:1", "r1:2"]  # run_started (seq 0) yields no frame
     for n in range(-1, 3):
         frames = ok(client, agent, payload, {**h, "Last-Event-ID": f"r1:{n}"}, continuation=True)
         t = types(frames)

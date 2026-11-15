@@ -230,9 +230,52 @@ def test_unknown_run_id_with_last_event_id_is_404_and_records_nothing(ag, tenant
     client, app = ag
     h = get_auth_header(tenant, "alice")
     agent_id = make_agent(client, h)
-    status, detail, _ = post(client, agent_id, body("t", "r9", user("u1", "hi")), {**h, "Last-Event-ID": "r9:-1"})
-    assert status == 404 and detail == {"detail": "Unknown runId"}
+    for header in ("r9:0", "r9:2", "other:-1"):
+        status, detail, _ = post(client, agent_id, body("t", "r9", user("u1", "hi")), {**h, "Last-Event-ID": header})
+        assert status == 404 and detail == {"detail": "Unknown runId"}, header
     assert runs_of(app, tenant) == [] and worker.calls == []
+
+
+def test_minus_one_cursor_on_an_unrecorded_run_id_runs_it_as_a_continuation(ag, tenant, worker):
+    """A client that lost the stream during the previous-turn wait holds RUN_STARTED only and
+    re-POSTs with `{runId}:-1`: nothing was recorded, so the run starts now, without RUN_STARTED."""
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    status, _, frames = post(client, agent_id, body("t", "r1", user("u1", "hi")), {**h, "Last-Event-ID": "r1:-1"})
+    assert status == 200
+    assert types(frames)[:2] == ["CUSTOM:pydanticos.run", "MESSAGES_SNAPSHOT"] and "RUN_STARTED" not in types(frames)
+    assert types(frames)[-1] == "RUN_FINISHED" and len(runs_of(app, tenant)) == 1
+    # While the previous turn still runs: the wait again, still without RUN_STARTED.
+    worker.hold = True
+    with client.stream("POST", f"/api/v1/ag-ui/agents/{agent_id}", json=body("t", "r2", user("u2", "b")), headers=h) as r:
+        assert r.status_code == 200
+    second = derive_agent_run_id(tenant, agent_id, "t", "r2")
+    worker.hold = False
+    threading.Thread(target=lambda: (time.sleep(0.4), complete(app, tenant, second, "second answer"))).start()
+    status, _, frames = post(client, agent_id, body("t", "r3", user("u3", "c")), {**h, "Last-Event-ID": "r3:-1"})
+    got = types(frames)
+    assert status == 200 and got[0] == "CUSTOM:pydanticos.waiting" and "RUN_STARTED" not in got
+    assert got[1:3] == ["CUSTOM:pydanticos.run", "MESSAGES_SNAPSHOT"] and got[-1] == "RUN_FINISHED"
+
+
+def test_a_failing_key_recheck_ends_the_stream_with_stream_interrupted(ag, tenant, worker, agui_settings, monkeypatch):
+    import eap_api.routes.ag_ui as routes
+
+    agui_settings[0] = AgUiRouteSettings(key_recheck_s=0.1)
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    _, key = _key(client, tenant)
+
+    def broken(c):
+        raise ConnectionError("database unreachable")
+
+    monkeypatch.setattr(routes, "_key_active", broken)
+    worker.hold = True
+    status, _, frames = post(client, agent_id, body("t", "r1", user("u1", "a")), {"Authorization": f"Bearer {key}"})
+    assert status == 200
+    assert frames[-1].data["type"] == "RUN_ERROR" and frames[-1].data["code"] == "stream_interrupted"
 
 
 def test_get_attach_and_thread_snapshot(ag, tenant):
@@ -430,3 +473,49 @@ def test_tool_results_must_answer_pending_calls_and_client_tools_may_not_shadow(
     status, detail, _ = post(client, agent_id, body("t", "r1", user("u1", "a"), tools=shadow), h)
     assert status == 422 and detail["detail"][0]["type"] == "client_tool_shadows_server_tool"
     assert runs_of(app, tenant) == [] and worker.calls == []
+
+
+def _snapshot_ids(frames) -> list[str]:
+    return [m["id"] for m in next(f.data for f in frames if f.data and f.data["type"] == "MESSAGES_SNAPSHOT")["messages"]]
+
+
+def test_regenerate_run_snapshots_leave_out_the_superseded_turn(ag, tenant):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    assert post(client, agent_id, body("t", "r1", user("u1", "hello")), h)[0] == 200
+    regenerate = body("t", "r2", user("u1", "hello"))
+    assert post(client, agent_id, regenerate, h)[0] == 200
+    # Re-POST (attach from start): history is r2's own user message only, then its events.
+    status, _, frames = post(client, agent_id, regenerate, h)
+    assert status == 200 and _snapshot_ids(frames) == ["u1"]
+    # A continuation after r2's answer, and the GET attach, agree.
+    status, _, frames = post(client, agent_id, regenerate, {**h, "Last-Event-ID": "r2:2"})
+    assert status == 200 and _snapshot_ids(frames) == ["u1", "r2-m0"]
+    with client.stream("GET", f"/api/v1/ag-ui/agents/{agent_id}/threads/t/runs/r2/stream", headers=h) as response:
+        assert _snapshot_ids(list(iter_frames(response))) == ["u1"]
+
+
+def test_regenerate_after_a_lost_stream_reruns_only_the_latest_turn(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    assert post(client, agent_id, body("t", "r1", user("u1", "a")), h)[0] == 200
+    assert post(client, agent_id, body("t", "r2", user("u1", "a"), user("u2", "b")), h)[0] == 200  # deduped: b
+    assert post(client, agent_id, body("t", "r3", user("u1", "a"), user("u2", "b")), h)[0] == 200  # regenerate
+    assert [r["input"] for r in runs_of(app, tenant)] == ["a", "b", "b"]
+    thread = client.get(f"/api/v1/ag-ui/agents/{agent_id}/threads/t", headers=h).json()
+    assert [m["id"] for m in thread["messages"]] == ["u1", "r1-m0", "u2", "r3-m0"]
+    assert [r["superseded"] for r in thread["runs"]] == [False, True, False]
+
+
+def test_a_partial_regenerate_keeps_the_earlier_turn_text(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    assert post(client, agent_id, body("t", "r1", user("u0", "x"), user("u1", "y")), h)[0] == 200
+    assert post(client, agent_id, body("t", "r2", user("u1", "y")), h)[0] == 200  # regenerate of u1 alone
+    thread = client.get(f"/api/v1/ag-ui/agents/{agent_id}/threads/t", headers=h).json()
+    ids = [m["id"] for m in thread["messages"]]
+    assert ids == ["u0", "r1-m0", "u1", "r2-m0"] and len(ids) == len(set(ids))
+    assert thread["messages"][0]["content"] == "x\n\ny"

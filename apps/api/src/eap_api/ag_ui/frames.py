@@ -6,7 +6,7 @@ frames come before the run exists or after the stream must stop for a reason of 
   keep-alives while waiting, and `RUN_ERROR previous_turn_running` when the wait times out;
 - a failure to record or start the turn after the wait: `RUN_ERROR` with the refusal's code;
 - the API key re-check of an open stream: `RUN_ERROR unauthorized` once the key is revoked or
-  expired (the run itself continues).
+  expired, `RUN_ERROR stream_interrupted` when the check itself fails (the run continues).
 
 None of these carries a frame id: they derive from no durable event (D7).
 """
@@ -17,7 +17,7 @@ from typing import Any
 
 from ag_ui.core import PROTOCOL_VERSION, RunErrorEvent, RunStartedEvent
 
-from eap_api.ag_ui.translate import KEEP_ALIVE, custom, encode
+from eap_api.ag_ui.translate import KEEP_ALIVE, STREAM_INTERRUPTED_MESSAGE, custom, encode
 
 PREVIOUS_TURN_RUNNING = "previous_turn_running"
 PREVIOUS_TURN_RUNNING_MESSAGE = "The previous turn of this thread is still running; send the message again later."
@@ -42,6 +42,11 @@ def previous_turn_timeout_frame() -> str:
     return run_error_frame(PREVIOUS_TURN_RUNNING_MESSAGE, PREVIOUS_TURN_RUNNING)
 
 
+def stream_interrupted_frame() -> str:
+    """The route could not go on (e.g. the key re-check failed); the run continues, resume (D7)."""
+    return run_error_frame(STREAM_INTERRUPTED_MESSAGE, "stream_interrupted")
+
+
 def unauthorized_frame() -> str:
     return run_error_frame(UNAUTHORIZED_MESSAGE, UNAUTHORIZED)
 
@@ -54,5 +59,6 @@ __all__ = [
     "previous_turn_timeout_frame",
     "run_error_frame",
     "run_started_frame",
+    "stream_interrupted_frame",
     "unauthorized_frame",
 ]

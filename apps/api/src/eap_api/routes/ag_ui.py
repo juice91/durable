@@ -26,7 +26,9 @@ The POST, in order, everything before the stream opens:
    `plan_stream` (409 for another fingerprint, 400 for a malformed `Last-Event-ID`, the run's
    `end_seq` passed), then the recorded run is launched again (a crash between insert and enqueue
    heals) and streamed. A known runId on an archived agent still attaches;
-5. an unknown runId: 404 with a `Last-Event-ID` (nothing is recorded); else a new turn: the D5
+5. an unknown runId: 404 with a `Last-Event-ID` other than `{runId}:-1` (nothing is recorded;
+   `:-1` is a client that lost the stream during the wait below: the new turn, opened as a
+   continuation without RUN_STARTED); else a new turn: the D5
    tail is deduped against the thread's recorded `input_message_ids` (AGUI.5 review M1), the
    options are validated (`new_turn_options`: 409 AGENT_ARCHIVED, 404/409/422/413), client tools
    checked against the spec's server tools (422), the thread resolved (D3: a conversation of this
@@ -63,12 +65,15 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_observability import log_failure
+
 from eap_api.ag_ui.frames import (
     KEEP_ALIVE,
     custom_frame,
     previous_turn_timeout_frame,
     run_error_frame,
     run_started_frame,
+    stream_interrupted_frame,
     unauthorized_frame,
 )
 from eap_api.ag_ui.input import (
@@ -116,7 +121,7 @@ from eap_api.sse import (
 )
 from eap_api.streams.formatter import format_stream
 from eap_api.streams.native import run_items
-from eap_api.streams.resume import StreamPlan, plan_stream
+from eap_api.streams.resume import LastEventIdError, StreamPlan, parse_last_event_id, plan_stream
 from eap_run_store import (
     AgUiRunModel,
     AgUiRunRecord,
@@ -303,18 +308,20 @@ def _plan_or_raise(plan: StreamPlan) -> StreamPlan:
 # --------------------------------------------------------------------------- reads
 
 
-def _thread_message_ids(c: _Ctx, thread_id: str) -> set[str]:
-    """Every client user-message id recorded for this AG-UI thread (all its runs)."""
+def _thread_message_ids(c: _Ctx, thread_id: str) -> list[tuple[str, ...]]:
+    """The client user-message ids recorded by each AG-UI run of this thread, oldest first."""
     with Session(c.engine) as session:
         rows = session.execute(
-            select(AgUiRunModel.input_message_ids).where(
+            select(AgUiRunModel.input_message_ids)
+            .where(
                 AgUiRunModel.tenant_id == c.tenant_id,
                 AgUiRunModel.scope_kind == "agent",
                 AgUiRunModel.scope_id == c.agent_id,
                 AgUiRunModel.external_thread_id == thread_id,
             )
+            .order_by(AgUiRunModel.created_at, AgUiRunModel.external_run_id)
         ).scalars()
-        return {str(i) for ids in rows for i in (ids or []) if isinstance(i, str)}
+        return [tuple(str(i) for i in (ids or []) if isinstance(i, str)) for ids in rows]
 
 
 @dataclass(frozen=True)
@@ -400,8 +407,9 @@ def _thread_view(
     Ids follow D13 with the AG-UI runId that started each turn as the prefix (the native run id
     for a turn started elsewhere, e.g. Studio's REST chat).
 
-    Regenerates (D5, D7): a turn whose client user-message id is sent again by a later turn (a
-    regenerate re-POSTs the same user message under a new runId) is superseded. Its messages are
+    Regenerates (D5, D7): a turn whose user message a later turn sends again (a regenerate
+    re-POSTs the same user message under a new runId) is superseded: the later turn shows the
+    same first client id, or re-sends all of the earlier turn's ids. Its messages are
     left out, so the thread shows the user message once, followed by the latest branch's answer,
     and AG-UI message ids stay unique in the thread. The superseded turn stays in `runs` with
     `superseded: true` (it is still a run, with its own usage and trace). `later_ids` are the
@@ -414,15 +422,19 @@ def _thread_view(
     last = turns[-1]["turn"] + 1
     completed = {str(t["run_id"]): t for t in c.run_store.completed_turns_before(c.tenant_id, conversation_id, last)}
     records = _records_by_run(c, [str(t["id"]) for t in turns])
-    # Walk newest first: a turn is superseded when a later turn (or `later_ids`) names one of its ids.
-    seen: set[str] = set(later_ids)
+    # Walk newest first. A turn shows its user message under its first client id, so an earlier
+    # turn is superseded when a later turn (or `later_ids`) shows the same first id, or re-sends
+    # all of its ids: ids stay unique, and a turn re-running only part of an earlier turn's
+    # messages (a regenerate of u1 after [u0, u1]) leaves that earlier turn's text in place.
+    later: list[tuple[str, ...]] = [later_ids] if later_ids else []
     superseded: set[str] = set()
     for t in reversed(turns):
         rec = records.get(str(t["id"]))
-        ids = set(rec.input_message_ids) if rec is not None else set()
-        if ids & seen:
+        ids = rec.input_message_ids if rec is not None else ()
+        if ids and any(l[0] == ids[0] or set(ids) <= set(l) for l in later):
             superseded.add(str(t["id"]))
-        seen |= ids
+        if ids:
+            later.append(ids)
     view = _ThreadView()
     for t in turns:
         run_id = str(t["id"])
@@ -484,6 +496,8 @@ class _Prepared:
     record: AgUiRunRecord
     prior: list[RunEvent]
     history: list[dict[str, Any]]
+    # A new run recorded for a re-POST with `{runId}:-1`: open as a continuation (no RUN_STARTED).
+    opens_as_continuation: bool = False
 
 
 @dataclass
@@ -492,6 +506,9 @@ class _Wait:
 
     busy_run_id: str
     new_turn: "_NewTurn"
+    # The client already holds RUN_STARTED (a re-POST with `{runId}:-1` after losing the stream
+    # during an earlier wait): the stream starts with CUSTOM pydanticos.waiting.
+    continuation: bool = False
 
 
 def _prepare_known(c: _Ctx, record: AgUiRunRecord, *, same_fingerprint: bool, last_event_id: str | None,
@@ -548,24 +565,40 @@ class _NewTurn:
     fingerprint: str
 
 
-def _deduped(body: Any, mapped: AgUiInput, recorded: set[str]) -> AgUiInput:
+def _without_users(body: dict[str, Any], messages: list[Any], drop: set[str]) -> AgUiInput:
+    kept = [
+        m
+        for m in messages
+        if not (isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("id"), str) and m["id"] in drop)
+    ]
+    return parse_run_agent_input({**body, "messages": kept})
+
+
+def _deduped(body: Any, mapped: AgUiInput, recorded_runs: list[tuple[str, ...]]) -> AgUiInput:
     """The input without the tail's user messages already recorded for this thread (AGUI.5
     review M1): after a lost stream, a plain client's next message re-sends the previous user
-    message too, because it never got the answer. When nothing new would remain (a regenerate:
-    the same user message again with a new runId), the input is kept as sent, so the turn runs
-    that message again."""
+    message too, because it never got the answer.
+
+    When nothing new would remain, the request is a regenerate: it re-runs the user messages of
+    the **latest** recorded run that holds any of the tail's ids, and only those (an earlier
+    turn's message the tail still carries, e.g. [u1, u2] after a lost stream, stays deduped).
+    The new turn then has exactly that run's ids, so it supersedes that turn alone in snapshots
+    (`_thread_view`)."""
+    recorded = {i for ids in recorded_runs for i in ids}
     if not recorded or not any(i in recorded for i in mapped.input_message_ids):
         return mapped
     messages = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(messages, list):
         return mapped
-    kept = [
-        m
-        for m in messages
-        if not (isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("id"), str) and m["id"] in recorded)
-    ]
     try:
-        return parse_run_agent_input({**body, "messages": kept})
+        return _without_users(body, messages, recorded)
+    except AgUiInputError as exc:
+        if exc.code != NO_NEW_INPUT:
+            raise
+    sent = set(mapped.input_message_ids)
+    latest = next((set(ids) for ids in reversed(recorded_runs) if sent & set(ids)), set())
+    try:
+        return _without_users(body, messages, recorded - latest)
     except AgUiInputError as exc:
         if exc.code == NO_NEW_INPUT:
             return mapped
@@ -678,26 +711,39 @@ def _prepare_post(c: _Ctx, body: Any, mapped: AgUiInput, last_event_id: str | No
     fp = fingerprint(mapped)
     key = c.key(mapped.thread_id, mapped.run_id)
     native_run_id = derive_agent_run_id(c.tenant_id, c.agent_id, mapped.thread_id, mapped.run_id)
-    with Session(c.engine) as db:
-        agent = lock_agent(db, c.tenant_id, c.agent_id)
-        record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
-        if record is None and c.run_store.get_run(c.tenant_id, uuid.UUID(native_run_id)) is not None:
-            # The turn exists without its AG-UI row (recorded by a path that did not write it):
-            # record it now, first writer wins, then treat the runId as known.
-            try:
-                record, _ = c.ag_ui.record_ag_ui_run(
-                    c.tenant_id, **key, run_id=native_run_id, fingerprint=fp,
-                    input_message_ids=mapped.input_message_ids,
-                )
-            except (AgUiScopeMismatch, RunNotFound):
-                record = None
-        if record is not None:
+    _load_agent_or_404(c)  # tenant-scoped: another tenant's agent is 404 before anything else
+    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
+    if record is None and c.run_store.get_run(c.tenant_id, uuid.UUID(native_run_id)) is not None:
+        # The turn exists without its AG-UI row (recorded by a path that did not write it):
+        # record it now, first writer wins, then treat the runId as known.
+        try:
+            record, _ = c.ag_ui.record_ag_ui_run(
+                c.tenant_id, **key, run_id=native_run_id, fingerprint=fp,
+                input_message_ids=mapped.input_message_ids,
+            )
+        except (AgUiScopeMismatch, RunNotFound):
+            record = None
+    if record is not None:
+        # A replay starts nothing new, so it takes no agent lock (an archive or publish never
+        # waits for its event and history loads); an archived agent's runs still attach.
+        with Session(c.engine) as db:
             return _prepare_known(
                 c, record, same_fingerprint=record.fingerprint == fp, last_event_id=header, launch=db
             )
-        if header:
+    continuation = False
+    if header:
+        # Only `{runId}:-1` may name a runId not recorded yet: a client that lost the stream during
+        # the previous-turn wait holds RUN_STARTED alone, and the wait ended with the connection,
+        # so nothing was recorded. It is served as the new run, opened as a continuation.
+        try:
+            continuation = parse_last_event_id(header, mapped.run_id, None) == -1
+        except LastEventIdError:
+            continuation = False
+        if not continuation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
 
+    with Session(c.engine) as db:
+        agent = lock_agent(db, c.tenant_id, c.agent_id)
         # A new runId: validate everything before anything is written.
         thread = resolve_agent_thread(c.run_store, c.tenant_id, c.agent_id, mapped.thread_id)
         effective = _deduped(body, mapped, _thread_message_ids(c, mapped.thread_id))
@@ -732,9 +778,11 @@ def _prepare_post(c: _Ctx, body: Any, mapped: AgUiInput, last_event_id: str | No
         native_run_id=native_run_id, fingerprint=fp,
     )
     try:
-        return _record(c, new)
+        prepared = _record(c, new)
     except TurnInProgress as busy:
-        return _Wait(busy_run_id=busy.run_id, new_turn=new)
+        return _Wait(busy_run_id=busy.run_id, new_turn=new, continuation=continuation)
+    prepared.opens_as_continuation = continuation
+    return prepared
 
 
 # --------------------------------------------------------------------------- streaming
@@ -792,14 +840,15 @@ def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncI
     )
     # After the previous-turn wait the client already holds RUN_STARTED: the continuation opening
     # (CUSTOM pydanticos.run, MESSAGES_SNAPSHOT with the missed answer) follows.
-    resume_after = p.plan.after_seq if (p.plan.mode == "continue" or after_wait) else None
+    resume_after = p.plan.after_seq if (p.plan.mode == "continue" or after_wait or p.opens_as_continuation) else None
     return format_stream(items, formatter, resume_after=resume_after)
 
 
 async def _wait_then_stream(d: _StreamDeps, wait: _Wait) -> AsyncIterator[str]:
     c = d.c
     new = wait.new_turn
-    yield run_started_frame(d.thread_id, new.mapped.run_id)
+    if not wait.continuation:
+        yield run_started_frame(d.thread_id, new.mapped.run_id)
     busy = wait.busy_run_id
     yield custom_frame("waiting", {"run_id": busy})
     deadline = time.monotonic() + d.agui.previous_turn_wait_s
@@ -839,12 +888,20 @@ def _key_active(c: _Ctx) -> bool:
 async def _rechecking_key(stream: AsyncIterator[str], c: _Ctx, interval: float) -> AsyncIterator[str]:
     """An API key's stream: before sending a frame, at most every `interval` seconds, check that
     the key is still active; once it is revoked or expired, `RUN_ERROR unauthorized` replaces the
-    frame and the stream ends (never after the run's own terminal frame, which is the last one)."""
+    frame and the stream ends (never after the run's own terminal frame, which is the last one).
+    A check that fails (a database error) ends the stream with `RUN_ERROR stream_interrupted`."""
     next_check = time.monotonic() + interval
     async with aclosing(stream) as frames:
         async for frame in frames:
             if time.monotonic() >= next_check:
-                if not await run_in_threadpool(_key_active, c):
+                try:
+                    active = await run_in_threadpool(_key_active, c)
+                except Exception as exc:  # noqa: BLE001 - a failed check must still end the stream cleanly
+                    # The run continues; the client resumes (D7) and is re-authenticated then.
+                    log_failure(log, "ag-ui key re-check failed", exc, code="agui_key_recheck_failed")
+                    yield stream_interrupted_frame()
+                    return
+                if not active:
                     yield unauthorized_frame()
                     return
                 next_check = time.monotonic() + interval
