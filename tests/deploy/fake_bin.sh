@@ -2,6 +2,12 @@
 set -euo pipefail
 tool=$(basename "$0")
 printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG}"
+# Like the real tools, consume a manifest piped in with `-f -`. Exiting without reading it
+# lets the writer (e.g. `kubectl create secret ... -o yaml | kubectl apply -f -`) die of
+# SIGPIPE, and under pipefail that kills up.sh with exit 141 at random.
+if [[ " $* " == *" -f - "* || " $* " == *" --filename=- "* || " $* " == *" --filename - "* ]]; then
+  cat >/dev/null || true
+fi
 if [[ -n "${STUB_FAIL_SUBSTRING:-}" && " $* " == *" ${STUB_FAIL_SUBSTRING} "* ]]; then
   exit 1
 fi
