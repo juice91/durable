@@ -1367,3 +1367,39 @@ def canonical_workflow_hash(spec: WorkflowSpec) -> str:
     """SHA-256 of the spec's JSON with sorted keys: equal specs hash equal, any change changes it."""
     payload = json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+class WorkflowScheduleSpec(BaseModel):
+    """Body of POST /workflows/{id}/schedules: a named cron (5 fields) that runs the latest
+    published version with a fixed input. The routes validate cron, timezone and input."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    cron: str = Field(min_length=1, max_length=100)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    input: Any = Field(default_factory=dict)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+class WorkflowScheduleUpdate(BaseModel):
+    """Body of PATCH /workflows/schedules/{id}: any subset of the fields (and `active`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    cron: str | None = Field(default=None, min_length=1, max_length=100)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    input: Any = None
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def _not_null(self) -> "WorkflowScheduleUpdate":
+        for key in self.model_fields_set:
+            if key != "input" and getattr(self, key) is None:
+                raise ValueError(f"{key} cannot be null")
+        return self

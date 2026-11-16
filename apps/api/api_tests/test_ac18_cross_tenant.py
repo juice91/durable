@@ -30,7 +30,7 @@ from eap_api.launcher import DBOSRunLauncher, LauncherSettings, get_run_launcher
 from .conftest import get_auth_header
 from .run_helpers import PG_URL, cleanup_tenant, hard_timeout, requires_pg
 from .test_approvals_api import tool_url, waiting_step, waiting_tool_call
-from .test_workflow_runs_api import FakeClient
+from .test_workflow_runs_api import FakeClient, publish_demo
 
 pytestmark = requires_pg
 API = "/api/v1"
@@ -64,6 +64,12 @@ NEW_ROUTES = {
     ("GET", "/api/v1/eval-suites"),
     ("GET", "/api/v1/evals/runs"),
     ("GET", "/api/v1/evals/scorers"),
+    # Parity round 2, D2: workflow schedules.
+    ("GET", "/api/v1/workflows/schedules"),
+    ("GET", "/api/v1/workflows/{workflow_id}/schedules"),
+    ("POST", "/api/v1/workflows/{workflow_id}/schedules"),
+    ("PATCH", "/api/v1/workflows/schedules/{schedule_id}"),
+    ("DELETE", "/api/v1/workflows/schedules/{schedule_id}"),
 }
 # Pre-milestone decision routes that now go through the shared decision helper (AC.8).
 CHANGED_DECISION_ROUTES = {
@@ -99,6 +105,7 @@ def api(fake):
     engine = app.state.database_engine
     for t in tenants:
         with engine.begin() as conn:
+            conn.execute(text("DELETE FROM workflow_schedules WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM eval_suites WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM workflow_versions WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM workflows WHERE tenant_id = :t"), {"t": t})
@@ -116,7 +123,7 @@ def test_the_inventory_is_every_approval_eval_and_output_schema_route(api):
     routes = app_routes(app)
     assert NEW_ROUTES <= routes, NEW_ROUTES - routes
     assert CHANGED_DECISION_ROUTES <= routes
-    kinds = ("approval", "eval", "output-schema")
+    kinds = ("approval", "eval", "output-schema", "schedules")
     of_kind = {(m, p) for m, p in routes if any(k in p for k in kinds)}
     assert of_kind <= NEW_ROUTES | CHANGED_DECISION_ROUTES, of_kind - NEW_ROUTES - CHANGED_DECISION_ROUTES
 
@@ -149,7 +156,12 @@ def owner_world(client, app, tenant: str, h: dict[str, str]) -> dict[str, Any]:
             " cache_read_tokens, cache_write_tokens, usage_measured, created_at, operation)"
             " VALUES (:t, :r, :k, 'test:judge', 200, 50, 0, 0, true, now() - interval '1 hour', 'chat')"),
             {"t": tenant, "r": eval_run, "k": f"judge:{case_id}:1"})
-    return {"run": str(run_id), "agent": agent_id, "step_run": str(step_run), "structured": structured,
+    workflow = publish_demo(client, h)
+    r = client.post(f"{API}/workflows/{workflow}/schedules", headers=h,
+                    json={"name": "nightly", "cron": "0 3 * * *", "input": {"q": "x"}})
+    assert r.status_code == 201, r.text
+    return {"workflow": workflow, "schedule": r.json()["id"],
+            "run": str(run_id), "agent": agent_id, "step_run": str(step_run), "structured": structured,
             "suite": suite_id, "case": case_id, "eval_run": eval_run}
 
 
@@ -200,6 +212,14 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
          f"/workflows/runs/{w['step_run']}/steps/approve/approve", {"comment": "x"}, 404),
         (("POST", "/api/v1/workflows/runs/{run_id}/steps/{step_id}/reject"), "POST",
          f"/workflows/runs/{w['step_run']}/steps/approve/reject", {}, 404),
+        (("GET", "/api/v1/workflows/schedules"), "GET", "/workflows/schedules", None, 200),
+        (("GET", "/api/v1/workflows/{workflow_id}/schedules"), "GET", f"/workflows/{w['workflow']}/schedules", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/schedules"), "POST", f"/workflows/{w['workflow']}/schedules",
+         {"name": "x", "cron": "* * * * *", "input": {"priority": "low"}}, 404),
+        (("PATCH", "/api/v1/workflows/schedules/{schedule_id}"), "PATCH", f"/workflows/schedules/{w['schedule']}",
+         {"active": False}, 404),
+        (("DELETE", "/api/v1/workflows/schedules/{schedule_id}"), "DELETE", f"/workflows/schedules/{w['schedule']}",
+         None, 404),
         (("GET", "/api/v1/runs/{run_id}"), "GET", f"/runs/{e}", None, 404),
         (("GET", "/api/v1/runs/{run_id}/trace"), "GET", f"/runs/{e}/trace", None, 404),
     ]
@@ -239,6 +259,9 @@ def test_another_tenant_reaches_nothing_on_any_new_route(api, fake):
     assert sorted((i["kind"], i["approval_key"], i["decision"]) for i in pending) == [
         ("step", "approve", None), ("tool", "call_1", None)]
     assert fake.sent == sent_before  # no wake-up for a refused decision
+    mine = client.get(f"{API}/workflows/schedules", headers=h).json()["items"]
+    assert [(i["id"], i["active"], i["name"]) for i in mine] == [(w["schedule"], True, "nightly")]
+    assert client.get(f"{API}/workflows/schedules", headers=other).json()["items"] == []
     assert client.get(f"{API}/eval-suites/{w['suite']}", headers=h).json()["case_count"] == 1
     assert client.get(f"{API}/eval-suites/{w['suite']}/cases/{w['case']}", headers=h).json()["input"] == "hi"
     runs = client.get(f"{API}/agents/{w['agent']}/evals/runs", headers=h).json()["items"]
