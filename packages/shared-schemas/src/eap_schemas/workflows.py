@@ -88,6 +88,7 @@ __all__ = (
     "AllCondition",
     "AnyCondition",
     "ApprovalStep",
+    "InputStep",
     "BranchCase",
     "BranchStep",
     "Condition",
@@ -365,7 +366,7 @@ def _check_step_id(value: str, what: str = "step id") -> str:
     return value
 
 
-_STEP_TAGS = frozenset({"agent", "tool", "branch", "parallel", "approval", "foreach", "loop", "evaluate"})
+_STEP_TAGS = frozenset({"agent", "tool", "branch", "parallel", "approval", "input", "foreach", "loop", "evaluate"})
 
 
 def _json_loc(loc: tuple[Any, ...]) -> list[Any]:
@@ -461,6 +462,40 @@ class ApprovalStep(_Sequential):
     type: Literal["approval"] = "approval"
     prompt: str = Field(min_length=1, max_length=2000)
     timeout_hours: int = Field(ge=1, le=168)
+
+
+MAX_RESUME_SCHEMA_BYTES = 16 * 1024
+
+
+class InputStep(_Sequential):
+    """Pause until a person submits data that satisfies ``resume_schema`` (a JSON Schema object),
+    or the timeout passes. The submitted object is the step's output under ``data`` (``decided_by``
+    names who submitted it). Unlike an approval step this is a data form, not an approve/reject
+    decision; a person may still reject it (the run then fails ``approval_rejected``)."""
+
+    type: Literal["input"] = "input"
+    prompt: str = Field(min_length=1, max_length=2000)
+    timeout_hours: int = Field(ge=1, le=168)
+    resume_schema: dict[str, Any]
+
+    @field_validator("resume_schema")
+    @classmethod
+    def _resume_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        import json
+
+        import jsonschema
+
+        if value.get("type") != "object":
+            raise ValueError("resume_schema must be a JSON Schema with type 'object'")
+        if len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_RESUME_SCHEMA_BYTES:
+            raise ValueError(f"resume_schema must be at most {MAX_RESUME_SCHEMA_BYTES // 1024} KiB as JSON")
+        if "$ref" in json.dumps(value):
+            raise ValueError("resume_schema must not use $ref")
+        try:
+            jsonschema.validators.validator_for(value).check_schema(value)
+        except jsonschema.SchemaError:
+            raise ValueError("resume_schema is not a valid JSON Schema") from None
+        return value
 
 
 class BranchCase(BaseModel):
@@ -658,7 +693,7 @@ class EvaluateStep(_Sequential):
 
 
 Step = Annotated[
-    Union[AgentStep, ToolStep, BranchStep, ParallelStep, ApprovalStep, ForeachStep, LoopStep, EvaluateStep],
+    Union[AgentStep, ToolStep, BranchStep, ParallelStep, ApprovalStep, InputStep, ForeachStep, LoopStep, EvaluateStep],
     Field(discriminator="type"),
 ]
 

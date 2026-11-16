@@ -18,6 +18,14 @@ export interface AgentSpec {
   model_settings?: {
     temperature?: number | null;
     max_tokens?: number | null;
+    /** Left out of the stored spec while unset (the hash of older specs stays the same). */
+    top_p?: number | null;
+    top_k?: number | null;
+    frequency_penalty?: number | null;
+    presence_penalty?: number | null;
+    seed?: number | null;
+    max_steps?: number | null;
+    max_retries?: number | null;
   };
 }
 

@@ -35,6 +35,10 @@ export interface ComboboxProps {
   contentClassName?: string;
   /** data-testid on the trigger. */
   testId?: string;
+  /** id of the trigger, so a visible `<label htmlFor>` and "focus this field" can reach it. */
+  id?: string;
+  invalid?: boolean;
+  describedBy?: string;
 }
 
 /**
@@ -55,6 +59,9 @@ export function Combobox({
   className,
   contentClassName,
   testId,
+  id,
+  invalid,
+  describedBy,
 }: ComboboxProps) {
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.value === value) ?? null;
@@ -64,7 +71,10 @@ export function Combobox({
         <Button
           role="combobox"
           aria-expanded={open}
+          id={id}
           aria-label={label}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={describedBy}
           variant="ghost"
           disabled={disabled}
           data-testid={testId}

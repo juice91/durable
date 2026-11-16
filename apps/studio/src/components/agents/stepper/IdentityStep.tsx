@@ -1,9 +1,12 @@
 "use client";
 
 import React from "react";
+import { ModelPicker, useModelList } from "@/components/shared/ModelPicker";
 import { fallbackProblems, limitsProblems } from "../agentCapabilities";
 import { stepForErrorMessage, stepStatus } from "../specSections";
-import { numberProblems, TEMPERATURE_MAX, TEMPERATURE_MIN, type EditorDraft } from "./editorDraft";
+import { ModelSettingsFields } from "@/components/shared/ModelSettingsFields";
+import { EXTRA_SETTING_KEYS, type ModelSettingKey } from "@/lib/modelSettings";
+import { extraSettingProblems, numberProblems, TEMPERATURE_MAX, TEMPERATURE_MIN, type EditorDraft } from "./editorDraft";
 import { fieldClass, labelClass } from "./fieldStyles";
 import { LimitsFields, limitsFieldId } from "./LimitsFields";
 import type { EditorStepDefinition, MissingField, StepProps } from "./types";
@@ -11,12 +14,24 @@ import type { EditorStepDefinition, MissingField, StepProps } from "./types";
 // Polite and persistent, like the instructions' placeholder checks.
 const problemClass = "mt-1 text-caption text-destructive-text";
 
+/** Element ids of the other model settings' inputs (camelCase of the spec key). */
+export const EXTRA_SETTING_IDS: Record<(typeof EXTRA_SETTING_KEYS)[number], string> = {
+  top_p: "topP",
+  top_k: "topK",
+  frequency_penalty: "frequencyPenalty",
+  presence_penalty: "presencePenalty",
+  seed: "seed",
+  max_steps: "maxSteps",
+  max_retries: "maxRetries",
+};
+
 /**
  * Step 1: the agent's name, model and model settings, then the collapsible "Limits and fallback
  * models" group (AC.13: `spec.limits` and `spec.fallback_models`, edited through `onSpecChange`).
  */
 export function IdentityStep({ draft, spec, onChange, onSpecChange }: StepProps) {
   const problems = numberProblems(draft);
+  const catalog = useModelList();
   return (
     <div className="space-y-4">
       <div>
@@ -26,20 +41,16 @@ export function IdentityStep({ draft, spec, onChange, onSpecChange }: StepProps)
         <input id="name" type="text" value={draft.name} onChange={(e) => onChange({ name: e.target.value })} className={fieldClass} required />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="min-w-0">
-          <label htmlFor="provider" className={labelClass}>
-            Model provider
-          </label>
-          <input id="provider" type="text" value={draft.provider} onChange={(e) => onChange({ provider: e.target.value })} className={fieldClass} required />
-        </div>
-        <div className="min-w-0">
-          <label htmlFor="modelName" className={labelClass}>
-            Model name
-          </label>
-          <input id="modelName" type="text" value={draft.modelName} onChange={(e) => onChange({ modelName: e.target.value })} className={fieldClass} required />
-        </div>
-      </div>
+      <ModelPicker
+        providerId="provider"
+        modelId="modelName"
+        provider={draft.provider}
+        name={draft.modelName}
+        models={catalog.models}
+        loadError={catalog.error}
+        required
+        onChange={({ provider, name }) => onChange({ provider, modelName: name })}
+      />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="min-w-0">
@@ -86,6 +97,19 @@ export function IdentityStep({ draft, spec, onChange, onSpecChange }: StepProps)
         </div>
       </div>
 
+      <fieldset className="space-y-3">
+        <legend className={labelClass}>More model settings (optional)</legend>
+        <p className="text-caption text-muted-foreground">
+          Left empty, a setting is not sent and the provider&apos;s default applies. Some providers refuse some settings; publishing says which.
+        </p>
+        <ModelSettingsFields
+          keys={EXTRA_SETTING_KEYS}
+          values={draft.modelExtras}
+          idFor={(key) => EXTRA_SETTING_IDS[key as (typeof EXTRA_SETTING_KEYS)[number]]}
+          onChange={(key: ModelSettingKey, value) => onChange({ modelExtras: { ...draft.modelExtras, [key]: value } })}
+        />
+      </fieldset>
+
       <LimitsFields spec={spec} onSpecChange={onSpecChange} />
     </div>
   );
@@ -105,6 +129,9 @@ export const identityStep: EditorStepDefinition = {
     const problems = numberProblems(draft);
     if (problems.temperature) out.push({ step: "identity", fieldId: "temperature", message: problems.temperature });
     if (problems.maxTokens) out.push({ step: "identity", fieldId: "maxTokens", message: problems.maxTokens });
+    for (const [key, message] of Object.entries(extraSettingProblems(draft))) {
+      out.push({ step: "identity", fieldId: EXTRA_SETTING_IDS[key as (typeof EXTRA_SETTING_KEYS)[number]], message });
+    }
     for (const problem of limitsProblems(spec)) out.push({ step: "identity", fieldId: limitsFieldId(problem.field), message: problem.message });
     // The problem fields are the element ids already: `fallback-<i>` (fallbackFieldId) or `fallback-add`.
     for (const problem of fallbackProblems(spec)) out.push({ step: "identity", fieldId: problem.field, message: problem.message });

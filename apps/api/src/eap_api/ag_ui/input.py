@@ -12,7 +12,8 @@ What it does, in order (`parse_run_agent_input`):
   keyed with `thread_key` (a hyphenated UUID is lowercased, anything else is opaque).
 - `messages`: only the **tail after the last assistant message** is read (D5). In it, `user`
   messages give the new input (text only: a string, or a list of `{"type": "text"}` parts; any
-  other part is 422 `unsupported_content`), joined with a blank line; `tool` messages give the
+  other part is 422 `unsupported_content`; `image` and `document` parts that reference an uploaded
+  attachment (W2.4) are accepted, see `_user_content`), joined with a blank line; `tool` messages give the
   client tool results (`ClientToolResult`). `system`, `developer`, `reasoning` and `activity`
   messages in the tail, and every message before it, are ignored and counted (logged by count
   only). Client-sent assistant turns, system prompts and earlier history never reach the run.
@@ -66,7 +67,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 
 from eap_api.request_guard import guarded_json_route
-from eap_schemas import AgentSpec, ModelRef
+from eap_schemas import AgentSpec, ModelRef, ModelSettings
 from eap_schemas.client_tools import (
     MAX_AGUI_INPUT_BYTES,
     MAX_CLIENT_TOOL_SCHEMA_NODES,
@@ -139,6 +140,7 @@ RESUME_UNKNOWN_INTERRUPT = "resume_unknown_interrupt"
 WORKFLOW_INPUT_INVALID = "workflow_input_invalid"
 DRAFT_NOT_ALLOWED = "draft_not_allowed"
 MODEL_OVERRIDE_NOT_ALLOWED = "model_override_not_allowed"
+MODEL_SETTINGS_OVERRIDE_NOT_ALLOWED = "model_settings_override_not_allowed"
 RESOURCE_MISMATCH = "resource_mismatch"
 RESOURCE_ID_INVALID = "resource_id_invalid"
 
@@ -183,7 +185,7 @@ def _model_keys(*models: type[BaseModel]) -> frozenset[str]:
     return frozenset(keys)
 
 
-_KNOWN_LOC_KEYS = _model_keys(AgUiRunOptions, ModelRef, ClientToolDecl, ClientToolResult)
+_KNOWN_LOC_KEYS = _model_keys(AgUiRunOptions, ModelRef, ModelSettings, ClientToolDecl, ClientToolResult)
 
 
 def _safe_loc(loc: Iterable[Any]) -> list[str | int]:
@@ -290,6 +292,8 @@ class AgUiInput:
     client_thread_id: str = ""
     tool_result_message_indexes: tuple[int, ...] = ()
     input_messages: tuple[tuple[str, str], ...] = ()
+    # (message id, attachment ids) of the kept user messages that reference uploaded files (W2.4).
+    attachments: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def has_user_input(self) -> bool:
@@ -370,9 +374,60 @@ def _text_content(content: Any, loc: list[str | int], *, allow_none: bool) -> st
     raise _unprocessable(MESSAGE_INVALID, loc, "content must be a string or a list of text parts")
 
 
+_ATTACHMENT_URL = re.compile(
+    r"^(?:attachment:|(?:.*/)?attachments/)(?P<id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+MAX_ATTACHMENTS_PER_MESSAGE = 5
+ATTACHMENT_PART_TYPES = ("image", "document")
+
+
+def _user_content(content: Any, loc: list[str | int]) -> tuple[str, tuple[str, ...]]:
+    """A user message's text and the attachment ids its media parts reference. An `image` or
+    `document` part is accepted only as a reference to an uploaded attachment: `source` a `url`
+    source whose value is `/api/v1/attachments/{id}` (or `attachment:{id}`). Inline data, other
+    URLs, audio and video are 422 unsupported_content."""
+    if not isinstance(content, list) or not any(
+        isinstance(p, dict) and p.get("type") in ATTACHMENT_PART_TYPES for p in content
+    ):
+        return _text_content(content, loc, allow_none=False), ()
+    texts: list[str] = []
+    ids: list[str] = []
+    for i, part in enumerate(content):
+        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+            raise _unprocessable(MESSAGE_INVALID, [*loc, i], "a content part must be an object with a type")
+        kind = part["type"]
+        if kind == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise _unprocessable(MESSAGE_INVALID, [*loc, i, "text"], "a text part needs a string text")
+            texts.append(text)
+        elif kind in ATTACHMENT_PART_TYPES:
+            source = part.get("source")
+            value = source.get("value") if isinstance(source, dict) and source.get("type") == "url" else None
+            found = _ATTACHMENT_URL.match(value) if isinstance(value, str) else None
+            if found is None:
+                raise _unprocessable(
+                    UNSUPPORTED_CONTENT, [*loc, i, "source"],
+                    "an attachment part must reference an uploaded file: a url source /api/v1/attachments/{id}"
+                    " (upload with POST /attachments first)",
+                )
+            attachment_id = found.group("id").lower()
+            if attachment_id not in ids:
+                ids.append(attachment_id)
+        else:
+            raise _unprocessable(
+                UNSUPPORTED_CONTENT, [*loc, i, "type"], "only text, image and document content is supported"
+            )
+    if len(ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise _unprocessable(
+            "attachments_too_many", loc, f"at most {MAX_ATTACHMENTS_PER_MESSAGE} attachments per message"
+        )
+    return "".join(texts), tuple(ids)
+
+
 def _parse_messages(
     messages: Any,
-) -> tuple[list[tuple[str, str]], list[ClientToolResult], list[int], int, dict[str, int]]:
+) -> tuple[list[tuple[str, str]], list[ClientToolResult], list[int], int, dict[str, int], dict[str, tuple[str, ...]]]:
     """(user messages [(id, text)], tool results, each result's index in `messages`, messages
     before the tail, ignored tail roles)."""
     if messages is None:
@@ -386,6 +441,7 @@ def _parse_messages(
         if message["role"] == "assistant":
             last_assistant = i
     users: list[tuple[str, str]] = []
+    user_attachments: dict[str, tuple[str, ...]] = {}
     results: list[ClientToolResult] = []
     result_indexes: list[int] = []
     seen_calls: set[str] = set()
@@ -396,7 +452,13 @@ def _parse_messages(
         loc: list[str | int] = ["messages", i]
         if role == "user":
             message_id = _external_id(message.get("id"), [*loc, "id"], MESSAGE_INVALID)
-            users.append((message_id, _text_content(message.get("content"), [*loc, "content"], allow_none=False)))
+            text, attachment_ids = _user_content(message.get("content"), [*loc, "content"])
+            if attachment_ids and not text.strip():
+                # An attachment-only message still needs a text turn: name the files.
+                text = "Attached: see the attached file" + ("s" if len(attachment_ids) > 1 else "") + "."
+            users.append((message_id, text))
+            if attachment_ids:
+                user_attachments[message_id] = attachment_ids
         elif role == "tool":
             call_id = message.get("toolCallId")
             if not isinstance(call_id, str) or _TOOL_CALL_ID.match(call_id) is None:
@@ -420,7 +482,7 @@ def _parse_messages(
                 raise _from_validation(exc, loc, TOOL_RESULT_INVALID) from None
         else:
             ignored_roles[role] = ignored_roles.get(role, 0) + 1
-    return users, results, result_indexes, last_assistant + 1, ignored_roles
+    return users, results, result_indexes, last_assistant + 1, ignored_roles, user_attachments
 
 
 def _parse_tools(tools: Any) -> tuple[ClientToolDecl, ...]:
@@ -558,7 +620,9 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
         raise _unprocessable(BODY_INVALID, [], "the body must be a RunAgentInput object")
     thread_id = _path_id(body.get("threadId"), ["threadId"], THREAD_ID_INVALID)
     run_id = _path_id(body.get("runId"), ["runId"], RUN_ID_INVALID)
-    users, results, result_indexes, before_tail, ignored_roles = _parse_messages(body.get("messages"))
+    users, results, result_indexes, before_tail, ignored_roles, user_attachments = _parse_messages(
+        body.get("messages")
+    )
     client_tools = _parse_tools(body.get("tools"))
     options = _parse_options(body.get("forwardedProps"))
     resume = _parse_resume(body.get("resume"))
@@ -595,6 +659,9 @@ def parse_run_agent_input(body: Any) -> AgUiInput:
         last_user_text=kept[-1][1] if kept else None,
         input_message_ids=tuple(message_id for message_id, _ in kept),
         input_messages=tuple(kept),
+        attachments=tuple(
+            (message_id, user_attachments[message_id]) for message_id, _ in kept if message_id in user_attachments
+        ),
         tool_results=tuple(results),
         tool_result_message_indexes=tuple(result_indexes),
         client_tools=client_tools,
@@ -662,8 +729,12 @@ def fingerprint_payload(mapped: AgUiInput) -> dict[str, Any]:
         "request_context": options.request_context or {},
         "resource_id": options.resource_id,
     }
+    if options.model_settings is not None and options.model_settings.set_values():
+        payload["model_settings"] = options.model_settings.set_values()  # absent when unset: old fingerprints hold
     if options.has_input:
         payload["workflow_input"] = options.input
+    if mapped.attachments:
+        payload["attachments"] = [[mid, list(ids)] for mid, ids in mapped.attachments]  # absent when none
     return payload
 
 
@@ -791,7 +862,7 @@ def check_thread_resource(conversation: dict[str, Any], options: AgUiRunOptions)
 
 
 def check_principal_options(options: AgUiRunOptions, *, is_api_key: bool) -> None:
-    """D16: an API key may not run the draft or override the model (403). The dev bearer may."""
+    """D16: an API key may not run the draft or override the model or its settings (403). The dev bearer may."""
     if not is_api_key:
         return
     if options.version == "draft":
@@ -807,6 +878,13 @@ def check_principal_options(options: AgUiRunOptions, *, is_api_key: bool) -> Non
             MODEL_OVERRIDE_NOT_ALLOWED,
             ["forwardedProps", "pydanticos", "model"],
             "an API key may not override the model",
+        )
+    if options.model_settings is not None and options.model_settings.set_values():
+        raise AgUiInputError(
+            status.HTTP_403_FORBIDDEN,
+            MODEL_SETTINGS_OVERRIDE_NOT_ALLOWED,
+            ["forwardedProps", "pydanticos", "modelSettings"],
+            "an API key may not override the model settings",
         )
 
 

@@ -22,6 +22,7 @@ import { useUnsavedChangesGuard } from "@/components/agents/stepper/useUnsavedCh
 import { navigateGuarded } from "@/components/frame/navigationGuard";
 import { useRouter } from "next/navigation";
 import { useAgentPage } from "./AgentPageContext";
+import { AttachedScorers } from "./AttachedScorers";
 
 const notice = "rounded-md border p-3 text-label";
 
@@ -268,6 +269,10 @@ export function EditorTab({ agentId }: { agentId: string }) {
           ),
         }}
       />
+      <section aria-labelledby="editor-scorers-title" className="mt-6 border-t border-border pt-4">
+        <h2 id="editor-scorers-title" className="mb-2 text-title font-semibold text-foreground">Scorers</h2>
+        <AttachedScorers agentId={agent.id} />
+      </section>
       <CompareSheet
         agentId={agent.id}
         compare={query.compare}

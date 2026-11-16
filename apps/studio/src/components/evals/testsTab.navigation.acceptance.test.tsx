@@ -50,10 +50,10 @@ describe("the Tests tab and its route", () => {
     expect(routes.agentTests("a1", { suite: "s1", compare: `${RUN_A}..${RUN_B}` })).toContain("compare=");
   });
 
-  it("adds no Evaluation nav group (the group stays empty and hidden)", () => {
+  it("the Evaluation group holds Datasets, Scorers and Experiments, and the Tests tab is still not a nav item", () => {
     expect(NAV_GROUPS.some((g) => g.id === "evaluation")).toBe(true);
-    expect(navItems.filter((item) => item.group === "evaluation")).toEqual([]);
-    expect(navSections.some((section) => section.group.id === "evaluation")).toBe(false);
+    expect(navItems.filter((item) => item.group === "evaluation").map((item) => item.label)).toEqual(["Datasets", "Scorers", "Experiments"]);
+    expect(navSections.find((section) => section.group.id === "evaluation")?.items.map((item) => item.href)).toEqual([routes.datasets(), routes.scorers(), routes.experiments()]);
     expect(allNavItems.some((item) => /\/tests/.test(item.href))).toBe(false);
   });
 

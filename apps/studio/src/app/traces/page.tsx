@@ -1,5 +1,6 @@
 "use client";
 
+import { TRACE_COLUMNS_STORAGE_KEY } from "@/lib/traces";
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { formatCost, formatTokens } from "@/lib/format";
@@ -27,6 +28,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { navCrumb } from "@/lib/nav";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Button } from "@/components/ui/Button";
+import { ColumnChooser, useColumnVisibility } from "@/components/shared/ColumnChooser";
 import { RunModel } from "@/components/traces/RunModel";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
@@ -45,6 +47,10 @@ const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "recovering", label: "Recovering" },
   { value: "needs_attention", label: "Needs Attention" },
 ];
+
+/** Per-viewer column choice (hidden ids) for the list; tags are off until asked for. */
+const DEFAULT_HIDDEN_COLUMNS = ["tags"] as const;
+const splitList = (value: string | null) => (value ? value.split(",").map((v) => v.trim()).filter(Boolean) : []);
 
 const inputClass =
   "h-8 rounded-md border border-input bg-surface px-2 text-label text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -176,7 +182,7 @@ function TracesList() {
   const customStatus = filters.status.length > 1 || (filters.status.length === 1 && !STATUS_OPTIONS.some((o) => o.value === filters.status[0]));
   const agentOptions = Object.entries(agentNames).sort((a, b) => a[1].localeCompare(b[1]));
 
-  const columns: DataListColumn<TraceRun>[] = [
+  const allColumns: DataListColumn<TraceRun>[] = [
     {
       id: "time",
       header: "Time",
@@ -192,6 +198,18 @@ function TracesList() {
       ),
     },
     { id: "status", header: "Status", cell: (run) => <StatusPill status={run.display_status} /> },
+    {
+      id: "tags",
+      header: "Tags",
+      cell: (run) =>
+        run.tags && run.tags.length ? (
+          <span className="flex flex-wrap gap-1" data-testid="trace-row-tags">
+            {run.tags.map((tag) => <span key={tag} className="rounded-sm border border-border px-1 font-mono text-caption">{tag}</span>)}
+          </span>
+        ) : (
+          <span className={dim}>-</span>
+        ),
+    },
     {
       id: "model",
       header: "Model",
@@ -280,6 +298,15 @@ function TracesList() {
     },
   ];
 
+  const columnChoice = useColumnVisibility(TRACE_COLUMNS_STORAGE_KEY, DEFAULT_HIDDEN_COLUMNS);
+  // "time" holds the row's open button, so it cannot be hidden.
+  const columns = allColumns.filter((column) => column.id === "time" || columnChoice.isVisible(column.id));
+  const chooserColumns = allColumns.map((column) => ({
+    id: column.id,
+    label: typeof column.header === "string" ? column.header : column.id,
+    locked: column.id === "time",
+  }));
+
   return (
     <>
       <PageHeader crumbs={[navCrumb("traces", { current: true })]} />
@@ -359,11 +386,17 @@ function TracesList() {
                   className={inputClass}
                 />
               </div>
+              <TextFilter id="q-filter" label="Search" value={filters.q} placeholder="input, output, error, model" onCommit={(q) => setFilters({ q })} />
+              <TextFilter id="tags-filter" label="Tags" value={filters.tags.length ? filters.tags.join(", ") : null} placeholder="kind:agent, draft" onCommit={(value) => setFilters({ tags: splitList(value) })} />
+              <TextFilter id="metadata-filter" label="Metadata" value={filters.metadata.length ? filters.metadata.join(", ") : null} placeholder="key=value, key=value" onCommit={(value) => setFilters({ metadata: splitList(value).filter((pair) => pair.includes("=")) })} />
               {hasActiveFilters(filters) ? (
                 <Button variant="ghost" size="sm" onClick={() => writeFilters(EMPTY_FILTERS)}>
                   Clear filters
                 </Button>
               ) : null}
+              <div className="ml-auto">
+                <ColumnChooser columns={chooserColumns} hidden={columnChoice.hidden} onVisibleChange={columnChoice.setVisible} onReset={columnChoice.reset} />
+              </div>
             </div>
 
             {error ? (

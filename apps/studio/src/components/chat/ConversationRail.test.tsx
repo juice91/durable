@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationRail, RAIL_SETTLE_MS, RAIL_SETTLE_READS, turnUnfinished } from "./ConversationRail";
 import {
+  cloneConversation,
   listConversations,
   renameConversation,
   type Conversation,
@@ -11,6 +12,7 @@ import {
 } from "@/lib/conversations";
 
 vi.mock("@/lib/conversations", () => ({
+  cloneConversation: vi.fn(),
   listConversations: vi.fn(),
   renameConversation: vi.fn(),
 }));
@@ -327,5 +329,38 @@ describe("ConversationRail: a finished turn's status settles", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("Clone", () => {
+    const openMenu = async (name: RegExp) => {
+      const trigger = await screen.findByRole("button", { name });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      return screen.findByTestId("conversation-clone");
+    };
+
+    it("clones from the row menu: the copy goes to the top and is handed to onCloned", async () => {
+      vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer"), conv("c2", "Other")]));
+      vi.mocked(cloneConversation).mockResolvedValue(conv("c3", "Printer (copy)"));
+      const onCloned = vi.fn();
+      renderRail({ onCloned });
+      fireEvent.click(await openMenu(/^Actions for Printer/));
+      await waitFor(() => expect(cloneConversation).toHaveBeenCalledWith("c1"));
+      await waitFor(() => expect(onCloned).toHaveBeenCalledWith(expect.objectContaining({ id: "c3" })));
+      const rows = screen.getAllByRole("button").filter((b) => b.hasAttribute("data-conversation"));
+      expect(rows.map((b) => b.getAttribute("data-conversation"))).toEqual(["c3", "c1", "c2"]);
+      expect(screen.queryByTestId("conversation-clone-error")).toBeNull();
+    });
+
+    it("a failure shows the error and opens nothing", async () => {
+      vi.mocked(listConversations).mockResolvedValue(page([conv("c1", "Printer")]));
+      vi.mocked(cloneConversation).mockRejectedValue(Object.assign(new Error("Conversation not found"), { status: 404 }));
+      const onCloned = vi.fn();
+      renderRail({ onCloned });
+      fireEvent.click(await openMenu(/^Actions for Printer/));
+      expect(await screen.findByTestId("conversation-clone-error")).toHaveTextContent("Conversation not found");
+      expect(onCloned).not.toHaveBeenCalled();
+      expect(screen.getAllByRole("button").filter((b) => b.hasAttribute("data-conversation"))).toHaveLength(1);
+    });
   });
 });

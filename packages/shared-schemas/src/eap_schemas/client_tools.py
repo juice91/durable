@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, m
 from pydantic.alias_generators import to_camel
 from pydantic_core import PydanticCustomError
 
+from eap_schemas import ModelSettings
 from eap_schemas.json_schema_subset import DRAFT_2020_12, json_depth_exceeds, json_size
 from eap_schemas.model_ref import ModelRef
 from eap_schemas.tools import RESERVED_TOOL_NAMES
@@ -434,6 +435,8 @@ class AgUiRunOptions(BaseModel):
       for the latest published version.
     - `model`: a per-run model override (allowlist and provider rules apply in the API; API keys
       may not override).
+    - `modelSettings`: per-run model settings overrides (`RunCreate.model_settings`; snake_case keys,
+      the object is `ModelSettings`).
     - `requestContext`: values for the spec's `context_fields`, validated like
       `RunCreate.request_context` by the API.
     - `resourceId`: the resource of a conversation derived from a `threadId`, set once at
@@ -448,6 +451,7 @@ class AgUiRunOptions(BaseModel):
 
     version: RunVersionOption = None
     model: ModelRef | None = None
+    model_settings: ModelSettings | None = None
     request_context: dict[str, Any] | None = None
     resource_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:@-]{1,128}$")
     input: Any = None

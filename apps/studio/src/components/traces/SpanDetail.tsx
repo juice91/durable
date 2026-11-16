@@ -20,6 +20,7 @@ import { TraceLink } from "./TraceLink";
 import { KnowledgeBaseLink, RAG_SHOWN, RagSpanSection, USAGE_KINDS } from "./RagSpanSections";
 import { CAPABILITY_SHOWN, CAPABILITY_USAGE_KINDS, CapabilitySpanSection } from "./CapabilitySpanSections";
 import { LOOP_SHOWN, LoopSpanSection } from "./LoopSpanSections";
+import { TraceFeedback } from "./TraceFeedback";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -169,11 +170,13 @@ function attrValue(value: unknown): string {
 interface SpanDetailProps {
   span: TraceSpan | null;
   names?: NameMaps;
+  /** The trace the span belongs to: with it the detail ends with the span's feedback (W2.2). */
+  runId?: string;
 }
 
 /** The selected span: status, timing, error, model usage and cost, links, input, output and the
  * remaining attributes. */
-export function SpanDetail({ span, names }: SpanDetailProps) {
+export function SpanDetail({ span, names, runId }: SpanDetailProps) {
   if (!span) {
     return (
       <div className="rounded-md border border-border bg-card p-4 text-sm text-muted-foreground">
@@ -263,6 +266,7 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
           </dl>
         </section>
       ) : null}
+      {runId ? <TraceFeedback runId={runId} spanId={span.id} className="border-t border-border pt-3" /> : null}
     </aside>
   );
 }

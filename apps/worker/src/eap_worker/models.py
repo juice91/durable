@@ -211,12 +211,28 @@ def _tool_returns(messages: list[ModelMessage]) -> list[ToolReturnPart]:
     return [p for m in messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, ToolReturnPart)]
 
 
+def render_prompt(content: Any) -> str:
+    """A user prompt as text: a string as is; a part list as its strings, then one note per file
+    (`[file image/png 12 bytes]`) or inlined text file (`[text file ...]`)."""
+    if isinstance(content, str):
+        return content
+    out: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            out.append(item)
+        elif hasattr(item, "media_type") and hasattr(item, "data"):
+            out.append(f"[file {item.media_type} {len(item.data)} bytes]")
+        elif hasattr(item, "content"):
+            out.append(f"[text file {str(item.content)[:200]}]")
+    return " ".join(out)
+
+
 def _last_prompt(messages: list[ModelMessage]) -> str:
     for m in reversed(messages):
         if isinstance(m, ModelRequest):
             for p in m.parts:
-                if isinstance(p, UserPromptPart) and isinstance(p.content, str):
-                    return p.content
+                if isinstance(p, UserPromptPart):
+                    return render_prompt(p.content)
     return ""
 
 

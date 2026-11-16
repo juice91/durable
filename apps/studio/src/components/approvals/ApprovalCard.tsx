@@ -4,7 +4,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
 import { decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, refreshPendingApprovals } from "@/lib/approvals";
-import { decideApproval, MAX_APPROVAL_COMMENT } from "@/lib/workflows";
+import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
+import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
+import { serverFieldErrors, validateAgainstSchema } from "@/lib/schemaValidation";
+import type { JsonSchema } from "@/lib/tools";
 
 // The one approval card (AC.14, moved from components/workflows/): a workflow approval step (the
 // workflow run view's "Needs input" overlay), a gated tool call (the agent Chat tab's waiting turn)
@@ -17,7 +20,16 @@ export const TOOL_NOT_WAITING_MESSAGE =
 
 export type ApprovalTarget =
   | { kind: "tool"; runId: string; toolCallId: string; toolName: string; args: unknown; deadline: string | null }
-  | { kind: "step"; runId: string; stepId: string; prompt: string | null; deadline: string | null };
+  | {
+      kind: "step";
+      runId: string;
+      stepId: string;
+      prompt: string | null;
+      deadline: string | null;
+      /** An input step: the JSON Schema of the data it waits for. The card then shows a form and
+       * "Submit" (POST .../resume) instead of "Approve"; Reject stays. */
+      resumeSchema?: JsonSchema | null;
+    };
 
 export interface ApprovalCardProps {
   approval: ApprovalTarget;
@@ -82,6 +94,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
   const key = tool ? `tool-${approval.toolCallId}` : approval.stepId;
   const denyLabel = tool ? "Deny" : "Reject";
   const maxComment = tool ? MAX_TOOL_APPROVAL_COMMENT : MAX_APPROVAL_COMMENT;
+  const resumeSchema = approval.kind === "step" ? approval.resumeSchema ?? null : null;
+  const [formValue, setFormValue] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState<null | "approve" | "deny">(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +116,14 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
 
   const decide = async (decision: "approve" | "deny") => {
     if (busy || tooLong) return;
+    if (decision === "approve" && resumeSchema) {
+      const problems = validateAgainstSchema(resumeSchema, formValue);
+      setFieldErrors(problems);
+      if (Object.keys(problems).length > 0) {
+        setError("Fix the highlighted fields before submitting.");
+        return;
+      }
+    }
     setBusy(decision);
     setError(null);
     setDialogError(null);
@@ -109,6 +132,8 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
         await submit(decision, comment);
       } else if (approval.kind === "tool") {
         await decideToolApproval(approval.runId, approval.toolCallId, decision, comment);
+      } else if (resumeSchema && decision === "approve" && approval.kind === "step") {
+        await resumeStep(approval.runId, approval.stepId, formValue, comment);
       } else {
         await decideApproval(approval.runId, approval.stepId, decision === "approve" ? "approve" : "reject", comment);
       }
@@ -133,6 +158,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           ? "Tool call not found: the run may have been removed, or it belongs to another tenant."
           : "Run not found: it may have been removed, or it belongs to another tenant.";
         setConfirmDeny(false);
+      } else if (status === 422 && resumeSchema && reason instanceof ApiError) {
+        setFieldErrors(serverFieldErrors(reason.details));
+        message = "The server rejected some fields; fix them and submit again.";
       } else {
         message = reason instanceof Error && reason.message ? reason.message : "The decision could not be recorded; try again.";
       }
@@ -154,7 +182,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
     >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="min-w-0 break-words font-semibold text-foreground">
-          {tool ? "Approve tool call: " : "Waiting for approval: "}
+          {tool ? "Approve tool call: " : resumeSchema ? "Waiting for input: " : "Waiting for approval: "}
           <span className="font-mono">{subject}</span>
         </h3>
         <p className="text-xs text-muted-foreground">
@@ -184,6 +212,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           {approval.prompt ?? "(no prompt)"}
         </p>
       )}
+      {resumeSchema ? (
+        <JsonSchemaForm schema={resumeSchema} value={formValue} onChange={setFormValue} errors={fieldErrors} idPrefix={`resume-${key}`} />
+      ) : null}
       <div className="space-y-1">
         <label htmlFor={commentId} className="block text-sm font-medium text-foreground">
           Comment (optional{tool ? "; a denial's comment is shown to the model" : ""})
@@ -215,7 +246,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           aria-busy={busy === "approve"}
           className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Approve
+          {resumeSchema ? "Submit" : "Approve"}
         </button>
         <button
           type="button"

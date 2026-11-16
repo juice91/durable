@@ -7,6 +7,7 @@ import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import type { Run } from "@/lib/runs";
 import { listWorkflowRuns } from "@/lib/workflows";
 import { isTerminal } from "@/lib/workflowRunState";
+import { RerunButton } from "./RerunButton";
 import { routes } from "@/lib/routes";
 import { durationBetween, formatDuration } from "@/lib/format";
 
@@ -28,10 +29,12 @@ export interface WorkflowRunHistoryProps {
   footer?: React.ReactNode;
   /** `card`: a bordered card (the Runs tab); `panel`: borderless, inside the floating panel. */
   variant?: "card" | "panel";
+  /** Adds a "Run again" action per terminal run; called with the new run's id. */
+  onRerunStarted?: (runId: string) => void;
 }
 
 /** The runs of one workflow, newest first, each linking to its live execution view. */
-export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = "Run history", footer, variant = "card" }: WorkflowRunHistoryProps) {
+export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = "Run history", footer, variant = "card", onRerunStarted }: WorkflowRunHistoryProps) {
   // Runs are stored with the workflow they were loaded for, so a page reused for another
   // workflow (/workflows/A -> /workflows/B) never lists A's runs under B.
   const [loaded, setLoaded] = useState<{ workflowId: string; runs: Run[] } | null>(null);
@@ -91,7 +94,8 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                 <th scope="col" className="py-2 pr-3 font-medium">Status</th>
                 {panel ? null : <th scope="col" className="py-2 pr-3 font-medium">Version</th>}
                 <th scope="col" className="py-2 pr-3 font-medium">Started</th>
-                <th scope="col" className="py-2 font-medium">Duration</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Duration</th>
+                {onRerunStarted ? <th scope="col" className="py-2 font-medium"><span className="sr-only">Actions</span></th> : null}
               </tr>
             </thead>
             <tbody>
@@ -106,6 +110,11 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                   <td className="whitespace-nowrap py-2 tabular-nums text-muted-foreground">
                     {isTerminal(run.display_status) ? formatRunDuration(run.created_at, run.updated_at) : "in progress"}
                   </td>
+                  {onRerunStarted ? (
+                    <td className="py-2">
+                      {isTerminal(run.display_status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>

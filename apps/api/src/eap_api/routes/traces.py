@@ -10,6 +10,8 @@ has span status `waiting` and `display_status` `waiting_approval`. Tenant-scoped
 tenant's, is a 404 (its child runs are read under the caller's tenant only). The DBOS and HTTP
 spans stay in Grafana (the run's `trace_id`).
 
+Feedback (W2.2, 0019_trace_feedback): `POST | GET /traces/{trace_id}/feedback`; a trace id is the run id.
+
 Response: `{run, spans, totals, truncated, limits}`; `run` is the GET /runs/{id} shape. See
 eap_run_store.trace for the span shape, ids, statuses, timing and the payload bounds.
 """
@@ -17,10 +19,11 @@ eap_run_store.trace for the span shape, ids, statuses, timing and the payload bo
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
@@ -30,19 +33,25 @@ from eap_api.models import AgentVersionModel
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowVersionModel
 from eap_run_store.trace import TraceQueryTimeout, TraceReader
+from eap_run_store.trace_feedback import (
+    FEEDBACK_COMMENT_MAX_CHARS,
+    FEEDBACK_SCORE_LIMIT,
+    FEEDBACK_SPAN_ID_MAX_CHARS,
+    TraceFeedbackStore,
+)
+from eap_api.request_guard import GuardedJsonRoute
 
 TIMEOUT_DETAIL = "Trace query timed out; retry later"
 
-router = APIRouter(tags=["traces"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}})
+router = APIRouter(
+    tags=["traces"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}}, route_class=GuardedJsonRoute
+)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
-@router.get("/runs/{run_id}/trace")
-def get_run_trace(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, db: SessionDep) -> JSONResponse:
-    """The run's span tree with tokens and cost. 404 for an unknown run or another tenant's; 503
-    when reading it hits the statement timeout."""
+def _read_trace(run_id: uuid.UUID, principal: Principal, stores: Any, db: Session) -> dict[str, Any]:
     run_store, _ = stores
     tenant_id = principal.tenant_id
 
@@ -82,4 +91,72 @@ def get_run_trace(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep,
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     chat = run_store.chat_usage(tenant_id, [trace["run"]["id"]])
     trace["run"] = _run_json(trace["run"], chat.get(str(trace["run"]["id"])))
-    return JSONResponse(content=trace)
+    return trace
+
+
+@router.get("/runs/{run_id}/trace")
+def get_run_trace(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, db: SessionDep) -> JSONResponse:
+    """The run's span tree with tokens and cost. 404 for an unknown run or another tenant's; 503
+    when reading it hits the statement timeout."""
+    return JSONResponse(content=_read_trace(run_id, principal, stores, db))
+
+
+# ---------------------------------------------------------------------------- feedback (W2.2)
+
+
+class FeedbackCreate(BaseModel):
+    """Body of POST /traces/{trace_id}/feedback."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rating: Literal["up", "down"]
+    comment: str | None = Field(default=None, max_length=FEEDBACK_COMMENT_MAX_CHARS)
+    score: float | None = Field(default=None, ge=-FEEDBACK_SCORE_LIMIT, le=FEEDBACK_SCORE_LIMIT, allow_inf_nan=False)
+    span_id: str | None = Field(default=None, min_length=1, max_length=FEEDBACK_SPAN_ID_MAX_CHARS)
+
+
+def _feedback_store(request: Request, stores: StoresDep) -> TraceFeedbackStore:
+    store = getattr(request.app.state, "trace_feedback_store", None)
+    if store is None:
+        run_store, _ = stores
+        store = request.app.state.trace_feedback_store = TraceFeedbackStore(run_store.engine)
+    return store
+
+
+FeedbackStoreDep = Annotated[TraceFeedbackStore, Depends(_feedback_store)]
+
+
+@router.post("/traces/{trace_id}/feedback", status_code=status.HTTP_201_CREATED)
+def add_trace_feedback(
+    trace_id: uuid.UUID, body: FeedbackCreate, principal: PrincipalDep, stores: StoresDep, db: SessionDep,
+    store: FeedbackStoreDep,
+) -> JSONResponse:
+    """Record feedback on a trace (a run) or, with `span_id`, on one of its spans: a thumbs up or
+    down, an optional comment and numeric score, with who and when. 404 for an unknown trace or
+    another tenant's; 422 for a span that is not in the trace."""
+    run_store, _ = stores
+    if run_store.get_run(principal.tenant_id, trace_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trace not found")
+    if body.span_id is not None:
+        trace = _read_trace(trace_id, principal, stores, db)
+        if body.span_id not in {span["id"] for span in trace["spans"]}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="span_id is not a span of this trace")
+    record = store.add(
+        principal.tenant_id, trace_id, rating=body.rating, created_by=principal.user_id,
+        span_id=body.span_id, score=body.score, comment=(body.comment or "").strip() or None,
+    )
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=record.as_json())
+
+
+@router.get("/traces/{trace_id}/feedback")
+def list_trace_feedback(
+    trace_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, store: FeedbackStoreDep,
+    span_id: Annotated[str | None, Query(min_length=1, max_length=FEEDBACK_SPAN_ID_MAX_CHARS)] = None,
+) -> JSONResponse:
+    """The trace's feedback, newest first (`span_id` narrows to one span). 404 for an unknown trace
+    or another tenant's."""
+    run_store, _ = stores
+    if run_store.get_run(principal.tenant_id, trace_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trace not found")
+    items = store.list(principal.tenant_id, trace_id, span_id=span_id)
+    return JSONResponse(content={"items": [r.as_json() for r in items]})

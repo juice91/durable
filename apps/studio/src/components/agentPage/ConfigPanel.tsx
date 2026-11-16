@@ -1,5 +1,6 @@
 "use client";
 
+import { EXTRA_SETTING_KEYS, MODEL_SETTING_FIELDS } from "@/lib/modelSettings";
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Agent, AgentVersion } from "@/lib/api";
@@ -144,6 +145,14 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
               <p className={cn("text-caption", muted)}>Temperature {spec.model_settings.temperature}</p>
             ) : null}
             {spec.model_settings?.max_tokens ? <p className={cn("text-caption", muted)}>Max tokens {spec.model_settings.max_tokens}</p> : null}
+            {EXTRA_SETTING_KEYS.map((key) => {
+              const value = spec.model_settings?.[key];
+              return typeof value === "number" ? (
+                <p key={key} className={cn("text-caption", muted)}>
+                  {MODEL_SETTING_FIELDS.find((field) => field.key === key)?.label} {value}
+                </p>
+              ) : null;
+            })}
             {fallbacks.length > 0 ? (
               <div className="mt-1.5 text-caption" data-testid="config-fallback-models">
                 <p className={muted}>Fallback models</p>

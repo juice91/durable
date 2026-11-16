@@ -239,6 +239,9 @@ export type TraceRun = Run & {
   started_at?: string | null;
   finished_at?: string | null;
   draft?: boolean;
+  /** Tags derived from what the run records (kind, agent, model, draft, context keys). */
+  tags?: string[];
+  request_context?: Record<string, unknown>;
 };
 
 export interface Trace {
@@ -510,10 +513,17 @@ export interface TraceFilters {
   provider: string | null;
   agent_id: string | null;
   kind: RunKind | null;
+  /** Derived run tags (`kind:agent`, `draft`, `ctx:<key>`...); a run must carry all of them. */
+  tags: string[];
+  /** `key=value` pairs matched against the run's request context; all must match. */
+  metadata: string[];
+  /** Free text over the run's input, output, error, tool id and model id. */
+  q: string | null;
 }
 
 export const EMPTY_FILTERS: TraceFilters = {
   status: [], from: null, to: null, model: null, provider: null, agent_id: null, kind: null,
+  tags: [], metadata: [], q: null,
 };
 
 const KINDS: ReadonlySet<string> = new Set<RunKind>(["agent", "tool", "workflow", "kb_ingest", "eval"]);
@@ -536,6 +546,9 @@ export function parseTraceFilters(params: URLSearchParams | { get(name: string):
     provider: one("provider"),
     agent_id: one("agent_id"),
     kind: kind && KINDS.has(kind) ? (kind as TraceFilters["kind"]) : null,
+    tags: Array.from(new Set((params.getAll ? params.getAll("tags") : [params.get("tags") ?? ""]).flatMap((t) => (t ?? "").split(",")).map((t) => t.trim()).filter(Boolean))),
+    metadata: Array.from(new Set((params.getAll ? params.getAll("metadata") : [params.get("metadata") ?? ""]).map((m) => (m ?? "").trim()).filter((m) => m.includes("=")))),
+    q: one("q"),
   };
 }
 
@@ -547,6 +560,9 @@ export function traceFiltersToParams(filters: TraceFilters): URLSearchParams {
     const v = filters[key];
     if (v) params.set(key, v);
   }
+  if (filters.tags.length) params.set("tags", filters.tags.join(","));
+  for (const pair of filters.metadata) params.append("metadata", pair);
+  if (filters.q) params.set("q", filters.q);
   return params;
 }
 
@@ -577,3 +593,47 @@ export function runModels(source: { model_id?: unknown; answering_model_id?: unk
   if (!answering) return { model: requested, requested: null };
   return { model: answering, requested: requested && requested !== answering ? requested : null };
 }
+
+
+// ---------------------------------------------------------------------------- feedback (W2.2)
+
+export type FeedbackRating = "up" | "down";
+
+/** One piece of feedback on a trace (a run) or one of its spans (`span_id`), with who and when. */
+export interface TraceFeedback {
+  id: string;
+  trace_id: string;
+  span_id: string | null;
+  rating: FeedbackRating;
+  score: number | null;
+  comment: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface FeedbackInput {
+  rating: FeedbackRating;
+  comment?: string | null;
+  score?: number | null;
+  span_id?: string | null;
+}
+
+export async function listTraceFeedback(traceId: string, opts: { spanId?: string | null; signal?: AbortSignal } = {}): Promise<TraceFeedback[]> {
+  const query = opts.spanId ? `?${new URLSearchParams({ span_id: opts.spanId })}` : "";
+  const response = await fetch(`${BASE_URL}/api/v1/traces/${encodeURIComponent(traceId)}/feedback${query}`, { headers: apiHeaders(), signal: opts.signal });
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return ((await response.json()) as { items: TraceFeedback[] }).items;
+}
+
+export async function addTraceFeedback(traceId: string, input: FeedbackInput): Promise<TraceFeedback> {
+  const response = await fetch(`${BASE_URL}/api/v1/traces/${encodeURIComponent(traceId)}/feedback`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** localStorage key: the trace list columns the viewer has hidden (listed in Settings, browser data). */
+export const TRACE_COLUMNS_STORAGE_KEY = "studio.traces.hiddenColumns";

@@ -29,6 +29,7 @@ from sqlalchemy import (
     text,
     func,
     case,
+    false,
     null,
     or_,
     tuple_,
@@ -238,6 +239,9 @@ class RunModel(Base):
     # fields only; NULL = none). draft_spec: the agent draft snapshot of a draft test run
     # (agent_version NULL); a retry relaunches from it, never from the live draft.
     request_context: Mapped[dict | None] = mapped_column("request_context", JSONB, nullable=True)
+    # Per-run model settings overrides (0018_run_model_settings): only the fields the caller set
+    # (NULL = none); the worker merges them over the spec's model settings.
+    model_settings: Mapped[dict | None] = mapped_column("model_settings", JSONB, nullable=True)
     draft_spec: Mapped[dict | None] = mapped_column("draft_spec", JSONB, nullable=True)
     # The knowledge base a kb_ingest run ingests into (0011_knowledge_bases; a tool run of the search
     # tester may name one too). No FK: the run outlives a deleted knowledge base as its audit and
@@ -633,6 +637,40 @@ def _status_condition(statuses: list[str]) -> Any:
     return or_(*conditions)
 
 
+def run_tags(run: dict[str, Any]) -> list[str]:
+    """The tags a run carries (W2.2). Runs have no stored tags; they are derived from what the run
+    already records: `kind:<kind>`, `agent:<id>` / `workflow:<id>` / `tool:<id>`, `model:<id>`,
+    `draft` (a draft test run), `model-override`, and `ctx:<key>` per request context key."""
+    tags = [f"kind:{run['kind']}"]
+    for label, key in (("agent", "agent_id"), ("workflow", "workflow_id"), ("tool", "tool_id"), ("model", "model_id")):
+        if run.get(key):
+            tags.append(f"{label}:{run[key]}")
+    if run.get("draft_spec") is not None:
+        tags.append("draft")
+    if run.get("model_overridden"):
+        tags.append("model-override")
+    tags.extend(f"ctx:{k}" for k in sorted(run.get("request_context") or {}))
+    return tags
+
+
+def run_tag_condition(tag: str) -> Any:
+    """The SQL condition for one derived tag (see `run_tags`); an unknown tag matches nothing."""
+    if tag == "draft":
+        return RunModel.draft_spec.is_not(None)
+    if tag == "model-override":
+        return RunModel.model_overridden.is_(True)
+    label, _, value = tag.partition(":")
+    columns = {
+        "kind": RunModel.kind, "agent": RunModel.agent_id, "workflow": RunModel.workflow_id,
+        "tool": RunModel.tool_id, "model": RunModel.model_id,
+    }
+    if label in columns and value:
+        return columns[label] == value
+    if label == "ctx" and value:
+        return RunModel.request_context.has_key(value)
+    return false()
+
+
 def _run_select() -> Any:
     """SELECT runs plus whether each has an open approval (for _run_dict's display status)."""
     from eap_run_store.approvals import open_approval_exists
@@ -672,6 +710,7 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "request_context": run.request_context,
+        "model_settings": run.model_settings,
         "draft_spec": run.draft_spec,
         "knowledge_base_id": run.knowledge_base_id,
         "output_format": run.output_format,
@@ -789,9 +828,12 @@ END_EVENT_KEY = "end"
 
 # Events a completed conversation turn's post-turn steps append after its `end` (RM.13
 # observational memory, RM.14 semantic-recall indexing, their `:failed` events, and the P1.C1
-# `post_turn_done` marker at `memory:post_turn:{turn}`). They describe work done after the answer,
+# `post_turn_done` marker at `memory:post_turn:{turn}`, and the W2.3 `score:{scorer_id}` events). They describe work done after the answer,
 # never change the status, and stay allowed after `end`.
-POST_END_EVENT_KEY_PREFIXES = ("memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:")
+POST_END_EVENT_KEY_PREFIXES = (
+    "memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:", "score:",
+    "feedback:",
+)
 
 # The key of the cancel request (`cancel_requested`, written by POST /runs/{id}/cancel).
 CANCEL_EVENT_KEY = "cancel"
@@ -863,6 +905,7 @@ def _run_option_values(
     draft_spec: dict[str, Any] | None,
     model_id: str | None,
     model_overridden: bool,
+    model_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Insert values for the run options of an agent run (0010_run_options; model_id from 0008).
     An empty context is stored as NULL, like a run recorded before request context existed. SQL
@@ -872,6 +915,7 @@ def _run_option_values(
         "draft_spec": null() if draft_spec is None else draft_spec,
         "model_id": model_id,
         "model_overridden": bool(model_overridden),
+        "model_settings": model_settings or null(),
     }
 
 
@@ -1051,6 +1095,7 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        model_settings: dict[str, Any] | None = None,
     ) -> tuple[UUID, bool]:
         """Create a new agent run. Idempotent: same run_id returns existing without creating second row.
 
@@ -1073,7 +1118,7 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
-            **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+            **_run_option_values(request_context, draft_spec, model_id, model_overridden, model_settings),
         )
 
     def create_tool_run(
@@ -1746,6 +1791,9 @@ class RunStore:
         created_to: datetime | None = None,
         model: str | None = None,
         provider: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+        text_query: str | None = None,
         statement_timeout_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
@@ -1764,8 +1812,17 @@ class RunStore:
         keep runs that used that model (eap_run_store.metrics.run_model_condition). That filter is
         two EXISTS lookups per run and may walk far back in history to fill a page, so the query
         then runs under the metrics `statement_timeout` (`statement_timeout_ms`, default 5 s) and
-        raises MetricsQueryTimeout when it fires."""
+        raises MetricsQueryTimeout when it fires.
+
+        Trace list filters (W2.2): `tags` (all of them; see `run_tag_condition`), `metadata` (every
+        key=value pair equals the run's request context value, as text) and `text_query` (a
+        case-insensitive substring of the run's input, output, error, tool id or model id; it runs
+        under the same statement timeout as `model`)."""
         query = _run_select().where(RunModel.tenant_id == tenant_id)
+        for tag in tags or ():
+            query = query.where(run_tag_condition(tag))
+        for key, value in (metadata or {}).items():
+            query = query.where(RunModel.request_context[key].astext == value)
         if parent_run_id is not None:
             query = query.where(RunModel.parent_run_id == str(parent_run_id))
         else:
@@ -1785,6 +1842,16 @@ class RunStore:
         if created_to is not None:
             query = query.where(RunModel.created_at < created_to)
         timeout_ms = None
+        if text_query:
+            from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS
+
+            pattern = "%" + text_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            query = query.where(
+                or_(*(col.ilike(pattern, escape="\\") for col in (
+                    RunModel.input, RunModel.output, RunModel.error, RunModel.tool_id, RunModel.model_id,
+                )))
+            )
+            timeout_ms = int(statement_timeout_ms or DEFAULT_STATEMENT_TIMEOUT_MS)
         if model is not None or provider is not None:
             from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS, run_model_condition
 
@@ -2032,6 +2099,7 @@ class RunStore:
         agent_id: UUID | str | None = None,
         limit: int = 100,
         before: ConversationCursor | None = None,
+        title_contains: str | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's conversations ordered (updated_at DESC, id DESC), at most `limit`, strictly
         after the `before` position (ConversationCursor.after(last row of the previous page)).
@@ -2042,6 +2110,9 @@ class RunStore:
         query = self._conversation_select().where(ConversationModel.tenant_id == tenant_id)
         if agent_id is not None:
             query = query.where(ConversationModel.agent_id == str(agent_id))
+        if title_contains:
+            escaped = title_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(ConversationModel.title.ilike(f"%{escaped}%", escape="\\"))
         if before is not None:
             query = query.where(
                 tuple_(ConversationModel.updated_at, ConversationModel.id) < tuple_(before.updated_at, before.id)
@@ -2096,6 +2167,7 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        model_settings: dict[str, Any] | None = None,
         client_tools: list[dict[str, Any]] | None = None,
         client_tool_results: list[dict[str, Any]] | None = None,
         ag_ui_run: Any = None,
@@ -2174,7 +2246,7 @@ class RunStore:
                     updated_at=now,
                     trace_id=trace_id,
                     traceparent=traceparent,
-                    **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+                    **_run_option_values(request_context, draft_spec, model_id, model_overridden, model_settings),
                     # SQL NULL explicitly (JSONB binds Python None as the JSON value `null`).
                     client_tools=null() if client_tools is None else client_tools,
                     client_tool_results=null() if client_tool_results is None else client_tool_results,
@@ -2230,6 +2302,90 @@ class RunStore:
                 }
                 for r in runs
             ]
+
+    def clone_conversation(self, tenant_id: str, conversation_id: UUID | str, title: str | None) -> dict[str, Any]:
+        """Copy a conversation into a NEW one (same agent, same resource_id), in one transaction.
+
+        Only terminal turns are copied (completed, failed, needs_attention); a queued or running
+        turn is skipped. The copies are renumbered gap-free from 1 in the source's order and keep
+        what the chat view and the next turn's history read: input, output, error, messages,
+        status, run options, and the run's events (same seq, key, type, data, ts). They do NOT
+        keep trace ids, usage totals or cost, and no `run_model_requests` rows, so the metrics and
+        the cost record count each model call once (the source). Observations, conversation
+        working memory and recall embeddings are derived and are not copied; resource-scoped
+        memory is shared by resource_id as before. The source is read under its row lock (a
+        concurrent create_turn waits) and is not changed. Returns the new conversation (get_conversation's
+        shape). Raises ConversationNotFound for another tenant's or an unknown conversation.
+        """
+        src_id = str(conversation_id)
+        new_id = str(uuid4())
+        with self.Session() as session:
+            src = session.execute(
+                select(ConversationModel)
+                .where(ConversationModel.id == src_id, ConversationModel.tenant_id == tenant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if src is None:
+                session.rollback()
+                raise ConversationNotFound(tenant_id, src_id)
+            now = datetime.now(timezone.utc)
+            session.add(
+                ConversationModel(
+                    id=new_id, tenant_id=tenant_id, agent_id=src.agent_id, title=title,
+                    resource_id=src.resource_id, created_at=now, updated_at=now,
+                )
+            )
+            session.flush()
+            runs = session.execute(
+                select(RunModel)
+                .where(
+                    RunModel.tenant_id == tenant_id,
+                    RunModel.conversation_id == src_id,
+                    RunModel.status.in_(sorted(TERMINAL_RUN_STATUSES)),
+                )
+                .order_by(RunModel.turn)
+            ).scalars().all()
+            for turn, run in enumerate(runs, start=1):
+                copy_id = str(uuid4())
+                session.add(
+                    RunModel(
+                        id=copy_id, tenant_id=tenant_id, kind=run.kind, agent_id=run.agent_id,
+                        agent_version=run.agent_version, status=run.status, input=run.input,
+                        output=run.output, error=run.error, created_at=run.created_at,
+                        updated_at=run.updated_at, conversation_id=new_id, turn=turn,
+                        # SQL NULL, not the JSON value `null`, for an absent JSONB column.
+                        messages=_sql_null_if_none(run.messages), model_id=run.model_id,
+                        model_overridden=run.model_overridden,
+                        started_at=run.started_at, finished_at=run.finished_at,
+                        request_context=_sql_null_if_none(run.request_context),
+                        draft_spec=_sql_null_if_none(run.draft_spec),
+                        model_settings=_sql_null_if_none(run.model_settings),
+                        output_format=run.output_format, client_tools=_sql_null_if_none(run.client_tools),
+                        client_tool_results=_sql_null_if_none(run.client_tool_results),
+                        event_order_next=run.event_order_next,
+                    )
+                )
+                session.flush()
+                events = session.execute(
+                    select(ExecutionEventModel)
+                    .where(ExecutionEventModel.tenant_id == tenant_id, ExecutionEventModel.run_id == run.id)
+                    .order_by(ExecutionEventModel.seq)
+                ).scalars().all()
+                for e in events:
+                    session.add(
+                        ExecutionEventModel(
+                            tenant_id=tenant_id, run_id=copy_id, seq=e.seq, event_key=e.event_key,
+                            type=e.type, data=e.data, ts=e.ts, root_order=e.root_order,
+                        )
+                    )
+            session.commit()
+        cloned = self.get_conversation(tenant_id, new_id)
+        assert cloned is not None
+        return cloned
+
+
+def _sql_null_if_none(value: Any) -> Any:
+    return null() if value is None else value
 
 
 def _recorded_cost_in_session(session, tenant_id: str, run_ids: list[str]) -> Decimal:

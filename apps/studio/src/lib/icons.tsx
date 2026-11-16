@@ -3,9 +3,13 @@ import {
   BookOpen,
   Bot,
   ChartLine,
+  Database,
+  FlaskConical,
+  Gauge,
   Inbox,
   KeyRound,
   ListTree,
+  MessagesSquare,
   Plug,
   ScrollText,
   Settings,
@@ -43,7 +47,11 @@ export const ProcessorsIcon = studioIcon(ShieldCheck, "ProcessorsIcon");
 export const KnowledgeIcon = studioIcon(BookOpen, "KnowledgeIcon");
 export const MetricsIcon = studioIcon(ChartLine, "MetricsIcon");
 export const TracesIcon = studioIcon(ListTree, "TracesIcon");
+export const ThreadsIcon = studioIcon(MessagesSquare, "ThreadsIcon");
 export const LogsIcon = studioIcon(ScrollText, "LogsIcon");
+export const DatasetsIcon = studioIcon(Database, "DatasetsIcon");
+export const ScorersIcon = studioIcon(Gauge, "ScorersIcon");
+export const ExperimentsIcon = studioIcon(FlaskConical, "ExperimentsIcon");
 export const SettingsIcon = studioIcon(Settings, "SettingsIcon");
 export const ApprovalsIcon = studioIcon(Inbox, "ApprovalsIcon");
 // Transitional page (removed with its nav item in SL.10).

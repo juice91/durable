@@ -700,3 +700,28 @@ def test_agent_step_uuid_validation():
     """agent_id must be a valid UUID, and the message names the step."""
     with pytest.raises(ValueError, match="step 's1': agent_id: Input should be a valid UUID"):
         AgentStep(id="s1", agent_id="not-a-uuid")
+
+
+# --------------------------------------------------------------------------- input steps (W2.1)
+
+
+def _input_spec(schema, *, in_loop=False):
+    step = {"id": "ask", "type": "input", "prompt": "Details?", "timeout_hours": 1, "resume_schema": schema}
+    return {"name": "W", "input_schema": {"type": "object"}, "start": "ask", "steps": [step]}
+
+
+def test_input_step_validates_its_resume_schema():
+    from eap_schemas.workflows import InputStep, WorkflowSpec
+
+    ok = WorkflowSpec.model_validate(_input_spec({"type": "object", "properties": {"a": {"type": "string"}}}))
+    assert isinstance(ok.steps[0], InputStep)
+    for bad in ({"type": "string"}, {"type": "object", "properties": 5},
+                {"type": "object", "properties": {"a": {"$ref": "http://x/y"}}}):
+        with pytest.raises(Exception):
+            WorkflowSpec.model_validate(_input_spec(bad))
+    with pytest.raises(Exception):  # an input step is a person's data form: no input in a loop body
+        WorkflowSpec.model_validate({
+            "name": "W", "input_schema": {"type": "object"}, "start": "f",
+            "steps": [{"id": "f", "type": "foreach", "items": {"$ref": "input.xs"}, "concurrency": 1, "max_items": 2,
+                       "body": {"start": "ask", "steps": [_input_spec({"type": "object"})["steps"][0]]}}],
+        })

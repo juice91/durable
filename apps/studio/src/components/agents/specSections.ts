@@ -111,8 +111,10 @@ export interface ModelOption {
   name: string;
   /** A `provider:*` allowlist entry: the name is typed freely. */
   wildcard: boolean;
-  source: "allowlist" | "scripted" | string;
+  source: "allowlist" | "scripted" | "discovered" | string;
   description: string | null;
+  /** On a wildcard entry whose provider's model list could not be loaded: why. */
+  discovery_error?: string | null;
 }
 
 export const MAX_CONTEXT_FIELDS = 32;

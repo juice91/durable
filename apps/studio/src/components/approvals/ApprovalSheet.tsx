@@ -168,6 +168,12 @@ export function ApprovalSheet({ approval, missing = false, missingError = null, 
                         {approval.decision === "timed_out" ? " (timeout)" : approval.decided_by ? ` by ${approval.decided_by}` : ""}
                       </Field>
                     ) : null}
+                    {approval.decided_at && approval.comment ? <Field label="Comment" testId="approval-sheet-comment">{approval.comment}</Field> : null}
+                    {approval.decided_at && approval.resume_data != null ? (
+                      <Field label="Submitted data" testId="approval-sheet-resume-data">
+                        <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{JSON.stringify(approval.resume_data, null, 2)}</pre>
+                      </Field>
+                    ) : null}
                     <Field label="Run"><span className="font-mono">{approval.run_id}</span></Field>
                     {approval.root_run_id !== approval.run_id ? <Field label="Workflow run"><span className="font-mono">{approval.root_run_id}</span></Field> : null}
                     {approval.kind === "tool" ? <Field label="Tool call"><span className="font-mono">{approval.approval_key}</span></Field> : null}

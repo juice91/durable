@@ -6,6 +6,7 @@
 - PATCH  /mcp-servers/{id}         change name, url, enabled and/or replace all headers
 - DELETE /mcp-servers/{id}         delete (204), with its secrets
 - POST   /mcp-servers/{id}/test    connect, list tools, record last_status (200 with status ok|error)
+- POST   /mcp-servers/{id}/tools/{tool}/runs   run one tool of the server as a recorded tool run
 
 Every lookup is tenant-scoped: another tenant's or an unknown id is a 404. Only remote servers over
 Streamable HTTP; the URL must pass the outbound policy (eap_secrets.outbound) on create and on every
@@ -46,10 +47,15 @@ from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
-from eap_api.mcp_servers.connection import connection_timeout_s, list_server_tools
+from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
 from eap_api.mcp_servers.models import TRANSPORT_STREAMABLE_HTTP, McpServerModel, McpServerSecretModel
 from eap_api.request_guard import GuardedJsonRoute
+from eap_api.routes.runs import StoresDep
+from eap_api.routes.tools import MAX_TOOL_INPUT_BYTES, ToolRunCreate, _canonical_json, _tool_run_body
 from eap_api.schemas import ErrorDetail
+from eap_observability import current_trace_context
+from eap_run_store import RunIdConflict
+from eap_schemas import mcp_tool_name
 
 log = logging.getLogger("eap_api.mcp_servers")
 
@@ -391,3 +397,219 @@ async def run_mcp_server_test(
 
     await run_in_threadpool(_record_result, request, tenant_id, server_id, "error", code)
     return JSONResponse(content={"status": "error", "error_code": code, "tools": []})
+
+
+# --- running one tool of a server ------------------------------------------------------------------
+
+MCP_TOOL_ID_PREFIX = "mcp:"
+TOOL_ERROR_MESSAGE = "The MCP server reported that this tool call failed. Details are withheld."
+
+
+def mcp_run_tool_id(server_id: str, tool: str) -> str:
+    """The ledger's `tool_id` for a server's tool: `mcp:<server id>/<tool>` (the id, not the name,
+    so a rename keeps the history; the built-in tools' ids never start with `mcp:`)."""
+    return f"{MCP_TOOL_ID_PREFIX}{server_id}/{tool}"
+
+
+def _input_errors(schema: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+    """The tool's own input schema applied to `args`, as FastAPI-style loc/msg/type entries that
+    never carry the rejected values. A schema that cannot be applied checks nothing (the server
+    decides)."""
+    from jsonschema import Draft202012Validator
+
+    errors: list[dict[str, Any]] = []
+    try:
+        validator = Draft202012Validator(schema)
+        found = sorted(validator.iter_errors(args), key=lambda e: [str(p) for p in e.absolute_path])
+    except Exception:  # noqa: BLE001 - a malformed or unresolvable schema
+        return []
+    for err in found[:20]:
+        loc: list[Any] = ["body", "input", *err.absolute_path]
+        if err.validator == "required" and isinstance(err.instance, dict):
+            for name in err.validator_value:
+                if name not in err.instance:
+                    errors.append({"loc": [*loc, name], "msg": "Field required", "type": "missing"})
+        elif err.validator == "type":
+            errors.append({"loc": loc, "msg": f"Input should be of type {err.validator_value}", "type": "type_error"})
+        else:
+            errors.append({"loc": loc, "msg": f"Input violates the schema's {err.validator} rule", "type": "schema_error"})
+    return errors
+
+
+def _run_body(run: dict[str, Any], status_value: str | None = None) -> dict[str, Any]:
+    return {
+        "run_id": str(run["id"]),
+        "kind": "tool",
+        "tool_id": run["tool_id"],
+        "status": status_value or run["status"],
+        "display_status": status_value or run["display_status"],
+        "trace_id": run["trace_id"],
+    }
+
+
+@router.post(
+    "/mcp-servers/{server_id}/tools/{tool}/runs",
+    responses={409: {"model": ErrorDetail}},
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ToolRunCreate.model_json_schema()}},
+        }
+    },
+)
+async def run_mcp_tool(
+    server_id: uuid.UUID,
+    tool: str,
+    request: Request,
+    principal: PrincipalDep,  # before the body: 401 wins over 422
+    body: Annotated[ToolRunCreate, Depends(_tool_run_body)],
+    stores: StoresDep,
+    policy: PolicyDep,
+) -> JSONResponse:
+    """Run one tool of a registered MCP server and record it on the tool-run ledger (the same runs,
+    list/get endpoints and fields as POST /tools/{id}/runs; `tool_id` is `mcp:<server id>/<tool>`).
+
+    The call is made here, within the connection test's bounded time (EAP_MCP_TEST_TIMEOUT_SECONDS),
+    with the server's decrypted headers, and answers 200 with the finished run ({run_id, status,
+    ...}); read its output and error through GET /runs/{run_id}. 404 server not found (another
+    tenant's too) or the server does not offer the tool; 422 server disabled, input too large, or
+    input rejected by the tool's input schema (loc/msg/type, never the values; nothing recorded);
+    409 `run_id` used by a different request; 503 header secrets without the platform key.
+    A connection or call failure is recorded as a failed run (a call that was sent and got no
+    answer: needs_attention, the tool may have run), and a repeated `run_id` returns the recorded
+    run without calling the tool again."""
+    tenant_id = principal.tenant_id
+    run_store, event_log = stores
+    run_id = body.run_id or uuid.uuid4()
+    sid = str(server_id)
+    tool_id = mcp_run_tool_id(sid, tool)
+
+    def load() -> tuple[str, str, bool, list[tuple[str, bytes, str]]]:
+        with Session(request.app.state.database_engine) as db:
+            server = _get_or_404(db, tenant_id, server_id)
+            secrets = db.execute(
+                select(McpServerSecretModel.header_name, McpServerSecretModel.ciphertext, McpServerSecretModel.key_id)
+                .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id)
+            ).all()
+            return server.name, server.url, server.enabled, [(n, bytes(c), k) for n, c, k in secrets]
+
+    name, url, enabled, secrets = await run_in_threadpool(load)
+    if not enabled:
+        raise _unprocessable("MCP server is disabled")
+    input_json = _canonical_json(body.input)
+    if len(input_json.encode("utf-8")) > MAX_TOOL_INPUT_BYTES:
+        raise _unprocessable(f"input must be at most {MAX_TOOL_INPUT_BYTES // 1024} KiB as JSON")
+
+    existing = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
+    if existing is not None:
+        if existing["kind"] != "tool" or existing["tool_id"] != tool_id or existing["input"] != input_json:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
+            )
+        return JSONResponse(content=_run_body(existing))  # the recorded run; the tool is never called twice
+
+    headers: dict[str, str] = {}
+    code: str | None = None
+    if secrets:
+        ring = _keyring()
+        try:
+            for hname, ciphertext, key_id in secrets:
+                headers[hname] = ring.decrypt(ciphertext, key_id, context=_secret_context(tenant_id, sid, hname))
+        except DecryptionFailed as exc:
+            code = "secret_unreadable"
+            log_failure(log, "mcp server secret could not be decrypted", exc, code=code,
+                        tenant_id=tenant_id, server_id=sid)
+
+    timeout = connection_timeout_s()
+    schema: dict[str, Any] = {}
+    if code is None:
+        listed = await list_server_tools(url, headers, policy, timeout)
+        if listed.status == "ok":
+            found = next((t for t in listed.tools if t["name"] == tool), None)
+            if found is None:
+                headers.clear()
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP tool not found")
+            schema = found["input_schema"]
+            errors = _input_errors(schema, body.input)
+            if errors:
+                headers.clear()
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
+        else:
+            code = listed.error_code or "connection_failed"
+            assert listed.error is not None
+            log_failure(log, "mcp tool listing failed", listed.error, code=code, tenant_id=tenant_id, server_id=sid)
+
+    trace_id, traceparent = current_trace_context()
+    try:
+        _, created = await run_in_threadpool(
+            lambda: run_store.create_tool_run(
+                tenant_id, tool_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
+            )
+        )
+    except RunIdConflict:
+        headers.clear()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
+    if not created:  # a concurrent request with the same run_id owns this run
+        run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
+        headers.clear()
+        return JSONResponse(content=_run_body(run or {"id": run_id, "tool_id": tool_id, "status": "running",
+                                                       "display_status": "running", "trace_id": trace_id}))
+
+    # Shielded: a client that disconnects must not leave the recorded run unfinished.
+    with anyio.CancelScope(shield=True):
+        call_data = {"tool_call_id": "tool_run", "tool_name": mcp_tool_name(name, tool), "tool_id": tool_id}
+
+        def record(key: str, type_: str, data: dict[str, Any]) -> None:
+            event_log.append(tenant_id, run_id, key, type_, data)
+
+        await run_in_threadpool(run_store.mark_running, tenant_id, run_id)
+        await run_in_threadpool(record, "start", "run_started", {"kind": "tool", "tool_id": tool_id, "input": body.input})
+
+        final_status, output, error, error_code = "failed", None, None, code
+        called = False
+        raised = False
+        content: Any = None
+        if code is None:
+            await run_in_threadpool(record, "tool:tool_run:call", "tool_call", {**call_data, "args": body.input})
+            called = True
+            try:
+                result = await call_server_tool(url, headers, policy, timeout, tool, body.input)
+            except Exception as exc:  # the ledger row must never stay `running`
+                log_failure(log, "mcp tool call raised", exc, code="mcp_call_failed",
+                            tenant_id=tenant_id, server_id=sid, run_id=str(run_id))
+                raised = True
+                final_status, error_code, error = "failed", "mcp_call_failed", str(exc)
+                result = None
+            if result is None:
+                pass
+            elif result.status == "ok":
+                content = result.content
+                final_status = "completed"
+                output = _canonical_json(content)
+            else:
+                error_code = result.error_code or "call_failed"
+                if result.error is not None:
+                    log_failure(log, "mcp tool call failed", result.error, code=error_code,
+                                tenant_id=tenant_id, server_id=sid, run_id=str(run_id))
+                if error_code == "tool_error":
+                    error = TOOL_ERROR_MESSAGE
+                elif result.sent:
+                    final_status, error_code = "needs_attention", "side_effect_outcome_unknown"
+                    error = "a tool's external side effect may or may not have happened; check the external system"
+        headers.clear()
+        if error is None and final_status == "failed":
+            error = f"MCP tool '{name}/{tool}' is unavailable ({error_code})"
+
+        if final_status == "completed":
+            await run_in_threadpool(record, "tool:tool_run:result", "tool_result", {**call_data, "status": "ok", "content": content})
+            await run_in_threadpool(record, "end", "run_completed", {"output": output, "result": content})
+        else:
+            if called:
+                await run_in_threadpool(record, "tool:tool_run:result", "tool_result",
+                                        {**call_data, "status": "error", "error": error, "error_code": error_code})
+            await run_in_threadpool(record, "end", "run_failed",
+                                    {"status": final_status, "error": error, "error_code": error_code})
+        await run_in_threadpool(run_store.set_status, tenant_id, run_id, final_status, output, error)
+        run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
+        assert run is not None
+        return JSONResponse(content=_run_body(run), status_code=502 if raised else 200)

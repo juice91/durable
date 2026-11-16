@@ -9,12 +9,16 @@ import { routes } from "@/lib/routes";
 import type { WorkflowTab } from "@/lib/routes/workflows";
 import { listWorkflows } from "@/lib/workflows";
 
-/** The workflow page's tabs: Graph (`/workflows/:id`), Runs (`?tab=runs`) and Traces (`/workflows/:id/traces`). */
-export function workflowTabs(workflowId: string, active: WorkflowTab): LinkTab[] {
+/** Graph, Runs, Traces, and the Schedules tab from the workflow tour. */
+export type WorkflowHeaderTab = WorkflowTab | "schedules";
+
+/** The workflow page's tabs: Graph, Runs, Traces, and Schedules. */
+export function workflowTabs(workflowId: string, active: WorkflowHeaderTab): LinkTab[] {
   return [
     { href: routes.workflow(workflowId), label: "Graph", active: active === "graph", testId: "workflow-tab-graph" },
     { href: routes.workflow(workflowId, { tab: "runs" }), label: "Runs", active: active === "runs", testId: "workflow-tab-runs" },
     { href: routes.workflowTraces(workflowId), label: "Traces", active: active === "traces", testId: "workflow-tab-traces" },
+    { href: routes.workflowSchedule(workflowId), label: "Schedules", active: active === "schedules", testId: "workflow-tab-schedules" },
   ];
 }
 
@@ -40,18 +44,23 @@ export interface WorkflowHeaderProps {
   workflowId: string;
   /** The workflow's name once loaded. */
   name: string | null;
-  tab: WorkflowTab;
+  tab: WorkflowHeaderTab;
   actions?: React.ReactNode;
 }
 
 /**
  * The workflow pages' header: Workflows › {name} (the h1, with a "Switch workflow" combobox that
- * keeps the current tab), the page actions, Connect (AG-UI), and the Graph · Runs · Traces tabs.
+ * keeps the current tab), the page actions, Connect (AG-UI), and the Graph · Runs · Traces · Schedules tabs.
  * Needs a `<Suspense>` boundary above it (the Connect Sheet reads the URL).
  */
 export function WorkflowHeader({ workflowId, name, tab, actions }: WorkflowHeaderProps) {
   const options = useWorkflowOptions();
-  const hrefFor = (id: string) => (tab === "traces" ? routes.workflowTraces(id) : routes.workflow(id, { tab: tab === "runs" ? "runs" : null }));
+  const hrefFor = (id: string) => {
+    if (tab === "traces") return routes.workflowTraces(id);
+    if (tab === "schedules") return routes.workflowSchedule(id);
+    return routes.workflow(id, { tab: tab === "runs" ? "runs" : null });
+  };
+  const section = tab === "graph" ? "" : tab === "runs" ? "Runs" : tab === "traces" ? "Traces" : "Schedules";
   return (
     <PageHeader
       crumbs={[
@@ -61,7 +70,7 @@ export function WorkflowHeader({ workflowId, name, tab, actions }: WorkflowHeade
           switcher: options.length > 1 ? { label: "Switch workflow", options, value: workflowId, hrefFor, testId: "workflow-switcher" } : undefined,
         },
       ]}
-      documentTitle={name ? `${name}${tab === "graph" ? "" : ` · ${tab === "runs" ? "Runs" : "Traces"}`}` : "Workflow"}
+      documentTitle={name ? `${name}${section ? ` · ${section}` : ""}` : "Workflow"}
       actions={
         <>
           {actions}

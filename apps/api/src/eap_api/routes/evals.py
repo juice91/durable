@@ -28,6 +28,15 @@ Eval runs:
   `GET .../evals/runs/{run_id}/results[?limit=&after=]` (by position, `next_cursor`).
 - `GET  /agents/{agent_id}/evals/compare?base=<run_id>&target=<run_id>`.
 
+Across the tenant's agents (the Studio Datasets, Scorers and Experiments pages; `eap_api.eval_overview`):
+- `GET  /eval-suites[?agent_id=&include_archived=&limit=&after=]`: suites by name with `agent_name`,
+  `case_count` and `last_run` (the suite's newest run with `{cases, passed, failed, errors, pass_rate}`).
+- `GET  /evals/runs[?agent_id=&suite_id=&limit=&before=]`: eval runs newest first with `agent_name`,
+  `suite_name` and aggregates.
+- `GET  /evals/scorers[?limit=&after=]`: evaluators in use by (kind, name) with the suites that use
+  them and recent per-run values (`score`: mean score, `pass_rate`: share of passed assertions).
+All three are paginated with an opaque `next_cursor` (422 for a cursor this API did not issue).
+
 Errors: 404 (agent, suite, case, version or run not found), 409 (name already used, suite archived,
 id already used, no published version or no draft), 413 (an eval case's hand-off payload over
 EAP_MAX_RUN_PAYLOAD_BYTES), 422 (invalid suite, case, evaluator, file or draft), 503 (the run was
@@ -53,6 +62,7 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.auth import Principal, current_principal
+from eap_api import eval_overview
 from eap_api.eval_format import (
     MAX_IMPORT_BYTES,
     EvalFormatError,
@@ -341,6 +351,97 @@ def list_suites(
     _agent_or_404(db, principal.tenant_id, agent_id)
     suites = store.list_suites(principal.tenant_id, agent_id, include_archived=include_archived)
     return JSONResponse(content={"items": [suite_json(s) for s in suites]})
+
+
+OVERVIEW_MAX_LIMIT = 100
+
+
+def _overview_agent(db, tenant_id: str, agent_id: uuid.UUID | None) -> str | None:
+    if agent_id is None:
+        return None
+    return _agent_or_404(db, tenant_id, agent_id).id
+
+
+@_json_router.get("/eval-suites")
+def list_tenant_suites(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    agent_id: uuid.UUID | None = None,
+    include_archived: bool = False,
+    limit: Annotated[int, Query(ge=1, le=OVERVIEW_MAX_LIMIT)] = 50,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The tenant's suites across agents by name, with the agent's name and the latest run of each."""
+    tenant_id = principal.tenant_id
+    agent = _overview_agent(db, tenant_id, agent_id)
+    try:
+        rows, next_cursor = eval_overview.list_suite_overview(
+            store, db, tenant_id, agent_id=agent, include_archived=include_archived, limit=limit, after=after
+        )
+    except eval_overview.InvalidCursor:
+        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    items = []
+    for row in rows:
+        item = suite_json(row["suite"])
+        item["agent_name"] = row["agent_name"]
+        item["agent_archived"] = row["agent_archived"]
+        last = row["last_run"]
+        item["last_run"] = None if last is None else {
+            **{k: v for k, v in eval_run_json(last["run"]).items()
+               if k in ("run_id", "version", "status", "display_status", "created_at", "updated_at")},
+            "aggregates": eval_overview.brief_aggregates(last["aggregates"]),
+        }
+        items.append(item)
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+@_json_router.get("/evals/runs")
+def list_tenant_eval_runs(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    agent_id: uuid.UUID | None = None,
+    suite_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RUNS)] = 50,
+    before: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The tenant's eval runs across agents, newest first, each with its aggregates and the agent
+    and suite names. `next_cursor` is set when a full page came back (pass it as `before`)."""
+    tenant_id = principal.tenant_id
+    agent = _overview_agent(db, tenant_id, agent_id)
+    cursor = None
+    if before is not None:
+        try:
+            cursor = RunCursor.decode(before)
+        except InvalidRunCursor:
+            raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    rows, next_cursor = eval_overview.list_run_overview(
+        store, db, tenant_id, agent_id=agent, suite_id=None if suite_id is None else str(suite_id),
+        limit=limit, before=cursor,
+    )
+    items = [
+        {**eval_run_json(row["run"], row["aggregates"]), "agent_name": row["agent_name"], "suite_name": row["suite_name"]}
+        for row in rows
+    ]
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+@_json_router.get("/evals/scorers")
+def list_scorers(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    limit: Annotated[int, Query(ge=1, le=OVERVIEW_MAX_LIMIT)] = 50,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The evaluators the tenant's active suites use, by (kind, name), each with its suites and
+    recent per-run values from their eval runs."""
+    try:
+        rows, next_cursor = eval_overview.list_scorer_overview(store, db, principal.tenant_id, limit=limit, after=after)
+    except eval_overview.InvalidCursor:
+        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    return JSONResponse(content={"items": rows, "next_cursor": next_cursor})
 
 
 @_json_router.post("/agents/{agent_id}/eval-suites", status_code=status.HTTP_201_CREATED)

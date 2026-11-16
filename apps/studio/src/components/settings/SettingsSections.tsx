@@ -1,9 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { BASE_URL } from "@/lib/api";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { routes } from "@/lib/routes";
 import { applySidebarAttribute, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
@@ -189,6 +191,18 @@ function BrowserDataSection() {
   );
 }
 
+function ProvidersSection() {
+  return (
+    <Section id="providers" testId="settings-providers" title="Model providers" description="The providers the server reaches for models, their status and the models they list. Read-only: keys come from the server's environment.">
+      <div>
+        <Link href={routes.settingsProviders()} className="text-label font-medium text-foreground underline underline-offset-4 hover:text-muted-foreground" data-testid="settings-providers-link">
+          View providers
+        </Link>
+      </div>
+    </Section>
+  );
+}
+
 function AboutSection() {
   const version = studioVersion();
   return (
@@ -213,6 +227,7 @@ export function SettingsSections() {
       <Section id="shortcuts" testId="settings-shortcuts" title="Keyboard shortcuts" description="Single keys work when focus is not in a text field. Press ? anywhere to see this list.">
         <ShortcutTable headingLevel={3} />
       </Section>
+      <ProvidersSection />
       <ApiKeysSection />
       <BrowserDataSection />
       <AboutSection />

@@ -276,6 +276,31 @@ class TestConversationListAndRename:
         assert item["turn_count"] == 0 and item["last_turn_status"] is None
         assert {"last_turn_run_id", "last_turn_display_status", "title", "updated_at"} <= set(item)
 
+    def test_q_filters_by_title_substring_within_the_tenant(self, pg, tenant_of):
+        client, _ = pg
+        _, h = tenant_of()
+        _, other = tenant_of()
+        a1, a2 = make_agent(client, h), make_agent(client, h)
+        refund = new_conversation(client, h, a1, "Refund for order 7")
+        pct = new_conversation(client, h, a2, "100% done_ok")
+        new_conversation(client, h, a1, "Printer jam")
+        foreign = make_agent(client, other)
+        new_conversation(client, other, foreign, "Refund elsewhere")
+
+        def ids(query: str) -> list[str]:
+            r = client.get(f"/api/v1/conversations?{query}", headers=h)
+            assert r.status_code == 200, r.text
+            return [c["id"] for c in r.json()["items"]]
+
+        assert ids("q=REFUND") == [refund]
+        assert ids(f"q=refund&agent_id={a2}") == []
+        # LIKE wildcards in the term are literal.
+        assert ids("q=%25") == [pct]
+        assert ids("q=_") == [pct]
+        assert ids("q=zzz") == []
+        assert client.get("/api/v1/conversations?q=", headers=h).status_code == 422
+        assert client.get(f"/api/v1/conversations?q={'a' * 201}", headers=h).status_code == 422
+
     @pytest.mark.parametrize("before", ["nope", "", "a" * 300])
     def test_bad_cursor_or_limit_is_422(self, pg, tenant_of, before):
         client, _ = pg

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Tuple
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
 from eap_schemas.approvals import ApprovalPolicy
@@ -24,7 +24,7 @@ from eap_schemas.knowledge import (
     check_knowledge_base_refs,
 )
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid
-from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
+from eap_schemas.limits import MAX_REQUESTS, RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.mcp import McpToolRef, mcp_tool_name
 from eap_schemas.memory import (
     HistoryConfig,
@@ -145,6 +145,18 @@ __all__ = (
 MAX_FALLBACK_MODELS = 3
 
 
+MAX_MODEL_RETRIES = 10
+MODEL_SETTINGS_OMIT_WHEN_NONE = (
+    "top_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+    "max_steps",
+    "max_retries",
+)
+
+
 class ModelSettings(BaseModel):
     """Settings for model inference."""
 
@@ -152,6 +164,31 @@ class ModelSettings(BaseModel):
 
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, gt=0)
+    # Added after specs were first stored: an unset one is left out of every dump (as `mcp_tools` is
+    # on AgentSpec), so a spec without them keeps its exact JSON and canonical_spec_hash.
+    # `temperature` and `max_tokens` stay in the dump as null, as they always were.
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    seed: StrictInt | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
+    # Caps the agent loop (model requests of one run; Pydantic AI `request_limit`) and sets the
+    # agent's tool and output retry budgets (`retries`).
+    max_steps: int | None = Field(default=None, ge=1, le=MAX_REQUESTS)
+    max_retries: int | None = Field(default=None, ge=0, le=MAX_MODEL_RETRIES)
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_new_fields(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            for name in MODEL_SETTINGS_OMIT_WHEN_NONE:
+                if getattr(self, name) is None:
+                    data.pop(name, None)
+        return data
+
+    def set_values(self) -> dict[str, Any]:
+        """The settings that are set, by name."""
+        return {name: getattr(self, name) for name in type(self).model_fields if getattr(self, name) is not None}
 
 
 class AgentSpec(BaseModel):
@@ -491,6 +528,12 @@ RunEventType = Literal[
     "loop_iteration_completed",  # key `loop:{S}:completed`: {step_id, scope, index, ...}
     "loop_iteration_failed",  # key `loop:{S}:failed`: {step_id, scope, index, error_code, error}
     "cancel_requested",  # written by the API (POST /runs/{id}/cancel), key `cancel`: {requested_by}
+    # Reusable scorers (W2.3): written by the worker after a run finished, key `score:{scorer_id}`:
+    # {scorer, scorer_id, score, passed, reason}. Never output text.
+    "score",
+    # Message feedback (W2.4), written by the API after the turn ended, key `feedback:{message_id}`:
+    # {message_id, rating: "up"|"down"|null, comment: str|null}. The comment is the user's own note.
+    "message_feedback",
 ]
 
 

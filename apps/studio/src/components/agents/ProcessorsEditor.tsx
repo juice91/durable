@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { ModelPicker } from "@/components/shared/ModelPicker";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import type { JsonSchema } from "@/lib/tools";
 import {
@@ -91,7 +92,7 @@ function LinesInput({ id, label, description, value, maxItems, maxLength, onChan
   );
 }
 
-/** The moderation model: an allowlisted model, or a free-text name under a wildcard provider. */
+/** The moderation model: a provider and model from the allowlist (the shared picker), or free text where the list is unavailable. */
 export function ModerationModelPicker({ id, value, models, modelsError, onChange }: {
   id: string;
   value: { provider?: string; name?: string } | undefined;
@@ -101,46 +102,20 @@ export function ModerationModelPicker({ id, value, models, modelsError, onChange
 }) {
   const provider = value?.provider ?? "";
   const name = value?.name ?? "";
-  const current = provider ? `${provider}:${name}` : "";
-  const exact = models?.find((m) => !m.wildcard && m.id === current);
-  const wildcard = !exact ? models?.find((m) => m.wildcard && m.provider === provider) : undefined;
-  const selected = exact ? exact.id : wildcard ? wildcard.id : current;
-  const known = Boolean(exact || wildcard);
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium text-foreground">Moderation model *</label>
-      <select
-        id={id}
-        className={inputClass}
-        value={selected}
-        onChange={(e) => {
-          const option = models?.find((m) => m.id === e.target.value);
-          if (option) onChange({ provider: option.provider, name: option.wildcard ? "" : option.name });
-        }}
-      >
-        <option value="" disabled>Select a model…</option>
-        {current && !known ? <option value={current}>{current} (not in the allowlist)</option> : null}
-        {(models ?? []).map((m) => (
-          <option key={m.id} value={m.id}>{m.wildcard ? `${m.provider}: any model (type a name)` : m.id}{m.description ? ` — ${m.description}` : ""}</option>
-        ))}
-      </select>
-      {wildcard ? (
-        <input
-          aria-label="Moderation model name"
-          aria-invalid={!name}
-          aria-describedby={!name ? `${id}-name-problem` : undefined}
-          className={inputClass}
-          placeholder={`${wildcard.provider} model name`}
-          value={name}
-          onChange={(e) => onChange({ provider: wildcard.provider, name: e.target.value })}
-        />
-      ) : null}
-      {modelsError ? <p role="alert" className="text-xs text-destructive-text">Could not load models: {modelsError}</p> : null}
-      <div id={`${id}-name-problem`} aria-live="polite">
-        {wildcard && !name ? <p className="text-xs text-destructive-text">Type a model name</p> : null}
-      </div>
-      <p className="text-xs text-muted-foreground">Must be in the platform allowlist; checked at publish and at run time.</p>
-    </div>
+    <ModelPicker
+      providerId={`${id}-provider`}
+      modelId={id}
+      providerLabel="Moderation provider *"
+      modelLabel="Moderation model *"
+      provider={provider}
+      name={name}
+      models={models}
+      loadError={modelsError}
+      problem={provider && !name ? "Type or choose a model name" : null}
+      hint="Must be in the platform allowlist; checked at publish and at run time."
+      onChange={onChange}
+    />
   );
 }
 

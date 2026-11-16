@@ -214,6 +214,7 @@ describe("TracesPage", () => {
     expect((listRuns as any).mock.calls[0][0]).toEqual({
       status: ["failed", "needs_attention"], model: "openai:gpt-4.1", provider: null,
       from: "2026-11-01T00:00:00", to: "2026-11-02T00:00:00", agent_id: "agent-1", kind: "agent",
+      tags: [], metadata: [], q: null,
     });
     expect((screen.getByLabelText(/model/i) as HTMLInputElement).value).toBe("openai:gpt-4.1");
 

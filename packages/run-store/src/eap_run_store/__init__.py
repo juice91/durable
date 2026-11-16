@@ -47,6 +47,11 @@ from eap_run_store.ag_ui import (
     AgUiStore,
     PendingClientToolCall,
 )
+from eap_run_store.scorers import (  # noqa: F401  W2.3: registers the scorer tables
+    ScorerNameConflict,
+    ScorerNotFound,
+    ScorerStore,
+)
 from eap_run_store.api_keys import (
     API_KEY_PREFIX,
     API_KEY_SCOPES,
@@ -58,6 +63,16 @@ from eap_run_store.api_keys import (
     looks_like_api_key,
     normalize_origin,
     parse_api_key,
+)
+from eap_run_store.trace_feedback import (  # noqa: F401  0019_trace_feedback: registers the table
+    TraceFeedbackModel,
+    TraceFeedbackStore,
+)
+from eap_run_store.chat_attachments import (  # 0021_chat_attachments
+    ChatAttachmentModel,
+    ChatAttachmentStore,
+    MessageFeedbackModel,
+    MessageFeedbackStore,
 )
 from eap_run_store.approvals import (
     APPROVAL_ARGS_MAX_BYTES,
@@ -167,6 +182,8 @@ __all__ = [
     "API_KEY_SCOPES",
     "ApiKeyLimitExceeded",
     "ApiKeyModel",
+    "TraceFeedbackModel",
+    "TraceFeedbackStore",
     "ApiKeyRecord",
     "ApiKeyStore",
     "CreatedApiKey",
@@ -189,6 +206,9 @@ __all__ = [
     "EvalCaseResultModel",
     "EvalRunNotFound",
     "EvalStore",
+    "ScorerNameConflict",
+    "ScorerNotFound",
+    "ScorerStore",
     "EvalSuiteArchived",
     "EvalSuiteModel",
     "EvalSuiteNameConflict",

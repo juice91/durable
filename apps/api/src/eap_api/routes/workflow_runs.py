@@ -13,6 +13,13 @@ durable before the wake-up is sent; if the send fails the answer is still 200 wi
 `"notified": false`, and the worker picks the decision up at its next poll
 (EAP_APPROVAL_POLL_SECONDS, default one hour).
 
+`POST /workflows/runs/{run_id}/steps/{step_id}/resume {data, comment?}` answers an input step (a
+step with a `resume_schema`): `data` is validated against the schema recorded in the step's waiting
+event (422 with loc/msg/type only, never the values), then recorded as the decision event
+`step:{step_id}:decision` (step_approved, data {decided_by, comment, resume_data}; the event's time
+is when) through the same `decide` helper, so the audit (who, when, what) is the event, tenant-scoped
+with the run, and a second answer is 409. `approve` on an input step is 422 `resume_data_required`.
+
 `POST /runs/{run_id}/cancel` (loops D12, LP.8; `cancel_router`, mounted without the /workflows
 prefix) cancels a workflow run and its whole tree in three steps, none of them holding a lock
 across another:
@@ -43,7 +50,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_api.agent_archive import archived_step_problems
-from eap_api.approvals import decide
+from eap_api.approvals import DecisionResult, decide
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
@@ -54,6 +61,7 @@ from eap_api.schemas import CancelNotSupportedDetail, ErrorDetail, RunCancelResp
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability import current_trace_context, log_failure
 from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, RunIdConflict
+from eap_run_store.store import TERMINAL_RUN_STATUSES
 from eap_schemas.workflows import STEP_ID_PATTERN, WorkflowSpec
 
 log = logging.getLogger("eap_api")
@@ -330,6 +338,42 @@ def start_workflow_run(
     )
 
 
+class ResumeSubmission(BaseModel):
+    """Body of .../resume: the object the input step's `resume_schema` describes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    data: dict[str, Any]
+    comment: str | None = Field(default=None, max_length=MAX_COMMENT_CHARS)
+
+
+async def _resume_body(request: Request) -> ResumeSubmission:
+    return await _parse_body(request, ResumeSubmission)
+
+
+def resume_data_errors(schema: dict[str, Any], value: Any) -> list[dict[str, Any]]:
+    """`value` checked against an input step's resume_schema, as `input_schema_errors` does (an empty
+    Registry; loc/keyword only, never jsonschema's message, which quotes the rejected value), at
+    loc ["body", "data", ...]. Non-finite numbers are errors too."""
+    import jsonschema
+    from referencing import Registry
+
+    found = [{**e, "loc": ["body", "data", *e["loc"][2:]]} for e in non_finite_errors(value)]
+    try:
+        cls = jsonschema.validators.validator_for(schema)
+        cls.check_schema(schema)
+        for err in sorted(cls(schema, registry=Registry()).iter_errors(value), key=lambda e: list(e.absolute_path))[
+            :MAX_REPORTED_ERRORS
+        ]:
+            loc = ["body", "data", *[p if isinstance(p, int) else str(p)[:100] for p in err.absolute_path]]
+            found.append({"loc": loc, "msg": f"does not satisfy the step's schema ('{err.validator}' keyword)",
+                          "type": f"json_schema.{err.validator}"})
+    except Exception:  # noqa: BLE001 - SchemaError, an unresolvable $ref, ...
+        return [{"loc": ["body", "data"], "msg": "the step's schema could not be applied",
+                 "type": "json_schema.invalid_schema"}]
+    return found[:MAX_REPORTED_ERRORS]
+
+
 def _decide(
     decision: str,
     run_id: uuid.UUID,
@@ -352,6 +396,12 @@ def _decide(
     )
     if result.outcome == "run_not_found":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if result.outcome == "data_required":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=[{"loc": ["path", "step_id"], "msg": "this step takes data: answer it with .../resume",
+                     "type": "resume_data_required"}],
+        )
     if result.outcome != "created":
         # Same text as always; an earlier decision (a person's or the timeout's) is added.
         return JSONResponse(
@@ -380,6 +430,77 @@ _DECISION_RESPONSES: dict[int | str, dict[str, Any]] = {
     409: {"model": ErrorDetail},
     422: {"model": ErrorDetail},
 }
+
+
+@router.post(
+    "/runs/{run_id}/steps/{step_id}/resume",
+    responses={**_DECISION_RESPONSES, 413: {"model": ErrorDetail}, 415: {"model": ErrorDetail}},
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ResumeSubmission.model_json_schema()}},
+        }
+    },
+)
+def resume_step(
+    run_id: uuid.UUID,
+    step_id: StepIdPath,
+    principal: PrincipalDep,  # before the body: 401 wins over 422
+    body: Annotated[ResumeSubmission, Depends(_resume_body)],
+    stores: StoresDep,
+    launcher: LauncherDep,
+) -> JSONResponse:
+    """Answer a waiting input step with `data`: 200 {run_id, step_id, decision: "approved",
+    decided_by, decided_at, comment, notified}. 404 unknown, another tenant's or non-workflow run;
+    409 the step is not waiting, is already decided (the answer names the recorded decision, who and
+    when) or takes no data (an approval step); 422 `data` does not satisfy the step's resume_schema
+    (loc/msg/type only, never the values), is over 32 KiB or has a non-finite number."""
+    run_store, event_log = stores
+    tenant_id = principal.tenant_id
+    run = run_store.get_run(tenant_id, run_id)
+    if run is None or run.get("kind") != "workflow":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    waiting = event_log.get_event(tenant_id, run_id, f"step:{step_id}:waiting")
+    waiting_data = waiting.data if waiting is not None and isinstance(waiting.data, dict) else {}
+    schema = waiting_data.get("resume_schema")
+    earlier = event_log.get_event(tenant_id, run_id, f"step:{step_id}:decision") if waiting is not None else None
+    if earlier is not None:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": NOT_WAITING_DETAIL, **(DecisionResult("exists", event=earlier).recorded_decision() or {})},
+        )
+    if waiting is None or run.get("status") in TERMINAL_RUN_STATUSES:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=NOT_WAITING_DETAIL)
+    if not isinstance(schema, dict):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="step takes no data: approve or reject it")
+    errors = resume_data_errors(schema, body.data)
+    if not errors and len(_canonical_json(body.data).encode("utf-8")) > MAX_WORKFLOW_INPUT_BYTES:
+        errors = [{"loc": ["body", "data"], "msg": f"data must be at most {MAX_WORKFLOW_INPUT_BYTES // 1024} KiB as JSON",
+                   "type": "too_long"}]
+    if errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
+    result = decide(
+        event_log, launcher, tenant_id=tenant_id, run_id=run_id, kind="step", key=step_id,
+        decision="approved", decided_by=principal.user_id, comment=body.comment, resume_data=body.data,
+    )
+    if result.outcome == "run_not_found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if result.outcome != "created":
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": NOT_WAITING_DETAIL, **(result.recorded_decision() or {})},
+        )
+    return JSONResponse(
+        content={
+            "run_id": str(run_id),
+            "step_id": step_id,
+            "decision": "approved",
+            "decided_by": principal.user_id,
+            "decided_at": (result.recorded_decision() or {}).get("decided_at"),
+            "comment": body.comment,
+            "notified": result.notified,
+        }
+    )
 
 
 @router.post("/runs/{run_id}/steps/{step_id}/approve", responses=_DECISION_RESPONSES)

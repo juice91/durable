@@ -117,6 +117,10 @@ export const workflowRoutes = {
       [WORKFLOW_TAB_PARAM, tab === "runs" ? "runs" : null],
       [WORKFLOW_COLLAPSED_PARAM, tab === "runs" ? null : collapsedParam(collapsed)],
     ])}`,
+  /** `/workflows/schedules`: every workflow schedule. */
+  workflowSchedules: (): string => "/workflows/schedules",
+  /** `/workflows/:id/schedules`: one workflow's Schedules tab. */
+  workflowSchedule: (id: string): string => `/workflows/${seg(id)}/schedules`,
   /** `/workflows/:id/traces`: the workflow's Traces tab (its runs, opening the trace Sheet). */
   workflowTraces: (id: string): string => `/workflows/${seg(id)}/traces`,
   /** `/workflows/:id/runs/:runId`: one workflow run. */

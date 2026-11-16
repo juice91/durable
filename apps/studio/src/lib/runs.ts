@@ -123,7 +123,11 @@ export interface RunEvent {
     // Workflow loops (loops D4, D12): one per iteration (`loop:{S}:started|completed|failed`), and
     // the durable cancel request (key `cancel`, {requested_by}).
     | "loop_iteration_started" | "loop_iteration_completed" | "loop_iteration_failed"
-    | "cancel_requested";
+    | "cancel_requested"
+    // Reusable scorers (W2.3): written by the worker after a run, key `score:{scorer_id}`.
+    | "score"
+    // Message feedback (W2.4): written by the API, key `feedback:{message_id}`.
+    | "message_feedback";
   data: RunEventData;
   ts: string;
 }

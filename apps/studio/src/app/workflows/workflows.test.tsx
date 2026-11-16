@@ -61,13 +61,14 @@ afterEach(() => {
 });
 
 describe("/workflows", () => {
-  it("lists workflows with latest version, updated and a link", async () => {
+  it("lists name, step count and a schedules link, and leaves idle counts blank", async () => {
     render(<WorkflowsPage />);
     const row = await screen.findByTestId("workflow-row-wf-1");
     expect(within(row).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
-    expect(row).toHaveTextContent("v2");
-    await waitFor(() => expect(row).toHaveTextContent("2026"));
-    expect(screen.getByTestId("workflow-row-wf-2")).toHaveTextContent("Draft only");
+    await waitFor(() => expect(row).toHaveTextContent("5"));
+    expect(row).not.toHaveTextContent("Draft only");
+    expect(screen.getByTestId("workflow-row-wf-2")).toHaveTextContent("5");
+    expect(screen.getByTestId("workflows-schedules")).toHaveAttribute("href", routes.workflowSchedules());
   });
 });
 

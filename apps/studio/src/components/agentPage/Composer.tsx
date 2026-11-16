@@ -6,6 +6,7 @@ import { ArrowUp, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { focusRing } from "@/components/ui/Button";
+import { AttachButton, ComposerAttachmentList } from "@/components/chat/Attachments";
 
 export interface ComposerProps {
   /** The run option chips (version, model) and the request context button, in that order. */
@@ -15,6 +16,8 @@ export interface ComposerProps {
   /** Refusals and notices about the options, under the chips. */
   notices?: React.ReactNode;
   placeholder?: string;
+  /** The runtime has an attachment adapter (the AG-UI chat): shows the paperclip and the file chips. */
+  attachments?: boolean;
 }
 
 /**
@@ -22,12 +25,13 @@ export interface ComposerProps {
  * option chips on the left and the output-check hint and Send on the right. Enter sends, Shift+Enter
  * adds a line. The row wraps, so the chips fit a 375 px screen.
  */
-export function Composer({ chips, outputChecked, notices, placeholder = "Message the agent…" }: ComposerProps) {
+export function Composer({ chips, outputChecked, notices, placeholder = "Message the agent…", attachments = false }: ComposerProps) {
   return (
     <ComposerPrimitive.Root
       data-testid="chat-composer"
       className="flex min-w-0 flex-col gap-2 rounded-lg border border-border bg-surface-raised p-2 shadow-raised focus-within:border-ring"
     >
+      {attachments ? <ComposerAttachmentList /> : null}
       <ComposerPrimitive.Input
         aria-label="Message"
         placeholder={placeholder}
@@ -35,6 +39,7 @@ export function Composer({ chips, outputChecked, notices, placeholder = "Message
         className="max-h-60 min-h-12 w-full min-w-0 resize-none bg-transparent px-2 py-1.5 text-body text-foreground placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
       />
       <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="run-options">
+        {attachments ? <AttachButton /> : null}
         {chips}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {outputChecked ? (

@@ -58,6 +58,15 @@ export interface ApprovalStep extends StepBase {
   next?: string | null;
 }
 
+/** A step that waits for a person to submit data matching `resume_schema` (a JSON Schema object). */
+export interface InputStep extends StepBase {
+  type: "input";
+  prompt: string;
+  timeout_hours: number;
+  resume_schema: JsonSchema;
+  next?: string | null;
+}
+
 export interface BranchStep extends StepBase {
   type: "branch";
   cases: { when: Expression; next: string }[];
@@ -125,6 +134,7 @@ export type WorkflowStep =
   | AgentStep
   | ToolStep
   | ApprovalStep
+  | InputStep
   | BranchStep
   | ParallelStep
   | ForeachStep
@@ -277,6 +287,24 @@ export async function decideApproval(
       body: JSON.stringify(trimmed ? { comment: trimmed } : {}),
     },
   );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** Answer a waiting input step with `data` (POST .../steps/{id}/resume). Throws ApiError (404, 409
+ * not waiting or already decided, 422 with `detail` [{loc, msg, type}]). */
+export async function resumeStep(
+  runId: string,
+  stepId: string,
+  data: Record<string, unknown>,
+  comment?: string,
+): Promise<ApprovalDecisionResult> {
+  const trimmed = comment?.trim();
+  const response = await fetch(`${BASE_URL}/api/v1/workflows/runs/${enc(runId)}/steps/${enc(stepId)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    body: JSON.stringify(trimmed ? { data, comment: trimmed } : { data }),
+  });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
 }

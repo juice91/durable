@@ -28,8 +28,10 @@ import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
 import { timelineClock, timelineRows } from "./workflowTimeline";
 import { CancelRunButton } from "./CancelRunButton";
+import { RerunButton } from "./RerunButton";
 import { IterationPager, LoopIterationTable } from "./LoopIterations";
 import { copyText } from "@/lib/clipboard";
+import type { JsonSchema } from "@/lib/tools";
 
 /** How often a live run's open timeline bars grow. */
 const TIMELINE_TICK_MS = 1000;
@@ -72,6 +74,8 @@ interface WorkflowRunViewProps {
   /** Loop instances whose pager steps through failed iterations only (`?failedOnly=`). */
   failedOnlyLoops?: ReadonlySet<string>;
   onFailedOnlyLoopsChange?: (next: Set<string>) => void;
+  /** "Run again" started a new run (its id); the page navigates to it. Omitted, no button. */
+  onRerunStarted?: (runId: string) => void;
 }
 
 /** The "Cancelled" label of a run that ended with `run_cancelled` and status `failed`. (A cancel that
@@ -102,6 +106,7 @@ export function WorkflowRunView({
   onIterationSelectionChange,
   failedOnlyLoops,
   onFailedOnlyLoopsChange,
+  onRerunStarted,
 }: WorkflowRunViewProps) {
   // One collapsed set for the canvas and the step list: the page's URL state, else kept here.
   const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -308,6 +313,7 @@ export function WorkflowRunView({
             )}
           </span>
           {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
+          {run && onRerunStarted && isTerminal(view.status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
         </>
       }
     />
@@ -342,7 +348,7 @@ export function WorkflowRunView({
       {view.waiting.map((id) => (
         <ApprovalCard
           key={id}
-          approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null }}
+          approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null, resumeSchema: (view.steps[id]?.resumeSchema as JsonSchema | null | undefined) ?? null }}
           onRefresh={refresh}
           onDecided={() => {
             refocusAfterDecision.current = true;

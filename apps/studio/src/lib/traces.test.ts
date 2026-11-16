@@ -104,6 +104,7 @@ describe("URL filters", () => {
     expect(filters).toEqual({
       status: ["failed", "needs_attention"], from: "2026-11-01T00:00:00", to: "2026-11-02T00:00:00",
       model: "openai:gpt-4.1", provider: "openai", agent_id: "a1", kind: "agent",
+      tags: [], metadata: [], q: null,
     });
     expect(parseTraceFilters(traceFiltersToParams(filters))).toEqual(filters);
   });

@@ -107,6 +107,9 @@ describe("recent failures", () => {
       provider: null,
       agent_id: null,
       kind: null,
+      tags: [],
+      metadata: [],
+      q: null,
     });
     expect(ATTENTION_STATUSES).toEqual(["failed", "needs_attention"]);
   });

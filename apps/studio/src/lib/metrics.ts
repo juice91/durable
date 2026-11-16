@@ -557,8 +557,10 @@ export interface ModelOption {
   name: string;
   /** `provider:*` allowlist entry: any name of that provider. */
   wildcard: boolean;
-  source: "allowlist" | "scripted";
+  source: "allowlist" | "scripted" | "discovered";
   description: string | null;
+  /** On a wildcard entry whose provider's model list could not be loaded: why. */
+  discovery_error?: string | null;
 }
 
 export async function fetchModels(signal?: AbortSignal): Promise<ModelOption[]> {
@@ -615,6 +617,9 @@ export function recentFailuresFilters(filters: MetricsFilters): TraceFilters {
     provider: filters.provider ?? null,
     agent_id: filters.agent_id ?? null,
     kind: filters.kind ?? null,
+    tags: [],
+    metadata: [],
+    q: null,
   };
 }
 

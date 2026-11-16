@@ -2,6 +2,7 @@
 
 import React, { useEffect, useId, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { ModelPicker } from "@/components/shared/ModelPicker";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
@@ -17,8 +18,9 @@ import {
 import { alertClass, cardClass, fieldClass, hintClass, labelClass, monoFieldClass } from "./evalsUi";
 
 /** The judge models offered (allowlisted concrete models from `GET /models`), loaded once per editor. */
-export function useJudgeModels(): { models: string[]; loaded: boolean; error: string | null } {
+export function useJudgeModels(): { models: string[]; options: ModelOption[] | null; loaded: boolean; error: string | null } {
   const [models, setModels] = useState<string[]>([]);
+  const [options, setOptions] = useState<ModelOption[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -27,19 +29,21 @@ export function useJudgeModels(): { models: string[]; loaded: boolean; error: st
       .then(() => fetchModels())
       .then((items: ModelOption[]) => {
         if (cancelled) return;
-        setModels(judgeModelIds(Array.isArray(items) ? items : []));
+        const list = Array.isArray(items) ? items : [];
+        setModels(judgeModelIds(list));
+        setOptions(list);
         setLoaded(true);
       })
       .catch(() => {
         if (cancelled) return;
-        setError("Models could not be loaded; type the judge model as provider:name.");
+        setError("the request failed");
         setLoaded(true);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-  return { models, loaded, error };
+  return { models, options, loaded, error };
 }
 
 interface EvaluatorsEditorProps {
@@ -69,6 +73,7 @@ export function EvaluatorsEditor({ drafts, onChange, max, errorIndex = null, err
           draft={draft}
           index={index}
           judgeModels={judge.models}
+          judgeOptions={judge.options}
           judgeModelsLoaded={judge.loaded}
           judgeModelsError={judge.error}
           onChange={(patch) => update(index, patch)}
@@ -90,6 +95,8 @@ interface EvaluatorRowProps {
   draft: EvaluatorDraft;
   index: number;
   judgeModels: string[];
+  /** The `GET /models` items (null until loaded or when they could not be). */
+  judgeOptions: ModelOption[] | null;
   /** The list has loaded (or failed): only then does a stored model's absence from it mean anything. */
   judgeModelsLoaded: boolean;
   judgeModelsError: string | null;
@@ -99,15 +106,13 @@ interface EvaluatorRowProps {
   disabled: boolean;
 }
 
-function EvaluatorRow({ draft, index, judgeModels, judgeModelsLoaded, judgeModelsError, onChange, onRemove, error, disabled }: EvaluatorRowProps) {
+function EvaluatorRow({ draft, index, judgeModels, judgeOptions, judgeModelsError, onChange, onRemove, error, disabled }: EvaluatorRowProps) {
   const id = useId();
   const field = (suffix: string) => `${id}-${suffix}`;
   const setKind = (kind: EvaluatorKind) => onChange({ kind, model: kind === "llm_judge" && !draft.model ? judgeModels[0] ?? "" : draft.model });
-  // A stored judge model that is not offered (anymore) is kept as typed text. That is decided once the
-  // list has loaded; until the user toggles (choice not null), it follows the list.
-  const modelInList = judgeModels.includes(draft.model);
-  const [typedChoice, setTypedChoice] = useState<boolean | null>(null);
-  const typedModel = typedChoice ?? (judgeModelsLoaded && !modelInList && draft.model !== "");
+  const sep = draft.model.indexOf(":");
+  const judgeProvider = sep < 0 ? draft.model : draft.model.slice(0, sep);
+  const judgeName = sep < 0 ? "" : draft.model.slice(sep + 1);
   return (
     <fieldset className={`${cardClass} space-y-3 p-3`} data-testid="evaluator-row" data-index={index} data-kind={draft.kind} disabled={disabled}>
       <legend className="sr-only">Evaluator {index + 1}</legend>
@@ -192,23 +197,18 @@ function EvaluatorRow({ draft, index, judgeModels, judgeModelsLoaded, judgeModel
             <textarea id={field("rubric")} rows={4} className={fieldClass} value={draft.rubric} onChange={(e) => onChange({ rubric: e.target.value })} placeholder="The answer is polite and names the order number." data-testid="evaluator-rubric" />
           </div>
           <div className="space-y-1">
-            <label htmlFor={field("model")} className={labelClass}>Judge model</label>
-            {typedModel || judgeModels.length === 0 ? (
-              <input id={field("model")} className={monoFieldClass} value={draft.model} onChange={(e) => onChange({ model: e.target.value })} placeholder="provider:name" data-testid="evaluator-model-text" />
-            ) : (
-              <select id={field("model")} className={fieldClass} value={modelInList ? draft.model : ""} onChange={(e) => onChange({ model: e.target.value })} data-testid="evaluator-model">
-                {modelInList ? null : <option value="">Choose a model</option>}
-                {judgeModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            )}
-            {judgeModels.length > 0 ? (
-              <button type="button" className="text-caption text-muted-foreground underline-offset-4 hover:underline" onClick={() => setTypedChoice(!typedModel)} data-testid="evaluator-model-toggle">
-                {typedModel ? "Choose from the allowed models" : "Type a model id"}
-              </button>
-            ) : null}
-            {judgeModelsError ? <p className={hintClass}>{judgeModelsError}</p> : <p className={hintClass}>Only allowed models can judge; the judge has no fallback models.</p>}
+            <ModelPicker
+              providerId={field("provider")}
+              modelId={field("model")}
+              providerLabel="Judge provider"
+              modelLabel="Judge model"
+              provider={judgeProvider}
+              name={judgeName}
+              models={judgeOptions}
+              loadError={judgeModelsError}
+              onChange={({ provider, name }) => onChange({ model: provider || name ? `${provider}:${name}` : "" })}
+            />
+            <p className={hintClass}>Only allowed models can judge; the judge has no fallback models.</p>
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-2">
             <label className="flex items-center gap-2 text-label text-foreground">

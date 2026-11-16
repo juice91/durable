@@ -116,7 +116,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 # client as `RUN_FINISHED{outcome: cancelled}` (D17).
 SILENT_EVENT_TYPES = frozenset(
     {"embedding", "memory_updated", "memory_observe_failed", "memory_observe_trimmed", "post_turn_done",
-     "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested"}
+     "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested", "score"}
 )
 STEP_DECISIONS = {"step_approved": "approved", "step_rejected": "rejected", "step_timed_out": "timed_out"}
 TOOL_DECISIONS = {"tool_approved": "approved", "tool_denied": "denied", "tool_approval_timed_out": "timed_out"}
@@ -502,6 +502,8 @@ class _Turn:
         if kind == "output_retry":
             errors = [e for e in (data.get("errors") or []) if isinstance(e, str)]
             return [custom("output_retry", {"model_request": data.get("model_request"), "errors": errors})], None
+        if kind == "message_feedback":
+            return [custom("message_feedback", dict(data))], None
         if kind == "tool_approval_waiting":
             return self.on_approval_waiting(data)
         if kind in TOOL_DECISIONS:
@@ -780,7 +782,9 @@ class AgUiFormatter:
             return self._frames(turn.on_delta(item)) if turn is not None else []
         if isinstance(item, DurableEvent):
             events = self._on_durable(item)
-            return self._frames(events, item.seq if item.scope is None else None)
+            # A trailing `message_feedback` precedes the terminal frame with a later seq: no frame id.
+            keyed = item.scope is None and item.event.type != "message_feedback"
+            return self._frames(events, item.seq if keyed else None)
         return []
 
     def finish(self, reason: EndReason) -> list[str]:

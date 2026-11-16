@@ -14,6 +14,8 @@ RENDERED = {
     "step_started", "step_waiting", "step_completed", "step_failed", *STEP_DECISIONS,
     # Workflow loops (LP.13, D17): iteration frames and the loop-step counters.
     "loop_iteration_started", "loop_iteration_completed", "loop_iteration_failed",
+    # W2.4 message feedback: the custom event `pydanticos.message_feedback`.
+    "message_feedback",
 }
 
 

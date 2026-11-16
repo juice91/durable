@@ -25,12 +25,15 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
 import { TraceSpans } from "./TraceSpans";
+import { TraceFeedback } from "./TraceFeedback";
+import { TraceScores } from "./TraceScores";
+import { AddToDataset } from "./AddToDataset";
 import type { SpanTreeMode } from "./TraceWaterfall";
 import { renderedSheetWidth, spanDetailBeside, traceSheetWidth } from "./traceSheetModel";
 import { useNames, useTrace } from "./useTrace";
 import { copyText } from "@/lib/clipboard";
 
-const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", logs: "Logs" };
+const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", scores: "Scores", logs: "Logs" };
 const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run", eval: "Eval run" };
 const icon = (Icon: typeof Copy) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
 
@@ -236,6 +239,16 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
           </div>
         ) : null}
 
+        {run ? (
+          <div className="flex min-w-0 flex-col gap-3">
+            {runKind(run) === "agent" && run.input ? <div className="self-start"><AddToDataset run={run} /></div> : null}
+            <details className="rounded-md border border-border p-3" data-testid="trace-feedback-details">
+              <summary className="cursor-pointer text-label font-medium">Trace feedback</summary>
+              <TraceFeedback runId={runId} className="mt-3" />
+            </details>
+          </div>
+        ) : null}
+
         <Tabs value={tab} onValueChange={(value) => onTabChange(value as TraceTab)} className="flex min-w-0 flex-col gap-4">
           <TabsList aria-label="Trace views">
             {TRACE_TABS.map((value) => (
@@ -270,6 +283,10 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
 
           <TabsContent value="events">
             <RunEventsPanel runId={runId} />
+          </TabsContent>
+
+          <TabsContent value="scores">
+            <TraceScores runId={runId} />
           </TabsContent>
 
           <TabsContent value="logs">

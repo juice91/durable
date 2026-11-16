@@ -102,4 +102,4 @@ def test_api_keys_revision_follows_ag_ui():
 
     script = ScriptDirectory.from_config(alembic_config())
     assert script.get_revision("0017_api_keys").down_revision == "0016_ag_ui"
-    assert script.get_heads() == ["0017_api_keys"]
+    assert len(script.get_heads()) == 1  # later revisions build on 0017; test_migrations pins the head

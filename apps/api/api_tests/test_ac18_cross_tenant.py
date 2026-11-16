@@ -60,6 +60,10 @@ NEW_ROUTES = {
     ("GET", "/api/v1/agents/{agent_id}/evals/runs/{run_id}/results"),
     ("GET", "/api/v1/agents/{agent_id}/evals/compare"),
     ("GET", "/api/v1/agents/{agent_id}/evals/warnings"),
+    # W1.5: tenant-wide lists behind the Evaluation pages (cross-tenant cases in test_evals_overview_api.py).
+    ("GET", "/api/v1/eval-suites"),
+    ("GET", "/api/v1/evals/runs"),
+    ("GET", "/api/v1/evals/scorers"),
 }
 # Pre-milestone decision routes that now go through the shared decision helper (AC.8).
 CHANGED_DECISION_ROUTES = {
@@ -186,6 +190,12 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
         (("GET", "/api/v1/agents/{agent_id}/evals/compare"), "GET", f"/agents/{a}/evals/compare?base={e}&target={e}",
          None, 404),
         (("GET", "/api/v1/agents/{agent_id}/evals/warnings"), "GET", f"/agents/{a}/evals/warnings", None, 404),
+        # W1.5 tenant-wide lists: another tenant sees an empty page; naming A's agent or suite is a 404.
+        (("GET", "/api/v1/eval-suites"), "GET", "/eval-suites", None, 200),
+        (("GET", "/api/v1/eval-suites"), "GET", f"/eval-suites?agent_id={a}", None, 404),
+        (("GET", "/api/v1/evals/runs"), "GET", "/evals/runs", None, 200),
+        (("GET", "/api/v1/evals/runs"), "GET", f"/evals/runs?agent_id={a}", None, 404),
+        (("GET", "/api/v1/evals/scorers"), "GET", "/evals/scorers", None, 200),
         (("POST", "/api/v1/workflows/runs/{run_id}/steps/{step_id}/approve"), "POST",
          f"/workflows/runs/{w['step_run']}/steps/approve/approve", {"comment": "x"}, 404),
         (("POST", "/api/v1/workflows/runs/{run_id}/steps/{step_id}/reject"), "POST",

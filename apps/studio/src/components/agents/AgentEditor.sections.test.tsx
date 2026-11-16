@@ -142,11 +142,16 @@ describe("AgentEditor processors and request context", () => {
     await waitFor(() => expect(fetchModels).toHaveBeenCalled());
     fireEvent.change(screen.getByLabelText("Output processor type"), { target: { value: "moderation" } });
     fireEvent.click(screen.getByRole("button", { name: "Add output processor" }));
-    const picker = screen.getByLabelText("Moderation model *");
-    expect(picker).toHaveValue("test:moderation");
+    // The shared picker preselects the first listed model: provider and model both shown.
+    await waitFor(() => expect(screen.getByLabelText("Moderation provider *")).toHaveValue("test"));
+    expect(screen.getByLabelText("Moderation model *")).toHaveTextContent("moderation");
+    // The model is chosen from a searchable list of the provider's models.
+    fireEvent.click(screen.getByLabelText("Moderation model *"));
+    fireEvent.click(await screen.findByRole("option", { name: "echo" }));
+    await waitFor(() => expect(screen.getByLabelText("Moderation model *")).toHaveTextContent("echo"));
     // A wildcard provider takes a typed name.
-    fireEvent.change(picker, { target: { value: "litellm:*" } });
-    fireEvent.change(screen.getByLabelText("Moderation model name"), { target: { value: "gpt-4o-mini" } });
+    fireEvent.change(screen.getByLabelText("Moderation provider *"), { target: { value: "litellm" } });
+    fireEvent.change(screen.getByLabelText("Moderation model *"), { target: { value: "gpt-4o-mini" } });
     fireEvent.click(screen.getByText("Save"));
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     expect(onSubmit.mock.calls[0][0].output_processors).toEqual([

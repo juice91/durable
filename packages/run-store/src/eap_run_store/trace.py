@@ -666,7 +666,7 @@ OBSERVER_ATTRIBUTES = (
 )
 # `post_turn_done` (P1.C1): shown as the run span's `post_turn` attribute (no span of its own).
 POST_TURN_ATTRIBUTES = ("observe", "index")
-_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed"})
+_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed", "score"})
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 

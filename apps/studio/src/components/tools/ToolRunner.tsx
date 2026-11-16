@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { ApiError } from "@/lib/api";
 import type { RunStatus } from "@/lib/runs";
-import { startToolRun, ToolRunError } from "@/lib/toolRuns";
+import { startToolRun, ToolRunError, type ToolRunAccepted } from "@/lib/toolRuns";
 import { canonicalInputKey, toolRunLedger, type PendingRun } from "@/lib/toolRunLedger";
 import type { ToolDefinition } from "@/lib/tools";
 import { JsonSchemaForm } from "./JsonSchemaForm";
@@ -42,7 +42,17 @@ export function useToolRunLedger(): boolean {
  * arrives after this instance is gone becomes an "Open run" note instead. The request itself is
  * never aborted: the server may already have accepted the run.
  */
-export function ToolRunner({ tool }: { tool: ToolDefinition }) {
+export function ToolRunner({
+  tool,
+  start,
+  onStarted,
+}: {
+  tool: ToolDefinition;
+  /** How a run is started; the built-in tools' POST /tools/{id}/runs by default (an MCP tool passes its own route). */
+  start?: (input: Record<string, unknown>, runId: string) => Promise<ToolRunAccepted>;
+  /** Called with the accepted run while this runner is still mounted (e.g. to refresh a history list). */
+  onStarted?: (accepted: ToolRunAccepted) => void;
+}) {
   const [mode, setMode] = useState<InputMode>("form");
   const [input, setInput] = useState<Record<string, unknown>>({});
   const [rawInput, setRawInput] = useState("{}");
@@ -78,9 +88,10 @@ export function ToolRunner({ tool }: { tool: ToolDefinition }) {
     setRunBanner(null);
     setFieldErrors({});
     try {
-      const accepted = await startToolRun(toolId, input, runId);
+      const accepted = await (start ? start(input, runId) : startToolRun(toolId, input, runId));
       // Ledger updates happen even after an unmount: they are what a remounted runner reads.
       toolRunLedger.forget(toolId, inputKey, runId);
+      onStarted?.(accepted);
       if (isCurrent()) setActiveRun({ runId: accepted.run_id, status: accepted.display_status });
       else toolRunLedger.addNote({ runId: accepted.run_id, toolId, toolTitle });
     } catch (reason: unknown) {

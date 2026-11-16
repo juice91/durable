@@ -2,7 +2,7 @@ import { seg, withQuery, type RouteQuery } from "./query";
 import type { LegacyRule } from "./legacy";
 
 /** The trace Sheet's tabs (SL.12). `spans` is the default and is left out of URLs. */
-export const TRACE_TABS = ["spans", "events", "logs"] as const;
+export const TRACE_TABS = ["spans", "events", "scores", "logs"] as const;
 export type TraceTab = (typeof TRACE_TABS)[number];
 /** Query parameter holding the open trace Sheet's run id. */
 export const TRACE_PARAM = "trace";
@@ -46,6 +46,8 @@ export const observabilityRoutes = {
   },
   /** A run's details: the trace Sheet on its Events tab (the former `/runs/:id` page). */
   run: (runId: string): string => observabilityRoutes.trace(runId, { tab: "events" }),
+  /** `/threads?agent_id=&q=`: the conversations of every agent (W2.5). A row opens the thread in the agent's chat. */
+  threads: (query?: RouteQuery): string => withQuery("/threads", query),
   /** `/logs`, with the Logs filters. */
   logs: (query?: RouteQuery): string => withQuery("/logs", query),
   /** The retired `/traces/:runId` page path (a redirect since SL.12). */

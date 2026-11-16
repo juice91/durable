@@ -24,12 +24,20 @@ const USERS = [
   "components/approvals/ApprovalsInbox.tsx",
   "components/evals/CompareView.tsx",
   "components/evals/EvalRunView.tsx",
+  // W1.5: the tenant-wide evaluation pages.
+  "components/evals/overview/DatasetsPage.tsx",
+  "components/evals/overview/ExperimentsPage.tsx",
+  "components/evals/overview/ScorersPage.tsx",
   "components/evals/SuiteView.tsx",
   "components/evals/TestsTab.tsx",
   "components/knowledge/DocumentsTab.tsx",
   "components/knowledge/IngestRunsTab.tsx",
   "components/logs/LogsList.tsx",
   "components/processors/ProcessorList.tsx",
+  // W2.5: the tenant-wide Threads page.
+  "components/threads/ThreadsPage.tsx",
+  // Round 1: the (empty) Schedules table.
+  "components/workflows/WorkflowSchedules.tsx",
 ];
 
 function sources(dir: string, out: string[] = []): string[] {

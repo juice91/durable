@@ -9,6 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { toast } from "@/components/ui/Toaster";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import {
+  cloneConversation,
   deleteConversation,
   listConversations,
   renameConversation,
@@ -66,13 +67,15 @@ export interface ConversationRailProps {
   onRenamed?: (conversation: Conversation) => void;
   /** Called after a conversation was deleted (or found already gone), with its id (RM.18). */
   onDeleted?: (conversationId: string) => void;
+  /** Called after a conversation was cloned, with the new one (already at the top of the list): open it. */
+  onCloned?: (conversation: Conversation) => void;
 }
 
 /**
  * The playground's left rail: the selected agent's conversations, most recently active first, paged
  * with the API's opaque cursor. Select to load, rename inline (Enter or leaving the field saves,
  * Escape cancels), "New conversation". Arrow Up/Down move between conversations. Each row's menu
- * also deletes the conversation (confirmed; RM.18).
+ * also clones the conversation (its finished turns, as a new thread) and deletes it (confirmed; RM.18).
  */
 export function ConversationRail({
   agentId,
@@ -82,6 +85,7 @@ export function ConversationRail({
   onNew,
   onRenamed,
   onDeleted,
+  onCloned,
 }: ConversationRailProps) {
   const [items, setItems] = useState<Conversation[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -94,6 +98,8 @@ export function ConversationRail({
   const [deleting, setDeleting] = useState<Conversation | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [cloneError, setCloneError] = useState<string | null>(null);
   const newButtonRef = useRef<HTMLButtonElement | null>(null);
   // Only the latest request may write: an agent switch or refresh makes older responses stale.
   const requestRef = useRef(0);
@@ -268,6 +274,24 @@ export function ConversationRail({
     onDeleted?.(conversation.id);
   };
 
+  const startClone = async (conversation: Conversation) => {
+    if (cloningId) return;
+    setCloningId(conversation.id);
+    setCloneError(null);
+    try {
+      const cloned = await cloneConversation(conversation.id);
+      // The clone is the most recently active: it goes to the top (the list is read again on the
+      // next refresh), and the host opens it.
+      setItems((current) => [cloned, ...current.filter((item) => item.id !== cloned.id)]);
+      toast.success("Conversation cloned");
+      onCloned?.(cloned);
+    } catch (error) {
+      setCloneError(error instanceof Error && error.message ? error.message : "Failed to clone the conversation.");
+    } finally {
+      setCloningId(null);
+    }
+  };
+
   const moveFocus = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const buttons = Array.from(
@@ -295,6 +319,12 @@ export function ConversationRail({
       {error && (
         <p role="alert" className="mb-2 px-2 text-label text-destructive-text">
           {error}
+        </p>
+      )}
+
+      {cloneError && (
+        <p role="alert" data-testid="conversation-clone-error" className="mb-2 px-2 text-label text-destructive-text">
+          {cloneError}
         </p>
       )}
 
@@ -380,6 +410,9 @@ export function ConversationRail({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onSelect={() => startRename(conversation)}>Rename</DropdownMenuItem>
+                    <DropdownMenuItem data-testid="conversation-clone" disabled={cloningId !== null} onSelect={() => void startClone(conversation)}>
+                      Clone conversation
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       destructive
                       data-testid="conversation-delete"

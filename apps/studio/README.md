@@ -47,6 +47,7 @@ components never write paths by hand. Query parameters below are part of the URL
 | `/knowledge` | Knowledge bases list. |
 | `/knowledge/:id[?tab=search\|runs][&doc=<document key>]` | One knowledge base: Documents tab (default), Search (`tab=search`, the search tester) or Ingest runs (`tab=runs`). `doc` opens that document's Sheet. Hosts the trace Sheet with `traceTab` as its tab parameter. |
 | `/metrics` | Metrics, with the Overview at the top. Parameters: `range` (default `7d`, left out), `from`/`to` (with `range=custom`), `interval`, `agent_id`, `model`, `provider`, `kind`. |
+| `/threads[?agent_id=<agent>&q=<title search>]` | Threads: the conversations of every agent, most recently active first. A row opens the thread in the agent's Chat tab. |
 | `/traces` | Traces list. Filters: `status` (comma-separated), `from`, `to`, `model`, `provider`, `agent_id`, `kind`. |
 | `/traces?trace=<runId>[&tab=events\|logs]` | The trace Sheet over the Traces list. `spans` is the default tab and is left out. `routes.run(id)` is the Sheet on `tab=events`. |
 | `/logs` | Logs. Filters: `q`, `level`, `agent_id`, `run_id`, and `from`/`to` or `range`. Hosts the trace Sheet (`?trace=&tab=`). |
@@ -98,7 +99,11 @@ for the second key.
 | `g` then `m` | Go to MCP Servers |
 | `g` then `p` | Go to Processors |
 | `g` then `k` | Go to Knowledge |
+| `g` then `d` | Go to Datasets |
+| `g` then `s` | Go to Scorers |
+| `g` then `e` | Go to Experiments |
 | `g` then `n` | Go to Metrics |
+| `g` then `h` | Go to Threads |
 | `g` then `t` | Go to Traces |
 | `g` then `l` | Go to Logs |
 | `g` then `,` | Go to Settings |
@@ -123,6 +128,7 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agent page layout | `studio.agent-layout.v1.<agentId>…`, `studio.agent-config.v1.<agentId>` | Pane widths on each agent's page, and whether its Config panel was left open or closed. | Layout |
 | Agents list view | `studio.agents.view` | List or Compact. | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
+| Trace list columns | `studio.traces.hiddenColumns` | Which columns the Traces list shows. | Layout |
 | Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |
 | Chat protocol | `studio.chat.protocol` | AG-UI or Native, for the agent Chat tab (Settings → Chat; AG-UI when unset). | Layout |
 | Last agent | `studio.lastAgent` | The agent the playground reopens. | Layout |

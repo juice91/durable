@@ -159,6 +159,12 @@ class ItemStream:
         self.load_summary = load_summary
         self.end_reason: EndReason = "gone"
 
+    async def _trailing_feedback(self, after_seq: int) -> list[DurableEvent]:
+        """`message_feedback` events written after the run's `end` (the API appends them to a finished
+        turn): a replay sends them just before the terminal frame, so no AG-UI event follows it."""
+        events = await asyncio.to_thread(self.load_events, after_seq)
+        return [DurableEvent(e) for e in events if e.type == "message_feedback"]
+
     async def __aiter__(self) -> AsyncIterator[StreamItem]:  # noqa: C901 - one loop, kept as in sse.py
         run_id = self.run_id
         settings = self.settings
@@ -224,6 +230,8 @@ class ItemStream:
                     ):
                         if (item := await summary()) is not None:
                             yield item
+                        for trailing in await self._trailing_feedback(last_seq):
+                            yield trailing
                         yield DurableEvent(pending_terminal)
                         self.end_reason = "terminal"
                         return
@@ -238,6 +246,8 @@ class ItemStream:
                             if event.type in TERMINAL_EVENT_TYPES:
                                 if (item := await summary()) is not None:
                                     yield item
+                                for trailing in await self._trailing_feedback(last_seq):
+                                    yield trailing
                                 yield DurableEvent(event)
                                 self.end_reason = "terminal"
                                 return

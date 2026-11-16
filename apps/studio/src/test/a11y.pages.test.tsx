@@ -174,10 +174,15 @@ function respond(url: URL): unknown {
   // AC.16: the Tests tab's suite list and eval runs.
   if (p === "/agents/a1/eval-suites") return { items: [{ id: "s1", agent_id: "a1", name: "Refund suite", description: null, evaluators: [{ kind: "equals_expected" }], case_count: 2, archived: false, archived_at: null, created_at: T0, updated_at: T1 }] };
   if (p === "/agents/a1/evals/runs") return { items: [], next_cursor: null };
+  // W1.5: the tenant-wide Datasets, Scorers and Experiments lists.
+  if (p === "/eval-suites") return { items: [{ id: "s1", agent_id: "a1", name: "Refund suite", description: null, evaluators: [{ kind: "equals_expected" }], case_count: 2, archived: false, archived_at: null, created_at: T0, updated_at: T1, agent_name: "Support bot", agent_archived: false, last_run: { run_id: "er1", version: 2, status: "completed", display_status: "completed", created_at: T1, updated_at: T1, aggregates: { cases: 2, passed: 1, failed: 1, errors: 0, pass_rate: 0.5 } } }], next_cursor: null };
+  if (p === "/evals/runs") return { items: [{ ...run("er1", { kind: "eval" }), suite_id: "s1", suite_hash: "h", suite_name: "Refund suite", agent_name: "Support bot", aggregates: { cases: 2, passed: 1, failed: 1, errors: 0, pass_rate: 0.5, scores_avg: { quality: 0.75 }, duration_ms_p50: 120, cost_usd: "0.0002" } }], next_cursor: null };
+  if (p === "/evals/scorers") return { items: [{ kind: "equals_expected", name: "equals_expected", suite_count: 1, suites: [{ id: "s1", name: "Refund suite", agent_id: "a1", agent_name: "Support bot", case_level_uses: 0 }], history: [{ run_id: "er1", suite_id: "s1", agent_id: "a1", created_at: T1, metric: "pass_rate", value: 0.5 }] }], next_cursor: null };
   if (p === "/agents/a1/request-context") return { agent_id: "a1", version: 2, draft: false, fields: [], schema: { type: "object", properties: {} } };
   if (p === "/agents/a1/conversations" || p === "/conversations") return { items: [{ id: "c1", agent_id: "a1", title: "Refund question", turn_count: 2, created_at: T0, updated_at: T1 }], next_before: null };
   if (p === "/conversations/c1") return { id: "c1", agent_id: "a1", title: "Refund question", turn_count: 1, created_at: T0, updated_at: T1, runs: [run("r1", { conversation_id: "c1", turn: 1 })] };
   if (p === "/models") return { items: modelsFixture };
+  if (p === "/providers") return { items: [{ id: "litellm", label: "LiteLLM gateway", configured: true, env_var: "EAP_LITELLM_API_KEY", base_url_host: "gateway.example.test", status: "ok", model_count: 3, checked_at: T0, error: null }] };
   if (p === "/processors") return processorCatalogFixture;
   if (p === "/processor-results") return PROCESSOR_RESULTS;
   if (p === "/tools") return TOOLS;
@@ -265,6 +270,8 @@ const PAGES: PageCase[] = [
   { name: "agent tests", path: "/agents/a1/tests", params: { id: "a1" }, load: () => inAgentLayout(import("@/app/agents/[id]/tests/page")), h1: "Support bot", shows: "Refund suite" },
   { name: "agent memory", path: "/agents/a2/memory", params: { id: "a2" }, load: () => inAgentLayout(import("@/app/agents/[id]/memory/page")), h1: "Memory bot", shows: "#memory-resource-option" },
   { name: "workflows", path: "/workflows", load: () => import("@/app/workflows/page"), h1: "Workflows", shows: "Triage" },
+  { name: "workflow schedules", path: "/workflows/schedules", load: () => import("@/app/workflows/schedules/page"), h1: "Schedules", shows: "No schedules" },
+  { name: "workflow schedules tab", path: "/workflows/w1/schedules", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/schedules/page"), h1: "Triage", shows: "No schedules" },
   { name: "workflow graph", path: "/workflows/w1", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/page"), h1: "Triage", shows: "classify" },
   { name: "workflow traces", path: "/workflows/w1/traces", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/traces/page"), h1: "Triage", shows: "#workflow-trace-row" },
   { name: "workflow run", path: "/workflows/w1/runs/wr1", params: { id: "w1", runId: "wr1" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr1", shows: "classify" },
@@ -276,9 +283,14 @@ const PAGES: PageCase[] = [
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", shows: "#processor-row" },
   { name: "processor detail", path: "/processors/pii_redact", params: { type: "pii_redact" }, load: () => import("@/app/processors/[type]/page"), h1: "PII redaction", shows: "#result-row" },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },
+  { name: "threads", path: "/threads", load: () => import("@/app/threads/page"), h1: "Threads", shows: "Refund question" },
   { name: "traces", path: "/traces", load: () => import("@/app/traces/page"), h1: "Traces", shows: "#trace-row" },
   { name: "logs", path: "/logs", load: () => import("@/app/logs/page"), h1: "Logs", shows: "tool failed" },
   { name: "approvals", path: "/approvals", load: () => import("@/app/approvals/page"), h1: "Approvals", shows: "send_email" },
+  { name: "datasets", path: "/datasets", load: () => import("@/app/datasets/page"), h1: "Datasets", shows: "Refund suite" },
+  { name: "scorers", path: "/scorers", load: () => import("@/app/scorers/page"), h1: "Scorers", shows: "#scorer-row" },
+  { name: "experiments", path: "/experiments", load: () => import("@/app/experiments/page"), h1: "Experiments", shows: "#experiment-row" },
+  { name: "providers", path: "/settings/providers", load: () => import("@/app/settings/providers/page"), h1: "Providers", shows: "LiteLLM gateway" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
 ];
 

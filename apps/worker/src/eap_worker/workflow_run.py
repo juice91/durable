@@ -239,6 +239,7 @@ from eap_schemas.workflows import (
     BranchStep,
     EvaluateStep,
     ForeachStep,
+    InputStep,
     LoopStep,
     MAX_STEPS,
     ParallelStep,
@@ -821,7 +822,7 @@ class _Interpreter:
         problem: WorkflowStepError | None = None
         if step_id in self.executed or len(self.executed) >= MAX_STEPS:
             problem = WorkflowStepError("step_limit_exceeded", step_id)
-        elif self.scope and isinstance(step, (ApprovalStep, ParallelStep)):
+        elif self.scope and isinstance(step, (ApprovalStep, InputStep, ParallelStep)):
             problem = WorkflowStepError("loop_body_step_not_allowed", step_id)  # the schema forbids it
         self.executed.add(step_id)
         resolved: dict[str, Any] | None = None
@@ -982,7 +983,7 @@ class _Interpreter:
             return await self._foreach(step)
         if isinstance(step, ParallelStep):
             return await self._parallel(step)
-        if isinstance(step, ApprovalStep):
+        if isinstance(step, (ApprovalStep, InputStep)):
             return await self._approval(step)
         if isinstance(step, EvaluateStep):
             return await self._evaluate(step)
@@ -1374,7 +1375,11 @@ class _Interpreter:
             raise WorkflowStepError("workflow_context_too_large", step.id)
         return None
 
-    async def _approval(self, step: ApprovalStep) -> Any:
+    async def _approval(self, step: ApprovalStep | InputStep) -> Any:
+        """An approval step, or an input step (the same wait; it also records its `resume_schema` in
+        the waiting event so the API validates a submission against what the run waits for, and
+        outputs the submitted object as `data`)."""
+        is_input = isinstance(step, InputStep)
         timeout_seconds = step.timeout_hours * self.limits["hour_seconds"]
         deadline = await approval_begin_step(
             self.run_id, self.tenant_id, step.id,
@@ -1382,6 +1387,7 @@ class _Interpreter:
                 "step_id": step.id,
                 "prompt": step.prompt,
                 "timeout_hours": step.timeout_hours,
+                **({"resume_schema": step.resume_schema} if isinstance(step, InputStep) else {}),
                 # The DBOS workflow that waits (the run, or a parallel branch's child workflow):
                 # the API sends the wake-up here.
                 "workflow_id": DBOS.workflow_id,
@@ -1406,6 +1412,9 @@ class _Interpreter:
             decision = await approval_decision_step(self.run_id, self.tenant_id, step.id, True)
         kind = (decision or {}).get("type")
         info = (decision or {}).get("data") or {}
+        if kind == "step_approved" and is_input:
+            return {"data": info.get("resume_data"), "decided_by": info.get("decided_by"),
+                    "comment": info.get("comment")}
         if kind == "step_approved":
             return {"approved": True, "decided_by": info.get("decided_by"), "comment": info.get("comment")}
         if kind == "step_rejected":

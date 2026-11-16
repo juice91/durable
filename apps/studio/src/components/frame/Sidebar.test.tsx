@@ -63,8 +63,9 @@ describe("Sidebar", () => {
   test("groups show their titles in order, with Settings in the footer", () => {
     render(<FrameHarness />);
     const groups = Array.from(sidebar().querySelectorAll("[data-nav-group]")).map((el) => el.getAttribute("data-nav-group"));
-    expect(groups).toEqual(["approvals", "primitives", "observability", "settings"]);
+    expect(groups).toEqual(["approvals", "primitives", "evaluation", "observability", "settings"]);
     expect(within(sidebar()).getByRole("list", { name: "Primitives" })).toBeInTheDocument();
+    expect(within(sidebar()).getByRole("list", { name: "Evaluation" })).toBeInTheDocument();
     expect(within(sidebar()).getByRole("list", { name: "Observability" })).toBeInTheDocument();
     expect(within(screen.getByTestId("sidebar-footer")).getByRole("link", { name: "Settings" })).toBeInTheDocument();
   });

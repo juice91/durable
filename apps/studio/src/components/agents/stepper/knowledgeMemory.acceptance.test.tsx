@@ -30,6 +30,11 @@ vi.mock("@/lib/agentVersions", async (importOriginal) => {
   return { ...actual, compareVersions: vi.fn(), restoreVersion: vi.fn() };
 });
 vi.mock("@/lib/tools", () => ({ listTools: vi.fn(() => Promise.resolve([])) }));
+// The editor also mounts the attached-scorers section; this suite isn't about it, so its lists are empty.
+vi.mock("@/lib/scorers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/scorers")>();
+  return { ...actual, listAgentScorers: vi.fn(() => Promise.resolve([])), listReusableScorers: vi.fn(() => Promise.resolve([])) };
+});
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
   return { ...actual, mcpServers: { ...actual.mcpServers, list: vi.fn(() => Promise.resolve([])), test: vi.fn() } };
@@ -110,6 +115,16 @@ const region = (label: string) => screen.getByRole("region", { name: label });
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const set = (id: string, value: string) => fireEvent.change(byId(id), { target: { value } });
 const click = (id: string) => fireEvent.click(byId(id));
+/** The shared ModelPicker: choose the provider in its select, then the model in its searchable combobox. */
+async function pickModel(modelId: string, provider: string, name: string, { hidden = false } = {}) {
+  const providerId = modelId.replace(/-model$/, "-provider");
+  await waitFor(() => expect(within(byId(providerId)).getByRole("option", { name: new RegExp(`^${provider}\\b`), hidden })).toBeInTheDocument());
+  set(providerId, provider);
+  await waitFor(() => expect(byId(modelId)).toBeEnabled());
+  fireEvent.click(byId(modelId));
+  fireEvent.click(await screen.findByRole("option", { name, hidden }));
+  await waitFor(() => expect(byId(modelId)).toHaveTextContent(name));
+}
 const saveButton = () => screen.getByRole("button", { name: "Save draft" });
 const publishButton = () => screen.getByRole("button", { name: "Publish" });
 /** The spec the last save sent. */
@@ -150,8 +165,7 @@ async function buildFull() {
   fireEvent.click(screen.getByRole("radio", { name: /^JSON schema/ }));
   set("memory-working-schema", JSON.stringify(SCHEMA));
   click("memory-observational-enabled");
-  await waitFor(() => expect(within(byId("memory-observational-model")).getAllByRole("option").length).toBeGreaterThan(1));
-  set("memory-observational-model", "test:echo");
+  await pickModel("memory-observational-model", "test", "echo");
   click("memory-recall-enabled");
   await waitFor(() => expect(within(byId("memory-recall-embedding_model")).getAllByRole("option").length).toBeGreaterThan(1));
   set("memory-recall-embedding_model", "test:hash");
@@ -351,8 +365,8 @@ describe("a stored model outside the allowlist", () => {
   } as unknown as AgentSpec;
   const select = (id: string) => byId<HTMLSelectElement>(id);
   const marked = async (id: string) => {
-    await waitFor(() => expect(select(id)).toHaveAttribute("aria-invalid", "true"));
-    expect(select(id)).toHaveAccessibleDescription(/Not in the platform allowlist/);
+    await waitFor(() => expect(byId(id)).toHaveAttribute("aria-invalid", "true"));
+    expect(byId(id)).toHaveAccessibleDescription(/Not in the platform allowlist/);
   };
 
   it("stays selected and marked on both pickers, without blocking the step", async () => {
@@ -360,9 +374,9 @@ describe("a stored model outside the allowlist", () => {
     await renderEditor("memory");
     await marked("memory-observational-model");
     await marked("memory-recall-embedding_model");
-    expect(select("memory-observational-model")).toHaveValue("test:gone");
+    expect(byId("memory-observational-provider")).toHaveValue("test");
+    expect(byId("memory-observational-model")).toHaveTextContent("gone (not listed)");
     expect(select("memory-recall-embedding_model")).toHaveValue("other:gone");
-    expect(screen.getByRole("option", { name: "test:gone (not in the allowlist)" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "other:gone (not in the allowlist)" })).toBeInTheDocument();
     expect(navButton(/^Memory/)).toHaveTextContent("History 20 · Observational · Recall");
   });
@@ -379,16 +393,16 @@ describe("a stored model outside the allowlist", () => {
     expect(memory.observational.keep_recent_turns).toBe(6);
     expect(memory.semantic_recall.embedding_model).toBe("other:gone");
     expect(memory.semantic_recall.top_k).toBe(3);
-    expect(select("memory-observational-model")).toHaveValue("test:gone");
+    expect(byId("memory-observational-model")).toHaveTextContent("gone (not listed)");
   });
 
   it("picking an allowlisted model replaces it, clears the mark and is saved", async () => {
     seedStored(OUTSIDE);
     await renderEditor("memory");
     await marked("memory-observational-model");
-    set("memory-observational-model", "test:echo");
+    await pickModel("memory-observational-model", "test", "echo");
     set("memory-recall-embedding_model", "test:hash");
-    expect(select("memory-observational-model")).not.toHaveAttribute("aria-invalid");
+    expect(byId("memory-observational-model")).not.toHaveAttribute("aria-invalid");
     expect(select("memory-recall-embedding_model")).not.toHaveAttribute("aria-invalid");
     expect(screen.queryByRole("option", { name: /not in the allowlist/ })).toBeNull();
     await save();
@@ -597,7 +611,7 @@ describe("phone width (by classes)", () => {
     restoreWidth = setWindowWidth(PHONE);
     await renderEditor(step);
     await screen.findByRole("heading", { name: "Product docs", hidden: true });
-    await waitFor(() => expect(within(byId("memory-observational-model")).getAllByRole("option", { hidden: true }).length).toBeGreaterThan(1));
+    await waitFor(() => expect(within(byId("memory-observational-provider")).getAllByRole("option", { hidden: true }).length).toBeGreaterThan(1));
   }
 
   it("the step select lists steps 6 and 7 and there is no nav column", async () => {
@@ -685,7 +699,7 @@ describe("accessibility", () => {
     await screen.findByRole("heading", { name: "Product docs" });
     await expectNoAxeViolations(document.body);
     goTo(/^Memory/);
-    await waitFor(() => expect(within(byId("memory-observational-model")).getAllByRole("option").length).toBeGreaterThan(1));
+    await waitFor(() => expect(within(byId("memory-observational-provider")).getAllByRole("option").length).toBeGreaterThan(1));
     await expectNoAxeViolations(document.body);
     expect(levels().filter((l) => l === 1)).toHaveLength(1);
     expect(levels().every((l, i, all) => l <= (all[i - 1] ?? 0) + 1)).toBe(true);

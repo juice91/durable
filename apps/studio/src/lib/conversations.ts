@@ -91,15 +91,25 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   if (!response.ok) throw await apiErrorFromResponse(response);
 }
 
+/**
+ * Clone a conversation into a new one on the same agent, titled "<title> (copy)": its finished
+ * turns are copied, a turn still queued or running is not. 201 with the new conversation; 404 when
+ * the source is gone.
+ */
+export function cloneConversation(conversationId: string): Promise<Conversation> {
+  return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}/clone`, { method: "POST" });
+}
+
 export function getConversation(conversationId: string): Promise<ConversationDetail> {
   return send(`/api/v1/conversations/${encodeURIComponent(conversationId)}`);
 }
 
 export function listConversations(
-  options: { agentId?: string; limit?: number; before?: string | null } = {},
+  options: { agentId?: string; q?: string; limit?: number; before?: string | null } = {},
 ): Promise<ConversationPage> {
   const params = new URLSearchParams();
   if (options.agentId) params.set("agent_id", options.agentId);
+  if (options.q) params.set("q", options.q);
   if (options.limit) params.set("limit", String(options.limit));
   if (options.before) params.set("before", options.before);
   const query = params.toString();

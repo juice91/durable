@@ -16,6 +16,7 @@ import {
   mapContextErrors,
   type RequestContextValue,
 } from "@/lib/requestContext";
+import { hasSettings, type ModelSettingsBody } from "@/lib/modelSettings";
 import type { RunEvent } from "@/lib/runs";
 
 /** A turn's target: a published version, the draft, or null for the latest published version. */
@@ -33,6 +34,8 @@ export interface TurnOptions {
   model: ModelRefBody | null;
   /** null: no context supplied. */
   request_context: RequestContextValue | null;
+  /** Per-run model settings (only the ones set); null or absent: the version's own. */
+  model_settings?: ModelSettingsBody | null;
 }
 
 export const NO_OPTIONS: TurnOptions = { version: null, model: null, request_context: null };
@@ -43,6 +46,7 @@ export function turnBody(runId: string, input: string, options: TurnOptions): Re
   if (options.version !== null) body.version = options.version;
   if (options.model !== null) body.model = options.model;
   if (options.request_context !== null) body.request_context = options.request_context;
+  if (hasSettings(options.model_settings)) body.model_settings = options.model_settings;
   return body;
 }
 
@@ -341,9 +345,11 @@ export interface TurnOptionErrors {
   model: string | null;
   version: string | null;
   general: string | null;
+  /** The per-run model settings, by field name or "" for a message about the settings as a whole. */
+  modelSettings: Record<string, string> | null;
 }
 
-export const NO_OPTION_ERRORS: TurnOptionErrors = { context: null, model: null, version: null, general: null };
+export const NO_OPTION_ERRORS: TurnOptionErrors = { context: null, model: null, version: null, general: null, modelSettings: null };
 
 /**
  * Maps a turn start's error body onto the controls. A 422 list puts `body.request_context.*`
@@ -364,6 +370,10 @@ export function classifyTurnError(status: number, detail: unknown, options: Turn
       if (area === "request_context") contextItems.push(item);
       else if (area === "model") errors.model = errors.model ? `${errors.model}; ${msg}` : msg;
       else if (area === "version") errors.version = errors.version ? `${errors.version}; ${msg}` : msg;
+      else if (area === "model_settings") {
+        const field = loc[2] ?? "";
+        errors.modelSettings = { ...(errors.modelSettings ?? {}), [field]: msg };
+      }
       else general.push(loc.length > 0 ? `${loc.filter((part) => part !== "body").join(".")}: ${msg}` : msg);
     }
     if (contextItems.length > 0) {
@@ -375,7 +385,10 @@ export function classifyTurnError(status: number, detail: unknown, options: Turn
   }
   const message = typeof detail === "string" && detail ? detail : `The request failed (HTTP ${status})`;
   const override = options.model ? `'${options.model.provider}:${options.model.name}'` : null;
-  if (status === 422 && override !== null && message.includes(override)) errors.model = message;
+  const refused = /does not accept an? ([a-z_]+) setting/.exec(message);
+  if (status === 422 && refused !== null && hasSettings(options.model_settings) && refused[1] in options.model_settings!) {
+    errors.modelSettings = { [refused[1]]: message };
+  } else if (status === 422 && override !== null && message.includes(override)) errors.model = message;
   else if (status === 422 && options.version === "draft") errors.version = `The draft cannot run: ${message}`;
   else errors.general = message;
   return errors;
@@ -398,6 +411,7 @@ export interface RunUsageRow {
   draft?: boolean;
   version?: number | null;
   request_context?: RequestContextValue | null;
+  model_settings?: ModelSettingsBody | null;
 }
 
 export interface TurnUsage {
@@ -502,6 +516,7 @@ export function optionsFromRun(run: RunUsageRow): TurnOptions {
     version: run.draft ? "draft" : (run.version ?? null),
     model: run.model_overridden && run.model_id && run.model_id.includes(":") ? modelRef(run.model_id) : null,
     request_context: context,
+    ...(hasSettings(run.model_settings) ? { model_settings: run.model_settings } : {}),
   };
 }
 

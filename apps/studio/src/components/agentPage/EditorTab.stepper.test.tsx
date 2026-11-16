@@ -313,7 +313,10 @@ describe("create mode", () => {
     expect(api.agents.create).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "N" } });
     fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "test" } });
-    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "echo" } });
+    await waitFor(() => expect(screen.getByLabelText("Model name")).toBeEnabled());
+    fireEvent.click(screen.getByLabelText("Model name"));
+    fireEvent.click(await screen.findByRole("option", { name: "echo" }));
+    await waitFor(() => expect(screen.getByLabelText("Model name")).toHaveTextContent("echo"));
     fireEvent.click(navButton(/^Instructions/));
     fireEvent.change(screen.getByRole("textbox", { name: "Instructions" }), { target: { value: "Hi" } });
     fireEvent.click(screen.getByRole("button", { name: "Create agent" }));

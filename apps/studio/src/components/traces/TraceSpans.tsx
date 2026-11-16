@@ -85,7 +85,7 @@ export function TraceSpans({ trace, names, selectedId, onSelect, error = null, m
           />
         </div>
         <div className="min-w-0">
-          <SpanDetail span={selected} names={names} />
+          <SpanDetail span={selected} names={names} runId={trace.run.run_id} />
         </div>
       </div>
     </>

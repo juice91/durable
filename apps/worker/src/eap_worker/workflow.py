@@ -336,9 +336,10 @@ from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore
+from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore, ScorerStore
 from eap_schemas import AgentSpec, approval_required_tool_names
-from eap_schemas.limits import RunBudgetExceeded
+from eap_schemas import ModelSettings as ModelSettingsSpec
+from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
@@ -406,6 +407,7 @@ from eap_worker.memory import (
 )
 from eap_worker.observational import observe_after_turn
 from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
+from eap_worker.scoring import score_run_step
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
@@ -780,6 +782,7 @@ async def start_run_step(
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         # A draft run (version 0) is stored like the API stores it: no version, the snapshot instead.
         draft = version == DRAFT_VERSION and spec_json is not None
+        draft_run = draft
         rt.run_store.create_run(
             tenant_id,
             UUID(agent_id),
@@ -825,6 +828,11 @@ async def start_run_step(
                 # `{S}/{step_id}`; a top-level step id never contains `/`). It never waits.
                 approval_mode = "deny"
                 approval_deny_reason = LOOP_BODY_DENY_REASON
+        # W2.3: the agent's attached scorers, only for a top-level run that has any (an agent
+        # without scorers keeps its recorded link and step layout exactly).
+        scorers: list[dict[str, Any]] = []
+        if run.get("parent_run_id") is None and not draft_run:
+            scorers = ScorerStore(rt.engine).attached_to_agent(tenant_id, agent_id)
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
@@ -833,6 +841,7 @@ async def start_run_step(
             "superseded": not started,
             "model_id": run.get("model_id"),
             "request_context": run.get("request_context") or {},
+            "model_settings": run.get("model_settings") or {},
             "is_draft": run.get("draft_spec") is not None,
             "approval_mode": approval_mode,
             "approval_timing": read_approval_timing(),
@@ -841,6 +850,7 @@ async def start_run_step(
             "client_tool_results": run.get("client_tool_results") or None,
             "client_tool_pending": client_pending,
             "client_turn_chain": client_chain,
+            **({"scorers": scorers} if scorers else {}),
         }
 
     return await asyncio.to_thread(work)
@@ -1272,6 +1282,27 @@ class RecordedTokens:
             self.output_tokens += int(item.get("output_tokens") or 0)
 
 
+def apply_run_model_settings(spec: AgentSpec, override: dict[str, Any] | None) -> AgentSpec:
+    """The spec the run executes: its model settings with the run's overrides (`runs.model_settings`,
+    validated by the API, so again here) on top, and `max_steps` folded into the request cap
+    (`limits.max_requests`, the smaller of the two), so that a run stopped by it fails
+    `usage_limit_exceeded` naming `max_requests`. The spec itself is returned when nothing changes."""
+    settings = spec.model_settings
+    if override:
+        settings = ModelSettingsSpec(**{**settings.set_values(), **ModelSettingsSpec.model_validate(override).set_values()})
+    steps = settings.max_steps
+    if settings is spec.model_settings and steps is None:
+        return spec
+    update: dict[str, Any] = {"model_settings": settings}
+    if steps is not None:
+        current = spec.limits
+        cap = steps if current is None or current.max_requests is None else min(steps, current.max_requests)
+        update["limits"] = (
+            UsageLimitsSpec(max_requests=cap) if current is None else current.model_copy(update={"max_requests": cap})
+        )
+    return spec.model_copy(update=update)
+
+
 def usage_limits_for(spec: AgentSpec) -> UsageLimits | None:
     """AC.5: Pydantic AI's UsageLimits for the spec's request and tool-call caps, or None (no
     argument: the default UsageLimits, 50 requests, applies as before). An unset max_requests keeps
@@ -1469,6 +1500,9 @@ async def _final_structured_output(run_id: str, tenant_id: str, spec: AgentSpec,
     return final.text
 
 
+from eap_worker.attachments import resolve_prompt  # noqa: E402 (W2.4)
+
+
 async def _drive_agent(
     run_id: str,
     deps: WorkerDeps,
@@ -1478,6 +1512,7 @@ async def _drive_agent(
     approvals: ApprovalSettings | None = None,
     client: ClientToolsRun | None = None,
     resume: ClientResume | None = None,
+    prompt: Any = None,
 ) -> tuple[str | None, list[dict[str, Any]], Any, list[str]]:
     """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
     messages as JSON, output_json, pending client call ids). `approvals` (AC.6): the run's recorded approval options, for
@@ -1490,10 +1525,11 @@ async def _drive_agent(
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
-    if spec.model_settings.temperature is not None:
-        settings["temperature"] = spec.model_settings.temperature
-    if spec.model_settings.max_tokens is not None:
-        settings["max_tokens"] = spec.model_settings.max_tokens
+    # max_steps (the request limit) and max_retries (the agent's retry budgets) are not request
+    # settings: usage_limits_for and retries_for read them from the spec.
+    for name, value in spec.model_settings.set_values().items():
+        if name not in ("max_steps", "max_retries"):
+            settings[name] = value
 
     if model_id is None:
         model_id = model_id_for(spec.model.provider, spec.model.name)
@@ -1502,7 +1538,10 @@ async def _drive_agent(
     mode = spec.output.effective_mode() if spec.output is not None else None
     run_options: dict[str, Any] = {}
     if structured:
-        run_options = {"output_type": output_type_for(spec), "retries": retries_for(spec)}
+        run_options = {"output_type": output_type_for(spec)}
+    retries = retries_for(spec)
+    if retries is not None:
+        run_options["retries"] = retries
     if client is not None:
         # AGUI.7 (D10): a client call ends the run with DeferredToolRequests (never executed here).
         run_options["output_type"] = [run_options.get("output_type") or str, DeferredToolRequests]
@@ -1546,7 +1585,7 @@ async def _drive_agent(
     client_token = set_client_tools(client)
     try:
         async with agent.iter(
-            None if resume is not None and not input_text else input_text,
+            None if resume is not None and not input_text else (prompt if prompt is not None else input_text),
             message_history=history or None,
             deps=deps,
             model=model_id,
@@ -1763,6 +1802,17 @@ async def agent_run(
         return result
 
 
+async def _score_run(run_id: str, tenant_id: str, scorers: list[dict[str, Any]], spec: AgentSpec) -> None:
+    """Apply the attached scorers (step `eap.score_run`); never fails the completed run."""
+    from eap_worker.observational import is_dbos_control_flow
+    try:
+        await score_run_step(run_id, tenant_id, scorers, spec.output.json_schema if spec.output is not None else None)
+    except Exception as exc:  # noqa: BLE001 - the run is completed; scoring is best effort
+        if is_dbos_control_flow(exc):
+            raise
+        log_failure(log, "scoring failed", exc, code=classify(exc).code, run_id=run_id, tenant_id=tenant_id)
+
+
 def _check_request_context(spec: AgentSpec, request_context: dict[str, Any] | None) -> None:
     """The run's declared context must satisfy the spec's context fields before the model is called
     (no step: pure and deterministic). The API validates a caller's context, but a workflow agent
@@ -1819,7 +1869,7 @@ async def _run_body(
         if pre is not None and pre.text is None:  # blocked or failed: the main model is never called
             raise pre.error if pre.error is not None else _blocked_error(pre, "input")
         rt = get_runtime()
-        spec = _parse_spec(spec_json)
+        spec = apply_run_model_settings(_parse_spec(spec_json), link.get("model_settings"))
         # Model governance: the effective model (an override recorded on the run, else the spec's)
         # is re-checked here, not only at publish or run start, because the policy may have changed
         # since. Fails before any model request is made.
@@ -1873,8 +1923,10 @@ async def _run_body(
         if resume is not None:
             for data in resume.events:  # before the first model request (D10)
                 await append_event_step(run_id, tenant_id, f"tool:{data['tool_call_id']}:result", "tool_result", data)
+        # W2.4: the turn's attached files as prompt parts (text files inlined; images and PDFs binary).
+        prompt = await resolve_prompt(rt.run_store.engine, tenant_id, run_id, input_text, model_id) if input_text else None
         output, new_messages, output_json, pending_client = await _drive_agent(
-            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume
+            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume, prompt
         )
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
@@ -1914,6 +1966,9 @@ async def _run_body(
         run_id, tenant_id, "completed", output, None, new_messages,
         output_format="json" if spec.output is not None else None,
     )
+    if link.get("scorers"):
+        # W2.3: the agent's reusable scorers, as `score` events after the run's end.
+        await _score_run(run_id, tenant_id, link["scorers"], spec)
     if link.get("conversation_id") is None or not has_post_turn_steps(spec):
         return result
     conversation_id, turn = str(link["conversation_id"]), int(link["turn"])
