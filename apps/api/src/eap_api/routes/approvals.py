@@ -128,8 +128,13 @@ def _step_extras(event_log: Any, tenant_id: str, row: dict[str, Any], *, detail:
     if row["kind"] != "step":
         return {}
     waiting = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:waiting")
-    schema = (waiting.data or {}).get("resume_schema") if waiting is not None and isinstance(waiting.data, dict) else None
-    extras: dict[str, Any] = {"resume_schema": schema if isinstance(schema, dict) else None}
+    wdata = waiting.data if waiting is not None and isinstance(waiting.data, dict) else {}
+    schema = wdata.get("resume_schema")
+    # `pause`: a step-by-step run's pause ("Paused after {step}", answered with Continue or Stop).
+    extras: dict[str, Any] = {
+        "resume_schema": schema if isinstance(schema, dict) else None,
+        "pause": wdata.get("pause") is True,
+    }
     if detail:
         decision = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:decision")
         data = decision.data if decision is not None and isinstance(decision.data, dict) else {}

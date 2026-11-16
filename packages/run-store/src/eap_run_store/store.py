@@ -1178,11 +1178,13 @@ class RunStore:
         *,
         rerun_of: UUID | str | None = None,
         schedule_id: UUID | str | None = None,
+        pause_after_each_step: bool = False,
     ) -> tuple[UUID, bool]:
         """Create a workflow run (kind 'workflow': published version `workflow_version` of
         `workflow_id`, `input` = the workflow input as canonical JSON text). `rerun_of`: the earlier
         run this one repeats (the caller has checked it is the same tenant's and workflow's).
-        `schedule_id`: the schedule whose tick created the run.
+        `schedule_id`: the schedule whose tick created the run. `pause_after_each_step`: a
+        step-by-step run (the worker waits after every top-level step).
 
         Same idempotency and tenant rules as create_run."""
         return self._insert_run(
@@ -1196,6 +1198,7 @@ class RunStore:
             traceparent=traceparent,
             rerun_of=None if rerun_of is None else str(rerun_of),
             schedule_id=None if schedule_id is None else str(schedule_id),
+            pause_after_each_step=pause_after_each_step,
         )
 
     def create_kb_ingest_run(

@@ -99,6 +99,7 @@ class WorkflowRunCreate(BaseModel):
     version: int | None = Field(default=None, ge=1)
     run_id: uuid.UUID | None = None
     rerun_of: uuid.UUID | None = None
+    pause_after_each_step: bool = False
 
 
 class ApprovalDecision(BaseModel):
@@ -280,6 +281,7 @@ def start_workflow_run(
         _, created = run_store.create_workflow_run(
             tenant_id, workflow.id, version_row.version, input_json, run_id, trace_id=trace_id, traceparent=traceparent,
             rerun_of=body.rerun_of,
+            pause_after_each_step=body.pause_after_each_step,
         )
     except RunIdConflict:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
@@ -291,6 +293,7 @@ def start_workflow_run(
         or run["workflow_id"] != str(workflow.id)
         or run["input"] != input_json
         or run["rerun_of"] != (None if body.rerun_of is None else str(body.rerun_of))
+        or run["pause_after_each_step"] != body.pause_after_each_step
         or (body.version is not None and run["workflow_version"] != body.version)
     ):
         raise HTTPException(

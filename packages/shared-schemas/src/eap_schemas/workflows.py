@@ -84,6 +84,7 @@ __all__ = (
     "MAX_SPEC_BYTES",
     "MAX_SPEC_DEPTH",
     "MAX_STEPS",
+    "PAUSE_STEP_SUFFIX",
     "AgentStep",
     "AllCondition",
     "AnyCondition",
@@ -120,6 +121,7 @@ MAX_SPEC_BYTES = 64 * 1024
 MAX_LITERAL_DEPTH = 32  # nesting levels of one template value or condition literal
 MAX_SPEC_DEPTH = 64  # nesting levels of the whole spec document
 STEP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+PAUSE_STEP_SUFFIX = "_pause"  # reserved: a step-by-step run waits under `{step_id}_pause`
 TOOL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SEGMENT = r"[A-Za-z0-9_-]{1,64}"
 REF_PATTERN = re.compile(
@@ -1356,6 +1358,11 @@ class WorkflowSpec(BaseModel):
 
     @model_validator(mode="after")
     def _graph(self) -> WorkflowSpec:
+        for _, step in walk_steps(self.steps):
+            if step.id.endswith(PAUSE_STEP_SUFFIX):
+                raise ValueError(
+                    f"step_id_reserved_suffix: step id '{step.id}' must not end in '{PAUSE_STEP_SUFFIX}'"
+                )
         info, top, graphs = _check_graphs(self.steps, self.start)
         _check_refs(top, graphs, info)
         if _spec_bytes(self.model_dump(mode="json")) > MAX_SPEC_BYTES:
@@ -1400,6 +1407,6 @@ class WorkflowScheduleUpdate(BaseModel):
     @model_validator(mode="after")
     def _not_null(self) -> "WorkflowScheduleUpdate":
         for key in self.model_fields_set:
-            if key != "input" and getattr(self, key) is None:
+            if getattr(self, key) is None:
                 raise ValueError(f"{key} cannot be null")
         return self

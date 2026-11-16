@@ -234,6 +234,7 @@ from eap_schemas.workflow_scope import (
 )
 from eap_schemas.workflows import (
     LOOP_STEP_TYPES,
+    PAUSE_STEP_SUFFIX,
     AgentStep,
     ApprovalStep,
     BranchStep,
@@ -365,6 +366,15 @@ def approval_poll_seconds() -> float:
         return 3600.0
 
 
+def pause_timeout_hours() -> float:
+    """EAP_PAUSE_TIMEOUT_HOURS (default 24): how long a step-by-step run waits at a pause."""
+    try:
+        value = float(os.environ.get("EAP_PAUSE_TIMEOUT_HOURS", "24"))
+    except ValueError:
+        return 24.0
+    return value if value > 0 else 24.0
+
+
 def read_limits() -> dict[str, Any]:
     """Every environment knob of a run, read ONCE inside eap.start_workflow_run and checkpointed
     with it; workflow code (and branch workflows, which receive it as an argument) only ever uses
@@ -375,6 +385,7 @@ def read_limits() -> dict[str, Any]:
         "max_run_seconds": max_run_seconds(),
         "hour_seconds": hour_seconds(),
         "approval_poll_seconds": approval_poll_seconds(),
+        "pause_timeout_hours": pause_timeout_hours(),
         **{key: _env_int(env, default) for key, (env, default) in WORKFLOW_LOOP_LIMIT_DEFAULTS.items()},
     }
 
@@ -427,6 +438,7 @@ async def start_workflow_run_step(
         run = rt.run_store.get_run(tenant_id, uuid.UUID(run_id)) or {}
         return {
             "started": bool(started),
+            "pause_after_each_step": bool(run.get("pause_after_each_step")),
             "traceparent": run.get("traceparent"),
             "workflow_id": row.workflow_id if row is not None else run.get("workflow_id"),
             "workflow_version": row.version if row is not None else run.get("workflow_version"),
@@ -750,6 +762,7 @@ class _Interpreter:
         scope: Scope = EMPTY_SCOPE,
         loops: dict[str, dict[str, Any]] | None = None,
         workflow_version_id: str | None = None,
+        pause_after_each_step: bool = False,
     ) -> None:
         self.run_id = run_id
         self.tenant_id = tenant_id
@@ -768,6 +781,9 @@ class _Interpreter:
         self.scope_text = scope_string(scope)
         self.loops = loops or {}
         self.workflow_version_id = workflow_version_id
+        # Step by step: only the run's root interpreter pauses (a loop iteration or a parallel
+        # branch builds its own interpreter, which never gets the flag).
+        self.pause_after_each_step = pause_after_each_step
         self._warnings: list[dict[str, Any]] = []
         # The cost cap (D11): the spec's `limits`, empty or absent for every spec published before
         # LP.11, so their runs never tick outside loops.
@@ -807,6 +823,8 @@ class _Interpreter:
             step = self.by_id[current]
             output = await self.run_step(step)
             last = (step.id, output)
+            if self.pause_after_each_step:
+                await self._pause(step)
             if isinstance(step, BranchStep):
                 current = output["next"]
             elif isinstance(step, ParallelStep):
@@ -1380,36 +1398,16 @@ class _Interpreter:
         the waiting event so the API validates a submission against what the run waits for, and
         outputs the submitted object as `data`)."""
         is_input = isinstance(step, InputStep)
-        timeout_seconds = step.timeout_hours * self.limits["hour_seconds"]
-        deadline = await approval_begin_step(
-            self.run_id, self.tenant_id, step.id,
+        decision = await self._wait_decision(
+            step.id,
             {
                 "step_id": step.id,
                 "prompt": step.prompt,
                 "timeout_hours": step.timeout_hours,
                 **({"resume_schema": step.resume_schema} if isinstance(step, InputStep) else {}),
-                # The DBOS workflow that waits (the run, or a parallel branch's child workflow):
-                # the API sends the wake-up here.
-                "workflow_id": DBOS.workflow_id,
             },
-            timeout_seconds,
+            step.timeout_hours * self.limits["hour_seconds"],
         )
-        crash_point("workflow_waiting", event_key=f"step:{step.id}:waiting")
-        poll = self.limits["approval_poll_seconds"]
-        timed_out = False
-        max_rounds = math.ceil(timeout_seconds / poll) + 16
-        decision: dict[str, Any] | None = None
-        for _ in range(max_rounds):
-            decision = await approval_decision_step(self.run_id, self.tenant_id, step.id, timed_out)
-            if decision is not None:
-                break
-            remaining = deadline - await clock_step()
-            if remaining <= 0:
-                timed_out = True
-                continue
-            await DBOS.recv_async(approval_topic(step.id), timeout_seconds=min(remaining, poll))
-        if decision is None:
-            decision = await approval_decision_step(self.run_id, self.tenant_id, step.id, True)
         kind = (decision or {}).get("type")
         info = (decision or {}).get("data") or {}
         if kind == "step_approved" and is_input:
@@ -1420,6 +1418,52 @@ class _Interpreter:
         if kind == "step_rejected":
             raise WorkflowStepError("approval_rejected", step.id)
         raise WorkflowStepError("approval_timeout", step.id)
+
+    async def _pause(self, step: Any) -> None:
+        """Step by step (D3): after a top-level step, wait exactly as an approval does under the
+        reserved id `{step.id}_pause` (prompt "Paused after {step.id}", no `resume_schema`, waiting
+        data carries `pause: true`). Approve continues; reject fails the run `cancelled_by_user`;
+        the timeout (EAP_PAUSE_TIMEOUT_HOURS, default 24) fails it `pause_timed_out`."""
+        pause_id = f"{step.id}{PAUSE_STEP_SUFFIX}"
+        hours = self.limits.get("pause_timeout_hours", 24.0)
+        decision = await self._wait_decision(
+            pause_id,
+            {"step_id": pause_id, "prompt": f"Paused after {step.id}", "pause": True, "timeout_hours": hours},
+            hours * self.limits["hour_seconds"],
+        )
+        kind = (decision or {}).get("type")
+        if kind == "step_approved":
+            return
+        if kind == "step_rejected":
+            raise WorkflowStepError("cancelled_by_user", pause_id)
+        raise WorkflowStepError("pause_timed_out", pause_id)
+
+    async def _wait_decision(self, step_id: str, data: dict[str, Any], timeout_seconds: float) -> dict[str, Any] | None:
+        """Record `step_id`'s waiting event (and inbox row) and wait for its decision or timeout."""
+        deadline = await approval_begin_step(
+            self.run_id, self.tenant_id, step_id,
+            # The DBOS workflow that waits (the run, or a parallel branch's child workflow): the API
+            # sends the wake-up here.
+            {**data, "workflow_id": DBOS.workflow_id},
+            timeout_seconds,
+        )
+        crash_point("workflow_waiting", event_key=f"step:{step_id}:waiting")
+        poll = self.limits["approval_poll_seconds"]
+        timed_out = False
+        max_rounds = math.ceil(timeout_seconds / poll) + 16
+        decision: dict[str, Any] | None = None
+        for _ in range(max_rounds):
+            decision = await approval_decision_step(self.run_id, self.tenant_id, step_id, timed_out)
+            if decision is not None:
+                break
+            remaining = deadline - await clock_step()
+            if remaining <= 0:
+                timed_out = True
+                continue
+            await DBOS.recv_async(approval_topic(step_id), timeout_seconds=min(remaining, poll))
+        if decision is None:
+            decision = await approval_decision_step(self.run_id, self.tenant_id, step_id, True)
+        return decision
 
 
 def _resolve_operand(value: Any, context: dict[str, Any]) -> Any:
@@ -1620,6 +1664,7 @@ async def _workflow_body(
         interp = _Interpreter(
             run_id, tenant_id, spec, input_value, {}, link["limits"], link.get("traceparent"),
             workflow_version_id=workflow_version_id,
+            pause_after_each_step=bool(link.get("pause_after_each_step")),
         )
         _last_step, last_output = await interp.run_path(spec.start, None)
         output = final_output(spec, last_output)

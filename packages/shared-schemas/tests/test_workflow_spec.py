@@ -308,6 +308,16 @@ def test_bad_step_id_pattern_rejected():
         )
 
 
+def test_step_id_ending_in_pause_is_rejected():
+    with pytest.raises(ValueError, match="step_id_reserved_suffix"):
+        WorkflowSpec(
+            name="Test",
+            input_schema={"type": "object"},
+            steps=(ToolStep(id="a_pause", tool_id="clock.now"),),
+            start="a_pause",
+        )
+
+
 def test_missing_start_rejected():
     with pytest.raises(ValueError, match="start step 'missing' does not exist"):
         WorkflowSpec(

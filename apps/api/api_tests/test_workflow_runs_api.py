@@ -280,6 +280,24 @@ def test_decision_wakes_the_branch_workflow_that_waits(api, fake):
     assert fake.sent == [(f"{run_id}:fan:a", {"decision": "approved"}, "approval:a")]
 
 
+def test_pause_flag_is_stored_and_returned(api, fake):
+    client, app, tenant_of = api
+    _, headers = tenant_of()
+    workflow_id = publish_demo(client, headers)
+    r = client.post(
+        f"/api/v1/workflows/{workflow_id}/runs", json={"input": {"q": "hi"}, "pause_after_each_step": True},
+        headers=headers,
+    )
+    assert r.status_code == 202, r.text
+    run_id = r.json()["run_id"]
+    assert client.get(f"/api/v1/runs/{run_id}", headers=headers).json()["pause_after_each_step"] is True
+    plain = client.post(f"/api/v1/workflows/{workflow_id}/runs", json={"input": {"q": "hi"}}, headers=headers)
+    assert client.get(f"/api/v1/runs/{plain.json()['run_id']}", headers=headers).json()["pause_after_each_step"] is False
+    # A retry that flips the flag is a different request.
+    body = {"input": {"q": "hi"}, "run_id": run_id, "pause_after_each_step": False}
+    assert client.post(f"/api/v1/workflows/{workflow_id}/runs", json=body, headers=headers).status_code == 409
+
+
 def test_rerun_of_is_stored_and_returned(api, fake):
     client, app, tenant_of = api
     _, headers = tenant_of()

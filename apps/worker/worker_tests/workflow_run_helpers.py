@@ -101,10 +101,13 @@ def enqueue_workflow_run(
     app_version: str,
     version: int = 1,
     run_id: uuid.UUID | None = None,
+    pause_after_each_step: bool = False,
 ) -> uuid.UUID:
     run_id = run_id or uuid.uuid4()
     input_json = canonical(input_value)
-    run_store.create_workflow_run(tenant_id, workflow_id, version, input_json, run_id)
+    run_store.create_workflow_run(
+        tenant_id, workflow_id, version, input_json, run_id, pause_after_each_step=pause_after_each_step
+    )
     client.enqueue(
         {
             "queue_name": "eap-agent-runs",

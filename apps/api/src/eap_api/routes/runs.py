@@ -103,6 +103,8 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         "parent_step_id": run.get("parent_step_id"),
         # The earlier run this one repeats ("Run again"); null otherwise.
         "rerun_of": run.get("rerun_of"),
+        # A step-by-step run: the worker waits after every top-level step.
+        "pause_after_each_step": bool(run.get("pause_after_each_step")),
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],
