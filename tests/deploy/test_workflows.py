@@ -201,18 +201,18 @@ def test_hosted_path_filters_skip_unaffected_jobs():
     assert "tests/deploy/**" in filters
 
 
-# Peeled commit of pnpm/action-setup v4.1.0. The 40-hex value currently in ci.yml is the
+# Peeled commit of pnpm/action-setup v6.1.1. The 40-hex value currently in ci.yml is the
 # annotated tag object, which has no action.yml.
-PNPM_ACTION_COMMIT = "a7487c7e89a18df4991f7f222e4898a00d66ddda"
+PNPM_ACTION_COMMIT = "73e46992e05b19abd31f2f3c20e0e7370d762115"
 PNPM_ACTION_TAG_OBJECT = "7088e561eb65bb68695d245aa206f005ef30921d"
 
 
-def test_pnpm_action_setup_is_pinned_to_the_v4_1_0_commit():
+def test_pnpm_action_setup_is_pinned_to_the_v6_1_1_commit():
     text = (WORKFLOW_DIR / "ci.yml").read_text()
     pinned_to_commit = f"pnpm/action-setup@{PNPM_ACTION_COMMIT}" in text
     pinned_to_tag_object = PNPM_ACTION_TAG_OBJECT in text
     if pinned_to_tag_object or not pinned_to_commit:
         raise AssertionError(
             "pnpm/action-setup must be pinned to commit "
-            f"{PNPM_ACTION_COMMIT} (v4.1.0); the annotated tag object is not a commit"
+            f"{PNPM_ACTION_COMMIT} (v6.1.1); the annotated tag object is not a commit"
         )
