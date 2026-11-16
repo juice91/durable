@@ -318,6 +318,30 @@ def test_step_id_ending_in_pause_is_rejected():
         )
 
 
+def test_loop_body_step_id_ending_in_pause_is_rejected():
+    spec = {
+        "name": "Test", "input_schema": {"type": "object"}, "start": "lp",
+        "steps": [{
+            "id": "lp", "type": "loop", "max_iterations": 2,
+            "until": {"op": "eq", "left": {"$ref": "loop.lp.index"}, "right": 1},
+            "body": {"start": "tick_pause",
+                     "steps": [{"id": "tick_pause", "type": "tool", "tool_id": "clock.now", "input": {}}]},
+        }],
+    }
+    with pytest.raises(ValueError, match="step_id_reserved_suffix"):
+        WorkflowSpec.model_validate(spec)
+
+
+def test_step_id_containing_pause_but_not_ending_in_it_is_accepted():
+    spec = WorkflowSpec(
+        name="Test",
+        input_schema={"type": "object"},
+        steps=(ToolStep(id="pause_x", tool_id="clock.now"),),
+        start="pause_x",
+    )
+    assert spec.start == "pause_x"
+
+
 def test_missing_start_rejected():
     with pytest.raises(ValueError, match="start step 'missing' does not exist"):
         WorkflowSpec(

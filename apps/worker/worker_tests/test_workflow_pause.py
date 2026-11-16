@@ -4,6 +4,7 @@ after a whole loop node, and approve continues / reject fails `cancelled_by_user
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
 from worker_tests.conftest import APP_VERSION, event_rows, wait_terminal
 from worker_tests.workflow_run_helpers import (
@@ -35,6 +36,36 @@ LOOP = {
         },
     ],
 }
+
+
+PARALLEL = {
+    "name": "Par",
+    "input_schema": {"type": "object"},
+    "start": "fan",
+    "steps": [
+        {"id": "fan", "type": "parallel", "branches": ["a", "b"], "join": "done"},
+        {"id": "a", "type": "tool", "tool_id": "clock.now", "input": {}},
+        {"id": "b", "type": "tool", "tool_id": "clock.now", "input": {}},
+        {"id": "done", "type": "tool", "tool_id": "clock.now", "input": {}},
+    ],
+}
+
+
+def _open_rows(worker, tenant):
+    with worker.engine.connect() as conn:
+        return conn.execute(
+            text("SELECT count(*) FROM pending_approvals WHERE tenant_id=:t AND decision IS NULL"), {"t": tenant}
+        ).scalar_one()
+
+
+def _assert_pause_failure(worker, tenant, run_id, code):
+    rows = event_rows(worker.engine, run_id)
+    end = rows[-1][3]
+    assert end["error_code"] == code and end["step_id"] == "first_pause"
+    failed = [r for r in rows if r[1] == "step:first_pause:failed"]
+    assert failed and failed[0][3]["error_code"] == code
+    assert _open_rows(worker, tenant) == 0
+    assert worker.run_store.get_run(tenant, run_id)["display_status"] != "waiting_approval"
 
 
 @pytest.fixture
@@ -79,6 +110,8 @@ def test_pause_after_loop_node_not_inside(worker, client, tenant, defs):
     keys = [k for _, k, _, _ in event_rows(worker.engine, run_id)]
     assert not [k for k in keys if "tick_pause" in k]
     assert "step:lp:completed" in keys
+    keys_in_order = keys.index("step:lp_pause:waiting")
+    assert len([k for k in keys[:keys_in_order] if k.endswith("step:tick:completed")]) == 3
     decide(worker.event_log, client, tenant_id=tenant, run_id=run_id, step_id="lp_pause")
     assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "completed"
 
@@ -89,7 +122,7 @@ def test_reject_at_pause_fails_run_cancelled_by_user(worker, client, tenant, def
     decide(worker.event_log, client, tenant_id=tenant, run_id=run_id, step_id="first_pause", approve=False)
     run = wait_terminal(worker.run_store, tenant, run_id)
     assert run["status"] == "failed"
-    assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "cancelled_by_user"
+    _assert_pause_failure(worker, tenant, run_id, "cancelled_by_user")
 
 
 def test_pause_timeout_fails_run_pause_timed_out(worker, client, tenant, defs, monkeypatch):
@@ -98,4 +131,32 @@ def test_pause_timeout_fails_run_pause_timed_out(worker, client, tenant, defs, m
     run_id = _start(worker, client, tenant, TWO)
     run = wait_terminal(worker.run_store, tenant, run_id)
     assert run["status"] == "failed"
-    assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "pause_timed_out"
+    _assert_pause_failure(worker, tenant, run_id, "pause_timed_out")
+
+
+def test_pause_after_parallel_node_not_inside_branches(worker, client, tenant, defs):
+    run_id = _start(worker, client, tenant, PARALLEL)
+    wait_event(worker.engine, run_id, "step:fan_pause:waiting")
+    keys = [k for _, k, _, _ in event_rows(worker.engine, run_id)]
+    assert not [k for k in keys if k.endswith(("a_pause:waiting", "b_pause:waiting"))]
+    assert "step:fan:completed" in keys
+    decide(worker.event_log, client, tenant_id=tenant, run_id=run_id, step_id="fan_pause")
+    wait_event(worker.engine, run_id, "step:done_pause:waiting")
+    decide(worker.event_log, client, tenant_id=tenant, run_id=run_id, step_id="done_pause")
+    assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "completed"
+    keys = [k for _, k, _, _ in event_rows(worker.engine, run_id)]
+    assert sorted(k for k in keys if k.endswith("_pause:waiting")) == ["step:done_pause:waiting", "step:fan_pause:waiting"]
+
+
+def test_cooperative_cancel_wakes_a_pause_within_one_poll_round(worker, client, tenant, defs, monkeypatch):
+    monkeypatch.setenv("EAP_APPROVAL_POLL_SECONDS", "2")
+    run_id = _start(worker, client, tenant, TWO)
+    wait_event(worker.engine, run_id, "step:first_pause:waiting")
+    assert _open_rows(worker, tenant) == 1
+    # Only the cancel event; no DBOS cancel and no API cascade (the cancel did not land).
+    worker.event_log.append(tenant, run_id, "cancel", "cancel_requested", {"requested_by": "alice"})
+    run = wait_terminal(worker.run_store, tenant, run_id, timeout=30)
+    assert run["status"] == "failed"
+    end = event_rows(worker.engine, run_id)[-1][3]
+    assert end["error_code"] == "run_cancelled" and end["step_id"] == "first_pause"
+    assert _open_rows(worker, tenant) == 0

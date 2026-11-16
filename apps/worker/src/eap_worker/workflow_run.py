@@ -689,6 +689,26 @@ async def approval_begin_step(
     return deadline
 
 
+@DBOS.step(name="eap.workflow_pause_cancel_check")
+async def pause_cancel_check_step(run_id: str, tenant_id: str, step_id: str) -> bool:
+    """A pause's cooperative cancel (D3): does the run have its `cancel` event? When it does, the
+    pause's decision is recorded `step_rejected` by `system:run_cancelled` (which closes its
+    pending_approvals row; a decision that raced in first stays) and True is returned, so the
+    waiting run ends `run_cancelled` even when the DBOS cancel never landed."""
+    rt = get_runtime()
+
+    def work() -> bool:
+        cancel = rt.event_log.get_event(tenant_id, run_id, CANCEL_EVENT_KEY)
+        if cancel is None or cancel.type != "cancel_requested":
+            return False
+        rt.event_log.append_step_decision(
+            tenant_id, run_id, step_id, "step_rejected", {"step_id": step_id, "decided_by": "system:run_cancelled"}
+        )
+        return True
+
+    return await asyncio.to_thread(work)
+
+
 @DBOS.step(name="eap.workflow_approval_decision")
 async def approval_decision_step(run_id: str, tenant_id: str, step_id: str, timed_out: bool) -> dict[str, Any] | None:
     """The step's recorded decision {"type", "data"}, or None while there is none. With
@@ -1426,19 +1446,29 @@ class _Interpreter:
         the timeout (EAP_PAUSE_TIMEOUT_HOURS, default 24) fails it `pause_timed_out`."""
         pause_id = f"{step.id}{PAUSE_STEP_SUFFIX}"
         hours = self.limits.get("pause_timeout_hours", 24.0)
-        decision = await self._wait_decision(
-            pause_id,
-            {"step_id": pause_id, "prompt": f"Paused after {step.id}", "pause": True, "timeout_hours": hours},
-            hours * self.limits["hour_seconds"],
-        )
-        kind = (decision or {}).get("type")
-        if kind == "step_approved":
-            return
-        if kind == "step_rejected":
-            raise WorkflowStepError("cancelled_by_user", pause_id)
-        raise WorkflowStepError("pause_timed_out", pause_id)
+        try:
+            decision = await self._wait_decision(
+                pause_id,
+                {"step_id": pause_id, "prompt": f"Paused after {step.id}", "pause": True, "timeout_hours": hours},
+                hours * self.limits["hour_seconds"],
+                cancel_aware=True,
+            )
+            kind = (decision or {}).get("type")
+            if kind == "step_approved":
+                return
+            if kind == "step_rejected":
+                raise WorkflowStepError("cancelled_by_user", pause_id)
+            raise WorkflowStepError("pause_timed_out", pause_id)
+        except WorkflowStepError as exc:
+            # The pause runs outside run_step: name the pause step in step_failed and run_failed.
+            failure = classify(exc)
+            failure = dataclasses.replace(failure, status=_failure_status(exc, failure))
+            await self._record_failure(pause_id, failure)
+            raise StepFailed(pause_id, failure) from None
 
-    async def _wait_decision(self, step_id: str, data: dict[str, Any], timeout_seconds: float) -> dict[str, Any] | None:
+    async def _wait_decision(
+        self, step_id: str, data: dict[str, Any], timeout_seconds: float, cancel_aware: bool = False
+    ) -> dict[str, Any] | None:
         """Record `step_id`'s waiting event (and inbox row) and wait for its decision or timeout."""
         deadline = await approval_begin_step(
             self.run_id, self.tenant_id, step_id,
@@ -1456,6 +1486,8 @@ class _Interpreter:
             decision = await approval_decision_step(self.run_id, self.tenant_id, step_id, timed_out)
             if decision is not None:
                 break
+            if cancel_aware and await pause_cancel_check_step(self.run_id, self.tenant_id, step_id):
+                raise WorkflowStepError("run_cancelled", step_id)
             remaining = deadline - await clock_step()
             if remaining <= 0:
                 timed_out = True
