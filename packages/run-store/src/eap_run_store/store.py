@@ -307,6 +307,7 @@ class RunModel(Base):
         Index("ix_runs_parent_run", "parent_run_id"),
         Index("ix_runs_rerun_of", "rerun_of"),
         Index("ix_runs_schedule_id", "schedule_id"),
+        Index("ix_runs_updated_at", "updated_at"),
         # A knowledge base's runs (ingest progress, summed cost), newest first.
         Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
         # A test suite's eval runs, newest first (0015_evals).

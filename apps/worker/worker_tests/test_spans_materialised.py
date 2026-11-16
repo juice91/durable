@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from sqlalchemy import text
 
 from worker_tests.conftest import APP_VERSION, enqueue_run, ticket_spec, wait_for, wait_terminal
@@ -174,33 +175,95 @@ def _cancelled_by_the_api(worker, tenant, *, age_hours: int = 0):
     return run_id
 
 
-def test_the_reconcile_pass_records_spans_of_runs_the_api_cancelled(worker, tenant):
+@pytest.fixture
+def watermark(worker):
+    """The backfill watermark of the session's shared table, reset around the test."""
+    from eap_worker.cancel_reconcile import SPANS_WATERMARK_KEY
+
+    def read():
+        with worker.engine.connect() as conn:
+            return conn.execute(text("SELECT value FROM worker_state WHERE key = :k"), {"k": SPANS_WATERMARK_KEY}).scalar()
+
+    def reset(value=None):
+        with worker.engine.begin() as conn:
+            conn.execute(text("DELETE FROM worker_state WHERE key = :k"), {"k": SPANS_WATERMARK_KEY})
+            if value is not None:
+                conn.execute(text("INSERT INTO worker_state (key, value) VALUES (:k, :v)"),
+                             {"k": SPANS_WATERMARK_KEY, "v": value})
+
+    reset()
+    yield type("W", (), {"read": staticmethod(read), "reset": staticmethod(reset)})
+    reset()
+
+
+def test_the_reconcile_pass_records_spans_of_runs_the_api_cancelled(worker, tenant, watermark):
     from eap_worker.cancel_reconcile import record_missing_spans_step
 
     first = _cancelled_by_the_api(worker, tenant)
     second = _cancelled_by_the_api(worker, tenant)
-    old = _cancelled_by_the_api(worker, tenant, age_hours=24)
+    old = _cancelled_by_the_api(worker, tenant, age_hours=24 * 8)  # older than the 7-day first lookback
     assert _spans(worker.engine, tenant, first) == []
-    # bounded per tick, oldest first; other tenants' pending runs may share the table, so count ours
-    recorded = record_missing_spans_step(500)
-    assert recorded >= 2
+    assert record_missing_spans_step(500) >= 2
     assert [r["kind"] for r in _spans(worker.engine, tenant, first)] == ["run"]
     assert [r["status"] for r in _spans(worker.engine, tenant, second)] == ["error"]
-    assert _spans(worker.engine, tenant, old) == []  # ended long ago: no backfill
-    again = record_missing_spans_step(500)
-    assert len(_spans(worker.engine, tenant, first)) == 1 and again < recorded  # idempotent
+    assert _spans(worker.engine, tenant, old) == []  # no backfill past the first-start lookback
+    record_missing_spans_step(500)
+    assert len(_spans(worker.engine, tenant, first)) == 1  # idempotent
 
 
-def test_the_reconcile_pass_is_bounded_per_tick(worker, tenant):
+def test_the_watermark_advances_and_a_first_start_picks_up_older_runs_once(worker, tenant, watermark):
+    from datetime import datetime, timedelta, timezone
+
     from eap_worker.cancel_reconcile import record_missing_spans_step
 
-    runs = [_cancelled_by_the_api(worker, tenant) for _ in range(3)]
-    assert record_missing_spans_step(1) == 1
+    recent_old = _cancelled_by_the_api(worker, tenant, age_hours=24 * 3)  # inside 7 days, before any watermark
+    assert watermark.read() is None
+    before = datetime.now(timezone.utc)
+    assert record_missing_spans_step(500) >= 1
+    assert [r["kind"] for r in _spans(worker.engine, tenant, recent_old)] == ["run"]
+    mark = watermark.read()
+    assert mark is not None and mark >= before - timedelta(minutes=2)  # advanced to just before now
+    # a run that ended before the watermark yet has no spans is not scanned again
+    skipped = _cancelled_by_the_api(worker, tenant, age_hours=3)
+    record_missing_spans_step(500)
+    assert _spans(worker.engine, tenant, skipped) == []
+    assert watermark.read() >= mark  # never moves back
+
+
+def test_a_full_page_moves_the_watermark_to_the_last_run_scanned(worker, tenant, watermark):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import record_missing_spans_step
+
+    watermark.reset(datetime.now(timezone.utc) - timedelta(days=1))
+    runs = [_cancelled_by_the_api(worker, tenant, age_hours=h) for h in (5, 4, 3)]
+    assert record_missing_spans_step(2) == 2
     done = [r for r in runs if _spans(worker.engine, tenant, r)]
-    assert len(done) <= 1
+    assert done == runs[:2]  # oldest first
+    with worker.engine.connect() as conn:
+        updated = conn.execute(text("SELECT updated_at FROM runs WHERE id = :r"), {"r": str(runs[1])}).scalar()
+    assert watermark.read() == updated
+    assert record_missing_spans_step(2) == 1 and _spans(worker.engine, tenant, runs[2])
 
 
-def test_a_failing_span_write_leaves_the_cancel_finish_and_the_pass_intact(worker, tenant, monkeypatch):
+def test_a_run_with_no_spans_from_its_trace_is_marked_and_not_selected_again(worker, tenant, watermark, monkeypatch):
+    from uuid import uuid4
+
+    from eap_worker.cancel_reconcile import record_missing_spans_step
+
+    monkeypatch.setattr("eap_run_store.trace.flat_spans", lambda trace: [])
+    run_id = _cancelled_by_the_api(worker, tenant)
+    watermark.reset(None)
+    assert record_missing_spans_step(500) >= 1
+    rows = _spans(worker.engine, tenant, run_id)
+    assert [(r["kind"], r["span_id"], r["status"]) for r in rows] == [("run", f"run:{run_id}", "error")]
+    assert rows[0]["start"] is not None and rows[0]["end"] is not None
+    watermark.reset(None)  # even a fresh scan from 7 days back does not pick it up again
+    record_missing_spans_step(500)
+    assert len(_spans(worker.engine, tenant, run_id)) == 1
+
+
+def test_a_failing_span_write_leaves_the_cancel_finish_and_the_pass_intact(worker, tenant, watermark, monkeypatch):
     from uuid import uuid4
 
     from eap_worker import cancel_reconcile

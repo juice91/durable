@@ -49,6 +49,19 @@ class SpanModel(Base):
     )
 
 
+class WorkerStateModel(Base):
+    """`worker_state`: small timestamps the worker keeps between ticks (the spans backfill pass's
+    watermark, key `spans_backfill_watermark`)."""
+
+    __tablename__ = "worker_state"
+
+    key: Mapped[str] = mapped_column("key", String, primary_key=True)
+    value: Mapped[datetime] = mapped_column("value", DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        "updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class InvalidSpanCursor(ValueError):
     """The token is not a cursor `SpanStore.list` issued."""
 
@@ -126,8 +139,9 @@ def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
     """Replace the run's `spans` rows from its trace; returns the rows written. Writes nothing (0)
     for an unknown run, one that has not finished, a child run (its spans are part of its parent's
     trace) or a run of another kind than agent, tool and workflow. Idempotent. Called by the worker
-    when a run ends, and by the cancel paths (the API's cancel and the worker's reconciler), where
-    the run is ended from outside and its own workflow never gets to record."""
+    when a run ends and by the worker's cancel reconcile (the cancel finish and the backfill pass),
+    for runs ended from outside whose own workflow never gets to record; the API never calls it.
+    A trace with no span to show still gets one synthetic `run` row."""
     from eap_run_store.store import TERMINAL_RUN_STATUSES
     from eap_run_store.trace import TraceReader, flat_spans
 
@@ -146,7 +160,18 @@ def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
         or run.get("parent_run_id") is not None
     ):
         return 0
-    return SpanStore(engine).replace_for_run(tenant_id, run_id, flat_spans(trace))
+    spans = flat_spans(trace)
+    if not spans:
+        # Nothing to show (no span with a start): one `run` row from the run's own times, so the
+        # backfill pass, which selects runs without rows, never takes the run again.
+        spans = [{
+            "span_id": f"run:{run['id']}", "parent_id": None, "kind": "run", "name": str(run.get("name") or "run"),
+            "start": run.get("started_at") or run["created_at"],
+            "end": run.get("finished_at") or run.get("updated_at"),
+            "status": "ok" if run["status"] == "completed" else "error",
+            "agent_id": run.get("agent_id"), "workflow_id": run.get("workflow_id"), "model": run.get("model_id"),
+        }]
+    return SpanStore(engine).replace_for_run(tenant_id, run_id, spans)
 
 
 _SPAN_COLUMNS = ("run_id", "span_id", "parent_id", "kind", "name", "start", "end", "status",
@@ -269,4 +294,4 @@ class SpanStore:
         return buckets
 
 
-__all__ = ["MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_filter_conditions"]
+__all__ = ["WorkerStateModel", "MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_filter_conditions"]

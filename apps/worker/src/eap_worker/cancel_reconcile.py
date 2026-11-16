@@ -181,34 +181,58 @@ def finish_cancel_step(tenant_id: str, run_id: str) -> dict[str, Any]:
 
 SPANS_STEP = "eap.cancel_reconcile.spans"
 SPANS_PER_TICK = 200
-# Only runs that ended this recently are looked at: spans are not backfilled for older runs.
-SPANS_WINDOW = timedelta(hours=6)
+# First start (no watermark yet): look back this far; spans are not backfilled for older runs.
+SPANS_FIRST_LOOKBACK = timedelta(days=7)
+# The scan restarts this far before the watermark, so a run whose commit landed after a newer one is
+# not skipped (a run that has spans is never selected again, so the overlap costs nothing).
+SPANS_OVERLAP = timedelta(minutes=1)
+SPANS_WATERMARK_KEY = "spans_backfill_watermark"
+_WATERMARK_READ = text("SELECT value FROM worker_state WHERE key = :k")
+_WATERMARK_WRITE = text(
+    "INSERT INTO worker_state (key, value, updated_at) VALUES (:k, :v, now())"
+    " ON CONFLICT (key) DO UPDATE SET value = GREATEST(worker_state.value, EXCLUDED.value), updated_at = now()"
+)
 _MISSING_SPANS = text(
-    "SELECT r.tenant_id, r.id FROM runs r"
+    "SELECT r.tenant_id, r.id, r.updated_at FROM runs r"
     " WHERE r.parent_run_id IS NULL AND r.kind IN ('agent', 'tool', 'workflow')"
-    " AND r.status IN ('completed', 'failed', 'needs_attention') AND r.updated_at >= :since"
+    " AND r.status IN ('completed', 'failed', 'needs_attention') AND r.updated_at > :since"
     " AND NOT EXISTS (SELECT 1 FROM spans s WHERE s.run_id = CAST(r.id AS uuid))"
-    " ORDER BY r.updated_at LIMIT :n"
+    " ORDER BY r.updated_at ASC LIMIT :n"
 )
 
 
 @DBOS.step(name=SPANS_STEP)
 def record_missing_spans_step(limit: int = SPANS_PER_TICK) -> int:
-    """Materialise the spans of recently ended top-level runs that have none: a cancelled run is
-    ended from outside (the API's cancel), so its own workflow never reaches `eap.record_spans`; a
-    run whose recording failed is retried here too. At most `limit` per tick, oldest first,
-    idempotent (materialise_spans replaces a run's rows). Returns the runs recorded."""
+    """Materialise the spans of ended top-level runs that have none: a cancelled run is ended from
+    outside (the API's cancel), so its own workflow never reaches `eap.record_spans`; a run whose
+    recording failed, or that ended while no worker ran, is picked up here too.
+
+    A watermark (`worker_state.spans_backfill_watermark`: the newest `runs.updated_at` scanned)
+    keeps each tick to `updated_at > watermark` (index `ix_runs_updated_at`), oldest first, at most
+    `limit` runs; a run with no spans from its trace gets one synthetic `run` span
+    (materialise_spans), so it is never selected again. Without a watermark (first start) the scan
+    reaches back 7 days. A page that is not full moves the watermark to just before now. Returns
+    the runs recorded."""
     rt = get_runtime()
-    since = datetime.now(timezone.utc) - SPANS_WINDOW
+    now = datetime.now(timezone.utc)
     with rt.engine.connect() as conn:
+        mark = conn.execute(_WATERMARK_READ, {"k": SPANS_WATERMARK_KEY}).scalar()
+        since = (mark - SPANS_OVERLAP) if mark is not None else now - SPANS_FIRST_LOOKBACK
         rows = conn.execute(_MISSING_SPANS, {"since": since, "n": limit}).all()
     recorded = 0
-    for tenant_id, run_id in rows:
+    for tenant_id, run_id, _updated in rows:
         try:
             materialise_spans(rt.engine, tenant_id, run_id)
             recorded += 1
         except Exception:  # noqa: BLE001 - best effort; the next tick retries
             log.warning("cancel reconcile: spans of run %s not recorded", run_id)
+    if len(rows) >= limit:
+        advance = rows[-1][2]  # a full page: continue after the last run scanned
+    else:
+        advance = now - SPANS_OVERLAP
+    if mark is None or advance > mark:
+        with rt.engine.begin() as conn:
+            conn.execute(_WATERMARK_WRITE, {"k": SPANS_WATERMARK_KEY, "v": advance})
     return recorded
 
 

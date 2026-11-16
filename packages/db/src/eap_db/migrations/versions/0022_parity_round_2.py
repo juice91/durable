@@ -18,7 +18,8 @@ Create Date: 2026-11-17 09:00:00
   with `agent_id` NULL (a workflow suite's run). Every other rule is unchanged. Added NOT VALID
   (no second scan): the new text is the old one plus a branch, so existing rows satisfy it.
 - `spans`: a flat, materialised span list filled when a run finishes. PK `(run_id, span_id)`;
-  `(tenant_id, start DESC)` indexed. No backfill of older runs.
+  `(tenant_id, start DESC)` indexed. No backfill of older runs. `runs(updated_at)` is indexed and
+  `worker_state(key, value, updated_at)` holds the spans backfill pass's watermark.
 
 - `ck_runs_parent_link` is recreated too (NOT VALID, same reason): a parented run may be kind `agent` or
   `workflow`, so a workflow suite's case runs are children of their eval run (cancel, cost and tree
@@ -145,9 +146,21 @@ def upgrade() -> None:
         "ix_spans_tenant_start", "spans", ["tenant_id", sa.text("start DESC")], unique=False
     )
 
+    # The spans backfill pass scans `runs.updated_at > watermark`; the watermark lives in worker_state.
+    op.create_index("ix_runs_updated_at", "runs", ["updated_at"], unique=False)
+    op.create_table(
+        "worker_state",
+        sa.Column("key", sa.String(), nullable=False),
+        sa.Column("value", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.PrimaryKeyConstraint("key", name="worker_state_pkey"),
+    )
+
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.drop_table("worker_state")
+    op.drop_index("ix_runs_updated_at", table_name="runs")
     op.drop_index("ix_spans_tenant_start", table_name="spans")
     op.drop_table("spans")
 
