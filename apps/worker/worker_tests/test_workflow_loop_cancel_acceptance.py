@@ -67,6 +67,13 @@ def _assert_cancelled(worker, run_id, step_id):
     return events
 
 
+def _db_now_ms():
+    """The DBOS database's clock in ms. `workflow_status.created_at` is stamped by that server, so
+    comparing it with this host's clock breaks when the Docker VM's clock is skewed."""
+    with psycopg.connect(DBOS_DB_URL, connect_timeout=5) as conn:
+        return float(conn.execute("SELECT extract(epoch FROM clock_timestamp()) * 1000").fetchone()[0])
+
+
 def _iteration_workflows(worker_settings, run_id, loop_id="lp"):
     """The DBOS iteration workflows of the run's loop `loop_id`: {workflow id: created_at (ms)}."""
     schema = worker_settings.dbos_system_schema
@@ -146,7 +153,7 @@ def test_api_cancel_of_a_100_iteration_loop_starts_no_iteration_workflow_after(
         assert api.post(f"/api/v1/workflows/{wf}/runs", headers=auth_header(tenant),
                         json={"input": {}, "run_id": run_id}).status_code == 202
         assert gate["entered"].wait(60), "iteration 2's agent request never started"
-        cancelled_at_ms = time.time() * 1000
+        cancelled_at_ms = _db_now_ms()
         r = api.post(f"/api/v1/runs/{run_id}/cancel", headers=auth_header(tenant, "alice"))
         assert r.status_code == 202 and r.json()["error_code"] == "run_cancelled", r.text
         gate["release"].set()

@@ -521,20 +521,25 @@ def _expected_keys():
     return keys
 
 
-@pytest.mark.parametrize("crash_env", [
-    pytest.param({"EAP_CRASH_AT": "workflow_mid_step", "EAP_CRASH_EVENT_KEY": "loop:each.1:step:mk:started"},
+@pytest.mark.parametrize("crash_env, concurrency", [
+    pytest.param({"EAP_CRASH_AT": "workflow_mid_step", "EAP_CRASH_EVENT_KEY": "loop:each.1:step:mk:started"}, 1,
                  id="in-flight-iteration"),
     pytest.param({"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:each.0:completed"},
-                 id="parent-after-first-await"),
+                 3, id="parent-after-first-await"),
     # The refill (LP.10 review): item 3's start is recorded after awaiting item 0, then the parent
     # dies before awaiting item 1; recovery replays the start (same workflow id) and runs item 3 once.
     pytest.param({"EAP_CRASH_AT": "foreach_refill", "EAP_CRASH_EVENT_KEY": "loop:each.3:refill"},
-                 id="parent-after-refill-start"),
+                 3, id="parent-after-refill-start"),
     pytest.param({"EAP_CRASH_AT": "after_event_write", "EAP_CRASH_EVENT_KEY": "loop:each.4:completed"},
-                 id="after-last-item-before-the-step-completes"),
+                 3, id="after-last-item-before-the-step-completes"),
 ])
-def test_crash_recovery_runs_each_item_once_in_order(worker, tenant, defs, crash_schema, tmp_path, crash_env):
+def test_crash_recovery_runs_each_item_once_in_order(
+        worker, tenant, defs, crash_schema, tmp_path, crash_env, concurrency):
+    # The in-flight-step case isolates the killed iteration. With a concurrent window, SIGKILL can
+    # legitimately catch a sibling after reserving its external side effect, which is separately
+    # covered by test_crash_mid_window_with_a_call_in_flight_needs_attention.
     spec = _crash_spec(worker, tenant)
+    spec["steps"][0]["concurrency"] = concurrency
     run_id, run = _crash_run(worker, tenant, crash_schema, tmp_path, crash_env, spec)
     events = event_rows(worker.engine, run_id)
     keys = [e[1] for e in events]

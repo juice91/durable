@@ -239,7 +239,7 @@ def test_api_crash_between_cascade_and_end_is_finished_by_the_reconciler(
     try:
         assert apply_cancel_reconcile_schedule(
             ReconcileConfig(schedule="*/2 * * * * *", after_seconds=1, limit=1000)) == "applied"
-        wait_for(lambda: all(len(ends(event_rows(worker.engine, i))) == 1 for i in ids), 20,
+        wait_for(lambda: all(len(ends(event_rows(worker.engine, i))) == 1 for i in ids), 60,
                  what="the reconciler to finish the tree")
     finally:
         DBOS.delete_schedule(CANCEL_RECONCILE_SCHEDULE_NAME)

@@ -123,7 +123,13 @@ it reads the clock, whether the run has its `cancel_requested` event, and with
 judge rows on the run, AC.5's sum). The step about to start then fails, in this order:
 `run_cancelled` (the cooperative cancel), `workflow_deadline_exceeded` (the recorded
 max_run_seconds), `run_budget_exceeded` (cost >= the cap; RunBudgetExceeded, so step_failed and
-run_failed carry AC.5's {limit: "max_cost_usd", value, spent_usd}). A foreach whose tick stops it
+run_failed carry AC.5's {limit: "max_cost_usd", value, spent_usd}). The same order applies at the
+deadline gate in `run_step`, which used to raise `workflow_deadline_exceeded` before the tick could
+see a cancel: `eap.workflow_step_begin` now also records whether `cancel` was already stored, and
+that snapshot wins only when it is already past the deadline. Inside the deadline the tick still
+decides, so a body step already started runs to its end. A checkpoint recorded before the snapshot
+is a float and keeps that run's deadline-first outcome; the step name is unchanged, so the
+operation list of a run recorded earlier does not grow. A foreach whose tick stops it
 starts no more items, awaits the started ones, then fails; a tick failure (those three codes,
 or the tick step itself raising, e.g. a lost DB connection: `internal_error`, marked run-level by
 LoopTickFailed) is never collected as an error entry under `on_item_error: collect`, also when the
@@ -433,14 +439,22 @@ async def start_workflow_run_step(
 @DBOS.step(name="eap.workflow_step_begin")
 async def step_begin_step(
     run_id: str, tenant_id: str, step_id: str, data: dict[str, Any], key: str | None = None
-) -> float:
+) -> dict[str, Any]:
     """Record step_started (`step:{step_id}:started`, or the scoped `key` of a body step) and
-    return the current time (epoch seconds)."""
+    return the current time and whether cancellation was already requested.
+
+    Checkpointed versions before the cancellation-order fix returned only the float timestamp;
+    `run_step` keeps accepting that shape so those executions replay their original decision and
+    operation sequence exactly."""
     rt = get_runtime()
     key = key or f"step:{step_id}:started"
     await asyncio.to_thread(rt.event_log.append, tenant_id, uuid.UUID(run_id), key, "step_started", data)
     crash_point("after_event_write", event_key=key)
-    return time.time()
+    cancel = await asyncio.to_thread(rt.event_log.get_event, tenant_id, run_id, CANCEL_EVENT_KEY)
+    return {
+        "now": time.time(),
+        "cancel_requested": cancel is not None and cancel.type == "cancel_requested",
+    }
 
 
 @DBOS.step(name="eap.workflow_clock")
@@ -823,14 +837,21 @@ class _Interpreter:
         elif isinstance(step, ToolStep):
             data["tool_id"] = step.tool_id
         started_key = self.key(step_id, "started")
-        now = await step_begin_step(
+        begin = await step_begin_step(
             self.run_id, self.tenant_id, step_id, self._scoped(data), started_key if self.scope else None
         )
         crash_point("workflow_mid_step", event_key=started_key)
         try:
             if problem is not None:
                 raise problem
+            # A float is a checkpoint from before the cancel snapshot. It keeps that run's
+            # deadline-first outcome and the same next operation. A dict applies the snapshot only
+            # when this step is already past the deadline (cancel wins); inside the deadline the
+            # tick still owns cancel, so an in-flight iteration's body is not cut short here.
+            now = begin["now"] if isinstance(begin, dict) else begin
             if now - self.limits["started_at"] > self.limits["max_run_seconds"]:
+                if isinstance(begin, dict) and begin.get("cancel_requested"):
+                    raise WorkflowStepError("run_cancelled", step_id)
                 raise WorkflowStepError("workflow_deadline_exceeded", step_id)
             if self.limited and not self.scope and step.type in TICKED_STEP_TYPES:
                 await self._tick(step_id, EMPTY_SCOPE)  # D11: only with `limits`, so goldens hold

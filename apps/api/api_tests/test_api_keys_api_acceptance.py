@@ -128,7 +128,7 @@ def test_every_bad_key_gets_the_identical_401(c, tenant):
     revoked = _create(c, tenant)
     assert c.delete(f"{KEYS}/{revoked['id']}", headers=_dev(tenant)).status_code == 204
     expired = _create(c, tenant, expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
-    _sql(c, "UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = :i", i=expired["id"])
+    _sql(c, "UPDATE api_keys SET expires_at = now() - interval '1 hour' WHERE id = :i", i=expired["id"])
     bad = {
         "wrong_secret": f"pos_{good['id']}_{'A' * 43}",
         "wrong_id": f"pos_{'e' * 24}_{secret}",

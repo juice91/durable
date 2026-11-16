@@ -17,7 +17,7 @@ from worker_tests.conftest import DBOS_DB_URL, event_rows, wait_terminal
 from worker_tests.test_conversation import step_names
 from worker_tests.test_crash_recovery import APP_VERSION as CRASH_APP_VERSION
 from worker_tests.test_crash_recovery import WorkerProcess, _env, crash_schema  # noqa: F401 - fixture
-from worker_tests.test_workflow_loop_tick import TICK, _ask, _loop, _wf, defs  # noqa: F401
+from worker_tests.test_workflow_loop_tick import BEGIN, TICK, _ask, _loop, _tool, _wf, defs  # noqa: F401
 from worker_tests.workflow_run_helpers import agent_spec, enqueue_workflow_run, publish_agent, publish_workflow
 from worker_tests.test_workflow_loop_cancel_acceptance import _body
 from worker_tests.test_workflow_loop_tick import _iteration_starts
@@ -130,3 +130,48 @@ def test_a_crash_at_a_top_level_agent_tick_runs_the_agent_once(worker, tenant, d
     assert names.count(TICK) == 2
     assert len(worker.run_store.list_runs(tenant, parent_run_id=run_id)) == 2
     assert worker.run_store.run_tree_cost(tenant, run_id) == Decimal("0.04")
+
+
+def test_cancel_wins_over_deadline_when_step_begin_replays_after_a_crash(
+        worker, tenant, defs, crash_schema, tmp_path):
+    """The step-start event committed but its DBOS step did not. While the worker is down the
+    cancel lands and the recorded deadline expires; replay re-executes step-begin and must choose
+    cancellation without adding another durable operation or event."""
+    workflow_id, version_id = publish_workflow(worker.engine, tenant, _wf(_tool()))
+    executor_id = f"tk-{uuid.uuid4().hex[:8]}"
+    env = {
+        "EAP_CRASH_AT": "after_event_write",
+        "EAP_CRASH_EVENT_KEY": "step:x:started",
+        "EAP_WORKFLOW_MAX_RUN_SECONDS": "1",
+    }
+    first = WorkerProcess(_env(crash_schema, executor_id, **env), tmp_path / "deadline-w1.log")
+    second = dbos_client = None
+    try:
+        first.wait_ready()
+        dbos_client = DBOSClient(system_database_url=DBOS_DB_URL, dbos_system_schema=crash_schema)
+        run_id = enqueue_workflow_run(
+            dbos_client,
+            worker.run_store,
+            tenant_id=tenant,
+            workflow_id=workflow_id,
+            version_id=version_id,
+            input_value={},
+            app_version=CRASH_APP_VERSION,
+        )
+        assert first.wait_exit() == 137, (tmp_path / "deadline-w1.log").read_text()
+        worker.event_log.append(tenant, run_id, "cancel", "cancel_requested", {"requested_by": "test"})
+        time.sleep(1.1)  # cross the run's recorded one-second deadline while no worker is running
+        second = WorkerProcess(_env(crash_schema, executor_id), tmp_path / "deadline-w2.log")
+        second.wait_ready()
+        run = wait_terminal(worker.run_store, tenant, run_id, timeout=90)
+        assert run["status"] == "failed", (run["error"], (tmp_path / "deadline-w2.log").read_text())
+        data = _clean_events(worker, run_id)
+        assert data["step:x:failed"]["error_code"] == "run_cancelled"
+        assert data["end"]["error_code"] == "run_cancelled"
+        assert step_names(crash_schema, run_id).count(BEGIN) == 1
+    finally:
+        first.kill()
+        if second is not None:
+            second.stop()
+        if dbos_client is not None:
+            dbos_client.destroy()

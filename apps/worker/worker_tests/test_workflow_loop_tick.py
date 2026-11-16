@@ -124,6 +124,66 @@ def test_tick_deadline_wins_over_the_cap(monkeypatch):
     _decide(_interp())
 
 
+def test_step_begin_cancel_wins_over_the_early_deadline(monkeypatch):
+    """The pre-execution deadline gate must use the cancel snapshot recorded by step-begin."""
+    interp = _interp()
+
+    async def begin(*args, **kwargs):
+        return {"now": 1061.0, "cancel_requested": True}
+
+    async def append(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(wr, "step_begin_step", begin)
+    monkeypatch.setattr(wr, "append_event_step", append)
+    with pytest.raises(wr.StepFailed) as raised:
+        asyncio.run(interp.run_step(interp.spec.steps[0]))
+    assert raised.value.failure.code == "run_cancelled"
+
+
+def test_old_float_step_begin_checkpoint_keeps_its_recorded_deadline_decision(monkeypatch):
+    """A pre-fix replay returns the recorded float and must not gain a new cancel read or step."""
+    interp = _interp()
+
+    async def old_begin(*args, **kwargs):
+        return 1061.0
+
+    async def append(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(wr, "step_begin_step", old_begin)
+    monkeypatch.setattr(wr, "append_event_step", append)
+    with pytest.raises(wr.StepFailed) as raised:
+        asyncio.run(interp.run_step(interp.spec.steps[0]))
+    assert raised.value.failure.code == "workflow_deadline_exceeded"
+
+
+def test_step_begin_cancel_inside_the_deadline_still_reaches_the_tick(monkeypatch):
+    """Cancel does not cut a step short unless that same snapshot is already past the deadline.
+    The tick remains the cooperative cancel inside the deadline."""
+    interp = _interp()
+    calls = []
+
+    async def begin(*args, **kwargs):
+        return {"now": 1001.0, "cancel_requested": True}
+
+    async def tick(*args, **kwargs):
+        calls.append(args)
+        raise wr.WorkflowStepError("run_cancelled", "lp")
+
+    async def append(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(wr, "step_begin_step", begin)
+    monkeypatch.setattr(wr, "loop_tick_step", tick)
+    monkeypatch.setattr(wr, "append_event_step", append)
+    monkeypatch.setattr(wr, "crash_point", lambda *a, **k: None)
+    with pytest.raises(wr.StepFailed) as raised:
+        asyncio.run(interp.run_step(interp.spec.steps[0]))
+    assert calls, "the deadline gate must not fail the step before its tick"
+    assert raised.value.failure.code == "run_cancelled"
+
+
 def test_failure_results_carry_data_only_when_there_is_some():
     plain = RunFailure("failed", "input_ref_missing", "WorkflowStepError", "m")
     assert wr._failure_result(plain, "x") == {
@@ -250,21 +310,18 @@ def test_a_cancel_landing_between_the_tick_and_the_child_run_ends_the_run_run_ca
     """The live race: the tick before iteration 1 reads no cancel, then the cancel lands before the
     iteration's agent step creates its child run. The child is refused (ParentRunStopped) and the
     run ends exactly as a cooperative cancel: `run_cancelled` on the loop step and `end`."""
-    from eap_run_store import CANCEL_EVENT_KEY
-
     agent_id = publish_agent(worker.engine, tenant, agent_spec())
-    original = worker.event_log.get_event
+    original_tick = wr.loop_tick_step
     reads = []
 
-    def get_event(tenant_id, run_id, event_key):
-        found = original(tenant_id, run_id, event_key)
-        if event_key == CANCEL_EVENT_KEY:
-            reads.append(run_id)
-            if len(reads) == 2:  # the tick before iteration 1 has read "no cancel"
-                worker.event_log.append(tenant_id, run_id, "cancel", "cancel_requested", {"requested_by": "test"})
+    async def tick(run_id, tenant_id, scope_text, step_id, with_cost):
+        found = await original_tick(run_id, tenant_id, scope_text, step_id, with_cost)
+        reads.append(run_id)
+        if len(reads) == 2:  # the tick before iteration 1 has read "no cancel"
+            worker.event_log.append(tenant_id, run_id, "cancel", "cancel_requested", {"requested_by": "test"})
         return found
 
-    monkeypatch.setattr(worker.event_log, "get_event", get_event)
+    monkeypatch.setattr(wr, "loop_tick_step", tick)
     run_id = _start(worker, client, tenant, _wf(_loop([_ask(agent_id)], max_iterations=6)), {})
     run = wait_terminal(worker.run_store, tenant, run_id)
     assert run["status"] == "failed", run
