@@ -277,7 +277,7 @@ class SpanStore:
             first = first.replace(hour=0)
         buckets = []
         at = first
-        while at <= end.astimezone(timezone.utc):
+        while at < end:
             runs, failed = found.get(at, (0, 0))
             buckets.append({"start": at, "runs": runs, "failed": failed})
             at += step

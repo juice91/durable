@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -53,6 +53,7 @@ from eap_run_store import (
     RunStore,
 )
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
+from eap_run_store.spans import SpanStore
 from eap_run_store.store import run_tags
 
 log = logging.getLogger("eap_api")
@@ -462,6 +463,88 @@ def list_runs(
     return JSONResponse(
         content={"items": [_run_json(r, chat.get(str(r["id"]))) for r in runs], "next_before": next_before}
     )
+
+
+HISTOGRAM_DEFAULT_RANGE = timedelta(days=7)
+HISTOGRAM_HOURLY_UNDER = timedelta(hours=72)
+HISTOGRAM_MAX_RANGE = timedelta(days=366)
+
+
+def get_span_store(request: Request, stores: StoresDep) -> SpanStore:
+    """The tenant-agnostic span store (every call takes the tenant), one per app."""
+    store = getattr(request.app.state, "span_store", None)
+    if store is None:
+        run_store, _ = stores
+        store = request.app.state.span_store = SpanStore(run_store.engine)
+    return store
+
+
+SpanStoreDep = Annotated[SpanStore, Depends(get_span_store)]
+
+
+def metadata_filter(metadata: list[str] | None) -> dict[str, str] | None:
+    """`?metadata=key=value` pairs as a dict (422 for a malformed pair); None when absent."""
+    found: dict[str, str] = {}
+    for pair in _list_param(metadata, "metadata", split=False) or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip() or len(key) > 64 or len(value) > 256:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="metadata must be key=value pairs (key up to 64 and value up to 256 characters)",
+            )
+        found[key.strip()] = value
+    return found or None
+
+
+@router.get("/runs/histogram")
+def runs_histogram(
+    principal: PrincipalDep,
+    spans: SpanStoreDep,
+    agent_id: uuid.UUID | None = None,
+    run_status: Annotated[list[str] | None, Query(alias="status")] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
+    tool_id: Annotated[str | None, Query(max_length=64)] = None,
+    workflow_id: uuid.UUID | None = None,
+    knowledge_base_id: uuid.UUID | None = None,
+    parent_run_id: uuid.UUID | None = None,
+    created_from: Annotated[datetime | None, Query(alias="from")] = None,
+    created_to: Annotated[datetime | None, Query(alias="to")] = None,
+    model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+    provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    tags: Annotated[list[str] | None, Query()] = None,
+    metadata: Annotated[list[str] | None, Query()] = None,
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+) -> JSONResponse:
+    """Runs per bucket over the `GET /runs` filters (same meaning), for the Traces page strip:
+    `{interval, buckets: [{start, runs, failed}]}`, one bucket per UTC hour (a range under 72 hours)
+    or day, zero-filled from the bucket holding `from` up to `to`. The range is `[from, to)`,
+    default the last 7 days; `from` must be before `to` and the range at most 366 days (422)."""
+    now = datetime.now(UTC)
+    end = _utc(created_to) if created_to is not None else now
+    start = _utc(created_from) if created_from is not None else end - HISTOGRAM_DEFAULT_RANGE
+    if start >= end:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
+    if end - start > HISTOGRAM_MAX_RANGE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the range is at most 366 days"
+        )
+    interval = "hour" if end - start < HISTOGRAM_HOURLY_UNDER else "day"
+    filters = {
+        "agent_id": agent_id, "status": _status_filter(run_status), "kind": kind, "tool_id": tool_id,
+        "workflow_id": workflow_id, "knowledge_base_id": knowledge_base_id, "parent_run_id": parent_run_id,
+        "model": model, "provider": provider, "tags": _list_param(tags, "tags", split=True),
+        "metadata": metadata_filter(metadata), "text_query": q.strip() if q and q.strip() else None,
+    }
+    try:
+        buckets = spans.runs_histogram(
+            principal.tenant_id, start, end, interval, {k: v for k, v in filters.items() if v is not None}
+        )
+    except MetricsQueryTimeout:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
+    return JSONResponse(content={
+        "interval": interval,
+        "buckets": [{**b, "start": b["start"].isoformat()} for b in buckets],
+    })
 
 
 @router.get("/runs/{run_id}")

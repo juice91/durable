@@ -17,6 +17,11 @@ key, so a replayed step writes nothing twice. Sampling is a stable function of (
 that raises is `passed: false`, `score: null` with a fixed reason; scoring never changes the run's
 status or fails the run. Only the worker writes these events, never the API.
 
+On demand (`POST /runs/{id}/score`): workflow `eap.score_run(run_id, tenant_id, scorer_ids)` loads those
+scorers (sampling rate 1: the caller asked for them; a scorer deleted meanwhile is skipped) and the
+run's output schema, then runs the same scoring step, so the events, their keys and their rules are
+the ones above. Scoring a run again with a scorer writes nothing new.
+
 LLM-judge scorers are not supported: the judge is a durable model step of the eval workflow.
 """
 
@@ -29,6 +34,7 @@ from typing import Any
 from uuid import UUID
 
 from dbos import DBOS
+from sqlalchemy import text
 
 from eap_run_store.scorers import sampled
 from eap_schemas.scorers import SCORE_EVENT_TYPE, score_event_key
@@ -111,4 +117,48 @@ async def score_run_step(
     return written
 
 
-__all__ = ["SCORER_FAILED", "score_data", "score_run_step"]
+_AGENT_SPEC = text("SELECT spec FROM agent_versions WHERE tenant_id = :t AND agent_id = :a AND version = :v")
+
+
+@DBOS.step(name="eap.load_scorers")
+async def load_scorers_step(run_id: str, tenant_id: str, scorer_ids: list[str]) -> dict[str, Any]:
+    """`{scorers, output_schema}` for an on-demand score: the named scorers of the tenant (records as
+    the link carries them, sampling rate 1; unknown ones left out) and the run's agent output schema."""
+    from eap_run_store.scorers import ScorerNotFound, ScorerStore
+
+    rt = get_runtime()
+    store = ScorerStore(rt.engine)
+    scorers: list[dict[str, Any]] = []
+    for scorer_id in dict.fromkeys(scorer_ids):
+        try:
+            record = await asyncio.to_thread(store.get, tenant_id, scorer_id)
+        except ScorerNotFound:
+            continue
+        scorers.append({"id": record.id, "name": record.name, "evaluator": record.evaluator, "sampling_rate": 1})
+    run = await asyncio.to_thread(rt.run_store.get_run, tenant_id, UUID(run_id)) or {}
+    spec = run.get("draft_spec")
+    if spec is None and run.get("agent_id") and run.get("agent_version") is not None:
+        def read() -> Any:
+            with rt.engine.connect() as conn:
+                row = conn.execute(
+                    _AGENT_SPEC, {"t": tenant_id, "a": str(run["agent_id"]), "v": run["agent_version"]}
+                ).first()
+            return row[0] if row else None
+
+        spec = await asyncio.to_thread(read)
+    output = (spec or {}).get("output") if isinstance(spec, dict) else None
+    schema = output.get("json_schema") if isinstance(output, dict) else None
+    return {"scorers": scorers, "output_schema": schema}
+
+
+@DBOS.workflow(name="eap.score_run")
+async def score_run(run_id: str, tenant_id: str, scorer_ids: list[str]) -> dict[str, int]:
+    """Score a finished run with the named scorers (`POST /runs/{id}/score`); `{written}` events."""
+    loaded = await load_scorers_step(run_id, tenant_id, scorer_ids)
+    if not loaded["scorers"]:
+        return {"written": 0}
+    written = await score_run_step(run_id, tenant_id, loaded["scorers"], loaded["output_schema"])
+    return {"written": written}
+
+
+__all__ = ["SCORER_FAILED", "load_scorers_step", "score_data", "score_run", "score_run_step"]

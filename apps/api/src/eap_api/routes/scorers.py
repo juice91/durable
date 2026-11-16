@@ -7,7 +7,7 @@
 - `GET /agents/{id}/scorers`, `PUT|DELETE /agents/{id}/scorers/{scorer_id}`: attach a scorer to an
   agent (with a `sampling_rate` in (0, 1], default 1) or detach it.
 
-Nothing here scores a run. The worker applies an agent's attached scorers after each of its runs
+`POST /runs/{id}/score` asks the worker to score one finished run now. Otherwise the worker applies an agent's attached scorers after each of its runs
 finished and records the results as `score` run events. Another tenant's scorer or agent is a 404.
 Errors: 404, 409 (name used, attachment limit), 422 (invalid scorer).
 """
@@ -27,11 +27,13 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
+from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.runs import StoresDep
+from eap_api.routes.runs import StoresDep, _get_run_or_404
 from eap_api.schemas import ErrorDetail
 from eap_processors import Re2PatternError, compile_re2
+from eap_run_store import TERMINAL_RUN_STATUSES
 from eap_run_store.scorers import (
     SCORER_DESCRIPTION_MAX_CHARS,
     SCORER_NAME_MAX_CHARS,
@@ -216,3 +218,51 @@ async def detach_scorer(
     _agent_or_404(db, principal.tenant_id, agent_id)
     await run_in_threadpool(store.detach, principal.tenant_id, agent_id, scorer_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------- score on demand
+
+RUN_NOT_FINISHED = "run_not_finished"
+MAX_SCORE_SCORERS = 8
+SCORE_START_FAILED = "scoring could not be started; retry"
+LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
+
+
+class ScoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scorer_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_SCORE_SCORERS)
+
+
+@router.post(
+    "/runs/{run_id}/score",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={503: {"model": ErrorDetail}},
+)
+async def score_run(
+    run_id: uuid.UUID, body: ScoreRequest, principal: PrincipalDep, stores: StoresDep, store: ScorerStoreDep,
+    launcher: LauncherDep,
+) -> JSONResponse:
+    """Score a finished run with the named scorers now (the Score button of the trace drawer).
+    Enqueues DBOS workflow `eap.score_run`; the worker appends one `score` event per scorer (key
+    `score:{scorer_id}`, idempotent: scoring a run again with the same scorer writes nothing new)
+    and the answer is `202 {run_id, scorer_ids}` (repeated ids count once). 404 for another tenant's
+    run or scorer, 409 `run_not_finished` while the run has not ended, 422 for 0 or more than 8 ids."""
+    run_store, _ = stores
+    tenant_id = principal.tenant_id
+    run = await run_in_threadpool(_get_run_or_404, run_store, tenant_id, run_id)
+    if run["status"] not in TERMINAL_RUN_STATUSES:
+        raise _http(status.HTTP_409_CONFLICT, RUN_NOT_FINISHED)
+    scorer_ids = list(dict.fromkeys(str(s) for s in body.scorer_ids))
+    for scorer_id in scorer_ids:
+        try:
+            await run_in_threadpool(store.get, tenant_id, scorer_id)
+        except ScorerNotFound:
+            raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
+    try:
+        await run_in_threadpool(
+            lambda: launcher.launch_score(run_id=run_id, tenant_id=tenant_id, scorer_ids=scorer_ids)
+        )
+    except Exception:  # noqa: BLE001 - nothing was recorded; the caller may retry
+        raise _http(status.HTTP_503_SERVICE_UNAVAILABLE, SCORE_START_FAILED) from None
+    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"run_id": str(run_id), "scorer_ids": scorer_ids})
