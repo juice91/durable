@@ -261,6 +261,76 @@ def test_permanent_fire_failure_stops_schedule_after_five_ticks(worker, tenant, 
     assert _runs(worker, schedule["id"]) == []
 
 
+def test_late_tick_bursts_fire_once_and_next_fire_uses_the_real_clock(worker, tenant, make_schedule):
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=10), cron="*/5 * * * *")
+    late = datetime.now(timezone.utc) - timedelta(minutes=10)  # DBOS recovered an old tick
+    asyncio.run_coroutine_threadsafe(schedule_tick(late, {}), _LOOP).result(60)
+    assert len(_runs(worker, schedule["id"])) == 1
+    assert _schedules(worker).get(tenant, schedule["id"])["next_fire_at"] > datetime.now(timezone.utc)
+    run_tick()
+    assert len(_runs(worker, schedule["id"])) == 1
+
+
+def test_six_transient_db_failures_never_stop_the_schedule(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
+    monkeypatch.setattr(st, "_failures", {})
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    real_fire = st._fire
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) <= 6:
+            raise (OperationalError("SELECT 1", {}, Exception("down")) if len(calls) % 2
+                   else InterfaceError("SELECT 1", {}, Exception("closed")))
+        return real_fire(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_fire", flaky)
+    for _ in range(6):
+        assert run_tick()["failed"] == 1
+        assert _schedules(worker).get(tenant, schedule["id"])["active"] is True
+    assert st._failures == {}
+    assert run_tick()["fired"] == 1
+
+
+def test_stop_failure_does_not_block_other_schedules(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from eap_run_store import ScheduleStore
+
+    bad, _ = make_schedule(next_fire_at=_past(minutes=2))
+    good, _ = make_schedule(next_fire_at=_past(minutes=1))
+    monkeypatch.setattr(st, "_failures", {bad["id"]: st.MAX_FIRE_FAILURES - 1})
+    real_fire, real_stop = st._fire, ScheduleStore.stop
+
+    def selective(session, store, schedule, now):
+        if schedule["id"] == bad["id"]:
+            raise ValueError("permanent")
+        return real_fire(session, store, schedule, now)
+
+    def broken_stop(self, schedule_id, *args, **kwargs):
+        if schedule_id == bad["id"]:
+            raise RuntimeError("stop failed")
+        return real_stop(self, schedule_id, *args, **kwargs)
+
+    monkeypatch.setattr(st, "_fire", selective)
+    monkeypatch.setattr(ScheduleStore, "stop", broken_stop)
+    result = run_tick()
+    assert result["fired"] == 1 and result["failed"] == 1
+    assert len(_runs(worker, good["id"])) == 1
+    assert _schedules(worker).get(tenant, bad["id"])["active"] is True
+    assert st._failures[bad["id"]] == st.MAX_FIRE_FAILURES - 1  # the streak stays
+
+
+def test_failure_streak_entries_of_schedules_no_longer_due_are_dropped(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+
+    monkeypatch.setattr(st, "_failures", {"deleted-or-paused": 3})
+    run_tick()
+    assert "deleted-or-paused" not in st._failures
+
+
 # --------------------------------------------------------------------------- orphan sweep
 
 

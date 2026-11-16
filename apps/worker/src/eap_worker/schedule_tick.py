@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 
 from dbos import DBOS, SetWorkflowID
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 from eap_run_store import ScheduleStore
 from eap_worker.cancel_reconcile import valid_cron
@@ -235,6 +236,7 @@ def _orphans(now: datetime) -> list[dict[str, str]]:
     return found
 
 
+_TRANSIENT = (OperationalError, InterfaceError, DBAPIError, OSError)
 _failures: dict[str, int] = {}  # consecutive fire failures per schedule id (this process)
 
 
@@ -248,24 +250,36 @@ async def schedule_tick_step(now: str) -> dict[str, Any]:
     cannot start one), the fired ones plus orphans of an earlier tick that died after its commit."""
     rt = get_runtime()
     store = ScheduleStore(rt.engine)
-    now_dt = datetime.fromisoformat(now)
+    # The real clock decides what is due and when the next fire is: a recovered tick can carry a
+    # `now` minutes old, which would land next_fire_at in the past and fire once per missed window.
+    now_dt = max(datetime.fromisoformat(now), datetime.now(timezone.utc))
     counts = {"due": 0, "fired": 0, "stopped": 0, "failed": 0}
     start: dict[str, dict[str, str]] = {}
     session = store.Session()
     try:
         due = await asyncio.to_thread(store.claim_due, now_dt, CLAIM_LIMIT, session=session)
         counts["due"] = len(due)
+        due_ids = {d["id"] for d in due}
+        for stale in [k for k in _failures if k not in due_ids]:  # deleted, paused or fired since
+            _failures.pop(stale, None)
         for schedule in due:
             try:
                 started = await asyncio.to_thread(_fire, session, store, schedule, now_dt)
             except Exception as exc:  # noqa: BLE001 - one schedule's failure never stops the others
                 counts["failed"] += 1
+                if isinstance(exc, _TRANSIENT):  # an outage never stops a schedule or counts
+                    log.warning("schedule %s not fired (%s); the next tick retries", schedule["id"], type(exc).__name__)
+                    continue
                 streak = _failures.get(schedule["id"], 0) + 1
                 if streak >= MAX_FIRE_FAILURES:
-                    _failures.pop(schedule["id"], None)
                     reason = f"fire_failed: {type(exc).__name__}"
-                    await asyncio.to_thread(store.stop, schedule["id"], reason, session=session)
-                    log.warning("schedule %s stopped: fire_failed (%s)", schedule["id"], type(exc).__name__)
+                    try:
+                        await asyncio.to_thread(store.stop, schedule["id"], reason, session=session)
+                        _failures.pop(schedule["id"], None)
+                        log.warning("schedule %s stopped: fire_failed (%s)", schedule["id"], type(exc).__name__)
+                    except Exception as stop_exc:  # noqa: BLE001 - never lose the other schedules' work
+                        log.warning("schedule %s could not be stopped (%s); the streak stays", schedule["id"],
+                                    type(stop_exc).__name__)
                 else:
                     _failures[schedule["id"]] = streak
                     log.warning("schedule %s not fired (%s, %d/%d); the next tick retries", schedule["id"],
@@ -299,7 +313,7 @@ async def schedule_tick_step(now: str) -> dict[str, Any]:
 @DBOS.workflow(name=SCHEDULE_TICK_WORKFLOW_NAME)
 async def schedule_tick(scheduled_at: datetime, context: Any) -> dict[str, int]:
     """The scheduled tick (DBOS passes the tick time and the schedule context)."""
-    result = await schedule_tick_step(_utc(scheduled_at).isoformat())
+    result = await schedule_tick_step(_utc(scheduled_at).isoformat())  # scheduled_at is for logging; the step reads the real clock
     for item in result["start"]:
         with SetWorkflowID(item["run_id"]):
             await DBOS.start_workflow_async(
