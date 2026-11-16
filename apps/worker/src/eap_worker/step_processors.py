@@ -102,11 +102,15 @@ class StepProcessorCapability(AbstractCapability[Any]):
         args_text = canonical_json(to_jsonable_python(args, fallback=str))
         chain = await run_chain(run_id, tenant_id, "step", specs, args_text, moderation=False)
         await _record_processor_results(run_id, tenant_id, chain, f":tool:{n}:args")
+        decisions = getattr(ctx.deps, "step_decisions", None)
+        decision_key = (ctx.run_step - 1, call.tool_call_id)  # (model request n, id): ids may repeat across responses
         if chain.error is not None:
             # A processor ERROR (not a block) fails the run on purpose: text that could not be checked
             # must not reach the tool. A block never raises; it replaces the result (below).
             raise chain.error
         if chain.text is None:
+            if decisions is not None:
+                decisions[decision_key] = {"withheld": "step_processor"}
             return blocked_message(chain)
         if chain.text != args_text:
             try:
@@ -114,8 +118,12 @@ class StepProcessorCapability(AbstractCapability[Any]):
             except ValueError:
                 new_args = None
             if not isinstance(new_args, dict):  # a redaction that broke the JSON: the call cannot run
+                if decisions is not None:
+                    decisions[decision_key] = {"withheld": "step_processor"}
                 return f"Blocked by processor {chain.records[-1].data.get('processor_type')}: {ARGS_INVALID_REASON}"
             args = new_args
+        if decisions is not None:
+            decisions[decision_key] = to_jsonable_python(args, fallback=str)  # what the tool really runs with
 
         result = await handler(args)
 

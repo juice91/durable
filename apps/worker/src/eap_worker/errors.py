@@ -86,15 +86,17 @@ class OutputBlocked(Exception):
     SCHEMA_INVALID_AFTER_PROCESSING when the processed structured output no longer matches the
     output schema (e.g. a redaction broke a `const` or `minLength`)."""
 
-    def __init__(self, index: int, processor_type: str, reason: str | None = None) -> None:
+    def __init__(self, index: int, processor_type: str, reason: str | None = None, phase: str = "output") -> None:
         self.index = index
         self.processor_type = processor_type
         self.reason = reason
-        super().__init__(index, processor_type, reason)  # pickle-safe
+        # `stream` or `output`: with a structured output both lists are checked, so the index alone is ambiguous.
+        self.phase = phase
+        super().__init__(index, processor_type, reason, phase)  # pickle-safe
 
     def __str__(self) -> str:
         suffix = f": {self.reason}" if self.reason else ""
-        return f"output blocked by output_processors[{self.index}] ({self.processor_type}){suffix}"
+        return f"output blocked by {self.phase}_processors[{self.index}] ({self.processor_type}){suffix}"
 
 
 SCHEMA_INVALID_AFTER_PROCESSING = "schema_invalid_after_processing"
@@ -450,6 +452,10 @@ def _data(code: str, exc: BaseException) -> dict[str, Any] | None:
         return usage_limit_data(exc)
     if code == "run_budget_exceeded":
         return budget_data(exc)
+    if code == "output_blocked":
+        phase, index = getattr(exc, "phase", None), getattr(exc, "index", None)
+        if phase in ("stream", "output") and type(index) is int and index >= 0:
+            return {"processor_phase": phase, "processor_index": index}
     if code == "fallback_exhausted":
         data: dict[str, Any] = {"cause": _first_member_code(exc)}
         described = getattr(exc, "eap_fallback", None)

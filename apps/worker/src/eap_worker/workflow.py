@@ -1298,7 +1298,8 @@ def _blocked_error(chain: ChainRun, phase: str) -> Exception:
         return InputBlocked(index, processor_type)
     # AC.4: two object keys that processing made equal: the object no longer fits its schema.
     reason = SCHEMA_INVALID_AFTER_PROCESSING if record and record.data.get("reason") == SCHEMA_INVALID_AFTER_PROCESSING else None
-    return OutputBlocked(index, processor_type, reason)
+    phase_name = str(record.data.get("phase")) if record and record.data.get("phase") in ("stream", "output") else "output"
+    return OutputBlocked(index, processor_type, reason, phase_name)
 
 
 def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
@@ -1512,6 +1513,28 @@ async def _run_output_phases(
     return chain
 
 
+def _patch_logged_args(
+    messages: list[dict[str, Any]], logged: dict[tuple[int, str], Any], executed: dict[tuple[int, str], Any]
+) -> list[dict[str, Any]]:
+    """`messages` with each tool call's arguments replaced by what the log keeps, keyed by (the
+    response's request number n, tool_call id) so a provider that reuses ids cannot overwrite an
+    earlier response's call. `executed` (StepProcessorCapability's decisions) wins over `logged`."""
+    if not logged and not executed:
+        return messages
+    out: list[dict[str, Any]] = []
+    n = 0
+    for message in messages:
+        if message.get("kind") == "response":
+            for part in message.get("parts", []):
+                if part.get("part_kind") == "tool-call":
+                    key = (n, part.get("tool_call_id"))
+                    if key in executed or key in logged:
+                        message = processed_output_call(message, key[1], executed.get(key, logged.get(key)))
+            n += 1
+        out.append(message)
+    return out
+
+
 async def _phase_chains(
     run_id: str, tenant_id: str, spec: AgentSpec, *, key: str, value: Any = None, text: str | None = None
 ) -> ChainRun:
@@ -1536,7 +1559,9 @@ async def _phase_chains(
     return chain
 
 
-async def _logged_tool_args(spec: AgentSpec, calls: list[ToolCallPart]) -> dict[str, Any]:
+async def _logged_tool_args(
+    spec: AgentSpec, calls: list[ToolCallPart], client_names: frozenset[str] = frozenset()
+) -> dict[str, Any]:
     """tool_call id -> the arguments the log may keep: the step processors' deterministic chain over
     each call's arguments (what the tool will run with), `{"withheld": ...}` when the chain blocks or
     cannot be applied. Pure (no step, nothing recorded: `StepProcessorCapability` records the
@@ -1553,6 +1578,10 @@ async def _logged_tool_args(spec: AgentSpec, calls: list[ToolCallPart]) -> dict[
     if not segment:
         return out
     for call in calls:
+        # Client (frontend) tool calls never run on the worker and never pass wrap_tool_execute: the
+        # client executes the raw arguments, so the log keeps them raw too (it must show what ran).
+        if call.tool_name in client_names:
+            continue
         args = to_jsonable_python(call.args_as_dict(), fallback=str)
         try:
             done = await asyncio.to_thread(_apply_segment, "step", segment, canonical_json(args))
@@ -1695,7 +1724,7 @@ async def _drive_agent(
     request_token = _MODEL_REQUEST.set(request_state)
     pending: list[ToolCallPart] = []
     has_output = bool(spec.stream_processors or spec.output_processors)  # the output pass runs
-    logged_all: dict[str, Any] = {}  # step processors: tool_call id -> the arguments the log keeps
+    logged_all: dict[tuple[int, str], Any] = {}  # step processors: (model request n, tool_call id) -> logged arguments
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
     stored: dict[int, dict[str, Any]] = {}  # structured + output processors: n -> the stored response
     candidates: dict[int, Any] = {}  # structured: n -> its raw candidate (for output_retry paths)
@@ -1799,10 +1828,10 @@ async def _drive_agent(
                             final_text = text
                     # Step processors: the log keeps the arguments the chain let through, never the raw ones
                     # (the model saw them; this is about what is stored).
-                    logged_args = await _logged_tool_args(spec, calls)
+                    logged_args = await _logged_tool_args(spec, calls, client_names)
                     for call_id, args in logged_args.items():
                         message = processed_output_call(message, call_id, args)
-                        logged_all[call_id] = args
+                        logged_all[(n, call_id)] = args
                     data: dict[str, Any] = {"model_request": n, "text": text, "message": message, **fallback_data}
                     if candidate:
                         data["output_candidate"] = True
@@ -1855,10 +1884,9 @@ async def _drive_agent(
                 scrub_failed_attempts(ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")),
                 memory,
             )
-            for call_id, args in logged_all.items():  # the stored messages keep the logged arguments too
-                new_messages = [
-                    processed_output_call(m, call_id, args) if m.get("kind") == "response" else m for m in new_messages
-                ]
+            # The stored messages keep the logged arguments too; what the tool really ran with (the
+            # capability's decision on the validated arguments) wins over the pre-run recomputation.
+            new_messages = _patch_logged_args(new_messages, logged_all, deps.step_decisions)
             result_output = run.result.output
             if isinstance(result_output, DeferredToolRequests):
                 # AGUI.7: only client calls end a run this way (SpecCapability resolves approvals).

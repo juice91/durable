@@ -204,3 +204,64 @@ def test_structured_stream_block_reports_its_own_index(worker, client, tenant):
     events = event_rows(worker.engine, run_id)
     assert event(events, "processor:stream:1:model:0")[3]["action"] == "block"
     assert not any(k.startswith("processor:output:") for _, k, _, _ in events)
+
+
+# --------------------------------------------------------------------------- follow-ups (10c)
+
+
+def _call(tool: str, call_id: str, args: dict):
+    from pydantic_ai.messages import ToolCallPart
+
+    return ToolCallPart(tool_name=tool, args=args, tool_call_id=call_id)
+
+
+def _spec_with_step(processors):
+    from eap_schemas import AgentSpec
+
+    return AgentSpec.model_validate(step_spec(processors))
+
+
+def test_logged_tool_args_skip_client_tools():
+    import asyncio
+
+    from eap_worker.workflow import _logged_tool_args
+
+    spec = _spec_with_step([REDACT_SECRET])
+    calls = [_call("tickets__create", "a", {"body": f"{SECRET} x"}), _call("ask_user", "b", {"q": f"{SECRET} y"})]
+    logged = asyncio.run(_logged_tool_args(spec, calls, client_names=frozenset({"ask_user"})))
+    assert set(logged) == {"a"} and SECRET not in json.dumps(logged["a"])  # the client call is logged raw (absent)
+
+
+def test_patched_messages_key_calls_by_response_and_id_and_prefer_the_executed_decision():
+    from eap_worker.workflow import _patch_logged_args
+
+    def response(args):
+        return {"kind": "response", "parts": [{"part_kind": "tool-call", "tool_call_id": "0", "tool_name": "t", "args": args}]}
+
+    messages = [{"kind": "request", "parts": []}, response({"v": "raw0"}), {"kind": "request", "parts": []}, response({"v": "raw1"})]
+    logged = {(0, "0"): {"v": "log0"}, (1, "0"): {"v": "log1"}}  # a provider that reuses id "0"
+    out = _patch_logged_args(messages, logged, {})
+    assert [m["parts"][0]["args"] for m in out if m["kind"] == "response"] == [{"v": "log0"}, {"v": "log1"}]
+    # What the tool really ran with (validated, defaults filled) wins over the recomputed log.
+    out = _patch_logged_args(messages, logged, {(1, "0"): {"v": "executed", "default": 1}})
+    assert [m["parts"][0]["args"] for m in out if m["kind"] == "response"] == [{"v": "log0"}, {"v": "executed", "default": 1}]
+
+
+def test_output_blocked_carries_its_phase():
+    import pickle
+
+    from eap_worker.errors import OutputBlocked, classify
+
+    exc = OutputBlocked(1, "regex_blocklist", None, "stream")
+    assert "stream_processors[1]" in str(exc) and OutputBlocked(0, "x").phase == "output"
+    assert pickle.loads(pickle.dumps(exc)).phase == "stream"
+    failure = classify(exc)
+    assert failure.data == {"processor_phase": "stream", "processor_index": 1}
+
+
+def test_structured_stream_block_event_names_the_phase(worker, client, tenant):
+    prompt = json.dumps({"output": {"note": f"xx {SECRET} yy"}})
+    run_id, row = run(worker, client, tenant, structured_spec([PII, BLOCK_SECRET]), prompt)
+    assert row["status"] == "failed"
+    end = event_rows(worker.engine, run_id)[-1][3]
+    assert end["error_code"] == "output_blocked" and end["processor_phase"] == "stream" and end["processor_index"] == 1
