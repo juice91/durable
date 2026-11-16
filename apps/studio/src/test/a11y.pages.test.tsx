@@ -97,6 +97,14 @@ function run(id: string, extra: Record<string, unknown> = {}) {
 
 const WORKFLOW_RUN = run("wr1", { kind: "workflow", agent_id: null, version: null, workflow_id: "w1", workflow_version: 1 });
 
+/** A step-by-step run paused after `classify` (waiting on the synthetic `classify_pause` step). */
+const PAUSED_RUN = run("wr2", { kind: "workflow", agent_id: null, version: null, workflow_id: "w1", workflow_version: 1, status: "waiting_approval", display_status: "waiting_approval", pause_after_each_step: true });
+const PAUSED_EVENTS = [
+  { seq: 0, type: "step_started", data: { step_id: "classify", step_type: "agent", input: { text: "hi" } }, ts: T0 },
+  { seq: 1, type: "step_completed", data: { step_id: "classify", output: "billing" }, ts: T0 },
+  { seq: 2, type: "step_waiting", data: { step_id: "classify_pause", prompt: "Paused after classify", pause: true, timeout_hours: 24, workflow_id: "w1", deadline: "2099-01-01T00:00:00Z" }, ts: T0 },
+];
+
 const TOOLS = [
   { id: "http.get", title: "HTTP GET", description: "Fetch a URL.", side_effect: false, external_idempotent: true, input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] }, allowed: true },
   { id: "clock.now", title: "Current time", description: "The current time.", side_effect: false, external_idempotent: true, input_schema: { type: "object", properties: {} }, allowed: true },
@@ -201,6 +209,8 @@ function respond(url: URL): unknown {
     return { items: [run("r1"), run("r2", { status: "failed", display_status: "failed", error: "Tool failed" })], next_before: null };
   }
   if (p === "/runs/wr1") return WORKFLOW_RUN;
+  if (p === "/runs/wr2") return PAUSED_RUN;
+  if (p === "/runs/wr2/events") return PAUSED_EVENTS;
   if (/^\/runs\/[^/]+\/events$/.test(p)) return [];
   if (/^\/runs\/[^/]+$/.test(p)) return run(p.split("/").pop()!);
   if (p === "/logs") return LOGS;
@@ -275,6 +285,7 @@ const PAGES: PageCase[] = [
   { name: "workflow graph", path: "/workflows/w1", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/page"), h1: "Triage", shows: "classify" },
   { name: "workflow traces", path: "/workflows/w1/traces", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/traces/page"), h1: "Triage", shows: "#workflow-trace-row" },
   { name: "workflow run", path: "/workflows/w1/runs/wr1", params: { id: "w1", runId: "wr1" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr1", shows: "classify" },
+  { name: "workflow run paused", path: "/workflows/w1/runs/wr2", params: { id: "w1", runId: "wr2" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr2", shows: "#workflow-paused-banner" },
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", shows: "Current time" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", shows: "Docs" },
   { name: "mcp detail", path: "/mcp/m1", params: { id: "m1" }, load: () => import("@/app/mcp/[id]/page"), h1: "Docs", shows: "https://docs.example.test/mcp" },

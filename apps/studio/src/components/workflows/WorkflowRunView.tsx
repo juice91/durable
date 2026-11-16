@@ -315,8 +315,6 @@ export function WorkflowRunView({
   const statusRef = useRef<HTMLSpanElement>(null);
   const refocusAfterDecision = useRef(false);
   const waitingKey = view.waiting.join("\n");
-  useEffect(() => {
-    if (!refocusAfterDecision.current) return;
   // A step-by-step pause (`<step>_pause`) is a banner, and opens the step it follows in the IO panel.
   const pausedId = view.waiting.find((id) => view.steps[id]?.pause) ?? null;
   useEffect(() => {
@@ -324,6 +322,8 @@ export function WorkflowRunView({
   }, [pausedId]);
     const active = typeof document !== "undefined" ? document.activeElement : null;
     if (active && active !== document.body && active.isConnected) return;
+  useEffect(() => {
+    if (!refocusAfterDecision.current) return;
     refocusAfterDecision.current = false;
     statusRef.current?.focus();
   }, [waitingKey]);
@@ -380,7 +380,9 @@ export function WorkflowRunView({
       <p className="flex items-center gap-2 px-1">
         <Badge variant="warning" data-testid="workflow-needs-input">Needs input</Badge>
         <span className="text-caption text-muted-foreground">
-          {view.waiting.length === 1 ? "A step is waiting for approval." : `${view.waiting.length} steps are waiting for approval.`}
+          {view.waiting.every((id) => view.steps[id]?.pause)
+            ? "Paused. Continue or stop the run."
+            : view.waiting.length === 1 ? "A step is waiting for approval." : `${view.waiting.length} steps are waiting for approval.`}
         </span>
       </p>
       {view.waiting.map((id) => view.steps[id]?.pause ? (

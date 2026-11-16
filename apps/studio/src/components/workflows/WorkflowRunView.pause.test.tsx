@@ -2,6 +2,7 @@ import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunEvent, SubscribeHandlers } from "@/lib/runs";
+import { ApiError } from "@/lib/api";
 import { demoSpec } from "@/test/workflowFixtures";
 
 const runsMock = vi.hoisted(() => ({ getRun: vi.fn(), listEvents: vi.fn(), subscribeRun: vi.fn() }));
@@ -76,5 +77,54 @@ describe("WorkflowRunView paused after a step", () => {
     expect(wfMock.decideApproval).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(wfMock.decideApproval).toHaveBeenCalledWith("run-1", "classify_pause", "reject"));
+  });
+
+  it("says the run is paused in the overlay header", async () => {
+    await renderPaused();
+    expect(await screen.findByText("Paused. Continue or stop the run.")).toBeInTheDocument();
+    expect(screen.getByTestId("workflow-paused-banner")).toHaveTextContent("open in the step panel");
+  });
+
+  it("removes the banner once the pause step is approved", async () => {
+    await renderPaused();
+    await screen.findByTestId("workflow-paused-banner");
+    act(() => {
+      handlers.onEvent?.(ev("step_approved", { step_id: "classify_pause", decided_by: "dev" }));
+      handlers.onEvent?.(ev("step_completed", { step_id: "classify_pause", output: null }));
+    });
+    await waitFor(() => expect(screen.queryByTestId("workflow-paused-banner")).toBeNull());
+  });
+
+  it("removes the banner when the run is terminal", async () => {
+    await renderPaused();
+    await screen.findByTestId("workflow-paused-banner");
+    act(() => handlers.onEvent?.(ev("run_failed", { error_code: "pause_timed_out" })));
+    await waitFor(() => expect(screen.queryByTestId("workflow-paused-banner")).toBeNull());
+  });
+
+  it("disables Continue and Stop while the decision is pending", async () => {
+    let finish!: () => void;
+    wfMock.decideApproval.mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
+    await renderPaused();
+    const banner = await screen.findByTestId("workflow-paused-banner");
+    fireEvent.click(within(banner).getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(within(banner).getByRole("button", { name: "Continue" })).toBeDisabled());
+    expect(within(banner).getByRole("button", { name: "Stop" })).toBeDisabled();
+    expect(wfMock.decideApproval).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+  });
+
+  it("explains a 409 on Continue", async () => {
+    wfMock.decideApproval.mockRejectedValue(new ApiError(409, "not waiting"));
+    await renderPaused();
+    fireEvent.click(within(await screen.findByTestId("workflow-paused-banner")).getByRole("button", { name: "Continue" }));
+    expect(await screen.findByTestId("workflow-paused-error")).toHaveTextContent(/no longer paused/);
+  });
+
+  it("shows a generic failure on Continue", async () => {
+    wfMock.decideApproval.mockRejectedValue(new Error("boom"));
+    await renderPaused();
+    fireEvent.click(within(await screen.findByTestId("workflow-paused-banner")).getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
   });
 });

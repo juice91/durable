@@ -270,7 +270,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
             tool
               ? "The tool does not run. The model is told the call was denied (with your comment) and carries on."
               : pause
-                ? "Stopping fails the workflow run with cancelled_by_user. This cannot be undone."
+                ? "Stopping ends the run as cancelled. This cannot be undone."
                 : "Rejecting fails the workflow run with approval_rejected. This cannot be undone."
           }
           confirmLabel={pause ? "Stop run" : denyLabel}

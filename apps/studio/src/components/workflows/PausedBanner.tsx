@@ -71,7 +71,7 @@ export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided }: 
         </p>
         {deadline ? <p className="text-caption text-muted-foreground">Auto-stops: <time dateTime={deadline}>{formatDateTime(deadline)}</time></p> : null}
       </div>
-      <p className="text-caption text-muted-foreground">The output of {step} is open on the right. Continue runs the next step.</p>
+      <p className="text-caption text-muted-foreground">The output of {step} is open in the step panel. Continue runs the next step.</p>
       {error ? <p role="alert" data-testid="workflow-paused-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">{error}</p> : null}
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={() => void decide("approve")} disabled={busy !== null} aria-busy={busy === "approve"} className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
@@ -84,7 +84,7 @@ export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided }: 
       {confirmStop ? (
         <ConfirmDialog
           title="Stop this run?"
-          description="Stopping fails the workflow run with cancelled_by_user. This cannot be undone."
+          description="Stopping ends the run as cancelled. This cannot be undone."
           confirmLabel="Stop run"
           destructive
           busy={busy === "reject"}
