@@ -74,6 +74,8 @@ from eap_run_store.chat_attachments import (  # 0021_chat_attachments
     MessageFeedbackModel,
     MessageFeedbackStore,
 )
+from eap_run_store.schedules import WorkflowScheduleModel  # noqa: F401  0022: registers the table
+from eap_run_store.spans import SpanModel  # noqa: F401  0022: registers the table
 from eap_run_store.approvals import (
     APPROVAL_ARGS_MAX_BYTES,
     APPROVAL_DECISIONS,

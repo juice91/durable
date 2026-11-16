@@ -123,7 +123,9 @@ class EvalSuiteModel(Base):
 
     id: Mapped[str] = mapped_column("id", PG_UUID(as_uuid=False), primary_key=True)
     tenant_id: Mapped[str] = mapped_column("tenant_id", String, nullable=False)
-    agent_id: Mapped[str] = mapped_column("agent_id", String, nullable=False)
+    # Exactly one of agent_id and workflow_id (ck_eval_suites_one_target, 0022_parity_round_2).
+    agent_id: Mapped[str | None] = mapped_column("agent_id", String, nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column("workflow_id", String, nullable=True)
     name: Mapped[str] = mapped_column("name", String, nullable=False)
     description: Mapped[str | None] = mapped_column("description", Text, nullable=True)
     evaluators: Mapped[list] = mapped_column(
@@ -140,6 +142,8 @@ class EvalSuiteModel(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_eval_suites_tenant_id_id"),
         UniqueConstraint("tenant_id", "agent_id", "name", name="uq_eval_suites_tenant_agent_name"),
+        UniqueConstraint("tenant_id", "workflow_id", "name", name="uq_eval_suites_tenant_workflow_name"),
+        CheckConstraint("(agent_id IS NULL) <> (workflow_id IS NULL)", name="ck_eval_suites_one_target"),
         CheckConstraint(SUITE_EVALUATORS_CHECK, name="ck_eval_suites_evaluators"),
     )
 

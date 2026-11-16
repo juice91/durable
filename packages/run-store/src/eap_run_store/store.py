@@ -82,8 +82,8 @@ ENQUEUE_FAILED_ERROR = (
 # run), and no tool or workflow; a tool run names its tool only and is never a conversation turn
 # (it may name a knowledge base: the search tester); a workflow run names its published workflow
 # version only; a kb_ingest run names its knowledge base only; an eval run (0015_evals) names its
-# agent with exactly one of its version and a draft snapshot, and its test suite. Same text as
-# migration 0015_evals.
+# agent with exactly one of its version and a draft snapshot, and its test suite; a workflow suite's
+# eval run names the workflow and its version instead of an agent. Same text as migration 0022.
 RUN_KIND_TARGET_CHECK = (
     "(kind = 'agent' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
     " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL AND knowledge_base_id IS NULL)"
@@ -98,6 +98,9 @@ RUN_KIND_TARGET_CHECK = (
     " OR (kind = 'eval' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
     " AND eval_suite_id IS NOT NULL AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL"
     " AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
+    " OR (kind = 'eval' AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL"
+    " AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL AND eval_suite_id IS NOT NULL"
+    " AND tool_id IS NULL AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
 )
 # run_model_requests.operation (0011_knowledge_bases): a chat model request or an embedding call.
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
@@ -258,6 +261,14 @@ class RunModel(Base):
     # The snapshot's suite_hash (sha256 hex), recorded once at creation: compare uses it, never
     # re-validating an old snapshot.
     eval_suite_hash: Mapped[str | None] = mapped_column("eval_suite_hash", String, nullable=True)
+    # Parity round 2 (0022_parity_round_2). rerun_of: the run this one repeats; schedule_id: the
+    # workflow schedule that started it (no FKs, the run outlives both); pause_after_each_step: the
+    # workflow run pauses after each top-level step.
+    rerun_of: Mapped[str | None] = mapped_column("rerun_of", PG_UUID(as_uuid=False), nullable=True)
+    schedule_id: Mapped[str | None] = mapped_column("schedule_id", PG_UUID(as_uuid=False), nullable=True)
+    pause_after_each_step: Mapped[bool] = mapped_column(
+        "pause_after_each_step", Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # AG-UI client (frontend) tools (0016_ag_ui, D10): the turn's declarations (a JSON array of
     # eap_schemas ClientToolDecl dumps) and the client's results for the previous turn's pending
     # calls (a JSON array of ClientToolResult dumps). NULL for every other run.
@@ -292,6 +303,8 @@ class RunModel(Base):
         Index("ix_runs_tenant_tool_created", "tenant_id", "tool_id", "created_at"),
         Index("ix_runs_tenant_workflow_created", "tenant_id", "workflow_id", "created_at"),
         Index("ix_runs_parent_run", "parent_run_id"),
+        Index("ix_runs_rerun_of", "rerun_of"),
+        Index("ix_runs_schedule_id", "schedule_id"),
         # A knowledge base's runs (ingest progress, summed cost), newest first.
         Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
         # A test suite's eval runs, newest first (0015_evals).
@@ -716,6 +729,9 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "output_format": run.output_format,
         "eval_suite_id": run.eval_suite_id,
         "eval_suite_hash": run.eval_suite_hash,
+        "rerun_of": run.rerun_of,
+        "schedule_id": run.schedule_id,
+        "pause_after_each_step": run.pause_after_each_step,
         "client_tools": run.client_tools,
         "client_tool_results": run.client_tool_results,
     }
