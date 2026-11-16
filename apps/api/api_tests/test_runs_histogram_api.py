@@ -104,3 +104,23 @@ def test_histogram_rejects_a_bad_range(pg, tenant_of):
     assert client.get("/api/v1/runs/histogram", params={"from": same, "to": same}, headers=h).status_code == 422
     huge = {"from": BASE.isoformat(), "to": (BASE + timedelta(days=800)).isoformat()}
     assert client.get("/api/v1/runs/histogram", params=huge, headers=h).status_code == 422
+
+
+def test_histogram_filters_by_q_and_metadata(pg, tenant_of):
+    client, app = pg
+    _, h = tenant_of()
+    agent_id = make_agent(client, h)
+    window = {"from": BASE.isoformat(), "to": (BASE + timedelta(hours=6)).isoformat()}
+    ids = _runs_at(client, app, h, agent_id, [BASE + timedelta(hours=1), BASE + timedelta(hours=2)])
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET input = 'printer on fire' WHERE id = :r"), {"r": ids[0]})
+        conn.execute(text("UPDATE runs SET input = 'billing question', request_context = CAST(:c AS jsonb) WHERE id = :r"),
+                     {"r": ids[1], "c": '{"team": "ops"}'})
+    total = lambda body: sum(b["runs"] for b in body["buckets"])  # noqa: E731
+    assert total(_hist(client, h, q="PRINTER", **window)) == 1
+    assert total(_hist(client, h, q="nothing like it", **window)) == 0
+    assert total(_hist(client, h, metadata="team=ops", **window)) == 1
+    assert total(_hist(client, h, metadata="team=dev", **window)) == 0
+    assert client.get("/api/v1/runs/histogram", params={"metadata": "no-equals", **window}, headers=h).status_code == 422
+    same = client.get("/api/v1/runs", params={"metadata": "team=ops"}, headers=h).json()["items"]
+    assert [i["run_id"] for i in same] == [ids[1]]  # GET /runs reads the same filter

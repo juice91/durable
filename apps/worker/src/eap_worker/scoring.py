@@ -17,7 +17,7 @@ key, so a replayed step writes nothing twice. Sampling is a stable function of (
 that raises is `passed: false`, `score: null` with a fixed reason; scoring never changes the run's
 status or fails the run. Only the worker writes these events, never the API.
 
-On demand (`POST /runs/{id}/score`): workflow `eap.score_run(run_id, tenant_id, scorer_ids)` loads those
+On demand (`POST /runs/{id}/score`): workflow `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)` loads those
 scorers (sampling rate 1: the caller asked for them; a scorer deleted meanwhile is skipped) and the
 run's output schema, then runs the same scoring step, so the events, their keys and their rules are
 the ones above. Scoring a run again with a scorer writes nothing new.
@@ -151,7 +151,7 @@ async def load_scorers_step(run_id: str, tenant_id: str, scorer_ids: list[str]) 
     return {"scorers": scorers, "output_schema": schema}
 
 
-@DBOS.workflow(name="eap.score_run")
+@DBOS.workflow(name="eap.score_run_on_demand")
 async def score_run(run_id: str, tenant_id: str, scorer_ids: list[str]) -> dict[str, int]:
     """Score a finished run with the named scorers (`POST /runs/{id}/score`); `{written}` events."""
     loaded = await load_scorers_step(run_id, tenant_id, scorer_ids)

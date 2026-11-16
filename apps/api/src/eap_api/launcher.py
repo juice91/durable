@@ -57,10 +57,10 @@ LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 # DBOS stores workflow inputs again in its system database. AC.11 may read `runs.input` by run id
 # instead and ignore `input_json`; the argument stays so the hand-off shape matches the plan.
 EVAL_WORKFLOW_NAME = "eap.eval_run"
-# Score on demand (parity round 2): `eap.score_run(run_id, tenant_id, scorer_ids)` on the agent-run queue;
+# Score on demand (parity round 2): `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)` on the agent-run queue;
 # its workflow id is `score:{run_id}:{random}` (a run can be scored any number of times, and its own
 # workflow id is the run id).
-SCORE_WORKFLOW_NAME = "eap.score_run"
+SCORE_WORKFLOW_NAME = "eap.score_run_on_demand"  # not eap.score_run: that is the per-run scoring step
 
 
 def approval_topic(step_id: str) -> str:
@@ -246,7 +246,7 @@ class DBOSRunLauncher:
         self._get_client().enqueue(options, str(run_id), tenant_id, input_json)
 
     def launch_score(self, *, run_id: UUID, tenant_id: str, scorer_ids: list[str]) -> None:
-        """Enqueue `eap.score_run(run_id, tenant_id, scorer_ids)`: the worker scores the finished run with
+        """Enqueue `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)`: the worker scores the finished run with
         those scorers and appends `score` events. Workflow id `score:{run_id}:{random}`."""
         options = self._options(SCORE_WORKFLOW_NAME, run_id, None)
         options["workflow_id"] = f"score:{run_id}:{uuid4().hex}"

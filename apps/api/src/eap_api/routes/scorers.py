@@ -223,9 +223,23 @@ async def detach_scorer(
 # ---------------------------------------------------------------------------- score on demand
 
 RUN_NOT_FINISHED = "run_not_finished"
+ALREADY_SCORED = "already_scored"
 MAX_SCORE_SCORERS = 8
 SCORE_START_FAILED = "scoring could not be started; retry"
 LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
+
+
+def _already_scored(engine: Any, tenant_id: str, run_id: uuid.UUID, scorer_ids: list[str]) -> set[str]:
+    """The scorer ids that already have a `score:{id}` event on the run."""
+    from sqlalchemy import text
+
+    keys = {f"score:{s}": s for s in scorer_ids}
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT event_key FROM execution_events WHERE tenant_id = :t AND run_id = :r AND event_key = ANY(:k)"),
+            {"t": tenant_id, "r": str(run_id), "k": list(keys)},
+        )
+        return {keys[r[0]] for r in rows}
 
 
 class ScoreRequest(BaseModel):
@@ -245,24 +259,37 @@ async def score_run(
 ) -> JSONResponse:
     """Score a finished run with the named scorers now (the Score button of the trace drawer).
     Enqueues DBOS workflow `eap.score_run`; the worker appends one `score` event per scorer (key
-    `score:{scorer_id}`, idempotent: scoring a run again with the same scorer writes nothing new)
-    and the answer is `202 {run_id, scorer_ids}` (repeated ids count once). 404 for another tenant's
-    run or scorer, 409 `run_not_finished` while the run has not ended, 422 for 0 or more than 8 ids."""
+    `score:{scorer_id}`, first write wins) and the answer is `202 {run_id, scorer_ids, already_scored}`:
+    `scorer_ids` are the ones queued (repeated ids count once), `already_scored` the requested ones
+    that already have a score event on the run and are left alone. 404 for another tenant's run or
+    scorer; 409 `run_not_finished` unless the run is `completed` (a failed or cancelled run has no
+    answer to score); 409 `{detail: "already_scored", already_scored: [...]}` when every requested
+    scorer already has its event; 422 for 0 or more than 8 ids."""
     run_store, _ = stores
     tenant_id = principal.tenant_id
     run = await run_in_threadpool(_get_run_or_404, run_store, tenant_id, run_id)
-    if run["status"] not in TERMINAL_RUN_STATUSES:
+    if run["status"] != "completed":  # scoring reads the answer: a failed or cancelled run has none
         raise _http(status.HTTP_409_CONFLICT, RUN_NOT_FINISHED)
-    scorer_ids = list(dict.fromkeys(str(s) for s in body.scorer_ids))
-    for scorer_id in scorer_ids:
+    requested = list(dict.fromkeys(str(s) for s in body.scorer_ids))
+    for scorer_id in requested:
         try:
             await run_in_threadpool(store.get, tenant_id, scorer_id)
         except ScorerNotFound:
             raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
+    done = await run_in_threadpool(_already_scored, run_store.engine, tenant_id, run_id, requested)
+    already = [s for s in requested if s in done]
+    scorer_ids = [s for s in requested if s not in done]
+    if not scorer_ids:  # a score event is first-write-wins: another request would write nothing
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, content={"detail": ALREADY_SCORED, "already_scored": already}
+        )
     try:
         await run_in_threadpool(
             lambda: launcher.launch_score(run_id=run_id, tenant_id=tenant_id, scorer_ids=scorer_ids)
         )
     except Exception:  # noqa: BLE001 - nothing was recorded; the caller may retry
         raise _http(status.HTTP_503_SERVICE_UNAVAILABLE, SCORE_START_FAILED) from None
-    return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"run_id": str(run_id), "scorer_ids": scorer_ids})
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"run_id": str(run_id), "scorer_ids": scorer_ids, "already_scored": already},
+    )

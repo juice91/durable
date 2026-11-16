@@ -425,15 +425,7 @@ def list_runs(
     under the metrics statement timeout (503 when it fires)."""
     statuses = _status_filter(run_status)
     tag_list = _list_param(tags, "tags", split=True)
-    metadata_map: dict[str, str] = {}
-    for pair in _list_param(metadata, "metadata", split=False) or []:
-        key, sep, value = pair.partition("=")
-        if not sep or not key.strip() or len(key) > 64 or len(value) > 256:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="metadata must be key=value pairs (key up to 64 and value up to 256 characters)",
-            )
-        metadata_map[key.strip()] = value
+    metadata_map = metadata_filter(metadata) or {}
     start = _utc(created_from) if created_from is not None else None
     end = _utc(created_to) if created_to is not None else None
     if start is not None and end is not None and start >= end:

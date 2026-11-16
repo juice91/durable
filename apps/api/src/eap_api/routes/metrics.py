@@ -213,7 +213,9 @@ def metrics_breakdown(
     "label", ...metrics}`: for an agent, `key` is its id and `label` its current name (null if it was
     deleted); for a model or an operation, both are the model id or the operation name. With
     `compare=previous` each item also has `previous`: the same metrics of that key over the period of
-    equal length just before `[from, to)`, or null when the key had nothing then."""
+    equal length just before `[from, to)`, or null when the key had nothing then. The previous period
+    is read as its own top-50 by `sort` (the store's cap), so with more than 50 groups a key that
+    ranked below 50 then shows null, not its real previous values."""
     items = _call(store.breakdown, q, by, sort=sort, limit=limit)
     previous: dict[str, dict[str, Any]] = {}
     if compare == "previous" and items:
