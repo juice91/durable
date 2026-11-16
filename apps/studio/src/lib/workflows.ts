@@ -249,12 +249,13 @@ const WORKFLOW_RUN_FALLBACKS: Record<number, string> = {
 export async function startWorkflowRun(
   workflowId: string,
   input: Record<string, unknown>,
-  { version, runId, rerunOf }: { version?: number | null; runId?: string; rerunOf?: string | null } = {},
+  { version, runId, rerunOf, pauseAfterEachStep }: { version?: number | null; runId?: string; rerunOf?: string | null; pauseAfterEachStep?: boolean } = {},
 ): Promise<WorkflowRunAccepted> {
-  const body: { input: Record<string, unknown>; version?: number; run_id?: string; rerun_of?: string } = { input };
+  const body: { input: Record<string, unknown>; version?: number; run_id?: string; rerun_of?: string; pause_after_each_step?: boolean } = { input };
   if (version != null) body.version = version;
   if (runId) body.run_id = runId;
   if (rerunOf) body.rerun_of = rerunOf;
+  if (pauseAfterEachStep) body.pause_after_each_step = true;
   const response = await fetch(`${BASE_URL}/api/v1/workflows/${enc(workflowId)}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...apiHeaders() },

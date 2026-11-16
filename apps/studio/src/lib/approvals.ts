@@ -45,6 +45,8 @@ export interface Approval {
   run_status: string | null;
   /** An input step: the JSON Schema of the data it waits for; null for any other approval. */
   resume_schema?: JsonSchema | null;
+  /** A step-by-step pause (the run waits after a step, id `<step>_pause`): Continue, not Approve. */
+  pause?: boolean;
   /** The decision's audit (single read, decided steps): the comment and the submitted data. */
   comment?: string | null;
   resume_data?: unknown;

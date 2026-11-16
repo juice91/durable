@@ -29,6 +29,8 @@ export type ApprovalTarget =
       /** An input step: the JSON Schema of the data it waits for. The card then shows a form and
        * "Submit" (POST .../resume) instead of "Approve"; Reject stays. */
       resumeSchema?: JsonSchema | null;
+      /** A step-by-step pause: titled "Paused after step", with Continue (approve) and Stop (reject). */
+      pause?: boolean;
     };
 
 export interface ApprovalCardProps {
@@ -92,7 +94,8 @@ function prettyJson(value: unknown): string {
 export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submit }: ApprovalCardProps) {
   const tool = approval.kind === "tool";
   const key = tool ? `tool-${approval.toolCallId}` : approval.stepId;
-  const denyLabel = tool ? "Deny" : "Reject";
+  const pause = approval.kind === "step" && approval.pause === true;
+  const denyLabel = tool ? "Deny" : pause ? "Stop" : "Reject";
   const maxComment = tool ? MAX_TOOL_APPROVAL_COMMENT : MAX_APPROVAL_COMMENT;
   const resumeSchema = approval.kind === "step" ? approval.resumeSchema ?? null : null;
   const [formValue, setFormValue] = useState<Record<string, unknown>>({});
@@ -182,8 +185,8 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
     >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="min-w-0 break-words font-semibold text-foreground">
-          {tool ? "Approve tool call: " : resumeSchema ? "Waiting for input: " : "Waiting for approval: "}
-          <span className="font-mono">{subject}</span>
+          {tool ? "Approve tool call: " : pause ? "Paused after step: " : resumeSchema ? "Waiting for input: " : "Waiting for approval: "}
+          <span className="font-mono">{pause ? subject.replace(/_pause$/, "") : subject}</span>
         </h3>
         <p className="text-xs text-muted-foreground">
           Deadline:{" "}
@@ -246,7 +249,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           aria-busy={busy === "approve"}
           className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {resumeSchema ? "Submit" : "Approve"}
+          {resumeSchema ? "Submit" : pause ? "Continue" : "Approve"}
         </button>
         <button
           type="button"
@@ -262,13 +265,15 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       </div>
       {confirmDeny ? (
         <ConfirmDialog
-          title={tool ? `Deny ${approval.toolName}?` : `Reject step ${approval.stepId}?`}
+          title={tool ? `Deny ${approval.toolName}?` : pause ? "Stop this run?" : `Reject step ${approval.stepId}?`}
           description={
             tool
               ? "The tool does not run. The model is told the call was denied (with your comment) and carries on."
-              : "Rejecting fails the workflow run with approval_rejected. This cannot be undone."
+              : pause
+                ? "Stopping fails the workflow run with cancelled_by_user. This cannot be undone."
+                : "Rejecting fails the workflow run with approval_rejected. This cannot be undone."
           }
-          confirmLabel={denyLabel}
+          confirmLabel={pause ? "Stop run" : denyLabel}
           destructive
           busy={busy === "deny"}
           error={dialogError}

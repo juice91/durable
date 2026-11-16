@@ -48,6 +48,7 @@ export function InboxApprovalCard({ approval, onConflict, onDecided }: InboxAppr
           prompt: approval.prompt,
           deadline: approval.deadline,
           resumeSchema: approval.resume_schema ?? null,
+          pause: approval.pause === true,
         };
   return <ApprovalCard approval={card} onRefresh={handleRefresh} onDecided={handleDecided} />;
 }

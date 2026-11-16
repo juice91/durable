@@ -44,6 +44,8 @@ export interface StepDetail {
   timeoutHours: number | null;
   /** An input step's JSON Schema (from its waiting event); null otherwise. */
   resumeSchema?: Record<string, unknown> | null;
+  /** A step-by-step pause (`<step>_pause`, from the waiting event's `pause: true`). */
+  pause?: boolean;
   decision: StepDecision | null;
   /** Why a `skipped` step was skipped: an untaken branch arm, the run completed before reaching it
    * (the completion sweep), or (a loop body step) its iteration ended without it. Null unless
@@ -241,6 +243,7 @@ function applyStepEvent(d: StepDetail, event: RunEvent, chosen: Map<string, stri
         d.resumeSchema = data.resume_schema as Record<string, unknown>;
       }
       d.timeoutHours = typeof data.timeout_hours === "number" ? data.timeout_hours : d.timeoutHours;
+      if (data.pause === true) d.pause = true;
       if (waitingOrder && !waitingOrder.includes(d.stepId)) waitingOrder.push(d.stepId);
       break;
     }

@@ -60,6 +60,8 @@ export interface Run {
   workflow_version?: number | null;
   /** Workflow runs: the earlier run this one repeats ("Run again"), or null. */
   rerun_of?: string | null;
+  /** The run was started step by step: it waits for Continue after each top-level step. */
+  pause_after_each_step?: boolean;
   /** Workflow runs: the schedule that started this run, or null. */
   schedule_id?: string | null;
   parent_run_id?: string | null;

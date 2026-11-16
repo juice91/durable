@@ -31,6 +31,7 @@ import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
 import { timelineClock, timelineRows } from "./workflowTimeline";
 import { CancelRunButton } from "./CancelRunButton";
 import { RerunButton } from "./RerunButton";
+import { PausedBanner, pausedAfter } from "./PausedBanner";
 import { IterationPager, LoopIterationTable } from "./LoopIterations";
 import { copyText } from "@/lib/clipboard";
 import type { JsonSchema } from "@/lib/tools";
@@ -316,6 +317,11 @@ export function WorkflowRunView({
   const waitingKey = view.waiting.join("\n");
   useEffect(() => {
     if (!refocusAfterDecision.current) return;
+  // A step-by-step pause (`<step>_pause`) is a banner, and opens the step it follows in the IO panel.
+  const pausedId = view.waiting.find((id) => view.steps[id]?.pause) ?? null;
+  useEffect(() => {
+    if (pausedId) setSelected(pausedAfter(pausedId));
+  }, [pausedId]);
     const active = typeof document !== "undefined" ? document.activeElement : null;
     if (active && active !== document.body && active.isConnected) return;
     refocusAfterDecision.current = false;
@@ -377,7 +383,18 @@ export function WorkflowRunView({
           {view.waiting.length === 1 ? "A step is waiting for approval." : `${view.waiting.length} steps are waiting for approval.`}
         </span>
       </p>
-      {view.waiting.map((id) => (
+      {view.waiting.map((id) => view.steps[id]?.pause ? (
+        <PausedBanner
+          key={id}
+          runId={runId}
+          stepId={id}
+          deadline={view.steps[id]?.deadline ?? null}
+          onRefresh={refresh}
+          onDecided={() => {
+            refocusAfterDecision.current = true;
+          }}
+        />
+      ) : (
         <ApprovalCard
           key={id}
           approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null, resumeSchema: (view.steps[id]?.resumeSchema as JsonSchema | null | undefined) ?? null }}
