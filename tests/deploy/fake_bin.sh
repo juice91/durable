@@ -2,6 +2,8 @@
 set -euo pipefail
 tool=$(basename "$0")
 printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG}"
+# Only `op` may see the 1Password token; up.sh must unset it before docker, kubectl and the rest.
+[[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || printf 'TOKEN_LEAK %s\n' "$tool" >>"${STUB_LOG}"
 # Like the real tools, consume a manifest piped in with `-f -`. Exiting without reading it
 # lets the writer (e.g. `kubectl create secret ... -o yaml | kubectl apply -f -`) die of
 # SIGPIPE, and under pipefail that kills up.sh with exit 141 at random.

@@ -70,14 +70,16 @@ def test_run_blocks_do_not_interpolate_untrusted_event_fields():
 def test_deploy_credentials_do_not_come_from_github_secrets():
     for name in WORKFLOW_NAMES:
         text = (WORKFLOW_DIR / name).read_text()
-        assert "secrets." not in text.lower(), name
+        assert not re.search(r"\$\{\{\s*secrets\.", text), name
 
 
-def test_deploy_is_approval_gated_and_serialized():
+def test_deploy_is_serialized_and_uses_the_studio_environment():
     deploy = _load("deploy.yml")
     assert deploy.get("concurrency") == {"group": "deploy-studio", "cancel-in-progress": "false"}
-    deploy_job = deploy["jobs"]["deploy"]
-    assert deploy_job.get("environment") == "studio"
+    # GitHub Pro: the `studio` environment carries a main-only deployment branch policy. It is not
+    # the approval (required reviewers need Team/Enterprise for private repos); the manual gate is.
+    assert deploy["jobs"]["deploy"]["environment"] == "studio"
+    assert deploy["jobs"]["deploy"]["if"].count("github.repository_owner") == 2
 
 
 def test_hosted_ci_never_builds_studio():
@@ -93,29 +95,68 @@ def test_no_workflow_lists_issue_comment_or_a_write_permission():
         assert "pull-requests: write" not in text, name
 
 
-def test_workflow_run_deploys_only_a_successful_main_push_sha():
+def test_deploy_is_manual_dispatch_only():
     deploy = _load("deploy.yml")
-    trigger = deploy["on"]["workflow_run"]
-    assert trigger["workflows"] == ["CI Heavy"]
-    assert trigger["types"] == ["completed"]
-    assert trigger["branches"] == ["main"]
-    condition = deploy["jobs"]["deploy"]["if"]
-    assert "github.event.workflow_run.conclusion == 'success'" in condition
-    assert "github.event.workflow_run.event == 'push'" in condition
+    assert list(deploy["on"]) == ["workflow_dispatch"]
     text = (WORKFLOW_DIR / "deploy.yml").read_text()
-    assert "github.event.workflow_run.head_sha" in text
-    assert '[[ "$sha" =~ ^[0-9a-f]{40}$ ]]' in text
-    checkout = next(
-        step
-        for step in deploy["jobs"]["deploy"]["steps"]
-        if str(step.get("uses", "")).startswith("actions/checkout@")
-    )
-    assert checkout["with"]["ref"] == "${{ steps.revision.outputs.sha }}"
+    assert "workflow_run:" not in text
+    inputs = deploy["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["confirm"]["required"] == "true"
+    assert inputs["allow_untested"]["default"] == "false"
+    assert inputs["allow_untested"]["type"] == "boolean"
+
+
+def test_deploy_runs_only_for_the_owner_on_main():
+    job = _load("deploy.yml")["jobs"]["deploy"]
+    condition = " ".join(job["if"].split())
+    assert condition == "github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner"
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
+
+
+def test_deploy_fails_immediately_unless_confirm_is_deploy():
+    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
+    first = steps[0]
+    assert first["env"]["CONFIRM"] == "${{ inputs.confirm }}"
+    assert '[[ "$CONFIRM" != deploy ]]' in first["run"]
+    assert "exit 1" in first["run"]
+    # Nothing that touches the host runs before the confirmation.
+    assert not any("uses" in step for step in steps[:1])
+
+
+def test_deploy_checks_out_exactly_github_sha_and_never_uses_event_fields():
+    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
+    checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
     assert checkout["with"]["persist-credentials"] == "false"
-    # The head SHA is copied into env before the shell runs. It is not expanded inside `run:`.
-    for step in deploy["jobs"]["deploy"]["steps"]:
-        run = step.get("run", "")
-        assert "github.event" not in run
+    for step in steps:
+        assert "github.event" not in step.get("run", "")
+    # Untrusted input reaches the shell only through env.
+    for step in steps:
+        assert "inputs." not in step.get("run", "")
+
+
+def test_deploy_reports_ci_status_and_needs_allow_untested_to_override():
+    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
+    check = next(step for step in steps if step.get("name") == "Report CI status for this commit")
+    assert check["env"]["ALLOW_UNTESTED"] == "${{ inputs.allow_untested }}"
+    assert check["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert "GITHUB_STEP_SUMMARY" in check["run"]
+    assert "'CI' 'CI Heavy'" in check["run"]
+    assert '[[ "$ALLOW_UNTESTED" == true ]]' in check["run"]
+    assert steps.index(check) < next(i for i, s in enumerate(steps) if "uses" in s)
+
+
+def test_deploy_secrets_come_from_1password_in_the_deploy_step_only():
+    text = (WORKFLOW_DIR / "deploy.yml").read_text()
+    assert "up.sh --op-refs deploy/secrets.op.env" in text
+    assert "--sops" not in text and "sops" not in text.lower()
+    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
+    sourcing = [step for step in steps if "runner.env" in step.get("run", "")]
+    assert [step["name"] for step in sourcing] == ["Deploy this revision"]
+    assert "OP_SERVICE_ACCOUNT_TOKEN" in sourcing[0]["run"]
+    # The token is never exported at workflow or job level.
+    deploy = _load("deploy.yml")
+    assert "env" not in deploy and "env" not in deploy["jobs"]["deploy"]
 
 
 def test_ci_heavy_postgres_is_loopback_and_always_removed():

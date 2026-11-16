@@ -32,7 +32,7 @@ def test_no_key_like_values_in_deploy_tree():
                 hits.append(f"{rel}:{i}")
             for match in PASSWORD_RE.finditer(line):
                 value = match.group(1).strip().strip(",").strip('"').strip("'")
-                if value in OK_VALUES or value.startswith("$") or value.startswith("{"):
+                if value in OK_VALUES or value.startswith(("$", "{", "op://")):
                     continue
                 hits.append(f"{rel}:{i}")
     assert hits == [], f"key-like values in deploy files: {hits}"

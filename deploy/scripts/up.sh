@@ -6,15 +6,15 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 SECRETS_ENV=""
-SOPS_FILE=""
+OP_REFS=""
 while (($#)); do
   case "$1" in
     --secrets-env) SECRETS_ENV=${2:?missing path after --secrets-env}; shift 2 ;;
-    --sops) SOPS_FILE=${2:?missing path after --sops}; shift 2 ;;
-    *) printf 'Usage: %s [--secrets-env FILE | --sops FILE]\n' "$0" >&2; exit 64 ;;
+    --op-refs) OP_REFS=${2:?missing path after --op-refs}; shift 2 ;;
+    *) printf 'Usage: %s [--secrets-env FILE | --op-refs FILE]\n' "$0" >&2; exit 64 ;;
   esac
 done
-if [[ -n "$SECRETS_ENV" && -n "$SOPS_FILE" ]]; then
+if [[ -n "$SECRETS_ENV" && -n "$OP_REFS" ]]; then
   printf 'Choose only one secrets input.\n' >&2
   exit 64
 fi
@@ -23,6 +23,7 @@ fi
 validate_and_prepare_data_dir
 
 tmp_files=()
+secret_file="" rendered_file="" migrate_status_file="" migrate_err_file="" runs_err_file=""
 cleanup() {
   local path
   if ((${#tmp_files[@]})); then
@@ -33,18 +34,59 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# A signal must end the script (running the EXIT trap) even while a foreground child such as
+# `docker build` is still going; bash otherwise carries on once that child exits normally.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
+# make_tmp NAME VAR: create a mode-600 temp file and assign its path to VAR. It must run in this
+# shell, not in $(...): a subshell would drop the registration and the trap would never remove it.
 make_tmp() {
   local path
   path=$(mktemp "${TMPDIR:-/tmp}/pydanticos-$1.XXXXXX")
   chmod 0600 "$path"
   tmp_files+=("$path")
-  printf '%s\n' "$path"
+  printf -v "$2" '%s' "$path"
+}
+
+# Keys the Secret must carry. The two URLs are derived from the passwords unless supplied.
+base_keys=(POSTGRES_PASSWORD EAP_APP_DATABASE_PASSWORD EAP_DBOS_DATABASE_PASSWORD EAP_SECRETS_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY EAP_AUDIT_HASH_SALT)
+postgres_host=postgres.pydanticos.svc.cluster.local
+
+# Value of KEY in a dotenv file (first match, everything after the first "="). Used only to fill
+# shell variables; callers never print it.
+dotenv_get() {
+  awk -v k="$2" 'index($0, k "=") == 1 {print substr($0, length(k) + 2); exit}' "$1"
 }
 
 for command_name in colima docker kubectl git mktemp sed awk realpath stat; do
   require_command "$command_name"
 done
+
+# Resolve the 1Password references before anything else touches Colima, so a missing `op`
+# or token fails fast. Only `op` ever sees the service-account token: it is unset right after.
+op_file=""
+if [[ -n "$OP_REFS" ]]; then
+  require_command op
+  [[ -r "$OP_REFS" ]] || { printf 'The --op-refs file is not readable: %s\n' "$OP_REFS" >&2; exit 1; }
+  [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || {
+    printf 'OP_SERVICE_ACCOUNT_TOKEN is not set. Put the 1Password service-account token in runner.env, or export it.\n' >&2
+    exit 1
+  }
+  op whoami >/dev/null || { printf '1Password rejected the service-account token (op whoami failed).\n' >&2; exit 1; }
+  make_tmp op-secrets op_file
+  # --force: mktemp already created the file. The values go only to the mode-600 file.
+  op inject --force --file-mode 0600 -i "$OP_REFS" -o "$op_file" >/dev/null \
+    || { printf 'op inject failed; check the vault, item and field names in %s.\n' "$OP_REFS" >&2; exit 1; }
+  unset OP_SERVICE_ACCOUNT_TOKEN
+  # inject keeps one output line per KEY=ref line. A secret value containing a newline would add
+  # lines, which `--from-env-file` would read as extra variables; refuse without echoing anything.
+  [[ "$(awk '!/^[[:space:]]*(#|$)/ {n++} END {print n + 0}' "$OP_REFS")" == "$(awk '!/^[[:space:]]*(#|$)/ {n++} END {print n + 0}' "$op_file")" ]] || {
+    printf 'A 1Password value contains a newline, so the injected file has a different number of KEY=value lines than %s. Refusing to use it.\n' "$OP_REFS" >&2
+    exit 1
+  }
+fi
 
 # One writable mount. Colima 0.10 treats an empty mounts list as "mount ~"
 # (yaml.go: Mounts != nil && len == 0). Passing this single --mount replaces
@@ -107,24 +149,49 @@ docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/stu
 
 kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/namespace.yaml"
 
-secret_file=""
-if [[ -n "$SOPS_FILE" ]]; then
-  require_command sops
-  secret_file=$(make_tmp secrets)
-  sops --decrypt --output-type dotenv "$SOPS_FILE" >"$secret_file"
+# Collect the secrets into one mode-600 file (never the operator's own file, which is only read).
+source_file=""
+make_tmp secrets secret_file
+if [[ -n "$op_file" ]]; then
+  source_file=$op_file
 elif [[ -n "$SECRETS_ENV" ]]; then
-  # Never delete, move, or modify a file the operator supplied.
-  secret_file=$SECRETS_ENV
+  [[ -r "$SECRETS_ENV" ]] || { printf 'Secrets input is not readable.\n' >&2; exit 1; }
+  source_file=$SECRETS_ENV
 else
-  secret_file=$(make_tmp secrets)
-  required_keys=(POSTGRES_PASSWORD EAP_APP_DATABASE_PASSWORD EAP_DBOS_DATABASE_PASSWORD EAP_DATABASE_URL EAP_DBOS_URL EAP_SECRETS_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY EAP_AUDIT_HASH_SALT)
-  for key in "${required_keys[@]}"; do
-    [[ -n "${!key:-}" ]] || { printf 'Required secret environment variable is unset: %s\n' "$key" >&2; exit 1; }
-    printf '%s=%s\n' "$key" "${!key}" >>"$secret_file"
+  for key in "${base_keys[@]}" EAP_DATABASE_URL EAP_DBOS_URL; do
+    [[ -z "${!key:-}" ]] || printf '%s=%s\n' "$key" "${!key}" >>"$secret_file"
   done
 fi
+if [[ -n "$source_file" ]]; then
+  cat -- "$source_file" >>"$secret_file"
+  # A trailing newline keeps the appended derived lines on their own line.
+  [[ -z "$(tail -c1 "$secret_file")" ]] || printf '\n' >>"$secret_file"
+fi
 
-[[ -r "$secret_file" ]] || { printf 'Secrets input is not readable.\n' >&2; exit 1; }
+for key in "${base_keys[@]}"; do
+  value=$(dotenv_get "$secret_file" "$key")
+  [[ -n "$value" ]] || { printf 'Required secret is missing or empty: %s\n' "$key" >&2; exit 1; }
+  # An unreplaced op-bootstrap placeholder must never reach the cluster.
+  [[ "$value" != CHANGE_ME* ]] || { printf 'Secret %s is still a placeholder; run litellm-deploy-key.sh.\n' "$key" >&2; exit 1; }
+done
+
+# EAP_DATABASE_URL / EAP_DBOS_URL follow from the roles in deploy/k8s/configmap.yaml (eap_app,
+# eap_dbos), their databases, and the in-cluster Postgres service. They are derived unless a
+# non-empty value was supplied, so 1Password stores only the passwords.
+derive_url() {
+  local key=$1 scheme=$2 role=$3 password_key=$4 database=$5 password
+  [[ -z "$(dotenv_get "$secret_file" "$key")" ]] || return 0
+  password=$(dotenv_get "$secret_file" "$password_key")
+  # Passwords are put into a URL without encoding, so only URL-safe characters are allowed.
+  [[ "$password" =~ ^[A-Za-z0-9._~-]+$ ]] || {
+    printf '%s may only contain letters, digits and ._~- so it can be embedded in %s.\n' "$password_key" "$key" >&2
+    exit 1
+  }
+  printf '%s=%s://%s:%s@%s:5432/%s\n' "$key" "$scheme" "$role" "$password" "$postgres_host" "$database" >>"$secret_file"
+}
+derive_url EAP_DATABASE_URL postgresql+psycopg eap_app EAP_APP_DATABASE_PASSWORD eap_app
+derive_url EAP_DBOS_URL postgresql eap_dbos EAP_DBOS_DATABASE_PASSWORD eap_dbos
+
 kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
   --from-env-file="$secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
 
@@ -133,12 +200,12 @@ if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
 
+# Registered here, in the main shell: query_active_runs runs inside $(...), where a registration
+# would be lost and the file would outlive the script.
+make_tmp runs-query runs_err_file
 query_active_runs() {
   local output err rc
-  # Assign the temp path in this shell. Command substitution would drop the trap registration.
-  err=$(mktemp "${TMPDIR:-/tmp}/pydanticos-runs-query.XXXXXX")
-  chmod 0600 "$err"
-  tmp_files+=("$err")
+  err=$runs_err_file
   set +e
   # Single quotes are deliberate: the postgres container expands its own password.
   # shellcheck disable=SC2016
@@ -206,7 +273,7 @@ if [[ ! "$host_gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   exit 1
 fi
 
-rendered_file=$(make_tmp rendered)
+make_tmp rendered rendered_file
 kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
   | sed \
     -e "s|pydanticos-python:dev|${python_image}|g" \
@@ -228,8 +295,8 @@ kubectl_for_profile -n "$NAMESPACE" patch job migrate --type=merge --patch '{"sp
 migrate_timeout=${PYDANTICOS_MIGRATE_TIMEOUT:-600}
 migrate_started=$SECONDS
 migrate_errors=0
-migrate_status_file=$(make_tmp migrate-status)
-migrate_err_file=$(make_tmp migrate-status-err)
+make_tmp migrate-status migrate_status_file
+make_tmp migrate-status-err migrate_err_file
 while true; do
   if (( SECONDS - migrate_started >= migrate_timeout )); then
     printf 'Timed out after %s seconds waiting for the migrate Job to succeed or fail.\n' "$migrate_timeout" >&2
