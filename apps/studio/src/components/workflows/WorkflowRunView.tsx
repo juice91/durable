@@ -24,6 +24,7 @@ import { StepIoPanel } from "./StepIoPanel";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { listWorkflowRuns } from "@/lib/workflows";
+import { listSchedules } from "@/lib/schedules";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowFloatingPanel";
 import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
@@ -275,6 +276,19 @@ export function WorkflowRunView({
   ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
   // The newest later run that re-ran this one, from the workflow's run history (no extra API).
+  const [scheduleName, setScheduleName] = useState<string | null>(null);
+  const scheduleId = run?.schedule_id ?? null;
+  useEffect(() => {
+    setScheduleName(null);
+    if (!scheduleId || !effectiveWorkflowId) return;
+    const controller = new AbortController();
+    listSchedules({ workflowId: effectiveWorkflowId, limit: 200, signal: controller.signal })
+      .then((page) => {
+        if (!controller.signal.aborted) setScheduleName(page.items.find((s) => s.id === scheduleId)?.name ?? null);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [scheduleId, effectiveWorkflowId]);
   const [rerunId, setRerunId] = useState<string | null>(null);
   useEffect(() => {
     setRerunId(null);
@@ -417,6 +431,9 @@ export function WorkflowRunView({
               <div className="mt-3 space-y-2 empty:hidden">
                 {workflowId && run?.workflow_id && run.workflow_id !== workflowId ? (
                   <p role="status" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">This run belongs to another workflow; showing that workflow&apos;s graph.</p>
+                ) : null}
+                {scheduleId ? (
+                  <p data-testid="workflow-run-scheduled" className="text-label text-muted-foreground">{scheduleName ? `Scheduled: ${scheduleName}` : "Scheduled"}</p>
                 ) : null}
                 {effectiveWorkflowId && run?.rerun_of ? (
                   <p data-testid="workflow-run-rerun-of" className="text-label text-muted-foreground">

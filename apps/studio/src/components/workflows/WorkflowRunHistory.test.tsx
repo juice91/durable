@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Run } from "@/lib/runs";
 
 const wfMock = vi.hoisted(() => ({ listWorkflowRuns: vi.fn() }));
+const schedMock = vi.hoisted(() => ({ listSchedules: vi.fn() }));
+vi.mock("@/lib/schedules", async (importOriginal) => ({ ...(await importOriginal<object>()), ...schedMock }));
 vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal<object>()), ...wfMock }));
 vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 
@@ -28,6 +30,15 @@ beforeEach(() => wfMock.listWorkflowRuns.mockReset());
 afterEach(() => cleanup());
 
 describe("WorkflowRunHistory", () => {
+  it("tags a scheduled run with the schedule's name, or just Scheduled before names load", async () => {
+    schedMock.listSchedules.mockResolvedValue({ items: [{ id: "s1", name: "Hourly" }], next_before: null });
+    wfMock.listWorkflowRuns.mockResolvedValue({ items: [{ ...run("cccccccc-1", "wf-c"), schedule_id: "s1" }], next_before: null });
+    render(<WorkflowRunHistory workflowId="wf-c" />);
+    expect(await screen.findByText(/^Scheduled/)).toHaveTextContent(/^Scheduled/);
+    await act(async () => {});
+    expect(screen.getByText(/^Scheduled/)).toHaveTextContent("Scheduled: Hourly");
+  });
+
   it("ignores a stale load for the previous workflow after switching", async () => {
     const loadA = deferred();
     const loadB = deferred();
