@@ -149,13 +149,35 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
                 "SELECT timezone, active, input, last_error FROM workflow_schedules"
             )).one() == ("UTC", True, {}, None)
 
+        # The workflow eval run `evw` has a child run, events and model requests: the downgrade drops the
+        # eval run with its events and requests, and keeps the child as a standalone run.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO runs (id, tenant_id, kind, agent_id, agent_version, status, input, parent_run_id,"
+                " parent_step_id, created_at, updated_at)"
+                " VALUES ('evwc', 't1', 'agent', 'ag', 1, 'completed', '{}', 'evw', 'case:c1', now(), now())"
+            ))
+            conn.execute(text(
+                "INSERT INTO execution_events (tenant_id, run_id, seq, event_key, type, data, ts)"
+                " VALUES ('t1', 'evw', 1, 'start', 'run_started', '{}', now())"
+            ))
+            conn.execute(text(
+                "INSERT INTO run_model_requests (tenant_id, run_id, request_key, model_id, input_tokens,"
+                " output_tokens, cache_read_tokens, cache_write_tokens, usage_measured, created_at, operation)"
+                " VALUES ('t1', 'evw', 'judge:c1:1', 'test:judge', 10, 5, 0, 0, true, now(), 'chat')"
+            ))
         with engine.begin() as conn:
             command.downgrade(alembic_config(conn), "0021_chat_attachments")
         with engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT parent_run_id, parent_step_id FROM runs WHERE id = 'evwc'"
+            )).one() == (None, None)
+            assert conn.execute(text("SELECT count(*) FROM execution_events WHERE run_id = 'evw'")).scalar() == 0
+            assert conn.execute(text("SELECT count(*) FROM run_model_requests WHERE run_id = 'evw'")).scalar() == 0
             assert {"workflow_schedules", "spans"}.isdisjoint(_tables(conn))
             assert {"rerun_of", "schedule_id", "pause_after_each_step"}.isdisjoint(_columns(conn, "runs"))
             assert "workflow_id" not in _columns(conn, "eval_suites")
-            assert conn.execute(text("SELECT id FROM runs ORDER BY id")).scalars().all() == ["eva", "old"]
+            assert conn.execute(text("SELECT id FROM runs ORDER BY id")).scalars().all() == ["eva", "evwc", "old"]
             assert conn.execute(text("SELECT id::text FROM eval_suites")).scalars().all() == [SUITE_A]
 
         with engine.begin() as conn:

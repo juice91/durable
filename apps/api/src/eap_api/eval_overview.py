@@ -24,6 +24,7 @@ from sqlalchemy import cast, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, distinct_on
 
 from eap_api.models import AgentModel
+from eap_api.workflows.models import WorkflowModel
 from eap_run_store import RunCursor
 from eap_run_store.evals import EvalCaseModel, EvalStore, EvalSuiteModel, _suite_record
 from eap_run_store.store import RunModel, _run_dict
@@ -57,6 +58,20 @@ def _agents(db, tenant_id: str, agent_ids: set[str]) -> dict[str, AgentModel]:
         return {}
     rows = db.query(AgentModel).filter(AgentModel.tenant_id == tenant_id, AgentModel.id.in_(agent_ids)).all()
     return {row.id: row for row in rows}
+
+
+def _workflows(db, tenant_id: str, workflow_ids: set[str]) -> dict[str, WorkflowModel]:
+    if not workflow_ids:
+        return {}
+    rows = db.query(WorkflowModel).filter(WorkflowModel.tenant_id == tenant_id, WorkflowModel.id.in_(workflow_ids)).all()
+    return {row.id: row for row in rows}
+
+
+def target_names(db, tenant_id: str, suites) -> dict[tuple[str, str], str]:
+    """(target_kind, target_id) -> name for the agents and workflows the suites target."""
+    agents = _agents(db, tenant_id, {s.agent_id for s in suites if s.agent_id})
+    workflows = _workflows(db, tenant_id, {s.workflow_id for s in suites if s.workflow_id})
+    return {**{("agent", k): v.name for k, v in agents.items()}, **{("workflow", k): v.name for k, v in workflows.items()}}
 
 
 def brief_aggregates(aggregates: dict[str, Any]) -> dict[str, Any]:
@@ -120,15 +135,17 @@ def list_suite_overview(
             for run in session.execute(newest).scalars():
                 last[run.eval_suite_id] = _run_dict(run)
     aggregates = store.aggregates_for_runs(tenant_id, [r["id"] for r in last.values()])
-    agents = _agents(db, tenant_id, {s.agent_id for s in found})
+    agents = _agents(db, tenant_id, {s.agent_id for s in found if s.agent_id})
+    names = target_names(db, tenant_id, found)
     rows = []
     for suite in found:
-        agent = agents.get(suite.agent_id)
+        agent = agents.get(suite.agent_id) if suite.agent_id else None
         run = last.get(suite.id)
         rows.append({
             "suite": suite,
             "agent_name": agent.name if agent else None,
             "agent_archived": bool(agent.archived) if agent else False,
+            "target_name": names.get((suite.target_kind, suite.target_id)),
             "last_run": None if run is None else {"run": run, "aggregates": aggregates[str(run["id"])]},
         })
     next_cursor = _encode([found[-1].name, found[-1].id]) if len(found) == limit else None
@@ -176,13 +193,18 @@ def list_run_overview(
             }
     aggregates = store.aggregates_for_runs(tenant_id, [r["id"] for r in runs])
     agents = _agents(db, tenant_id, {str(r["agent_id"]) for r in runs if r.get("agent_id")})
+    workflows = _workflows(db, tenant_id, {str(r["workflow_id"]) for r in runs if r.get("workflow_id")})
     rows = []
     for run in runs:
         agent = agents.get(str(run["agent_id"])) if run.get("agent_id") else None
+        workflow = workflows.get(str(run["workflow_id"])) if run.get("workflow_id") else None
         rows.append({
             "run": run,
             "aggregates": aggregates[str(run["id"])],
             "agent_name": agent.name if agent else None,
+            "target_kind": "workflow" if run.get("workflow_id") else "agent",
+            "target_id": str(run["workflow_id"] if run.get("workflow_id") else run["agent_id"]),
+            "target_name": workflow.name if workflow else (agent.name if agent else None),
             "suite_name": suites.get(str(run.get("eval_suite_id"))),
         })
     next_cursor = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
@@ -280,7 +302,8 @@ def list_scorer_overview(
             ).scalars()
         ]
     values = _run_values(store, tenant_id, [str(r["id"]) for r in runs])
-    agents = _agents(db, tenant_id, {suites[s].agent_id for s in suite_ids})
+    names = target_names(db, tenant_id, [suites[s] for s in suite_ids])  # ORM rows quack alike
+    agents = _agents(db, tenant_id, {suites[s].agent_id for s in suite_ids if suites[s].agent_id})
 
     rows = []
     for key in page:
@@ -313,6 +336,11 @@ def list_scorer_overview(
                     "name": suites[sid].name,
                     "agent_id": suites[sid].agent_id,
                     "agent_name": agents[suites[sid].agent_id].name if suites[sid].agent_id in agents else None,
+                    "workflow_id": suites[sid].workflow_id,
+                    "target_kind": "workflow" if suites[sid].workflow_id else "agent",
+                    "target_name": names.get(
+                        ("workflow", suites[sid].workflow_id) if suites[sid].workflow_id else ("agent", suites[sid].agent_id)
+                    ),
                     "case_level_uses": entry["cases"],
                 }
                 for sid, entry in suite_rows[:SCORER_SUITES_SHOWN]

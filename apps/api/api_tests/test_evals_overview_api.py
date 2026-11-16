@@ -136,3 +136,43 @@ def test_overview_is_tenant_scoped(api):
     assert client.get(f"{API}/eval-suites", params={"agent_id": agent}, headers=h2).status_code == 404
     assert client.get(f"{API}/evals/runs", params={"agent_id": agent}, headers=h2).status_code == 404
     assert len(client.get(f"{API}/eval-suites", headers=h1).json()["items"]) == 1
+
+
+from .test_evals_workflow_api import agent_suite, workflow_suite, wf_api  # noqa: E402,F401
+from .test_workflow_runs_api import publish_demo  # noqa: E402
+
+
+@pg
+def test_overview_rows_carry_target_kind_and_name(wf_api):
+    client, app, _, tenant_of = wf_api
+    tenant, h = tenant_of()
+    wf = publish_demo(client, h)
+    ws = workflow_suite(client, h, wf, name="wfs", cases=('{"q": "a"}',))
+    agent_id, as_ = agent_suite(client, h, name="ags")
+    wf_run = client.post(
+        f"{API}/workflows/{wf}/evals/runs", json={"run_id": str(uuid.uuid4()), "suite_id": ws}, headers=h
+    ).json()["run_id"]
+    ag_run = _run(client, h, agent_id, as_)
+    _record(app, tenant, wf_run, ["passed"])
+
+    suites = {s["id"]: s for s in client.get(f"{API}/eval-suites", headers=h).json()["items"]}
+    assert (suites[ws]["target_kind"], suites[ws]["target_id"], suites[ws]["target_name"]) == ("workflow", wf, "Triage")
+    assert (suites[ws]["agent_id"], suites[ws]["agent_name"], suites[ws]["workflow_id"]) == (None, None, wf)
+    assert suites[ws]["last_run"]["run_id"] == wf_run
+    assert (suites[as_]["target_kind"], suites[as_]["target_id"], suites[as_]["target_name"]) == (
+        "agent", agent_id, "Evaluated")
+    assert (suites[as_]["agent_id"], suites[as_]["agent_name"]) == (agent_id, "Evaluated")
+
+    runs = {r["run_id"]: r for r in client.get(f"{API}/evals/runs", headers=h).json()["items"]}
+    assert (runs[wf_run]["target_kind"], runs[wf_run]["target_id"], runs[wf_run]["target_name"]) == (
+        "workflow", wf, "Triage")
+    assert (runs[wf_run]["agent_id"], runs[wf_run]["agent_name"], runs[wf_run]["workflow_id"]) == (None, None, wf)
+    assert runs[wf_run]["suite_name"] == "wfs" and runs[wf_run]["aggregates"]["passed"] == 1
+    assert (runs[ag_run]["target_kind"], runs[ag_run]["target_name"], runs[ag_run]["agent_name"]) == (
+        "agent", "Evaluated", "Evaluated")
+    # The agent filter keeps the workflow suites out.
+    only = client.get(f"{API}/eval-suites", params={"agent_id": agent_id}, headers=h).json()["items"]
+    assert [s["id"] for s in only] == [as_]
+    # Scorers list a workflow suite's evaluator with its target.
+    scorer = next(x for x in client.get(f"{API}/evals/scorers", headers=h).json()["items"] if x["kind"] == "contains")
+    assert scorer["suites"][0]["target_kind"] == "workflow" and scorer["suites"][0]["target_name"] == "Triage"

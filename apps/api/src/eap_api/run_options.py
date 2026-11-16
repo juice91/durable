@@ -33,7 +33,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -74,12 +74,16 @@ def resolve_version(db: Session, agent_id: uuid.UUID | str, requested: int | Non
 
 @dataclass(frozen=True)
 class RunTarget:
-    """What a run executes: a published version (`version` set) or a draft snapshot (`draft_spec`)."""
+    """What a run executes: a published version (`version` set) or a draft snapshot (`draft_spec`).
+    `kind` is "agent" (`spec` an AgentSpec) or "workflow" (`spec` a WorkflowSpec, never a draft,
+    `workflow_version_id` the row the worker starts)."""
 
     version: int | None
-    spec: AgentSpec
+    spec: Any
     spec_dict: dict[str, Any]
     draft_spec: dict[str, Any] | None
+    kind: Literal["agent", "workflow"] = "agent"
+    workflow_version_id: str | None = None
 
     @property
     def is_draft(self) -> bool:
@@ -115,6 +119,33 @@ def resolve_target(db: Session, tenant_id: str, agent: AgentModel, requested: in
         return _draft_target(db, tenant_id, agent)
     assert requested is None or isinstance(requested, int)
     return _published_target(db, agent.id, resolve_version(db, agent.id, requested))
+
+
+def resolve_workflow_target(db: Session, tenant_id: str, workflow_id: uuid.UUID | str, requested: int | None) -> RunTarget:
+    """The published workflow version an eval run executes (latest when `requested` is None; 409
+    when the workflow has none, 404 for an unknown number)."""
+    from eap_api.workflows.models import WorkflowVersionModel
+    from eap_schemas.workflows import WorkflowSpec
+
+    query = db.query(WorkflowVersionModel).filter(
+        WorkflowVersionModel.workflow_id == str(workflow_id), WorkflowVersionModel.tenant_id == tenant_id
+    )
+    if requested is None:
+        row = query.order_by(WorkflowVersionModel.version.desc()).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Workflow has no published version")
+    else:
+        row = query.filter(WorkflowVersionModel.version == requested).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return RunTarget(
+        version=row.version,
+        spec=WorkflowSpec.model_validate(row.spec),
+        spec_dict=row.spec,
+        draft_spec=None,
+        kind="workflow",
+        workflow_version_id=str(row.id),
+    )
 
 
 def stored_target(db: Session, run: dict[str, Any]) -> RunTarget:

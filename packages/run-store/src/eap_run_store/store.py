@@ -1268,6 +1268,44 @@ class RunStore:
             draft_spec=null() if draft_spec is None else draft_spec,
         )
 
+    def create_workflow_eval_run(
+        self,
+        tenant_id: str,
+        workflow_id: UUID | str,
+        workflow_version: int,
+        eval_suite_id: UUID | str,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create an eval run of a workflow suite (kind 'eval', `workflow_id` and `workflow_version`
+        set, `agent_id` NULL: ck_runs_kind_target of 0022_parity_round_2). `input` is the suite
+        snapshot as for create_eval_run. The caller has checked that the workflow and the suite
+        belong to `tenant_id`. Same idempotency and tenant rules as create_run."""
+        from pydantic import ValidationError
+
+        from eap_schemas.evals import EvalSuiteSnapshot
+
+        try:
+            snapshot = EvalSuiteSnapshot.model_validate_json(input)
+        except ValidationError as exc:
+            raise ValueError(f"input is not a valid suite snapshot: {exc.errors()[0]['msg']}") from None
+        if str(snapshot.suite_id) != str(eval_suite_id):
+            raise ValueError("input is a snapshot of another suite")
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="eval",
+            workflow_id=str(workflow_id),
+            workflow_version=workflow_version,
+            eval_suite_id=str(eval_suite_id),
+            eval_suite_hash=snapshot.suite_hash(),
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
     def create_eval_child_run(
         self,
         tenant_id: str,

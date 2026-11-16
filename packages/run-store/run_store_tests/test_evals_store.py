@@ -567,3 +567,49 @@ def test_field_equals_null_value_round_trips(store, tenant, engine):
         {"kind": "equals_expected"},
         {"kind": "contains", "case_sensitive": True, "name": "c"},
     ]
+
+
+# ---------------------------------------------------------------------------- workflow targets (parity round 2)
+
+
+def test_workflow_suites_have_no_agent_and_conflict_per_target(store, tenant, other):
+    wsuite = store.create_workflow_suite(tenant, "wf", "smoke")
+    assert (wsuite.agent_id, wsuite.workflow_id, wsuite.target_kind, wsuite.target_id) == (None, "wf", "workflow", "wf")
+    with pytest.raises(EvalSuiteNameConflict) as info:
+        store.create_workflow_suite(tenant, "wf", "smoke")
+    assert "workflow" in str(info.value) and info.value.agent_id == "wf"
+    store.create_workflow_suite(tenant, "wf2", "smoke")  # another workflow, the same name
+    agent = store.create_suite(tenant, "ag", "smoke")  # an agent suite with the same name is no conflict
+    assert (agent.workflow_id, agent.target_kind) == (None, "agent")
+
+    assert [s.id for s in store.list_workflow_suites(tenant, "wf")] == [wsuite.id]
+    assert [s.id for s in store.list_suites(tenant, "ag")] == [agent.id]
+    assert store.list_suites(tenant, "wf") == []
+    # Each target sees only its own suites by id.
+    assert store.get_suite(tenant, wsuite.id, workflow_id="wf").id == wsuite.id
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(tenant, wsuite.id, agent_id="ag")
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(tenant, agent.id, workflow_id="wf")
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(other, wsuite.id)
+
+
+def test_renaming_a_workflow_suite_onto_a_taken_name_is_a_name_conflict(store, tenant):
+    store.create_workflow_suite(tenant, "wf", "one")
+    two = store.create_workflow_suite(tenant, "wf", "two")
+    with pytest.raises(EvalSuiteNameConflict) as info:
+        store.update_suite(tenant, two.id, name="one")
+    assert info.value.agent_id == "wf" and info.value.kind == "workflow"
+    assert store.update_suite(tenant, two.id, name="three").name == "three"
+    assert store.update_suite(tenant, two.id, archived=True).archived  # no agent id needed to update
+
+
+def test_workflow_suite_snapshot_needs_the_workflow(store, tenant):
+    suite = store.create_workflow_suite(tenant, "wf", "snap")
+    store.add_case(tenant, suite.id, {"name": "c", "input": '{"q": 1}'})
+    assert store.snapshot(tenant, suite.id, workflow_id="wf").cases[0].name == "c"
+    with pytest.raises(EvalSuiteNotFound):
+        store.snapshot(tenant, suite.id, agent_id="ag")
+    with pytest.raises(EvalSuiteNotFound):
+        store.snapshot(tenant, suite.id, workflow_id="other")
