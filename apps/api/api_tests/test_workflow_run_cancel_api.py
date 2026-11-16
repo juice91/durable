@@ -172,3 +172,17 @@ def test_no_lock_is_held_across_the_cascade(api, fake):  # noqa: F811
     fake.during_cancel = worker_append
     assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202
     assert finished == [True]
+
+
+def test_cancel_records_the_cancelled_runs_spans(api, fake):  # noqa: F811
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    run_id = _start(client, headers)
+    run_store, _ = app.state.run_stores
+    run_store.mark_running(tenant, uuid.UUID(run_id))
+    assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202
+    spans = client.get("/api/v1/spans", headers=headers).json()["items"]
+    assert [s["span_id"] for s in spans if s["run_id"] == run_id] == [f"run:{run_id}"]
+    assert spans[0]["status"] == "error"
+    assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202  # a retry changes nothing
+    assert len(client.get("/api/v1/spans", headers=headers).json()["items"]) == 1

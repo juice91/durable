@@ -105,3 +105,43 @@ def test_cursor_round_trip_and_rejects_garbage():
     for bad in ("", "x" * 400, "!!!", "e30"):
         with pytest.raises(InvalidSpanCursor):
             SpanCursor.decode(bad)
+
+
+def test_materialise_spans_records_a_cancelled_run_once(engine, run_store, event_log, store, tenant):
+    from eap_run_store.spans import materialise_spans
+
+    run_id = uuid4()
+    run_store.create_run(tenant, uuid4(), 1, "cancel me", run_id)
+    _seed(engine, event_log, tenant, run_id, AGENT_EVENTS[:3])
+    run_store.mark_running(tenant, run_id)
+    assert materialise_spans(engine, tenant, run_id) == 0  # not finished: nothing yet
+    run_store.cancel_run_tree(tenant, run_id)
+    written = materialise_spans(engine, tenant, run_id)
+    assert written >= 2
+    root = next(i for i in store.list(tenant, {}, 50, None)[0] if i["span_id"] == f"run:{run_id}")
+    assert root["status"] == "error"
+    assert materialise_spans(engine, tenant, run_id) == written  # idempotent
+    assert len(store.list(tenant, {}, 50, None)[0]) == written
+    assert materialise_spans(engine, f"{tenant}_other", run_id) == 0
+
+
+def test_materialise_spans_skips_child_runs(engine, run_store, event_log, store, tenant):
+    from eap_run_store.spans import materialise_spans
+
+    parent, child = uuid4(), uuid4()
+    run_store.create_run(tenant, uuid4(), 1, "parent", parent)
+    run_store.create_child_agent_run(tenant, str(uuid4()), 1, "child", child, parent, "ask")
+    run_store.mark_running(tenant, child)
+    run_store.cancel_run_tree(tenant, parent)
+    assert materialise_spans(engine, tenant, child) == 0
+
+
+def test_list_bounds_the_limit_and_the_name_query_in_the_store(engine, run_store, event_log, store, tenant):
+    run_id = _finished_agent_run(engine, run_store, event_log, tenant)
+    store.replace_for_run(tenant, run_id, flat_spans(TraceReader(engine).read(tenant, run_id)))
+    assert len(store.list(tenant, {}, 0, None)[0]) == 1  # clamped up to 1
+    assert len(store.list(tenant, {}, -5, None)[0]) == 1
+    assert len(store.list(tenant, {}, 10_000, None)[0]) == 4
+    long_q = "tickets" + "x" * 5000  # cut to 200 characters: the name no longer matches
+    assert store.list(tenant, {"q": long_q}, 50, None)[0] == []
+    assert [i["kind"] for i in store.list(tenant, {"q": "tickets" + "x" * 0}, 50, None)[0]] == ["tool_call"]

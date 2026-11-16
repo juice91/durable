@@ -172,6 +172,41 @@ def _execute(session: Any, statement: Any, slow: bool, timeout_ms: int | None) -
         raise
 
 
+SPAN_RUN_KINDS = frozenset({"agent", "tool", "workflow"})
+MAX_LIST_LIMIT = 200
+MAX_NAME_QUERY = 200
+_WORKFLOW_SPEC = text(
+    "SELECT spec FROM workflow_versions WHERE tenant_id = :t AND workflow_id = :w AND version = :v"
+)
+
+
+def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
+    """Replace the run's `spans` rows from its trace; returns the rows written. Writes nothing (0)
+    for an unknown run, one that has not finished, a child run (its spans are part of its parent's
+    trace) or a run of another kind than agent, tool and workflow. Idempotent. Called by the worker
+    when a run ends, and by the cancel paths (the API's cancel and the worker's reconciler), where
+    the run is ended from outside and its own workflow never gets to record."""
+    from eap_run_store.store import TERMINAL_RUN_STATUSES
+    from eap_run_store.trace import TraceReader, flat_spans
+
+    def workflow_spec(workflow_id: str, version: int) -> dict[str, Any] | None:
+        with engine.connect() as conn:
+            row = conn.execute(_WORKFLOW_SPEC, {"t": tenant_id, "w": str(workflow_id), "v": version}).first()
+        return dict(row[0]) if row is not None else None
+
+    trace = TraceReader(engine).read(tenant_id, run_id, workflow_spec=workflow_spec)
+    if trace is None:
+        return 0
+    run = trace["run"]
+    if (
+        run["status"] not in TERMINAL_RUN_STATUSES
+        or run["kind"] not in SPAN_RUN_KINDS
+        or run.get("parent_run_id") is not None
+    ):
+        return 0
+    return SpanStore(engine).replace_for_run(tenant_id, run_id, flat_spans(trace))
+
+
 _SPAN_COLUMNS = ("run_id", "span_id", "parent_id", "kind", "name", "start", "end", "status",
                  "agent_id", "workflow_id", "model")
 # `list` keys that are conditions on the span's run (see run_conditions).
@@ -213,8 +248,16 @@ class SpanStore:
         `span_kind`, `q` (case-insensitive substring of the span name), `agent_id`, `workflow_id`,
         `model` and `provider` (as `GET /runs`: the run used that model), and `status`, `kind`,
         `tool_id`, `tags`, `metadata` of the span's run. The second item is an opaque cursor when
-        a full page came back, else None."""
-        f = filters or {}
+        a full page came back, else None. `limit` is clamped to 1..200 and `q` to its first 200
+        characters (the store holds the bounds, not only the route).
+
+        `model` and `provider` match through the span's RUN, as `GET /runs` does (the run, or one of
+        its child runs, made a request on that model), not the span's own `model` column; so every
+        span of such a run is listed, including its tool calls."""
+        limit = min(max(int(limit), 1), MAX_LIST_LIMIT)
+        f = dict(filters or {})
+        if f.get("q"):
+            f["q"] = str(f["q"])[:MAX_NAME_QUERY]
         stmt = select(SpanModel).where(SpanModel.tenant_id == tenant_id)
         if f.get("from") is not None:
             stmt = stmt.where(SpanModel.start >= f["from"])
@@ -284,4 +327,4 @@ class SpanStore:
         return buckets
 
 
-__all__ = ["InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_conditions"]
+__all__ = ["MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_conditions"]

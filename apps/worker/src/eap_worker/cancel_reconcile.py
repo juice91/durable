@@ -51,6 +51,7 @@ from uuid import UUID
 
 from dbos import DBOS
 
+from eap_run_store.spans import materialise_spans
 from eap_worker.runtime import get_runtime
 
 log = logging.getLogger("eap_worker.cancel_reconcile")
@@ -163,7 +164,12 @@ def find_unfinished_cancels_step(after_seconds: int, limit: int) -> list[dict[st
 def finish_cancel_step(tenant_id: str, run_id: str) -> dict[str, Any]:
     """D12 step 3 for one run: RunStore.cancel_run_tree (idempotent). Returns counts and the root's
     status only."""
-    result = get_runtime().run_store.cancel_run_tree(tenant_id, UUID(run_id))
+    rt = get_runtime()
+    result = rt.run_store.cancel_run_tree(tenant_id, UUID(run_id))
+    try:  # the cancelled run's own workflow never reaches its record_spans step
+        materialise_spans(rt.engine, tenant_id, run_id)
+    except Exception:  # noqa: BLE001 - spans are best effort; the cancel is done
+        log.warning("run %s: spans not recorded after cancel", run_id)
     return {
         "run_id": run_id,
         "status": result.status,
