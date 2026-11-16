@@ -274,6 +274,7 @@ from eap_worker.evaluators import (
 from eap_worker.pricing import usage_record
 from eap_worker.errors import LoopTickFailed, RunFailure, WorkflowStepError, classify
 from eap_worker.runtime import get_runtime
+from eap_worker.spans_step import record_spans
 from eap_worker.tool_run import _REJECTIONS, call_tool_guarded, check_tool_step
 from eap_worker.workflow import _heartbeat, agent_run, append_event_step, finish_run_step
 from eap_worker.workflow_eval import (
@@ -1729,6 +1730,7 @@ async def _workflow_body(
         # End event before the terminal status, as in agent and tool runs.
         await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output_text, "result": output})
         await finish_run_step(run_id, tenant_id, "completed", output_text, None)
+        await record_spans(run_id, tenant_id)
         return {"status": "completed", "output": output_text}
     finally:
         heartbeat.cancel()
@@ -1738,6 +1740,7 @@ async def _workflow_body(
          "step_id": failed_step},
     )
     await finish_run_step(run_id, tenant_id, failure.status, None, failure.error)
+    await record_spans(run_id, tenant_id)
     return {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": failed_step}
 
 

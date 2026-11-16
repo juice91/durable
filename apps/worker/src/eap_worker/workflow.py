@@ -408,7 +408,9 @@ from eap_worker.memory import (
 from eap_worker.observational import observe_after_turn
 from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
 from eap_worker.scoring import score_run_step
+from eap_worker.spans_step import record_spans
 from eap_worker.recall import index_after_turn, recall_before_turn
+from eap_worker.step_processors import StepProcessorCapability
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
 from eap_worker.pricing import (
@@ -701,11 +703,30 @@ async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     # UI waits for the checked model_message. Structured output (AC.4): no deltas either (native and
     # prompted modes would stream raw JSON fragments). The crash point stays where the delta would go.
     live = not ctx.deps.spec.output_processors and ctx.deps.spec.output is None
+    # Stream processors (parity round 2): a live filter on each delta. Nothing is recorded here (this
+    # runs inside the model-request step): the post-step output pass runs the same processors on the
+    # whole response and writes the events, so the stored answer agrees with what was shown. A
+    # modified delta is published modified; a block stops publishing for the rest of this response.
+    # A pattern split across two deltas is only caught by that post-step pass.
+    stream_chain = None
+    if live and ctx.deps.spec.stream_processors:
+        try:
+            stream_chain = compiled_chain(ctx.deps.spec.stream_processors, "stream_processors")
+        except Exception:  # noqa: BLE001 - fail closed: no unfiltered text goes out
+            live = False
     async for event in events:
         text = _text_of(event)
         if text:
             await asyncio.to_thread(crash_gate, "model_request")  # crash tests only (EAP_CRASH_GATE_FILE)
-            if live:
+            if live and stream_chain is not None:
+                try:
+                    filtered = await asyncio.to_thread(apply_deterministic, stream_chain, text)
+                    text = filtered.text
+                except Exception:  # noqa: BLE001 - never publish what the chain could not check
+                    text = None
+                if text is None:  # blocked: the client sees the stream end early
+                    live = False
+            if live and text:
                 await asyncio.to_thread(rt.publish_delta, run_id, model_request, attempt, text)
             crash_point("model_request")
 
@@ -723,6 +744,9 @@ agent: Agent[WorkerDeps, str] = Agent(
         ResolveModelId(_recording_resolver(make_resolver(lambda: get_runtime().settings, fallback=True))),
         # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
         RetrieveNumbering(),
+        # Step processors (parity round 2): arguments and results of each tool call; a no-op without
+        # `step_processors` (workflow-side hook, steps only for specs that list them).
+        StepProcessorCapability(),
         # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
         # hooks only: no step. Before DBOSDurability, which stays last.
         SpecCapability(),
@@ -1797,6 +1821,7 @@ async def agent_run(
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
         result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)
+        await record_spans(run_id, tenant_id)  # Task 16: the finished run's spans (any outcome)
         set_run_outcome(span, result["status"], result.get("error_code"))
         log.info("run %s %s", run_id, result["status"])
         return result

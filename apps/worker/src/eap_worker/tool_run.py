@@ -64,6 +64,7 @@ from eap_worker.platform_tools import HIDDEN_TOOL_IDS
 from eap_worker.search_guard import search_guard_for
 from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID
 from eap_worker.runtime import get_runtime
+from eap_worker.spans_step import record_spans
 from eap_worker.workflow import _heartbeat, _is_side_effect_unknown, append_event_step, finish_run_step
 
 log = logging.getLogger("eap_worker")
@@ -292,6 +293,7 @@ async def _tool_run_body(run_id: str, tenant_id: str, tool_id: str, input_json: 
             {"status": status, "error": failure.error, "error_code": failure.code},
         )
         await finish_run_step(run_id, tenant_id, status, None, failure.error)
+        await record_spans(run_id, tenant_id)
         return {"status": status, "error": failure.error, "error_code": failure.code}
     finally:
         heartbeat.cancel()
@@ -307,6 +309,7 @@ async def _tool_run_body(run_id: str, tenant_id: str, tool_id: str, input_json: 
     await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output, "result": content},
                             search_guard=guard)
     status = await finish_run_step(run_id, tenant_id, "completed", output, None, search_guard=guard) or "completed"
+    await record_spans(run_id, tenant_id)
     if status != "completed":
         from eap_worker.search_guard import KB_DELETED_CODE, KB_DELETED_ERROR
 
