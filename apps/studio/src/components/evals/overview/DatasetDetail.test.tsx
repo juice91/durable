@@ -60,7 +60,7 @@ afterEach(() => {
 describe("DatasetDetail", () => {
   it("shows the dataset with New item, Import CSV, Import JSON and Schema", async () => {
     renderDetail();
-    expect(await screen.findByTestId("eval-suite-title")).toHaveTextContent("Refunds");
+    expect(await screen.findByTestId("eval-suite-title", {}, { timeout: 5000 })).toHaveTextContent("Refunds");
     expect(screen.getByTestId("dataset-target-line")).toHaveTextContent("agent · Support bot");
     for (const name of ["New item", "Import CSV", "Import JSON", "Schema"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();

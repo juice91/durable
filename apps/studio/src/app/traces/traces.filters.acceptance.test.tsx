@@ -21,7 +21,10 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(nav.query),
 }));
 vi.mock("@/lib/traces", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/traces")>()), listTraceRuns: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { agents: { list: vi.fn() } } }));
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  api: { agents: { list: vi.fn() } },
+}));
 vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal<object>()), listWorkflows: vi.fn(async () => []) }));
 
 const run = {

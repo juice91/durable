@@ -24,7 +24,10 @@ vi.mock("@/lib/traces", async (importOriginal) => ({
   fetchRunsHistogram: vi.fn(),
 }));
 vi.mock("@/lib/spans", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/spans")>()), listSpans: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { agents: { list: vi.fn() } } }));
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
+  api: { agents: { list: vi.fn() } },
+}));
 vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal<object>()), listWorkflows: vi.fn(async () => []) }));
 
 const HIST = { interval: "day" as const, buckets: [{ start: "2026-11-15T00:00:00Z", runs: 3, failed: 1 }] };
