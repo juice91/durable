@@ -36,6 +36,12 @@ export function formatCost(value: string | number | null | undefined): string | 
   return n === null ? null : formatUsd(n);
 }
 
+/** A score (evaluator verdicts 0..1, retrieval hits) with `digits` decimals: "0.75", "0.500".
+ * The one placeholder for a missing score is "-", as for tokens and durations. */
+export function formatScore(value: unknown, digits = 2): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "-";
+}
+
 /** Token count: exact with grouping below a million ("999,999"), compact above ("1.2M", "3.4B");
  * "-" when missing. */
 export function formatTokens(value: number | null | undefined): string {

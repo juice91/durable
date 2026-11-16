@@ -118,7 +118,7 @@ def test_event_budget_covers_the_whole_trace_and_child_cap(ctx, monkeypatch):
     for c in children:
         ctx.model(c, 0, 1, 1, Decimal("0.001"))
     clean = ctx.trace(root)
-    assert clean["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0}
+    assert clean["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0, "iterations": 0}
     assert clean["limits"]["max_trace_events"] == 4 * clean["limits"]["max_spans"] == 8000
     monkeypatch.setattr(trace, "MAX_TRACE_EVENTS", 3)  # the root's own 3 events use the whole budget
     cut = ctx.trace(root)

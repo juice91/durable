@@ -144,7 +144,7 @@ def test_search_records_a_tool_run_and_enqueues_it(pg, tenant_of, kb_cleanup, fa
     # The worker finishing the run: the long-poll answers 200 with the parsed result.
     result = {"hits": [], "text": "No matching sections were found in the knowledge base."}
     app.state.run_stores[0].mark_running(tenant, uuid.UUID(run_id))
-    app.state.run_stores[0].set_status(tenant, uuid.UUID(run_id), "completed", json.dumps(result), None)
+    app.state.run_stores[0].finish_with_end(tenant, uuid.UUID(run_id), "completed", json.dumps(result), None)
     r = client.post(f"{API}/knowledge-bases/{kb['id']}/search?wait=1", json=body, headers=h)
     assert r.status_code == 200 and r.json()["status"] == "completed" and r.json()["result"] == result
     assert len(fake_dbos.calls) == 2  # a finished search is answered as recorded, not re-enqueued

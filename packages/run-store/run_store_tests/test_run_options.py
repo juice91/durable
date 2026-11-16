@@ -15,6 +15,7 @@ def tenant(engine):
     tenant_id = f"test_tenant_{uuid4().hex[:8]}"
     yield tenant_id
     with engine.begin() as conn:
+        conn.execute(text("DELETE FROM execution_events WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})
 
@@ -64,7 +65,7 @@ def test_draft_turn_and_published_turn(run_store, engine, tenant):
     first = uuid4()
     run_store.create_turn(tenant, conv["id"], 1, "one", first)
     assert tuple(_nulls(engine, first))[:3] == (True, True, 1)
-    run_store.set_status(tenant, first, "completed", output="ok")
+    run_store.finish_with_end(tenant, first, "completed", output="ok")
     second = uuid4()
     run_store.create_turn(tenant, conv["id"], None, "two", second, draft_spec={"name": "A"},
                           request_context={"x": 1})

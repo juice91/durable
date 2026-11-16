@@ -114,7 +114,7 @@ def _bad_tokens(store, engine, tenant):
     store.revoke(tenant, revoked.record.id)
     expired = store.create(tenant, name="e", created_by="a", expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
     with engine.begin() as conn:
-        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = :i"),
+        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 hour' WHERE id = :i"),
                      {"i": expired.record.id})
     flipped = secret[:-1] + ("A" if secret[-1] != "A" else "B")
     return good, {
@@ -246,7 +246,7 @@ def test_expiry_is_checked_on_every_call(store, engine, tenant):
     c = store.create(tenant, name="n", created_by="a", expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
     assert store.authenticate(c.key) is not None and c.record.status() == "active"
     with engine.begin() as conn:
-        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = :i"),
+        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 hour' WHERE id = :i"),
                      {"i": c.record.id})
     assert store.authenticate(c.key) is None
     assert store.get(tenant, c.record.id).status() == "expired"

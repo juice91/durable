@@ -107,7 +107,12 @@ def tenant(worker) -> Iterator[str]:
 
 def cleanup_tenant(engine, tenant_id: str) -> None:
     with engine.begin() as conn:
-        run_ids = [r[0] for r in conn.execute(text("SELECT id FROM runs WHERE tenant_id = :t"), {"t": tenant_id})]
+        # FOR UPDATE: the run-row lock a model step's in-step usage write takes (LP.8), so a late
+        # write of a cancelled run waits, then finds the run gone (no FK race with the deletes).
+        run_ids = [
+            r[0]
+            for r in conn.execute(text("SELECT id FROM runs WHERE tenant_id = :t FOR UPDATE"), {"t": tenant_id})
+        ]
         for run_id in run_ids:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
         conn.execute(text("DELETE FROM fake_external_tickets WHERE tenant_id = :t"), {"t": tenant_id})

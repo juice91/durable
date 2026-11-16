@@ -71,6 +71,9 @@ log = logging.getLogger("eap_worker")
 TOOL_CALL_ID = "tool_run"
 CALL_EVENT_KEY = f"tool:{TOOL_CALL_ID}:call"
 RESULT_EVENT_KEY = f"tool:{TOOL_CALL_ID}:result"
+# The workflow result's error_code of a run that was already terminal when its workflow started
+# (loops D12): it is not run, and its row and events are left as they are.
+RUN_ENDED = "run_ended"
 
 
 def side_effect_key(run_id: str) -> str:
@@ -95,7 +98,11 @@ _REJECTIONS: dict[str, type[Exception]] = {
 
 @DBOS.step(name="eap.start_tool_run")
 async def start_tool_run_step(run_id: str, tenant_id: str, tool_id: str, input_json: str) -> dict[str, Any]:
-    """Returns {"traceparent"} (None when the API had telemetry off)."""
+    """Returns {"traceparent"} (None when the API had telemetry off), plus `"stopped": True` with
+    the run's `"status"` and `"error"` when the run is already terminal (loops D12: mark_running
+    refused it, e.g. it was ended while queued) and must not run. The decision is this step's
+    recorded output, so a replay takes the same branch; a checkpoint recorded before the key
+    existed has no `stopped` and runs as before."""
     rt = get_runtime()
 
     def work() -> dict[str, Any]:
@@ -104,9 +111,16 @@ async def start_tool_run_step(run_id: str, tenant_id: str, tool_id: str, input_j
         rt.run_store.create_tool_run(tenant_id, tool_id, input_json, UUID(run_id))
         # running, clearing an ENQUEUE_FAILED_ERROR in the same statement: the API marks a run failed
         # when its enqueue raised, yet DBOS may have accepted it, and then this workflow runs it.
-        rt.run_store.mark_running(tenant_id, UUID(run_id))
-        rt.run_store.heartbeat(tenant_id, UUID(run_id))
+        # False: the run is terminal (never revived), so the tool is never called.
+        started = rt.run_store.mark_running(tenant_id, UUID(run_id))
+        if started is not False:
+            rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
+        if started is False:
+            return {
+                "traceparent": run.get("traceparent"), "stopped": True,
+                "status": run.get("status"), "error": run.get("error"),
+            }
         return {"traceparent": run.get("traceparent")}
 
     return await asyncio.to_thread(work)
@@ -228,6 +242,10 @@ async def tool_call_step(run_id: str, tenant_id: str, tool_id: str, args: dict[s
 async def tool_run(run_id: str, tenant_id: str, tool_id: str, input_json: str) -> dict[str, Any]:
     with log_context(tenant_id=tenant_id, run_id=run_id):  # records before run_span carry the ids too
         link = await start_tool_run_step(run_id, tenant_id, tool_id, input_json) or {}
+        if link.get("stopped"):
+            # Terminal before it started (loops D12): no event, no tool call, no status change.
+            log.warning("tool run %s not started: the run is already %s", run_id, link.get("status"))
+            return {"status": link.get("status") or "failed", "error": link.get("error"), "error_code": RUN_ENDED}
     # run_span's agent attributes are empty for a tool run; the tool is named in its own attributes.
     with run_span(run_id, tenant_id, "", "", traceparent=link.get("traceparent")) as span:
         span.set_attribute("eap.run_kind", "tool")

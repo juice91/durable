@@ -255,6 +255,116 @@ def run_span(
         yield span
 
 
+def _tracer(tracer_provider: TracerProvider | None) -> trace.Tracer:
+    provider = tracer_provider or _state.tracer_provider
+    return provider.get_tracer("eap_observability") if provider is not None else trace.NoOpTracer()
+
+
+def _parent_context(traceparent: str | None) -> Any:
+    if not traceparent:
+        return None
+    extracted = _propagator.extract({"traceparent": traceparent})
+    return extracted if trace.get_current_span(extracted).get_span_context().is_valid else None
+
+
+def _require_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative int")
+    return value
+
+
+ITERATION_SPAN_NAME = "eap.loop_iteration"
+# The only attributes an iteration span ever carries: ids and counts, never the loop's item, state,
+# conditions, step outputs or error text (loops LP.9).
+ITERATION_SPAN_ATTRIBUTES = (
+    "eap.run_id", "eap.tenant_id", "eap.workflow_step_id", "eap.loop_kind", "eap.loop_scope",
+    "eap.loop_depth", "eap.iteration_index", "eap.iteration_status", "eap.error_code",
+    "eap.body_steps", "eap.child_runs",
+)
+
+
+@contextmanager
+def iteration_span(
+    run_id: str,
+    tenant_id: str,
+    loop_id: str,
+    index: int,
+    *,
+    scope: str = "",
+    loop_kind: str = "loop",
+    traceparent: str | None = None,
+    tracer_provider: TracerProvider | None = None,
+) -> Iterator[Span]:
+    """The `eap.loop_iteration` span of iteration `index` of loop step `loop_id`, current for the
+    block (loops LP.9). `scope` is the iteration's scope string (`each.3`, `outer.2/inner.0`,
+    eap_schemas.workflow_scope.scope_string) and `loop_kind` is `loop` or `foreach`.
+
+    Ids and counts only (ITERATION_SPAN_ATTRIBUTES): never the item, state, condition values,
+    outputs or error text. With `traceparent` (the run's) it is that span's child, else the current
+    context's (the DBOS iteration workflow's span). Non-recording when telemetry is off. Log
+    records inside the block carry the run's ids (log_context).
+    """
+    attributes = {
+        "eap.run_id": str(run_id),
+        "eap.tenant_id": tenant_id,
+        "eap.workflow_step_id": str(loop_id),
+        "eap.loop_kind": "foreach" if loop_kind == "foreach" else "loop",
+        "eap.loop_scope": str(scope),
+        "eap.loop_depth": str(scope).count("/") + 1 if scope else 1,
+        "eap.iteration_index": _require_int("index", index),
+    }
+    with (
+        log_context(tenant_id=tenant_id, run_id=str(run_id)),
+        _tracer(tracer_provider).start_as_current_span(
+            ITERATION_SPAN_NAME,
+            context=_parent_context(traceparent),
+            attributes=attributes,
+            # The SDK defaults would add an `exception` event (message and stack trace) and set
+            # the status description to "<Type>: <message>": error text. Keep ids and codes only.
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span,
+    ):
+        try:
+            yield span
+        except BaseException as exc:
+            _mark_span_raised(span, exc)
+            raise
+
+
+def _mark_span_raised(span: Span, exc: BaseException) -> None:
+    """An exception left the span's block: mark it an error with the exception's class name only
+    (never its message), keeping an error code set_iteration_outcome already recorded."""
+    status = getattr(span, "status", None)
+    if status is not None and status.status_code == StatusCode.ERROR:
+        return
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+
+
+def set_iteration_outcome(
+    span: Span,
+    status: str,
+    error_code: str | None = None,
+    *,
+    body_steps: int | None = None,
+    child_runs: int | None = None,
+) -> None:
+    """Record an iteration's status (`completed`, `failed`, `needs_attention`), its stable error
+    code (never text) and how many body steps and child agent runs it executed. Anything but
+    `completed` marks the span an error."""
+    span.set_attribute("eap.iteration_status", status)
+    if error_code:
+        span.set_attribute("eap.error_code", error_code)
+    if body_steps is not None:
+        span.set_attribute("eap.body_steps", _require_int("body_steps", body_steps))
+    if child_runs is not None:
+        span.set_attribute("eap.child_runs", _require_int("child_runs", child_runs))
+    if status == "completed":
+        span.set_status(Status(StatusCode.OK))
+    else:
+        span.set_status(Status(StatusCode.ERROR, error_code or status))
+
+
 def set_run_outcome(span: Span, status: str, error_code: str | None = None) -> None:
     """Record the run's terminal status on its span; anything but `completed` marks it an error.
 
@@ -286,8 +396,12 @@ __all__ = [
     "current_trace_id",
     "dbos_otel_config",
     "dbos_trace_attributes",
-    "instrument_fastapi",
     "install_access_logging",
+    "instrument_fastapi",
+    "ITERATION_SPAN_ATTRIBUTES",
+    "ITERATION_SPAN_NAME",
+    "iteration_span",
+    "set_iteration_outcome",
     "otlp_endpoint_from_env",
     "run_span",
     "set_run_outcome",

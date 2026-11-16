@@ -1,0 +1,61 @@
+{
+  "description": "Write a draft, judge it, and feed the judge's reason back into the next attempt until the judge passes it, at most five attempts and USD 0.05. The scripted writer (test:refine) answers {\"draft\": \"attempt <attempt + 1>\", \"after\": <feedback>}, and the scripted judge (test:judge) passes when the draft contains the quoted MUST_CONTAIN text, so the loop passes on the third attempt. The USD 0.05 cap only bites under a price file that prices test:* models (config/model-prices.test.json); under the default price file both models cost $0, the cap never stops the loop, and publish warns cost_cap_unpriced_model.",
+  "agents": {
+    "writer": {
+      "name": "Release note writer",
+      "instructions": "Write a one-line release note. If feedback is given, revise the draft to address it.",
+      "model": {"provider": "test", "name": "refine"},
+      "output": {
+        "json_schema": {
+          "type": "object",
+          "properties": {"draft": {"type": "string"}, "after": {"type": "string"}},
+          "required": ["draft", "after"],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "input": {},
+  "spec": {
+    "name": "Refine a release note",
+    "input_schema": {"type": "object"},
+    "limits": {"max_cost_usd": "0.05"},
+    "start": "refine",
+    "steps": [
+      {
+        "id": "refine",
+        "type": "loop",
+        "max_iterations": 5,
+        "until": {"op": "eq", "left": {"$ref": "steps.judge.output.passed"}, "right": true},
+        "state": {"feedback": ""},
+        "carry": {"feedback": {"$ref": "steps.judge.output.reason"}},
+        "body": {
+          "start": "write",
+          "steps": [
+            {
+              "id": "write",
+              "type": "agent",
+              "agent_id": "${agents.writer}",
+              "version": 1,
+              "input": {"attempt": {"$ref": "loop.refine.index"}, "feedback": {"$ref": "loop.refine.state.feedback"}},
+              "next": "judge"
+            },
+            {
+              "id": "judge",
+              "type": "evaluate",
+              "value": {"$ref": "steps.write.output.draft"},
+              "evaluators": [
+                {
+                  "kind": "llm_judge",
+                  "rubric": "The release note must say which attempt it is. MUST_CONTAIN:\"attempt 3\"",
+                  "model": {"provider": "test", "name": "judge"}
+                }
+              ],
+              "pass": "all"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

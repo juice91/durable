@@ -119,7 +119,11 @@ export interface RunEvent {
     | "output_retry"
     | "tool_approval_waiting" | "tool_approved" | "tool_denied" | "tool_approval_timed_out"
     // Eval runs (AC.11): one per case, status and counts only.
-    | "eval_case_result";
+    | "eval_case_result"
+    // Workflow loops (loops D4, D12): one per iteration (`loop:{S}:started|completed|failed`), and
+    // the durable cancel request (key `cancel`, {requested_by}).
+    | "loop_iteration_started" | "loop_iteration_completed" | "loop_iteration_failed"
+    | "cancel_requested";
   data: RunEventData;
   ts: string;
 }

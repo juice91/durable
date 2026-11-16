@@ -20,7 +20,7 @@ export const CAPABILITY_SHOWN: Partial<Record<SpanKind, readonly string[]>> = {
     "case_id", "case_status", "position", "assertions", "scores", "labels", "evaluator_failures", "duration_ms",
     "child_run_id",
   ],
-  judge: ["request_key", "case_id", "evaluator_index"],
+  judge: ["request_key", "case_id", "evaluator_index", "evaluator_name", "step_id", "scope"],
 };
 
 /** Capability kinds whose usage (model, tokens, cost) goes in the "Model and usage" section. */
@@ -203,6 +203,10 @@ function JudgeSection({ span }: { span: TraceSpan }) {
   return (
     <Section title="Judge" testId="span-judge">
       {index !== null ? <Row label="Evaluator">{index + 1}</Row> : null}
+      {str(a.evaluator_name) ? <Row label="Evaluator name" testId="span-judge-evaluator">{a.evaluator_name as string}</Row> : null}
+      {/* LP.15: a workflow evaluate step's judge (its step and, in a loop body, its iteration). */}
+      {str(a.step_id) ? <Row label="Step" testId="span-judge-step">{a.step_id as string}</Row> : null}
+      {str(a.scope) ? <Row label="Iteration scope">{a.scope as string}</Row> : null}
       {str(a.request_key) ? <Row label="Request key">{a.request_key as string}</Row> : null}
     </Section>
   );

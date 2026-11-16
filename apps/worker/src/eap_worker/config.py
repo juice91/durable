@@ -16,6 +16,20 @@ TOOL_WORKFLOW_NAME = "eap.tool_run"
 # branches run as child workflows of WORKFLOW_BRANCH_NAME (never enqueued by the API).
 WORKFLOW_RUN_NAME = "eap.workflow_run"
 WORKFLOW_BRANCH_NAME = "eap.workflow_branch"
+# One iteration of a loop step (loops D5/D6): a child workflow of the run (or of an enclosing
+# iteration), workflow id `{run_id}:loop:{S}` (eap_schemas.workflow_scope.iteration_workflow_id).
+WORKFLOW_ITERATION_NAME = "eap.workflow_iteration"
+# Workflow loop knobs (loops D10): recorded key -> (environment variable, default). Read once by
+# eap.start_workflow_run into the run's `limits`. A run (or branch) started before the loops
+# milestone has a recorded `limits` WITHOUT these keys, so every reader uses
+# `limits.get(key, WORKFLOW_LOOP_LIMIT_DEFAULTS[key][1])` and only on loop paths.
+WORKFLOW_LOOP_LIMIT_DEFAULTS: dict[str, tuple[str, int]] = {
+    "max_loop_iterations": ("EAP_WORKFLOW_MAX_LOOP_ITERATIONS", 100),
+    "max_step_executions": ("EAP_WORKFLOW_MAX_STEP_EXECUTIONS", 2000),
+    "max_run_concurrency": ("EAP_WORKFLOW_MAX_RUN_CONCURRENCY", 8),
+    "max_loop_output_bytes": ("EAP_WORKFLOW_MAX_LOOP_OUTPUT_BYTES", 256 * 1024),
+    "max_loop_state_bytes": ("EAP_WORKFLOW_MAX_LOOP_STATE_BYTES", 16 * 1024),
+}
 DELTA_CHANNEL = "eap_run_deltas"
 # Knowledge base ingest and reindex runs (eap.kb_ingest) have their own queue, so a bulk upload never
 # holds agent-run slots and never sends more than EAP_KB_INGEST_CONCURRENCY embedding workloads at

@@ -12,6 +12,8 @@ RENDERED = {
     "run_started", "model_message", "tool_call", "tool_result", "run_completed", "run_failed",
     "processor_result", "output_retry", "tool_approval_waiting", *TOOL_DECISIONS,
     "step_started", "step_waiting", "step_completed", "step_failed", *STEP_DECISIONS,
+    # Workflow loops (LP.13, D17): iteration frames and the loop-step counters.
+    "loop_iteration_started", "loop_iteration_completed", "loop_iteration_failed",
 }
 
 

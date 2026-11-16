@@ -11,8 +11,11 @@ out. It yields, in order:
 - `Heartbeat` every `heartbeat_interval`;
 - `RunSummary` just before the terminal event, only when the caller passed `load_summary`.
 
-The stream ends right after `run_completed` / `run_failed`, when the run has a terminal status
-and no further events, when the run disappears, or at `max_lifetime`.
+The stream ends on `run_completed` / `run_failed` only once the run row is terminal (those are
+separate commits; the terminal frame is held until the status commit, and is not reordered past
+any earlier durable event; after `terminal_status_grace` it is sent anyway, for a worker that
+died between the two commits), when the run has a terminal status and no further events, when the
+run disappears, or at `max_lifetime`.
 
 Each output format is a `StreamFormatter` (eap_api.streams.formatter) that turns these items into
 frames: the native SSE (eap_api.streams.native_sse) and AG-UI (eap_api.ag_ui). Nothing here knows
@@ -48,6 +51,9 @@ class StreamSettings:
     poll_interval: float = 0.5
     heartbeat_interval: float = 10.0
     max_lifetime: float = 3600.0
+    # How long a terminal event may wait for the terminal run status before it is sent anyway
+    # (a worker that died between the two commits). Normally the status follows within ms.
+    terminal_status_grace: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -182,24 +188,29 @@ class ItemStream:
                 yield Status(run)
                 shown_status = run["display_status"]
                 last_seq = self.after_seq
+                pending_terminal: RunEvent | None = None
+                pending_since = 0.0
                 next_heartbeat = time.monotonic() + settings.heartbeat_interval
 
                 while True:
                     if time.monotonic() >= expires_at:
                         self.end_reason = "expired"
                         return
-                    for event in await asyncio.to_thread(self.load_events, last_seq):
-                        if time.monotonic() >= expires_at:
-                            self.end_reason = "expired"
-                            return
-                        last_seq = event.seq
-                        if event.type in TERMINAL_EVENT_TYPES:
-                            if (item := await summary()) is not None:
-                                yield item
+                    if pending_terminal is None:
+                        for event in await asyncio.to_thread(self.load_events, last_seq):
+                            if time.monotonic() >= expires_at:
+                                self.end_reason = "expired"
+                                return
+                            last_seq = event.seq
+                            if event.type in TERMINAL_EVENT_TYPES:
+                                # The end event and terminal run status are separate commits. Hold
+                                # the public terminal frame until the status commit is visible, so
+                                # a client whose stream has closed can immediately read a terminal
+                                # run row. Store guards guarantee nothing after `end` is visible.
+                                pending_terminal = event
+                                pending_since = time.monotonic()
+                                break
                             yield DurableEvent(event)
-                            self.end_reason = "terminal"
-                            return
-                        yield DurableEvent(event)
                     run = await asyncio.to_thread(self.load_run)
                     if run is None:
                         self.end_reason = "gone"
@@ -207,6 +218,15 @@ class ItemStream:
                     if run["display_status"] != shown_status:
                         shown_status = run["display_status"]
                         yield Status(run)
+                    if pending_terminal is not None and (
+                        run["status"] in TERMINAL_STATUSES
+                        or time.monotonic() - pending_since >= settings.terminal_status_grace
+                    ):
+                        if (item := await summary()) is not None:
+                            yield item
+                        yield DurableEvent(pending_terminal)
+                        self.end_reason = "terminal"
+                        return
                     if run["status"] in TERMINAL_STATUSES:
                         # The worker writes the end event before the terminal status, so one more
                         # read picks up anything written since the read above; then nothing more.
@@ -241,7 +261,11 @@ class ItemStream:
                             )
                         except TimeoutError:
                             continue
-                        yield Delta(delta)
+                        # A held terminal event is the next durable frame. Live deltas that arrive
+                        # while waiting for the status commit stay out of the stream, so they cannot
+                        # land ahead of that event.
+                        if pending_terminal is None:
+                            yield Delta(delta)
             finally:
                 pump_task.cancel()
                 with suppress(asyncio.CancelledError, Exception):

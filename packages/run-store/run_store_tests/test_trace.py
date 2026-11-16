@@ -50,7 +50,7 @@ def _seed(engine, event_log, tenant, run_id, events, usage=None) -> None:
 
 def _finish(engine, run_store, tenant, run_id, status="completed", output="done", seconds=100) -> None:
     run_store.mark_running(tenant, UUID(str(run_id)))
-    run_store.set_status(tenant, UUID(str(run_id)), status, output=output if status == "completed" else None,
+    run_store.finish_with_end(tenant, UUID(str(run_id)), status, output=output if status == "completed" else None,
                          error=None if status == "completed" else "Boom: failed")
     with engine.begin() as conn:
         conn.execute(
@@ -116,7 +116,7 @@ def test_agent_run_with_tools(engine, run_store, event_log, tenant):
     assert totals["model_requests"] == 2 and totals["tool_calls"] == 1
     assert (totals["input_tokens"], totals["output_tokens"], totals["cost_usd"]) == (30, 12, "0.0030000000")
     assert totals["duration_ms"] == 100_000
-    assert trace["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0}
+    assert trace["truncated"] == {"spans": False, "events": False, "child_runs": False, "payload_fields": 0, "iterations": 0}
 
 
 def test_other_tenant_and_unknown_run_are_none(engine, run_store, event_log, tenant):

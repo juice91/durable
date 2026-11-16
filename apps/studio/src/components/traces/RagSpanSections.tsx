@@ -3,7 +3,7 @@
 import React from "react";
 import Link from "next/link";
 import { pageLabel, sourcePages } from "@/components/chat/citations";
-import { formatTokens } from "@/lib/format";
+import { formatScore, formatTokens } from "@/lib/format";
 import { routes } from "@/lib/routes";
 import { isSafeHttpUrl } from "@/lib/safeUrl";
 import type { NameMaps, RetrieveHit, RetrieveKnowledgeBase, SpanKind, TraceSpan } from "@/lib/traces";
@@ -62,10 +62,8 @@ function Count({ label, value, testId }: { label: string; value: unknown; testId
   return n === null ? null : <Row label={label} testId={testId}>{formatTokens(n)}</Row>;
 }
 
-export function formatScore(score: unknown): string {
-  const n = num(score);
-  return n === null ? "-" : n.toFixed(3);
-}
+/** A retrieval hit's score: three decimals (the shared formatScore). */
+const hitScore = (score: unknown) => formatScore(score, 3);
 
 function kbName(id: string | null | undefined, names: NameMaps | undefined): string | null {
   if (!id) return null;
@@ -126,7 +124,7 @@ function RetrieveSection({ span, names }: { span: TraceSpan; names?: NameMaps })
                       )}
                     </span>
                     <span className="shrink-0 font-mono text-xs text-muted-foreground" data-testid="span-retrieve-hit-score">
-                      {formatScore(hit.score)}
+                      {hitScore(hit.score)}
                     </span>
                   </div>
                   <p className="break-all font-mono text-xs text-muted-foreground" data-testid="span-retrieve-hit-meta" data-page={page ?? undefined}>

@@ -118,3 +118,29 @@ def test_kind_kb_ingest_is_accepted(seeded):
     r = client.get("/api/v1/metrics/summary", params={**WINDOW, "kind": "kb_ingest"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["current"]["runs"] == 0
+
+
+def test_workflow_judge_rows_appear_as_judge(pg, tenant_of):
+    """LP.14/LP.16 (loops D15): an evaluate step's judge rows are written with operation `chat` and
+    the key `judge:{S}:{id}:{k}` (`judge:<id>:<k>` at the top level). Metrics derive `judge` from the
+    key prefix: they count under `judge`, never `chat`, in the summary, the breakdown and the
+    `operation=judge` filter."""
+    client, app = pg
+    tenant, h = tenant_of()
+    with app.state.database_engine.begin() as conn:
+        _seed_run(conn, tenant, [
+            ("model:0", "chat", 10, 5, Decimal("0.001")),
+            ("judge:ev:0", "chat", 200, 50, Decimal("0.0004")),
+            ("judge:refine.0:judge:0", "chat", 200, 50, Decimal("0.0004")),
+            ("judge:refine.1:judge:0", "chat", 200, 50, Decimal("0.0004")),
+        ])
+    summary = client.get("/api/v1/metrics/summary", params=WINDOW, headers=h).json()
+    ops = summary["current"]["operations"]
+    assert (ops["judge"]["requests"], ops["judge"]["input_tokens"], ops["judge"]["cost_usd"]) == (
+        3, 600, "0.0012000000"
+    )
+    assert ops["chat"]["requests"] == 1 and ops["chat"]["input_tokens"] == 10
+    items = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "operation"}, headers=h).json()["items"]
+    assert {i["key"]: i["input_tokens"] for i in items} == {"judge": 600, "chat": 10}
+    judged = client.get("/api/v1/metrics/summary", params={**WINDOW, "operation": "judge"}, headers=h).json()
+    assert judged["current"]["requests"] == 3

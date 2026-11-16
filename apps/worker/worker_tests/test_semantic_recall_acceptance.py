@@ -229,7 +229,7 @@ def test_the_current_turn_is_excluded_even_when_already_indexed(api, worker, wor
     for turn_no in (1, 2):
         run_id, created = worker.run_store.create_turn(rt, conv, 1, f"{FACT} {turn_no}", uuid.uuid4())
         assert created
-        worker.run_store.set_status(rt, run_id, "completed", f"noted {turn_no}", None)
+        worker.run_store.finish_with_end(rt, run_id, "completed", f"noted {turn_no}", None)
         user = f"{FACT} {turn_no}"
         store.index_turn(rt, str(agent), conv, str(run_id), [
             TurnText("user", user, hash_embedding(user, 1536)),
@@ -393,7 +393,7 @@ def seed_sibling(api, worker, tenant, agent, *, model: str = "test:hash", dims: 
     conv = new_conv(api, tenant, agent)
     run_id, created = worker.run_store.create_turn(tenant, conv, 1, user, uuid.uuid4())
     assert created
-    worker.run_store.set_status(tenant, run_id, "completed", answer, None)
+    worker.run_store.finish_with_end(tenant, run_id, "completed", answer, None)
     MemoryStore(worker.engine).index_turn(
         tenant, str(agent), conv, str(run_id),
         [TurnText("user", user, hash_embedding(user, dims)), TurnText("assistant", answer, hash_embedding(answer, dims))],

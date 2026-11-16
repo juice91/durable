@@ -675,3 +675,260 @@ def test_structured_stored_messages_hide_the_output_tool_and_rejected_candidates
 
 def test_token_usage_skips_non_chat_rows():
     assert token_usage([{"request_key": "judge:0", "model_id": "openai:j", "input_tokens": 1}]) == []
+
+
+# --------------------------------------------------------------------------- loops (LP.13, D17)
+#
+# These runs follow the per-event D4 layout `workflow_run.py` writes:
+# - a top-level loop step's `step_started/completed` have no `scope` key;
+# - a body step's `step_started/completed/failed` carry `scope: [{loop, index}, ...]`;
+# - `loop_iteration_started|completed|failed` carry `step_id`, the OUTER scope and `index`;
+# - a body agent step's `step_started` has a scoped `child_run_id` (D4). The ChildScope the
+#   workflow merger builds from it still carries only `step_id`/`run_id`, so the translator
+#   remembers each child's instance token at `step_started`.
+#
+# Instance tokens (`each.i~body`) are built by `eap_schemas.workflow_scope.instance_token`, the
+# only source of these strings.
+
+
+def _scope(*frames: tuple[str, int]) -> list[dict[str, Any]]:
+    return [{"loop": loop, "index": index} for loop, index in frames]
+
+
+def _iter_child_uuid(step: str, index: int) -> str:
+    """A distinct child run id per iteration. The AG-UI translator never derives the id itself;
+    it reads it from `step_started.child_run_id` and uses it as a stream key only."""
+    import uuid as _uuid
+    return str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"test:{step}:{index}"))
+
+
+def test_loop_iteration_events_emit_custom_frames_and_bump_counters_on_a_top_level_loop():
+    log = Log()
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("step_started", step_id="each", step_type="foreach"),
+        log.add("loop_iteration_started", step_id="each", scope=[], index=0, item="a"),
+        log.add("loop_iteration_completed", step_id="each", scope=[], index=0, last_key="step:each.0:step:body:completed"),
+        log.add("loop_iteration_started", step_id="each", scope=[], index=1, item="b"),
+        log.add("loop_iteration_completed", step_id="each", scope=[], index=1, last_key="step:each.1:step:body:completed"),
+        log.add("loop_iteration_started", step_id="each", scope=[], index=2, item="c"),
+        log.add("loop_iteration_failed", step_id="each", scope=[], index=2, status="failed", error="boom",
+                error_code="tool_error", failed_step_id="body"),
+        log.add("step_completed", step_id="each", output=[{"v": 1}, {"v": 2}, {"error_code": "tool_error"}]),
+        log.add("run_completed", output=None),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    iterations = [e for e in events if e.get("name") == "pydanticos.loop_iteration"]
+    assert [e["value"] for e in iterations] == [
+        {"step_id": "each", "scope": [], "index": 0, "status": "started"},
+        {"step_id": "each", "scope": [], "index": 0, "status": "completed"},
+        {"step_id": "each", "scope": [], "index": 1, "status": "started"},
+        {"step_id": "each", "scope": [], "index": 1, "status": "completed"},
+        {"step_id": "each", "scope": [], "index": 2, "status": "started"},
+        {"step_id": "each", "scope": [], "index": 2, "status": "failed"},
+    ]
+    # STATE_DELTA writes only touch `/steps/each`, never a body instance.
+    deltas = [op for e in events if e["type"] == "STATE_DELTA" for op in e["delta"]]
+    paths = [op["path"] for op in deltas]
+    assert all(p == "/status" or p.startswith("/steps/each") for p in paths), paths
+    seeded = next(op for op in deltas if op["op"] == "add" and op["path"] == "/steps/each")
+    assert seeded["value"] == {"status": "running", "type": "foreach",
+                               "iterations_started": 0, "iterations_done": 0, "iterations_failed": 0}
+    counters = [op for op in deltas if op["path"].startswith("/steps/each/iterations_")]
+    assert [(op["path"].rsplit("/", 1)[1], op["value"]) for op in counters] == [
+        ("iterations_started", 1), ("iterations_done", 1),
+        ("iterations_started", 2), ("iterations_done", 2),
+        ("iterations_started", 3), ("iterations_failed", 1),
+    ]
+
+
+def test_loop_body_step_names_are_instance_tokens_and_emit_no_state_delta():
+    body_child_0 = _iter_child_uuid("body", 0)
+    body_child_1 = _iter_child_uuid("body", 1)
+    log, c0, c1 = Log(), Log(body_child_0), Log(body_child_1)
+    s0 = ChildScope("body", body_child_0)
+    s1 = ChildScope("body", body_child_1)
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("step_started", step_id="each", step_type="foreach"),
+        log.add("loop_iteration_started", step_id="each", scope=[], index=0, item="a"),
+        log.add("step_started", step_id="body", step_type="agent",
+                child_run_id=body_child_0, scope=_scope(("each", 0))),
+        DurableEvent(c0.add("run_started", input="a").event, s0),
+        DurableEvent(c0.add("model_message", model_request=0, text="r0", message={}).event, s0),
+        DurableEvent(c0.add("run_completed", output="r0").event, s0),
+        log.add("step_completed", step_id="body", output="r0", scope=_scope(("each", 0))),
+        log.add("loop_iteration_completed", step_id="each", scope=[], index=0,
+                last_key="loop:each.0:step:body:completed"),
+        log.add("loop_iteration_started", step_id="each", scope=[], index=1, item="b"),
+        log.add("step_started", step_id="body", step_type="agent",
+                child_run_id=body_child_1, scope=_scope(("each", 1))),
+        DurableEvent(c1.add("run_started", input="b").event, s1),
+        DurableEvent(c1.add("model_message", model_request=0, text="r1", message={}).event, s1),
+        DurableEvent(c1.add("run_completed", output="r1").event, s1),
+        log.add("step_completed", step_id="body", output="r1", scope=_scope(("each", 1))),
+        log.add("loop_iteration_completed", step_id="each", scope=[], index=1,
+                last_key="loop:each.1:step:body:completed"),
+        log.add("step_completed", step_id="each", output=["r0", "r1"]),
+        log.add("run_completed", output=None),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    # STEP_STARTED / STEP_FINISHED pair up by instance token. The loop step itself is still
+    # named by its bare id ("each"), unchanged from today.
+    starts = [e["stepName"] for e in events if e["type"] == "STEP_STARTED"]
+    finishes = [e["stepName"] for e in events if e["type"] == "STEP_FINISHED"]
+    assert starts == ["each", "each.0~body", "each.1~body"]
+    assert finishes == ["each.0~body", "each.1~body", "each"]
+    # Per-instance message ids: distinct per iteration and routed into the all-messages snapshot.
+    msgs = [e["messageId"] for e in events if e["type"] == "TEXT_MESSAGE_START"]
+    assert msgs == ["wrun-1-each.0~body-m0", "wrun-1-each.1~body-m0"]
+    # Body instances emit NO STATE_DELTA — only /steps/each and /status change.
+    delta_paths = [op["path"] for e in events if e["type"] == "STATE_DELTA" for op in e["delta"]]
+    assert all(p == "/status" or p.startswith("/steps/each") for p in delta_paths), delta_paths
+    assert "/steps/body" not in delta_paths
+    # The iteration frames carry the OUTER scope (empty here) and the index.
+    iters = [e["value"] for e in events if e.get("name") == "pydanticos.loop_iteration"]
+    assert [(i["index"], i["status"]) for i in iters] == [
+        (0, "started"), (0, "completed"), (1, "started"), (1, "completed"),
+    ]
+
+
+def test_cancelled_workflow_run_ends_with_cancelled_outcome():
+    log = Log()
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("step_started", step_id="s", step_type="tool"),
+        log.add("step_failed", step_id="s", status="failed", error="cancelled", error_code="run_cancelled"),
+        log.add("run_failed", status="failed", error="the run was cancelled", error_code="run_cancelled"),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    assert events[-1]["type"] == "RUN_FINISHED"
+    assert events[-1]["outcome"] == {"type": "cancelled"}
+    # State records the failed status so the terminal row and the stream agree (D12).
+    final_status = [op for e in events if e["type"] == "STATE_DELTA" for op in e["delta"]
+                    if op["path"] == "/status"][-1]
+    assert final_status["value"] == "failed"
+    # RUN_ERROR is NOT emitted for a cancelled run (D17).
+    assert "RUN_ERROR" not in types(events)
+
+
+def test_cancelled_run_before_any_step_still_closes_cleanly():
+    log = Log()
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("run_failed", status="failed", error="cancel", error_code="run_cancelled"),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    assert events[-1]["outcome"] == {"type": "cancelled"}
+    assert "RUN_ERROR" not in types(events)
+
+
+def test_other_run_failed_codes_still_render_run_error():
+    log = Log()
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("run_failed", status="failed", error="The step failed.", error_code="tool_error"),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    assert events[-1]["type"] == "RUN_ERROR" and events[-1]["code"] == "tool_error"
+
+
+def test_cancel_requested_event_is_silent_on_the_stream():
+    log = Log()
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("cancel_requested", requested_by="u"),
+        log.add("step_started", step_id="s", step_type="tool"),
+        log.add("step_failed", step_id="s", status="failed", error="cancel", error_code="run_cancelled"),
+        log.add("run_failed", status="failed", error="cancel", error_code="run_cancelled"),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    assert "cancel_requested" not in json.dumps(events)
+    assert events[-1]["outcome"] == {"type": "cancelled"}
+
+
+def test_nested_loop_iterations_emit_custom_frames_but_no_state_delta_on_the_inner_loop():
+    log = Log()
+    body_child = _iter_child_uuid("agent", 0)
+    scope_inner = _scope(("outer", 0), ("inner", 0))
+    items = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("step_started", step_id="outer", step_type="loop"),
+        log.add("loop_iteration_started", step_id="outer", scope=[], index=0, state={}),
+        # Inner loop step is a BODY step of the outer loop: emits STEP_STARTED with instance token,
+        # no STATE_DELTA (D17: body instances emit no state updates even when they are loops).
+        log.add("step_started", step_id="inner", step_type="foreach", scope=_scope(("outer", 0))),
+        log.add("loop_iteration_started", step_id="inner", scope=_scope(("outer", 0)), index=0, item="x"),
+        log.add("step_started", step_id="agent", step_type="agent",
+                child_run_id=body_child, scope=scope_inner),
+        log.add("step_completed", step_id="agent", output="y", scope=scope_inner),
+        log.add("loop_iteration_completed", step_id="inner", scope=_scope(("outer", 0)), index=0,
+                last_key="loop:outer.0/inner.0:step:agent:completed"),
+        log.add("step_completed", step_id="inner", output=["y"], scope=_scope(("outer", 0))),
+        log.add("loop_iteration_completed", step_id="outer", scope=[], index=0,
+                last_key="loop:outer.0:step:inner:completed"),
+        log.add("step_completed", step_id="outer", output={"iterations": 1}),
+        log.add("run_completed", output=None),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    starts = [e["stepName"] for e in events if e["type"] == "STEP_STARTED"]
+    # `instance_token` joins scope frames with `~` for AG-UI (one path segment, no `/`).
+    assert starts == ["outer", "outer.0~inner", "outer.0~inner.0~agent"]
+    # STATE_DELTA for the inner loop's iteration is NOT emitted (its outer scope is non-empty).
+    delta_paths = [op["path"] for e in events if e["type"] == "STATE_DELTA" for op in e["delta"]]
+    assert all(p == "/status" or p.startswith("/steps/outer") for p in delta_paths), delta_paths
+    assert "/steps/inner" not in delta_paths
+    # Custom iteration frames are still emitted for the inner loop (clients that care can read
+    # the outer scope and index off the frame itself).
+    iters = [e["value"] for e in events if e.get("name") == "pydanticos.loop_iteration"]
+    assert {(i["step_id"], tuple((f["loop"], f["index"]) for f in i["scope"]), i["index"]) for i in iters} == {
+        ("outer", (), 0),
+        ("inner", (("outer", 0),), 0),
+    }
+
+
+def test_loop_free_workflow_run_stays_byte_identical_to_a_run_without_loops_imported():
+    # Guards the "A spec without loops keeps its exact JSON and its DBOS step sequence" contract
+    # (plan intro). Changing the translator to add loop support must not reshape the frames of a
+    # loop-free run: every TEXT, TOOL and STATE_DELTA frame is the same bytes as before loops.
+    items, _, _ = workflow_log()
+    chunks, _ = drive(wf_ctx(), items)
+    again, _ = drive(wf_ctx(), items)
+    assert chunks == again
+    # No loop_iteration frame leaked into a run that has no loops, and no cancelled outcome.
+    joined = "".join(chunks)
+    assert "pydanticos.loop_iteration" not in joined
+    assert '"type":"cancelled"' not in joined
+
+
+def test_message_ids_of_a_body_agent_child_run_are_per_iteration_distinct():
+    # LP.13 acceptance: a 3-iteration loop with a body agent; message ids are
+    # `{runId}-{L}.{i}~{step}-m{n}` and distinct per iteration.
+    log = Log()
+    body_children = [_iter_child_uuid("triage", i) for i in range(3)]
+    children = [Log(cid) for cid in body_children]
+    scopes = [ChildScope("triage", cid) for cid in body_children]
+    items: list[Any] = [
+        log.add("run_started", kind="workflow", workflow_id="w", input={}),
+        log.add("step_started", step_id="each", step_type="foreach"),
+    ]
+    for i, (child_id, c, s) in enumerate(zip(body_children, children, scopes)):
+        items += [
+            log.add("loop_iteration_started", step_id="each", scope=[], index=i, item=f"t{i}"),
+            log.add("step_started", step_id="triage", step_type="agent",
+                    child_run_id=child_id, scope=_scope(("each", i))),
+            DurableEvent(c.add("run_started", input=f"t{i}").event, s),
+            DurableEvent(c.add("model_message", model_request=0, text=f"r{i}", message={}).event, s),
+            DurableEvent(c.add("run_completed", output=f"r{i}").event, s),
+            log.add("step_completed", step_id="triage", output=f"r{i}", scope=_scope(("each", i))),
+            log.add("loop_iteration_completed", step_id="each", scope=[], index=i,
+                    last_key=f"loop:each.{i}:step:triage:completed"),
+        ]
+    items += [
+        log.add("step_completed", step_id="each", output=[f"r{i}" for i in range(3)]),
+        log.add("run_completed", output=None),
+    ]
+    events = check(drive(wf_ctx(), items)[0])
+    ids = [e["messageId"] for e in events if e["type"] == "TEXT_MESSAGE_START"]
+    assert ids == [f"wrun-1-each.{i}~triage-m0" for i in range(3)]
+    assert len(set(ids)) == len(ids)  # distinct per iteration

@@ -4,9 +4,11 @@ import React from "react";
 import { formatValue } from "@/components/runs/EventTimeline";
 import { NODE_STATE_CLASSES, NODE_STATE_LABELS } from "./WorkflowGraph";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
-import type { StepDetail } from "@/lib/workflowRunState";
+import type { IterationDetail, StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
+import { formatScore } from "@/lib/format";
+import { evaluationView, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
 
 function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
   return (
@@ -17,16 +19,133 @@ function Block({ label, value, testId, format }: { label: string; value: unknown
   );
 }
 
+/** A clipped scroll region that a keyboard can reach and scroll (axe scrollable-region-focusable):
+ * model text (reasons, drafts) can run to thousands of characters. */
+function Scroller({ label, className, testId, children }: { label: string; className: string; testId?: string; children: React.ReactNode }) {
+  return (
+    <div role="region" aria-label={label} tabIndex={0} data-testid={testId} className={`${className} min-w-0 overflow-auto rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring`}>
+      {children}
+    </div>
+  );
+}
+
 /** An agent step's output is an object when its agent has structured output (AC.9), else its text. */
 export function isStructuredAgentOutput(type: string | null | undefined, output: unknown): boolean {
   return type === "agent" && output !== null && typeof output === "object";
 }
 
+function Verdict({ passed, testId }: { passed: boolean | null; testId?: string }) {
+  if (passed === null) return <span data-testid={testId} data-passed="none" className="inline-block rounded border border-border px-1.5 text-badge text-muted-foreground">No verdict</span>;
+  return (
+    <span data-testid={testId} data-passed={passed ? "true" : "false"} className={`inline-block rounded border px-1.5 text-badge ${NODE_STATE_CLASSES[passed ? "completed" : "failed"]}`}>
+      {passed ? "Passed" : "Failed"}
+    </span>
+  );
+}
+
+function resultLabel(r: EvaluationView["results"][number]): string {
+  if (r.skipped) return "Skipped";
+  if (r.errorCode) return `Error (${r.errorCode})`;
+  return r.passed === true ? "Passed" : r.passed === false ? "Failed" : "-";
+}
+
+/** LP.15: an evaluate step's verdict, score, reason and per-evaluator results (plain text, never Markdown). */
+function EvaluationSection({ view }: { view: EvaluationView }) {
+  return (
+    <div data-testid="step-io-evaluation" className="min-w-0 space-y-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Evaluation</h4>
+      <p className="flex flex-wrap items-center gap-2 text-sm">
+        <Verdict passed={view.passed} testId="step-io-evaluation-verdict" />
+        <span className="text-muted-foreground">Score <span data-testid="step-io-evaluation-score" className="font-mono tabular-nums text-foreground">{formatScore(view.score)}</span></span>
+      </p>
+      {view.reason ? (
+        <Scroller label="Evaluation reason" className="max-h-40">
+          <p data-testid="step-io-evaluation-reason" className="whitespace-pre-wrap break-words text-sm text-foreground">{view.reason}</p>
+        </Scroller>
+      ) : null}
+      {view.results.length > 0 ? (
+        <ul aria-label="Evaluator results" className="min-w-0 divide-y divide-border rounded-md border border-border">
+          {view.results.map((r, i) => (
+            <li key={`${r.name}-${i}`} data-testid="step-io-evaluator-result" data-passed={r.passed === null ? "none" : String(r.passed)} data-skipped={r.skipped || undefined} className="min-w-0 space-y-0.5 p-2 text-caption">
+              <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2">
+                <span className="min-w-0 break-words font-mono text-foreground">
+                  {r.name}
+                  {r.kind && r.kind !== r.name ? <span className="text-muted-foreground"> ({r.kind})</span> : null}
+                </span>
+                <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{resultLabel(r)}{r.score !== null ? `, ${formatScore(r.score)}` : ""}</span>
+              </div>
+              {r.reason ? (
+                <Scroller label={`Reason of evaluator ${i + 1} (${r.name})`} className="max-h-24">
+                  <p data-testid="step-io-evaluator-reason" className="whitespace-pre-wrap break-words text-muted-foreground">{r.reason}</p>
+                </Scroller>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function draftText(draft: unknown): string | null {
+  if (draft === undefined) return null;
+  return typeof draft === "string" ? draft : formatValue(draft);
+}
+
+/** LP.15 (loops D15): a refine loop's attempts, one per iteration: the draft, score and reason. */
+export function RefineAttempts({ attempts, evaluateStepId }: { attempts: readonly RefineAttempt[]; evaluateStepId: string }) {
+  return (
+    <div data-testid="step-refine-attempts" className="min-w-0">
+      <h4 className="text-caption font-semibold uppercase tracking-wide text-muted-foreground">Attempts ({attempts.length})</h4>
+      <p className="text-caption text-muted-foreground">Judged by <span className="font-mono">{evaluateStepId}</span>.</p>
+      <Scroller label="Refine attempts" className="mt-1 max-h-96" testId="step-refine-attempts-scroll">
+      <ol aria-label="Refine attempts" className="min-w-0 space-y-2">
+        {attempts.map((a) => {
+          const draft = draftText(a.draft);
+          const ev = a.evaluation;
+          return (
+            <li key={a.scope} data-testid="step-refine-attempt" data-index={a.index} data-passed={ev && ev.passed !== null ? String(ev.passed) : "none"} className="min-w-0 space-y-1 rounded-md border border-border bg-surface p-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 text-caption">
+                <span className="font-medium text-foreground">Attempt {a.index + 1}</span>
+                {ev ? <Verdict passed={ev.passed} /> : <span className={`rounded-sm border px-1 text-badge ${NODE_STATE_CLASSES[a.iterationState]}`}>{a.errorCode ?? NODE_STATE_LABELS[a.iterationState]}</span>}
+                {ev ? <span className="text-muted-foreground">Score <span data-testid="step-refine-attempt-score" className="font-mono tabular-nums text-foreground">{formatScore(ev.score)}</span></span> : null}
+              </div>
+              {draft !== null ? (
+                <Scroller label={`Attempt ${a.index + 1} draft`} className="max-h-40">
+                  <pre data-testid="step-refine-attempt-draft" className="whitespace-pre-wrap break-words rounded-sm bg-muted p-1.5 font-mono text-caption text-foreground">{draft}</pre>
+                </Scroller>
+              ) : null}
+              {ev?.reason ? <p data-testid="step-refine-attempt-reason" className="whitespace-pre-wrap break-words text-caption text-muted-foreground">{ev.reason}</p> : null}
+            </li>
+          );
+        })}
+      </ol>
+      </Scroller>
+    </div>
+  );
+}
+
 const DECISION_LABELS = { approved: "Approved", rejected: "Rejected", timed_out: "Timed out" } as const;
 
-/** Input, output or error of one step, from its step_* events. */
-export function StepIoPanel({ step, detail, onClose, className }: { step: WorkflowStep | null; detail: StepDetail; onClose: () => void; className?: string }) {
+export interface StepIoPanelProps {
+  step: WorkflowStep | null;
+  detail: StepDetail;
+  onClose: () => void;
+  className?: string;
+  /** A loop body step: which iteration this detail is from ("Iteration 3 of each"). */
+  iterationLabel?: string | null;
+  /** Extra sections after the step's own (a loop step's iteration table, LP.12). */
+  children?: React.ReactNode;
+  /** A loop step's iterations (its pager's): a refine loop lists its attempts from them (LP.15). */
+  iterations?: readonly IterationDetail[] | null;
+}
+
+/** Input, output or error of one step, from its step_* events (a body step: of one iteration). */
+export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children, iterations }: StepIoPanelProps) {
   const type = step?.type ?? detail.stepType;
+  const evaluation = type === "evaluate" && detail.hasOutput ? evaluationView(detail.output) : null;
+  const attempts = refineAttempts(step, iterations);
+  const judgedBy = attempts.length > 0 ? refineEvaluateStep(step) : null;
   return (
     <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className={className ?? "min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4"}>
       <div className="flex items-center justify-between gap-2">
@@ -40,6 +159,7 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
         <span data-testid="step-io-state" className={`inline-block rounded border px-2 py-0.5 text-xs ${NODE_STATE_CLASSES[detail.state]}`}>{NODE_STATE_LABELS[detail.state]}</span>
         {detail.startedAt ? <span className="ml-2 text-xs text-muted-foreground">started {formatDateTime(detail.startedAt)}</span> : null}
       </p>
+      {iterationLabel ? <p data-testid="step-io-iteration" className="text-caption text-muted-foreground">{iterationLabel}</p> : null}
       {detail.childRunId ? (
         <p className="text-sm">
           {/* The child run's trace: in place, as the trace Sheet, on a page that hosts one (SL.12). */}
@@ -74,6 +194,14 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
           isStructuredAgentOutput(type, detail.output)
             ? <Block label="Structured output" value={detail.output} testId="step-io-output" format="json" />
             : <Block label="Output" value={detail.output} testId="step-io-output" format="text" />
+        ) : evaluation ? (
+          <>
+            <EvaluationSection view={evaluation} />
+            <details className="text-sm">
+              <summary className="cursor-pointer rounded-sm text-caption text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">Raw output</summary>
+              <div className="mt-1"><Block label="Output" value={detail.output} testId="step-io-output" /></div>
+            </details>
+          </>
         ) : <Block label="Output" value={detail.output} testId="step-io-output" />
       ) : null}
       {detail.unresolvedRefs && detail.unresolvedRefs.length > 0 ? (
@@ -98,9 +226,15 @@ export function StepIoPanel({ step, detail, onClose, className }: { step: Workfl
       {!detail.started && detail.state === "pending" ? <p className="text-sm text-muted-foreground">This step has not started.</p> : null}
       {detail.state === "skipped" ? (
         <p data-testid="step-io-skip-reason" data-skip-reason={detail.skipReason ?? undefined} className="text-sm text-muted-foreground">
-          {detail.skipReason === "run_ended" ? "Not reached: the run ended before this step." : "Skipped: this branch arm was not taken."}
+          {detail.skipReason === "run_ended"
+            ? "Not reached: the run ended before this step."
+            : detail.skipReason === "iteration_ended"
+              ? "Not run in this iteration."
+              : "Skipped: this branch arm was not taken."}
         </p>
       ) : null}
+      {attempts.length > 0 && judgedBy ? <RefineAttempts attempts={attempts} evaluateStepId={judgedBy.id} /> : null}
+      {children}
     </section>
   );
 }

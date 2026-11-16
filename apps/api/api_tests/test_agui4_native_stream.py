@@ -133,7 +133,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         script=lambda: Script(
             [[ev(0, "run_started", {"input": "hi"}), ev(1, "model_message", {"model_request": 0, "text": "yo"}),
               ev(2, "run_completed", {"output": "yo"}), ev(3, "tool_call", {})]],
-            [run_row()],
+            [run_row("completed")],
         ),
         payloads=[],
         settings=StreamSettings(poll_interval=0.5, heartbeat_interval=10.0),
@@ -151,7 +151,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         script=lambda: Script(
             [[ev(0, "run_started"), ev(1, "tool_call", {"tool_call_id": "c1"}), ev(2, "tool_result", {}),
               ev(3, "run_failed", {"error": "boom", "error_code": "x"})]],
-            [run_row()],
+            [run_row("failed")],
         ),
         payloads=[],
         settings=StreamSettings(),
@@ -249,13 +249,33 @@ def native_no_deltas():
 
 
 def test_echo_formatter_sees_typed_items_and_summary_before_the_terminal_event():
-    script = Script([[ev(0, "run_started"), ev(1, "run_completed", {"output": "x"})]], [run_row()])
+    script = Script([[ev(0, "run_started"), ev(1, "run_completed", {"output": "x"})]], [run_row("completed")])
     frames = asyncio.run(_collect(format_stream(_items(script, load_summary=lambda: {"usage": [1]}), EchoFormatter())))
     assert frames == ["start", "Status", "event:0:run_started", "RunSummary", "event:1:run_completed", "finish:terminal"]
 
 
+def test_terminal_event_waits_for_the_terminal_run_status():
+    script = Script(
+        [[ev(0, "run_started"), ev(1, "run_completed", {"output": "x"})]],
+        [run_row(), run_row("completed")],
+    )
+    frames = asyncio.run(_collect(format_stream(_items(script), EchoFormatter())))
+    assert frames == ["start", "Status", "event:0:run_started", "Status", "event:1:run_completed", "finish:terminal"]
+    assert script.run_calls == 2
+
+
+def test_terminal_event_is_sent_after_the_grace_when_the_status_never_turns_terminal():
+    script = Script([[ev(0, "run_started"), ev(1, "run_completed", {"output": "x"})]], [run_row()])
+    settings = StreamSettings(poll_interval=0.01, heartbeat_interval=10.0, terminal_status_grace=0.05)
+    frames = asyncio.run(_collect(format_stream(_items(script, settings=settings), EchoFormatter())))
+    assert frames[-2:] == ["event:1:run_completed", "finish:terminal"]
+
+
 def test_items_carry_typed_fields():
-    script = Script([[], [], [], [ev(0, "run_failed", {"error": "e"})]], [run_row()])
+    script = Script(
+        [[], [], [], [ev(0, "run_failed", {"error": "e"})]],
+        [run_row(), run_row(), run_row(), run_row(), run_row("failed")],
+    )
     seen: list[Any] = []
 
     async def scenario():
@@ -274,7 +294,9 @@ def test_items_carry_typed_fields():
 
 
 def test_resume_frames_replace_start_and_closed_formatter_stops_the_stream():
-    script = Script([[ev(0, "run_started"), ev(1, "tool_call"), ev(2, "run_completed")]], [run_row()])
+    script = Script(
+        [[ev(0, "run_started"), ev(1, "tool_call"), ev(2, "run_completed")]], [run_row("completed")]
+    )
     frames = asyncio.run(_collect(format_stream(_items(script), EchoFormatter(close_after=2), resume_after=-1)))
     assert frames == ["resume:-1", "Status", "event:0:run_started"]  # no finish once closed
 

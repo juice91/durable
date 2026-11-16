@@ -149,7 +149,7 @@ def test_failed_child_with_open_row_does_not_keep_parent_waiting(run_store, even
     _wait_tool(event_log, tenant, child)
     assert run_store.get_run(tenant, wf_run)["display_status"] == "waiting_approval"
 
-    run_store.set_status(tenant, child, "failed", error="boom")
+    run_store.finish_with_end(tenant, child, "failed", error="boom")
     assert _row(engine, tenant, child, "tool", "call_1")["decided_at"] is None  # left open
     assert run_store.get_run(tenant, child)["display_status"] == "failed"
     assert run_store.get_run(tenant, wf_run)["display_status"] == "running"
@@ -193,7 +193,7 @@ def test_decision_without_wait_or_on_ended_run_is_not_waiting(run_store, event_l
     run_id = _running_agent_run(run_store, tenant)
     assert event_log.append_tool_decision(tenant, run_id, "nope", "tool_approved", {}) == ("not_waiting", None)
     _wait_tool(event_log, tenant, run_id)
-    run_store.set_status(tenant, run_id, "failed", error="boom")
+    run_store.finish_with_end(tenant, run_id, "failed", error="boom")
     assert event_log.append_tool_decision(tenant, run_id, "call_1", "tool_approved", {}) == ("not_waiting", None)
     with pytest.raises(ValueError):  # a step type is not a tool decision
         event_log.append_tool_decision(tenant, run_id, "call_1", "step_approved", {})
@@ -346,7 +346,7 @@ def test_inbox_lists_filters_paginates_and_is_tenant_scoped(run_store, event_log
     assert len(approvals.list(tenant, "pending")[0]) == 5
 
     # A run that ended while waiting no longer appears as pending.
-    run_store.set_status(tenant, runs[1], "failed", error="boom")
+    run_store.finish_with_end(tenant, runs[1], "failed", error="boom")
     assert len(approvals.list(tenant, "pending")[0]) == 4
 
     with pytest.raises(InvalidRunCursor):

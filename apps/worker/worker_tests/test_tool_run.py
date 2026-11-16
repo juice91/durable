@@ -128,13 +128,15 @@ def test_worker_clears_an_enqueue_failure_left_on_a_run_dbos_accepted(worker, cl
     assert run["error"] is None
 
 
-def test_mark_running_keeps_any_other_error(worker, tenant):
+def test_mark_running_does_not_revive_a_run_failed_with_another_error(worker, tenant):
+    """Terminal runs stay terminal (loops D12): only a failed hand-off (ENQUEUE_FAILED_ERROR, no
+    `end` event) is revived; a run that failed with any other error stays failed, error kept."""
     run_id = uuid.uuid4()
     worker.run_store.create_tool_run(tenant, "clock.now", "{}", run_id)
-    worker.run_store.set_status(tenant, run_id, "failed", None, "SomeError: kept")
-    worker.run_store.mark_running(tenant, run_id)
+    worker.run_store.finish_with_end(tenant, run_id, "failed", None, "SomeError: kept")
+    assert worker.run_store.mark_running(tenant, run_id) is False
     run = worker.run_store.get_run(tenant, run_id)
-    assert (run["status"], run["error"]) == ("running", "SomeError: kept")
+    assert (run["status"], run["error"]) == ("failed", "SomeError: kept")
 
 
 def test_crash_before_the_end_of_a_rejected_tool_run_keeps_its_error_on_recovery(worker, tenant, crash_schema, tmp_path):

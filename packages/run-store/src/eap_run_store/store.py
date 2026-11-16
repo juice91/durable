@@ -1,5 +1,6 @@
 """Postgres store for durable runs and event logging."""
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from dataclasses import dataclass
@@ -46,7 +47,9 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 
-from eap_schemas import RunEvent, RunEventType
+from eap_schemas import LOOP_ERROR_MESSAGES, RunEvent, RunEventType, status_for_end
+
+log = logging.getLogger(__name__)
 
 log = logging.getLogger("eap_run_store")
 
@@ -430,6 +433,21 @@ def _run_event_from_model(model: ExecutionEventModel) -> RunEvent:
     )
 
 
+class ParentRunStopped(Exception):
+    """A child run was not created: its parent run has ended (`end`) or its cancel was requested
+    (`cancel`) (loops D12). Pickle-safe (raised inside DBOS steps)."""
+
+    def __init__(self, tenant_id: str, parent_run_id: str, reason: str):
+        super().__init__(tenant_id, parent_run_id, reason)
+        self.tenant_id = tenant_id
+        self.parent_run_id = parent_run_id
+        self.reason = reason
+
+    def __str__(self) -> str:
+        what = "has ended" if self.reason == "end" else "is being cancelled"
+        return f"parent run {self.parent_run_id} {what}: no child run is created"
+
+
 @dataclass(frozen=True)
 class OrderedEvent:
     """An event with its position in its root run's commit order (EventLog.list_root_events)."""
@@ -762,6 +780,64 @@ def _totals_values(tenant_id: str, run_id: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------- terminal guards (loops D12)
+
+
+# The one event key that ends a run. Once it exists the run's status follows it (status_for_end)
+# and no other event is appended, except the post-turn ones below.
+END_EVENT_KEY = "end"
+
+# Events a completed conversation turn's post-turn steps append after its `end` (RM.13
+# observational memory, RM.14 semantic-recall indexing, their `:failed` events, and the P1.C1
+# `post_turn_done` marker at `memory:post_turn:{turn}`). They describe work done after the answer,
+# never change the status, and stay allowed after `end`.
+POST_END_EVENT_KEY_PREFIXES = ("memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:")
+
+# The key of the cancel request (`cancel_requested`, written by POST /runs/{id}/cancel).
+CANCEL_EVENT_KEY = "cancel"
+
+
+def _lock_run(session, tenant_id: str, run_id: UUID | str) -> Any:
+    """Lock the tenant's run row (the lock event appends take) and return (id, status, error), or
+    None when it is unknown or another tenant's."""
+    return session.execute(
+        text("SELECT id, status, error FROM runs WHERE id = :run_id AND tenant_id = :tenant_id FOR UPDATE"),
+        {"run_id": str(run_id), "tenant_id": tenant_id},
+    ).fetchone()
+
+
+def _end_event(session, tenant_id: str, run_id: UUID | str) -> "ExecutionEventModel | None":
+    return session.execute(
+        select(ExecutionEventModel).where(
+            ExecutionEventModel.tenant_id == tenant_id,
+            ExecutionEventModel.run_id == str(run_id),
+            ExecutionEventModel.event_key == END_EVENT_KEY,
+        )
+    ).scalar_one_or_none()
+
+
+def _has_end(tenant_id: str, run_id: UUID | str) -> Any:
+    """SQL: the run has its `end` event."""
+    return (
+        select(ExecutionEventModel.seq)
+        .where(
+            ExecutionEventModel.tenant_id == tenant_id,
+            ExecutionEventModel.run_id == str(run_id),
+            ExecutionEventModel.event_key == END_EVENT_KEY,
+        )
+        .exists()
+    )
+
+
+def _revivable(tenant_id: str, run_id: UUID | str) -> Any:
+    """SQL: mark_running may move the run to `running`: it is not terminal, or it is a failed
+    hand-off (failed with ENQUEUE_FAILED_ERROR) without an `end` event."""
+    return or_(
+        RunModel.status.not_in(sorted(TERMINAL_RUN_STATUSES)),
+        (RunModel.status == "failed") & (RunModel.error == ENQUEUE_FAILED_ERROR) & ~_has_end(tenant_id, run_id),
+    )
+
+
 def insert_usage_in_session(session, tenant_id: str, run_id: UUID | str, usage: dict[str, Any], at: datetime | None = None) -> None:
     """Insert one `run_model_requests` row (first write wins per request key) inside the caller's
     session, then, if the run is already finished (`finished_at` set: a post-turn step such as the
@@ -797,6 +873,161 @@ def _run_option_values(
         "model_id": model_id,
         "model_overridden": bool(model_overridden),
     }
+
+
+# The run_failed data and runs.error of a run ended by cancel_run_tree (eap_schemas
+# LOOP_ERROR_MESSAGES["run_cancelled"]; the `ErrorType: message` form of every runs.error).
+RUN_CANCELLED_CODE = "run_cancelled"
+RUN_CANCELLED_ERROR = f"RunCancelled: {LOOP_ERROR_MESSAGES[RUN_CANCELLED_CODE]}"
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    """What cancel_run_tree did. `status`: the root run's status afterwards. `statuses`: every
+    run of the tree with its status afterwards. `ended`: the runs whose `end` this call wrote
+    (empty on a repeated call). `approvals_closed`: open pending_approvals rows closed."""
+
+    run_id: str
+    status: str
+    statuses: dict[str, str]
+    ended: tuple[str, ...]
+    approvals_closed: int
+
+
+def _cancel_one_in_session(session, tenant_id: str, run_id: str) -> tuple[str | None, bool]:
+    """cancel_run_tree's work for one run, in the caller's transaction: (status afterwards, whether
+    `end` was written here). (None, False) if the run vanished meanwhile."""
+    current = _lock_run(session, tenant_id, run_id)
+    if current is None:
+        return None, False
+    end = _end_event(session, tenant_id, run_id)
+    if end is not None:
+        expected = status_for_end(end.type, end.data)
+        if current.status in TERMINAL_RUN_STATUSES:
+            return current.status, False
+        data = end.data or {}
+        values: dict[str, Any] = {"status": expected, "updated_at": datetime.now(timezone.utc)}
+        if end.type == "run_completed" and isinstance(data.get("output"), str):
+            values["output"] = data["output"]
+            if "output_json" in data:
+                values["output_format"] = "json"
+        if end.type == "run_failed" and isinstance(data.get("error"), str):
+            values["error"] = data["error"]
+        values.update(_finish_values(tenant_id, run_id, expected))
+        session.execute(
+            update(RunModel)
+            .where(RunModel.id == run_id, RunModel.tenant_id == tenant_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        return expected, False
+    if current.status in TERMINAL_RUN_STATUSES:
+        # Terminal without `end`: a failed hand-off (mark_enqueue_failed), or a row written before
+        # the guards. Finalise it with an `end` matching its status, so it can never be revived
+        # (mark_running, requeue_after_enqueue_failure) and the reconciler stops listing it.
+        if current.status == "completed":
+            output = session.execute(
+                select(RunModel.output).where(RunModel.id == run_id, RunModel.tenant_id == tenant_id)
+            ).scalar_one()
+            append_event_in_session(session, tenant_id, run_id, END_EVENT_KEY, "run_completed", {"output": output})
+            return current.status, True
+        append_event_in_session(
+            session, tenant_id, run_id, END_EVENT_KEY, "run_failed",
+            {"status": current.status, "error": RUN_CANCELLED_ERROR, "error_code": RUN_CANCELLED_CODE},
+        )
+        session.execute(
+            update(RunModel)
+            .where(RunModel.id == run_id, RunModel.tenant_id == tenant_id)
+            .values(error=RUN_CANCELLED_ERROR, updated_at=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        )
+        return current.status, True
+    reserved = session.execute(
+        select(SideEffectModel.key)
+        .where(
+            SideEffectModel.tenant_id == tenant_id,
+            SideEffectModel.key.startswith(f"{run_id}:", autoescape=True),
+            SideEffectModel.state == "reserved",
+        )
+        .limit(1)
+    ).first()
+    status = "needs_attention" if reserved is not None else "failed"
+    append_event_in_session(
+        session, tenant_id, run_id, END_EVENT_KEY, "run_failed",
+        {"status": status, "error": RUN_CANCELLED_ERROR, "error_code": RUN_CANCELLED_CODE},
+    )
+    session.execute(
+        update(RunModel)
+        .where(RunModel.id == run_id, RunModel.tenant_id == tenant_id)
+        .values(
+            status=status, error=RUN_CANCELLED_ERROR, updated_at=datetime.now(timezone.utc),
+            **_finish_values(tenant_id, run_id, status),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return status, True
+
+
+def _write_status_in_session(
+    session,
+    tenant_id: str,
+    run_id: UUID | str,
+    status: str,
+    output: str | None,
+    error: str | None,
+    messages: list[Any] | None,
+    output_format: str | None,
+) -> bool:
+    """set_status's work in the caller's transaction (see RunStore.set_status for the rules)."""
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    if output_format is not None and output_format not in RUN_OUTPUT_FORMATS:
+        raise ValueError(f"output_format must be one of {RUN_OUTPUT_FORMATS}")
+    terminal = status in TERMINAL_RUN_STATUSES
+    current = _lock_run(session, tenant_id, run_id)
+    if current is None:
+        raise RunNotFound(tenant_id, run_id)
+    where = (RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+    refused = None
+    if current.status in TERMINAL_RUN_STATUSES and not terminal:
+        refused = "the run is terminal"
+    else:
+        end = _end_event(session, tenant_id, run_id)
+        if end is not None:
+            expected = status_for_end(end.type, end.data)
+            if status != expected:
+                refused = f"the end event fixes status {expected}"
+            elif current.status in TERMINAL_RUN_STATUSES:
+                # A matching finish after cancel_run_tree set the status from this end: fill only
+                # what is still missing, never the status, error, finished_at or totals.
+                fill: dict[str, Any] = {}
+                if messages is not None:
+                    fill["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+                if output is not None:
+                    fill["output"] = func.coalesce(RunModel.output, output)
+                if output_format is not None:
+                    fill["output_format"] = func.coalesce(RunModel.output_format, output_format)
+                if fill:
+                    session.execute(update(RunModel).where(*where).values(**fill).execution_options(synchronize_session=False))
+                refused = "the run is already terminal"
+        elif terminal:
+            refused = "a terminal status needs the run's end event"
+    if refused is not None:
+        log.debug("run %s: set_status(%s) refused: %s", run_id, status, refused)
+        return False
+    values: dict[str, Any] = {"status": status, "updated_at": datetime.now(timezone.utc)}
+    if output is not None:
+        values["output"] = output
+    if error is not None:
+        values["error"] = error
+    if messages is not None:
+        values["messages"] = func.coalesce(RunModel.messages, func.cast(_json_param(messages), JSONB))
+    if output_format is not None:
+        values["output_format"] = output_format
+    if terminal:
+        values.update(_finish_values(tenant_id, str(run_id), status))
+    session.execute(update(RunModel).where(*where).values(**values).execution_options(synchronize_session=False))
+    return True
 
 
 class RunStore:
@@ -1030,6 +1261,28 @@ class RunStore:
         if not tenant_id:
             raise ValueError("tenant_id is required")
         with self.Session() as session:
+            parent_run_id = values.get("parent_run_id")
+            if parent_run_id is not None:
+                # A child run is created under its parent's row lock (the lock cancel_run_tree and
+                # event appends take) and refused once the parent has ended or its cancel was
+                # requested (loops D12): a child created after cancel_run_tree's tree snapshot would
+                # otherwise stay queued forever. A child row that already exists (a replayed step)
+                # is returned as before.
+                _lock_run(session, tenant_id, parent_run_id)
+                existing = session.execute(
+                    select(RunModel.id, RunModel.tenant_id).where(RunModel.id == str(run_id))
+                ).first()
+                if existing is None:
+                    stopped = session.execute(
+                        select(ExecutionEventModel.event_key).where(
+                            ExecutionEventModel.tenant_id == tenant_id,
+                            ExecutionEventModel.run_id == str(parent_run_id),
+                            ExecutionEventModel.event_key.in_([END_EVENT_KEY, CANCEL_EVENT_KEY]),
+                        ).limit(1)
+                    ).first()
+                    if stopped is not None:
+                        session.rollback()
+                        raise ParentRunStopped(tenant_id, str(parent_run_id), stopped[0])
             # INSERT ... ON CONFLICT DO NOTHING ... RETURNING: atomic against a concurrent retry.
             stmt = (
                 insert(RunModel)
@@ -1060,7 +1313,7 @@ class RunStore:
         error: str | None = None,
         messages: list[Any] | None = None,
         output_format: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Update run status and optionally output, error or messages, only for a run owned by `tenant_id`.
 
         `output_format` (AC.4) is `json` when `output` is a structured output's canonical JSON text
@@ -1070,16 +1323,73 @@ class RunStore:
         so the history later turns read never changes after it was first recorded.
         A terminal status (completed, failed, needs_attention) also sets `finished_at` and the usage
         totals in the same statement (see _finish_values).
+
+        Terminal guards (loops D12), checked under the run-row lock (the lock event appends and
+        cancel_run_tree take):
+        - a non-terminal status is never written over a terminal one;
+        - a terminal status needs the run's `end` event, and must equal `status_for_end(end)`
+          (write both at once with finish_with_end). The one terminal write without `end` is the
+          failed hand-off, mark_enqueue_failed;
+        - a run that already has its terminal status is left unchanged (a re-executed finish
+          step), except that a matching finish fills `messages`, `output` and `output_format`
+          where they are still NULL: cancel_run_tree may have set the status from the `end` the
+          worker wrote before its finish ran, and that finish's messages must not be lost.
+        Returns True when the status was written, False when it was refused (nothing changes,
+        apart from that fill).
         Raises RunNotFound (and changes nothing) if the run does not exist or belongs to another tenant.
         """
-        self._update_owned(
-            tenant_id, run_id, _status_values(tenant_id, run_id, status, output, error, messages, output_format)
-        )
+        with self.Session() as session:
+            written = _write_status_in_session(
+                session, tenant_id, run_id, status, output, error, messages, output_format
+            )
+            session.commit()
+            return written
+
+    def finish_with_end(
+        self,
+        tenant_id: str,
+        run_id: UUID,
+        status: str,
+        output: str | None = None,
+        error: str | None = None,
+        messages: list[Any] | None = None,
+        output_format: str | None = None,
+        *,
+        end_data: dict[str, Any] | None = None,
+    ) -> bool:
+        """Write a run's `end` event and its terminal status in ONE transaction (loops D12). If the
+        run has no `end` yet, it appends `run_completed {output}` for `completed`, else
+        `run_failed {status, error}`, each merged with `end_data`; then the status is written
+        under set_status's rules (so an existing `end` that fixes another status wins and this
+        returns False). ValueError for a non-terminal status; RunNotFound as set_status."""
+        if status not in TERMINAL_RUN_STATUSES:
+            raise ValueError(f"finish_with_end needs a terminal status, not {status!r}")
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        with self.Session() as session:
+            if _lock_run(session, tenant_id, run_id) is None:
+                session.rollback()
+                raise RunNotFound(tenant_id, run_id)
+            if _end_event(session, tenant_id, run_id) is None:
+                if status == "completed":
+                    data: dict[str, Any] = {"output": output}
+                    end_type = "run_completed"
+                else:
+                    data = {"status": status, "error": error}
+                    end_type = "run_failed"
+                append_event_in_session(
+                    session, tenant_id, run_id, END_EVENT_KEY, end_type, {**data, **(end_data or {})}
+                )
+            written = _write_status_in_session(
+                session, tenant_id, run_id, status, output, error, messages, output_format
+            )
+            session.commit()
+            return written
 
     def mark_enqueue_failed(self, tenant_id: str, run_id: UUID) -> bool:
         """The run could not be handed to the orchestrator: queued -> failed (ENQUEUE_FAILED_ERROR).
 
-        Only a run still `queued` changes, so a workflow that did start (an enqueue that raised
+        Only a run still `queued` changes (so never a terminal run, loops D12), so a workflow that did start (an enqueue that raised
         after DBOS accepted it) is never overwritten. Returns whether the row changed.
 
         Like any terminal status it sets `finished_at` and the usage totals (zero: no model request
@@ -1156,9 +1466,20 @@ class RunStore:
                 if later is not None:
                     session.rollback()
                     return False
-            session.execute(
-                update(RunModel).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id).values(**values)
-            )
+            # Terminal-sticky (loops D12): a terminal run is never revived, except the failed
+            # hand-off above (failed with ENQUEUE_FAILED_ERROR and no `end` event: DBOS accepted the
+            # enqueue that raised, so this workflow is the run's only execution). One conditional
+            # UPDATE, so a concurrent cancel_run_tree or finish is never overwritten.
+            started = session.execute(
+                update(RunModel)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, _revivable(tenant_id, run_id))
+                .values(**values)
+                .returning(RunModel.id)
+            ).fetchone()
+            if started is None:
+                session.rollback()
+                log.debug("run %s: mark_running refused: the run is terminal", run_id)
+                return False
             session.commit()
             return True
 
@@ -1171,7 +1492,10 @@ class RunStore:
         the row changed."""
         if not tenant_id:
             raise ValueError("tenant_id is required")
-        failed_handoff = (RunModel.status == "failed") & (RunModel.error == ENQUEUE_FAILED_ERROR)
+        # Never once the run has its `end` (loops D12: e.g. a cancelled failed hand-off).
+        failed_handoff = (
+            (RunModel.status == "failed") & (RunModel.error == ENQUEUE_FAILED_ERROR) & ~_has_end(tenant_id, run_id)
+        )
         with self.Session() as session:
             run = session.execute(
                 select(RunModel.conversation_id, RunModel.turn)
@@ -1218,38 +1542,180 @@ class RunStore:
             session.commit()
             return updated is not None
 
-    def heartbeat(self, tenant_id: str, run_id: UUID) -> None:
-        """Update the heartbeat timestamp for a run owned by `tenant_id` (RunNotFound otherwise)."""
-        self._update_owned(tenant_id, run_id, {"heartbeat_at": datetime.now(timezone.utc)})
+    def heartbeat(self, tenant_id: str, run_id: UUID) -> bool:
+        """Update the heartbeat timestamp for a run owned by `tenant_id` (RunNotFound otherwise).
 
-    def _update_owned(self, tenant_id: str, run_id: UUID, values: dict[str, Any]) -> None:
+        Only while the run is not terminal (loops D12): a heartbeat that lands after the run ended
+        (or was cancelled) changes nothing and returns False; True when the row changed."""
         if not tenant_id:
             raise ValueError("tenant_id is required")
         with self.Session() as session:
             updated = session.execute(
                 update(RunModel)
-                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
-                .values(**values)
+                .where(
+                    RunModel.id == str(run_id),
+                    RunModel.tenant_id == tenant_id,
+                    RunModel.status.not_in(sorted(TERMINAL_RUN_STATUSES)),
+                )
+                .values(heartbeat_at=datetime.now(timezone.utc))
                 .returning(RunModel.id)
             ).fetchone()
             if updated is None:
+                owned = session.execute(
+                    select(RunModel.id).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+                ).first()
                 session.rollback()
-                raise RunNotFound(tenant_id, run_id)
+                if owned is None:
+                    raise RunNotFound(tenant_id, run_id)
+                return False
             session.commit()
+            return True
+
+    # ------------------------------------------------------------------ cancellation (loops D12)
+
+    def cancel_run_tree(self, tenant_id: str, run_id: UUID | str) -> "CancelResult":
+        """The guarded terminal write of a cancel (D12 step 3), after the DBOS cascade. Idempotent.
+
+        One transaction per run of the tree (the run, then its descendants by `parent_run_id`,
+        breadth first), each under that run's row lock:
+        - no `end` and not terminal: appends `end` run_failed `{status, error, error_code:
+          "run_cancelled"}` and sets that status, `failed`, or `needs_attention` when one of the
+          run's side effects (`{run_id}:...`) is still `reserved` (its outcome is unknown);
+        - `end` exists: sets the status `status_for_end(end)` when the run is not terminal yet (the
+          worker was cut off between its `end` and finish_run), with the end's output or error;
+        - otherwise (already terminal) nothing changes, so a run that ended on its own keeps its
+          end. A terminal run without `end` (a failed hand-off) is left as it is.
+        Then one transaction closes the tree's open pending_approvals rows (by `root_run_id`, and
+        any row of a run in the tree; approvals.close_open_for_tree_in_session).
+
+        Returns a CancelResult. Raises RunNotFound (nothing changed) for an unknown run or another
+        tenant's."""
+        from eap_run_store import approvals
+
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        root = str(run_id)
+        tree = self._run_tree_ids(tenant_id, root)
+        if not tree:
+            raise RunNotFound(tenant_id, run_id)
+        statuses: dict[str, str] = {}
+        ended: list[str] = []
+        for member in tree:
+            with self.Session() as session:
+                status, wrote_end = _cancel_one_in_session(session, tenant_id, member)
+                session.commit()
+            if status is not None:
+                statuses[member] = status
+            if wrote_end:
+                ended.append(member)
+        with self.Session() as session:
+            closed = approvals.close_open_for_tree_in_session(
+                session, tenant_id=tenant_id, root_run_id=root, run_ids=list(tree),
+                decided_at=datetime.now(timezone.utc),
+            )
+            session.commit()
+        return CancelResult(
+            run_id=root, status=statuses.get(root, ""), statuses=statuses, ended=tuple(ended),
+            approvals_closed=closed,
+        )
+
+    def _run_tree_ids(self, tenant_id: str, run_id: str) -> list[str]:
+        """The run and its descendants (by parent_run_id, same tenant), root first, then breadth
+        first in creation order. Empty when the run is unknown or another tenant's."""
+        with self.Session() as session:
+            rows = session.execute(
+                text(
+                    "WITH RECURSIVE tree(id, depth, created_at) AS ("
+                    " SELECT id, 0, created_at FROM runs WHERE tenant_id = :t AND id = :r"
+                    " UNION ALL"
+                    " SELECT c.id, tree.depth + 1, c.created_at FROM runs c JOIN tree ON c.parent_run_id = tree.id"
+                    " WHERE c.tenant_id = :t AND tree.depth < 16"
+                    ") SELECT id FROM tree ORDER BY depth, created_at, id"
+                ),
+                {"t": tenant_id, "r": run_id},
+            ).scalars().all()
+        return list(dict.fromkeys(rows))
+
+    def find_unfinished_cancels(
+        self, older_than: timedelta = timedelta(seconds=30), limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Cancelled workflow runs the reconciler (D12 step 4) must still finish, across tenants,
+        oldest request first: `[{tenant_id, run_id, requested_at}]`, at most `limit`.
+
+        A run is listed when its cancel was requested more than `older_than` ago and it is not
+        final yet: it has no `end` event, or one of its child runs has none (a backstop for a child
+        created around the cancel; child creation is refused once `cancel` exists). cancel_run_tree
+        writes an `end` for every run of the tree, including a terminal one without `end` (a failed
+        hand-off), so a run leaves this list after one reconcile and never starves newer cancels.
+
+        Index: the filter `event_key = 'cancel'` across tenants has no index of its own (the
+        `(tenant_id, type, ts)` index leads with the tenant, and Postgres 17 has no skip scan); a
+        partial index on `execution_events (ts) WHERE event_key = 'cancel'` needs a migration."""
+        cutoff = datetime.now(timezone.utc) - older_than
+        ended = aliased(ExecutionEventModel)
+        child = aliased(RunModel)
+        child_end = aliased(ExecutionEventModel)
+        cancel = ExecutionEventModel
+        has_end = select(ended.seq).where(ended.run_id == RunModel.id, ended.event_key == END_EVENT_KEY).exists()
+        unfinished_child = (
+            select(child.id)
+            .where(
+                child.tenant_id == RunModel.tenant_id,
+                child.parent_run_id == RunModel.id,
+                ~select(child_end.seq)
+                .where(child_end.run_id == child.id, child_end.event_key == END_EVENT_KEY)
+                .exists(),
+            )
+            .exists()
+        )
+        with self.Session() as session:
+            rows = session.execute(
+                select(RunModel.tenant_id, RunModel.id, cancel.ts)
+                .join(cancel, (cancel.tenant_id == RunModel.tenant_id) & (cancel.run_id == RunModel.id))
+                .where(
+                    RunModel.kind == "workflow",
+                    cancel.event_key == CANCEL_EVENT_KEY,
+                    cancel.type == "cancel_requested",
+                    cancel.ts < cutoff,
+                    or_(~has_end, unfinished_child),
+                )
+                .order_by(cancel.ts, RunModel.id)
+                .limit(limit)
+            ).all()
+        return [{"tenant_id": r[0], "run_id": r[1], "requested_at": r[2]} for r in rows]
+
+    def run_tree_cost(self, tenant_id: str, run_id: UUID | str) -> Decimal:
+        """The cost so far of the run and all its descendants (child runs by `parent_run_id`, and
+        theirs, up to depth 16): AC.5's recorded cost (`recorded_cost_usd`, what `eap.check_budget`
+        compares to a cap) summed over the tree, so a loop's cost and a run's budget can't disagree.
+        It includes the run's own rows such as judge requests (`judge:` keys). Tenant-scoped.
+        Unpriced requests (NULL cost) count as 0. Decimal 0 for a run without requests, an unknown
+        run or another tenant's. One statement (the recursive CTE on ix_runs_parent_run joined to
+        the SUM on the run_model_requests PK), so the loop tick costs one round trip and no bind
+        list of run ids; the same quantity as `_recorded_cost_in_session` over the tree's ids."""
+        with self.Session() as session:
+            total = session.execute(
+                text(
+                    "WITH RECURSIVE tree(id, depth) AS ("
+                    " SELECT id, 0 FROM runs WHERE tenant_id = :t AND id = :r"
+                    " UNION ALL"
+                    " SELECT c.id, tree.depth + 1 FROM runs c JOIN tree ON c.parent_run_id = tree.id"
+                    " WHERE c.tenant_id = :t AND tree.depth < 16"
+                    ") SELECT COALESCE(SUM(m.cost_usd), 0) FROM tree"
+                    " JOIN run_model_requests m ON m.run_id = tree.id AND m.tenant_id = :t"
+                ),
+                {"t": tenant_id, "r": str(run_id)},
+            ).scalar_one()
+            return Decimal(total)
 
     def recorded_cost_usd(self, tenant_id: str, run_id: UUID | str) -> Decimal:
         """The sum of `cost_usd` over the run's own `run_model_requests` rows recorded so far
         (AC.5 `eap.check_budget`): chat requests, failed fallback attempts that billed, moderation
         and embedding rows alike; an unpriced row counts as 0. Another tenant's run, or a run
-        without rows, gives 0. Never the child runs' rows (a cap is per run)."""
+        without rows, gives 0. Never the child runs' rows (a cap is per run; run_tree_cost sums
+        the same quantity over a run tree)."""
         with self.Session() as session:
-            total = session.execute(
-                select(func.coalesce(func.sum(RunModelRequestModel.cost_usd), 0)).where(
-                    RunModelRequestModel.tenant_id == tenant_id,
-                    RunModelRequestModel.run_id == str(run_id),
-                )
-            ).scalar_one()
-            return Decimal(total)
+            return _recorded_cost_in_session(session, tenant_id, [str(run_id)])
 
     def get_run(self, tenant_id: str, run_id: UUID) -> dict | None:
         """Get a run by ID. Returns None if not found or belongs to another tenant.
@@ -1766,6 +2232,58 @@ class RunStore:
             ]
 
 
+def _recorded_cost_in_session(session, tenant_id: str, run_ids: list[str]) -> Decimal:
+    """AC.5's recorded cost of these runs: SUM(`run_model_requests.cost_usd`) over their rows,
+    every operation and failed attempt included, NULL (unpriced) rows counting as 0; Decimal 0
+    without rows. The one definition behind recorded_cost_usd (`eap.check_budget`) and
+    run_tree_cost."""
+    if not run_ids:
+        return Decimal(0)
+    total = session.execute(
+        select(func.coalesce(func.sum(RunModelRequestModel.cost_usd), 0)).where(
+            RunModelRequestModel.tenant_id == tenant_id,
+            RunModelRequestModel.run_id.in_(run_ids),
+        )
+    ).scalar_one()
+    return Decimal(total)
+
+
+class AppendResult(tuple):
+    """What an event append returns: the `(event, created)` pair every caller unpacks, plus
+    `dropped` (loops D12).
+
+    - created: `(new event, True)`;
+    - exists: the key was already written, `(that event, False)`;
+    - dropped: the run already has its `end` event and the key is neither `end` nor a post-turn
+      key (POST_END_EVENT_KEY_PREFIXES). Nothing is written and no `seq` is consumed; `event` is
+      the run's `end` event, `created` is False and `dropped` is True. A usage row passed with the
+      event IS still written (the provider charged).
+    """
+
+    dropped: bool
+
+    def __new__(cls, event: RunEvent, created: bool, dropped: bool = False) -> "AppendResult":
+        result = super().__new__(cls, (event, created))
+        result.dropped = dropped
+        return result
+
+    def __getnewargs__(self) -> tuple[Any, ...]:
+        return (self[0], self[1], self.dropped)
+
+    @property
+    def event(self) -> RunEvent:
+        return self[0]
+
+    @property
+    def created(self) -> bool:
+        return self[1]
+
+    @property
+    def outcome(self) -> str:
+        """`created`, `exists` or `dropped`."""
+        return "dropped" if self.dropped else ("created" if self[1] else "exists")
+
+
 @dataclass(frozen=True)
 class LockedRun:
     """A run locked for an append: its status, and its root (itself when it has no parent)."""
@@ -1829,12 +2347,14 @@ def append_event_in_session(
     type: RunEventType | str,
     data: dict | None = None,
     usage: dict[str, Any] | list[dict[str, Any]] | None = None,
-) -> tuple[RunEvent, bool]:
+) -> AppendResult:
     """EventLog.append's work inside the caller's open ORM session, which commits it: a store that
     must write its own rows, an event and a usage row in one transaction (KnowledgeStore) uses this.
-    Same rules as EventLog.append (seq under the runs row lock, repeated key = no write).
+    Same rules as EventLog.append (seq under the runs row lock, repeated key = no write, nothing
+    but `end` and post-turn keys after `end`: AppendResult).
     `usage` is one row or a list of rows (AC.5: a model request answered by a fallback model plus
-    its failed attempts that reported usage), all written in the event's transaction.
+    its failed attempts that reported usage), all written in the event's transaction, also when
+    the event itself is dropped after `end`.
     A usage row inserted on a FINISHED run also refreshes the run's totals (insert_usage_in_session).
     Raises RunNotFound if the run does not exist or belongs to another tenant; the caller rolls back."""
     if not tenant_id:
@@ -1853,7 +2373,17 @@ def append_event_in_session(
     ).scalar_one_or_none()
     if existing_event is not None:
         # Event already exists, return it without consuming seq
-        return _run_event_from_model(existing_event), False
+        return AppendResult(_run_event_from_model(existing_event), False)
+
+    if event_key != END_EVENT_KEY and not event_key.startswith(POST_END_EVENT_KEY_PREFIXES):
+        end = _end_event(session, tenant_id, run_id)
+        if end is not None:
+            # Terminal runs stay terminal (loops D12): a step that finished after the run ended
+            # (e.g. after a cancel) appends nothing, and seq stays gap-free. Its cost is real.
+            log.debug("run %s: event %s dropped: the run has ended", run_id, event_key)
+            for row in usage_rows(usage):
+                insert_usage_in_session(session, tenant_id, run_id, row)
+            return AppendResult(_run_event_from_model(end), False, dropped=True)
 
     new_seq = session.execute(
         text("SELECT COALESCE(MAX(seq), -1) FROM execution_events WHERE run_id = :run_id"),
@@ -1874,7 +2404,7 @@ def append_event_in_session(
     for row in usage_rows(usage):
         # A usage row on a finished run (post-turn steps) also refreshes the run's totals.
         insert_usage_in_session(session, tenant_id, run_id, row, event_model.ts)
-    return _run_event_from_model(event_model), True
+    return AppendResult(_run_event_from_model(event_model), True)
 
 
 def usage_rows(usage: dict[str, Any] | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -1901,11 +2431,15 @@ class EventLog:
         type: RunEventType,
         data: dict | None = None,
         usage: dict[str, Any] | list[dict[str, Any]] | None = None,
-    ) -> tuple[RunEvent, bool]:
+    ) -> AppendResult:
         """Append an event to a run owned by `tenant_id`. Seq is assigned atomically.
 
-        Returns (RunEvent, created: bool) where created=False if the event_key already exists.
-        A repeated key never consumes a seq number.
+        Returns an AppendResult, the pair (RunEvent, created: bool) where created=False if the
+        event_key already exists. A repeated key never consumes a seq number.
+        After the run's `end` event (loops D12), `end` again returns the existing event, and any
+        other key except the post-turn ones (POST_END_EVENT_KEY_PREFIXES) is dropped: nothing is
+        written, no seq is consumed, and the result is `(end event, False)` with `dropped` True
+        (a debug log notes it). A usage row passed with a dropped event is still written.
         `usage`: a model request's usage row (the run_model_requests columns except tenant_id and
         run_id: request_key, model_id, provider_model_name, input_tokens, output_tokens,
         cache_read_tokens, cache_write_tokens, usage_measured, cost_usd, price_source, and
@@ -1921,12 +2455,12 @@ class EventLog:
             raise ValueError("tenant_id is required")
         with self.Session() as session:
             try:
-                event, created = append_event_in_session(session, tenant_id, run_id, event_key, type, data, usage)
+                result = append_event_in_session(session, tenant_id, run_id, event_key, type, data, usage)
             except RunNotFound:
                 session.rollback()
                 raise
             session.commit()
-            return event, created
+            return result
 
     def get_event(self, tenant_id: str, run_id: UUID | str, event_key: str) -> RunEvent | None:
         """The run's event with this key, or None (no such event, or another tenant's run)."""
@@ -1940,6 +2474,24 @@ class EventLog:
             ).scalar_one_or_none()
             return None if event is None else _run_event_from_model(event)
 
+    def read_outputs(self, tenant_id: str, run_id: UUID | str, keys: list[str] | tuple[str, ...]) -> dict[str, RunEvent]:
+        """The run's committed events with these keys, by key (keys without an event are absent).
+        Tenant-scoped: another tenant's run gives {}. An immutable read for the loop iterations
+        (loops D6): events are append-only and idempotent by key, so a replay reads the same
+        events. Not a DBOS step; the caller only asks for events committed before it started."""
+        wanted = list(dict.fromkeys(keys))
+        if not wanted:
+            return {}
+        with self.Session() as session:
+            events = session.execute(
+                select(ExecutionEventModel).where(
+                    ExecutionEventModel.tenant_id == tenant_id,
+                    ExecutionEventModel.run_id == str(run_id),
+                    ExecutionEventModel.event_key.in_(wanted),
+                )
+            ).scalars().all()
+            return {e.event_key: _run_event_from_model(e) for e in events}
+
     def append_approval_waiting(
         self,
         tenant_id: str,
@@ -1947,7 +2499,7 @@ class EventLog:
         kind: str,
         approval_key: str,
         data: dict[str, Any],
-    ) -> tuple[RunEvent, bool]:
+    ) -> AppendResult:
         """Record that the run waits for an approval: the waiting event and its open
         pending_approvals row, in ONE transaction under the run-row lock (0014_approvals).
 
@@ -1959,7 +2511,8 @@ class EventLog:
         (≤ 8 KiB canonical JSON, else {"truncated": true}), prompt and the deadline from the data,
         and the root run, agent and workflow from the run.
 
-        Returns (event, created). A repeated call (a replayed step) writes no event and returns the
+        Returns an AppendResult (event, created); `dropped` when the run already has its `end` event
+        (nothing written, no open row). A repeated call (a replayed step) writes no event and returns the
         first event, whose deadline stands; it only adds the open row when it is missing and the
         approval is undecided (an event written by a worker without the projection, during a
         rolling deploy), copied from that first event. Raises RunNotFound (writing nothing) for an unknown run
@@ -1982,9 +2535,14 @@ class EventLog:
         event_key = approvals.waiting_event_key(kind, approval_key)
         with self.Session() as session:
             try:
-                event, created = append_event_in_session(
+                result = append_event_in_session(
                     session, tenant_id, run_id, event_key, approvals.waiting_event_type(kind), payload
                 )
+                if result.dropped:
+                    # The run has ended (e.g. cancelled): no wait, and no open inbox row.
+                    session.commit()
+                    return result
+                event, created = result
                 # A replay also writes a missing row (ON CONFLICT DO NOTHING): during a rolling
                 # deploy a worker without the projection may have written the event alone. The
                 # row then copies the FIRST event (its deadline and time), and is never inserted
@@ -2010,7 +2568,7 @@ class EventLog:
                 session.rollback()
                 raise
             session.commit()
-            return event, created
+            return AppendResult(event, created)
 
     def append_step_decision(
         self, tenant_id: str, run_id: UUID | str, step_id: str, type: RunEventType, data: dict | None = None

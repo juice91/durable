@@ -83,7 +83,7 @@ def test_expired_key_is_refused(store, engine, tenant):
         tenant, name="k", created_by="alice", expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
     )
     with engine.begin() as conn:
-        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = :i"),
+        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 hour' WHERE id = :i"),
                      {"i": created.record.id})
     assert store.authenticate(created.key) is None
     assert store.get(tenant, created.record.id).status() == "expired"

@@ -143,7 +143,7 @@ def owner_world(client, app, tenant: str, h: dict[str, str]) -> dict[str, Any]:
         conn.execute(text(
             "INSERT INTO run_model_requests (tenant_id, run_id, request_key, model_id, input_tokens, output_tokens,"
             " cache_read_tokens, cache_write_tokens, usage_measured, created_at, operation)"
-            " VALUES (:t, :r, :k, 'test:judge', 200, 50, 0, 0, true, now(), 'chat')"),
+            " VALUES (:t, :r, :k, 'test:judge', 200, 50, 0, 0, true, now() - interval '1 hour', 'chat')"),
             {"t": tenant, "r": eval_run, "k": f"judge:{case_id}:1"})
     return {"run": str(run_id), "agent": agent_id, "step_run": str(step_run), "structured": structured,
             "suite": suite_id, "case": case_id, "eval_run": eval_run}

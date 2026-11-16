@@ -561,8 +561,35 @@ def _settle(client, tenant, marker, **params):
     return _search(client, tenant, lambda it: len(it) > 0, q=marker, **params)
 
 
+def _raw_loki_count(query: str, *, want: int, start_ns: int, timeout: float = 25.0) -> int:
+    """Poll a marker-scoped raw query over this test's window.
+
+    Loki indexes each stream on its own after OTLP has accepted the batch. A record with no
+    tenant attribute is a different stream from the tenant-tagged lines the API search already
+    waited for, so one immediate query can miss it. The marker keeps the assertion on the line
+    this test emitted.
+    """
+    deadline, count = time.monotonic() + timeout, 0
+    while True:
+        raw = requests.get(
+            f"{LOKI_URL}/loki/api/v1/query_range",
+            params={"query": query, "limit": 10, "start": str(start_ns), "end": str(time.time_ns())},
+            timeout=10,
+        ).json()
+        if raw.get("status") == "success":
+            count = sum(len(stream["values"]) for stream in raw["data"]["result"])
+            if count >= want:
+                return count
+        elif time.monotonic() > deadline:
+            raise AssertionError(raw)
+        if time.monotonic() > deadline:
+            return count
+        time.sleep(0.5)
+
+
 def test_live_two_tenants_never_see_each_other_nor_untagged_records(client, live):
     logger, flush = live
+    opened = time.time_ns()
     marker = f"mk{uuid.uuid4().hex}"
     a, b, c = (f"{p}{uuid.uuid4().hex[:8]}" for p in "abc")
     with obs.log_context(tenant_id=a):
@@ -579,12 +606,9 @@ def test_live_two_tenants_never_see_each_other_nor_untagged_records(client, live
     time.sleep(1)
     assert _get(client, c, q=marker).json()["items"] == []
     # The untagged record is really stored (so its absence above is isolation, not ingest delay).
-    raw = requests.get(
-        f"{LOKI_URL}/loki/api/v1/query_range",
-        params={"query": f'{{service_name="eap-worker"}} |= "{marker} untagged"', "limit": 5},
-        timeout=10,
-    ).json()
-    assert sum(len(s["values"]) for s in raw["data"]["result"]) == 1
+    assert _raw_loki_count(
+        f'{{service_name="eap-worker"}} |= "{marker} untagged"', want=1, start_ns=opened
+    ) == 1
     for items in (items_a, items_b):
         assert all(i["service"] == "eap-worker" and i["level"] == "warn" for i in items)
 

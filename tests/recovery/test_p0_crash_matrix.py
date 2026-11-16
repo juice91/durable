@@ -263,7 +263,10 @@ def test_p1_p2_crash_in_processors(harness: Harness, report: Callable[[str], Non
     before = crash_and_wait(h, first, crash_at, run_id)
     assert [e.event_key for e in before] == expected_before
     usage_before = usage_rows(h, run_id)
-    assert usage_before == {}  # the moderation row rides on its processor_result event, not yet written
+    # The moderation row rides on its processor_result event, not yet written. An output case's
+    # agent request (model:0) is billed already and its row is recorded inside its own model step
+    # (loops D12, LP.8), so it is there before its model_message event.
+    assert set(usage_before) == ({"model:0"} if phase == "output" else set())
 
     recover(h, run_id)
     # Moderation calls: the crash point fires only after the moderation model answered (call 1,

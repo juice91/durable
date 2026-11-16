@@ -5,6 +5,9 @@ import {
   ClipboardCheck,
   Gavel,
   Hand,
+  ListChecks,
+  ListOrdered,
+  Repeat,
   RotateCcw,
   Brain,
   CirclePlay,
@@ -66,6 +69,9 @@ export const KIND_BADGE: Record<SpanKind, string> = {
   output_retry: "RETRY",
   eval_case: "CASE",
   judge: "JUDGE",
+  loop: "LOOP",
+  loop_iteration: "ITER",
+  evaluate: "EVAL",
 };
 
 /** One icon per span kind (decorative: the badge and label carry the meaning). */
@@ -89,6 +95,9 @@ export const KIND_ICON: Record<SpanKind, LucideIcon> = {
   output_retry: RotateCcw,
   eval_case: ClipboardCheck,
   judge: Gavel,
+  loop: Repeat,
+  loop_iteration: ListOrdered,
+  evaluate: ListChecks,
 };
 
 /**
@@ -119,4 +128,9 @@ export const KIND_TONE: Record<SpanKind, string> = {
   output_retry: "text-muted-foreground",
   eval_case: "text-muted-foreground",
   judge: "text-muted-foreground",
+  // LP.9: loop spans stay muted; the badge and label carry the meaning.
+  loop: "text-muted-foreground",
+  loop_iteration: "text-muted-foreground",
+  // LP.15: an evaluate step stays muted too.
+  evaluate: "text-muted-foreground",
 };

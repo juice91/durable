@@ -49,6 +49,9 @@ Without the wait (one `eap.tool_approval_deny` step per call, no inbox row, a `t
 the decision key):
 - `approval_mode == "deny"` (a child run of an eval run, from eap.start_run): denied at once with
   EVAL_DENIED_MESSAGE, `decided_by: "eval"`;
+- `approval_mode == "deny"` with `approval_deny_reason == "loop_body"` (an agent step inside a
+  workflow loop body, loops D8a): denied at once with LOOP_BODY_DENIED_MESSAGE,
+  `decided_by: "system"`, reason `loop_body`;
 - a tool call id the decide route could never address (not 1-256 printable ASCII without spaces,
   AC.8's rule): denied at once with INVALID_ID_MESSAGE, `decided_by: "system"`, reason
   `invalid_tool_call_id`, so it never sits undecidable in the inbox.
@@ -278,6 +281,10 @@ INVALID_ID_MESSAGE = (
     "characters without spaces); it was not run."
 )
 INVALID_ID_REASON = "invalid_tool_call_id"
+# Loops D8a: an agent step inside a workflow loop body never waits for an approval.
+LOOP_BODY_DENY_REASON = "loop_body"
+LOOP_BODY_DENIED_MESSAGE = "Tool approvals are not available inside loops; this tool call was not run."
+
 # A gated call whose id an EARLIER model request of this run already used for an approval: its old
 # decision must never authorise this (different) call, so it is denied at once (security).
 DUPLICATE_ID_MESSAGE = (
@@ -324,6 +331,9 @@ class ApprovalSettings:
     mode: str = "interactive"
     hour_seconds: float = 3600.0
     poll_seconds: float = 3600.0
+    # Why "deny" mode denies: None for an eval child (EVAL_DENIED_MESSAGE), LOOP_BODY_DENY_REASON for
+    # a workflow loop body's agent step (LOOP_BODY_DENIED_MESSAGE).
+    deny_reason: str | None = None
 
     @classmethod
     def from_link(cls, link: dict[str, Any]) -> ApprovalSettings:
@@ -334,10 +344,12 @@ class ApprovalSettings:
         timing = link.get("approval_timing")
         if not isinstance(timing, dict):
             timing = {}
+        reason = link.get("approval_deny_reason")
         return cls(
             mode=mode if mode in APPROVAL_MODES else "interactive",
             hour_seconds=float(timing.get("hour_seconds") or 3600.0),
             poll_seconds=float(timing.get("poll_seconds") or 3600.0),
+            deny_reason=reason if reason == LOOP_BODY_DENY_REASON else None,
         )
 
 
@@ -462,6 +474,8 @@ def _result_for(decision: dict[str, Any] | None) -> ToolApproved | ToolDenied:
             return ToolDenied(EVAL_DENIED_MESSAGE)
         if data.get("reason") == INVALID_ID_REASON:
             return ToolDenied(INVALID_ID_MESSAGE)
+        if data.get("reason") == LOOP_BODY_DENY_REASON:
+            return ToolDenied(LOOP_BODY_DENIED_MESSAGE)
         if data.get("reason") == DUPLICATE_ID_REASON:
             return ToolDenied(DUPLICATE_ID_MESSAGE)
         comment = data.get("comment")
@@ -484,7 +498,12 @@ async def wait_for_tool_approvals(
     decisions: dict[str, dict[str, Any]] = {}
     waiting: list[ToolCallPart] = []
     for call in calls:
-        if settings.mode == "deny":
+        if settings.mode == "deny" and settings.deny_reason == LOOP_BODY_DENY_REASON:
+            data = {
+                "tool_call_id": call.tool_call_id, "decided_by": SYSTEM_DECIDER, "comment": None,
+                "reason": LOOP_BODY_DENY_REASON,
+            }
+        elif settings.mode == "deny":
             data = {"tool_call_id": call.tool_call_id, "decided_by": EVAL_DECIDER, "comment": None}
         elif not approvable_tool_call_id(call.tool_call_id):
             data = {
@@ -639,6 +658,8 @@ __all__ = [
     "DUPLICATE_ID_REASON",
     "INVALID_ID_MESSAGE",
     "INVALID_ID_REASON",
+    "LOOP_BODY_DENIED_MESSAGE",
+    "LOOP_BODY_DENY_REASON",
     "RETRY_HEADING",
     "SpecCapability",
     "approvable_tool_call_id",

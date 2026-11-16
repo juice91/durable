@@ -229,13 +229,15 @@ def _agent_events(tenant, run_id, log):
     log.append(tenant, rid, "memory:wm:c2", "memory_updated", {"scope": "resource", "format": "json", "version": 2,
                "changed_keys": ["name"], "tool_call_id": "c2", "redacted": 0, **BAD})
     log.append(tenant, rid, "tool:c2:result", "tool_result", {"tool_call_id": "c2", "tool_name": "update_working_memory", "status": "ok", "content": "ok"})
+    # embed:recall: belongs to the in-turn work (it reads the user text before the model request).
+    # Loops D12 drops non-post-turn events after `end`, so write this before the turn ends.
+    log.append(tenant, rid, "embed:recall:2:failed", "embedding", {"stage": "recall", "status": "failed", "error_code": "embedding_timeout", "model_id": "test:hash"})
     log.append(tenant, rid, "end", "run_completed", {"output": "done"})
     log.append(tenant, rid, "embed:index:1", "embedding", {**emb, "input_tokens": 9, "cost_usd": "0.00009", "stage": "index", "turn": 1,
                "inserted": 1, "existing": 0, "redacted": 0}, _usage("embed:index:1", "embedding", 9, 0, "0.00009", "test:hash"))
     log.append(tenant, rid, "memory:observe:1", "memory_updated", {"kind": "observation", "stage": "observe", "covers_from_turn": 0,
                "covers_to_turn": 1, "approx_tokens": 10, "notes": 2, "redacted": 0, **BAD}, _usage("memory:observe:1", "chat", 50, 20, "0.002"))
     log.append(tenant, rid, "memory:reflect:1:failed", "memory_observe_failed", {"stage": "reflect", "error_code": "overlap", **BAD})
-    log.append(tenant, rid, "embed:recall:2:failed", "embedding", {"stage": "recall", "status": "failed", "error_code": "embedding_timeout", "model_id": "test:hash"})
     log.append(tenant, rid, "embed:index:2:failed", "embedding", {"stage": "index", "status": "failed", "error_code": "embedding_timeout", "model_id": "test:hash"})
     return 3 + 2 + 9 + 50  # input tokens of the four usage rows
 

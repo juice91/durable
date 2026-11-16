@@ -47,6 +47,7 @@ from ag_ui.core import (
     Interrupt,
     MessagesSnapshotEvent,
     RunErrorEvent,
+    RunFinishedCancelledOutcome,
     RunFinishedEvent,
     RunFinishedInterruptOutcome,
     RunFinishedSuccessOutcome,
@@ -89,6 +90,7 @@ from eap_api.streams.native import (
 )
 from eap_api.streams.resume import frame_id, with_frame_id
 from eap_schemas import RunEvent
+from eap_schemas.workflow_scope import instance_token, scope_from_data
 
 KEEP_ALIVE = ": keep-alive\n\n"
 CUSTOM_PREFIX = "pydanticos."
@@ -109,10 +111,12 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 
 # Durable events with no AG-UI rendering (cost stays native; memory work follows the turn; evals
 # and knowledge ingestion are not served over AG-UI). `memory_observe_trimmed` is post-turn memory
-# work (RAG P1.C6); `extracted` belongs to kb_ingest runs (RAG P1.A3).
+# work (RAG P1.C6); `extracted` belongs to kb_ingest runs (RAG P1.A3). `cancel_requested` is an
+# API-authored request (D12); the terminal `run_failed` with `run_cancelled` is what reaches the
+# client as `RUN_FINISHED{outcome: cancelled}` (D17).
 SILENT_EVENT_TYPES = frozenset(
     {"embedding", "memory_updated", "memory_observe_failed", "memory_observe_trimmed", "post_turn_done",
-     "eval_case_result", "ingest_progress", "extracted", "text_delta"}
+     "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested"}
 )
 STEP_DECISIONS = {"step_approved": "approved", "step_rejected": "rejected", "step_timed_out": "timed_out"}
 TOOL_DECISIONS = {"tool_approved": "approved", "tool_denied": "denied", "tool_approval_timed_out": "timed_out"}
@@ -542,10 +546,17 @@ class AgUiFormatter:
             _Turn(ctx.prefix, ctx.native_run_id, self._all_messages, self._order) if ctx.kind == "agent" else None
         )
         self._child_turns: dict[str, _Turn] = {}
+        # A body agent step's child run (D17): child_run_id -> instance token the AG-UI side sees
+        # it under (`{S}~{step}`, e.g. `each.0~triage`). Top-level steps are not tracked — their
+        # instance token equals the bare step id and `_child` falls back to it.
+        self._child_instance: dict[str, str] = {}
         # The lifecycle event that already ended this AG-UI run inside `prior_events` (a
         # continuation at or after its interrupt or end event), and its seq: re-sent, then close.
         self._ended: tuple[BaseEvent, int | None] | None = None
-        # Workflow state (D11) and the steps this AG-UI run has announced with STEP_STARTED.
+        # Workflow state (D11) and the steps this AG-UI run has announced with STEP_STARTED. Step
+        # names in `_open_steps`/`_announced` are **instance tokens**: bare step ids at the top
+        # level, scoped (`L.i~step`) inside a loop body (D17). State paths (`/steps/{...}`) use
+        # the top-level step id only — body instances emit no STATE_DELTA.
         self._state: dict[str, Any] = {"status": "running", "steps": {}}
         self._open_steps: list[str] = []
         self._announced: list[str] = []
@@ -596,10 +607,15 @@ class AgUiFormatter:
         return ([self._turn] if self._turn is not None else []) + list(self._child_turns.values())
 
     def _child(self, scope: ChildScope) -> _Turn:
-        turn = self._child_turns.get(scope.step_id)
+        # D17: a body agent's child run keys on its distinct run id (iterations may overlap under
+        # foreach concurrency), and its message/call ids carry the step **instance** token
+        # (`each.0~triage`). Top-level steps keep `scope.step_id` as both key and token, so their
+        # ids are unchanged (AG-UI D13: `{runId}-{stepId}-m{n}`).
+        token = self._child_instance.get(scope.run_id, scope.step_id)
+        turn = self._child_turns.get(scope.run_id)
         if turn is None or turn.native_run_id != scope.run_id:
-            turn = self._child_turns[scope.step_id] = _Turn(
-                f"{self.ctx.prefix}-{scope.step_id}", scope.run_id, self._all_messages, self._order
+            turn = self._child_turns[scope.run_id] = _Turn(
+                f"{self.ctx.prefix}-{token}", scope.run_id, self._all_messages, self._order
             )
         return turn
 
@@ -703,6 +719,17 @@ class AgUiFormatter:
             ops.append({"op": op, "path": f"{path}/{_pointer(key)}", "value": value})
         return ops
 
+    def _bump(self, step_id: str, key: str) -> list[dict[str, Any]]:
+        """Increment a loop step's iteration counter (D17). `add` if the step has never seen one,
+        else `replace`; the loop's own `step_started` seeds `iterations_started|done|failed = 0`
+        so `replace` is the common case."""
+        steps = self._state["steps"]
+        entry = steps.setdefault(step_id, {})
+        exists = key in entry
+        entry[key] = entry.get(key, 0) + 1
+        return [{"op": "replace" if exists else "add", "path": f"/steps/{_pointer(step_id)}/{_pointer(key)}",
+                 "value": entry[key]}]
+
     # ------------------------------------------------------------------ StreamFormatter
 
     def start(self) -> list[str]:
@@ -799,7 +826,13 @@ class AgUiFormatter:
             self.closed = True
             return events
         if event.type == "run_failed":
-            events = self._turn.close() + [_run_error(data)]
+            # D17: a cancelled agent turn ends `RUN_FINISHED{outcome: cancelled}`, like a
+            # workflow run. Top-level agent runs can't be cancelled directly today (P1), but a
+            # cancelled workflow's child agent run that leaked back here would still render right.
+            if data.get("error_code") == "run_cancelled":
+                events = self._turn.close() + [self._finished(RunFinishedCancelledOutcome())]
+            else:
+                events = self._turn.close() + [_run_error(data)]
             self.closed = True
             return events
         events, interrupt = self._turn.on_event(event)
@@ -825,17 +858,42 @@ class AgUiFormatter:
         data = event.data or {}
         kind = event.type
         step_id = str(data.get("step_id") or "")
+        # D17: a body step carries `scope` (the chain of enclosing iterations). Top-level steps
+        # have no `scope` key, so the scope is empty and nothing below changes for them.
+        scope = scope_from_data(data.get("scope"))
+        in_body = bool(scope)
         if kind == "run_started":
             self._state = {"status": "running", "steps": {}}
             return [StateSnapshotEvent(snapshot={"status": "running", "steps": {}})]
         if kind == "step_started" and step_id:
-            if step_id not in self._open_steps:
-                self._open_steps.append(step_id)
-            ops = self._step_status(step_id, "running", {"type": data.get("step_type")} if data.get("step_type") else None)
+            # Top-level steps keep bare ids byte-identical (pre-loops fixtures also use ids with
+            # `/`, which `instance_token` rejects because loop ids are stricter; D4 says the empty
+            # scope keeps every identifier exactly as today).
+            token = instance_token(scope, step_id) if in_body else step_id
+            step_type = data.get("step_type")
+            child_run_id = data.get("child_run_id")
+            # Remember the child's instance token so its downstream events (tool calls, model
+            # messages) get `{runId}-{instance_token}-m{n}` ids. Top-level agent steps don't need
+            # it — _child falls back to the bare step id.
+            if in_body and step_type == "agent" and isinstance(child_run_id, str):
+                self._child_instance[child_run_id] = token
+            if token not in self._open_steps:
+                self._open_steps.append(token)
             events: list[BaseEvent] = []
-            if step_id not in self._announced:
-                self._announced.append(step_id)
-                events.append(StepStartedEvent(step_name=step_id))
+            if token not in self._announced:
+                self._announced.append(token)
+                events.append(StepStartedEvent(step_name=token))
+            if in_body:
+                # Body instances emit no STATE_DELTA (D17): with hundreds of iterations they would
+                # overwrite one key or bloat the state. The loop step's own `/steps/{L}` is enough.
+                return events
+            extra: dict[str, Any] = {}
+            if step_type:
+                extra["type"] = step_type
+            if step_type in ("foreach", "loop"):
+                # Seed the loop step's iteration counters (D17) so iteration events can `replace`.
+                extra.update(iterations_started=0, iterations_done=0, iterations_failed=0)
+            ops = self._step_status(step_id, "running", extra or None)
             return events + self._state_ops(ops)
         if kind == "step_waiting" and step_id:
             events = self._state_ops(self._step_status(step_id, "waiting"))
@@ -852,12 +910,15 @@ class AgUiFormatter:
             events.append(custom("approval_decided", {"kind": "step", "key": step_id, "decision": decision}))
             return events
         if kind in ("step_completed", "step_failed") and step_id:
+            token = instance_token(scope, step_id) if in_body else step_id
             events = []
-            if step_id in self._open_steps:
-                self._open_steps.remove(step_id)
-            if step_id in self._announced:
-                self._announced.remove(step_id)
-                events.append(StepFinishedEvent(step_name=step_id))
+            if token in self._open_steps:
+                self._open_steps.remove(token)
+            if token in self._announced:
+                self._announced.remove(token)
+                events.append(StepFinishedEvent(step_name=token))
+            if in_body:
+                return events  # body instances emit no STATE_DELTA (D17)
             if kind == "step_completed":
                 output = data.get("output")
                 encoded = json.dumps(output, separators=(",", ":"), ensure_ascii=False)
@@ -865,6 +926,28 @@ class AgUiFormatter:
                 return events + self._state_ops(self._step_status(step_id, "completed", extra))
             status = data.get("status") if isinstance(data.get("status"), str) else "failed"
             return events + self._state_ops(self._step_status(step_id, status))
+        if kind in ("loop_iteration_started", "loop_iteration_completed", "loop_iteration_failed") and step_id:
+            # D17: iteration frames carry the loop's bare step_id, the outer scope (enclosing
+            # iterations, outermost first) and the index. The counter at the loop step's path is
+            # updated only when the loop is at the top level.
+            status_label = {
+                "loop_iteration_started": "started",
+                "loop_iteration_completed": "completed",
+                "loop_iteration_failed": "failed",
+            }[kind]
+            index = data.get("index")
+            value: dict[str, Any] = {"step_id": step_id, "scope": data.get("scope") or [], "index": index,
+                                     "status": status_label}
+            events: list[BaseEvent] = [custom("loop_iteration", value)]
+            if in_body:
+                # A nested loop's iterations are body instances of the outer loop: no state update.
+                return events
+            counter = {
+                "started": "iterations_started",
+                "completed": "iterations_done",
+                "failed": "iterations_failed",
+            }[status_label]
+            return events + self._state_ops(self._bump(step_id, counter))
         if kind == "run_completed":
             self._state["status"] = "completed"
             events = self._state_ops([{"op": "replace", "path": "/status", "value": "completed"}])
@@ -873,11 +956,17 @@ class AgUiFormatter:
             self.closed = True
             return events
         if kind == "run_failed":
+            # D17: a cancelled run ends `RUN_FINISHED{outcome: cancelled}`, not RUN_ERROR; its
+            # state status is still `failed` (the terminal row has `status: failed`, D12).
+            cancelled = data.get("error_code") == "run_cancelled"
             status = "needs_attention" if data.get("status") == "needs_attention" else "failed"
             self._state["status"] = status
             events = self._state_ops([{"op": "replace", "path": "/status", "value": status}])
             events += self._close_open()
-            events.append(_run_error(data))
+            if cancelled:
+                events.append(self._finished(RunFinishedCancelledOutcome()))
+            else:
+                events.append(_run_error(data))
             self.closed = True
             return events
         if kind in ("tool_call", "tool_result", "tool_approval_waiting", *TOOL_DECISIONS):

@@ -404,7 +404,7 @@ def test_start_run_reads_resource_id_only_for_memory_specs(worker, mem_tenant):
         run_id, _ = worker.run_store.create_turn(mem_tenant, conv["id"], 1, "x", uuid.uuid4())
         link = asyncio.run(start_run_step(str(run_id), mem_tenant, str(agent), 1, "x", spec))
         assert link["resource_id"] == expected and link["conversation_id"] == conv["id"]
-        worker.run_store.set_status(mem_tenant, run_id, "completed", "x", None)
+        worker.run_store.finish_with_end(mem_tenant, run_id, "completed", "x", None)
 
 
 def test_the_block_has_a_data_guard_and_note_content_cannot_form_a_tag():

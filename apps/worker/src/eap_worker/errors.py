@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic_ai.exceptions import (
@@ -33,6 +33,7 @@ from eap_schemas.evals import EvalSuiteInvalid
 from eap_schemas.limits import USAGE_LIMIT_KWARGS, RunBudgetExceeded
 from eap_schemas.models_policy import ModelNotAllowed
 from eap_schemas.output import OutputInvalid
+from eap_schemas.workflow_scope import LOOP_WORKFLOW_FAILURES
 from eap_worker.client_tools import ClientToolArgsInvalid
 from eap_worker.mcp import McpToolUnavailable
 
@@ -253,7 +254,23 @@ WORKFLOW_FAILURES: dict[str, tuple[str, str]] = {
     "workflow_version_not_found": ("failed", "the workflow version was not found"),
     "step_limit_exceeded": ("failed", "the workflow exceeded its step execution limit"),
     "workflow_deadline_exceeded": ("failed", "the workflow exceeded its maximum run time"),
+    # Workflow loops (LP.2's registered codes and messages, eap_schemas.workflow_scope).
+    **LOOP_WORKFLOW_FAILURES,
 }
+
+
+class LoopTickFailed(Exception):
+    """The loop tick step itself raised (e.g. a lost database connection; loops D10-D12): raised
+    from the original error in workflow code, so the step fails with that error's classification
+    (`internal_error` for a DB error) marked `run_level` (RunFailure). A foreach then fails with it
+    instead of collecting it as an item's error entry, whether the tick belonged to the foreach or
+    to a loop nested in one of its items. Pickle-safe (no arguments)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __str__(self) -> str:
+        return "the loop tick failed"
 
 
 class WorkflowStepError(Exception):
@@ -305,6 +322,9 @@ class RunFailure:
     message: str  # stored as runs.error and in the run_failed event
     reason: str | None = None  # a fixed sub-code for run_failed data (AC.4: output_blocked's reason)
     data: dict[str, Any] | None = None  # AC.5: extra run_failed data (limit, value, cause); no text
+    # LP.14: about the run, not the step that saw it (the loop tick itself failed, LoopTickFailed):
+    # a foreach never collects it as an item's error entry, at any nesting depth. Never in events.
+    run_level: bool = False
 
     @property
     def error(self) -> str:
@@ -390,9 +410,19 @@ def _chain(exc: BaseException) -> Iterator[BaseException]:
 
 
 def classify(exc: BaseException) -> RunFailure:
+    if isinstance(exc, LoopTickFailed):
+        # Only the exception itself (raised in workflow code, never inside a step): an unrelated
+        # error that merely has a tick failure in its context is classified on its own.
+        cause = exc.__cause__
+        base = classify(cause) if cause is not None else RunFailure(
+            "failed", "internal_error", "LoopTickFailed", "the run failed with an internal error"
+        )
+        return replace(base, run_level=True)
     chain = list(_chain(exc))
     for cur in chain:
-        if isinstance(cur, WorkflowStepError) or type(cur).__name__ == "WorkflowStepError":
+        # LoopItemsError (eap_worker.workflow_eval, a foreach's `items`): its `.code` is
+        # `loop_items_not_list` or `loop_items_exceeded`, a step failure like WorkflowStepError's.
+        if isinstance(cur, WorkflowStepError) or type(cur).__name__ in ("WorkflowStepError", "LoopItemsError"):
             return _workflow_failure(cur)
     for cur in chain:
         if isinstance(cur, EvalRunError) or type(cur).__name__ == "EvalRunError":
@@ -526,6 +556,7 @@ __all__ = [
     "OutputBlocked",
     "OutputModeUnsupported",
     "RequestContextInvalid",
+    "LoopTickFailed",
     "RunFailure",
     "ToolInputInvalid",
     "WorkflowStepError",

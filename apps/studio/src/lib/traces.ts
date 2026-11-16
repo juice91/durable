@@ -25,13 +25,19 @@ export type SpanKind =
   | "tool_approval"
   | "output_retry"
   | "eval_case"
-  | "judge";
+  | "judge"
+  // Workflow loop spans (LP.9): a loop or foreach step, and one span per iteration.
+  | "loop"
+  | "loop_iteration"
+  // LP.15: a workflow evaluate step (verdict, evaluator results, judge usage; never text).
+  | "evaluate";
 
 /** Every span kind, in legend order. */
 export const SPAN_KINDS: readonly SpanKind[] = [
   "run", "child_run", "model_request", "tool_call", "processor", "workflow_step",
   "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
   "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
+  "loop", "loop_iteration", "evaluate",
 ];
 
 /** The agent capability span kinds (AC.17). */
@@ -204,6 +210,9 @@ export interface TraceTruncation {
   events: boolean;
   child_runs: boolean;
   payload_fields: number;
+  /** LP.9: loop iterations left out past `limits.max_loop_iteration_spans` per loop, or past
+   * `limits.max_loop_trace_events` in all (absent on older APIs). */
+  iterations?: number;
 }
 
 export interface TraceLimits {
@@ -212,6 +221,8 @@ export interface TraceLimits {
   max_child_runs: number;
   field_max_bytes: number;
   payload_budget_bytes: number;
+  max_loop_iteration_spans?: number;
+  max_loop_trace_events?: number;
 }
 
 /** Run JSON with the usage fields added in P0.1 and the draft flag of P0.8. */
@@ -429,6 +440,18 @@ export function spanLabel(
     const position = num(a.position);
     return `Case ${position !== null ? position + 1 : str(a.case_id) ?? ""}${str(a.case_status) ? `: ${a.case_status}` : ""}`.trim();
   }
+  if (span.kind === "loop") {
+    const done = num(a.iterations_completed);
+    return `Loop: ${span.name}${str(a.step_type) ? ` (${a.step_type})` : ""}${done !== null ? `, ${done} done` : ""}`;
+  }
+  if (span.kind === "loop_iteration") {
+    const i = num(a.index);
+    return `Iteration ${i !== null ? i + 1 : "?"}: ${str(a.step_id) ?? span.name}`;
+  }
+  if (span.kind === "evaluate") {
+    const verdict = a.passed === true ? "passed" : a.passed === false ? "failed" : null;
+    return `Evaluate: ${span.name}${verdict ? ` (${verdict})` : ""}`;
+  }
   if (span.kind === "judge") {
     const i = num(a.evaluator_index);
     return `Judge${i !== null ? ` (evaluator ${i + 1})` : ""}: ${str(a.model_id) ?? "unknown model"}`;
@@ -456,6 +479,9 @@ export const KIND_LABELS: Record<SpanKind, string> = {
   output_retry: "Output retry",
   eval_case: "Test case",
   judge: "Judge request",
+  loop: "Loop",
+  loop_iteration: "Loop iteration",
+  evaluate: "Evaluate step",
 };
 
 // ---------------------------------------------------------------------------- formatting

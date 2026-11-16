@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Background,
   Handle,
@@ -16,15 +16,15 @@ import {
 import "@xyflow/react/dist/style.css";
 // The chart tokens (`--viz-*`): the canvas's grid, edges and label backgrounds use them.
 import "@/components/metrics/chartTheme.css";
-import { Maximize, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { matchesNow } from "@/components/frame/useMediaQuery";
-import { buildWorkflowGraph, NODE_HEIGHT, NODE_WIDTH, type GraphEdge } from "@/lib/workflowGraph";
+import { buildWorkflowGraph, loopBadge, loopStepIds, loopSummary, type GraphEdge, type GraphNode } from "@/lib/workflowGraph";
 import { NODE_STATES, type NodeState } from "@/lib/workflowRunState";
-import type { WorkflowSpec, WorkflowStep } from "@/lib/workflows";
+import { isLoopStep, type LoopKindStep, type WorkflowSpec, type WorkflowStep } from "@/lib/workflows";
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {
   pending: "Pending",
@@ -52,7 +52,15 @@ export const STEP_TYPE_LABELS: Record<WorkflowStep["type"], string> = {
   branch: "Branch",
   parallel: "Parallel",
   approval: "Approval",
+  foreach: "Foreach",
+  loop: "Loop",
+  evaluate: "Evaluate",
 };
+
+/** A step kind's label; an unknown kind (a newer spec) shows its raw type. */
+export function stepTypeLabel(type: string): string {
+  return (STEP_TYPE_LABELS as Record<string, string | undefined>)[type] ?? type;
+}
 
 function stepSubtitle(step: WorkflowStep): string {
   switch (step.type) {
@@ -66,6 +74,16 @@ function stepSubtitle(step: WorkflowStep): string {
       return `${step.cases.length} case${step.cases.length === 1 ? "" : "s"} + default`;
     case "parallel":
       return `${step.branches.length} branches, join ${step.join}`;
+    case "foreach":
+    case "loop":
+      // The bound (or the run view's count) is the node's badge; the subtitle says what it repeats.
+      return loopSummary(step)[0];
+    case "evaluate": {
+      const count = Array.isArray(step.evaluators) ? step.evaluators.length : 0;
+      return `${count} evaluator${count === 1 ? "" : "s"}, pass ${step.pass ?? "all"}`;
+    }
+    default:
+      return "";
   }
 }
 
@@ -73,23 +91,62 @@ type StepNodeData = {
   step: WorkflowStep;
   state: NodeState | null;
   selected: boolean;
+  width: number;
+  height: number;
+  /** Loop steps only: whether the body is hidden, and the badge ("×50", or the run view's count). */
+  collapsed: boolean;
+  badge: string | null;
 };
 
+/** Marks the loop toggle inside a node: a click on it collapses or expands instead of selecting. */
+const LOOP_TOGGLE_ATTR = "data-loop-toggle";
+
+function TypeBadge({ type }: { type: string }) {
+  return <span className="shrink-0 rounded-sm bg-background/70 px-1.5 py-0.5 text-badge font-medium uppercase tracking-wide text-foreground">{stepTypeLabel(type)}</span>;
+}
+
+function CountBadge({ step, badge }: { step: LoopKindStep; badge: string }) {
+  return <span data-testid={`workflow-loop-badge-${step.id}`} className="shrink-0 rounded-sm border border-border bg-background/70 px-1 font-mono text-badge font-medium tabular-nums text-foreground">{badge}</span>;
+}
+
+/**
+ * The collapse chevron of a loop node. The graph is an image to assistive tech (its children are
+ * presentational), so this is a pointer convenience, not a control: keyboard users collapse one
+ * loop from its "Steps of <id>" button in the step list (which shares the collapsed set), or every
+ * loop with the canvas's "Collapse all loops" toggle.
+ */
+function LoopToggle({ collapsed }: { collapsed: boolean }) {
+  const Icon = collapsed ? ChevronRight : ChevronDown;
+  return (
+    <span {...{ [LOOP_TOGGLE_ATTR]: "" }} aria-hidden="true" className="-ml-1 inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm hover:bg-fill-hover">
+      <Icon className="size-3.5" strokeWidth={ICON_STROKE_WIDTH} />
+    </span>
+  );
+}
+
 function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
-  const { step, state, selected } = data;
+  const { step, state, selected, width, height, collapsed, badge } = data;
   const tone = NODE_STATE_CLASSES[state ?? "pending"];
+  const loop = isLoopStep(step) ? step : null;
   return (
     <div
       data-testid={`workflow-node-${step.id}`}
       data-state={state ?? "definition"}
       data-step-type={step.type}
-      style={{ width: NODE_WIDTH, height: NODE_HEIGHT }}
+      {...(loop ? { "data-collapsed": String(collapsed) } : {})}
+      style={{ width, height }}
       className={cn("flex flex-col justify-center rounded-md border-2 px-3 py-1 text-left shadow-raised", tone, selected && "outline outline-2 outline-offset-2 outline-ring")}
     >
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-label font-semibold">{step.id}</span>
-        <span className="shrink-0 rounded-sm bg-background/70 px-1.5 py-0.5 text-badge font-medium uppercase tracking-wide text-foreground">{STEP_TYPE_LABELS[step.type]}</span>
+        <span className="flex min-w-0 items-center gap-1">
+          {loop ? <LoopToggle collapsed={collapsed} /> : null}
+          <span className="truncate font-mono text-label font-semibold">{step.id}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-1">
+          {loop && badge ? <CountBadge step={loop} badge={badge} /> : null}
+          <TypeBadge type={step.type} />
+        </span>
       </div>
       <div className="flex items-center justify-between gap-2 text-caption">
         <span className="truncate opacity-80">{stepSubtitle(step)}</span>
@@ -100,7 +157,49 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
   );
 }
 
-const nodeTypes = { step: StepNode };
+/**
+ * An expanded loop (foreach or loop): a frame round its body with a header naming the loop, its
+ * kind, its `×n` badge and what it repeats over or until. The body's nodes are React Flow children
+ * of this node (`parentId`), drawn on top of it.
+ */
+function LoopGroupNode({ data }: NodeProps<Node<StepNodeData>>) {
+  const { step, state, selected, width, height, badge } = data;
+  const loop = step as LoopKindStep;
+  const tone = state ? NODE_STATE_CLASSES[state] : "border-border bg-muted/40 text-card-foreground";
+  const [first, second] = loopSummary(loop);
+  return (
+    <div
+      data-testid={`workflow-node-${step.id}`}
+      data-state={state ?? "definition"}
+      data-step-type={step.type}
+      data-collapsed="false"
+      data-group="true"
+      style={{ width, height }}
+      // A running state's pulse would animate the whole body: the group keeps a still frame.
+      className={cn("rounded-lg border-2 border-dashed text-left", tone, "animate-none", selected && "outline outline-2 outline-offset-2 outline-ring")}
+    >
+      <Handle type="target" position={Position.Top} isConnectable={false} />
+      <div className="flex flex-col gap-0.5 px-3 pt-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-1">
+            <LoopToggle collapsed={false} />
+            <span className="truncate font-mono text-label font-semibold">{step.id}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1">
+            {state ? <span className="text-caption font-medium">{NODE_STATE_LABELS[state]}</span> : null}
+            {badge ? <CountBadge step={loop} badge={badge} /> : null}
+            <TypeBadge type={step.type} />
+          </span>
+        </div>
+        <span data-testid={`workflow-loop-summary-${step.id}`} className="truncate font-mono text-caption opacity-80">{first}</span>
+        <span className="truncate text-caption opacity-80">{second}</span>
+      </div>
+      <Handle type="source" position={Position.Bottom} isConnectable={false} />
+    </div>
+  );
+}
+
+const nodeTypes = { step: StepNode, loopGroup: LoopGroupNode };
 
 function edgeStyle(edge: GraphEdge, dead: boolean): Partial<Edge> {
   const dashed = edge.kind === "join" || edge.kind === "default";
@@ -162,7 +261,13 @@ function zoomDuration(): number {
  * Zoom in, zoom out, 100% and fit, each with an accessible name. Rendered beside the graph (not
  * inside its `role="img"` surface, whose children are presentational).
  */
-function ZoomControls({ className }: { className?: string }) {
+interface LoopsToggle {
+  /** Every loop is collapsed. */
+  allCollapsed: boolean;
+  onToggle: () => void;
+}
+
+function ZoomControls({ className, loops }: { className?: string; loops?: LoopsToggle | null }) {
   const flow = useReactFlow();
   const icon = (Icon: typeof ZoomIn) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
   return (
@@ -194,6 +299,19 @@ function ZoomControls({ className }: { className?: string }) {
         data-testid="workflow-zoom-fit"
         onClick={() => void flow.fitView({ padding: FIT_PADDING, duration: zoomDuration() })}
       />
+      {loops ? (
+        <IconButton
+          // One fixed name; aria-pressed carries the state (pressed = every loop collapsed).
+          label="Collapse all loops"
+          title="Collapse all loops"
+          size="sm"
+          tooltip={false}
+          aria-pressed={loops.allCollapsed}
+          icon={icon(loops.allCollapsed ? ChevronsUpDown : ChevronsDownUp)}
+          data-testid="workflow-loops-toggle"
+          onClick={loops.onToggle}
+        />
+      ) : null}
     </div>
   );
 }
@@ -210,6 +328,15 @@ export interface WorkflowCanvasProps {
   controlsClassName?: string;
   /** Floating panels drawn over the canvas (the run panel, approvals, the step detail). */
   children?: React.ReactNode;
+  /**
+   * Loops drawn collapsed (controlled: pages pass `useCollapsedLoops()`, the `?collapsed=` URL
+   * state, and the same set to the step list); omitted, the canvas keeps its own set, every loop
+   * expanded at first.
+   */
+  collapsedLoops?: ReadonlySet<string>;
+  onCollapsedLoopsChange?: (next: Set<string>) => void;
+  /** A loop's badge text by step id (the run view's "×7"); a loop without one shows its bound ("×50"). */
+  loopBadges?: Record<string, string>;
 }
 
 /**
@@ -225,24 +352,111 @@ export function WorkflowCanvas(props: WorkflowCanvasProps) {
   );
 }
 
-function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectStep, className, controlsClassName, children }: WorkflowCanvasProps) {
-  const graph = useMemo(() => buildWorkflowGraph(spec), [spec]);
+/** `collapsed` with `id` added or removed. */
+export function toggledLoops(collapsed: ReadonlySet<string>, id: string): Set<string> {
+  const next = new Set(collapsed);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
+/**
+ * The collapsed set, controlled by `value`/`onChange` when `value` is given, else kept here (every
+ * loop expanded at first). `onChange` is still called in the uncontrolled case.
+ */
+function useCollapsedSet(value: ReadonlySet<string> | undefined, onChange: ((next: Set<string>) => void) | undefined) {
+  const [own, setOwn] = useState<ReadonlySet<string>>(() => new Set());
+  const collapsed = value ?? own;
+  const setCollapsed = useCallback(
+    (next: Set<string>) => {
+      onChange?.(next);
+      if (value === undefined) setOwn(next);
+    },
+    [value, onChange],
+  );
+  return [collapsed, setCollapsed] as const;
+}
+
+/**
+ * Re-fit the view when the collapsed set changes (not on the first render: React Flow's `fitView`
+ * prop fits that one), once React Flow has the new nodes.
+ */
+function useRefitOnCollapse(collapsed: ReadonlySet<string>) {
+  const flow = useReactFlow();
+  const flowRef = useRef(flow);
+  flowRef.current = flow;
+  const key = [...collapsed].sort().join(",");
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const fit = () => void flowRef.current.fitView({ padding: FIT_PADDING, duration: zoomDuration() });
+    if (typeof requestAnimationFrame !== "function") {
+      fit();
+      return;
+    }
+    const frame = requestAnimationFrame(fit);
+    return () => cancelAnimationFrame(frame);
+  }, [key]);
+}
+
+function badgeFor(n: GraphNode, loopBadges: Record<string, string> | undefined): string | null {
+  if (!isLoopStep(n.step)) return null;
+  return loopBadges?.[n.id] ?? loopBadge(n.step);
+}
+
+function CanvasInner({
+  spec,
+  states,
+  deadEdges,
+  selectedStepId = null,
+  onSelectStep,
+  className,
+  controlsClassName,
+  children,
+  collapsedLoops,
+  onCollapsedLoopsChange,
+  loopBadges,
+}: WorkflowCanvasProps) {
+  const [collapsed, setCollapsed] = useCollapsedSet(collapsedLoops, onCollapsedLoopsChange);
+  useRefitOnCollapse(collapsed);
+  const loopIds = useMemo(() => loopStepIds(spec), [spec]);
+  const graph = useMemo(() => buildWorkflowGraph(spec, { collapsed }), [spec, collapsed]);
+  const fullCount = useMemo(() => (loopIds.length > 0 ? buildWorkflowGraph(spec).nodes.length : graph.nodes.length), [spec, loopIds, graph]);
   const graphRef = useRef<HTMLDivElement | null>(null);
-  const graphLabel = `Execution graph of ${spec.name} with ${graph.nodes.length} steps`;
+  const loopCount = loopIds.length;
+  const graphLabel = `Execution graph of ${spec.name} with ${fullCount} steps${loopCount > 0 ? `, ${loopCount} loop${loopCount === 1 ? "" : "s"}` : ""}`;
   useGraphImage(graphRef, graphLabel);
+
+  const allCollapsed = loopCount > 0 && loopIds.every((id) => collapsed.has(id));
+  const loopsToggle = loopCount > 0
+    ? { allCollapsed, onToggle: () => setCollapsed(allCollapsed ? new Set() : new Set(loopIds)) }
+    : null;
+  const toggleLoop = (id: string) => setCollapsed(toggledLoops(collapsed, id));
 
   const nodes: Node<StepNodeData>[] = useMemo(
     () => graph.nodes.map((n) => ({
       id: n.id,
-      type: "step",
+      type: n.kind === "group" ? "loopGroup" : "step",
       position: { x: n.x, y: n.y },
-      data: { step: n.step, state: states ? states[n.id] ?? "pending" : null, selected: n.id === selectedStepId },
+      ...(n.parentId ? { parentId: n.parentId, extent: "parent" as const } : {}),
+      data: {
+        step: n.step,
+        state: states ? states[n.id] ?? "pending" : null,
+        selected: n.id === selectedStepId,
+        width: n.width,
+        height: n.height,
+        collapsed: n.collapsed,
+        badge: badgeFor(n, loopBadges),
+      },
       draggable: false,
       connectable: false,
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT,
+      width: n.width,
+      height: n.height,
     })),
-    [graph, states, selectedStepId],
+    [graph, states, selectedStepId, loopBadges],
   );
   const edges: Edge[] = useMemo(
     () => graph.edges.map((e) => ({
@@ -277,7 +491,11 @@ function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectS
           // Keyboard users select steps from the step list: the graph is an image to them.
           nodesFocusable={false}
           elementsSelectable={Boolean(onSelectStep)}
-          onNodeClick={onSelectStep ? (_, node) => onSelectStep(node.id) : undefined}
+          onNodeClick={(event, node) => {
+            const target = event.target as Element | null;
+            if (target?.closest?.(`[${LOOP_TOGGLE_ATTR}]`)) toggleLoop(node.id);
+            else onSelectStep?.(node.id);
+          }}
           minZoom={0.2}
           // React Flow's own credit, visible (hiding it needs a Pro licence, and warns). It is a
           // sibling of the drawing, which alone is the role="img" (useGraphImage).
@@ -287,7 +505,7 @@ function CanvasInner({ spec, states, deadEdges, selectedStepId = null, onSelectS
         </ReactFlow>
       </div>
       {children}
-      <ZoomControls className={cn("absolute bottom-3 right-3 z-10", controlsClassName)} />
+      <ZoomControls className={cn("absolute bottom-3 right-3 z-10", controlsClassName)} loops={loopsToggle} />
     </div>
   );
 }
@@ -299,12 +517,111 @@ export interface WorkflowStepListProps {
   onSelectStep?: (stepId: string) => void;
   /** Show the node state legend (the run view). */
   legend?: boolean;
+  /** The collapsed loops, shared with the canvas (pass the same set and setter to both). */
+  collapsedLoops?: ReadonlySet<string>;
+  onCollapsedLoopsChange?: (next: Set<string>) => void;
 }
 
-/** The graph's steps as a list (buttons when steps can be selected), with each step's targets. */
-export function WorkflowStepList({ spec, states, selectedStepId = null, onSelectStep, legend = false }: WorkflowStepListProps) {
+/**
+ * The graph's steps as a list (buttons when steps can be selected), with each step's targets. A
+ * loop's body steps are a nested, indented list inside the loop's item, in the body's layout order.
+ * Each loop has a "Steps of <id>" disclosure button (aria-expanded) that hides its body here and
+ * collapses it in the graph: the keyboard path to per-loop collapse.
+ */
+export function WorkflowStepList({
+  spec,
+  states,
+  selectedStepId = null,
+  onSelectStep,
+  legend = false,
+  collapsedLoops,
+  onCollapsedLoopsChange,
+}: WorkflowStepListProps) {
+  const [collapsed, setCollapsed] = useCollapsedSet(collapsedLoops, onCollapsedLoopsChange);
+  const baseId = useId();
   const graph = useMemo(() => buildWorkflowGraph(spec), [spec]);
   const outgoing = (stepId: string) => graph.edges.filter((e) => e.source === stepId);
+  const children = useMemo(() => {
+    const map = new Map<string | null, GraphNode[]>();
+    for (const n of graph.nodes) {
+      if (!map.has(n.parentId)) map.set(n.parentId, []);
+      map.get(n.parentId)!.push(n);
+    }
+    return map;
+  }, [graph]);
+
+  const renderItem = (n: GraphNode): React.ReactNode => {
+    const state = states ? states[n.id] ?? "pending" : null;
+    const targets = outgoing(n.id);
+    const loop = isLoopStep(n.step) ? n.step : null;
+    const label = stepTypeLabel(n.step.type);
+    const body = (
+      <>
+        <span className="flex min-w-0 items-center justify-between gap-2">
+          <span className="truncate font-mono text-label font-medium text-foreground">{n.id}</span>
+          <span className="shrink-0 text-caption text-muted-foreground">
+            {loop ? `${label} ${loopBadge(loop)}` : label}{state ? ` · ${NODE_STATE_LABELS[state]}` : ""}
+          </span>
+        </span>
+        {loop ? <span className="mt-0.5 block break-words font-mono text-caption text-muted-foreground">{loopSummary(loop).join(" · ")}</span> : null}
+        {targets.length > 0 ? (
+          <span className="mt-0.5 block break-words text-caption text-muted-foreground">
+            {targets.map((e) => `→ ${e.target}${e.label ? ` (${e.label})` : ""}`).join(", ")}
+          </span>
+        ) : <span className="mt-0.5 block text-caption text-muted-foreground">{n.parentId ? "ends the iteration" : "ends"}</span>}
+      </>
+    );
+    const cls = cn(
+      "block w-full min-w-0 rounded-md border px-2 py-1.5 text-left",
+      n.id === selectedStepId ? "border-foreground bg-fill-selected" : "border-border bg-surface",
+    );
+    const inner = children.get(n.id) ?? [];
+    const shut = Boolean(loop) && collapsed.has(n.id);
+    const bodyId = `${baseId}-body-${n.id}`;
+    const select = onSelectStep ? (
+          <button
+            type="button"
+            aria-pressed={n.id === selectedStepId}
+            aria-label={`Step ${n.id}, ${label}${loop ? `, up to ${loopBadge(loop).slice(1)} times` : ""}${state ? `, ${NODE_STATE_LABELS[state]}` : ""}`}
+            onClick={() => onSelectStep(n.id)}
+            className={cn(cls, "outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring")}
+          >
+            {body}
+          </button>
+        ) : <div className={cls}>{body}</div>;
+    return (
+      <li key={n.id} data-testid={`workflow-step-${n.id}`} data-state={state ?? "definition"} data-step-type={n.step.type} data-depth={n.depth} {...(loop ? { "data-collapsed": String(shut) } : {})}>
+        {loop && inner.length > 0 ? (
+          <div className="flex min-w-0 items-start gap-1">
+            <div className="min-w-0 flex-1">{select}</div>
+            <IconButton
+              label={`Steps of ${n.id}`}
+              title={`Steps of ${n.id}`}
+              size="sm"
+              tooltip={false}
+              aria-expanded={!shut}
+              aria-controls={bodyId}
+              data-testid={`workflow-loop-toggle-${n.id}`}
+              icon={shut ? <ChevronRight strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" /> : <ChevronDown strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
+              onClick={() => setCollapsed(toggledLoops(collapsed, n.id))}
+            />
+          </div>
+        ) : select}
+        {inner.length > 0 ? (
+          <ol
+            id={bodyId}
+            hidden={shut}
+            aria-label={`Body of ${n.id}`}
+            data-testid={`workflow-step-body-${n.id}`}
+            className="mt-1.5 ml-3 space-y-1.5 border-l-2 border-dashed border-border pl-2"
+          >
+            {inner.map(renderItem)}
+          </ol>
+        ) : null}
+      </li>
+    );
+  };
+
   return (
     <div className="min-w-0 space-y-3">
       {legend && states ? (
@@ -315,42 +632,7 @@ export function WorkflowStepList({ spec, states, selectedStepId = null, onSelect
         </ul>
       ) : null}
       <ol aria-label="Workflow steps" data-testid="workflow-step-list" className="space-y-1.5">
-        {graph.nodes.map((n) => {
-          const state = states ? states[n.id] ?? "pending" : null;
-          const targets = outgoing(n.id);
-          const body = (
-            <>
-              <span className="flex min-w-0 items-center justify-between gap-2">
-                <span className="truncate font-mono text-label font-medium text-foreground">{n.id}</span>
-                <span className="shrink-0 text-caption text-muted-foreground">{STEP_TYPE_LABELS[n.step.type]}{state ? ` · ${NODE_STATE_LABELS[state]}` : ""}</span>
-              </span>
-              {targets.length > 0 ? (
-                <span className="mt-0.5 block break-words text-caption text-muted-foreground">
-                  {targets.map((e) => `→ ${e.target}${e.label ? ` (${e.label})` : ""}`).join(", ")}
-                </span>
-              ) : <span className="mt-0.5 block text-caption text-muted-foreground">ends</span>}
-            </>
-          );
-          const cls = cn(
-            "block w-full min-w-0 rounded-md border px-2 py-1.5 text-left",
-            n.id === selectedStepId ? "border-foreground bg-fill-selected" : "border-border bg-surface",
-          );
-          return (
-            <li key={n.id} data-testid={`workflow-step-${n.id}`} data-state={state ?? "definition"} data-step-type={n.step.type}>
-              {onSelectStep ? (
-                <button
-                  type="button"
-                  aria-pressed={n.id === selectedStepId}
-                  aria-label={`Step ${n.id}, ${STEP_TYPE_LABELS[n.step.type]}${state ? `, ${NODE_STATE_LABELS[state]}` : ""}`}
-                  onClick={() => onSelectStep(n.id)}
-                  className={cn(cls, "outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring")}
-                >
-                  {body}
-                </button>
-              ) : <div className={cls}>{body}</div>}
-            </li>
-          );
-        })}
+        {(children.get(null) ?? []).map(renderItem)}
       </ol>
     </div>
   );

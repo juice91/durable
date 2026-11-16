@@ -147,6 +147,12 @@ def seed(app, run_id: str, events: list[tuple[str, str, dict[str, Any]]]) -> Non
     tenant_id = _tenant_of_run(app, run_id)
     for key, type_, data in events:
         log.append(tenant_id, uuid.UUID(run_id), key, type_, data)
+        # The worker commits the terminal run status right after the end event; the stream holds
+        # its terminal frame for that commit, so a seeded end event comes with its status.
+        if type_ in ("run_completed", "run_failed"):
+            with app.state.database_engine.begin() as conn:
+                conn.execute(text("UPDATE runs SET status = :s WHERE id = :i"),
+                             {"s": "completed" if type_ == "run_completed" else "failed", "i": run_id})
 
 
 FULL_RUN = [
@@ -330,7 +336,7 @@ class TestStream:
         run_id = start(client, h, make_agent(client, h)).json()["run_id"]
         seed(app, run_id, FULL_RUN)
         frames = read_all_frames(client, f"/api/v1/runs/{run_id}/stream", h)
-        assert frames[0].event == "status" and frames[0].data["display_status"] == "queued"
+        assert frames[0].event == "status" and frames[0].data["display_status"] == "completed"
         events = [f for f in frames if f.event == "run_event"]
         assert [f.id for f in events] == ["0", "1", "2", "3", "4"]
         assert [f.data["seq"] for f in events] == [0, 1, 2, 3, 4]
@@ -380,7 +386,7 @@ class TestStream:
         seed(app, run_id, FULL_RUN)
         from eap_run_store import RunStore
 
-        RunStore(app.state.database_engine).set_status(_tenant_of_run(app, run_id), uuid.UUID(run_id), "completed", "done")
+        RunStore(app.state.database_engine).finish_with_end(_tenant_of_run(app, run_id), uuid.UUID(run_id), "completed", "done")
         # Resuming after the final event: only a status frame, then the stream ends.
         frames = read_all_frames(client, f"/api/v1/runs/{run_id}/stream", {**h, "Last-Event-ID": "4"})
         assert [(f.event, f.data["display_status"]) for f in frames] == [("status", "completed")]
@@ -422,6 +428,7 @@ class TestStreamGenerator:
             polls["n"] += 1
             if polls["n"] == 8:
                 events.extend([_event(1, "model_message"), _event(2, "run_failed"), _event(3, "tool_call")])
+                run.update(status="failed", display_status="failed")  # the status commit follows the end event
             return [e for e in events if e.seq > after]
 
         chunks = _collect(

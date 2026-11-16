@@ -48,7 +48,8 @@ def _other_tool_run(engine, tenant: str, kb_id: str, doc_id: str) -> str:
     log = EventLog(engine)
     log.append(tenant, run_id, "tool:result", "tool_result",
                {"status": "ok", "content": {"hits": [{"document_id": doc_id, "content": CHUNK_TEXT}]}})
-    RunStore(engine).set_status(tenant, run_id, "completed", CHUNK_TEXT, None)
+    # loops D12: a terminal status needs an `end` event; finish_with_end writes both atomically.
+    RunStore(engine).finish_with_end(tenant, run_id, "completed", CHUNK_TEXT, None)
     return str(run_id)
 
 

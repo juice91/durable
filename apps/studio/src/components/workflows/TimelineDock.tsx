@@ -5,13 +5,16 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { NodeState } from "@/lib/workflowRunState";
-import { NODE_STATE_CLASSES, NODE_STATE_LABELS, STEP_TYPE_LABELS } from "./WorkflowGraph";
+import { NODE_STATE_CLASSES, NODE_STATE_LABELS, stepTypeLabel } from "./WorkflowGraph";
 import { DockResizeHandle } from "./WorkflowFloatingPanel";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { TIMELINE_BAR_HEIGHT } from "./workflowLayout";
 import { timelineSummary, type TimelineRow } from "./workflowTimeline";
 
 /** The bar colour of each state: the chart series tokens, critical for failures. */
+/** Left padding per loop depth (0: top level; deeper levels as deep as the step list's nesting). */
+const TIMELINE_INDENT = ["", "pl-7", "pl-11", "pl-14", "pl-16"] as const;
+
 const BAR_CLASSES: Record<NodeState, string> = {
   pending: "bg-transparent",
   running: "bg-[var(--viz-series-1-color)] animate-pulse motion-reduce:animate-none",
@@ -30,6 +33,8 @@ export interface TimelineDockProps {
   onHeightChange: (height: number, persist: boolean) => void;
   selectedStepId: string | null;
   onSelectStep: (stepId: string) => void;
+  /** An iteration row was chosen: show that iteration (the pager's choice by loop instance key, LP.12). */
+  onSelectIteration?: (pagerKey: string, index: number) => void;
 }
 
 /**
@@ -37,7 +42,7 @@ export interface TimelineDockProps {
  * resizable list of per-step rows (state, duration and a bar placed within the run) taken from the
  * run's events. A row selects its step, like a node.
  */
-export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange, selectedStepId, onSelectStep }: TimelineDockProps) {
+export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange, selectedStepId, onSelectStep, onSelectIteration }: TimelineDockProps) {
   const listId = useId();
   const { done, total } = timelineSummary(rows);
   return (
@@ -72,24 +77,42 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
             <p className="p-3 text-label text-muted-foreground">No steps yet.</p>
           ) : (
             <ol aria-label="Step timeline" data-testid="workflow-timeline" className="divide-y divide-border">
-              {rows.map((row) => (
-                <li key={row.stepId} data-testid={`workflow-timeline-row-${row.stepId}`} data-state={row.state}>
+              {rows.map((row) => {
+                const it = row.iteration;
+                const pressed = it ? it.shown : row.stepId === selectedStepId;
+                return (
+                <li
+                  key={row.key}
+                  data-testid={it ? `workflow-timeline-iteration-${it.loopId}-${it.index}` : `workflow-timeline-row-${row.stepId}`}
+                  data-kind={row.kind}
+                  data-state={row.state}
+                  data-depth={row.depth}
+                  {...(it ? { "data-shown": String(it.shown) } : {})}
+                >
                   <button
                     type="button"
-                    aria-pressed={row.stepId === selectedStepId}
-                    onClick={() => onSelectStep(row.stepId)}
+                    aria-pressed={pressed}
+                    aria-label={it ? `${row.stepId} iteration ${it.index + 1}, ${NODE_STATE_LABELS[row.state]}${it.shown ? ", shown" : ""}` : undefined}
+                    onClick={() => (it ? onSelectIteration?.(it.pagerKey, it.index) : onSelectStep(row.stepId))}
                     className={cn(
                       "grid w-full min-w-0 grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] items-center gap-3 px-3 py-1.5 text-left outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                      row.stepId === selectedStepId && "bg-fill-selected",
+                      // A loop's iterations and body rows are indented under it, as in the step list.
+                      TIMELINE_INDENT[Math.min(row.depth, TIMELINE_INDENT.length - 1)],
+                      pressed && "bg-fill-selected",
                     )}
                   >
                     <span className="flex min-w-0 flex-col">
-                      <span className="truncate font-mono text-label text-foreground">{row.stepId}</span>
-                      <span className="flex items-center gap-1.5 text-caption text-muted-foreground">
-                        {row.stepType ? STEP_TYPE_LABELS[row.stepType] : null}
+                      {it ? (
+                        <span className="truncate text-label text-foreground">Iteration <span className="font-mono tabular-nums">{it.index + 1}</span></span>
+                      ) : (
+                        <span className="truncate font-mono text-label text-foreground">{row.stepId}</span>
+                      )}
+                      <span className="flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
+                        {row.stepType ? stepTypeLabel(row.stepType) : null}
                         <span data-testid="workflow-timeline-state" className={cn("rounded-sm border px-1 text-badge", NODE_STATE_CLASSES[row.state])}>
                           {NODE_STATE_LABELS[row.state]}
                         </span>
+                        {it?.errorCode ? <code className="truncate font-mono text-badge">{it.errorCode}</code> : null}
                       </span>
                     </span>
                     <span aria-hidden="true" className="relative h-2 min-w-0 rounded-full bg-muted">
@@ -105,7 +128,8 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
                     </span>
                   </button>
                 </li>
-              ))}
+                );
+              })}
             </ol>
           )}
         </div>

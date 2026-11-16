@@ -473,7 +473,7 @@ def test_pending_hides_terminal_runs_and_decided_pages_stay(run_store, event_log
         gone = conn.execute(text(
             "SELECT count(*) FROM pending_approvals WHERE run_id = ANY(:r)"), {"r": runs}).scalar_one()
     for run_id, status in zip(runs, ["completed", "failed", "needs_attention"] * 4):
-        run_store.set_status(tenant, run_id, status, error="x" if status == "failed" else None)
+        run_store.finish_with_end(tenant, run_id, status, error="x" if status == "failed" else None)
     pending = _all_pages(approvals, tenant, limit=11)
     assert len(pending) == 120 - gone and not {r["run_id"] for r in pending} & set(runs)
     assert {r["run_status"] for r in pending} == {"running"}
@@ -602,9 +602,9 @@ def test_waiting_approval_filter_and_recovering_precedence(run_store, event_log,
     with engine.begin() as conn:
         conn.execute(text("UPDATE runs SET heartbeat_at = NULL WHERE id = :r"), {"r": str(agent)})
     assert _display(run_store, tenant, agent) == "waiting_approval"
-    run_store.set_status(tenant, agent, "completed", output="x")
+    run_store.finish_with_end(tenant, agent, "completed", output="x")
     assert _display(run_store, tenant, agent) == "completed" and str(agent) not in listed("waiting_approval")
-    run_store.set_status(tenant, wf, "failed", error="boom")
+    run_store.finish_with_end(tenant, wf, "failed", error="boom")
     assert _display(run_store, tenant, wf) == "failed" and listed("waiting_approval") == set()
     queued = uuid4()
     run_store.create_run(tenant, uuid4(), 1, "hi", queued)
@@ -739,7 +739,7 @@ def test_output_format_in_every_run_read_and_untouched_by_status_changes(run_sto
         assert run_store.get_run(tenant, run_id)["output_format"] is None
     with engine.begin() as conn:
         conn.execute(text("UPDATE runs SET output_format = 'json' WHERE id = ANY(:r)"), {"r": [str(turn), str(child)]})
-    run_store.set_status(tenant, turn, "completed", output='{"a":1}')
+    run_store.finish_with_end(tenant, turn, "completed", output='{"a":1}')
     assert run_store.get_run(tenant, turn)["output_format"] == "json"
     assert [r["output_format"] for r in run_store.list_turns(tenant, conv["id"])] == ["json"]
     assert [r["output_format"] for r in run_store.list_runs(tenant, parent_run_id=wf)] == ["json"]
@@ -863,7 +863,7 @@ def test_rows_and_events_always_agree_after_a_mixed_workload(run_store, event_lo
         _decide(event_log, kind)(tenant, run_id, "a", typ[(i + 1) % 3], {"decided_by": "late"})  # exists
         _decide(event_log, kind)(tenant, run_id, "zzz", typ[0], {})  # not_waiting
         if i % 4 == 0:  # the run ends while "c" is still open: decisions are refused from then on
-            run_store.set_status(tenant, run_id, "failed", error="x")
+            run_store.finish_with_end(tenant, run_id, "failed", error="x")
             assert _decide(event_log, kind)(tenant, run_id, "b", typ[0], {})[0] == "not_waiting"
         else:
             _decide(event_log, kind)(tenant, run_id, "b", typ[2], {})

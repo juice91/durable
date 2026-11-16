@@ -168,6 +168,9 @@ STEP_RETRY = {"retries_allowed": True, "max_attempts": 3, "interval_seconds": 1.
 
 # Failure codes (eap_schemas.knowledge.INGEST_FAILURE_CODES plus the platform's own) -> fixed message.
 INGEST_CANCELLED = "ingest_cancelled"
+# The workflow result's error_code of a run that was already terminal when its workflow started
+# (loops D12; the same code as eap_worker.tool_run.RUN_ENDED).
+RUN_ENDED = "run_ended"
 _CANCEL_MESSAGES = {
     "document_deleted": "the document was deleted during the ingest",
     "knowledge_base_deleted": "the knowledge base was deleted during the ingest",
@@ -417,7 +420,11 @@ async def start_ingest_step(run_id: str, tenant_id: str, kb_id: str, input_json:
     `extractor` (RAG P1) names the worker extractor of a worker-extracted document, only for a run
     whose input has `embed_split: true` (created by an API that knows worker formats): the workflow
     then runs eap.kb_extract_chunk instead of eap.kb_chunk. A run recorded before (no key in this
-    step's checkpointed output) or without the flag keeps eap.kb_chunk."""
+    step's checkpointed output) or without the flag keeps eap.kb_chunk.
+
+    Or {"traceparent", "stopped": True, "status", "error"} when the run is already terminal
+    (loops D12: mark_running refused it): nothing is read, marked or embedded, and the workflow
+    returns without an event. A checkpoint recorded before the key existed has no `stopped`."""
     rt = get_runtime()
     store = _store()
     params = json.loads(input_json)
@@ -425,10 +432,14 @@ async def start_ingest_step(run_id: str, tenant_id: str, kb_id: str, input_json:
     def work() -> dict[str, Any]:
         # The API inserts the row first; an idempotent safety net, as for tool runs.
         rt.run_store.create_kb_ingest_run(tenant_id, kb_id, input_json, UUID(run_id))
-        rt.run_store.mark_running(tenant_id, UUID(run_id))
-        rt.run_store.heartbeat(tenant_id, UUID(run_id))
+        # False: the run is terminal and is never revived (loops D12), so it must not run.
+        started = rt.run_store.mark_running(tenant_id, UUID(run_id))
+        if started is not False:
+            rt.run_store.heartbeat(tenant_id, UUID(run_id))
         run = rt.run_store.get_run(tenant_id, UUID(run_id)) or {}
         out: dict[str, Any] = {"traceparent": run.get("traceparent")}
+        if started is False:
+            return {**out, "stopped": True, "status": run.get("status"), "error": run.get("error")}
         if "reindex" in params:
             generation = int(params["reindex"])
             kb = store.get_knowledge_base(tenant_id, kb_id)
@@ -1287,6 +1298,10 @@ async def kb_ingest(run_id: str, tenant_id: str, kb_id: str, input_json: str) ->
             start = await start_ingest_step(run_id, tenant_id, kb_id, input_json)
         except Exception as exc:  # noqa: BLE001 - a run that cannot start still ends failed, never 'running'
             return await _fail(run_id, tenant_id, kb_id, _ctx_of(input_json), exc)
+        if start.get("stopped"):
+            # Terminal before it started (loops D12): no event, no document change, no embedding.
+            log.warning("kb_ingest run %s not started: the run is already %s", run_id, start.get("status"))
+            return {"status": start.get("status") or "failed", "error": start.get("error"), "error_code": RUN_ENDED}
     with run_span(run_id, tenant_id, "", "", traceparent=start.get("traceparent")) as span:
         span.set_attribute("eap.run_kind", "kb_ingest")
         span.set_attribute("eap.knowledge_base_id", kb_id)

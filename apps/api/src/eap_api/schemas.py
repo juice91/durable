@@ -811,3 +811,35 @@ class EvalRunCreate(BaseModel):
     suite_id: UUID
     version: RunVersion = None
     max_concurrency: int = Field(default=DEFAULT_MAX_CONCURRENCY, ge=1, le=MAX_MAX_CONCURRENCY)
+
+
+# --------------------------------------------------------------------------- run cancellation (loops D12)
+
+
+class RunCancelResponse(BaseModel):
+    """202 answer of POST /runs/{run_id}/cancel (a workflow run). `status` is the run's status
+    after the cancel, always equal to what its `end` event fixes: `failed` (or `needs_attention`
+    when one of its side effects was still reserved) with `error_code` `run_cancelled`, or the
+    run's own outcome when it had already ended by itself before the terminal write (a retry).
+    `cancelled` is True when the run's `end` is the cancel's (`error_code` `run_cancelled`).
+    `approvals_closed` counts the open approval inbox rows this call closed (0 on a retry)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    kind: Literal["workflow"]
+    status: str
+    display_status: str
+    error_code: str | None
+    cancelled: bool
+    requested_by: str | None
+    approvals_closed: int
+
+
+class CancelNotSupportedDetail(BaseModel):
+    """409 answer of POST /runs/{run_id}/cancel for a run that is not a workflow run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detail: str
+    code: Literal["cancel_not_supported"]

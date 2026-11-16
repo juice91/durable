@@ -23,7 +23,8 @@ Step layout of a run (each line is a DBOS step, so recovery replays recorded res
     eap-agent__model.request_stream     model request n (deltas NOTIFY'd live inside)
     eap.append_event   model:{n}:final  model_message (from the checkpointed response), with its
                                         usage and cost and, in the same transaction, its
-                                        run_model_requests row (eap_worker.pricing)
+                                        run_model_requests row (eap_worker.pricing); the row is
+                                        usually written already by the model step itself (below)
     eap.append_event   tool:{id}:call   tool_call (before the tool runs)
     eap-agent__dynamic_toolset__eap-spec-tools.call_tool   tickets.create, MCP tools (mcp__<server>__<tool>),
                                         platform tools (retrieve)
@@ -212,6 +213,27 @@ the response's model_message event and usage row are written (so a billed reques
 and before its tools run. With output processors that event carries no text (`"withheld":
 "usage_limit_exceeded"`), since the processors never checked it.
 
+Billed usage is recorded inside the model step (loops D12, LP.8): a cancel fences the next DBOS
+operation, so the `model:{n}:final` append of a request that finished after a cancel never runs.
+DBOSDurability resolves the run's model inside the model-request step, so the agent's
+ResolveModelId resolver wraps every resolved model in UsageRecordingModel (_recording_resolver).
+When the wrapped request returns, or its stream is drained and closed, still inside the step, it
+prices the response exactly as the workflow does (_request_usage) and writes its
+`run_model_requests` rows (`model:{n}`, plus `model:{n}:failed:{k}`) with ON CONFLICT DO NOTHING;
+the later append writes the same keys and so skips them. The event stream handler
+(_publish_deltas) only publishes deltas and writes nothing. No step is added; a failed write is
+logged and left to the append, so it never retries (re-bills) the model call.
+- A crash after that write and before the step's checkpoint re-executes the request (billed again,
+  as before this change). The first execution's row stands (first write wins), and the
+  `model:{n}:final` event takes its usage, model and cost fields from that stored row
+  (append_event_step), so the event and run_model_requests always agree; the event's message,
+  text and fallback fields describe the checkpointed (second) response. The second execution's
+  cost is not recorded: before this change the first one's was lost instead.
+- Suspended responses (Pydantic AI's background/batch `state == "suspended"`) are not recorded in
+  the step: their usage is provisional. Forward risk, if such a model is ever used: the completing
+  request must record the real usage under `model:{n}`, which the append does today; recording the
+  provisional one first would make the real one a no-op (first write wins).
+
 Tool approval (AC.6; eap_worker.capabilities): only for a spec with `approvals`, and only when the
 model calls a gated tool. SpecCapability marks the gated tools `unapproved`; Pydantic AI first runs the
 response's ungated tool calls as usual, then collects the gated ones, and the capability waits
@@ -273,6 +295,9 @@ the run span get only the code, the exception type and the run/tenant ids.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -282,6 +307,8 @@ from uuid import UUID, uuid4
 
 from dbos import DBOS
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse, infer_model
+from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.capabilities import ResolveModelId
 from pydantic_ai.durable_exec.dbos import DBOSDurability
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
@@ -316,6 +343,7 @@ from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
 from eap_worker.capabilities import (
+    LOOP_BODY_DENY_REASON,
     ApprovalSettings,
     SpecCapability,
     error_paths,
@@ -382,6 +410,7 @@ from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
 from eap_worker.pricing import (
+    USAGE_OUTPUT_BELOW_REASONING,
     failed_attempt_rows,
     fallback_usage,
     request_usage_input,
@@ -466,6 +495,193 @@ def _text_of(event: Any) -> str | None:
     return None
 
 
+def _request_usage(
+    model_chain: tuple[str, ...] | list[str], model_id: str, response: ModelResponse
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A model response's usage input for `eap.append_event` (`failed` rows included) and its
+    fallback fields (`answering_model` always; the fallback fields too with a chain): the one
+    computation the workflow's model_message append and the model step's usage write share, so
+    their rows agree. Both pass the response as `streamed_response`, so the streamed usage guard
+    (request_usage_input) corrects the same usage in both places."""
+    fallback_data: dict[str, Any] = {}
+    if len(model_chain) > 1:
+        # AC.5: priced as the model that answered; failed attempts with usage get rows.
+        # Streamed (model.request_stream): the answering model's impossible usage is corrected by
+        # the guard (request_usage_input).
+        usage, fallback_data, failed_usage = fallback_usage(model_chain, response, streamed_response=response)
+        if failed_usage:
+            usage["failed"] = failed_usage
+    else:
+        # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
+        usage = request_usage_input(model_id, response.model_name, response.usage, streamed_response=response)
+        fallback_data = {"answering_model": model_id}  # AC.5: on every model_message
+    return usage, fallback_data
+
+
+def _usage_rows(request_key: str, usage: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The run_model_requests rows of one model request (its own, then its failed attempts') and
+    the fields its event gets (usage_record)."""
+    row, fields = usage_record(request_key, usage)
+    failed = usage.get("failed") or []
+    return [row, *failed_attempt_rows(request_key, failed, row["created_at"])], fields
+
+
+# The model request in progress of this workflow execution (set by _drive_agent; read inside the
+# model step, in the same task, by UsageRecordingModel): run, tenant, the model chain and the
+# request's index n.
+_MODEL_REQUEST: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "eap_model_request", default=None
+)
+
+
+# Set while the model step prices its response (_record_usage_in_model_step): the workflow prices
+# the same response again for its model_message event, and that one logs the usage guard's
+# `usage_output_below_reasoning` warning, so the step's computation stays quiet (one warning per
+# request, as before).
+_QUIET_USAGE_GUARD: contextvars.ContextVar[bool] = contextvars.ContextVar("eap_quiet_usage_guard", default=False)
+
+
+class _QuietUsageGuardFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (_QUIET_USAGE_GUARD.get() and getattr(record, "code", None) == USAGE_OUTPUT_BELOW_REASONING)
+
+
+logging.getLogger("eap_worker").addFilter(_QuietUsageGuardFilter())
+
+
+def _write_request_usage(tenant_id: str, run_id: str, rows: list[dict[str, Any]]) -> None:
+    """Insert a model request's usage rows under the run-row lock (the lock event appends take),
+    first write wins per request key. An unknown run writes nothing."""
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.orm import Session
+
+    from eap_run_store import insert_usage_in_session
+
+    with Session(get_runtime().engine) as session:
+        owned = session.execute(
+            sql_text("SELECT id FROM runs WHERE id = :r AND tenant_id = :t FOR UPDATE"),
+            {"r": run_id, "t": tenant_id},
+        ).fetchone()
+        if owned is None:
+            session.rollback()
+            return
+        for row in rows:
+            insert_usage_in_session(session, tenant_id, run_id, row)
+        session.commit()
+
+
+_USAGE_COLUMNS = (
+    "model_id", "provider_model_name", "input_tokens", "output_tokens", "cache_read_tokens",
+    "cache_write_tokens", "usage_measured", "cost_usd", "price_source",
+)
+
+
+def _stored_usage_row(tenant_id: str, run_id: str, request_key: str) -> dict[str, Any] | None:
+    """The run's recorded run_model_requests row for `request_key` (the _USAGE_COLUMNS), or None."""
+    from sqlalchemy import text as sql_text
+
+    with get_runtime().engine.connect() as conn:
+        row = conn.execute(
+            sql_text(
+                f"SELECT {', '.join(_USAGE_COLUMNS)} FROM run_model_requests"
+                " WHERE tenant_id = :t AND run_id = :r AND request_key = :k"
+            ),
+            {"t": tenant_id, "r": run_id, "k": request_key},
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def _same_usage(stored: dict[str, Any], row: dict[str, Any]) -> bool:
+    """Whether a stored row records the same request as `row` (cost and price source aside, which
+    depend only on these and the price file)."""
+    return all(stored[c] == row[c] for c in _USAGE_COLUMNS if c not in ("cost_usd", "price_source"))
+
+
+def _usage_fields_from_row(stored: dict[str, Any]) -> dict[str, Any]:
+    """A model_message event's usage fields (pricing.usage_record's shape) from a stored row, marked
+    `recorded_attempt: "earlier"`: the row of an earlier execution of the model step."""
+    cost = stored["cost_usd"]
+    return {
+        "model_id": stored["model_id"],
+        "usage": {
+            "input_tokens": stored["input_tokens"],
+            "output_tokens": stored["output_tokens"],
+            "cache_read_tokens": stored["cache_read_tokens"],
+            "cache_write_tokens": stored["cache_write_tokens"],
+            "measured": stored["usage_measured"],
+            "provider_model_name": stored["provider_model_name"],
+            "price_source": stored["price_source"],
+            "recorded_attempt": "earlier",
+        },
+        "cost_usd": None if cost is None else format(cost, "f"),
+    }
+
+
+async def _record_usage_in_model_step(response: ModelResponse) -> None:
+    """Inside the model-request step, once the response is complete: write its usage rows (module
+    docstring, "Billed usage is recorded inside the model step"). Only for the run's own requests
+    (_drive_agent sets _MODEL_REQUEST); never raises."""
+    current = _MODEL_REQUEST.get()
+    if current is None or getattr(response, "state", "complete") == "suspended":
+        return  # not the run's own request, or provisional usage (module docstring)
+    try:
+        quiet = _QUIET_USAGE_GUARD.set(True)
+        try:
+            usage, _fallback = _request_usage(current["model_chain"], current["model_id"], response)
+        finally:
+            _QUIET_USAGE_GUARD.reset(quiet)
+        rows, _fields = _usage_rows(f"model:{current['n']}", usage)
+        await asyncio.to_thread(_write_request_usage, current["tenant_id"], current["run_id"], rows)
+    except Exception as exc:  # noqa: BLE001 - the model_message append writes the same rows
+        log_failure(
+            log, "usage not recorded in the model step", exc, code="usage_in_step_failed",
+            level=logging.WARNING, run_id=current["run_id"], tenant_id=current["tenant_id"],
+        )
+
+
+class UsageRecordingModel(WrapperModel):
+    """The run's resolved model (eap_worker.models' resolver, a FallbackModel included), wrapped so
+    that the request's usage is recorded inside the durable model step (DBOSDurability resolves
+    the model inside that step): after a streamed response is complete, or a request returns.
+    Requests behave exactly as the wrapped model's."""
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        response = await self.wrapped.request(messages, model_settings, model_request_parameters)
+        await _record_usage_in_model_step(response)
+        return response
+
+    @asynccontextmanager
+    async def request_stream(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        async with self.wrapped.request_stream(
+            messages, model_settings, model_request_parameters, run_context
+        ) as streamed:
+            yield streamed
+        # The consumer drained and closed the stream: the request is complete (and billed).
+        await _record_usage_in_model_step(streamed.get())
+
+
+def _recording_resolver(resolver: Any) -> Any:
+    """The ResolveModelId callback, with every resolved model wrapped in UsageRecordingModel (a
+    model id the resolver leaves to Pydantic AI is inferred here, as Pydantic AI would)."""
+
+    def resolve(ctx: Any, model_id: str) -> Model:
+        model = resolver(ctx, model_id)
+        return UsageRecordingModel(model if model is not None else infer_model(model_id))
+
+    return resolve
+
+
 async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     """DBOSDurability event_stream_handler.
 
@@ -501,7 +717,8 @@ agent: Agent[WorkerDeps, str] = Agent(
     model_settings=ModelSettings(max_retries=0),
     capabilities=[
         # AC.5: the spec's fallback chain for requests to its primary model (eap_worker.models).
-        ResolveModelId(make_resolver(lambda: get_runtime().settings, fallback=True)),
+        # Wrapped (LP.8): the request's usage row is written inside the model step itself.
+        ResolveModelId(_recording_resolver(make_resolver(lambda: get_runtime().settings, fallback=True))),
         # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
         RetrieveNumbering(),
         # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
@@ -548,8 +765,9 @@ async def start_run_step(
     mark_running); the decision is part of this step's recorded output, so a replayed workflow takes
     the same branch. `model_id` is the run's effective model (None: the spec's), `request_context`
     its validated context ({} when none), `is_draft` whether it is a draft test run. AC.6:
-    `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person),
-    else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
+    `approval_mode` is "deny" for a child run of an `eval` run (an eval never waits for a person)
+    and, with `approval_deny_reason` "loop_body", for an agent step inside a workflow loop body
+    (loops D8a), else "interactive"; `approval_timing` the approval knobs (capabilities.read_approval_timing).
     Both are recorded here, so a replay waits and denies exactly as the first attempt did. AGUI.7:
     `client_tools` (this turn's client tool declarations, or None), `client_tool_results` (its results
     for the previous turn's pending client calls, or None) and `client_tool_pending` ([{tool_call_id,
@@ -597,10 +815,16 @@ async def start_run_step(
             if calls and memory_spec is not None and memory_spec.memory is not None:
                 client_chain = _client_turn_chain(rt, ag_ui, tenant_id, str(run["conversation_id"]), calls)
         approval_mode = "interactive"
+        approval_deny_reason = None
         if run.get("parent_run_id") is not None:
             parent = rt.run_store.get_run(tenant_id, UUID(str(run["parent_run_id"]))) or {}
             if parent.get("kind") == "eval":
                 approval_mode = "deny"
+            elif parent.get("kind") == "workflow" and "/" in str(run.get("parent_step_id") or ""):
+                # Loops D8a: the agent step sits in a loop body (its parent_step_id is the scoped
+                # `{S}/{step_id}`; a top-level step id never contains `/`). It never waits.
+                approval_mode = "deny"
+                approval_deny_reason = LOOP_BODY_DENY_REASON
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
@@ -612,6 +836,7 @@ async def start_run_step(
             "is_draft": run.get("draft_spec") is not None,
             "approval_mode": approval_mode,
             "approval_timing": read_approval_timing(),
+            **({"approval_deny_reason": approval_deny_reason} if approval_deny_reason else {}),
             "client_tools": run.get("client_tools") or None,
             "client_tool_results": run.get("client_tool_results") or None,
             "client_tool_pending": client_pending,
@@ -752,6 +977,11 @@ async def append_event_step(
     pricing.fallback_usage) adds a row per failed fallback attempt that reported usage
     (`{request_key}:failed:{k}`), in the same transaction.
 
+    After the run's `end` (loops D12: e.g. the run was cancelled while this step ran), the store
+    drops the event (no `seq`, nothing written except the usage rows, whose cost is real) and this
+    step still succeeds: it returns the `end` event's seq, so the workflow goes on to its next
+    operation (where DBOS stops a cancelled workflow) instead of failing or retrying.
+
     `conversation` (agent_id, conversation_id), for a post-turn event (`post_turn_done`, P1.C1):
     the event is appended with the conversation row held `FOR KEY SHARE`
     (MemoryStore.append_conversation_event), so nothing is appended to a run whose conversation was
@@ -787,15 +1017,21 @@ async def append_event_step(
     rows: list[dict[str, Any]] | dict[str, Any] | None = None
     if usage is not None:
         key = request_key or event_key.removesuffix(":final")
-        row, fields = usage_record(key, usage)
+        row_list, fields = _usage_rows(key, usage)
+        if request_key is None and event_key.startswith("model:"):
+            # The model step may have recorded this request already (UsageRecordingModel). If it
+            # recorded another execution's usage (a crash between that write and the step's
+            # checkpoint), the event reports the stored row, so the two never disagree.
+            stored = await asyncio.to_thread(_stored_usage_row, tenant_id, run_id, key)
+            if stored is not None and not _same_usage(stored, row_list[0]):
+                fields = _usage_fields_from_row(stored)
         data = {**data, **fields}
-        failed = usage.get("failed") or []
-        rows = [row, *failed_attempt_rows(key, failed, row["created_at"])] if failed else row
-    event, _created = await asyncio.to_thread(
-        rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, rows
-    )
+        rows = row_list if len(row_list) > 1 else row_list[0]
+    result = await asyncio.to_thread(rt.event_log.append, tenant_id, UUID(run_id), event_key, type, data, rows)
+    if getattr(result, "dropped", False):
+        log.info("run %s: event %s not written: the run has already ended", run_id, event_key)
     crash_point("after_event_write", event_key=event_key)
-    return event.seq
+    return result[0].seq
 
 
 @DBOS.step(name="eap.finish_run")
@@ -813,15 +1049,23 @@ async def finish_run_step(
     structured output's canonical JSON text (AC.4); None leaves runs.output_format NULL (text).
     With `search_guard` (a `knowledge.search` tester run, P1.C4): in one transaction with the
     guard's FOR SHARE locks, the output without deleted documents' hits, or `failed` when the
-    knowledge base is gone; returns the status written (None otherwise, as before)."""
+    knowledge base is gone; returns the status written (None otherwise, as before).
+
+    A refused write is success here (loops D12): when the run already has its terminal status, or
+    its `end` fixes another one (a cancel's `run_failed` written before this run's own `end`, which
+    was then dropped), RunStore.set_status changes nothing (apart from filling NULL `messages`,
+    `output` and `output_format` on a matching end) and returns False. The step logs it and
+    returns normally, so a finish that lands after a cancel neither fails nor retries."""
     rt = get_runtime()
     if search_guard is not None:
         from eap_worker.search_guard import finish_guarded
 
         return await asyncio.to_thread(finish_guarded, rt.engine, tenant_id, run_id, output, search_guard)
-    await asyncio.to_thread(
+    written = await asyncio.to_thread(
         rt.run_store.set_status, tenant_id, UUID(run_id), status, output, error, messages, output_format
     )
+    if written is False:
+        log.info("run %s: status %s not written: the run's end event already fixed its status", run_id, status)
     return None
 
 
@@ -1279,6 +1523,12 @@ async def _drive_agent(
     # RM.12: a memory turn stores no copy of the note (eap_worker.memory.scrub_memory_messages).
     memory = memory_of(deps)
     n = 0
+    # The model step's usage write (LP.8) reads the request index n from here; n only changes
+    # between model requests, so the step sees the n its model:{n}:final event will use.
+    request_state: dict[str, Any] = {
+        "run_id": run_id, "tenant_id": tenant_id, "model_chain": tuple(model_chain), "model_id": model_id, "n": n,
+    }
+    request_token = _MODEL_REQUEST.set(request_state)
     pending: list[ToolCallPart] = []
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
     stored: dict[int, dict[str, Any]] = {}  # structured + output processors: n -> the stored response
@@ -1337,22 +1587,8 @@ async def _drive_agent(
                     candidate = bool(output_calls) or (structured and mode != "tool" and not calls and bool(text))
                     if candidate:
                         candidates[n] = _candidate_value(spec, output_calls, text)
-                    fallback_data: dict[str, Any] = {}
-                    if len(model_chain) > 1:
-                        # AC.5: priced as the model that answered; failed attempts with usage get rows.
-                        # Streamed (model.request_stream): the answering model's impossible usage
-                        # is corrected by the guard (request_usage_input).
-                        usage, fallback_data, failed_usage = fallback_usage(
-                            model_chain, response, streamed_response=response
-                        )
-                        if failed_usage:
-                            usage["failed"] = failed_usage
-                    else:
-                        # Streamed (model.request_stream): a gateway's impossible usage is corrected here.
-                        usage = request_usage_input(
-                            model_id, response.model_name, response.usage, streamed_response=response
-                        )
-                        fallback_data = {"answering_model": model_id}  # AC.5: on every model_message
+                    # The same usage the model step already recorded (_record_usage_in_model_step).
+                    usage, fallback_data = _request_usage(model_chain, model_id, response)
                     # AC.5: a fallback attempt's error text (provider body, request) is never stored.
                     message = scrub_failed_attempts_message(_message_json(response))
                     message = scrub_memory_message(message, memory)
@@ -1436,6 +1672,7 @@ async def _drive_agent(
                     if structured:
                         awaiting_retry = n
                     n += 1
+                    request_state["n"] = n
             if pending:
                 await _record_tool_results(
                     run_id, tenant_id, pending, _all_parts(run.all_messages()), client_names=client_names
@@ -1475,6 +1712,7 @@ async def _drive_agent(
     finally:
         reset_client_tools(client_token)
         reset_approval_settings(approval_token)
+        _MODEL_REQUEST.reset(request_token)
     if pending_client:
         # AGUI.7: no answer yet (the client executes its calls; the next turn continues). The stored
         # messages get the same treatment as an answered turn's.

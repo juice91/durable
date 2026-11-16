@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RouteIdError, routes } from "./index";
-import { parseWorkflowTab } from "./workflows";
+import { collapsedParam, parseCollapsedParam, parseWorkflowTab } from "./workflows";
 
 describe("workflow routes (SL.14)", () => {
   it("builds the Graph, Runs and Traces tabs and keeps the run view URL", () => {
@@ -20,5 +20,18 @@ describe("workflow routes (SL.14)", () => {
     expect(parseWorkflowTab("runs")).toBe("runs");
     expect(parseWorkflowTab(null)).toBe("graph");
     expect(parseWorkflowTab("traces")).toBe("graph");
+  });
+
+  it("carries collapsed loops (?collapsed=, LP.6) on the Graph tab and the run view, sorted", () => {
+    const set = new Set(["inner", "each"]);
+    expect(routes.workflow("wf-1", { collapsed: set })).toBe("/workflows/wf-1?collapsed=each%2Cinner");
+    expect(routes.workflow("wf-1", { collapsed: new Set() })).toBe("/workflows/wf-1");
+    // The Runs tab has no graph.
+    expect(routes.workflow("wf-1", { tab: "runs", collapsed: set })).toBe("/workflows/wf-1?tab=runs");
+    expect(routes.workflowRun("wf-1", "r1", { collapsed: set })).toBe("/workflows/wf-1/runs/r1?collapsed=each%2Cinner");
+    expect(collapsedParam(["b", "a", "Not-An-Id"])).toBe("a,b");
+    expect(collapsedParam(null)).toBeNull();
+    expect([...parseCollapsedParam("each, inner,,x;y,BAD")]).toEqual(["each", "inner"]);
+    expect(parseCollapsedParam(null).size).toBe(0);
   });
 });

@@ -61,7 +61,8 @@ def _turn(run_store, tenant, conv_id, *, status="completed", **kwargs):
     if status != "queued":
         run_store.set_status(tenant, run_id, "running")
         if status != "running":
-            run_store.set_status(tenant, run_id, status)
+            # loops D12: a terminal status needs an `end` event; finish_with_end writes both atomically.
+            run_store.finish_with_end(tenant, run_id, status)
     return str(run_id)
 
 

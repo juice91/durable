@@ -65,13 +65,13 @@ def test_totals_and_timestamps(run_store, event_log, tenant):
 
     event_log.append(tenant, run_id, "model:0:final", "model_message", {}, _usage("model:0", 10, 5, "0.0010000001"))
     event_log.append(tenant, run_id, "model:1:final", "model_message", {}, _usage("model:1", 20, 7, "0.002"))
-    run_store.set_status(tenant, run_id, "completed", output="ok")
+    run_store.finish_with_end(tenant, run_id, "completed", output="ok")
     run = run_store.get_run(tenant, run_id)
     assert (run["input_tokens"], run["output_tokens"], run["cost_usd"]) == (30, 12, Decimal("0.0030000001"))
     finished = run["finished_at"]
     assert finished is not None and finished >= started
     # A re-executed finish step: same totals, same finished_at.
-    run_store.set_status(tenant, run_id, "completed", output="ok")
+    run_store.finish_with_end(tenant, run_id, "completed", output="ok")
     again = run_store.get_run(tenant, run_id)
     assert again["finished_at"] == finished and again["cost_usd"] == Decimal("0.0030000001")
 
@@ -81,7 +81,7 @@ def test_unpriced_request_makes_cost_null_and_failed_runs_get_totals(run_store, 
     run_store.create_run(tenant, uuid4(), 1, "hi", run_id)
     event_log.append(tenant, run_id, "model:0:final", "model_message", {}, _usage("model:0", 10, 5, "0.001"))
     event_log.append(tenant, run_id, "model:1:final", "model_message", {}, _usage("model:1", 3, 4, None))
-    run_store.set_status(tenant, run_id, "needs_attention", error="x")
+    run_store.finish_with_end(tenant, run_id, "needs_attention", error="x")
     run = run_store.get_run(tenant, run_id)
     assert (run["input_tokens"], run["output_tokens"], run["cost_usd"]) == (13, 9, None)
     assert run["finished_at"] is not None
@@ -93,7 +93,7 @@ def test_run_without_requests_and_non_terminal_status(run_store, tenant):
     run_store.set_status(tenant, run_id, "running")
     run = run_store.get_run(tenant, run_id)
     assert run["finished_at"] is None and run["input_tokens"] is None and run["cost_usd"] is None
-    run_store.set_status(tenant, run_id, "failed", error="x")
+    run_store.finish_with_end(tenant, run_id, "failed", error="x")
     run = run_store.get_run(tenant, run_id)
     assert (run["input_tokens"], run["output_tokens"], run["cost_usd"]) == (0, 0, Decimal(0))
     assert run["model_id"] is None and run["model_overridden"] is False
@@ -111,9 +111,9 @@ def test_workflow_totals_sum_child_runs(run_store, event_log, tenant):
     other = uuid4()
     run_store.create_run(tenant, uuid4(), 1, "x", other)
     event_log.append(tenant, other, "model:0:final", "model_message", {}, _usage("model:0", 1000, 1000, "100"))
-    run_store.set_status(tenant, c1, "completed")
-    run_store.set_status(tenant, c2, "completed")
-    run_store.set_status(tenant, wf, "completed", output="{}")
+    run_store.finish_with_end(tenant, c1, "completed")
+    run_store.finish_with_end(tenant, c2, "completed")
+    run_store.finish_with_end(tenant, wf, "completed", output="{}")
     run = run_store.get_run(tenant, wf)
     assert (run["input_tokens"], run["output_tokens"], run["cost_usd"]) == (30, 3, Decimal("0.75"))
 
@@ -161,7 +161,7 @@ def test_enqueue_failed_is_finished_with_zero_totals_until_revived(run_store, te
     run_store.mark_running(tenant, started)
     assert not run_store.mark_enqueue_failed(tenant, started)
     assert run_store.get_run(tenant, started)["finished_at"] is None
-    run_store.set_status(tenant, started, "failed", error="other")
+    run_store.finish_with_end(tenant, started, "failed", error="other")
     finished = run_store.get_run(tenant, started)["finished_at"]
     run_store.mark_running(tenant, started)
     assert run_store.get_run(tenant, started)["finished_at"] == finished

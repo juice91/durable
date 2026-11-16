@@ -19,6 +19,7 @@ import type { TraceTab } from "@/lib/routes/observability";
 import { TraceLink } from "./TraceLink";
 import { KnowledgeBaseLink, RAG_SHOWN, RagSpanSection, USAGE_KINDS } from "./RagSpanSections";
 import { CAPABILITY_SHOWN, CAPABILITY_USAGE_KINDS, CapabilitySpanSection } from "./CapabilitySpanSections";
+import { LOOP_SHOWN, LoopSpanSection } from "./LoopSpanSections";
 
 // Attributes shown in their own sections rather than in the generic attribute list.
 const SHOWN = new Set([
@@ -186,7 +187,9 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
   const errorCode = str(a.error_code);
   const approval = a.approval as Record<string, unknown> | undefined;
   const decision = a.decision as Record<string, unknown> | undefined;
-  const ragShown = new Set([...(RAG_SHOWN[span.kind] ?? []), ...(CAPABILITY_SHOWN[span.kind] ?? [])]);
+  const ragShown = new Set([
+    ...(RAG_SHOWN[span.kind] ?? []), ...(CAPABILITY_SHOWN[span.kind] ?? []), ...(LOOP_SHOWN[span.kind] ?? []),
+  ]);
   const others = Object.entries(a).filter(([k, v]) => !SHOWN.has(k) && !ragShown.has(k) && v !== null && v !== undefined);
   // A model request always shows its usage; the RAG and memory kinds and processors when they carry a model.
   // A moderation processor is a model call of its own (its model, not the agent's chat model).
@@ -221,6 +224,7 @@ export function SpanDetail({ span, names }: SpanDetailProps) {
 
       {showUsage ? <UsageSection span={span} /> : null}
       <CapabilitySpanSection span={span} />
+      <LoopSpanSection span={span} />
       <RagSpanSection span={span} names={names} />
       {span.kind === "run" || span.kind === "child_run" ? <RunUsageSection span={span} /> : null}
 

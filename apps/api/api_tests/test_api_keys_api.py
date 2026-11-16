@@ -128,7 +128,7 @@ def test_agui_principal_key_and_errors(probe_client, tenant):
     from sqlalchemy import text
 
     with engine.begin() as conn:
-        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 second' WHERE id = :i"),
+        conn.execute(text("UPDATE api_keys SET expires_at = now() - interval '1 hour' WHERE id = :i"),
                      {"i": expired["id"]})
     bad_keys += [expired["key"], revoked["key"]]
     details = set()
