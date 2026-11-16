@@ -183,22 +183,57 @@ SPANS_STEP = "eap.cancel_reconcile.spans"
 SPANS_PER_TICK = 200
 # First start (no watermark yet): look back this far; spans are not backfilled for older runs.
 SPANS_FIRST_LOOKBACK = timedelta(days=7)
-# The scan restarts this far before the watermark, so a run whose commit landed after a newer one is
-# not skipped (a run that has spans is never selected again, so the overlap costs nothing).
+# A partial page (everything scanned, nothing left) moves the watermark to this far before the DB's
+# clock, so a run whose commit landed after a newer one is not skipped (a run that has spans is never
+# selected again, so the overlap costs nothing). A full page moves it to the last run's exact
+# (updated_at, id) instead: continuing a backlog needs no overlap, and one would only re-read the page.
 SPANS_OVERLAP = timedelta(minutes=1)
+# A run whose materialisation raised (or wrote nothing) is retried each tick, the watermark held at it;
+# after this many failed attempts it gets the synthetic `run` span from its row and the pass moves on.
+SPANS_MAX_ATTEMPTS = 5
 SPANS_WATERMARK_KEY = "spans_backfill_watermark"
 _WATERMARK_READ = text("SELECT value FROM worker_state WHERE key = :k")
 _WATERMARK_WRITE = text(
     "INSERT INTO worker_state (key, value, updated_at) VALUES (:k, :v, now())"
     " ON CONFLICT (key) DO UPDATE SET value = GREATEST(worker_state.value, EXCLUDED.value), updated_at = now()"
 )
+# The DB's clock: `runs.updated_at` is set by the database, not by this process.
+_DB_NOW_MINUS = text("SELECT now() - make_interval(secs => :s)")
+# Keyset on (updated_at, id), inclusive: the watermark row itself is read again (it has spans by then,
+# unless it failed, which is the point).
 _MISSING_SPANS = text(
     "SELECT r.tenant_id, r.id, r.updated_at FROM runs r"
     " WHERE r.parent_run_id IS NULL AND r.kind IN ('agent', 'tool', 'workflow')"
-    " AND r.status IN ('completed', 'failed', 'needs_attention') AND r.updated_at > :since"
+    " AND r.status IN ('completed', 'failed', 'needs_attention')"
+    " AND (r.updated_at, r.id) >= (:since, :after_id)"
     " AND NOT EXISTS (SELECT 1 FROM spans s WHERE s.run_id = CAST(r.id AS uuid))"
-    " ORDER BY r.updated_at ASC LIMIT :n"
+    " ORDER BY r.updated_at ASC, r.id ASC LIMIT :n"
 )
+_RUN_ROW = text(
+    "SELECT id, kind, status, created_at, updated_at, agent_id, workflow_id FROM runs"
+    " WHERE tenant_id = :t AND id = :r"
+)
+# The watermark's id half (the table holds the timestamp only) and the failed attempts per run live in
+# this process; after a restart the scan resumes at the stored timestamp and the counts start over.
+_mark_id: tuple[datetime, str] | None = None
+_span_attempts: dict[str, int] = {}
+
+
+def _write_synthetic_span(engine: Any, tenant_id: str, run_id: str) -> int:
+    """The last resort for a run whose trace cannot be materialised: one `run` span from its row."""
+    from eap_run_store.spans import SpanStore
+
+    with engine.connect() as conn:
+        row = conn.execute(_RUN_ROW, {"t": tenant_id, "r": run_id}).mappings().first()
+    if row is None:
+        return 0
+    span = {
+        "span_id": f"run:{row['id']}", "parent_id": None, "kind": "run", "name": str(row["kind"]),
+        "start": row["created_at"], "end": row["updated_at"],
+        "status": "ok" if row["status"] == "completed" else "error",
+        "agent_id": row["agent_id"], "workflow_id": row["workflow_id"], "model": None,
+    }
+    return SpanStore(engine).replace_for_run(tenant_id, run_id, [span])
 
 
 @DBOS.step(name=SPANS_STEP)
@@ -207,32 +242,60 @@ def record_missing_spans_step(limit: int = SPANS_PER_TICK) -> int:
     outside (the API's cancel), so its own workflow never reaches `eap.record_spans`; a run whose
     recording failed, or that ended while no worker ran, is picked up here too.
 
-    A watermark (`worker_state.spans_backfill_watermark`: the newest `runs.updated_at` scanned)
-    keeps each tick to `updated_at > watermark` (index `ix_runs_updated_at`), oldest first, at most
-    `limit` runs; a run with no spans from its trace gets one synthetic `run` span
-    (materialise_spans), so it is never selected again. Without a watermark (first start) the scan
-    reaches back 7 days. A page that is not full moves the watermark to just before now. Returns
-    the runs recorded."""
+    A watermark (`worker_state.spans_backfill_watermark` plus its id half, a keyset on
+    `(runs.updated_at, runs.id)`, index `ix_runs_updated_at`) keeps each tick to the runs from it on,
+    oldest first, at most `limit`. A run with no spans from its trace gets one synthetic `run` span
+    (materialise_spans), so it is never selected again. The watermark moves to the oldest run that did
+    not succeed (so the next tick retries it; after SPANS_MAX_ATTEMPTS failures it gets the synthetic
+    span and is given up on, logged); else to the last run of a full page; else to just before the
+    database's now. Without a watermark (first start) the scan reaches back 7 days. Returns the runs
+    recorded."""
+    global _mark_id
     rt = get_runtime()
-    now = datetime.now(timezone.utc)
     with rt.engine.connect() as conn:
         mark = conn.execute(_WATERMARK_READ, {"k": SPANS_WATERMARK_KEY}).scalar()
-        since = (mark - SPANS_OVERLAP) if mark is not None else now - SPANS_FIRST_LOOKBACK
-        rows = conn.execute(_MISSING_SPANS, {"since": since, "n": limit}).all()
+        db_back = lambda delta: conn.execute(_DB_NOW_MINUS, {"s": delta.total_seconds()}).scalar()  # noqa: E731
+        if mark is not None:
+            since, after_id = mark, (_mark_id[1] if _mark_id and _mark_id[0] == mark else "")
+        else:
+            since, after_id = db_back(SPANS_FIRST_LOOKBACK), ""
+        rows = conn.execute(_MISSING_SPANS, {"since": since, "after_id": after_id, "n": limit}).all()
+        overlap_mark = db_back(SPANS_OVERLAP)
     recorded = 0
-    for tenant_id, run_id, _updated in rows:
+    failed: list[tuple[datetime, str]] = []
+    for tenant_id, run_id, updated in rows:
+        key = str(run_id)
         try:
-            materialise_spans(rt.engine, tenant_id, run_id)
+            written = materialise_spans(rt.engine, tenant_id, run_id)
+        except Exception:  # noqa: BLE001 - best effort; retried below
+            written = 0
+        if written:
             recorded += 1
-        except Exception:  # noqa: BLE001 - best effort; the next tick retries
-            log.warning("cancel reconcile: spans of run %s not recorded", run_id)
-    if len(rows) >= limit:
-        advance = rows[-1][2]  # a full page: continue after the last run scanned
+            _span_attempts.pop(key, None)
+            continue
+        attempts = _span_attempts.get(key, 0) + 1
+        if attempts >= SPANS_MAX_ATTEMPTS:
+            try:
+                recorded += 1 if _write_synthetic_span(rt.engine, tenant_id, key) else 0
+                _span_attempts.pop(key, None)
+                log.error("cancel reconcile: spans of run %s not recorded after %d attempts; wrote the "
+                          "synthetic run span", key, attempts)
+                continue
+            except Exception:  # noqa: BLE001
+                log.exception("cancel reconcile: synthetic span of run %s not written", key)
+        _span_attempts[key] = attempts
+        failed.append((updated, key))
+        log.warning("cancel reconcile: spans of run %s not recorded (attempt %d)", key, attempts)
+    if failed:
+        advance = failed[0]  # rows are ordered: the oldest run that did not succeed stays in the window
+    elif len(rows) >= limit:
+        advance = (rows[-1][2], str(rows[-1][1]))  # a full page: continue after the last run scanned
     else:
-        advance = now - SPANS_OVERLAP
-    if mark is None or advance > mark:
+        advance = (overlap_mark, "")
+    if mark is None or advance > (mark, _mark_id[1] if _mark_id and _mark_id[0] == mark else ""):
         with rt.engine.begin() as conn:
-            conn.execute(_WATERMARK_WRITE, {"k": SPANS_WATERMARK_KEY, "v": advance})
+            conn.execute(_WATERMARK_WRITE, {"k": SPANS_WATERMARK_KEY, "v": advance[0]})
+        _mark_id = advance
     return recorded
 
 

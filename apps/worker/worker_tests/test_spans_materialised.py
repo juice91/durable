@@ -191,9 +191,17 @@ def watermark(worker):
                 conn.execute(text("INSERT INTO worker_state (key, value) VALUES (:k, :v)"),
                              {"k": SPANS_WATERMARK_KEY, "v": value})
 
+    def clear_process_state():
+        from eap_worker import cancel_reconcile
+
+        cancel_reconcile._mark_id = None
+        cancel_reconcile._span_attempts.clear()
+
     reset()
+    clear_process_state()
     yield type("W", (), {"read": staticmethod(read), "reset": staticmethod(reset)})
     reset()
+    clear_process_state()
 
 
 def test_the_reconcile_pass_records_spans_of_runs_the_api_cancelled(worker, tenant, watermark):
@@ -279,3 +287,106 @@ def test_a_failing_span_write_leaves_the_cancel_finish_and_the_pass_intact(worke
     assert worker.run_store.get_run(tenant, run_id)["status"] == "failed"
     assert cancel_reconcile.record_missing_spans_step(50) == 0  # swallowed, the next tick retries
     assert _spans(worker.engine, tenant, run_id) == []
+
+
+def _fail_for(monkeypatch, bad: set, *, times: int | None = None):
+    """materialise_spans raises for the runs in `bad` (`times` calls each; every call when None)."""
+    from eap_worker import cancel_reconcile
+
+    real, calls = cancel_reconcile.materialise_spans, {}
+
+    def flaky(engine, tenant_id, run_id):
+        if str(run_id) in {str(b) for b in bad}:
+            calls[str(run_id)] = calls.get(str(run_id), 0) + 1
+            if times is None or calls[str(run_id)] <= times:
+                raise RuntimeError("transient")
+        return real(engine, tenant_id, run_id)
+
+    monkeypatch.setattr(cancel_reconcile, "materialise_spans", flaky)
+    return calls
+
+
+def _same_timestamp(worker, runs):
+    with worker.engine.begin() as conn:
+        for r in runs:
+            conn.execute(text("UPDATE runs SET updated_at = now() - interval '2 hours' WHERE id = :r"), {"r": str(r)})
+
+
+def test_a_run_whose_materialisation_raised_is_retried_on_the_next_tick(worker, tenant, watermark, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import record_missing_spans_step
+
+    watermark.reset(datetime.now(timezone.utc) - timedelta(days=1))
+    run_id = _cancelled_by_the_api(worker, tenant)
+    _fail_for(monkeypatch, {run_id}, times=1)
+    assert record_missing_spans_step(500) == 0
+    assert _spans(worker.engine, tenant, run_id) == []
+    with worker.engine.connect() as conn:
+        updated = conn.execute(text("SELECT updated_at FROM runs WHERE id = :r"), {"r": str(run_id)}).scalar()
+    assert watermark.read() <= updated  # the failed run stays in the window
+    assert record_missing_spans_step(500) == 1
+    assert [r["kind"] for r in _spans(worker.engine, tenant, run_id)] == ["run"]
+
+
+def test_a_run_that_never_materialises_gets_the_synthetic_span_after_the_retry_bound(worker, tenant, watermark, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import SPANS_MAX_ATTEMPTS, record_missing_spans_step
+
+    watermark.reset(datetime.now(timezone.utc) - timedelta(days=1))
+    run_id = _cancelled_by_the_api(worker, tenant)
+    _fail_for(monkeypatch, {run_id})
+    for _ in range(SPANS_MAX_ATTEMPTS - 1):
+        assert record_missing_spans_step(500) == 0 and _spans(worker.engine, tenant, run_id) == []
+    assert record_missing_spans_step(500) == 1
+    rows = _spans(worker.engine, tenant, run_id)
+    assert [(r["kind"], r["span_id"], r["status"]) for r in rows] == [("run", f"run:{run_id}", "error")]
+    assert record_missing_spans_step(500) == 0  # given up on: not selected again
+
+
+def test_the_keyset_pages_through_runs_sharing_a_timestamp(worker, tenant, watermark):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import record_missing_spans_step
+
+    watermark.reset(datetime.now(timezone.utc) - timedelta(days=1))
+    runs = [_cancelled_by_the_api(worker, tenant) for _ in range(3)]
+    _same_timestamp(worker, runs)
+    assert record_missing_spans_step(2) == 2
+    assert record_missing_spans_step(2) == 1
+    assert all(_spans(worker.engine, tenant, r) for r in runs)
+
+
+def test_a_full_page_of_runs_that_never_get_spans_does_not_stall_the_pass(worker, tenant, watermark, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import SPANS_MAX_ATTEMPTS, record_missing_spans_step
+
+    watermark.reset(datetime.now(timezone.utc) - timedelta(days=1))
+    runs = sorted((_cancelled_by_the_api(worker, tenant) for _ in range(3)), key=str)
+    _same_timestamp(worker, runs)
+    _fail_for(monkeypatch, set(runs[:2]))  # the first two of the page of 2 never materialise
+    for _ in range(SPANS_MAX_ATTEMPTS):
+        record_missing_spans_step(2)
+    assert not _spans(worker.engine, tenant, runs[2])
+    record_missing_spans_step(2)  # the two are given up on; the third is reached
+    assert all(_spans(worker.engine, tenant, r) for r in runs)
+
+
+def test_the_partial_page_advance_uses_the_database_clock(worker, tenant, watermark, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker import cancel_reconcile
+
+    class WrongClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(cancel_reconcile, "datetime", WrongClock)
+    with worker.engine.connect() as conn:
+        db_now = conn.execute(text("SELECT now()")).scalar()
+    cancel_reconcile.record_missing_spans_step(500)
+    mark = watermark.read()
+    assert db_now - timedelta(minutes=2) <= mark <= db_now
