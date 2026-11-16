@@ -269,8 +269,8 @@ def test_destroy_sh_prompts_before_deleting(tmp_path: Path):
 
 
 def test_tunnel_sh_local_ports_do_not_clash(tmp_path: Path):
-    env = _env(tmp_path, _install_stubs(tmp_path))
-    proc = _run("tunnel.sh", env, ["deploy-host"])
+    env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_TUNNEL_ONCE": "1"})
+    proc = _run("tunnel.sh", env, ["deploy-host"], timeout=30)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     log = _log(env)
     assert log.startswith("ssh ")
@@ -549,3 +549,11 @@ def test_colima_start_is_not_tracked_by_the_actions_runner(tmp_path: Path):
     starts = [line for line in _log(env).splitlines() if line.startswith("COLIMA_START_TRACKING_ID=")]
     assert starts, "colima start was not invoked"
     assert all(line == "COLIMA_START_TRACKING_ID=[]" for line in starts), starts
+
+
+def test_tunnel_sh_reconnects_until_stopped(tmp_path: Path):
+    # Cloudflare's SSH proxy drops long sessions; the default loop must reconnect, not exit.
+    env = _env(tmp_path, _install_stubs(tmp_path))
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run("tunnel.sh", env, ["deploy-host"], timeout=8)
+    assert _log(env).count("ssh ") >= 2, _log(env)
