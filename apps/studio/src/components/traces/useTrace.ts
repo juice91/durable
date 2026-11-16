@@ -56,7 +56,7 @@ export interface TraceState {
 }
 
 /** One run's trace from GET /runs/:id/trace, polled every TRACE_POLL_MS while the run is not finished. */
-export function useTrace(runId: string): TraceState {
+export function useTrace(runId: string, initialSpanId: string | null = null): TraceState {
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -68,6 +68,9 @@ export function useTrace(runId: string): TraceState {
   // The run on screen: a response for a run the view has since moved away from is dropped.
   const runIdRef = useRef(runId);
   runIdRef.current = runId;
+  // The span the Sheet was opened on (`?span=`), selected on the first load when the trace has it.
+  const initialSpanRef = useRef(initialSpanId);
+  initialSpanRef.current = initialSpanId;
 
   const load = useCallback(async () => {
     const requested = runId;
@@ -79,7 +82,11 @@ export function useTrace(runId: string): TraceState {
       if (signature !== signatureRef.current) {
         signatureRef.current = signature;
         setTrace(data);
-        setSelectedId((prev) => (prev && data.spans.some((s) => s.id === prev) ? prev : (data.spans[0]?.id ?? null)));
+        setSelectedId((prev) => {
+          if (prev && data.spans.some((s) => s.id === prev)) return prev;
+          const wanted = initialSpanRef.current;
+          return wanted && data.spans.some((s) => s.id === wanted) ? wanted : (data.spans[0]?.id ?? null);
+        });
       }
       setError(null);
     } catch (err) {

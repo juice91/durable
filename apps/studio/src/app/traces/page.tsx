@@ -2,7 +2,6 @@
 
 import { TRACE_COLUMNS_STORAGE_KEY } from "@/lib/traces";
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { formatCost, formatTokens } from "@/lib/format";
 import { useSearchParams } from "next/navigation";
 import { StatusPill } from "@/components/runs/StatusPill";
@@ -11,7 +10,6 @@ import { api } from "@/lib/api";
 import { listWorkflows } from "@/lib/workflows";
 import { RunSubject } from "@/components/runs/RunSubject";
 import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
-import { RUN_KIND_LABELS, type RunKind } from "@/lib/runs";
 import {
   EMPTY_FILTERS,
   formatDuration,
@@ -33,57 +31,19 @@ import { RunModel } from "@/components/traces/RunModel";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { usePendingQuery } from "@/components/traces/usePendingQuery";
+import { TraceFilterBar } from "@/components/traces/TraceFilterBar";
+import { TracesTabs } from "@/components/traces/TracesTabs";
+import { RunsHistogram } from "@/components/traces/RunsHistogram";
 
 /** The list row's test id (kept from P0.13), as a `testId` key so the test-id inventory sees it rendered. */
 const TRACE_ROW = { testId: "trace-row" } as const;
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
 
-const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "completed", label: "Completed" },
-  { value: "failed", label: "Failed" },
-  { value: "running", label: "Running" },
-  { value: "queued", label: "Queued" },
-  { value: "recovering", label: "Recovering" },
-  { value: "needs_attention", label: "Needs Attention" },
-];
-
 /** Per-viewer column choice (hidden ids) for the list; tags are off until asked for. */
 const DEFAULT_HIDDEN_COLUMNS = ["tags"] as const;
-const splitList = (value: string | null) => (value ? value.split(",").map((v) => v.trim()).filter(Boolean) : []);
-
-const inputClass =
-  "h-8 rounded-md border border-input bg-surface px-2 text-label text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const labelClass = "text-caption font-medium text-muted-foreground";
 const dim = "text-muted-foreground";
 const linkClass = "text-info-text underline-offset-4 hover:underline";
-
-function TextFilter({ id, label, value, placeholder, onCommit }: {
-  id: string; label: string; value: string | null; placeholder: string; onCommit: (value: string | null) => void;
-}) {
-  const [draft, setDraft] = useState(value ?? "");
-  useEffect(() => setDraft(value ?? ""), [value]);
-  const commit = () => {
-    const next = draft.trim() || null;
-    if (next !== value) onCommit(next);
-  };
-  return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <label htmlFor={id} className={labelClass}>{label}</label>
-      <input
-        id={id}
-        value={draft}
-        placeholder={placeholder}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-        }}
-        className={`${inputClass} w-full sm:w-44`}
-      />
-    </div>
-  );
-}
 
 function TracesList() {
   const searchParams = useSearchParams();
@@ -178,9 +138,6 @@ function TracesList() {
     void loadRuns();
   }, [loadRuns]);
 
-  const statusValue = filters.status.length === 0 ? "all" : filters.status.length === 1 ? filters.status[0] : filters.status.join(",");
-  const customStatus = filters.status.length > 1 || (filters.status.length === 1 && !STATUS_OPTIONS.some((o) => o.value === filters.status[0]));
-  const agentOptions = Object.entries(agentNames).sort((a, b) => a[1].localeCompare(b[1]));
 
   const allColumns: DataListColumn<TraceRun>[] = [
     {
@@ -310,94 +267,20 @@ function TracesList() {
   return (
     <>
       <PageHeader crumbs={[navCrumb("traces", { current: true })]} />
+      <TracesTabs active="traces" />
       <TraceSheetHost runIds={visibleIds ?? runs.map((run) => run.run_id)} baseParams={pendingParams}>
         {(sheet) => (
           <div className="flex min-w-0 flex-col gap-4 p-4">
             <p className="text-label text-muted-foreground">Runs with their span tree, tokens and cost</p>
+            <RunsHistogram filters={filters} onPickBucket={({ from, to }) => setFilters({ from, to })} />
 
-            <div className="flex min-w-0 flex-wrap items-end gap-3 rounded-lg border border-border bg-surface p-3" role="search" aria-label="Trace filters" data-testid="traces-filter-bar">
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="status-filter" className={labelClass}>
-                  Filter by status:
-                </label>
-                <select
-                  id="status-filter"
-                  value={statusValue}
-                  onChange={(e) => setFilters({ status: e.target.value === "all" ? [] : e.target.value.split(",") })}
-                  className={inputClass}
-                >
-                  <option value="all">All</option>
-                  {STATUS_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                  {customStatus ? <option value={statusValue}>{filters.status.join(", ").replace(/_/g, " ")}</option> : null}
-                </select>
-              </div>
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="kind-filter" className={labelClass}>Kind</label>
-                <select
-                  id="kind-filter"
-                  value={filters.kind ?? "all"}
-                  onChange={(e) => setFilters({ kind: e.target.value === "all" ? null : (e.target.value as TraceFilters["kind"]) })}
-                  className={inputClass}
-                >
-                  <option value="all">All</option>
-                  {(Object.keys(RUN_KIND_LABELS) as RunKind[]).map((kind) => (
-                    <option key={kind} value={kind}>{RUN_KIND_LABELS[kind]}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="agent-filter" className={labelClass}>Agent</label>
-                <select
-                  id="agent-filter"
-                  value={filters.agent_id ?? ""}
-                  onChange={(e) => setFilters({ agent_id: e.target.value || null })}
-                  className={`${inputClass} max-w-48`}
-                >
-                  <option value="">All agents</option>
-                  {agentOptions.map(([id, name]) => (
-                    <option key={id} value={id}>{name}</option>
-                  ))}
-                  {filters.agent_id && !agentNames[filters.agent_id] ? (
-                    <option value={filters.agent_id}>{filters.agent_id.slice(0, 8)}...</option>
-                  ) : null}
-                </select>
-              </div>
-              <TextFilter id="model-filter" label="Model" value={filters.model} placeholder="provider:name" onCommit={(model) => setFilters({ model })} />
-              <TextFilter id="provider-filter" label="Provider" value={filters.provider} placeholder="e.g. openai" onCommit={(provider) => setFilters({ provider })} />
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="from-filter" className={labelClass}>From</label>
-                <input
-                  id="from-filter"
-                  type="datetime-local"
-                  value={isoToLocalInput(filters.from)}
-                  onChange={(e) => setFilters({ from: localInputToIso(e.target.value) })}
-                  className={inputClass}
-                />
-              </div>
-              <div className="flex min-w-0 flex-col gap-1">
-                <label htmlFor="to-filter" className={labelClass}>To</label>
-                <input
-                  id="to-filter"
-                  type="datetime-local"
-                  value={isoToLocalInput(filters.to)}
-                  onChange={(e) => setFilters({ to: localInputToIso(e.target.value) })}
-                  className={inputClass}
-                />
-              </div>
-              <TextFilter id="q-filter" label="Search" value={filters.q} placeholder="input, output, error, model" onCommit={(q) => setFilters({ q })} />
-              <TextFilter id="tags-filter" label="Tags" value={filters.tags.length ? filters.tags.join(", ") : null} placeholder="kind:agent, draft" onCommit={(value) => setFilters({ tags: splitList(value) })} />
-              <TextFilter id="metadata-filter" label="Metadata" value={filters.metadata.length ? filters.metadata.join(", ") : null} placeholder="key=value, key=value" onCommit={(value) => setFilters({ metadata: splitList(value).filter((pair) => pair.includes("=")) })} />
-              {hasActiveFilters(filters) ? (
-                <Button variant="ghost" size="sm" onClick={() => writeFilters(EMPTY_FILTERS)}>
-                  Clear filters
-                </Button>
-              ) : null}
-              <div className="ml-auto">
-                <ColumnChooser columns={chooserColumns} hidden={columnChoice.hidden} onVisibleChange={columnChoice.setVisible} onReset={columnChoice.reset} />
-              </div>
-            </div>
+            <TraceFilterBar
+              filters={filters}
+              setFilters={setFilters}
+              onClear={() => writeFilters(EMPTY_FILTERS)}
+              agentNames={agentNames}
+              trailing={<ColumnChooser columns={chooserColumns} hidden={columnChoice.hidden} onVisibleChange={columnChoice.setVisible} onReset={columnChoice.reset} />}
+            />
 
             {error ? (
               <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">

@@ -582,6 +582,25 @@ export async function listTraceRuns(
   return response.json();
 }
 
+export interface RunsHistogramBucket {
+  start: string;
+  runs: number;
+  failed: number;
+}
+
+export interface RunsHistogram {
+  interval: "hour" | "day";
+  buckets: RunsHistogramBucket[];
+}
+
+/** GET /runs/histogram for the list filters: zero-filled buckets, hourly under 72 h, else daily. */
+export async function fetchRunsHistogram(filters: TraceFilters, signal?: AbortSignal): Promise<RunsHistogram> {
+  const params = traceFiltersToParams(filters);
+  const response = await fetch(`${BASE_URL}/api/v1/runs/histogram?${params.toString()}`, { headers: apiHeaders(), signal });
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
 /**
  * A run's model as Studio shows it (the Traces lists and the run span's Run usage): the model that
  * answered, and the requested one only where they differ (a fallback model answered). Without an

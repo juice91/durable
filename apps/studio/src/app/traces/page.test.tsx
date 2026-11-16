@@ -95,7 +95,7 @@ describe("TracesPage", () => {
     render(<TracesPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Traces")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Traces" })).toBeInTheDocument();
     });
   });
 

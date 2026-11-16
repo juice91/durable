@@ -3,7 +3,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useUrlSheet } from "@/components/ui/useUrlSheet";
-import { parseTraceTab, TRACE_PARAM, TRACE_TAB_PARAM, type TraceTab } from "@/lib/routes/observability";
+import { parseTraceTab, TRACE_PARAM, TRACE_SPAN_PARAM, TRACE_TAB_PARAM, type TraceTab } from "@/lib/routes/observability";
 import { TraceSheetContext, type TraceSheetApi } from "./TraceLink";
 import { TraceSheet } from "./TraceSheet";
 import { prevNext } from "./traceSheetModel";
@@ -18,7 +18,7 @@ export function withSheetParams(
   tabParam: string = TRACE_TAB_PARAM,
 ): URLSearchParams {
   const out = new URLSearchParams(params);
-  for (const key of [TRACE_PARAM, tabParam]) {
+  for (const key of [TRACE_PARAM, tabParam, TRACE_SPAN_PARAM]) {
     const value = current?.get(key);
     if (value) out.set(key, value);
     else out.delete(key);
@@ -85,10 +85,11 @@ interface ChildSheet {
 }
 
 function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, baseParams, children }: TraceSheetHostProps) {
-  const pushSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam], history: "push", baseParams });
-  const replaceSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam], baseParams });
+  const pushSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam, TRACE_SPAN_PARAM], history: "push", baseParams });
+  const replaceSheet = useUrlSheet(TRACE_PARAM, { clear: [tabParam, TRACE_SPAN_PARAM], baseParams });
   const searchParams = useSearchParams();
   const tab = parseTraceTab(searchParams?.get(tabParam));
+  const spanId = searchParams?.get(TRACE_SPAN_PARAM) || null;
   const [registered, setRegistered] = useState<readonly string[]>([]);
   const [child, setChild] = useState<ChildSheet | null>(null);
   const value = pushSheet.value;
@@ -112,13 +113,19 @@ function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, baseParams, children }: 
     previousValue.current = value;
   }, [value]);
 
-  const tabExtra = useCallback((nextTab: TraceTab | null) => ({ [tabParam]: nextTab && nextTab !== "spans" ? nextTab : null }), [tabParam]);
+  const tabExtra = useCallback(
+    (nextTab: TraceTab | null, span: string | null = null) => ({
+      [tabParam]: nextTab && nextTab !== "spans" ? nextTab : null,
+      [TRACE_SPAN_PARAM]: span,
+    }),
+    [tabParam],
+  );
 
   /** Open (or switch to) a run from a list or a link: one history entry. */
   const open = useCallback(
-    (runId: string, nextTab: TraceTab | null = null) => {
+    (runId: string, nextTab: TraceTab | null = null, span: string | null = null) => {
       // Pushed unless the page had a filter write in flight (then it replaced: see useUrlSheet).
-      pushed.current = pushOpen(runId, tabExtra(nextTab));
+      pushed.current = pushOpen(runId, tabExtra(nextTab, span));
       openedRunId.current = runId;
       openedByHost.current = true;
     },
@@ -126,16 +133,16 @@ function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, baseParams, children }: 
   );
   /** Prev / next and tab changes: replace the current entry. */
   const navigate = useCallback(
-    (runId: string, nextTab: TraceTab | null) => {
+    (runId: string, nextTab: TraceTab | null, span: string | null = null) => {
       // Through the push hook while its entry is on top (it replaces then, and closing still goes Back).
-      if (pushed.current) pushOpen(runId, tabExtra(nextTab));
-      else replaceOpen(runId, tabExtra(nextTab));
+      if (pushed.current) pushOpen(runId, tabExtra(nextTab, span));
+      else replaceOpen(runId, tabExtra(nextTab, span));
     },
     [pushOpen, replaceOpen, tabExtra],
   );
   const onTabChange = useCallback((next: TraceTab) => {
-    if (value) navigate(value, next);
-  }, [navigate, value]);
+    if (value) navigate(value, next, spanId);
+  }, [navigate, value, spanId]);
   const closeFocusTarget = useCallback((runId: string): HTMLElement | null => {
     if (openedRunId.current === null || runId === openedRunId.current || typeof document === "undefined") return null;
     const row = Array.from(document.querySelectorAll<HTMLElement>("[data-row-id]")).find((el) => el.dataset.rowId === runId);
@@ -161,6 +168,7 @@ function RootHost({ runIds, tabParam = TRACE_TAB_PARAM, baseParams, children }: 
       {value ? (
         <TraceSheet
           runId={value}
+          initialSpanId={spanId}
           open
           onOpenChange={pushSheet.onOpenChange}
           tab={tab}

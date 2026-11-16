@@ -95,7 +95,7 @@ export const navItems: readonly NavItem[] = [
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },
   { id: "threads", label: "Threads", href: routes.threads(), icon: ThreadsIcon, group: "observability", gKey: "h", keywords: ["conversations", "chats", "messages", "history"] },
-  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t" },
+  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t", match: [routes.spans()] },
   { id: "logs", label: "Logs", href: routes.logs(), icon: LogsIcon, group: "observability", gKey: "l" },
   // Bottom
   { id: "settings", label: "Settings", href: routes.settings(), icon: SettingsIcon, group: "settings", gKey: "," },

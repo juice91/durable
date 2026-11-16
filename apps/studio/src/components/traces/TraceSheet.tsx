@@ -61,6 +61,8 @@ export interface TraceSheetProps {
    * (whatever opened it). The host returns the list row of a run reached with prev / next.
    */
   closeFocusTarget?: (runId: string) => HTMLElement | null;
+  /** The span to select on open (`?span=`, from the Spans list). */
+  initialSpanId?: string | null;
 }
 
 /** The "Open agent" / "Open workflow" / "Open knowledge base" link for a run. A kb_ingest run links
@@ -89,7 +91,7 @@ export function subjectLink(
  * event timeline) and Logs (narrowed to the selected span). Inside it, trace links stack a second
  * Sheet (`TraceLink`).
  */
-export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth = 0, navigation = null, closeFocusTarget }: TraceSheetProps) {
+export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth = 0, navigation = null, closeFocusTarget, initialSpanId = null }: TraceSheetProps) {
   const [expanded, setExpanded] = useState(false);
   const frameState = useFrame();
   const viewport = useViewportWidth(open);
@@ -118,6 +120,7 @@ export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth 
             <TraceSheetBody
               key={runId}
               runId={runId}
+              initialSpanId={initialSpanId}
               tab={tab}
               onTabChange={onTabChange}
               navigation={navigation}
@@ -144,6 +147,7 @@ function TraceLoadError({ message, onRetry }: { message: string; onRetry: () => 
 
 interface TraceSheetBodyProps {
   runId: string;
+  initialSpanId: string | null;
   tab: TraceTab;
   onTabChange: (tab: TraceTab) => void;
   navigation: TraceSheetNavigation | null;
@@ -152,8 +156,8 @@ interface TraceSheetBodyProps {
   detailBeside: boolean;
 }
 
-function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggleExpanded, detailBeside }: TraceSheetBodyProps) {
-  const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId);
+function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, expanded, onToggleExpanded, detailBeside }: TraceSheetBodyProps) {
+  const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId, initialSpanId);
   const baseNames = useNames();
   const [mode, setMode] = useState<SpanTreeMode>("timeline");
   const root = trace?.spans[0] ?? null;

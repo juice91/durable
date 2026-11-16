@@ -8,6 +8,8 @@ export type TraceTab = (typeof TRACE_TABS)[number];
 export const TRACE_PARAM = "trace";
 /** Query parameter holding the trace Sheet's tab (on `/traces`; a host page may use another name). */
 export const TRACE_TAB_PARAM = "tab";
+/** Query parameter holding the span selected when the trace Sheet opens (from the Spans list). */
+export const TRACE_SPAN_PARAM = "span";
 
 /** A URL's `tab` value as a trace tab; anything else (or nothing) is the default, `spans`. */
 export function parseTraceTab(raw: string | null | undefined): TraceTab {
@@ -17,6 +19,8 @@ export function parseTraceTab(raw: string | null | undefined): TraceTab {
 export interface TraceRouteOptions {
   /** The Sheet tab to open on; `spans` (the default) is left out of the URL. */
   tab?: TraceTab | null;
+  /** The span to select when the Sheet opens. */
+  span?: string | null;
 }
 
 /**
@@ -32,16 +36,19 @@ export const observabilityRoutes = {
   metrics: (query?: RouteQuery): string => withQuery("/metrics", query),
   /** `/traces`, with the Traces list filters. */
   traces: (query?: RouteQuery): string => withQuery("/traces", query),
+  /** `/traces/spans`, with the Spans list filters. */
+  spans: (query?: RouteQuery): string => withQuery("/traces/spans", query),
   /**
    * `/traces?trace=:runId[&tab=]`: one run's trace in the trace Sheet. Pages that host the Sheet
    * open it in place instead (`TraceLink`), with the same URL as the link's href.
    * Throws RouteIdError for "." and "..", like every id builder.
    */
-  trace: (runId: string, { tab = null }: TraceRouteOptions = {}): string => {
+  trace: (runId: string, { tab = null, span = null }: TraceRouteOptions = {}): string => {
     seg(runId);
     const params = new URLSearchParams();
     params.set(TRACE_PARAM, runId);
     if (tab && tab !== "spans") params.set(TRACE_TAB_PARAM, tab);
+    if (span) params.set(TRACE_SPAN_PARAM, span);
     return `/traces?${params.toString()}`;
   },
   /** A run's details: the trace Sheet on its Events tab (the former `/runs/:id` page). */

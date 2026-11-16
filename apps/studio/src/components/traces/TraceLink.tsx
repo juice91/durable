@@ -10,7 +10,7 @@ export interface TraceSheetApi {
   /** The run whose trace Sheet is open (from the URL), or null. */
   runId: string | null;
   /** Open (or switch) the trace Sheet to `runId`, on `tab` (default Spans). */
-  open: (runId: string, tab?: TraceTab | null) => void;
+  open: (runId: string, tab?: TraceTab | null, spanId?: string | null) => void;
   /** Stack a second trace Sheet over the first (a child run); a third replaces the second. */
   openChild: (runId: string, tab?: TraceTab | null) => void;
   close: () => void;
