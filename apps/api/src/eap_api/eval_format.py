@@ -83,6 +83,8 @@ survives), and before constructing, every node must carry a JSON tag (no timesta
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from decimal import Decimal
@@ -95,7 +97,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from eap_schemas.evals import EvaluatorSpec
 
-ExportFormat = Literal["yaml", "json"]
+# "csv" is import only (`parse_csv_cases`); export writes yaml or json.
+ExportFormat = Literal["yaml", "json", "csv"]
 MAX_IMPORT_BYTES = 1024 * 1024
 # Prescan caps (a 500-case suite uses roughly 5 to 20 lines per case and nests 6 to 10 levels).
 MAX_YAML_DEPTH = 64
@@ -231,6 +234,8 @@ def dataset_dict(name: str, evaluators: Any, cases: Any) -> dict[str, Any]:
 
 
 def dump_dataset(data: dict[str, Any], fmt: ExportFormat) -> str:
+    if fmt == "csv":
+        raise ValueError("a suite is exported as yaml or json")
     if fmt == "json":
         return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False, width=1000)
@@ -476,6 +481,118 @@ def parse_file(text: str, fmt: ExportFormat) -> Any:
         raise EvalFormatError("the file is nested too deeply") from None
 
 
+class CsvFormatError(EvalFormatError):
+    """A CSV import problem at one row (`row` counts records from 1 = the header line; `message`
+    never quotes the cell). Pickle-safe."""
+
+    def __init__(self, row: int, message: str) -> None:
+        self.row = row
+        self.message = message
+        super().__init__(message, f"row {row}")
+
+    def __str__(self) -> str:
+        return f"the CSV file is invalid at row {self.row}: {self.message}"
+
+
+CSV_COLUMNS = ("name", "input", "expected_output", "metadata")
+
+
+def _csv_json(value: str) -> Any:
+    """`value` parsed as JSON (NaN and Infinity are not JSON), or ValueError."""
+
+    def refuse(constant: str) -> Any:
+        raise ValueError(constant)
+
+    return json.loads(value, parse_constant=refuse)
+
+
+def parse_csv_cases(text: str) -> list[dict[str, Any]]:
+    """The cases of a CSV file, as EvalCase dicts (`name`, `input`, `expected_output`, `metadata`).
+
+    The header names the columns: `name` and `input` are required, `expected_output` and `metadata`
+    optional, in any order; nothing else is accepted. `expected_output` is JSON when it parses,
+    else the text itself, and empty means none; `metadata` is the JSON text of an object, or empty.
+    Quoted cells may hold commas, quotes and line breaks. All or nothing: the first problem is a
+    `CsvFormatError` naming its row (the header is row 1), and no case is returned. Blank lines are
+    skipped, names must be unique in the file."""
+    from eap_schemas.evals import EvalCase
+
+    text = text.removeprefix("\ufeff")  # a spreadsheet's UTF-8 byte order mark
+    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+    try:
+        header = next(reader, None)
+    except csv.Error:
+        raise CsvFormatError(1, "the header is not valid CSV") from None
+    if header is None:
+        raise CsvFormatError(1, "the file is empty; the first line must be the column names")
+    columns = [h.strip().lower() for h in header]
+    unknown = [c for c in columns if c not in CSV_COLUMNS]
+    if unknown:
+        raise CsvFormatError(1, f"unknown column {unknown[0][:50]!r}; the columns are {', '.join(CSV_COLUMNS)}")
+    if len(set(columns)) != len(columns):
+        raise CsvFormatError(1, "a column appears twice")
+    for required in ("name", "input"):
+        if required not in columns:
+            raise CsvFormatError(1, f"the {required} column is missing")
+
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    row = 1
+    while True:
+        row += 1
+        try:
+            record = next(reader)
+        except StopIteration:
+            break
+        except csv.Error:
+            raise CsvFormatError(row, "not valid CSV (an unclosed quote, or a cell that is too large)") from None
+        if not record:
+            continue  # a blank line
+        if len(record) != len(columns):
+            raise CsvFormatError(row, f"expected {len(columns)} cells, found {len(record)}")
+        cells = dict(zip(columns, record))
+        name = cells["name"].strip()
+        if not name:
+            raise CsvFormatError(row, "name is required")
+        if name in seen:
+            raise CsvFormatError(row, "name is used by an earlier row (cases are imported by name)")
+        seen.add(name)
+        expected: Any = None
+        raw_expected = cells.get("expected_output", "")
+        if raw_expected.strip():
+            try:
+                expected = _csv_json(raw_expected)
+            except ValueError:
+                expected = raw_expected
+        metadata: Any = {}
+        raw_metadata = cells.get("metadata", "")
+        if raw_metadata.strip():
+            try:
+                metadata = _csv_json(raw_metadata)
+            except ValueError:
+                raise CsvFormatError(row, "metadata must be the JSON text of an object") from None
+            if not isinstance(metadata, dict):
+                raise CsvFormatError(row, "metadata must be the JSON text of an object")
+        try:
+            case = EvalCase.model_validate(
+                {"name": name, "input": cells["input"], "expected_output": expected, "metadata": metadata}
+            )
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(p) for p in first["loc"])
+            raise CsvFormatError(row, f"{where}: {first['msg']}" if where else first["msg"]) from None
+        cases.append(
+            {
+                "name": case.name,
+                "input": case.input,
+                "expected_output": case.expected_output,
+                "metadata": dict(case.metadata),
+                "evaluators": [],
+            }
+        )
+    return cases
+
+
 def read_dataset(data: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
     """(cases, suite evaluators) of parsed file data. `cases` are EvalCase dicts (validated by the
     store); the evaluators are None when the file has no `evaluators` key (the suite's are kept)."""
@@ -521,6 +638,8 @@ def read_dataset(data: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]] 
 
 __all__ = [
     "CLASS_TO_KIND",
+    "CSV_COLUMNS",
+    "CsvFormatError",
     "EvalFormatError",
     "ExportFormat",
     "KIND_TO_CLASS",
@@ -533,6 +652,7 @@ __all__ = [
     "dump_dataset",
     "evaluator_from_spec",
     "evaluator_to_spec",
+    "parse_csv_cases",
     "parse_file",
     "prescan_yaml",
     "read_dataset",

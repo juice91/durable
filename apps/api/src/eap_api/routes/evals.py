@@ -74,10 +74,12 @@ from eap_api.auth import Principal, current_principal
 from eap_api import eval_overview
 from eap_api.eval_format import (
     MAX_IMPORT_BYTES,
+    CsvFormatError,
     EvalFormatError,
     ExportFormat,
     dataset_dict,
     dump_dataset,
+    parse_csv_cases,
     parse_file,
     read_dataset,
 )
@@ -251,6 +253,11 @@ def _store_error(exc: Exception) -> HTTPException:
         return _http(status.HTTP_404_NOT_FOUND, str(exc))
     if isinstance(exc, (EvalSuiteNameConflict, EvalCaseNameConflict, EvalSuiteArchived)):
         return _http(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, CsvFormatError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "csv_invalid", "row": exc.row, "message": exc.message},
+        )
     if isinstance(exc, (EvalSuiteInvalid, EvalCaseLimitExceeded, EvalFormatError)):
         return _http(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     raise exc
@@ -777,21 +784,35 @@ def export_suite(
     )
 
 
-def _import_sync(store: EvalStore, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat) -> dict[str, Any]:
+def _import_sync(
+    store: EvalStore, db, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat
+) -> dict[str, Any]:
     """Off the event loop. The suite is checked before the file is parsed: an unknown or foreign
-    suite is a 404 and an archived one a 409, whatever the file holds, and no parse runs for them."""
+    suite is a 404 and an archived one a 409, whatever the file holds, and no parse runs for them.
+    Everything is validated before the one transaction that writes (all or nothing)."""
     suite = store.get_suite(tenant_id, suite_id)
     if suite.archived:
         raise EvalSuiteArchived(suite.id)
-    data = parse_file(text, fmt)
-    issues = unstorable_strings(data)
+    if fmt == "csv":
+        cases, evaluators = parse_csv_cases(text), None
+        issues = unstorable_strings(cases)
+    else:
+        data = parse_file(text, fmt)
+        issues = unstorable_strings(data)
+        if not issues:
+            cases, evaluators = read_dataset(data)
     if issues:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=issues)
-    cases, evaluators = read_dataset(data)
     check_regex_evaluators(evaluators, "evaluators")
     _check_case_regexes(cases)
+    if suite.workflow_id is not None:
+        spec = _latest_workflow_spec(db, tenant_id, suite.workflow_id)
+        for case in cases:
+            problem = workflow_input_problem(spec, case["name"], case["input"])
+            if problem is not None:
+                raise problem
     kwargs: dict[str, Any] = {} if evaluators is None else {"evaluators": evaluators}
-    result = store.upsert_cases(tenant_id, suite_id, cases, **kwargs)
+    result = store.upsert_cases(tenant_id, suite_id, cases, keep_case_evaluators=fmt == "csv", **kwargs)
     suite = store.get_suite(tenant_id, suite_id)
     return {"created": result.created, "updated": result.updated, "suite": suite_json(suite)}
 
@@ -801,14 +822,19 @@ async def import_suite(
     suite_id: uuid.UUID,
     request: Request,
     principal: PrincipalDep,
+    db: SessionDep,
     store: EvalStoreDep,
-    fmt: Annotated[Literal["yaml", "json"] | None, Query(alias="format")] = None,
+    fmt: Annotated[Literal["yaml", "json", "csv"] | None, Query(alias="format")] = None,
 ) -> JSONResponse:
-    """Import a `pydantic_evals` dataset file (the raw body, at most 1 MiB): cases are upserted by
-    name in one transaction, all or nothing (an existing case keeps its id and position, new ones
-    are appended); the file's `evaluators`, when present, replace the suite's. 200
-    `{created, updated, suite}`; 422 for a file that is too large, not UTF-8, not parseable, an
-    unknown evaluator or an invalid case; 404 / 409 as for the other suite routes."""
+    """Import a `pydantic_evals` dataset file, or a CSV file (the raw body, at most 1 MiB): cases are
+    upserted by name in one transaction, all or nothing (an existing case keeps its id and position,
+    new ones are appended); the dataset file's `evaluators`, when present, replace the suite's. A CSV
+    file (`?format=csv`, or Content-Type text/csv) has the columns `name,input[,expected_output]
+    [,metadata]` and leaves the evaluators alone. 200 `{created, updated, suite}`; 422 for a file
+    that is too large, not UTF-8, not parseable, an unknown evaluator or an invalid case (a CSV
+    problem is `{code: "csv_invalid", row, message}`; for a workflow suite a case input that does not
+    fit the workflow's input schema is `{code: "input_schema_errors", case, errors}`); 404 / 409 as
+    for the other suite routes."""
     body = await read_capped_body(request, MAX_IMPORT_BYTES)
     if body is None:
         raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, IMPORT_TOO_LARGE)
@@ -817,9 +843,10 @@ async def import_suite(
     except UnicodeDecodeError:
         raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, IMPORT_NOT_UTF8) from None
     if fmt is None:
-        fmt = "json" if "json" in request.headers.get("content-type", "").lower() else "yaml"
+        content_type = request.headers.get("content-type", "").lower()
+        fmt = "csv" if "csv" in content_type else "json" if "json" in content_type else "yaml"
     try:
-        content = await run_in_threadpool(_import_sync, store, principal.tenant_id, suite_id, text, fmt)
+        content = await run_in_threadpool(_import_sync, store, db, principal.tenant_id, suite_id, text, fmt)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
     return JSONResponse(content=content)

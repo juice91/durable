@@ -1013,10 +1013,12 @@ class EvalStore:
         *,
         evaluators: Sequence[Any] = _UNSET,
         agent_id: UUID | str | None = None,
+        keep_case_evaluators: bool = False,
     ) -> ImportResult:
         """Import: upsert `cases` by name in ONE transaction (all or nothing). An existing case keeps
         its id and position; new cases are appended in the given order. `evaluators`, when given,
-        replaces the suite's. Raises EvalSuiteInvalid (a bad case, duplicate names, name clashes),
+        replaces the suite's. `keep_case_evaluators`: an existing case keeps its own evaluators (for
+        a file format that has no place for them, CSV). Raises EvalSuiteInvalid (a bad case, duplicate names, name clashes),
         EvalCaseLimitExceeded, EvalSuiteArchived or EvalSuiteNotFound."""
         valid = [_validate_case(c) for c in cases]
         names = [c.name for c in valid]
@@ -1036,14 +1038,16 @@ class EvalStore:
                 raise EvalCaseLimitExceeded(str(suite.id), MAX_SUITE_CASES)
             imported = {c.name for c in valid}
             for case in valid:
+                if keep_case_evaluators and case.name in existing:
+                    continue  # its stored evaluators are checked below
                 _check_names(suite_specs, case.evaluators, f"cases.{case.name}.evaluators")
             for name, row in existing.items():
-                if name not in imported:
+                if name not in imported or keep_case_evaluators:
                     _check_names(suite_specs, _evaluators(row.evaluators, "case"), f"cases.{name}.evaluators")
             position = self._next_position(session, tenant_id, suite.id)
             for case in valid:
                 if case.name in existing:
-                    self._apply_case(existing[case.name], case)
+                    self._apply_case(existing[case.name], case, keep_evaluators=keep_case_evaluators)
                 else:
                     session.add(self._new_case_row(tenant_id, suite.id, case, position, None))
                     position += 1
@@ -1466,12 +1470,13 @@ class EvalStore:
         return row
 
     @staticmethod
-    def _apply_case(row: EvalCaseModel, case: EvalCase) -> None:
+    def _apply_case(row: EvalCaseModel, case: EvalCase, keep_evaluators: bool = False) -> None:
         row.name = case.name
         row.input = case.input
         row.expected_output = null() if case.expected_output is None else case.expected_output
         row.metadata_ = dict(case.metadata)
-        row.evaluators = _dump_evaluators(case.evaluators)
+        if not keep_evaluators:
+            row.evaluators = _dump_evaluators(case.evaluators)
         row.updated_at = _now()
 
     @staticmethod
