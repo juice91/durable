@@ -72,6 +72,21 @@ describe("RunsHistogram", () => {
     expect(onReset).toHaveBeenCalled();
   });
 
+  it("keeps Reset range next to the 422 message and on an empty histogram", async () => {
+    const onReset = vi.fn();
+    const range = { ...EMPTY_FILTERS, from: "2024-01-01T00:00:00.000Z", to: "2026-11-16T00:00:00.000Z" };
+    fetchHistogram.mockRejectedValue(new ApiError(422, "from/to span more than 366 days", []));
+    const { unmount } = render(<RunsHistogram filters={range} onPickBucket={vi.fn()} onResetRange={onReset} />);
+    expect(await screen.findByText("Narrow the date range to see the histogram.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reset range" }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    unmount();
+    fetchHistogram.mockResolvedValue({ interval: "day", buckets: [] });
+    render(<RunsHistogram filters={range} onPickBucket={vi.fn()} onResetRange={onReset} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Reset range" }));
+    expect(onReset).toHaveBeenCalledTimes(2);
+  });
+
   it("a bucket's range is half open: its to is the next bucket's from", async () => {
     const onPick = vi.fn();
     render(<RunsHistogram filters={EMPTY_FILTERS} onPickBucket={onPick} />);

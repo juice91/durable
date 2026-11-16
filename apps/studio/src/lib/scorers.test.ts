@@ -37,6 +37,13 @@ describe("scoreRun", () => {
     expect(error.code).toBe("already_scored");
   });
 
+  it("reads the API's real already_scored 409 body", async () => {
+    reply(409, { detail: "already_scored", already_scored: ["s1", "s2"] });
+    const error = await scoreRun("r1", ["s1", "s2"]).catch((e) => e);
+    expect(error).toBeInstanceOf(ScoreRunError);
+    expect(error.code).toBe("already_scored");
+  });
+
   it("leaves other failures as the API's message", async () => {
     reply(404, { detail: "scorer not found" });
     await expect(scoreRun("r1", ["s1"])).rejects.toThrow("scorer not found");

@@ -47,7 +47,7 @@ const enc = encodeURIComponent;
 const CODE_MESSAGES: Record<string, string> = {
   schedule_name_taken: "A schedule with this name already exists",
   invalid_timezone: "Unknown timezone (use an IANA name such as UTC)",
-  invalid_cron: "Cron must have 5 fields",
+  invalid_cron: "Not a valid 5-field cron expression",
 };
 
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
@@ -63,7 +63,7 @@ async function call(path: string, init: RequestInit = {}): Promise<Response> {
       const detail = data?.detail;
       if (detail && typeof detail === "object" && !Array.isArray(detail) && typeof detail.code === "string") {
         const errors = Array.isArray(detail.errors) ? ` ${detail.errors.map(String).join("; ")}` : "";
-        error.message = CODE_MESSAGES[detail.code] ?? `${detail.code}${typeof detail.message === "string" ? `: ${detail.message}` : errors ? `:${errors}` : ""}`;
+        error.message = typeof detail.message === "string" && detail.message ? detail.message : CODE_MESSAGES[detail.code] ?? `${detail.code}${errors ? `:${errors}` : ""}`;
       }
     } catch {
       // keep the status fallback

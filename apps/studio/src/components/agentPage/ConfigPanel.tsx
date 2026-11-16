@@ -390,7 +390,6 @@ function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
-/** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */
 /** The agent's attached scorers (a failed load is shown as such, never thrown). */
 function useAgentScorers(agentId: string): { items: AttachedScorer[] | null; error: boolean } {
   const [state, setState] = useState<{ items: AttachedScorer[] | null; error: boolean }>({ items: null, error: false });
@@ -410,6 +409,7 @@ function useAgentScorers(agentId: string): { items: AttachedScorer[] | null; err
   return state;
 }
 
+/** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */
 function useKnowledgeBaseNames(needed: boolean): Map<string, string> | null {
   const [names, setNames] = useState<Map<string, string> | null>(null);
   useEffect(() => {

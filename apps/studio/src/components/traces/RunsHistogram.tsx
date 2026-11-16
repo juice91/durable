@@ -54,8 +54,25 @@ export function RunsHistogram({ filters, onPickBucket, onResetRange }: RunsHisto
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(filters)]);
 
-  if (error) return <p role="status" className="text-caption text-muted-foreground">{error}</p>;
-  if (!histogram || !Array.isArray(histogram.buckets) || histogram.buckets.length === 0) return null;
+  const canReset = Boolean(onResetRange && (filters.from || filters.to));
+  const resetButton = canReset ? (
+    <button type="button" onClick={onResetRange} className="rounded-sm text-info-text underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      Reset range
+    </button>
+  ) : null;
+
+  // The message and the Reset button go together: an over-a-year range must be resettable.
+  if (error) {
+    return (
+      <p role="status" className="flex items-center gap-3 text-caption text-muted-foreground">
+        <span>{error}</span>
+        {resetButton}
+      </p>
+    );
+  }
+  if (!histogram || !Array.isArray(histogram.buckets) || histogram.buckets.length === 0) {
+    return resetButton ? <p className="flex items-center gap-3 text-caption text-muted-foreground">{resetButton}</p> : null;
+  }
 
   const { buckets, interval } = histogram;
   const span = interval === "hour" ? HOUR_MS : DAY_MS;
@@ -72,11 +89,7 @@ export function RunsHistogram({ filters, onPickBucket, onResetRange }: RunsHisto
     <div data-testid="runs-histogram" className="min-w-0 rounded-lg border border-border bg-surface p-3">
       <p className="mb-1 flex items-center gap-3 text-caption text-muted-foreground">
         <span>Runs per {interval}. Pick a bar to narrow the dates.</span>
-        {onResetRange && (filters.from || filters.to) ? (
-          <button type="button" onClick={onResetRange} className="rounded-sm text-info-text underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            Reset range
-          </button>
-        ) : null}
+        {resetButton}
       </p>
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" className="h-20 w-full text-primary" aria-label="Runs over time">
         {buckets.map((bucket, i) => {

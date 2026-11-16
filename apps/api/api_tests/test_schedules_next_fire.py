@@ -16,6 +16,8 @@ def test_spring_forward_gap_does_not_raise_and_is_strictly_after():
     assert nxt.tzinfo is not None and nxt.utcoffset() == timedelta(0)
     assert nxt > after
     assert nxt < after + timedelta(days=3)
+    # croniter resolves the absent 02:30 CET to 01:00 UTC on 2026-03-29 (the instant of the jump).
+    assert nxt == datetime(2026, 3, 29, 1, 0, tzinfo=UTC)
 
 
 def test_autumn_fall_back_returns_one_value_after_the_anchor():

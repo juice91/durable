@@ -15,10 +15,15 @@ describe("schedule API errors", () => {
   it.each([
     [409, "schedule_name_taken", "A schedule with this name already exists"],
     [422, "invalid_timezone", "Unknown timezone (use an IANA name such as UTC)"],
-    [422, "invalid_cron", "Cron must have 5 fields"],
+    [422, "invalid_cron", "Not a valid 5-field cron expression"],
   ])("maps %s %s to readable copy", async (status, code, message) => {
     failWith(status, { code });
     await expect(createSchedule("w1", body)).rejects.toMatchObject({ message });
+  });
+
+  it("prefers the API's message when present", async () => {
+    failWith(422, { code: "invalid_cron", message: "minute field out of range" });
+    await expect(createSchedule("w1", body)).rejects.toMatchObject({ message: "minute field out of range" });
   });
 
   it("keeps the input_schema_errors list", async () => {
