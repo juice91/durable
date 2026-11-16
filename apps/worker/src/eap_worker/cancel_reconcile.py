@@ -183,10 +183,11 @@ SPANS_STEP = "eap.cancel_reconcile.spans"
 SPANS_PER_TICK = 200
 # First start (no watermark yet): look back this far; spans are not backfilled for older runs.
 SPANS_FIRST_LOOKBACK = timedelta(days=7)
-# A partial page (everything scanned, nothing left) moves the watermark to this far before the DB's
-# clock, so a run whose commit landed after a newer one is not skipped (a run that has spans is never
-# selected again, so the overlap costs nothing). A full page moves it to the last run's exact
-# (updated_at, id) instead: continuing a backlog needs no overlap, and one would only re-read the page.
+# No advance passes this far before the DB's clock, so a run whose commit landed after a newer one (an
+# `updated_at` older than the mark) is not skipped (a run that has spans is never selected again, so the
+# overlap costs nothing). A partial page (everything scanned) moves the mark to exactly that point; a full
+# page to the last run's (updated_at, id), clamped to it: a backlog still drains, as the clamp only bites
+# in the last minute.
 SPANS_OVERLAP = timedelta(minutes=1)
 # A run whose materialisation raised (or wrote nothing) is retried each tick, the watermark held at it;
 # after this many failed attempts it gets the synthetic `run` span from its row and the pass moves on.
@@ -213,8 +214,11 @@ _RUN_ROW = text(
     "SELECT id, kind, status, created_at, updated_at, agent_id, workflow_id FROM runs"
     " WHERE tenant_id = :t AND id = :r"
 )
-# The watermark's id half (the table holds the timestamp only) and the failed attempts per run live in
-# this process; after a restart the scan resumes at the stored timestamp and the counts start over.
+# Process-local on purpose. The watermark's id half (the table holds the timestamp only) and the failed
+# attempts per run live in this process: after a restart the scan resumes inclusively at the stored
+# timestamp (rows sharing it are read again; those with spans are not selected) and the attempt counts
+# start over (a failing run gets its SPANS_MAX_ATTEMPTS again). Neither costs correctness.
+_MAX_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 _mark_id: tuple[datetime, str] | None = None
 _span_attempts: dict[str, int] = {}
 
@@ -247,8 +251,8 @@ def record_missing_spans_step(limit: int = SPANS_PER_TICK) -> int:
     oldest first, at most `limit`. A run with no spans from its trace gets one synthetic `run` span
     (materialise_spans), so it is never selected again. The watermark moves to the oldest run that did
     not succeed (so the next tick retries it; after SPANS_MAX_ATTEMPTS failures it gets the synthetic
-    span and is given up on, logged); else to the last run of a full page; else to just before the
-    database's now. Without a watermark (first start) the scan reaches back 7 days. Returns the runs
+    span and is given up on, logged); else to the last run of a full page, never past a minute before the database's now; else to that
+    point. Without a watermark (first start) the scan reaches back 7 days. Returns the runs
     recorded."""
     global _mark_id
     rt = get_runtime()
@@ -289,7 +293,9 @@ def record_missing_spans_step(limit: int = SPANS_PER_TICK) -> int:
     if failed:
         advance = failed[0]  # rows are ordered: the oldest run that did not succeed stays in the window
     elif len(rows) >= limit:
-        advance = (rows[-1][2], str(rows[-1][1]))  # a full page: continue after the last run scanned
+        # a full page: continue after the last run scanned, but never past now - overlap (a run still
+        # being committed may carry an older updated_at than the mark)
+        advance = min((rows[-1][2], str(rows[-1][1])), (overlap_mark, _MAX_ID))
     else:
         advance = (overlap_mark, "")
     if mark is None or advance > (mark, _mark_id[1] if _mark_id and _mark_id[0] == mark else ""):

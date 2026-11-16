@@ -390,3 +390,22 @@ def test_the_partial_page_advance_uses_the_database_clock(worker, tenant, waterm
     cancel_reconcile.record_missing_spans_step(500)
     mark = watermark.read()
     assert db_now - timedelta(minutes=2) <= mark <= db_now
+
+
+def test_a_full_page_never_moves_the_watermark_past_now_minus_the_overlap(worker, tenant, watermark):
+    from datetime import datetime, timedelta, timezone
+
+    from eap_worker.cancel_reconcile import SPANS_OVERLAP, record_missing_spans_step
+
+    start = datetime.now(timezone.utc) - timedelta(days=1)
+    watermark.reset(start)
+    runs = [_cancelled_by_the_api(worker, tenant) for _ in range(3)]  # all committed within the last minute
+    with worker.engine.connect() as conn:
+        db_now = conn.execute(text("SELECT now()")).scalar()
+        first = conn.execute(text("SELECT min(updated_at) FROM runs WHERE id = ANY(:r)"),
+                             {"r": [str(r) for r in runs]}).scalar()
+    assert record_missing_spans_step(2) == 2  # a full page
+    mark = watermark.read()
+    assert start < mark <= first and db_now - SPANS_OVERLAP - timedelta(seconds=30) <= mark <= db_now - SPANS_OVERLAP + timedelta(seconds=30)
+    assert record_missing_spans_step(2) == 1  # the next tick re-reads the window: the third run is reached
+    assert all(len(_spans(worker.engine, tenant, r)) == 1 for r in runs)  # and nothing is duplicated
