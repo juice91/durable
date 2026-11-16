@@ -1,9 +1,9 @@
 """Schedule tick (parity round 2, Task 5, decision D2): the scheduled DBOS workflow
 `eap.schedule_tick` that starts a run for every due workflow schedule.
 
-    eap.schedule_tick.fire    ONE step, ONE transaction: claim_due(session=) FOR UPDATE SKIP LOCKED,
-                              per schedule validate + create the run + mark_fired/stop, then a
-                              single commit
+    eap.schedule_tick.fire    ONE step: claim_due(session=) FOR UPDATE SKIP LOCKED opens the claim
+                              transaction; per schedule validate, create the run, mark_fired/stop;
+                              the claim transaction commits once at the end
     start (workflow body)     DBOS.start_workflow_async(workflow_run, ...) per fired run, workflow id =
                               run id (a step cannot start a workflow)
 
@@ -16,9 +16,16 @@
   (never the input's values).
 - A missed window fires once: the run belongs to the stored `next_fire_at`, and the next fire time
   is computed from now, not from that stale value.
-- Idempotent: the run id is `uuid5(schedule id, fire time as UTC isoformat)`. A repeat for the same
-  fire time (a tick that crashed before mark_fired, two workers) finds the same run row, and DBOS
-  starts one workflow per workflow id.
+- Idempotent: the run id is `uuid5(schedule id, fire time as UTC isoformat)`. Commit order: the
+  run row commits FIRST (`create_workflow_run` has its own session, so it is not part of the claim
+  transaction), the schedule row (mark_fired/stop) SECOND, in the claim transaction's single commit.
+  A crash between them leaves the schedule due; the next tick fires the same fire time, hits the same
+  deterministic run id (ON CONFLICT) and DBOS starts one workflow per workflow id, so it is harmless.
+- Orphans: a scheduled run still `queued` after ORPHAN_GRACE with NO DBOS workflow_status row (the tick
+  died between the commit and the start) is started again. The DBOS system tables live in their own
+  database, so the sweep filters candidates from the app DB against `<schema>.workflow_status`.
+- A schedule whose fire fails MAX_FIRE_FAILURES ticks in a row (a permanent error such as RunIdConflict)
+  is stopped with `last_error` = `fire_failed: <exception class name>`.
 
 Setting (read when the worker applies the schedule): EAP_SCHEDULE_TICK, a DBOS cron with seconds
 first; default `0 * * * * *` (every 60 s). `off` removes the shared schedule.
@@ -38,7 +45,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from dbos import DBOS, SetWorkflowID
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from eap_run_store import ScheduleStore
 from eap_worker.cancel_reconcile import valid_cron
@@ -57,6 +64,9 @@ OFF = "off"
 CLAIM_LIMIT = 100
 MAX_INPUT_BYTES = 32 * 1024  # as the API's MAX_WORKFLOW_INPUT_BYTES
 MAX_REPORTED_ERRORS = 5
+MAX_FIRE_FAILURES = 5
+ORPHAN_PAGE = 200
+ORPHAN_MAX_PAGES = 25
 ORPHAN_GRACE = timedelta(minutes=2)  # a fired run still queued after this was not started
 ORPHAN_WINDOW = timedelta(days=1)
 
@@ -166,25 +176,66 @@ def _fire(session: Any, store: ScheduleStore, schedule: dict[str, Any], now: dat
             "fire_at": fire_at, "cron": schedule["cron"], "timezone": schedule["timezone"], "id": sid}
 
 
-_ORPHANS = text(
-    "SELECT r.id AS run_id, r.tenant_id, v.id AS version_id, r.input AS input_json FROM runs r"
+_ORPHAN_CANDIDATES = text(
+    "SELECT r.id AS run_id, r.tenant_id, v.id AS version_id, r.input AS input_json, r.created_at FROM runs r"
     " JOIN workflow_versions v ON v.workflow_id = r.workflow_id AND v.tenant_id = r.tenant_id"
     " AND v.version = r.workflow_version"
     " WHERE r.schedule_id IS NOT NULL AND r.status = 'queued'"
-    " AND r.created_at < :newer_than AND r.created_at > :older_than ORDER BY r.created_at LIMIT :n"
+    " AND r.created_at < :newer_than AND r.created_at > :older_than"
+    " AND (r.created_at, r.id::text) > (:after_at, :after_id)"
+    " ORDER BY r.created_at, r.id::text LIMIT :n"
 )
+_dbos_engine: Any = None
+
+
+def _dbos_engine_for(url: str) -> Any:
+    global _dbos_engine
+    if _dbos_engine is None:
+        _dbos_engine = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1), pool_pre_ping=True)
+    return _dbos_engine
+
+
+def _with_workflow_status(ids: list[str]) -> set[str]:
+    """Of `ids`, those that have a row in the DBOS system schema's workflow_status."""
+    settings = get_runtime().settings
+    schema = settings.dbos_system_schema.replace('"', '""')
+    with _dbos_engine_for(settings.dbos_system_database_url).connect() as conn:
+        rows = conn.execute(
+            text(f'SELECT workflow_uuid FROM "{schema}".workflow_status WHERE workflow_uuid = ANY(:ids)'),
+            {"ids": ids},
+        ).all()
+    return {r[0] for r in rows}
 
 
 def _orphans(now: datetime) -> list[dict[str, str]]:
-    """Scheduled runs still `queued` after the grace period: their workflow was never started (the
-    tick died between the commit and the start). Starting one again is a no-op for DBOS (one
-    workflow per workflow id)."""
-    with get_runtime().engine.connect() as conn:
-        rows = conn.execute(
-            _ORPHANS, {"newer_than": now - ORPHAN_GRACE, "older_than": now - ORPHAN_WINDOW, "n": CLAIM_LIMIT}
-        ).mappings().all()
-    return [{"run_id": str(r["run_id"]), "tenant_id": r["tenant_id"], "version_id": str(r["version_id"]),
-             "input_json": r["input_json"]} for r in rows]
+    """Orphans: scheduled runs still `queued` after the grace period that have NO DBOS workflow_status
+    row, so their workflow was never started (the tick died between the commit and the start). A queued
+    run that DBOS already knows (a legitimate backlog) is not one and is skipped. Candidates are paged
+    by (created_at, id) so a backlog never hides a real orphan behind it. Starting one again is a no-op
+    for DBOS (one workflow per workflow id)."""
+    found: list[dict[str, str]] = []
+    after_at, after_id = datetime(1970, 1, 1, tzinfo=timezone.utc), ""
+    for _ in range(ORPHAN_MAX_PAGES):
+        with get_runtime().engine.connect() as conn:
+            rows = conn.execute(
+                _ORPHAN_CANDIDATES,
+                {"newer_than": now - ORPHAN_GRACE, "older_than": now - ORPHAN_WINDOW, "n": ORPHAN_PAGE,
+                 "after_at": after_at, "after_id": after_id},
+            ).mappings().all()
+        if not rows:
+            break
+        known = _with_workflow_status([str(r["run_id"]) for r in rows])
+        for r in rows:
+            if str(r["run_id"]) not in known:
+                found.append({"run_id": str(r["run_id"]), "tenant_id": r["tenant_id"],
+                              "version_id": str(r["version_id"]), "input_json": r["input_json"]})
+        if len(found) >= CLAIM_LIMIT:
+            return found[:CLAIM_LIMIT]
+        after_at, after_id = rows[-1]["created_at"], str(rows[-1]["run_id"])
+    return found
+
+
+_failures: dict[str, int] = {}  # consecutive fire failures per schedule id (this process)
 
 
 @DBOS.step(name=TICK_STEP)
@@ -209,15 +260,25 @@ async def schedule_tick_step(now: str) -> dict[str, Any]:
                 started = await asyncio.to_thread(_fire, session, store, schedule, now_dt)
             except Exception as exc:  # noqa: BLE001 - one schedule's failure never stops the others
                 counts["failed"] += 1
-                log.warning("schedule %s not fired (%s); the next tick retries", schedule["id"], type(exc).__name__)
+                streak = _failures.get(schedule["id"], 0) + 1
+                if streak >= MAX_FIRE_FAILURES:
+                    _failures.pop(schedule["id"], None)
+                    reason = f"fire_failed: {type(exc).__name__}"
+                    await asyncio.to_thread(store.stop, schedule["id"], reason, session=session)
+                    log.warning("schedule %s stopped: fire_failed (%s)", schedule["id"], type(exc).__name__)
+                else:
+                    _failures[schedule["id"]] = streak
+                    log.warning("schedule %s not fired (%s, %d/%d); the next tick retries", schedule["id"],
+                                type(exc).__name__, streak, MAX_FIRE_FAILURES)
                 continue
+            _failures.pop(schedule["id"], None)
             if started is None:
                 counts["stopped"] += 1
                 continue
             # A missed window fires once: the next time comes from now, not the stale next_fire_at.
-            store.mark_fired(
-                started["id"], started["fire_at"], next_fire(started["cron"], started["timezone"], now_dt),
-                session=session,
+            await asyncio.to_thread(
+                store.mark_fired, started["id"], started["fire_at"],
+                next_fire(started["cron"], started["timezone"], now_dt), session=session,
             )
             start[started["run_id"]] = {k: started[k] for k in ("run_id", "tenant_id", "version_id", "input_json")}
             counts["fired"] += 1
@@ -238,7 +299,7 @@ async def schedule_tick_step(now: str) -> dict[str, Any]:
 @DBOS.workflow(name=SCHEDULE_TICK_WORKFLOW_NAME)
 async def schedule_tick(scheduled_at: datetime, context: Any) -> dict[str, int]:
     """The scheduled tick (DBOS passes the tick time and the schedule context)."""
-    result = await schedule_tick_step(datetime.now(timezone.utc).isoformat())
+    result = await schedule_tick_step(_utc(scheduled_at).isoformat())
     for item in result["start"]:
         with SetWorkflowID(item["run_id"]):
             await DBOS.start_workflow_async(

@@ -37,10 +37,10 @@ _LOOP = asyncio.new_event_loop()
 threading.Thread(target=_LOOP.run_forever, daemon=True).start()  # like DBOS's: started workflows live on it
 
 
-def run_tick() -> None:
+def run_tick() -> dict:
     """One tick, as DBOS would start it (the workflow function called directly, on a long-lived loop
     so the workflows it starts are not cancelled when the tick returns)."""
-    asyncio.run_coroutine_threadsafe(schedule_tick(datetime.now(timezone.utc), {}), _LOOP).result(60)
+    return asyncio.run_coroutine_threadsafe(schedule_tick(datetime.now(timezone.utc), {}), _LOOP).result(60)
 
 
 def _schedules(worker):
@@ -135,8 +135,7 @@ def test_tick_deactivates_schedule_when_input_no_longer_validates(worker, tenant
     schedule, _ = make_schedule(next_fire_at=_past(minutes=1), input={"q": 5})
     run_tick()
     row = _schedules(worker).get(tenant, schedule["id"])
-    assert row["active"] is False and row["last_error"].startswith("input_schema_errors")
-    assert "5" not in row["last_error"].split(":", 1)[1]  # never quotes the value
+    assert row["active"] is False and row["last_error"] == "input_schema_errors: q: type"  # never quotes the value
     assert _runs(worker, schedule["id"]) == []
     run_tick()
     assert _runs(worker, schedule["id"]) == []
@@ -177,23 +176,160 @@ def test_tick_off_applies_no_schedule_and_config_from_env(worker, monkeypatch):
         DBOS.delete_schedule(SCHEDULE_TICK_SCHEDULE_NAME)
 
 
-def test_two_concurrent_ticks_create_one_run(worker, tenant, make_schedule):
-    """claim and mark_fired share one transaction: the second tick skips the locked row (or finds it
-    advanced), so one run exists even when two ticks overlap."""
-    schedules = [make_schedule(next_fire_at=_past(minutes=1))[0] for _ in range(3)]
-    errors: list[BaseException] = []
+def test_two_concurrent_ticks_create_one_run(worker, tenant, make_schedule, monkeypatch):
+    """The second tick overlaps the first MID-transaction (the first is held inside its fire step,
+    holding the row locks): FOR UPDATE SKIP LOCKED makes the second claim zero rows, and next_fire_at
+    advances exactly once."""
+    import eap_worker.schedule_tick as st
+    from eap_run_store import ScheduleStore
 
-    def tick() -> None:
-        try:
-            run_tick()
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    inside, release = threading.Event(), threading.Event()
+    real_fire = st._fire
+    marks: list[str] = []
+    real_mark = ScheduleStore.mark_fired
 
-    threads = [threading.Thread(target=tick) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(60)
-    assert not errors
-    for schedule in schedules:
-        assert len(_runs(worker, schedule["id"])) == 1
+    def held_fire(*args, **kwargs):
+        inside.set()
+        assert release.wait(30)
+        return real_fire(*args, **kwargs)
+
+    def counting_mark(self, schedule_id, *args, **kwargs):
+        marks.append(schedule_id)
+        return real_mark(self, schedule_id, *args, **kwargs)
+
+    monkeypatch.setattr(st, "_fire", held_fire)
+    monkeypatch.setattr(ScheduleStore, "mark_fired", counting_mark)
+    results: list[dict] = []
+    first = threading.Thread(target=lambda: results.append(run_tick()))
+    first.start()
+    try:
+        assert inside.wait(30), "the first tick never reached the fire step"
+        second = run_tick()  # overlaps: the first still holds the row lock
+        assert second["due"] == 0 and second["fired"] == 0
+    finally:
+        release.set()
+        first.join(60)
+    assert results and results[0]["due"] == 1 and results[0]["fired"] == 1
+    assert marks == [schedule["id"]]
+    assert len(_runs(worker, schedule["id"])) == 1
+    assert _schedules(worker).get(tenant, schedule["id"])["next_fire_at"] > datetime.now(timezone.utc)
+
+
+def test_transient_db_error_leaves_schedule_active_and_next_tick_fires(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(st, "_failures", {})
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    real_fire = st._fire
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("SELECT 1", {}, Exception("connection reset"))
+        return real_fire(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_fire", flaky)
+    assert run_tick()["failed"] == 1
+    row = _schedules(worker).get(tenant, schedule["id"])
+    assert row["active"] is True and row["last_error"] is None and _runs(worker, schedule["id"]) == []
+    assert run_tick()["fired"] == 1
+    assert len(_runs(worker, schedule["id"])) == 1
+
+
+def test_permanent_fire_failure_stops_schedule_after_five_ticks(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+
+    class RunIdConflict(Exception):
+        pass
+
+    monkeypatch.setattr(st, "_failures", {})
+
+    def boom(*args, **kwargs):
+        raise RunIdConflict("secret-value-123")
+
+    monkeypatch.setattr(st, "_fire", boom)
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    for _ in range(4):
+        run_tick()
+        assert _schedules(worker).get(tenant, schedule["id"])["active"] is True
+    run_tick()
+    row = _schedules(worker).get(tenant, schedule["id"])
+    assert row["active"] is False and row["last_error"] == "fire_failed: RunIdConflict"
+    assert _runs(worker, schedule["id"]) == []
+
+
+# --------------------------------------------------------------------------- orphan sweep
+
+
+def _queued_run(worker, tenant, schedule, workflow_id, *, scheduled: bool, start: bool) -> str:
+    """A `queued` run created `ORPHAN` minutes ago. `start`: DBOS also knows the workflow (it has a
+    workflow_status row), as for a legitimate backlog."""
+    import json
+
+    from dbos import DBOS, SetWorkflowID
+
+    from eap_worker.workflow_run import workflow_run
+
+    run_id = uuid.uuid4()
+    worker.run_store.create_workflow_run(
+        tenant, workflow_id, 1, json.dumps({"q": "hi"}), run_id, schedule_id=schedule["id"] if scheduled else None
+    )
+    if start:
+        with SetWorkflowID(str(run_id)):
+            asyncio.run_coroutine_threadsafe(
+                DBOS.start_workflow_async(workflow_run, str(run_id), tenant, _version_id(worker, workflow_id),
+                                          json.dumps({"q": "hi"})), _LOOP).result(30)
+        wait_for(lambda: (worker.run_store.get_run(tenant, run_id) or {}).get("status") in ("completed", "failed"),
+                 timeout=30, what="the started run to end")
+    with worker.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE runs SET status = 'queued', created_at = :c WHERE id = :i"),
+            {"c": datetime.now(timezone.utc) - timedelta(minutes=10), "i": str(run_id)},
+        )
+    return str(run_id)
+
+
+def _version_id(worker, workflow_id) -> str:
+    with worker.engine.connect() as conn:
+        return str(conn.execute(
+            text("SELECT id FROM workflow_versions WHERE workflow_id = :w ORDER BY version DESC LIMIT 1"),
+            {"w": workflow_id}).scalar_one())
+
+
+def test_orphan_sweep_skips_known_workflows_and_non_scheduled_runs(worker, tenant, make_schedule):
+    from eap_worker.schedule_tick import _orphans
+
+    schedule, workflow_id = make_schedule(next_fire_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    known = _queued_run(worker, tenant, schedule, workflow_id, scheduled=True, start=True)
+    orphan = _queued_run(worker, tenant, schedule, workflow_id, scheduled=True, start=False)
+    plain = _queued_run(worker, tenant, schedule, workflow_id, scheduled=False, start=False)
+    ids = {o["run_id"] for o in _orphans(datetime.now(timezone.utc))}
+    assert orphan in ids
+    assert known not in ids  # a workflow_status row exists: a legitimate backlog, not an orphan
+    assert plain not in ids  # not a scheduled run
+
+
+def test_orphan_sweep_is_not_starved_by_a_backlog_of_known_runs(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+
+    schedule, workflow_id = make_schedule(next_fire_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    orphan = _queued_run(worker, tenant, schedule, workflow_id, scheduled=True, start=False)
+    known = _queued_run(worker, tenant, schedule, workflow_id, scheduled=True, start=True)
+    # Make the known run older than the orphan and shrink the page so it alone would fill a page.
+    with worker.engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET created_at = created_at - interval '1 hour' WHERE id = :i"), {"i": known})
+    monkeypatch.setattr(st, "ORPHAN_PAGE", 1)
+    ids = {o["run_id"] for o in st._orphans(datetime.now(timezone.utc))}
+    assert ids == {orphan}
+
+
+def test_tick_starts_an_orphan_but_not_a_known_queued_run(worker, tenant, make_schedule):
+    schedule, workflow_id = make_schedule(next_fire_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    orphan = _queued_run(worker, tenant, schedule, workflow_id, scheduled=True, start=False)
+    result = run_tick()
+    assert result is not None
+    wait_for(lambda: (worker.run_store.get_run(tenant, uuid.UUID(orphan)) or {}).get("status") in ("completed", "failed"),
+             timeout=30, what="the orphan run to start and end")
