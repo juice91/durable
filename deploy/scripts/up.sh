@@ -148,8 +148,31 @@ git_sha=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
 python_image="pydanticos-python:${git_sha}"
 studio_image="pydanticos-studio:${git_sha}"
 
-docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/python.Dockerfile" -t "$python_image" "$REPO_ROOT"
-docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/studio.Dockerfile" -t "$studio_image" "$REPO_ROOT"
+# Right after the VM (re)starts its network can lag: a deploy failed with an i/o timeout to
+# registry-1.docker.io that worked seconds later. Wait (bounded) until the VM reaches the
+# registries the Dockerfiles pull from, then build, retrying a failed build once.
+registry_wait=${PYDANTICOS_REGISTRY_WAIT:-90}
+registry_started=$SECONDS
+until colima ssh -p "$PROFILE" -- curl -s -o /dev/null -m 5 https://registry-1.docker.io/v2/ >/dev/null 2>&1; do
+  if (( SECONDS - registry_started >= registry_wait )); then
+    printf 'Warning: the VM could not reach registry-1.docker.io within %s seconds; building anyway.\n' "$registry_wait" >&2
+    break
+  fi
+  sleep 3
+done
+
+build_image() { # DOCKERFILE TAG
+  local attempt
+  for attempt in 1 2; do
+    if docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/$1" -t "$2" "$REPO_ROOT"; then
+      return 0
+    fi
+    (( attempt == 2 )) || { printf 'Image build for %s failed; retrying once in 15 seconds.\n' "$1" >&2; sleep 15; }
+  done
+  return 1
+}
+build_image python.Dockerfile "$python_image"
+build_image studio.Dockerfile "$studio_image"
 
 kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/namespace.yaml"
 
