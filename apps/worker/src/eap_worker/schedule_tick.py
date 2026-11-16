@@ -236,7 +236,41 @@ def _orphans(now: datetime) -> list[dict[str, str]]:
     return found
 
 
-_TRANSIENT = (OperationalError, InterfaceError, DBAPIError, OSError)
+def _is_transient(exc: BaseException | None) -> bool:
+    """A connection-level failure anywhere in the cause/context chain: OperationalError,
+    InterfaceError, OSError, or a DBAPIError whose connection was invalidated. IntegrityError,
+    DataError, ProgrammingError... are permanent."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, (OperationalError, InterfaceError, OSError)):
+            return True
+        if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+_TRACKED_ACTIVE = text("SELECT id::text FROM workflow_schedules WHERE id::text = ANY(:ids) AND active")
+
+
+def _prune_failures() -> None:
+    """Drop streak entries of schedules that were deleted or stopped/paused (by state, not by this
+    tick's claimed page, which a backlog or SKIP LOCKED makes incomplete)."""
+    if not _failures:
+        return
+    with get_runtime().engine.connect() as conn:
+        live = {r[0] for r in conn.execute(_TRACKED_ACTIVE, {"ids": list(_failures)})}
+    for stale in [k for k in _failures if k not in live]:
+        _failures.pop(stale, None)
+
+
+def _stop_in_savepoint(store: ScheduleStore, schedule_id: str, reason: str, session: Any) -> None:
+    """A DB error inside stop rolls back only the savepoint, never the claim transaction."""
+    with session.begin_nested():
+        store.stop(schedule_id, reason, session=session)
+
+
 _failures: dict[str, int] = {}  # consecutive fire failures per schedule id (this process)
 
 
@@ -259,22 +293,20 @@ async def schedule_tick_step(now: str) -> dict[str, Any]:
     try:
         due = await asyncio.to_thread(store.claim_due, now_dt, CLAIM_LIMIT, session=session)
         counts["due"] = len(due)
-        due_ids = {d["id"] for d in due}
-        for stale in [k for k in _failures if k not in due_ids]:  # deleted, paused or fired since
-            _failures.pop(stale, None)
+        await asyncio.to_thread(_prune_failures)
         for schedule in due:
             try:
                 started = await asyncio.to_thread(_fire, session, store, schedule, now_dt)
             except Exception as exc:  # noqa: BLE001 - one schedule's failure never stops the others
                 counts["failed"] += 1
-                if isinstance(exc, _TRANSIENT):  # an outage never stops a schedule or counts
+                if _is_transient(exc):  # an outage never stops a schedule or counts
                     log.warning("schedule %s not fired (%s); the next tick retries", schedule["id"], type(exc).__name__)
                     continue
                 streak = _failures.get(schedule["id"], 0) + 1
                 if streak >= MAX_FIRE_FAILURES:
                     reason = f"fire_failed: {type(exc).__name__}"
                     try:
-                        await asyncio.to_thread(store.stop, schedule["id"], reason, session=session)
+                        await asyncio.to_thread(_stop_in_savepoint, store, schedule["id"], reason, session)
                         _failures.pop(schedule["id"], None)
                         log.warning("schedule %s stopped: fire_failed (%s)", schedule["id"], type(exc).__name__)
                     except Exception as stop_exc:  # noqa: BLE001 - never lose the other schedules' work

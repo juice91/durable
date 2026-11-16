@@ -331,6 +331,88 @@ def test_failure_streak_entries_of_schedules_no_longer_due_are_dropped(worker, t
     assert "deleted-or-paused" not in st._failures
 
 
+def test_integrity_error_is_permanent_and_stops_the_schedule(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from sqlalchemy.exc import IntegrityError
+
+    monkeypatch.setattr(st, "_failures", {})
+
+    def boom(*args, **kwargs):
+        raise IntegrityError("INSERT", {}, Exception("duplicate"))
+
+    monkeypatch.setattr(st, "_fire", boom)
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    for _ in range(5):
+        run_tick()
+    row = _schedules(worker).get(tenant, schedule["id"])
+    assert row["active"] is False and row["last_error"] == "fire_failed: IntegrityError"
+
+
+def test_wrapped_transient_error_is_not_counted(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(st, "_failures", {})
+
+    def wrapped(*args, **kwargs):
+        try:
+            raise OperationalError("SELECT 1", {}, Exception("down"))
+        except OperationalError as exc:
+            raise RuntimeError("fire failed") from exc
+
+    monkeypatch.setattr(st, "_fire", wrapped)
+    schedule, _ = make_schedule(next_fire_at=_past(minutes=1))
+    for _ in range(6):
+        run_tick()
+    assert st._failures == {}
+    assert _schedules(worker).get(tenant, schedule["id"])["active"] is True
+
+
+def test_db_error_inside_stop_rolls_back_only_its_savepoint(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+    from eap_run_store import ScheduleStore
+
+    bad, _ = make_schedule(next_fire_at=_past(minutes=2))
+    good, _ = make_schedule(next_fire_at=_past(minutes=1))
+    monkeypatch.setattr(st, "_failures", {bad["id"]: st.MAX_FIRE_FAILURES - 1})
+    real_fire, real_stop = st._fire, ScheduleStore.stop
+
+    def selective(session, store, schedule, now):
+        if schedule["id"] == bad["id"]:
+            raise ValueError("permanent")
+        return real_fire(session, store, schedule, now)
+
+    def aborting_stop(self, schedule_id, last_error, *, session=None):
+        session.execute(text("SELECT 1/0"))  # aborts the transaction unless a savepoint isolates it
+
+    monkeypatch.setattr(st, "_fire", selective)
+    monkeypatch.setattr(ScheduleStore, "stop", aborting_stop)
+    result = run_tick()
+    assert result["fired"] == 1
+    row = _schedules(worker).get(tenant, good["id"])
+    assert row["last_fired_at"] is not None and row["next_fire_at"] > datetime.now(timezone.utc)
+    assert len(_runs(worker, good["id"])) == 1
+
+
+def test_streaks_survive_a_backlog_larger_than_the_claim_page(worker, tenant, make_schedule, monkeypatch):
+    import eap_worker.schedule_tick as st
+
+    first, _ = make_schedule(next_fire_at=_past(minutes=3))
+    second, _ = make_schedule(next_fire_at=_past(minutes=2))
+    monkeypatch.setattr(st, "_failures", {})
+    monkeypatch.setattr(st, "CLAIM_LIMIT", 1)
+
+    def boom(*args, **kwargs):
+        raise ValueError("permanent")
+
+    monkeypatch.setattr(st, "_fire", boom)
+    run_tick()  # claims only `first`
+    assert st._failures == {first["id"]: 1}
+    st._failures[second["id"]] = 2  # tracked, still due, but off this tick's page
+    run_tick()
+    assert st._failures[second["id"]] == 2 and st._failures[first["id"]] == 2
+
+
 # --------------------------------------------------------------------------- orphan sweep
 
 
