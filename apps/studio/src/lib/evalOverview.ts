@@ -1,7 +1,7 @@
 // The tenant-wide eval lists behind the Datasets, Scorers and Experiments pages (W1.5):
 // `GET /eval-suites`, `GET /evals/scorers` and `GET /evals/runs`, each paginated by an opaque cursor.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
-import type { EvalAggregates, EvalRun, EvalSuite } from "./evals";
+import type { EvalAggregates, EvalRun, EvalSuite, EvalTargetKind } from "./evals";
 
 export interface SuiteLastRun {
   run_id: string;
@@ -13,14 +13,22 @@ export interface SuiteLastRun {
   aggregates: Pick<EvalAggregates, "cases" | "passed" | "failed" | "errors" | "pass_rate">;
 }
 
-/** A suite with its agent's name and its newest run (null: never run). */
+/** A suite with its target's name and its newest run (null: never run). The target is an agent or a
+ * workflow (`target_kind`, `target_id`, `target_name`); `agent_id` and `agent_name` stay for agent suites. */
 export interface OverviewSuite extends EvalSuite {
+  target_kind: EvalTargetKind;
+  target_id: string;
+  target_name: string | null;
   agent_name: string | null;
   agent_archived: boolean;
   last_run: SuiteLastRun | null;
 }
 
 export interface OverviewRun extends EvalRun {
+  workflow_id?: string | null;
+  target_kind: EvalTargetKind;
+  target_id: string;
+  target_name: string | null;
   agent_name: string | null;
   suite_name: string | null;
 }
@@ -28,8 +36,11 @@ export interface OverviewRun extends EvalRun {
 export interface ScorerSuite {
   id: string;
   name: string;
-  agent_id: string;
+  agent_id: string | null;
   agent_name: string | null;
+  workflow_id?: string | null;
+  target_kind?: EvalTargetKind;
+  target_name?: string | null;
   case_level_uses: number;
 }
 

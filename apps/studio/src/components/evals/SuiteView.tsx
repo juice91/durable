@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Download, MoreHorizontal, Pencil, Play, Plus, Upload } from "lucide-react";
+import { ArrowLeft, Download, FileText, MoreHorizontal, Pencil, Play, Plus, Upload } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/DropdownMenu";
 import { IconButton } from "@/components/ui/IconButton";
@@ -36,10 +36,12 @@ import {
   type EvalCase,
   type EvalRun,
   type EvalSuiteWithCases,
+  type EvalTargetRef,
   type ExportFormat,
 } from "@/lib/evals";
 import { CaseSheet, SuiteSheet } from "./EditSheets";
-import { RunDialog } from "./RunDialog";
+import { RunDialog, type RunVersion } from "./RunDialog";
+import { SchemaSheet } from "./SchemaSheet";
 import { rememberCaseCount } from "./useEvalRun";
 import { alertClass, cardClass, fieldClass, hintClass, labelClass, sectionTitleClass } from "./evalsUi";
 
@@ -47,9 +49,16 @@ import { alertClass, cardClass, fieldClass, hintClass, labelClass, sectionTitleC
 export const EDIT_PARAM = "edit";
 
 interface SuiteViewProps {
-  agent: Agent;
-  versions: AgentVersion[];
+  /** The suite's agent or workflow; defaults to `agent` as an agent target. */
+  target?: EvalTargetRef;
+  /** The agent, for an agent target. */
+  agent?: Agent | null;
+  versions: RunVersion[] | AgentVersion[];
   suiteId: string;
+  /** The dataset page: the header also has New item and Schema, and the Cases section no Add button. */
+  dataset?: boolean;
+  /** Where "Suites" (back) and a deleted suite lead; defaults to the target's Tests tab. */
+  backHref?: string;
   hasMemory: boolean;
   runs: EvalRun[] | null;
   runsError: string | null;
@@ -68,8 +77,15 @@ function expectedPreview(value: unknown): string {
 
 /** One suite: its evaluators, cases (a row opens the case Sheet), run history with compare, and the
  * Run, Import and Export actions. */
-export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError, reloadRuns }: SuiteViewProps) {
+export function SuiteView({ target: givenTarget, agent = null, versions, suiteId, dataset = false, backHref, hasMemory, runs, runsError, reloadRuns }: SuiteViewProps) {
   const router = useRouter();
+  const target: EvalTargetRef = givenTarget ?? { kind: "agent", id: agent?.id ?? "", name: agent?.name ?? "" };
+  const isWorkflow = target.kind === "workflow";
+  // The Tests tab of the target (a workflow has no run view yet: its runs are read on Experiments).
+  const testsHref = (opts: { suite?: string; run?: string; compare?: string } = {}) =>
+    isWorkflow ? routes.workflowTests(target.id, { suite: opts.suite }) : routes.agentTests(target.id, opts);
+  const home = backHref ?? testsHref();
+  const [schemaOpen, setSchemaOpen] = useState(false);
   const [suite, setSuite] = useState<EvalSuiteWithCases | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -79,8 +95,13 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [base, setBase] = useState("");
-  const [target, setTarget] = useState("");
+  const [compareTarget, setTarget] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const pickFile = (accept: string) => {
+    if (!fileRef.current) return;
+    fileRef.current.accept = accept;
+    fileRef.current.click();
+  };
   const edit = useUrlSheet(EDIT_PARAM, { history: "push" });
 
   const load = useCallback(() => setReloadKey((k) => k + 1), []);
@@ -152,7 +173,7 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
       await deleteSuite(suiteId);
       setConfirm(null);
       toast.success("Suite deleted");
-      router.push(routes.agentTests(agent.id));
+      router.push(home);
     } catch (reason: unknown) {
       setActionError(reason instanceof Error && reason.message ? reason.message : "The suite could not be deleted");
       setConfirm(null);
@@ -185,7 +206,7 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
       <div role="alert" className={alertClass} data-testid="eval-suite-load-error">
         {error}{" "}
         <Button size="sm" variant="ghost" onClick={load}>Retry</Button>{" "}
-        <Link href={routes.agentTests(agent.id)} className="underline underline-offset-4">All suites</Link>
+        <Link href={home} className="underline underline-offset-4">All suites</Link>
       </div>
     );
   }
@@ -194,7 +215,7 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
     <div className="min-w-0 space-y-6" data-testid="eval-suite-view">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Button asChild variant="ghost" size="sm">
-          <Link href={routes.agentTests(agent.id)} data-testid="eval-suite-back">
+          <Link href={home} data-testid="eval-suite-back">
             {icon(ArrowLeft)}
             Suites
           </Link>
@@ -208,11 +229,24 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
             {icon(Play)}
             Run
           </Button>
-          <Button onClick={() => fileRef.current?.click()} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A pydantic_evals YAML or JSON file, at most 1 MiB" data-testid="eval-suite-import">
-            {icon(Upload)}
-            {importing ? "Importing…" : "Import"}
+          {dataset ? (
+            <Button onClick={() => edit.open("new")} disabled={!canAddCase} data-testid="eval-suite-new-item">
+              {icon(Plus)}
+              New item
+            </Button>
+          ) : null}
+          <Button onClick={() => pickFile(".csv,text/csv")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A CSV file with the columns name, input, expected_output and metadata, at most 1 MiB" data-testid="eval-suite-import-csv">
+            {icon(FileText)}
+            Import CSV
           </Button>
-          <input ref={fileRef} type="file" accept=".yaml,.yml,.json,application/json,application/yaml,text/yaml" className="sr-only" tabIndex={-1} aria-label="Suite file to import" onChange={(e) => void onImportFile(e)} data-testid="eval-suite-import-file" />
+          <Button onClick={() => pickFile(".yaml,.yml,.json,application/json,application/yaml,text/yaml")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A pydantic_evals YAML or JSON file, at most 1 MiB" data-testid="eval-suite-import">
+            {icon(Upload)}
+            {importing ? "Importing…" : "Import JSON"}
+          </Button>
+          {dataset ? (
+            <Button onClick={() => setSchemaOpen(true)} disabled={!suite} data-testid="eval-suite-schema">Schema</Button>
+          ) : null}
+          <input ref={fileRef} type="file" accept=".yaml,.yml,.json,.csv,application/json,application/yaml,text/yaml,text/csv" className="sr-only" tabIndex={-1} aria-label="Suite file to import" onChange={(e) => void onImportFile(e)} data-testid="eval-suite-import-file" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button disabled={!suite} data-testid="eval-suite-export">
@@ -239,7 +273,7 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
       </div>
 
       <p id="eval-import-hint" className={hintClass} data-testid="eval-import-hint">
-        Import takes a pydantic_evals dataset file (YAML or JSON, at most 1 MiB); cases are matched by name.
+        Import takes a pydantic_evals dataset file (YAML or JSON) or a CSV file (name, input, expected_output, metadata), at most 1 MiB; cases are matched by name.{isWorkflow ? " A workflow case's input is JSON text of an object." : ""}
       </p>
       {archived ? <p className={hintClass} data-testid="eval-suite-archived">This suite is archived: it can be viewed and exported, not edited or run.</p> : null}
       {actionError ? <p role="alert" className={alertClass} data-testid="eval-suite-action-error">{actionError}</p> : null}
@@ -270,10 +304,12 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
       <section className="min-w-0 space-y-2" aria-labelledby="eval-cases-title">
         <div className="flex min-w-0 items-center gap-2">
           <h3 id="eval-cases-title" className={`${sectionTitleClass} min-w-0 flex-1`}>Cases</h3>
-          <Button size="sm" onClick={() => edit.open("new")} disabled={!canAddCase} data-testid="eval-case-add">
-            {icon(Plus)}
-            Add case
-          </Button>
+          {dataset ? null : (
+            <Button size="sm" onClick={() => edit.open("new")} disabled={!canAddCase} data-testid="eval-case-add">
+              {icon(Plus)}
+              Add case
+            </Button>
+          )}
         </div>
         <DataList<EvalCase>
           label="Cases"
@@ -299,7 +335,12 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
 
       <section className="min-w-0 space-y-2" aria-labelledby="eval-history-title">
         <h3 id="eval-history-title" className={sectionTitleClass}>Run history</h3>
-        {suiteRuns.length >= 2 ? (
+        {isWorkflow ? (
+          <p className={hintClass} data-testid="eval-history-experiments">
+            A workflow suite&apos;s runs are listed on <Link href={routes.experiments()} className="underline underline-offset-4">Experiments</Link>.
+          </p>
+        ) : null}
+        {isWorkflow ? null : suiteRuns.length >= 2 ? (
           <div className="flex min-w-0 flex-wrap items-end gap-2" data-testid="eval-history-compare">
             <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
               <label htmlFor="eval-compare-base" className={labelClass}>Base</label>
@@ -312,7 +353,7 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
             </div>
             <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
               <label htmlFor="eval-compare-target" className={labelClass}>Target</label>
-              <select id="eval-compare-target" className={fieldClass} value={target} onChange={(e) => setTarget(e.target.value)} data-testid="eval-compare-target">
+              <select id="eval-compare-target" className={fieldClass} value={compareTarget} onChange={(e) => setTarget(e.target.value)} data-testid="eval-compare-target">
                 <option value="">Choose a run</option>
                 {suiteRuns.map((r) => (
                   <option key={r.run_id} value={r.run_id}>{runTargetLabel(r)} · {new Date(r.created_at).toLocaleString()}</option>
@@ -320,32 +361,35 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
               </select>
             </div>
             <Button
-              disabled={!base || !target || base === target}
-              onClick={() => router.push(routes.agentTests(agent.id, { suite: suiteId, compare: runCompareParam(base, target) }))}
+              disabled={!base || !compareTarget || base === compareTarget}
+              onClick={() => router.push(testsHref({ suite: suiteId, compare: runCompareParam(base, compareTarget) }))}
               data-testid="eval-compare-open"
             >
               Compare
             </Button>
           </div>
         ) : null}
-        <DataList<EvalRun>
-          label="Eval runs"
-          rows={suiteRuns}
-          columns={runColumns}
-          getRowId={(r) => r.run_id}
-          getRowHref={(r) => routes.agentTests(agent.id, { suite: suiteId, run: r.run_id })}
-          getRowLabel={(r) => `Eval run ${runTargetLabel(r)} ${new Date(r.created_at).toLocaleString()}`}
-          getRowTestId={() => "eval-history-row"}
-          loading={runs === null && !runsError}
-          error={runsError}
-          onRetry={reloadRuns}
-          empty={{ title: "No runs yet", description: "Run the suite against a published version or the draft to see results here." }}
-          testId="eval-history"
-        />
+        {isWorkflow ? null : (
+          <DataList<EvalRun>
+            label="Eval runs"
+            rows={suiteRuns}
+            columns={runColumns}
+            getRowId={(r) => r.run_id}
+            getRowHref={(r) => testsHref({ suite: suiteId, run: r.run_id })}
+            getRowLabel={(r) => `Eval run ${runTargetLabel(r)} ${new Date(r.created_at).toLocaleString()}`}
+            getRowTestId={() => "eval-history-row"}
+            loading={runs === null && !runsError}
+            error={runsError}
+            onRetry={reloadRuns}
+            empty={{ title: "No runs yet", description: "Run the suite against a published version or the draft to see results here." }}
+            testId="eval-history"
+          />
+        )}
       </section>
 
       {running && suite ? (
         <RunDialog
+          target={target}
           agent={agent}
           versions={versions}
           suite={suite}
@@ -356,11 +400,17 @@ export function SuiteView({ agent, versions, suiteId, hasMemory, runs, runsError
             rememberCaseCount(started.run_id, started.cases);
             reloadRuns();
             if (started.warnings.length > 0) toast.warning(`${started.warnings.length} tool(s) with side effects run for real`);
-            router.push(routes.agentTests(agent.id, { suite: suiteId, run: started.run_id }));
+            if (isWorkflow) {
+              toast.success("Run started: follow it on Experiments");
+              router.push(routes.experiments());
+              return;
+            }
+            router.push(testsHref({ suite: suiteId, run: started.run_id }));
           }}
         />
       ) : null}
 
+      {schemaOpen && suite ? <SchemaSheet suite={suite} onClose={() => setSchemaOpen(false)} /> : null}
       {suite && editing === "suite" ? (
         <SuiteSheet
           suite={suite}

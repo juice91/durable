@@ -39,9 +39,23 @@ export type Evaluator =
       pass_threshold?: number | null;
     };
 
+/** What a suite and its runs are about: an agent or a workflow. */
+export type EvalTargetKind = "agent" | "workflow";
+
+export interface EvalTargetRef {
+  kind: EvalTargetKind;
+  id: string;
+  name: string;
+}
+
 export interface EvalSuite {
   id: string;
-  agent_id: string;
+  /** Exactly one of `agent_id` and `workflow_id` is set. */
+  agent_id: string | null;
+  workflow_id?: string | null;
+  target_kind?: EvalTargetKind;
+  target_id?: string;
+  target_name?: string | null;
   name: string;
   description: string | null;
   evaluators: Evaluator[];
@@ -160,7 +174,8 @@ export interface StartedEvalRun {
   run_id: string;
   status: string;
   display_status: string;
-  agent_id: string;
+  agent_id: string | null;
+  workflow_id?: string | null;
   version: number | null;
   draft: boolean;
   suite_id: string;
@@ -225,6 +240,8 @@ export interface ImportResult {
 }
 
 export type ExportFormat = "yaml" | "json";
+/** What an import file can be: the dataset formats and CSV (`name,input,expected_output,metadata`). */
+export type ImportFormat = ExportFormat | "csv";
 
 /** The body of a case create or update. */
 export interface EvalCaseBody {
@@ -321,28 +338,74 @@ export async function exportSuite(suiteId: string, format: ExportFormat): Promis
   return { filename: match ? match[1] : `suite.${format}`, text, type: format === "json" ? "application/json" : "application/yaml" };
 }
 
-/** The file format from a file name (`.json` → json, else yaml). */
-export function importFormatOf(filename: string): ExportFormat {
+/** The file format from a file name (`.json` → json, `.csv` → csv, else yaml). */
+export function importFormatOf(filename: string): ImportFormat {
+  if (/\.csv$/i.test(filename)) return "csv";
   return /\.json$/i.test(filename) ? "json" : "yaml";
 }
 
+const IMPORT_CONTENT_TYPES: Record<ImportFormat, string> = { json: "application/json", yaml: "application/yaml", csv: "text/csv" };
+
 /** Import a dataset file (raw body, ≤ 1 MiB): cases upserted by name, all or nothing. */
-export async function importSuite(suiteId: string, text: string, format: ExportFormat): Promise<ImportResult> {
+export async function importSuite(suiteId: string, text: string, format: ImportFormat): Promise<ImportResult> {
   if (new TextEncoder().encode(text).length > MAX_IMPORT_BYTES) {
     throw new ApiError(422, "the suite file must be at most 1 MiB");
   }
   const response = await fetch(`${BASE_URL}/api/v1/eval-suites/${seg(suiteId)}/import?format=${format}`, {
     method: "POST",
-    headers: apiHeaders({ "Content-Type": format === "json" ? "application/json" : "application/yaml" }),
+    headers: apiHeaders({ "Content-Type": IMPORT_CONTENT_TYPES[format] }),
     body: text,
   });
   if (!response.ok) throw await importError(response);
   return response.json() as Promise<ImportResult>;
 }
 
-/** The import's 422 lists unstorable strings as `{loc, msg}` items or a string; both become a message. */
+/** The import's 422 lists unstorable strings as `{loc, msg}` items or a string; both become a message.
+ * A CSV problem is `{code: "csv_invalid", row, message}` ("Row 3: name is required") and a workflow
+ * case whose input does not fit the input schema `{code: "input_schema_errors", case, errors}`. */
 async function importError(response: Response): Promise<ApiError> {
+  const text = await response.clone().text();
+  try {
+    const detail = (JSON.parse(text) as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const d = detail as { code?: unknown; row?: unknown; message?: unknown; case?: unknown };
+      if (d.code === "csv_invalid" && typeof d.row === "number") return new ApiError(response.status, `Row ${d.row}: ${String(d.message ?? "invalid")}`);
+      if (d.code === "input_schema_errors") return new ApiError(response.status, `The input of case “${String(d.case ?? "")}” does not fit the workflow's input schema`);
+    }
+  } catch {
+    // Not JSON: the generic error below.
+  }
   return apiErrorFromResponse(response);
+}
+
+/** The workflow's suites by name (a workflow has its own suite list, like an agent). */
+export function listWorkflowSuites(workflowId: string, opts: { includeArchived?: boolean; signal?: AbortSignal } = {}): Promise<EvalSuite[]> {
+  const query = opts.includeArchived ? "?include_archived=true" : "";
+  return call<{ items: EvalSuite[] }>(`/api/v1/workflows/${seg(workflowId)}/evals/suites${query}`, { signal: opts.signal }).then((d) => d.items);
+}
+
+export function createWorkflowSuite(workflowId: string, body: EvalSuiteBody & { suite_id?: string }): Promise<EvalSuite> {
+  return call<EvalSuite>(`/api/v1/workflows/${seg(workflowId)}/evals/suites`, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Start an eval run of a workflow suite against a published version (null: the latest). */
+export function startWorkflowEvalRun(
+  workflowId: string,
+  body: { run_id: string; suite_id: string; version: number | null; max_concurrency?: number },
+): Promise<StartedEvalRun> {
+  return call<StartedEvalRun>(`/api/v1/workflows/${seg(workflowId)}/evals/runs`, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The suite's target: its agent or workflow with the name the API gave (empty when it did not). */
+export function suiteTarget(suite: Pick<EvalSuite, "agent_id" | "workflow_id" | "target_kind" | "target_id" | "target_name">): EvalTargetRef {
+  const kind: EvalTargetKind = suite.target_kind ?? (suite.workflow_id ? "workflow" : "agent");
+  return { kind, id: suite.target_id ?? (kind === "workflow" ? suite.workflow_id ?? "" : suite.agent_id ?? ""), name: suite.target_name ?? "" };
+}
+
+/** "agent · name" or "workflow · name" (Datasets, Experiments). */
+export function targetText(target: { kind?: EvalTargetKind | string | null; name?: string | null }): string {
+  const kind = target.kind === "workflow" ? "workflow" : "agent";
+  return `${kind} · ${target.name || (kind === "workflow" ? "Unknown workflow" : "Unknown agent")}`;
 }
 
 export function getWarnings(agentId: string, target: EvalTarget, signal?: AbortSignal): Promise<EvalWarnings> {

@@ -10,8 +10,8 @@ import type { WorkflowTab } from "@/lib/routes/workflows";
 import { listSchedules } from "@/lib/schedules";
 import { listWorkflows } from "@/lib/workflows";
 
-/** Graph, Runs, Traces, and the Schedules tab from the workflow tour. */
-export type WorkflowHeaderTab = WorkflowTab | "schedules";
+/** Graph, Runs, Traces, and the Schedules and Tests tabs from the workflow tour. */
+export type WorkflowHeaderTab = WorkflowTab | "schedules" | "tests";
 
 /** The workflow page's tabs: Graph, Runs, Traces, and Schedules. */
 export function workflowTabs(workflowId: string, active: WorkflowHeaderTab, scheduleCount = 0): LinkTab[] {
@@ -20,6 +20,7 @@ export function workflowTabs(workflowId: string, active: WorkflowHeaderTab, sche
     { href: routes.workflow(workflowId, { tab: "runs" }), label: "Runs", active: active === "runs", testId: "workflow-tab-runs" },
     { href: routes.workflowTraces(workflowId), label: "Traces", active: active === "traces", testId: "workflow-tab-traces" },
     { href: routes.workflowSchedule(workflowId), label: "Schedules", count: scheduleCount > 0 ? scheduleCount : undefined, active: active === "schedules", testId: "workflow-tab-schedules" },
+    { href: routes.workflowTests(workflowId), label: "Tests", active: active === "tests", testId: "workflow-tab-tests" },
   ];
 }
 
@@ -78,9 +79,10 @@ export function WorkflowHeader({ workflowId, name, tab, actions, scheduleCount }
   const hrefFor = (id: string) => {
     if (tab === "traces") return routes.workflowTraces(id);
     if (tab === "schedules") return routes.workflowSchedule(id);
+    if (tab === "tests") return routes.workflowTests(id);
     return routes.workflow(id, { tab: tab === "runs" ? "runs" : null });
   };
-  const section = tab === "graph" ? "" : tab === "runs" ? "Runs" : tab === "traces" ? "Traces" : "Schedules";
+  const section = tab === "graph" ? "" : tab === "runs" ? "Runs" : tab === "traces" ? "Traces" : tab === "tests" ? "Tests" : "Schedules";
   return (
     <PageHeader
       crumbs={[

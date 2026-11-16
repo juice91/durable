@@ -19,13 +19,13 @@ vi.mock("next/navigation", () => ({
 
 const T = "2026-11-16T10:00:00Z";
 const suite = (n: number, over: Record<string, unknown> = {}) => ({
-  id: `s${n}`, agent_id: "a1", name: `Suite ${n}`, description: null, evaluators: [], case_count: n, archived: false, archived_at: null,
+  id: `s${n}`, agent_id: "a1", workflow_id: null, target_kind: "agent", target_id: "a1", target_name: "Support bot", name: `Suite ${n}`, description: null, evaluators: [], case_count: n, archived: false, archived_at: null,
   created_at: T, updated_at: T, agent_name: "Support bot", agent_archived: false, last_run: null, ...over,
 });
 const lastRun = { run_id: "r1", version: 2, status: "completed", display_status: "completed", created_at: T, updated_at: T, aggregates: { cases: 4, passed: 3, failed: 1, errors: 0, pass_rate: 0.75 } };
 const evalRun = (id: string, over: Record<string, unknown> = {}) => ({
   run_id: id, kind: "eval", agent_id: "a1", version: 2, status: "completed", display_status: "completed", error: null, created_at: T, updated_at: T,
-  trace_id: null, suite_id: "s1", suite_hash: "h", suite_name: "Suite 1", agent_name: "Support bot",
+  trace_id: null, suite_id: "s1", suite_hash: "h", suite_name: "Suite 1", agent_name: "Support bot", workflow_id: null, target_kind: "agent", target_id: "a1", target_name: "Support bot",
   aggregates: { cases: 4, passed: 3, failed: 1, errors: 0, pass_rate: 0.75, scores_avg: { quality: 0.8 }, duration_ms_p50: 100, cost_usd: "0.0001" }, ...over,
 });
 const scorer = (name: string, over: Record<string, unknown> = {}) => ({
@@ -64,17 +64,28 @@ describe("Evaluation navigation", () => {
 });
 
 describe("Datasets", () => {
-  it("lists suites across agents with agent, case count and last run, linking to the agent's Tests tab", async () => {
-    responses["/eval-suites"] = () => json({ items: [suite(4, { id: "s9", last_run: lastRun }), suite(2, { agent_id: "a2", agent_name: "Other bot" })], next_cursor: null });
+  it("lists suites across agents and workflows with target, items and last run, linking to the dataset page", async () => {
+    responses["/eval-suites"] = () =>
+      json({
+        items: [
+          suite(4, { id: "s9", last_run: lastRun }),
+          suite(2, { agent_id: "a2", agent_name: "Other bot", target_id: "a2", target_name: "Other bot" }),
+          suite(3, { agent_id: null, agent_name: null, workflow_id: "wf1", target_kind: "workflow", target_id: "wf1", target_name: "Triage" }),
+        ],
+        next_cursor: null,
+      });
     render(<DatasetsPage />);
     const rows = await screen.findAllByTestId("dataset-row");
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
+    expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(expect.arrayContaining(["Dataset", "Target", "Items", "Last run"]));
     expect(within(rows[0]).getByText("Suite 4")).toBeInTheDocument();
-    expect(within(rows[0]).getByText("Support bot")).toBeInTheDocument();
+    expect(within(rows[0]).getByTestId("dataset-target")).toHaveTextContent("agent · Support bot");
+    expect(within(rows[2]).getByTestId("dataset-target")).toHaveTextContent("workflow · Triage");
     expect(within(rows[0]).getByTestId("dataset-last-run")).toHaveTextContent("75%");
     expect(within(rows[1]).getByTestId("dataset-last-run")).toHaveTextContent("Never run");
-    expect(within(rows[0]).getByRole("link", { name: /Suite 4/ })).toHaveAttribute("href", routes.agentTests("a1", { suite: "s9" }));
-    expect(within(rows[1]).getByRole("link", { name: /Suite 2/ })).toHaveAttribute("href", routes.agentTests("a2", { suite: "s2" }));
+    expect(within(rows[0]).getByRole("link", { name: /Suite 4/ })).toHaveAttribute("href", routes.dataset("s9"));
+    expect(within(rows[1]).getByRole("link", { name: /Suite 2/ })).toHaveAttribute("href", "/datasets/s2");
+    expect(within(rows[2]).getByRole("link", { name: /Suite 3/ })).toHaveAttribute("href", "/datasets/s3");
   });
 
   it("loads further pages with Load more", async () => {
@@ -127,6 +138,14 @@ describe("Scorers", () => {
     expect(within(rows[1]).getByTestId("scorer-history")).toHaveTextContent("0.62");
   });
 
+  it("links a workflow suite of a scorer to the workflow's Tests tab", async () => {
+    responses["/evals/scorers"] = () =>
+      json({ items: [scorer("has_hi", { suites: [{ id: "s5", name: "Wf suite", agent_id: null, agent_name: null, workflow_id: "wf1", target_kind: "workflow", target_name: "Triage", case_level_uses: 0 }] })], next_cursor: null });
+    render(<ScorersPage />);
+    const row = await screen.findByTestId("scorer-row");
+    expect(within(row).getByRole("link", { name: "Wf suite" })).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s5" }));
+  });
+
   it("says when a scorer has no runs yet, and has an empty state", async () => {
     responses["/evals/scorers"] = () => json({ items: [scorer("x", { history: [] })], next_cursor: null });
     const { unmount } = render(<ScorersPage />);
@@ -164,6 +183,23 @@ describe("Experiments", () => {
     expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", routes.agentTests("a2", { suite: "s7", run: "er2" }));
     expect(within(rows[1]).getByTestId("experiment-scores")).toHaveTextContent("quality 0.80");
     expect(within(rows[1]).getByText("75%")).toBeInTheDocument();
+  });
+
+  it("names the target of each run, agent or workflow, and opens a workflow run's suite on the workflow", async () => {
+    responses["/evals/runs"] = () =>
+      json({
+        items: [
+          evalRun("er2", { agent_id: null, agent_name: null, workflow_id: "wf1", version: null, workflow_version: 3, target_kind: "workflow", target_id: "wf1", target_name: "Triage", suite_id: "s7", suite_name: "Suite 7" }),
+          evalRun("er1"),
+        ],
+        next_cursor: null,
+      });
+    render(<ExperimentsPage />);
+    const rows = await screen.findAllByTestId("experiment-row");
+    expect(within(rows[0]).getByTestId("experiment-target")).toHaveTextContent("workflow · Triage");
+    expect(within(rows[1]).getByTestId("experiment-target")).toHaveTextContent("agent · Support bot");
+    expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s7" }));
+    expect(within(rows[0]).getByText("v3")).toBeInTheDocument();
   });
 
   it("has empty, error and load-more states", async () => {

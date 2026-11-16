@@ -56,9 +56,9 @@ const columns: DataListColumn<Scorer>[] = [
         {s.suites.slice(0, 3).map((suite) => (
           <Link
             key={suite.id}
-            href={routes.agentTests(suite.agent_id, { suite: suite.id })}
+            href={suite.workflow_id ? routes.workflowTests(suite.workflow_id, { suite: suite.id }) : routes.agentTests(suite.agent_id ?? "", { suite: suite.id })}
             className="max-w-48 truncate underline underline-offset-4"
-            title={`${suite.name} (${suite.agent_name ?? "unknown agent"})`}
+            title={`${suite.name} (${suite.workflow_id ? `workflow ${suite.target_name ?? "unknown"}` : suite.agent_name ?? "unknown agent"})`}
           >
             {suite.name}
           </Link>
