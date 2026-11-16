@@ -142,6 +142,11 @@ def test_list_bounds_the_limit_and_the_name_query_in_the_store(engine, run_store
     assert len(store.list(tenant, {}, 0, None)[0]) == 1  # clamped up to 1
     assert len(store.list(tenant, {}, -5, None)[0]) == 1
     assert len(store.list(tenant, {}, 10_000, None)[0]) == 4
-    long_q = "tickets" + "x" * 5000  # cut to 200 characters: the name no longer matches
-    assert store.list(tenant, {"q": long_q}, 50, None)[0] == []
-    assert [i["kind"] for i in store.list(tenant, {"q": "tickets" + "x" * 0}, 50, None)[0]] == ["tool_call"]
+    long_name = "a" * 200
+    store.replace_for_run(tenant, run_id, [{
+        "span_id": "long", "parent_id": None, "kind": "run", "name": long_name, "start": T0, "end": None,
+        "status": "ok", "agent_id": None, "workflow_id": None, "model": None,
+    }])
+    # q is cut to 200 characters in the store: the over-long query matches the 200-character name
+    assert [i["span_id"] for i in store.list(tenant, {"q": long_name + "zzz"}, 50, None)[0]] == ["long"]
+    assert store.list(tenant, {"q": "b" * 300}, 50, None)[0] == []

@@ -61,7 +61,6 @@ from eap_api.schemas import CancelNotSupportedDetail, ErrorDetail, RunCancelResp
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability import current_trace_context, log_failure
 from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, RunIdConflict
-from eap_run_store.spans import materialise_spans
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 from eap_schemas.workflows import STEP_ID_PATTERN, WorkflowSpec
 
@@ -564,12 +563,7 @@ def _cascade(launcher: RunLauncher, run_id: uuid.UUID) -> None:
 
 def _finish_cancel(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> Any:
     """D12 step 3 (a seam the tests replace to inject a crash after the cascade)."""
-    result = run_store.cancel_run_tree(tenant_id, run_id)
-    try:  # the cancelled run's own workflow never records its spans (the Spans tab would miss it)
-        materialise_spans(run_store.engine, tenant_id, run_id)
-    except Exception:  # noqa: BLE001 - spans are best effort; the cancel is done
-        log.warning("run %s: spans not recorded after cancel", run_id)
-    return result
+    return run_store.cancel_run_tree(tenant_id, run_id)
 
 
 @cancel_router.post(

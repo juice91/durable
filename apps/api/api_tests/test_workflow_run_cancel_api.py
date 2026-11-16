@@ -174,7 +174,8 @@ def test_no_lock_is_held_across_the_cascade(api, fake):  # noqa: F811
     assert finished == [True]
 
 
-def test_cancel_records_the_cancelled_runs_spans(api, fake):  # noqa: F811
+def test_cancel_does_not_write_spans_from_the_api(api, fake):  # noqa: F811
+    """Derived data is the worker's: the cancel reconcile pass materialises a cancelled run's spans."""
     client, app, tenant_of = api
     tenant, headers = tenant_of()
     run_id = _start(client, headers)
@@ -182,7 +183,4 @@ def test_cancel_records_the_cancelled_runs_spans(api, fake):  # noqa: F811
     run_store.mark_running(tenant, uuid.UUID(run_id))
     assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202
     spans = client.get("/api/v1/spans", headers=headers).json()["items"]
-    assert [s["span_id"] for s in spans if s["run_id"] == run_id] == [f"run:{run_id}"]
-    assert spans[0]["status"] == "error"
-    assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202  # a retry changes nothing
-    assert len(client.get("/api/v1/spans", headers=headers).json()["items"]) == 1
+    assert [s for s in spans if s["run_id"] == run_id] == []

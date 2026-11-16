@@ -45,11 +45,12 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from dbos import DBOS
+from sqlalchemy import text
 
 from eap_run_store.spans import materialise_spans
 from eap_worker.runtime import get_runtime
@@ -178,6 +179,39 @@ def finish_cancel_step(tenant_id: str, run_id: str) -> dict[str, Any]:
     }
 
 
+SPANS_STEP = "eap.cancel_reconcile.spans"
+SPANS_PER_TICK = 200
+# Only runs that ended this recently are looked at: spans are not backfilled for older runs.
+SPANS_WINDOW = timedelta(hours=6)
+_MISSING_SPANS = text(
+    "SELECT r.tenant_id, r.id FROM runs r"
+    " WHERE r.parent_run_id IS NULL AND r.kind IN ('agent', 'tool', 'workflow')"
+    " AND r.status IN ('completed', 'failed', 'needs_attention') AND r.updated_at >= :since"
+    " AND NOT EXISTS (SELECT 1 FROM spans s WHERE s.run_id = CAST(r.id AS uuid))"
+    " ORDER BY r.updated_at LIMIT :n"
+)
+
+
+@DBOS.step(name=SPANS_STEP)
+def record_missing_spans_step(limit: int = SPANS_PER_TICK) -> int:
+    """Materialise the spans of recently ended top-level runs that have none: a cancelled run is
+    ended from outside (the API's cancel), so its own workflow never reaches `eap.record_spans`; a
+    run whose recording failed is retried here too. At most `limit` per tick, oldest first,
+    idempotent (materialise_spans replaces a run's rows). Returns the runs recorded."""
+    rt = get_runtime()
+    since = datetime.now(timezone.utc) - SPANS_WINDOW
+    with rt.engine.connect() as conn:
+        rows = conn.execute(_MISSING_SPANS, {"since": since, "n": limit}).all()
+    recorded = 0
+    for tenant_id, run_id in rows:
+        try:
+            materialise_spans(rt.engine, tenant_id, run_id)
+            recorded += 1
+        except Exception:  # noqa: BLE001 - best effort; the next tick retries
+            log.warning("cancel reconcile: spans of run %s not recorded", run_id)
+    return recorded
+
+
 # --------------------------------------------------------------------------- the workflow
 
 
@@ -201,7 +235,12 @@ def reconcile(config: ReconcileConfig) -> dict[str, Any]:
         finished += 1
         ended += done["ended"]
         log.info("cancel reconcile: run %s finished as %s", item["run_id"], done["status"])
-    return {"found": len(pending), "finished": finished, "failed": failed, "ended": ended}
+    try:
+        spans = record_missing_spans_step()
+    except Exception as exc:  # noqa: BLE001 - the cancels above are done; spans are best effort
+        log.warning("cancel reconcile: spans pass failed (%s)", type(exc).__name__)
+        spans = 0
+    return {"found": len(pending), "finished": finished, "failed": failed, "ended": ended, "spans": spans}
 
 
 @DBOS.workflow(name=CANCEL_RECONCILE_WORKFLOW_NAME)
@@ -256,5 +295,6 @@ __all__ = [
     "cancel_reconcile",
     "finish_cancel_step",
     "find_unfinished_cancels_step",
+    "record_missing_spans_step",
     "reconcile",
 ]
