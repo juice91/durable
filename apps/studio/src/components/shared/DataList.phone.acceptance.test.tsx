@@ -36,6 +36,8 @@ const USERS = [
   "components/processors/ProcessorList.tsx",
   // W2.5: the tenant-wide Threads page.
   "components/threads/ThreadsPage.tsx",
+  // Round 2: the Spans tab list.
+  "components/traces/SpansList.tsx",
   // Round 1: the (empty) Schedules table.
   "components/workflows/WorkflowSchedules.tsx",
 ];
