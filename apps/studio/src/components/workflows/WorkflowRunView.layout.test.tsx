@@ -105,7 +105,7 @@ describe("WorkflowRunView layout (SL.14)", () => {
     expect(within(rows[1]).getByTestId("workflow-timeline-duration")).toHaveTextContent("in progress");
     expect(screen.getByTestId("workflow-timeline-summary")).toHaveTextContent("1 of 5 steps done");
 
-    fireEvent.click(within(rows[0]).getByRole("button"));
+    fireEvent.click(within(rows[0]).getByRole("button", { pressed: false }));
     expect(screen.getByTestId("step-io-panel")).toHaveAttribute("data-step-id", "classify");
 
     const handle = screen.getByRole("separator", { name: "Resize timeline" });

@@ -550,8 +550,8 @@ describe("Timeline dock", () => {
     emit(ev("step_started", { step_id: "classify", step_type: "agent" }, 0), ev("step_completed", { step_id: "classify", output: "x" }, 1));
     expect(screen.getByTestId("workflow-timeline-summary")).toHaveTextContent("1 of 5 steps done");
     fireEvent.click(screen.getByTestId("workflow-timeline-toggle"));
-    fireEvent.click(within(timelineRow("classify")).getByRole("button"));
-    expect(within(timelineRow("classify")).getByRole("button")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(within(timelineRow("classify")).getByRole("button", { pressed: false }));
+    expect(within(timelineRow("classify")).getByRole("button", { pressed: true })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("step-io-panel")).toHaveAttribute("data-step-id", "classify");
   });
 });

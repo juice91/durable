@@ -277,6 +277,8 @@ export function WorkflowRunView({
   ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
   // The newest later run that re-ran this one, from the workflow's run history (no extra API).
+  // The "Scheduled: <name>" lookup reads the first 200 schedules (one request, no paging loop); a deleted
+  // or uncached schedule leaves the name null and the tag reads plain "Scheduled".
   const [scheduleName, setScheduleName] = useState<string | null>(null);
   const scheduleId = run?.schedule_id ?? null;
   useEffect(() => {
@@ -320,10 +322,10 @@ export function WorkflowRunView({
   useEffect(() => {
     if (pausedId) setSelected(pausedAfter(pausedId));
   }, [pausedId]);
-    const active = typeof document !== "undefined" ? document.activeElement : null;
-    if (active && active !== document.body && active.isConnected) return;
   useEffect(() => {
     if (!refocusAfterDecision.current) return;
+    const active = typeof document !== "undefined" ? document.activeElement : null;
+    if (active && active !== document.body && active.isConnected) return;
     refocusAfterDecision.current = false;
     statusRef.current?.focus();
   }, [waitingKey]);
@@ -576,6 +578,7 @@ export function WorkflowRunView({
 
         {spec ? (
           <TimelineDock
+            runId={runId}
             rows={rows}
             open={prefs.timelineOpen}
             height={prefs.timelineHeight}

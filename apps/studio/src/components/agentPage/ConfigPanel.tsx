@@ -15,6 +15,7 @@ import type { RunStatus } from "@/lib/runs";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
 import { listKnowledgeBases } from "@/lib/knowledge";
+import { listAgentScorers, type AttachedScorer } from "@/lib/scorers";
 import { knowledgeBasesOf, knowledgeRefSummary, memorySummaryLines } from "@/components/agents/knowledgeMemory";
 import {
   approvalsOf,
@@ -97,6 +98,7 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
   const knowledgeRefs = knowledgeBasesOf(spec);
   const memoryLines = memorySummaryLines(spec);
   const kbNames = useKnowledgeBaseNames(knowledgeRefs.length > 0);
+  const scorers = useAgentScorers(agent.id);
   // AC.13: fallback models and limits under Model, approval marks on tools, and the Output section.
   const fallbacks = fallbackModelsOf(spec);
   const limits = limitsOf(spec);
@@ -273,6 +275,24 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
             )}
           </Section>
 
+          <Section id="scorers" title="Scorers" count={scorers.items?.length} editHref={routes.agentEditor(agent.id)}>
+            {scorers.error ? (
+              <p className={muted}>Could not load the scorers</p>
+            ) : scorers.items === null ? (
+              <p className={muted}>Loading…</p>
+            ) : scorers.items.length === 0 ? (
+              <p className={muted}>None</p>
+            ) : (
+              <ul className="space-y-0.5 text-caption" data-testid="config-scorers">
+                {scorers.items.map((scorer) => (
+                  <li key={scorer.id} className="break-words">
+                    {scorer.name} · {Math.round(scorer.sampling_rate * 100)}%
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
           <Section id="knowledge" title="Knowledge" count={knowledgeRefs.length} editHref={edit("knowledge")}>
             {knowledgeRefs.length === 0 ? (
               <p className={muted}>None</p>
@@ -371,6 +391,25 @@ function shortId(id: string): string {
 }
 
 /** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */
+/** The agent's attached scorers (a failed load is shown as such, never thrown). */
+function useAgentScorers(agentId: string): { items: AttachedScorer[] | null; error: boolean } {
+  const [state, setState] = useState<{ items: AttachedScorer[] | null; error: boolean }>({ items: null, error: false });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ items: null, error: false });
+    Promise.resolve()
+      .then(() => listAgentScorers(agentId, controller.signal))
+      .then((items) => {
+        if (!controller.signal.aborted) setState({ items: Array.isArray(items) ? items : [], error: false });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setState({ items: null, error: true });
+      });
+    return () => controller.abort();
+  }, [agentId]);
+  return state;
+}
+
 function useKnowledgeBaseNames(needed: boolean): Map<string, string> | null {
   const [names, setNames] = useState<Map<string, string> | null>(null);
   useEffect(() => {
