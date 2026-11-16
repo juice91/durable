@@ -71,7 +71,7 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
       const saved = await updateSchedule(row.id, { active });
       apply((rows ?? []).map((r) => (r.id === row.id ? saved : r)));
     } catch (reason) {
-      setActionError(reason instanceof Error ? reason.message : "Failed to update the schedule");
+      setActionError(`${row.name}: ${reason instanceof Error ? reason.message : "Failed to update the schedule"}`);
     } finally {
       setBusyId(null);
     }

@@ -328,3 +328,28 @@ def test_mcp_tool_run_row_never_stays_running_on_any_store_failure(
         assert end["data"]["error_code"] == "side_effect_outcome_unknown"
     if failing == "set_status":
         assert run["status"] == "completed", run  # the end event fixed completed
+
+
+def test_mcp_tool_run_row_follows_an_end_event_that_committed_but_raised(
+    app_client, tenant_headers, dev_allow_loopback, monkeypatch
+):
+    """The end append commits, then the caller sees a raise (connection dropped after commit): the
+    fallback reads the end event and finishes with ITS status, never leaving the row `running`."""
+    client, app = app_client
+    _, event_log = app.state.run_stores
+    original = event_log.append
+
+    def commit_then_raise(tenant_id, run_id, key, type_, data):
+        result = original(tenant_id, run_id, key, type_, data)
+        if type_ == "run_completed":
+            raise RuntimeError("connection dropped after commit")
+        return result
+
+    monkeypatch.setattr(event_log, "append", commit_then_raise)
+    _, h = tenant_headers()
+    with hard_timeout(60), ToolServer() as mcp:
+        server = register(client, h, url=mcp.url).json()
+        with pytest.raises(RuntimeError):
+            client.post(runs_url(server["id"], "add"), json={"input": {"a": 1}}, headers=h)
+    run = _run_row(client, h, server)
+    assert run["status"] == "completed", run

@@ -29,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from eap_api.auth import Principal, current_principal
+from eap_api.auth import Principal, current_principal, feedback_viewer
 from eap_api.schemas import ErrorDetail
 from eap_run_store import AgUiRunModel
 from eap_run_store.chat_attachments import (
@@ -241,6 +241,9 @@ async def list_feedback(conversation_id: str, request: Request, principal: Princ
         run_store, _ = request.app.state.run_stores
         if run_store.get_conversation(principal.tenant_id, conversation_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-        return {"feedback": conversation_feedback(request, principal.tenant_id, principal.user_id, conversation_id)}
+        viewer = feedback_viewer(principal)
+        if viewer is None:
+            return {"feedback": {}}
+        return {"feedback": conversation_feedback(request, principal.tenant_id, viewer, conversation_id)}
 
     return JSONResponse(content=await run_in_threadpool(run))

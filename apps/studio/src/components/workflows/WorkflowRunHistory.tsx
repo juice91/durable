@@ -64,6 +64,8 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
   }, [workflowId, limit]);
 
   // Schedule names for the "Scheduled: <name>" tag; only fetched when a loaded run came from a schedule.
+  // One request for the first 200 schedules (no paging loop): a schedule that was deleted or sits past
+  // that cap is not in the map, and its runs show plain "Scheduled".
   const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
   const hasScheduled = (loadedRuns ?? []).some((r) => r.schedule_id);
   useEffect(() => {

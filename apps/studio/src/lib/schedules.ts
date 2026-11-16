@@ -43,6 +43,13 @@ export interface SchedulePage {
 
 const enc = encodeURIComponent;
 
+/** Readable copy for the API's schedule error codes; others (input_schema_errors) show the code and its list. */
+const CODE_MESSAGES: Record<string, string> = {
+  schedule_name_taken: "A schedule with this name already exists",
+  invalid_timezone: "Unknown timezone (use an IANA name such as UTC)",
+  invalid_cron: "Cron must have 5 fields",
+};
+
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
   const response = await fetch(`${BASE_URL}${path}`, {
     ...init,
@@ -56,7 +63,7 @@ async function call(path: string, init: RequestInit = {}): Promise<Response> {
       const detail = data?.detail;
       if (detail && typeof detail === "object" && !Array.isArray(detail) && typeof detail.code === "string") {
         const errors = Array.isArray(detail.errors) ? ` ${detail.errors.map(String).join("; ")}` : "";
-        error.message = `${detail.code}${typeof detail.message === "string" ? `: ${detail.message}` : errors ? `:${errors}` : ""}`;
+        error.message = CODE_MESSAGES[detail.code] ?? `${detail.code}${typeof detail.message === "string" ? `: ${detail.message}` : errors ? `:${errors}` : ""}`;
       }
     } catch {
       // keep the status fallback

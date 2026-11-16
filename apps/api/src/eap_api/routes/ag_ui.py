@@ -123,7 +123,7 @@ from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_mes
 from eap_run_store.chat_attachments import ChatAttachmentStore, MessageFeedbackStore, model_accepts
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
 from eap_api.agent_archive import AGENT_ARCHIVED
-from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, get_api_key_store, require_agui_agent
+from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, get_api_key_store, require_agui_agent
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
@@ -1146,13 +1146,6 @@ def _load_agent_or_404(c: _Ctx) -> None:
         ).first()
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-
-
-def feedback_viewer(principal: Any) -> str | None:
-    """The user whose own feedback may be shown, or None: API keys have no user, so they see none."""
-    if not principal.user_id or principal.is_api_key:
-        return None
-    return principal.user_id
 
 
 def _viewer_feedback(c: _Ctx, run_id: str) -> list[dict[str, Any]]:

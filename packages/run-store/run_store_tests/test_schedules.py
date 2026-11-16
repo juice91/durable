@@ -77,9 +77,10 @@ def test_claim_due_takes_only_active_due_rows_and_mark_fired_advances(store, ten
     paused = make(store, a, name="paused")
     store.update(a, paused["id"], active=False)
     now = T0 + timedelta(days=1)
-    assert [r["id"] for r in store.claim_due(now)] == [due["id"]]
+    # a shared dev DB may hold other tenants' due rows: only this test's tenant is compared
+    assert [r["id"] for r in store.claim_due(now) if r["tenant_id"] == a] == [due["id"]]
     store.mark_fired(due["id"], now, now + timedelta(days=2))
-    assert store.claim_due(now) == []
+    assert [r for r in store.claim_due(now) if r["tenant_id"] == a] == []
     assert store.get(a, due["id"])["last_fired_at"] == now
     store.stop(due["id"], "gone")
     row = store.get(a, due["id"])

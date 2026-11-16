@@ -55,7 +55,7 @@ from eap_api.routes.tools import MAX_TOOL_INPUT_BYTES, ToolRunCreate, _canonical
 from eap_api.schemas import ErrorDetail
 from eap_observability import current_trace_context
 from eap_run_store import RunIdConflict
-from eap_schemas import mcp_tool_name
+from eap_schemas import mcp_tool_name, status_for_end
 
 log = logging.getLogger("eap_api.mcp_servers")
 
@@ -642,7 +642,20 @@ async def run_mcp_tool(
                         )
                     )
                     if not written:
-                        log.warning("mcp tool run fallback did not write the status: run_id=%s", run_id)
+                        # An end event that committed but raised to us (connection dropped after the
+                        # commit) fixes the status, and finish_with_end refused ours: finish with ITS.
+                        end = await run_in_threadpool(event_log.get_event, tenant_id, run_id, "end")
+                        if end is None:
+                            log.warning("mcp tool run fallback did not write the status: run_id=%s", run_id)
+                        else:
+                            data = end.data or {}
+                            out = data.get("output") if isinstance(data.get("output"), str) else None
+                            err = data.get("error") if isinstance(data.get("error"), str) else None
+                            await run_in_threadpool(
+                                lambda: run_store.finish_with_end(
+                                    tenant_id, run_id, status_for_end(end.type, data), out, err,
+                                )
+                            )
                 except Exception as exc:  # noqa: BLE001
                     log_failure(log, "mcp tool run could not be marked failed", exc, code="mcp_call_failed",
                                 tenant_id=tenant_id, server_id=sid, run_id=str(run_id))

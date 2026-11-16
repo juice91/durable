@@ -13,7 +13,7 @@ import { listWorkflows } from "@/lib/workflows";
 /** Graph, Runs, Traces, and the Schedules and Tests tabs from the workflow tour. */
 export type WorkflowHeaderTab = WorkflowTab | "schedules" | "tests";
 
-/** The workflow page's tabs: Graph, Runs, Traces, and Schedules. */
+/** The workflow page's tabs: Graph, Runs, Traces, Schedules, and Tests. */
 export function workflowTabs(workflowId: string, active: WorkflowHeaderTab, scheduleCount = 0): LinkTab[] {
   return [
     { href: routes.workflow(workflowId), label: "Graph", active: active === "graph", testId: "workflow-tab-graph" },
@@ -52,11 +52,15 @@ export interface WorkflowHeaderProps {
   scheduleCount?: number;
 }
 
-/** How many schedules the workflow has (0 until loaded, or on failure). */
-function useScheduleCount(workflowId: string, known: number | undefined): number {
+/**
+ * How many schedules the workflow has (0 until loaded, or on failure). The badge is capped at the
+ * first 200 (one request, no paging loop). On the Schedules tab the page owns the count (it passes
+ * `known` from its own load), so the header never fetches there.
+ */
+function useScheduleCount(workflowId: string, known: number | undefined, tab: WorkflowHeaderTab): number {
   const [count, setCount] = useState(0);
   useEffect(() => {
-    if (known !== undefined || !workflowId) return;
+    if (known !== undefined || !workflowId || tab === "schedules") return;
     const controller = new AbortController();
     void listSchedules({ workflowId, limit: 200, signal: controller.signal })
       .then((page) => {
@@ -64,18 +68,18 @@ function useScheduleCount(workflowId: string, known: number | undefined): number
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [workflowId, known]);
+  }, [workflowId, known, tab]);
   return known ?? count;
 }
 
 /**
  * The workflow pages' header: Workflows › {name} (the h1, with a "Switch workflow" combobox that
- * keeps the current tab), the page actions, Connect (AG-UI), and the Graph · Runs · Traces · Schedules tabs.
+ * keeps the current tab), the page actions, Connect (AG-UI), and the Graph · Runs · Traces · Schedules · Tests tabs.
  * Needs a `<Suspense>` boundary above it (the Connect Sheet reads the URL).
  */
 export function WorkflowHeader({ workflowId, name, tab, actions, scheduleCount }: WorkflowHeaderProps) {
   const options = useWorkflowOptions();
-  const schedules = useScheduleCount(workflowId, scheduleCount);
+  const schedules = useScheduleCount(workflowId, scheduleCount, tab);
   const hrefFor = (id: string) => {
     if (tab === "traces") return routes.workflowTraces(id);
     if (tab === "schedules") return routes.workflowSchedule(id);

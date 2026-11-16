@@ -157,3 +157,31 @@ def test_global_list_includes_workflow_name_and_pages(api):
         nxt = page["next_before"]
     assert seen == ids[::-1]
     assert client.get(f"{API}/workflows/schedules?before=garbage", headers=h).status_code == 422
+
+
+def test_patch_rejects_a_null_input_like_the_other_fields(api):
+    client, _, tenant_of = api
+    _, h = tenant_of()
+    wf = publish_demo(client, h)
+    sid = make(client, h, wf).json()["id"]
+    for field in ("input", "name", "cron", "timezone", "active"):
+        r = client.patch(f"{API}/workflows/schedules/{sid}", json={field: None}, headers=h)
+        assert r.status_code == 422, (field, r.text)
+    assert client.get(f"{API}/workflows/{wf}/schedules", headers=h).json()["items"][0]["input"] == {"q": "x"}
+
+
+def test_pausing_skips_revalidation_of_cron_and_input(api):
+    """A schedule whose stored input no longer fits the workflow can still be paused."""
+    client, app, tenant_of = api
+    _, h = tenant_of()
+    wf = publish_demo(client, h)
+    sid = make(client, h, wf).json()["id"]
+    with app.state.database_engine.begin() as conn:  # a stored input that fails the schema, a cron that is junk
+        conn.execute(text("UPDATE workflow_schedules SET input = CAST(:i AS jsonb), cron = 'broken' WHERE id = :s"),
+                     {"i": '{"wrong": 1}', "s": sid})
+    r = client.patch(f"{API}/workflows/schedules/{sid}", json={"active": False}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["active"] is False and r.json()["input"] == {"wrong": 1}
+    # resuming still validates
+    r = client.patch(f"{API}/workflows/schedules/{sid}", json={"active": True}, headers=h)
+    assert r.status_code == 422, r.text

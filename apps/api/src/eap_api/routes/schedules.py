@@ -138,12 +138,17 @@ def update_schedule(schedule_id: str, body: WorkflowScheduleUpdate, principal: P
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
     workflow = _workflow_or_404(db, tenant, current["workflow_id"])
     fields = body.model_dump(exclude_unset=True)
-    cron = fields.get("cron", current["cron"])
-    zone = fields.get("timezone", current["timezone"])
-    _check_cron_zone(cron, zone)
-    _check_input(_latest_spec(db, workflow), fields.get("input", current["input"]))
-    fields["next_fire_at"] = next_fire(cron, zone, datetime.now(timezone.utc))
-    fields["last_error"] = None
+    if fields.keys() == {"active"} and fields["active"] is False:
+        # Pausing must always work: a stored cron or input that no longer validates (the workflow
+        # changed) is not re-checked, and next_fire_at is left alone.
+        fields["last_error"] = None
+    else:
+        cron = fields.get("cron", current["cron"])
+        zone = fields.get("timezone", current["timezone"])
+        _check_cron_zone(cron, zone)
+        _check_input(_latest_spec(db, workflow), fields.get("input", current["input"]))
+        fields["next_fire_at"] = next_fire(cron, zone, datetime.now(timezone.utc))
+        fields["last_error"] = None
     try:
         row = store.update(tenant, schedule_id, **fields)
     except ScheduleNameConflict:

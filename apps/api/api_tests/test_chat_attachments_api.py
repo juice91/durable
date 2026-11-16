@@ -302,3 +302,27 @@ def test_api_key_principal_with_a_user_id_sees_no_feedback_anywhere():
     c = SimpleNamespace(principal=principal, tenant_id="t", engine=None, run_store=None)
     assert ag_ui._viewer_feedback(c, "r") == []
     assert ag_ui._thread_feedback(c, "conv") == {}
+
+
+def test_an_api_key_principal_with_a_user_id_sees_no_feedback_over_http_or_replay(ag, tenant, worker):
+    """The HTTP read and the AG-UI replay share feedback_viewer: an API key has no own feedback, even
+    when its principal carries a user_id that matches an author."""
+    from eap_api.auth import AgUiPrincipal, current_principal
+
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id, conv = _answered_thread(client, h, worker)
+    url = f"/api/v1/conversations/{conv}/messages/r1-m0/feedback"
+    run_id = client.put(url, json={"rating": "up", "comment": "alice note"}, headers=h).json()["run_id"]
+    key = AgUiPrincipal(tenant_id=tenant, kind="api_key", user_id="alice", key_id="k1")
+    app.dependency_overrides[current_principal] = lambda: key
+    try:
+        r = client.get(f"/api/v1/conversations/{conv}/feedback", headers=h)
+    finally:
+        del app.dependency_overrides[current_principal]
+    assert r.status_code == 200 and r.json()["feedback"] == {}, r.text
+    from eap_api.auth import feedback_viewer
+
+    assert feedback_viewer(key) is None
+    assert feedback_viewer(AgUiPrincipal(tenant_id=tenant, kind="dev", user_id="alice")) == "alice"
+    assert run_id

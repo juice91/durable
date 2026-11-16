@@ -74,4 +74,11 @@ describe("WorkflowSchedules", () => {
     expect(workflowTabs("w1", "schedules", 0).find((t) => t.testId === "workflow-tab-schedules")?.count).toBeUndefined();
     expect(workflowTabs("w1", "schedules").find((t) => t.testId === "workflow-tab-schedules")?.count).toBeUndefined();
   });
+
+  it("a failed Pause names the schedule row in its error", async () => {
+    sched.updateSchedule.mockRejectedValue(new Error("Cron must have 5 fields"));
+    render(<WorkflowSchedules workflowId="w1" target="Triage" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Pause Hourly" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Hourly: Cron must have 5 fields");
+  });
 });

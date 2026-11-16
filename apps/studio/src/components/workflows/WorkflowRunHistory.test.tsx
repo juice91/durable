@@ -39,6 +39,14 @@ describe("WorkflowRunHistory", () => {
     expect(screen.getByText(/^Scheduled/)).toHaveTextContent("Scheduled: Hourly");
   });
 
+  it("shows plain Scheduled when the schedule was deleted or is not in the loaded list", async () => {
+    schedMock.listSchedules.mockResolvedValue({ items: [{ id: "other", name: "Hourly" }], next_before: null });
+    wfMock.listWorkflowRuns.mockResolvedValue({ items: [{ ...run("dddddddd-1", "wf-d"), schedule_id: "gone" }], next_before: null });
+    render(<WorkflowRunHistory workflowId="wf-d" />);
+    await act(async () => {});
+    expect(screen.getByText(/^Scheduled/)).toHaveTextContent(/^Scheduled$/);
+  });
+
   it("ignores a stale load for the previous workflow after switching", async () => {
     const loadA = deferred();
     const loadB = deferred();
