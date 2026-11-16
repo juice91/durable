@@ -127,15 +127,19 @@ assert_running_mount_is_only_data_dir() {
   fi
 }
 
+# The VM must outlive this script. Under a GitHub Actions self-hosted runner, every process a job
+# starts is tagged with RUNNER_TRACKING_ID and killed when the job ends ("Terminate orphan
+# process: colima, limactl"), which stopped the VM right after the first successful deploy.
+# Starting Colima with RUNNER_TRACKING_ID cleared keeps its host processes out of that cleanup.
 if colima status "$PROFILE" >/dev/null 2>&1; then
   assert_running_mount_is_only_data_dir
 # One awk reads all of `colima list`; a `| grep -q` here could SIGPIPE the producer, turn the
 # condition false under pipefail and wrongly create a new profile over an existing one.
 elif colima_profiles=$(colima list 2>/dev/null) \
   && awk -v p="$PROFILE" 'NR > 1 && $1 == p {found = 1} END {exit !found}' <<<"$colima_profiles"; then
-  XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg"
+  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg"
 else
-  XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg" --kubernetes --runtime docker --cpu 8 --memory 32 --disk 100
+  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg" --kubernetes --runtime docker --cpu 8 --memory 32 --disk 100
 fi
 
 guard_contexts

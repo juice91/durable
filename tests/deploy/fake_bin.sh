@@ -2,6 +2,8 @@
 set -euo pipefail
 tool=$(basename "$0")
 printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG}"
+# Record whether a colima start would be tracked (and killed) by a GitHub Actions runner.
+[[ "$tool" != colima || "${1:-}" != start ]] || printf 'COLIMA_START_TRACKING_ID=[%s]\n' "${RUNNER_TRACKING_ID-unset}" >>"${STUB_LOG}"
 # Only `op` may see the 1Password token; up.sh must unset it before docker, kubectl and the rest.
 [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || printf 'TOKEN_LEAK %s\n' "$tool" >>"${STUB_LOG}"
 # Like the real tools, consume a manifest piped in with `-f -`. Exiting without reading it

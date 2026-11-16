@@ -538,3 +538,14 @@ def test_restore_sh_latest_skips_empty_partial_and_unlistable_dumps(tmp_path: Pa
     assert (backup / "eap_app-20261115T191700Z.dump.partial").read_bytes() == b"partial-bytes"
     assert (backup / "eap_app-20261115T191701Z.dump").read_bytes() == b"NOT-A-DUMP"
     assert (backup / "eap_app-20261115T191702Z.dump").read_bytes() == b""
+
+
+def test_colima_start_is_not_tracked_by_the_actions_runner(tmp_path: Path):
+    # A self-hosted runner kills every process tagged with RUNNER_TRACKING_ID when the job ends;
+    # that stopped the VM after the first real deploy. up.sh must start Colima untracked.
+    bindir = _install_stubs(tmp_path)
+    env = _env(tmp_path, bindir, {"RUNNER_TRACKING_ID": "github_job_tracking_123"})
+    _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=60)
+    starts = [line for line in _log(env).splitlines() if line.startswith("COLIMA_START_TRACKING_ID=")]
+    assert starts, "colima start was not invoked"
+    assert all(line == "COLIMA_START_TRACKING_ID=[]" for line in starts), starts
