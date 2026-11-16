@@ -100,3 +100,40 @@ def test_spans_pages_by_cursor_and_rejects_bad_input(pg, tenant_of):
         assert client.get("/api/v1/spans", params={"from": T0.isoformat(), "to": T0.isoformat()}, headers=h).status_code == 422
     finally:
         _cleanup(app, tenant)
+
+
+def test_spans_and_runs_agree_on_tags_metadata_and_q(pg, tenant_of):
+    client, app = pg
+    tenant, h = tenant_of()
+    try:
+        agent_id = make_agent(client, h)
+        runs = []
+        for i, (text_in, ctx) in enumerate([
+            ("printer on fire", {"team": "ops"}), ("printer jammed", {"team": "dev"}), ("billing", {"team": "ops"}),
+        ]):
+            run_id = str(uuid.uuid4())
+            assert start(client, h, agent_id, run_id).status_code == 201
+            with app.state.database_engine.begin() as conn:
+                conn.execute(text("UPDATE runs SET input = :i, request_context = CAST(:c AS jsonb) WHERE id = :r"),
+                             {"i": text_in, "c": '{"team": "%s"}' % ctx["team"], "r": run_id})
+            SpanStore(app.state.database_engine).replace_for_run(tenant, run_id, [_span(run_id, i, "run", "Helper", agent_id)])
+            runs.append(run_id)
+        for params in (
+            {"tags": f"agent:{agent_id}", "metadata": "team=ops", "q": "PRINTER"},
+            {"tags": "kind:agent,ctx:team", "metadata": "team=ops"},
+            {"tags": "draft"},
+            {"status": "queued", "q": "printer"},
+        ):
+            from_runs = {i["run_id"] for i in client.get("/api/v1/runs", params={k: v for k, v in params.items()}, headers=h).json()["items"]}
+            # spans' own `q` is the span name, so the run-text filter is compared without it
+            span_params = {k: v for k, v in params.items() if k != "q"}
+            from_spans = {i["run_id"] for i in client.get("/api/v1/spans", params=span_params, headers=h).json()["items"]}
+            expected = {i["run_id"] for i in client.get("/api/v1/runs", params=span_params, headers=h).json()["items"]}
+            assert from_spans == expected, params
+            if "q" not in params:
+                assert from_spans == from_runs, params
+        assert {i["run_id"] for i in client.get("/api/v1/runs", params={"tags": f"agent:{agent_id}", "metadata": "team=ops", "q": "PRINTER"}, headers=h).json()["items"]} == {runs[0]}
+        hist = client.get("/api/v1/runs/histogram", params={"metadata": "team=ops", "q": "printer"}, headers=h).json()
+        assert sum(b["runs"] for b in hist["buckets"]) == 1
+    finally:
+        _cleanup(app, tenant)

@@ -4,7 +4,7 @@ Filled by a worker step when a top-level run finishes (`replace_for_run`, idempo
 insert), from the same derivation `GET /runs/{id}/trace` uses (`trace.flat_spans`). Runs finished
 before the table existed have no rows. Read newest first, paged by a `(start, span_id)` cursor.
 
-`run_conditions` builds the WHERE clause of the `GET /runs` filters on `runs` (the same meaning as
+`run_filter_conditions` (store.py, shared with `RunStore.list_runs`) builds the WHERE clause of the `GET /runs` filters on `runs` (the same meaning as
 `RunStore.list_runs`); the spans list applies it through the span's run and the runs histogram on
 `runs` directly.
 """
@@ -24,7 +24,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
-from eap_run_store.store import Base, RunModel, _status_condition, run_tag_condition
+from eap_run_store.store import Base, RunModel, run_filter_conditions
 
 
 class SpanModel(Base):
@@ -99,64 +99,6 @@ def _like(value: str) -> str:
     return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def run_conditions(
-    tenant_id: str,
-    *,
-    agent_id: UUID | str | None = None,
-    workflow_id: UUID | str | None = None,
-    knowledge_base_id: UUID | str | None = None,
-    parent_run_id: UUID | str | None = None,
-    status: list[str] | None = None,
-    kind: str | None = None,
-    tool_id: str | None = None,
-    created_from: datetime | None = None,
-    created_to: datetime | None = None,
-    model: str | None = None,
-    provider: str | None = None,
-    tags: list[str] | None = None,
-    metadata: dict[str, str] | None = None,
-    text_query: str | None = None,
-) -> tuple[list[Any], bool]:
-    """The `GET /runs` filters as SQL conditions on `RunModel` (tenant, top-level unless
-    `parent_run_id` is given), and whether the query should run under the metrics statement timeout
-    (`model`, `provider` and `text_query` walk far back in history)."""
-    conds: list[Any] = [RunModel.tenant_id == tenant_id]
-    conds.append(RunModel.parent_run_id == str(parent_run_id) if parent_run_id is not None
-                 else RunModel.parent_run_id.is_(None))
-    for tag in tags or ():
-        conds.append(run_tag_condition(tag))
-    for key, value in (metadata or {}).items():
-        conds.append(RunModel.request_context[key].astext == value)
-    if workflow_id is not None:
-        conds.append(RunModel.workflow_id == str(workflow_id))
-    if knowledge_base_id is not None:
-        conds.append(RunModel.knowledge_base_id == str(knowledge_base_id))
-    if agent_id is not None:
-        conds.append(RunModel.agent_id == str(agent_id))
-    if status:
-        conds.append(_status_condition(list(status)))
-    if created_from is not None:
-        conds.append(RunModel.created_at >= created_from)
-    if created_to is not None:
-        conds.append(RunModel.created_at < created_to)
-    slow = False
-    if text_query:
-        conds.append(or_(*(col.ilike(_like(text_query), escape="\\") for col in (
-            RunModel.input, RunModel.output, RunModel.error, RunModel.tool_id, RunModel.model_id,
-        ))))
-        slow = True
-    if model is not None or provider is not None:
-        from eap_run_store.metrics import run_model_condition
-
-        conds.append(run_model_condition(RunModel, tenant_id, model, provider))
-        slow = True
-    if kind is not None:
-        conds.append(RunModel.kind == kind)
-    if tool_id is not None:
-        conds.append(RunModel.tool_id == tool_id)
-    return conds, slow
-
-
 def _execute(session: Any, statement: Any, slow: bool, timeout_ms: int | None) -> Any:
     if not slow:
         return session.execute(statement)
@@ -209,7 +151,7 @@ def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
 
 _SPAN_COLUMNS = ("run_id", "span_id", "parent_id", "kind", "name", "start", "end", "status",
                  "agent_id", "workflow_id", "model")
-# `list` keys that are conditions on the span's run (see run_conditions).
+# `list` keys that are conditions on the span's run (see run_filter_conditions).
 _RUN_FILTERS = ("status", "kind", "tool_id", "workflow_id", "model", "provider", "tags", "metadata")
 
 
@@ -271,7 +213,7 @@ class SpanStore:
             stmt = stmt.where(SpanModel.agent_id == str(f["agent_id"]))
         slow = False
         if any(f.get(k) for k in _RUN_FILTERS):
-            conds, slow = run_conditions(
+            conds, slow = run_filter_conditions(
                 tenant_id, **{k: f[k] for k in _RUN_FILTERS if f.get(k)}, parent_run_id=None
             )
             stmt = stmt.where(exists().where(cast(RunModel.id, PG_UUID(as_uuid=False)) == SpanModel.run_id, *conds))
@@ -294,11 +236,11 @@ class SpanStore:
     ) -> list[dict[str, Any]]:
         """Runs per UTC `interval` ('hour' | 'day') bucket over `[start, end)`, zero-filled: one
         `{start, runs, failed}` per bucket from the one holding `start` to the one holding `end`.
-        `filters` are the `GET /runs` filters (run_conditions keys, `created_from` / `created_to`
+        `filters` are the `GET /runs` filters (run_filter_conditions keys, `created_from` / `created_to`
         replaced by the range)."""
         if interval not in ("hour", "day"):
             raise ValueError("interval must be hour or day")
-        conds, slow = run_conditions(
+        conds, slow = run_filter_conditions(
             tenant_id,
             **{k: v for k, v in (filters or {}).items() if k not in ("created_from", "created_to")},
             created_from=start, created_to=end,
@@ -327,4 +269,4 @@ class SpanStore:
         return buckets
 
 
-__all__ = ["MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_conditions"]
+__all__ = ["MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_filter_conditions"]

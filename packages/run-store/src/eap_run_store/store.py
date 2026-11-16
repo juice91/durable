@@ -686,6 +686,69 @@ def run_tag_condition(tag: str) -> Any:
     return false()
 
 
+def _like_pattern(value: str) -> str:
+    return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def run_filter_conditions(
+    tenant_id: str,
+    *,
+    agent_id: UUID | str | None = None,
+    workflow_id: UUID | str | None = None,
+    knowledge_base_id: UUID | str | None = None,
+    parent_run_id: UUID | str | None = None,
+    status: str | list[str] | tuple[str, ...] | None = None,
+    kind: str | None = None,
+    tool_id: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict[str, str] | None = None,
+    text_query: str | None = None,
+) -> tuple[list[Any], bool]:
+    """The one builder of the `GET /runs` filters, shared by `RunStore.list_runs`, `SpanStore.list` and the
+    runs histogram, as SQL conditions on `RunModel` (tenant, top-level unless
+    `parent_run_id` is given), and whether the query should run under the metrics statement timeout
+    (`model`, `provider` and `text_query` walk far back in history)."""
+    conds: list[Any] = [RunModel.tenant_id == tenant_id]
+    conds.append(RunModel.parent_run_id == str(parent_run_id) if parent_run_id is not None
+                 else RunModel.parent_run_id.is_(None))
+    for tag in tags or ():
+        conds.append(run_tag_condition(tag))
+    for key, value in (metadata or {}).items():
+        conds.append(RunModel.request_context[key].astext == value)
+    if workflow_id is not None:
+        conds.append(RunModel.workflow_id == str(workflow_id))
+    if knowledge_base_id is not None:
+        conds.append(RunModel.knowledge_base_id == str(knowledge_base_id))
+    if agent_id is not None:
+        conds.append(RunModel.agent_id == str(agent_id))
+    if status is not None:
+        conds.append(_status_condition([status] if isinstance(status, str) else list(status)))
+    if created_from is not None:
+        conds.append(RunModel.created_at >= created_from)
+    if created_to is not None:
+        conds.append(RunModel.created_at < created_to)
+    slow = False
+    if text_query:
+        conds.append(or_(*(col.ilike(_like_pattern(text_query), escape="\\") for col in (
+            RunModel.input, RunModel.output, RunModel.error, RunModel.tool_id, RunModel.model_id,
+        ))))
+        slow = True
+    if model is not None or provider is not None:
+        from eap_run_store.metrics import run_model_condition
+
+        conds.append(run_model_condition(RunModel, tenant_id, model, provider))
+        slow = True
+    if kind is not None:
+        conds.append(RunModel.kind == kind)
+    if tool_id is not None:
+        conds.append(RunModel.tool_id == tool_id)
+    return conds, slow
+
+
 def _run_select() -> Any:
     """SELECT runs plus whether each has an open approval (for _run_dict's display status)."""
     from eap_run_store.approvals import open_approval_exists
@@ -1923,49 +1986,20 @@ class RunStore:
         key=value pair equals the run's request context value, as text) and `text_query` (a
         case-insensitive substring of the run's input, output, error, tool id or model id; it runs
         under the same statement timeout as `model`)."""
-        query = _run_select().where(RunModel.tenant_id == tenant_id)
-        for tag in tags or ():
-            query = query.where(run_tag_condition(tag))
-        for key, value in (metadata or {}).items():
-            query = query.where(RunModel.request_context[key].astext == value)
-        if parent_run_id is not None:
-            query = query.where(RunModel.parent_run_id == str(parent_run_id))
-        else:
-            query = query.where(RunModel.parent_run_id.is_(None))
-        if workflow_id is not None:
-            query = query.where(RunModel.workflow_id == str(workflow_id))
-        if knowledge_base_id is not None:
-            query = query.where(RunModel.knowledge_base_id == str(knowledge_base_id))
+        conditions, slow = run_filter_conditions(
+            tenant_id, agent_id=agent_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
+            parent_run_id=parent_run_id, status=status, kind=kind, tool_id=tool_id, created_from=created_from,
+            created_to=created_to, model=model, provider=provider, tags=tags, metadata=metadata,
+            text_query=text_query,
+        )
+        query = _run_select().where(*conditions)
         if before is not None:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
-        if agent_id is not None:
-            query = query.where(RunModel.agent_id == str(agent_id))
-        if status is not None:
-            query = query.where(_status_condition([status] if isinstance(status, str) else list(status)))
-        if created_from is not None:
-            query = query.where(RunModel.created_at >= created_from)
-        if created_to is not None:
-            query = query.where(RunModel.created_at < created_to)
         timeout_ms = None
-        if text_query:
+        if slow:
             from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS
 
-            pattern = "%" + text_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            query = query.where(
-                or_(*(col.ilike(pattern, escape="\\") for col in (
-                    RunModel.input, RunModel.output, RunModel.error, RunModel.tool_id, RunModel.model_id,
-                )))
-            )
             timeout_ms = int(statement_timeout_ms or DEFAULT_STATEMENT_TIMEOUT_MS)
-        if model is not None or provider is not None:
-            from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS, run_model_condition
-
-            query = query.where(run_model_condition(RunModel, tenant_id, model, provider))
-            timeout_ms = int(statement_timeout_ms or DEFAULT_STATEMENT_TIMEOUT_MS)
-        if kind is not None:
-            query = query.where(RunModel.kind == kind)
-        if tool_id is not None:
-            query = query.where(RunModel.tool_id == tool_id)
         query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
         with self.Session() as session:
             if timeout_ms is None:
