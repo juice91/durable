@@ -1177,10 +1177,12 @@ class RunStore:
         traceparent: str | None = None,
         *,
         rerun_of: UUID | str | None = None,
+        schedule_id: UUID | str | None = None,
     ) -> tuple[UUID, bool]:
         """Create a workflow run (kind 'workflow': published version `workflow_version` of
         `workflow_id`, `input` = the workflow input as canonical JSON text). `rerun_of`: the earlier
         run this one repeats (the caller has checked it is the same tenant's and workflow's).
+        `schedule_id`: the schedule whose tick created the run.
 
         Same idempotency and tenant rules as create_run."""
         return self._insert_run(
@@ -1193,6 +1195,7 @@ class RunStore:
             trace_id=trace_id,
             traceparent=traceparent,
             rerun_of=None if rerun_of is None else str(rerun_of),
+            schedule_id=None if schedule_id is None else str(schedule_id),
         )
 
     def create_kb_ingest_run(
