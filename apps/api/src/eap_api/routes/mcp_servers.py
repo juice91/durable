@@ -475,8 +475,9 @@ async def run_mcp_tool(
     tenant's too) or the server does not offer the tool; 422 server disabled, input too large, or
     input rejected by the tool's input schema (loc/msg/type, never the values; nothing recorded);
     409 `run_id` used by a different request; 503 header secrets without the platform key.
-    A connection or call failure is recorded as a failed run (a call that was sent and got no
-    answer: needs_attention, the tool may have run), and a repeated `run_id` returns the recorded
+    A connection or call failure is recorded as a failed run, still answered 200 (a call that was
+    sent and got no answer, or that raised after it may have been sent: needs_attention, the tool may
+    have run; no exception text is stored), and a repeated `run_id` returns the recorded
     run without calling the tool again."""
     tenant_id = principal.tenant_id
     run_store, event_log = stores
@@ -540,76 +541,96 @@ async def run_mcp_tool(
             log_failure(log, "mcp tool listing failed", listed.error, code=code, tenant_id=tenant_id, server_id=sid)
 
     trace_id, traceparent = current_trace_context()
-    try:
-        _, created = await run_in_threadpool(
-            lambda: run_store.create_tool_run(
-                tenant_id, tool_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
-            )
-        )
-    except RunIdConflict:
-        headers.clear()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-    if not created:  # a concurrent request with the same run_id owns this run
-        run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
-        headers.clear()
-        return JSONResponse(content=_run_body(run or {"id": run_id, "tool_id": tool_id, "status": "running",
-                                                       "display_status": "running", "trace_id": trace_id}))
-
-    # Shielded: a client that disconnects must not leave the recorded run unfinished.
+    # Shielded from the create on: a client that disconnects must not leave a recorded run unfinished.
     with anyio.CancelScope(shield=True):
-        call_data = {"tool_call_id": "tool_run", "tool_name": mcp_tool_name(name, tool), "tool_id": tool_id}
+        try:
+            _, created = await run_in_threadpool(
+                lambda: run_store.create_tool_run(
+                    tenant_id, tool_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
+                )
+            )
+        except RunIdConflict:
+            headers.clear()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
+        if not created:  # a concurrent request with the same run_id owns this run
+            run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
+            headers.clear()
+            return JSONResponse(content=_run_body(run or {"id": run_id, "tool_id": tool_id, "status": "running",
+                                                           "display_status": "running", "trace_id": trace_id}))
 
-        def record(key: str, type_: str, data: dict[str, Any]) -> None:
-            event_log.append(tenant_id, run_id, key, type_, data)
+        finished = False
+        try:
+            call_data = {"tool_call_id": "tool_run", "tool_name": mcp_tool_name(name, tool), "tool_id": tool_id}
 
-        await run_in_threadpool(run_store.mark_running, tenant_id, run_id)
-        await run_in_threadpool(record, "start", "run_started", {"kind": "tool", "tool_id": tool_id, "input": body.input})
+            def record(key: str, type_: str, data: dict[str, Any]) -> None:
+                event_log.append(tenant_id, run_id, key, type_, data)
 
-        final_status, output, error, error_code = "failed", None, None, code
-        called = False
-        raised = False
-        content: Any = None
-        if code is None:
-            await run_in_threadpool(record, "tool:tool_run:call", "tool_call", {**call_data, "args": body.input})
-            called = True
-            try:
-                result = await call_server_tool(url, headers, policy, timeout, tool, body.input)
-            except Exception as exc:  # the ledger row must never stay `running`
-                log_failure(log, "mcp tool call raised", exc, code="mcp_call_failed",
-                            tenant_id=tenant_id, server_id=sid, run_id=str(run_id))
-                raised = True
-                final_status, error_code, error = "failed", "mcp_call_failed", str(exc)
-                result = None
-            if result is None:
-                pass
-            elif result.status == "ok":
-                content = result.content
-                final_status = "completed"
-                output = _canonical_json(content)
-            else:
-                error_code = result.error_code or "call_failed"
-                if result.error is not None:
-                    log_failure(log, "mcp tool call failed", result.error, code=error_code,
+            await run_in_threadpool(run_store.mark_running, tenant_id, run_id)
+            await run_in_threadpool(record, "start", "run_started", {"kind": "tool", "tool_id": tool_id, "input": body.input})
+
+            final_status, output, error, error_code = "failed", None, None, code
+            called = False
+            content: Any = None
+            if code is None:
+                await run_in_threadpool(record, "tool:tool_run:call", "tool_call", {**call_data, "args": body.input})
+                called = True
+                try:
+                    result = await call_server_tool(url, headers, policy, timeout, tool, body.input)
+                except Exception as exc:  # the ledger row must never stay `running`
+                    # No exception text is stored: it can carry a URL or a header value. The type and
+                    # code are logged. The request may have gone out before the raise, so the tool may
+                    # have run: the same outcome as a sent call that got no answer.
+                    log_failure(log, "mcp tool call raised", exc, code="mcp_call_failed",
                                 tenant_id=tenant_id, server_id=sid, run_id=str(run_id))
-                if error_code == "tool_error":
-                    error = TOOL_ERROR_MESSAGE
-                elif result.sent:
                     final_status, error_code = "needs_attention", "side_effect_outcome_unknown"
                     error = "a tool's external side effect may or may not have happened; check the external system"
-        headers.clear()
-        if error is None and final_status == "failed":
-            error = f"MCP tool '{name}/{tool}' is unavailable ({error_code})"
+                    result = None
+                if result is None:
+                    pass
+                elif result.status == "ok":
+                    content = result.content
+                    final_status = "completed"
+                    output = _canonical_json(content)
+                else:
+                    error_code = result.error_code or "call_failed"
+                    if result.error is not None:
+                        log_failure(log, "mcp tool call failed", result.error, code=error_code,
+                                    tenant_id=tenant_id, server_id=sid, run_id=str(run_id))
+                    if error_code == "tool_error":
+                        error = TOOL_ERROR_MESSAGE
+                    elif result.sent:
+                        final_status, error_code = "needs_attention", "side_effect_outcome_unknown"
+                        error = "a tool's external side effect may or may not have happened; check the external system"
+            headers.clear()
+            if error is None and final_status == "failed":
+                error = f"MCP tool '{name}/{tool}' is unavailable ({error_code})"
 
-        if final_status == "completed":
-            await run_in_threadpool(record, "tool:tool_run:result", "tool_result", {**call_data, "status": "ok", "content": content})
-            await run_in_threadpool(record, "end", "run_completed", {"output": output, "result": content})
-        else:
-            if called:
-                await run_in_threadpool(record, "tool:tool_run:result", "tool_result",
-                                        {**call_data, "status": "error", "error": error, "error_code": error_code})
-            await run_in_threadpool(record, "end", "run_failed",
-                                    {"status": final_status, "error": error, "error_code": error_code})
-        await run_in_threadpool(run_store.set_status, tenant_id, run_id, final_status, output, error)
-        run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
-        assert run is not None
-        return JSONResponse(content=_run_body(run), status_code=502 if raised else 200)
+            if final_status == "completed":
+                await run_in_threadpool(record, "tool:tool_run:result", "tool_result", {**call_data, "status": "ok", "content": content})
+                await run_in_threadpool(record, "end", "run_completed", {"output": output, "result": content})
+            else:
+                if called:
+                    await run_in_threadpool(record, "tool:tool_run:result", "tool_result",
+                                            {**call_data, "status": "error", "error": error, "error_code": error_code})
+                await run_in_threadpool(record, "end", "run_failed",
+                                        {"status": final_status, "error": error, "error_code": error_code})
+            await run_in_threadpool(run_store.set_status, tenant_id, run_id, final_status, output, error)
+            finished = True
+            run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
+            assert run is not None
+            return JSONResponse(content=_run_body(run))
+        finally:
+            headers.clear()
+            if not finished:  # a store error must not leave the row `running` (best effort)
+                fallback = f"MCP tool '{name}/{tool}' is unavailable (mcp_call_failed)"
+                try:
+                    # A terminal status needs the run's `end` event: write both in one transaction.
+                    await run_in_threadpool(
+                        lambda: run_store.finish_with_end(
+                            tenant_id, run_id, "failed", None, fallback,
+                            end_data={"error_code": "mcp_call_failed"},
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log_failure(log, "mcp tool run could not be marked failed", exc, code="mcp_call_failed",
+                                tenant_id=tenant_id, server_id=sid, run_id=str(run_id))

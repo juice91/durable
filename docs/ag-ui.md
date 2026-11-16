@@ -129,11 +129,12 @@ stream) is not run twice. Re-sending the latest recorded user message alone unde
   (tenant-scoped, `nosniff`).
 - **Feedback.** `PUT|DELETE /api/v1/conversations/{id}/messages/{messageId}/feedback`
   (`{rating: "up"|"down", comment?}`) rates an assistant message (`{runId}-m{n}`), one row per user.
-  The thread GET adds `feedback: {messageId: {rating, comment, updated_at}}` for the caller. Each change is
-  also a durable run event `message_feedback` (key `feedback:{messageId}`, the first one of a message
-  stands), and an attach or replay of the finished run sends it as the custom event
-  `pydanticos.message_feedback` `{message_id, rating: "up"|"down"|null, comment}` just before the
-  terminal frame, with no SSE id.
+  The thread GET adds `feedback: {messageId: {rating, comment, updated_at}}` for the caller. Feedback is
+  private to its author and is not a run event. An attach or replay of the run sends the viewer's own
+  current feedback, read from the feedback rows (the latest state after up, down, delete), as the custom
+  event `pydanticos.message_feedback` `{message_id, rating: "up"|"down", comment}` just before the
+  terminal frame, with no SSE id. Another user of the tenant, and an API key, receive none. A message
+  with no feedback sends no event, and `DELETE` of absent feedback is a no-op (204).
 
 ### `MESSAGES_SNAPSHOT` and how `@ag-ui/client` merges it
 

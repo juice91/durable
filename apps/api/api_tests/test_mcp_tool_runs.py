@@ -222,13 +222,13 @@ def test_header_secret_is_sent_but_never_stored_in_the_run(app_client, tenant_he
     assert "[REDACTED]" in run["output"]
 
 
-def test_mcp_tool_run_marks_ledger_failed_when_the_call_raises(
+def test_mcp_tool_run_marks_ledger_needs_attention_when_the_call_raises_and_stores_no_exception_text(
     app_client, tenant_headers, dev_allow_loopback, monkeypatch
 ):
     from eap_api.routes import mcp_servers
 
     async def explode(*args, **kwargs):
-        raise RuntimeError("transport blew up")
+        raise RuntimeError("transport blew up https://x/?token=SECRET-MARKER")
 
     monkeypatch.setattr(mcp_servers, "call_server_tool", explode)
     client, _ = app_client
@@ -236,9 +236,41 @@ def test_mcp_tool_run_marks_ledger_failed_when_the_call_raises(
     with hard_timeout(60), ToolServer() as mcp:
         server = register(client, h, url=mcp.url).json()
         r = client.post(runs_url(server["id"], "add"), json={"input": {"a": 1}}, headers=h)
-    assert r.status_code == 502, r.text
+    # Consistent with every other recorded failure of this route: 200 with the finished run.
+    assert r.status_code == 200, r.text
+    assert "SECRET-MARKER" not in r.text
     tool_id = f"mcp:{server['id']}/add"
     rows = ledger(client, h, tool_id)
-    assert len(rows) == 1 and rows[0]["status"] == "failed"
+    assert len(rows) == 1 and rows[0]["status"] == "needs_attention"
+    rid = rows[0]["run_id"]
+    run = client.get(f"/api/v1/runs/{rid}", headers=h)
+    assert run.json()["status"] == "needs_attention"
+    events = client.get(f"/api/v1/runs/{rid}/events", headers=h)
+    assert "SECRET-MARKER" not in run.text and "SECRET-MARKER" not in events.text
+    assert "transport blew up" not in run.text + events.text
+
+
+def test_mcp_tool_run_row_never_stays_running_when_the_event_log_fails(
+    app_client, tenant_headers, dev_allow_loopback, monkeypatch
+):
+    from eap_api.routes import mcp_servers
+
+    client, app = app_client
+    _, event_log = app.state.run_stores
+    original = event_log.append
+
+    def flaky(tenant_id, run_id, key, type_, data):
+        if type_ == "tool_call":
+            raise RuntimeError("db went away")
+        return original(tenant_id, run_id, key, type_, data)
+
+    monkeypatch.setattr(event_log, "append", flaky)
+    _, h = tenant_headers()
+    with hard_timeout(60), ToolServer() as mcp:
+        server = register(client, h, url=mcp.url).json()
+        with pytest.raises(RuntimeError):
+            client.post(runs_url(server["id"], "add"), json={"input": {"a": 1}}, headers=h)
+    rows = ledger(client, h, f"mcp:{server['id']}/add")
+    assert len(rows) == 1 and rows[0]["status"] == "failed", rows
     run = client.get(f"/api/v1/runs/{rows[0]['run_id']}", headers=h).json()
-    assert run["status"] == "failed" and "transport blew up" in run["error"]
+    assert run["error"] == f"MCP tool '{server['name']}/add' is unavailable (mcp_call_failed)"

@@ -531,8 +531,8 @@ RunEventType = Literal[
     # Reusable scorers (W2.3): written by the worker after a run finished, key `score:{scorer_id}`:
     # {scorer, scorer_id, score, passed, reason}. Never output text.
     "score",
-    # Message feedback (W2.4), written by the API after the turn ended, key `feedback:{message_id}`:
-    # {message_id, rating: "up"|"down"|null, comment: str|null}. The comment is the user's own note.
+    # Message feedback (W2.4): legacy, no longer written. Feedback is per user, so it lives only in
+    # `message_feedback` rows and is replayed to its own author; a shared run event would leak it.
     "message_feedback",
 ]
 

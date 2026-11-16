@@ -126,7 +126,7 @@ export interface RunEvent {
     | "cancel_requested"
     // Reusable scorers (W2.3): written by the worker after a run, key `score:{scorer_id}`.
     | "score"
-    // Message feedback (W2.4): written by the API, key `feedback:{message_id}`.
+    // Message feedback (W2.4): legacy, no longer written (feedback is per user; see docs/ag-ui.md).
     | "message_feedback";
   data: RunEventData;
   ts: string;

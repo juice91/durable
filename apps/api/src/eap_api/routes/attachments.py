@@ -194,18 +194,6 @@ def _turn_for_message(request: Request, tenant_id: str, conversation_id: str, me
     return str(row[0])
 
 
-def _record_feedback_event(
-    request: Request, tenant_id: str, run_id: str, message_id: str, rating: str | None, comment: str | None
-) -> None:
-    """Append the `message_feedback` run event of the turn (allowed after `end`, key `feedback:{message_id}`;
-    a repeated key keeps the first event, so the thread read stays the current state)."""
-    _, event_log = request.app.state.run_stores
-    event_log.append(
-        tenant_id, uuid.UUID(run_id), f"feedback:{message_id}", "message_feedback",
-        {"message_id": message_id, "rating": rating, "comment": comment},
-    )
-
-
 @router.put("/conversations/{conversation_id}/messages/{message_id}/feedback")
 async def put_feedback(
     conversation_id: str, message_id: str, body: FeedbackBody, request: Request, principal: PrincipalDep
@@ -217,7 +205,6 @@ async def put_feedback(
             principal.tenant_id, run_id, message_id, rating=body.rating, comment=comment,
             created_by=principal.user_id,
         )
-        _record_feedback_event(request, principal.tenant_id, run_id, message_id, record.rating, record.comment)
         return record.as_json()
 
     return JSONResponse(content=await run_in_threadpool(run))
@@ -228,9 +215,9 @@ async def delete_feedback(
     conversation_id: str, message_id: str, request: Request, principal: PrincipalDep
 ) -> Response:
     def run() -> None:
-        run_id = _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
+        _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
+        # Idempotent: deleting feedback that does not exist writes nothing.
         feedback_store(request).delete(principal.tenant_id, message_id, created_by=principal.user_id)
-        _record_feedback_event(request, principal.tenant_id, run_id, message_id, None, None)
 
     await run_in_threadpool(run)
     return Response(status_code=204)

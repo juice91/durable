@@ -132,7 +132,15 @@ class RunSummary:
     data: dict[str, Any] = field(default_factory=dict)
 
 
-StreamItem = DurableEvent | Delta | Status | Heartbeat | RunSummary
+@dataclass(frozen=True)
+class FeedbackItems:
+    """The viewing principal's own message feedback on this run, read at replay time (never a
+    durable event: feedback is per user, run events are shared by the tenant)."""
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+StreamItem = DurableEvent | Delta | Status | Heartbeat | RunSummary | FeedbackItems
 EndReason = Literal["terminal", "expired", "gone"]
 
 
@@ -149,6 +157,7 @@ class ItemStream:
         delta_source: DeltaSource,
         settings: StreamSettings,
         load_summary: Callable[[], dict[str, Any]] | None = None,
+        load_feedback: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.run_id = run_id
         self.after_seq = after_seq
@@ -157,13 +166,16 @@ class ItemStream:
         self.delta_source = delta_source
         self.settings = settings
         self.load_summary = load_summary
+        self.load_feedback = load_feedback
         self.end_reason: EndReason = "gone"
 
-    async def _trailing_feedback(self, after_seq: int) -> list[DurableEvent]:
-        """`message_feedback` events written after the run's `end` (the API appends them to a finished
-        turn): a replay sends them just before the terminal frame, so no AG-UI event follows it."""
-        events = await asyncio.to_thread(self.load_events, after_seq)
-        return [DurableEvent(e) for e in events if e.type == "message_feedback"]
+    async def _trailing_feedback(self) -> list[FeedbackItems]:
+        """The viewer's own feedback rows (latest state per message), sent just before the terminal
+        frame so no AG-UI event follows it."""
+        if self.load_feedback is None:
+            return []
+        rows = await asyncio.to_thread(self.load_feedback)
+        return [FeedbackItems(list(rows))] if rows else []
 
     async def __aiter__(self) -> AsyncIterator[StreamItem]:  # noqa: C901 - one loop, kept as in sse.py
         run_id = self.run_id
@@ -230,7 +242,7 @@ class ItemStream:
                     ):
                         if (item := await summary()) is not None:
                             yield item
-                        for trailing in await self._trailing_feedback(last_seq):
+                        for trailing in await self._trailing_feedback():
                             yield trailing
                         yield DurableEvent(pending_terminal)
                         self.end_reason = "terminal"
@@ -246,7 +258,7 @@ class ItemStream:
                             if event.type in TERMINAL_EVENT_TYPES:
                                 if (item := await summary()) is not None:
                                     yield item
-                                for trailing in await self._trailing_feedback(last_seq):
+                                for trailing in await self._trailing_feedback():
                                     yield trailing
                                 yield DurableEvent(event)
                                 self.end_reason = "terminal"
@@ -291,6 +303,7 @@ def run_items(
     delta_source: DeltaSource,
     settings: StreamSettings,
     load_summary: Callable[[], dict[str, Any]] | None = None,
+    load_feedback: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> ItemStream:
     """The typed items of one run. `load_events` / `load_run` / `load_summary` are blocking and
     run in a thread. Iterate it with `async for`; afterwards `end_reason` says why it ended."""
@@ -302,4 +315,5 @@ def run_items(
         delta_source=delta_source,
         settings=settings,
         load_summary=load_summary,
+        load_feedback=load_feedback,
     )

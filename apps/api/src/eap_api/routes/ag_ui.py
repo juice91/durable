@@ -1003,6 +1003,7 @@ def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncI
         delta_source=d.delta_source,
         settings=d.settings,
         load_summary=lambda: _model_requests(c, p.record.run_id),
+        load_feedback=lambda: _viewer_feedback(c, p.record.run_id),
     )
     formatter = AgUiFormatter(
         AgUiStreamContext(
@@ -1145,6 +1146,15 @@ def _load_agent_or_404(c: _Ctx) -> None:
         ).first()
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
+def _viewer_feedback(c: _Ctx, run_id: str) -> list[dict[str, Any]]:
+    """The viewing user's own feedback on one turn, for the replay (a tenant-mate's rating or comment
+    is never sent). API keys have no user, so they see none."""
+    if not c.principal.user_id or c.principal.is_api_key:
+        return []
+    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, [run_id], created_by=c.principal.user_id)
+    return [{"message_id": r.message_id, "rating": r.rating, "comment": r.comment} for r in rows]
 
 
 def _thread_feedback(c: _Ctx, conversation_id: str) -> dict[str, Any]:

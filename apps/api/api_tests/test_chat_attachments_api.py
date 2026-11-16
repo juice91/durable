@@ -238,19 +238,48 @@ def test_the_worker_finds_a_turns_attachments_through_its_message_ids(ag, tenant
     assert store.for_run(f"t{uuid.uuid4().hex[:8]}", native) == []
 
 
-def test_feedback_is_a_run_event_and_an_agui_custom_event(ag, tenant, worker):
-    client, _ = ag
-    h = get_auth_header(tenant, "alice")
-    agent_id, conv = _answered_thread(client, h, worker)
-    r = client.put(f"/api/v1/conversations/{conv}/messages/r1-m0/feedback", json={"rating": "up"}, headers=h)
-    assert r.status_code == 200
-    run_id = r.json()["run_id"]
-    events = client.get(f"/api/v1/runs/{run_id}/events", headers=h).json()
-    items = events["items"] if isinstance(events, dict) else events
-    sent = [e for e in items if e["type"] == "message_feedback"]
-    assert sent and sent[-1]["data"] == {"message_id": "r1-m0", "rating": "up", "comment": None}
-    with client.stream("GET", f"/api/v1/ag-ui/agents/{agent_id}/threads/t/runs/r1/stream", headers=h) as response:
+def _replay_feedback(client, agent_id, headers) -> list[dict[str, Any]]:
+    with client.stream("GET", f"/api/v1/ag-ui/agents/{agent_id}/threads/t/runs/r1/stream", headers=headers) as response:
         assert response.status_code == 200
         frames = list(iter_frames(response, deadline_s=30))
-    custom = [f.data for f in frames if f.data and f.data["type"] == "CUSTOM" and f.data["name"] == "pydanticos.message_feedback"]
-    assert custom and custom[-1]["value"] == {"message_id": "r1-m0", "rating": "up", "comment": None}
+    return [
+        f.data["value"] for f in frames
+        if f.data and f.data["type"] == "CUSTOM" and f.data["name"] == "pydanticos.message_feedback"
+    ]
+
+
+def test_feedback_replays_only_to_its_author_with_the_latest_state(ag, tenant, worker):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    bob = get_auth_header(tenant, "bob")
+    agent_id, conv = _answered_thread(client, h, worker)
+    url = f"/api/v1/conversations/{conv}/messages/r1-m0/feedback"
+    r = client.put(url, json={"rating": "up", "comment": "alice private note"}, headers=h)
+    assert r.status_code == 200
+    run_id = r.json()["run_id"]
+    # No shared run event is written.
+    events = client.get(f"/api/v1/runs/{run_id}/events", headers=h).json()
+    items = events["items"] if isinstance(events, dict) else events
+    assert [e for e in items if e["type"] == "message_feedback"] == []
+    assert _replay_feedback(client, agent_id, h) == [{"message_id": "r1-m0", "rating": "up", "comment": "alice private note"}]
+    # A second user of the tenant replays the run and sees none of it.
+    assert _replay_feedback(client, agent_id, bob) == []
+    # up -> down: the replay and the thread GET show the latest state.
+    assert client.put(url, json={"rating": "down"}, headers=h).status_code == 200
+    assert _replay_feedback(client, agent_id, h) == [{"message_id": "r1-m0", "rating": "down", "comment": None}]
+    thread = client.get(f"/api/v1/ag-ui/agents/{agent_id}/threads/t", headers=h).json()
+    assert thread["feedback"]["r1-m0"]["rating"] == "down"
+    # delete: both agree there is nothing.
+    assert client.delete(url, headers=h).status_code == 204
+    assert _replay_feedback(client, agent_id, h) == []
+    assert client.get(f"/api/v1/ag-ui/agents/{agent_id}/threads/t", headers=h).json()["feedback"] == {}
+
+
+def test_deleting_missing_feedback_is_idempotent_and_writes_nothing(ag, tenant, worker):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    _, conv = _answered_thread(client, h, worker)
+    url = f"/api/v1/conversations/{conv}/messages/r1-m0/feedback"
+    assert client.delete(url, headers=h).status_code == 204
+    assert client.delete(url, headers=h).status_code == 204
+    assert client.get(f"/api/v1/conversations/{conv}/feedback", headers=h).json()["feedback"] == {}
