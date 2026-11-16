@@ -94,4 +94,11 @@ describe("ScoreTraceDialog", () => {
     expect(await screen.findByRole("checkbox", { name: /Valid JSON/ })).not.toBeChecked();
     expect(listAgentScorers).not.toHaveBeenCalled();
   });
+
+  it("still lists the scorers when the agent's attachments fail to load (nothing preselected)", async () => {
+    vi.mocked(listAgentScorers).mockRejectedValue(new Error("boom"));
+    setup();
+    expect(await screen.findByRole("checkbox", { name: /Valid JSON/ })).not.toBeChecked();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

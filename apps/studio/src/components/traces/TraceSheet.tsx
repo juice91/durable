@@ -243,7 +243,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
           open={scoreOpen}
           onOpenChange={setScoreOpen}
           onRequested={(request) => {
-            setRequested({ key: Date.now(), ...request });
+            setRequested({ key: Date.now(), runId, ...request });
             onTabChange("scores");
           }}
         />

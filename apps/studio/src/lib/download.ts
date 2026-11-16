@@ -8,5 +8,6 @@ export function downloadJson(filename: string, data: unknown): void {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // After the click has been handled: revoking within it can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }

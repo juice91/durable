@@ -31,7 +31,7 @@ describe("TraceScores polling after a request", () => {
 
   it("polls every 3 s after a request and stops when the new scores arrive", async () => {
     list.mockResolvedValue([]);
-    render(<TraceScores runId="r1" requested={{ key: 1, count: 1, baseline: 0 }} />);
+    render(<TraceScores runId="r1" requested={{ key: 1, runId: "r1", count: 1, baseline: 0 }} />);
     await tick(0);
     expect(list).toHaveBeenCalledTimes(1);
     await tick(3000);
@@ -47,7 +47,7 @@ describe("TraceScores polling after a request", () => {
 
   it("gives up after 60 s with a notice and a Refresh link that loads once more", async () => {
     list.mockResolvedValue([]);
-    render(<TraceScores runId="r1" requested={{ key: 1, count: 1, baseline: 0 }} />);
+    render(<TraceScores runId="r1" requested={{ key: 1, runId: "r1", count: 1, baseline: 0 }} />);
     await tick(61_000);
     const calls = list.mock.calls.length;
     expect(calls).toBeLessThanOrEqual(22);
@@ -58,6 +58,17 @@ describe("TraceScores polling after a request", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await tick(0);
     expect(screen.getByTestId("trace-score")).toBeInTheDocument();
+    expect(screen.queryByText("Scoring is taking longer than expected")).not.toBeInTheDocument();
+  });
+
+  it("ignores a request made for another run (after prev / next) and never says scoring is slow", async () => {
+    list.mockResolvedValue([]);
+    const { rerender } = render(<TraceScores runId="r1" requested={{ key: 1, runId: "r1", count: 1, baseline: 0 }} />);
+    await tick(3000);
+    list.mockClear();
+    rerender(<TraceScores runId="r2" requested={{ key: 1, runId: "r1", count: 1, baseline: 0 }} />);
+    await tick(70_000);
+    expect(list).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Scoring is taking longer than expected")).not.toBeInTheDocument();
   });
 });

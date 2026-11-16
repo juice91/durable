@@ -88,8 +88,10 @@ describe("trace Sheet header actions", () => {
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
     expect(names).toEqual(["trace-run-77.json"]);
+    // Revoked after the click has been handled, not within it (that can cancel the download).
+    expect(revoke).not.toHaveBeenCalled();
     const blob = (create.mock.calls[0] as unknown as [Blob])[0];
     expect(JSON.parse(await new Promise<string>((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.readAsText(blob); })).run.run_id).toBe("run-77");
-    expect(revoke).toHaveBeenCalledWith("blob:trace");
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:trace"));
   });
 });

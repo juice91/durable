@@ -272,7 +272,8 @@ function TracesList() {
         {(sheet) => (
           <div className="flex min-w-0 flex-col gap-4 p-4">
             <p className="text-label text-muted-foreground">Runs with their span tree, tokens and cost</p>
-            <RunsHistogram filters={filters} onPickBucket={({ from, to }) => setFilters({ from, to })} />
+            <RunsHistogram filters={filters} onPickBucket={({ from, to }) => setFilters({ from, to })}
+              onResetRange={() => setFilters({ from: null, to: null })} />
 
             <TraceFilterBar
               filters={filters}

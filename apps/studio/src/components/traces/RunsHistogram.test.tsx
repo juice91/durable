@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RunsHistogram } from "./RunsHistogram";
 import { EMPTY_FILTERS, fetchRunsHistogram } from "@/lib/traces";
+import { ApiError } from "@/lib/api";
 
 vi.mock("@/lib/traces", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/traces")>()), fetchRunsHistogram: vi.fn() }));
 const fetchHistogram = vi.mocked(fetchRunsHistogram);
@@ -53,5 +54,30 @@ describe("RunsHistogram", () => {
     fetchHistogram.mockRejectedValue(new Error("boom"));
     render(<RunsHistogram filters={EMPTY_FILTERS} onPickBucket={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Could not load the runs histogram/)).toBeInTheDocument());
+  });
+
+  it("explains a 422 (a range over a year) instead of the generic error", async () => {
+    fetchHistogram.mockRejectedValue(new ApiError(422, "from/to span more than 366 days", []));
+    render(<RunsHistogram filters={EMPTY_FILTERS} onPickBucket={vi.fn()} />);
+    expect(await screen.findByText("Narrow the date range to see the histogram.")).toBeInTheDocument();
+  });
+
+  it("offers Reset range while dates are set, and it clears them", async () => {
+    const onReset = vi.fn();
+    const { rerender } = render(<RunsHistogram filters={EMPTY_FILTERS} onPickBucket={vi.fn()} onResetRange={onReset} />);
+    await screen.findAllByRole("button", { name: /runs/ });
+    expect(screen.queryByRole("button", { name: "Reset range" })).not.toBeInTheDocument();
+    rerender(<RunsHistogram filters={{ ...EMPTY_FILTERS, from: "2026-11-16T12:00:00.000Z", to: "2026-11-16T13:00:00.000Z" }} onPickBucket={vi.fn()} onResetRange={onReset} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Reset range" }));
+    expect(onReset).toHaveBeenCalled();
+  });
+
+  it("a bucket's range is half open: its to is the next bucket's from", async () => {
+    const onPick = vi.fn();
+    render(<RunsHistogram filters={EMPTY_FILTERS} onPickBucket={onPick} />);
+    const bars = await screen.findAllByRole("button", { name: /runs/ });
+    fireEvent.click(bars[0]);
+    fireEvent.click(bars[1]);
+    expect(onPick.mock.calls[0][0].to).toBe(onPick.mock.calls[1][0].from);
   });
 });

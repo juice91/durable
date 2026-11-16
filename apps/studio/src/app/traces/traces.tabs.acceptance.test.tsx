@@ -96,6 +96,23 @@ describe("Traces tabs and histogram", () => {
     expect(params.get("span_kind")).toBe("tool_call");
   });
 
+  it("the spans page searches by span name and shows Clear filters for the span kind alone", async () => {
+    nav.path = "/traces/spans";
+    nav.query = "span_kind=tool_call";
+    render(<SpansPage />);
+    await screen.findByText("lookup");
+    expect(screen.getByLabelText("Search")).toHaveAttribute("placeholder", "span name");
+    expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
+  });
+
+  it("the spans page highlights the row whose span the open sheet shows", async () => {
+    nav.path = "/traces/spans";
+    nav.query = "trace=run-9&span=s-9";
+    render(<SpansPage />);
+    const row = (await screen.findByText("lookup")).closest("[data-row-id]") as HTMLElement;
+    expect(row).toHaveAttribute("aria-current", "true");
+  });
+
   it("the route builders carry the span", () => {
     expect(observabilityRoutes.spans()).toBe("/traces/spans");
     expect(observabilityRoutes.trace("r1", { span: "s1" })).toBe("/traces?trace=r1&span=s1");

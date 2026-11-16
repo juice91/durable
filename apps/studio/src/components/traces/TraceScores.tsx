@@ -12,6 +12,8 @@ export const SCORE_POLL_WINDOW_MS = 60_000;
 /** A score request the tab is waiting on: `key` distinguishes requests; see ScoreRequest. */
 export interface PendingScores {
   key: number;
+  /** The run the request was made for; a request for another run (after prev / next) is ignored. */
+  runId: string;
   count: number;
   baseline: number;
 }
@@ -20,7 +22,8 @@ export interface PendingScores {
  * The Scores tab of a trace: the `score` events the worker recorded for the run after it finished
  * (one per attached scorer that sampled it): scorer, pass or fail, score and the reason.
  */
-export function TraceScores({ runId, requested = null }: { runId: string; requested?: PendingScores | null }) {
+export function TraceScores({ runId, requested: request = null }: { runId: string; requested?: PendingScores | null }) {
+  const requested = request && request.runId === runId ? request : null;
   const [scores, setScores] = useState<ScoreEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 

@@ -12,13 +12,15 @@ export interface SpansListProps {
   filters: SpanFilters;
   /** A row was opened: the trace Sheet at this run and span. */
   onOpen: (runId: string, spanId: string) => void;
+  /** The open trace Sheet's run and span: that row is highlighted. */
+  selectedRunId?: string | null;
   selectedSpanId?: string | null;
 }
 
 const dim = "text-muted-foreground";
 
 /** The flat list of spans (GET /spans), newest first, paged with the API's opaque cursor. */
-export function SpansList({ filters, onOpen, selectedSpanId = null }: SpansListProps) {
+export function SpansList({ filters, onOpen, selectedRunId = null, selectedSpanId = null }: SpansListProps) {
   const [rows, setRows] = useState<SpanRow[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -105,7 +107,7 @@ export function SpansList({ filters, onOpen, selectedSpanId = null }: SpansListP
           onRowOpen={(row) => onOpen(row.run_id, row.span_id)}
           getRowLabel={(row) => `Open ${row.name} in the trace of run ${row.run_id.slice(0, 8)}`}
           getRowTestId={() => "span-row"}
-          selectedRowId={selectedSpanId}
+          selectedRowId={selectedRunId && selectedSpanId ? `${selectedRunId}:${selectedSpanId}` : null}
           empty={{ title: hasActiveFilters(filters) || filters.span_kind ? "No spans match these filters." : "No spans yet. Spans appear when a run finishes." }}
           testId="spans-list"
         />

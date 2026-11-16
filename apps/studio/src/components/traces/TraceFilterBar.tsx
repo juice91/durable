@@ -56,6 +56,10 @@ export interface TraceFilterBarProps<F extends TraceFilters> {
   /** Clear every filter the page has. */
   onClear: () => void;
   agentNames: Record<string, string>;
+  /** The Search box's hint (what `q` matches on this page). */
+  searchPlaceholder?: string;
+  /** A filter the page has beyond TraceFilters is set (so Clear filters shows). */
+  extraActive?: boolean;
   /** Extra controls after the Kind select (the Spans page's Span kind). */
   extra?: React.ReactNode;
   /** Right-aligned controls (the column chooser). */
@@ -63,7 +67,7 @@ export interface TraceFilterBarProps<F extends TraceFilters> {
 }
 
 /** The Traces filter bar, shared by the Traces and Spans pages. */
-export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, onClear, agentNames, extra, trailing }: TraceFilterBarProps<F>) {
+export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, onClear, agentNames, searchPlaceholder = "input, output, error, model", extraActive = false, extra, trailing }: TraceFilterBarProps<F>) {
   const statusValue = filters.status.length === 0 ? "all" : filters.status.length === 1 ? filters.status[0] : filters.status.join(",");
   const customStatus = filters.status.length > 1 || (filters.status.length === 1 && !STATUS_OPTIONS.some((o) => o.value === filters.status[0]));
   const agentOptions = Object.entries(agentNames).sort((a, b) => a[1].localeCompare(b[1]));
@@ -140,10 +144,10 @@ export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, on
           className={inputClass}
         />
       </div>
-      <TextFilter id="q-filter" label="Search" value={filters.q} placeholder="input, output, error, model" onCommit={(q) => setFilters({ q })} />
+      <TextFilter id="q-filter" label="Search" value={filters.q} placeholder={searchPlaceholder} onCommit={(q) => setFilters({ q })} />
       <TextFilter id="tags-filter" label="Tags" value={filters.tags.length ? filters.tags.join(", ") : null} placeholder="kind:agent, draft" onCommit={(value) => setFilters({ tags: splitList(value) })} />
       <TextFilter id="metadata-filter" label="Metadata" value={filters.metadata.length ? filters.metadata.join(", ") : null} placeholder="key=value, key=value" onCommit={(value) => setFilters({ metadata: splitList(value).filter((pair) => pair.includes("=")) })} />
-      {hasActiveFilters(filters) ? (
+      {hasActiveFilters(filters) || extraActive ? (
         <Button variant="ghost" size="sm" onClick={onClear}>
           Clear filters
         </Button>

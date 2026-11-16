@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { ApiError } from "@/lib/api";
 import { fetchRunsHistogram, type RunsHistogram as Histogram, type RunsHistogramBucket, type TraceFilters } from "@/lib/traces";
 
 const HOUR_MS = 3_600_000;
@@ -14,6 +15,8 @@ export interface RunsHistogramProps {
   filters: TraceFilters;
   /** A bucket was picked: narrow the list's dates to it. */
   onPickBucket: (range: { from: string; to: string }) => void;
+  /** Clear the dates a bucket pick set (shown while a date is set). */
+  onResetRange?: () => void;
 }
 
 function bucketLabel(bucket: RunsHistogramBucket, interval: Histogram["interval"]): string {
@@ -28,21 +31,22 @@ function bucketLabel(bucket: RunsHistogramBucket, interval: Histogram["interval"
  * failed segment on the bar, and a click (or Enter) on a bar narrows the dates to that bucket.
  * Plain SVG in theme tokens, no chart library.
  */
-export function RunsHistogram({ filters, onPickBucket }: RunsHistogramProps) {
+export function RunsHistogram({ filters, onPickBucket, onResetRange }: RunsHistogramProps) {
   const [histogram, setHistogram] = useState<Histogram | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    setError(false);
+    setError(null);
     fetchRunsHistogram(filters, controller.signal)
       .then((data) => {
         if (!controller.signal.aborted) setHistogram(data);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!controller.signal.aborted) {
           setHistogram(null);
-          setError(true);
+          // 422: the range is over a year (the API's limit).
+          setError(err instanceof ApiError && err.status === 422 ? "Narrow the date range to see the histogram." : "Could not load the runs histogram.");
         }
       });
     return () => controller.abort();
@@ -50,7 +54,7 @@ export function RunsHistogram({ filters, onPickBucket }: RunsHistogramProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(filters)]);
 
-  if (error) return <p role="status" className="text-caption text-muted-foreground">Could not load the runs histogram.</p>;
+  if (error) return <p role="status" className="text-caption text-muted-foreground">{error}</p>;
   if (!histogram || !Array.isArray(histogram.buckets) || histogram.buckets.length === 0) return null;
 
   const { buckets, interval } = histogram;
@@ -66,7 +70,14 @@ export function RunsHistogram({ filters, onPickBucket }: RunsHistogramProps) {
 
   return (
     <div data-testid="runs-histogram" className="min-w-0 rounded-lg border border-border bg-surface p-3">
-      <p className="mb-1 text-caption text-muted-foreground">Runs per {interval}. Pick a bar to narrow the dates.</p>
+      <p className="mb-1 flex items-center gap-3 text-caption text-muted-foreground">
+        <span>Runs per {interval}. Pick a bar to narrow the dates.</span>
+        {onResetRange && (filters.from || filters.to) ? (
+          <button type="button" onClick={onResetRange} className="rounded-sm text-info-text underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Reset range
+          </button>
+        ) : null}
+      </p>
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" className="h-20 w-full text-primary" aria-label="Runs over time">
         {buckets.map((bucket, i) => {
           const total = (bucket.runs / max) * (HEIGHT - 2);

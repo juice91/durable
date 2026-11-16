@@ -53,7 +53,8 @@ export function ScoreTraceDialog({ runId, agentId, open, onOpenChange, onRequest
       try {
         const [all, attached, scores] = await Promise.all([
           listReusableScorers(controller.signal),
-          agentId ? listAgentScorers(agentId, controller.signal) : Promise.resolve([]),
+          // Attachments only preselect: without them the picker still works.
+          agentId ? listAgentScorers(agentId, controller.signal).catch(() => []) : Promise.resolve([]),
           listRunScores(runId, controller.signal),
         ]);
         if (controller.signal.aborted) return;
