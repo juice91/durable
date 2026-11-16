@@ -33,7 +33,7 @@ from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
 from eap_run_store import METRICS, MetricsQuery, MetricsQueryTimeout, MetricsRangeError, MetricsStore
-from eap_run_store.metrics import default_interval
+from eap_run_store.metrics import MAX_GROUPS, default_interval
 
 DEFAULT_RANGE = timedelta(days=7)
 TIMEOUT_DETAIL = "Metrics query timed out; narrow the time range or the filters"
@@ -207,11 +207,19 @@ def metrics_breakdown(
     by: Literal["agent", "model", "operation"],
     sort: Literal["runs", "failed", "requests", "tokens", "cost"] = "runs",
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    compare: Literal["previous"] | None = None,
 ) -> JSONResponse:
     """The top `limit` agents, models or operations by `sort` (descending). Items are `{"key",
     "label", ...metrics}`: for an agent, `key` is its id and `label` its current name (null if it was
-    deleted); for a model or an operation, both are the model id or the operation name."""
+    deleted); for a model or an operation, both are the model id or the operation name. With
+    `compare=previous` each item also has `previous`: the same metrics of that key over the period of
+    equal length just before `[from, to)`, or null when the key had nothing then."""
     items = _call(store.breakdown, q, by, sort=sort, limit=limit)
+    previous: dict[str, dict[str, Any]] = {}
+    if compare == "previous" and items:
+        wanted = {i["key"] for i in items}
+        before = _call(store.breakdown, q.previous(), by, sort=sort, limit=MAX_GROUPS)
+        previous = {i["key"]: i for i in before if i["key"] in wanted}
     labels: dict[str, str] = {}
     if by == "agent" and items:
         rows = (
@@ -227,7 +235,10 @@ def metrics_breakdown(
         "sort": sort,
         "filters": _filters_json(q),
         "items": [
-            {"key": i["key"], "label": labels.get(i["key"]) if by == "agent" else i["key"], **_metrics_json(i)}
+            {
+                "key": i["key"], "label": labels.get(i["key"]) if by == "agent" else i["key"], **_metrics_json(i),
+                **({"previous": _metrics_json(previous[i["key"]]) if i["key"] in previous else None} if compare else {}),
+            }
             for i in items
         ],
     })

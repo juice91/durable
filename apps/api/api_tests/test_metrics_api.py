@@ -447,3 +447,38 @@ def test_run_list_model_filter_runs_under_the_statement_timeout(seeded):
         app.state.run_stores = real
     assert r.status_code == 503
     assert r.json()["detail"] == "Run list query timed out; narrow the time range or the filters"
+
+
+def test_p99_latency_is_reported_and_at_least_p95(seeded):
+    client, _, h, _, a1, *_ = seeded
+    summary = client.get("/api/v1/metrics/summary", params=WINDOW, headers=h).json()["current"]
+    # Latencies 1, 3, 5, 10 s: linear interpolation at 0.99.
+    assert summary["latency_p99_ms"] == pytest.approx(9850)
+    assert summary["latency_p99_ms"] >= summary["latency_p95_ms"]
+    series = client.get("/api/v1/metrics/timeseries", params={**WINDOW, "interval": "day"}, headers=h).json()
+    assert all("latency_p99_ms" in b for b in series["buckets"])
+    only = client.get("/api/v1/metrics/timeseries", params={**WINDOW, "metric": "latency_p99_ms"}, headers=h).json()
+    assert set(only["buckets"][0]) == {"start", "latency_p99_ms"}
+    items = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "agent"}, headers=h).json()["items"]
+    by_key = {i["key"]: i for i in items}
+    assert by_key[a1]["latency_p99_ms"] >= by_key[a1]["latency_p95_ms"] > 0
+    models = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "model"}, headers=h).json()["items"]
+    assert all(m["latency_p99_ms"] is None for m in models)
+
+
+def test_breakdown_compare_returns_previous_per_key(seeded):
+    client, _, h, h_other, a1, a2, _ = seeded
+    r = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "agent", "compare": "previous"}, headers=h)
+    assert r.status_code == 200, r.text
+    items = {i["key"]: i for i in r.json()["items"]}
+    # the previous period holds r5 only (agent a1: 1 run, 1 request, 14 tokens)
+    assert items[a1]["previous"]["runs"] == 1 and items[a1]["previous"]["requests"] == 1
+    assert items[a1]["previous"]["latency_p99_ms"] == pytest.approx(2000)
+    assert items[a2]["previous"] is None  # nothing before the window for this key
+    plain = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "agent"}, headers=h).json()["items"]
+    assert all("previous" not in i for i in plain)
+    models = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "model", "compare": "previous"}, headers=h)
+    assert {m["key"]: m["previous"] is not None for m in models.json()["items"]} == {"test:a": True, "test:b": False}
+    other = client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "agent", "compare": "previous"}, headers=h_other)
+    assert all(i["previous"] is None or i["previous"]["runs"] == 0 for i in other.json()["items"])
+    assert client.get("/api/v1/metrics/breakdown", params={**WINDOW, "by": "agent", "compare": "x"}, headers=h).status_code == 422

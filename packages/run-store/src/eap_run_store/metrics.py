@@ -90,7 +90,7 @@ BreakdownSort = Literal["runs", "failed", "requests", "tokens", "cost"]
 
 RUN_METRICS = (
     "runs", "completed", "failed", "needs_attention", "in_progress", "blocked", "error_rate",
-    "latency_p50_ms", "latency_p95_ms",
+    "latency_p50_ms", "latency_p95_ms", "latency_p99_ms",
 )
 USAGE_METRICS = (
     "requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd",
@@ -302,6 +302,7 @@ def _run_columns(q: MetricsQuery, r: Any) -> list[Any]:
         func.count().filter(and_(r.status == "failed", blocked)).label("blocked"),
         func.percentile_cont(0.5).within_group(latency_ms).label("latency_p50_ms"),
         func.percentile_cont(0.95).within_group(latency_ms).label("latency_p95_ms"),
+        func.percentile_cont(0.99).within_group(latency_ms).label("latency_p99_ms"),
     ]
 
 
@@ -336,7 +337,7 @@ def _error_rate(failed: int, terminal: int) -> float | None:
 def _empty_runs() -> dict[str, Any]:
     return {
         "runs": 0, "completed": 0, "failed": 0, "needs_attention": 0, "in_progress": 0, "blocked": 0,
-        "error_rate": None, "latency_p50_ms": None, "latency_p95_ms": None,
+        "error_rate": None, "latency_p50_ms": None, "latency_p95_ms": None, "latency_p99_ms": None,
     }
 
 
@@ -362,6 +363,7 @@ def _runs_dict(row: Any) -> dict[str, Any]:
         "error_rate": _error_rate(m["failed"], terminal),
         "latency_p50_ms": _float(m["latency_p50_ms"]),
         "latency_p95_ms": _float(m["latency_p95_ms"]),
+        "latency_p99_ms": _float(m["latency_p99_ms"]),
     }
 
 

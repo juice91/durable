@@ -58,6 +58,7 @@ export interface MetricValues {
   error_rate: number | null;
   latency_p50_ms: number | null;
   latency_p95_ms: number | null;
+  latency_p99_ms: number | null;
   requests: number;
   input_tokens: number;
   output_tokens: number;
@@ -124,7 +125,9 @@ export interface MetricsTimeseries {
   buckets: MetricsBucket[];
 }
 
-export type BreakdownItem = { key: string; label: string | null } & MetricValues;
+/** `previous`: the same metrics over the period just before (only with `compare=previous`; null when the
+ * key had nothing then). */
+export type BreakdownItem = { key: string; label: string | null; previous?: MetricValues | null } & MetricValues;
 
 export interface MetricsBreakdown {
   from: string;
@@ -190,11 +193,13 @@ export function breakdownPath(
   by: BreakdownBy,
   sort: BreakdownSort = "runs",
   limit = 10,
+  compare?: "previous",
 ): string {
   const params = metricsQueryParams(filters);
   params.set("by", by);
   params.set("sort", sort);
   params.set("limit", String(limit));
+  if (compare) params.set("compare", compare);
   return `/api/v1/metrics/breakdown?${params.toString()}`;
 }
 
@@ -236,7 +241,7 @@ export function fetchMetricsBreakdown(
   limit = 10,
   signal?: AbortSignal,
 ): Promise<MetricsBreakdown> {
-  return getJson(breakdownPath(filters, by, sort, limit), signal);
+  return getJson(breakdownPath(filters, by, sort, limit, "previous"), signal);
 }
 
 // ------------------------------------------------------------------------- date ranges

@@ -5,6 +5,7 @@ import { formatCost, formatTokens } from "@/lib/format";
 import Link from "next/link";
 import {
   FAILED_STATUSES,
+  computeDelta,
   formatCount,
   formatLatency,
   formatPercent,
@@ -62,6 +63,16 @@ export function breakdownHref(item: BreakdownItem, by: BreakdownBy, filters: Met
   return tracesHref(filters, failedOnly ? { ...narrowed, status: FAILED_STATUSES } : narrowed);
 }
 
+/** The runs change against the previous period as a signed percentage ("+54.5%"); blank without a
+ * previous period or when it had no runs. */
+export function runsChange(item: BreakdownItem): string {
+  if (!item.previous) return "";
+  const delta = computeDelta(item.runs, item.previous.runs);
+  if (delta === null || delta.percent === null) return "";
+  const sign = delta.percent > 0 ? "+" : delta.percent < 0 ? "-" : "";
+  return `${sign}${Math.abs(delta.percent).toFixed(1)}%`;
+}
+
 function CostCell({ item }: { item: BreakdownItem }) {
   if (item.requests > 0 && item.unpriced_requests >= item.requests) {
     return <span className="text-muted-foreground">no price</span>;
@@ -95,6 +106,7 @@ export function BreakdownTable({
   const Heading = headingLevel === 3 ? "h3" : "h2";
   const sortId = `breakdown-sort-${by}`;
   const th = "px-3 py-2 font-medium text-muted-foreground whitespace-nowrap";
+  const showChange = (items ?? []).some((item) => item.previous !== undefined);
   return (
     <section className="min-w-0 rounded-lg border border-border bg-card text-card-foreground" aria-labelledby={`breakdown-title-${by}`} aria-busy={loading || undefined}>
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-4 pb-2">
@@ -138,6 +150,7 @@ export function BreakdownTable({
               <tr>
                 <th scope="col" className={`${th} text-left`}>{by === "agent" ? "Agent" : by === "model" ? "Model" : "Operation"}</th>
                 <th scope="col" className={`${th} text-right`}>Runs</th>
+                {showChange && <th scope="col" className={`${th} text-right`}>Change</th>}
                 <th scope="col" className={`${th} text-right`}>Failed</th>
                 <th scope="col" className={`${th} text-right`}>Error rate</th>
                 <th scope="col" className={`${th} text-right`}>p95</th>
@@ -166,6 +179,11 @@ export function BreakdownTable({
                       </Link>
                     </th>
                     <td className="px-3 py-2 text-right whitespace-nowrap">{formatCount(item.runs)}</td>
+                    {showChange && (
+                      <td className="px-3 py-2 text-right whitespace-nowrap" data-testid={`breakdown-change-${by}-${item.key}`}>
+                        {runsChange(item)}
+                      </td>
+                    )}
                     <td className="px-3 py-2 text-right whitespace-nowrap">
                       {item.failed > 0 ? (
                         <Link href={breakdownHref(item, by, filters, true)} className="hover:underline" aria-label={`${name}: open ${item.failed} failed runs`}>

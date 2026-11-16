@@ -125,3 +125,12 @@ describe("recent failures", () => {
     expect(attentionCount({ failed: 0, needs_attention: 0 })).toBe(0);
   });
 });
+
+describe("breakdownPath compare", () => {
+  it("asks for the previous period only when told to", async () => {
+    const { breakdownPath } = await import("./metrics");
+    const F = { from: "2026-11-10T00:00:00+00:00", to: "2026-11-13T00:00:00+00:00" };
+    expect(new URL(breakdownPath(F, "agent"), "http://x").searchParams.get("compare")).toBeNull();
+    expect(new URL(breakdownPath(F, "agent", "runs", 10, "previous"), "http://x").searchParams.get("compare")).toBe("previous");
+  });
+});
