@@ -44,7 +44,7 @@ from __future__ import annotations
 import html
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -209,6 +209,15 @@ class JsonEqualsExpected(EqualsExpected):
 
 
 @dataclass(repr=False)
+class ContainsText(Contains):
+    """`contains` on a structured output read as its canonical JSON text (a workflow run's output),
+    so `"abc"` finds the substring in the text, not a key of an object."""
+
+    def evaluate(self, ctx: EvaluatorContext[object, object, object]) -> EvaluationReason:  # type: ignore[override]
+        return super().evaluate(replace(ctx, output=output_text(ctx.output)))  # type: ignore[return-value]
+
+
+@dataclass(repr=False)
 class Regex(Evaluator[object, object, object]):
     """`regex`: an RE2 search on the output text (canonical JSON for a structured output)."""
 
@@ -278,8 +287,11 @@ class MaxCost(Evaluator[object, object, object]):
         return EvaluationReason(value=within, reason=None if within else f"the run cost {cost} USD, over {self.usd}")
 
 
-def build_evaluator(spec: Mapping[str, Any], expected_output: Any) -> Evaluator[Any, Any, Any]:
-    """The `pydantic_evals` evaluator of one deterministic spec evaluator (not `llm_judge`)."""
+def build_evaluator(
+    spec: Mapping[str, Any], expected_output: Any, *, text_contains: bool = False
+) -> Evaluator[Any, Any, Any]:
+    """The `pydantic_evals` evaluator of one deterministic spec evaluator (not `llm_judge`).
+    `text_contains`: `contains` matches the output's canonical JSON text (a workflow's output)."""
     parsed = EVALUATOR_ADAPTER.validate_python(dict(spec))
     kind = parsed.kind
     if kind == "equals_expected":
@@ -288,7 +300,7 @@ def build_evaluator(spec: Mapping[str, Any], expected_output: Any) -> Evaluator[
         value = parsed.value if parsed.value is not None else expected_output
         if value is None:
             raise EvaluatorSkipped()
-        return Contains(value=value, case_sensitive=parsed.case_sensitive)
+        return (ContainsText if text_contains else Contains)(value=value, case_sensitive=parsed.case_sensitive)
     if kind == "max_duration":
         return MaxDuration(seconds=parsed.seconds)
     if kind == "regex":
@@ -390,8 +402,10 @@ async def score_deterministic(
     duration_s: float | None,
     cost_usd: str | None,
     output_schema: dict[str, Any] | None,
+    text_contains: bool = False,
 ) -> CaseOutcome:
-    """Run every non-judge evaluator of `planned` on the output (evaluate_async); never raises."""
+    """Run every non-judge evaluator of `planned` on the output (evaluate_async); never raises.
+    `text_contains`: see `build_evaluator`."""
     outcome = CaseOutcome()
     ctx = evaluator_context(case, output, duration_s, cost_usd, output_schema)
     for evaluator in planned:
@@ -400,7 +414,7 @@ async def score_deterministic(
         try:
             if evaluator.kind == "max_duration" and duration_s is None:
                 raise EvaluatorUnavailable(NO_DURATION)
-            built = build_evaluator(evaluator.spec, case.get("expected_output"))
+            built = build_evaluator(evaluator.spec, case.get("expected_output"), text_contains=text_contains)
             result = await built.evaluate_async(ctx)
             outcome.add(evaluator.name, result)
         except EvaluatorSkipped:

@@ -131,6 +131,16 @@ _AGENT_VERSION = text(
 )
 
 
+_WORKFLOW_VERSION = text(
+    "SELECT id, spec FROM workflow_versions WHERE workflow_id = :w AND tenant_id = :t AND version = :v"
+)
+_WORKFLOW_ARCHIVED = text("SELECT archived FROM workflows WHERE id = :w AND tenant_id = :t")
+
+# A stopped case's error_code for a workflow suite (eap.eval_stop_cases); the run then fails
+# `eval_workflow_archived`.
+CASE_WORKFLOW_ARCHIVED = "workflow_archived"
+
+
 def eval_child_run_id(run_id: str, case_id: str) -> str:
     """The run id (and DBOS workflow id) of the agent run executing case `case_id`."""
     return str(uuid.uuid5(EVAL_NS, f"{run_id}:{case_id}"))
@@ -197,8 +207,29 @@ async def start_eval_run_step(run_id: str, tenant_id: str) -> dict[str, Any]:
             return {"found": False}
         rt.run_store.mark_running(tenant_id, uuid.UUID(run_id))
         rt.run_store.heartbeat(tenant_id, uuid.UUID(run_id))
+        if run.get("workflow_id") is not None:  # a workflow suite's run (agent_id is NULL)
+            out = {
+                "found": False,
+                "target_kind": "workflow",
+                "agent_id": None,
+                "workflow_id": str(run["workflow_id"]),
+                "workflow_version": run.get("workflow_version"),
+                "workflow_version_id": None,
+                "spec": None,
+                "traceparent": run.get("traceparent"),
+                "suite_hash": run.get("eval_suite_hash"),
+            }
+            with rt.engine.connect() as conn:
+                row = conn.execute(
+                    _WORKFLOW_VERSION,
+                    {"w": str(run["workflow_id"]), "t": tenant_id, "v": run.get("workflow_version")},
+                ).fetchone()
+            if row is not None:
+                out.update(found=True, spec=dict(row.spec), workflow_version_id=str(row.id))
+            return out
         out = {
             "found": True,
+            "target_kind": "agent",
             "agent_id": str(run["agent_id"]),
             "agent_version": run.get("agent_version"),
             "is_draft": run.get("draft_spec") is not None,
@@ -247,6 +278,35 @@ async def create_children_step(
     return await asyncio.to_thread(work)
 
 
+@DBOS.step(name="eap.eval_create_workflow_children")
+async def create_workflow_children_step(
+    run_id: str,
+    tenant_id: str,
+    workflow_id: str,
+    workflow_version: int,
+    cases: list[dict[str, str]],
+    traceparent: str | None,
+) -> list[str]:
+    """The child workflow run rows of one batch (`cases`: [{id, input}], the input JSON text of an
+    object), idempotent per child id. Returns the child run ids in case order. A workflow child
+    carries no `parent_run_id` (ck_runs_parent_link lets only an agent run have a parent): the
+    link is the case result's `child_run_id`."""
+    rt = get_runtime()
+
+    def work() -> list[str]:
+        ids: list[str] = []
+        for case in cases:
+            child = eval_child_run_id(run_id, case["id"])
+            rt.run_store.create_workflow_run(
+                tenant_id, workflow_id, workflow_version, canonical_json(json.loads(case["input"])),
+                uuid.UUID(child), traceparent=traceparent,
+            )
+            ids.append(child)
+        return ids
+
+    return await asyncio.to_thread(work)
+
+
 def _duration_ms(run: dict[str, Any]) -> int | None:
     start, end = run.get("started_at") or run.get("created_at"), run.get("finished_at")
     if not isinstance(start, datetime) or not isinstance(end, datetime):
@@ -268,8 +328,24 @@ async def eval_agent_archived_step(tenant_id: str, agent_id: str) -> bool:
     return await asyncio.to_thread(work)
 
 
+@DBOS.step(name="eap.eval_workflow_archived")
+async def eval_workflow_archived_step(tenant_id: str, workflow_id: str) -> bool:
+    """Whether the eval run's workflow is archived now (False for a row that is gone: the child
+    runs then fail on their own)."""
+    rt = get_runtime()
+
+    def work() -> bool:
+        with rt.engine.connect() as conn:
+            archived = conn.execute(_WORKFLOW_ARCHIVED, {"w": workflow_id, "t": tenant_id}).scalar_one_or_none()
+        return bool(archived)
+
+    return await asyncio.to_thread(work)
+
+
 @DBOS.step(name="eap.eval_stop_cases")
-async def eval_stop_cases_step(run_id: str, tenant_id: str, cases: list[dict[str, Any]]) -> int:
+async def eval_stop_cases_step(
+    run_id: str, tenant_id: str, cases: list[dict[str, Any]], error_code: str = CASE_AGENT_ARCHIVED
+) -> int:
     """Record each case not started (`cases`: [{case_id, case_name, position}]) as status `error`,
     error_code `agent_archived`, without a child run. Idempotent per case (a replay records
     nothing twice). Returns how many were recorded."""
@@ -278,7 +354,7 @@ async def eval_stop_cases_step(run_id: str, tenant_id: str, cases: list[dict[str
         store = _eval_store()
         for case in cases:
             store.record_case_result(
-                tenant_id, run_id, CaseResultWrite(**case, status="error", error_code=CASE_AGENT_ARCHIVED)
+                tenant_id, run_id, CaseResultWrite(**case, status="error", error_code=error_code)
             )
         return len(cases)
 
@@ -294,9 +370,11 @@ async def eval_score_step(
     output: Any,
     output_schema: dict[str, Any] | None,
     run_evaluators: bool,
+    text_contains: bool = False,
 ) -> dict[str, Any]:
     """The child run's recorded duration (ms) and, with `run_evaluators`, the deterministic
-    evaluators' outcome. Returns {"duration_ms", "outcome"}."""
+    evaluators' outcome (`text_contains`: `contains` reads the output's canonical JSON text, as for
+    a workflow's output). Returns {"duration_ms", "outcome"}."""
     rt = get_runtime()
     child = await asyncio.to_thread(rt.run_store.get_run, tenant_id, uuid.UUID(child_run_id))
     child = child or {}
@@ -311,6 +389,7 @@ async def eval_score_step(
             duration_s=None if duration_ms is None else duration_ms / 1000.0,
             cost_usd=None if cost is None else format(cost, "f"),
             output_schema=output_schema,
+            text_contains=text_contains,
         )
     return {"duration_ms": duration_ms, "outcome": outcome.as_json()}
 
@@ -347,7 +426,10 @@ def _batches(items: tuple[Any, ...], size: int) -> list[tuple[Any, ...]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def _output_schema(spec: dict[str, Any]) -> dict[str, Any] | None:
+def _output_schema(spec: dict[str, Any], workflow: bool = False) -> dict[str, Any] | None:
+    if workflow:
+        schema = spec.get("output_schema")
+        return schema if isinstance(schema, dict) else None
     output = spec.get("output")
     return output.get("json_schema") if isinstance(output, dict) else None
 
@@ -360,8 +442,11 @@ async def _case_result(
     child: str,
     handle: Any,
     output_schema: dict[str, Any] | None,
+    workflow: bool = False,
 ) -> None:
-    """Await one case's child, score it, run its judges and record it."""
+    """Await one case's child, score it, run its judges and record it. A workflow child's output is
+    its canonical JSON text: scored as the parsed value (`equals_expected`, `field_equals`), with
+    `contains` and `regex` on the text."""
     case_json = case.model_dump(mode="json")
     planned = plan_evaluators(snapshot.evaluators, case.evaluators)
     try:
@@ -373,10 +458,19 @@ async def _case_result(
     completed = result.get("status") == "completed"
     output = None
     if completed:
-        output = result["output_json"] if result.get("output_json") is not None else result.get("output")
-    scored = await eval_score_step(
-        tenant_id, child, case_json, [p.as_json() for p in planned], output, output_schema, completed
-    )
+        if workflow:
+            raw = result.get("output")
+            output = json.loads(raw) if isinstance(raw, str) else raw
+        else:
+            output = result["output_json"] if result.get("output_json") is not None else result.get("output")
+    if workflow:
+        scored = await eval_score_step(
+            tenant_id, child, case_json, [p.as_json() for p in planned], output, output_schema, completed, True
+        )
+    else:
+        scored = await eval_score_step(
+            tenant_id, child, case_json, [p.as_json() for p in planned], output, output_schema, completed
+        )
     outcome = CaseOutcome.from_json(scored["outcome"])
     judge_usage: list[dict[str, Any]] = []
     if completed:
@@ -416,9 +510,47 @@ async def _case_result(
     )
 
 
+async def _run_workflow_cases(
+    run_id: str, tenant_id: str, link: dict[str, Any], snapshot: EvalSuiteSnapshot
+) -> None:
+    """The cases of a workflow suite: batches of `max_concurrency` child workflow runs, started in
+    case order and awaited in case order, each scored on its final output."""
+    from eap_worker.workflow_run import workflow_run  # workflow_run imports run_judge from here
+
+    spec: dict[str, Any] = link["spec"]
+    output_schema = _output_schema(spec, workflow=True)
+    batches = _batches(snapshot.ordered_cases(), snapshot.max_concurrency)
+    for index, batch in enumerate(batches):
+        if await eval_workflow_archived_step(tenant_id, link["workflow_id"]):
+            remaining = [case for later in batches[index:] for case in later]
+            await eval_stop_cases_step(
+                run_id, tenant_id,
+                [{"case_id": str(c.id), "case_name": c.name, "position": c.position} for c in remaining],
+                CASE_WORKFLOW_ARCHIVED,
+            )
+            raise EvalRunError("eval_workflow_archived")
+        children = await create_workflow_children_step(
+            run_id, tenant_id, link["workflow_id"], int(link["workflow_version"]),
+            [{"id": str(c.id), "input": c.input} for c in batch], link.get("traceparent"),
+        )
+        handles = []
+        for case, child in zip(batch, children):
+            with SetWorkflowID(child):
+                handles.append(
+                    await DBOS.start_workflow_async(
+                        workflow_run, child, tenant_id, link["workflow_version_id"], canonical_json(json.loads(case.input))
+                    )
+                )
+        for case, child, handle in zip(batch, children, handles):
+            await _case_result(run_id, tenant_id, snapshot, case, child, handle, output_schema, workflow=True)
+
+
 async def _run_cases(
     run_id: str, tenant_id: str, link: dict[str, Any], snapshot: EvalSuiteSnapshot
 ) -> None:
+    if link.get("target_kind") == "workflow":
+        await _run_workflow_cases(run_id, tenant_id, link, snapshot)
+        return
     spec: dict[str, Any] = link["spec"]
     spec_json = json.dumps(spec)
     draft = bool(link.get("is_draft"))
@@ -453,12 +585,19 @@ async def _run_cases(
 async def eval_run(run_id: str, tenant_id: str, input_json: str) -> dict[str, Any]:
     with log_context(tenant_id=tenant_id, run_id=run_id):
         link = await start_eval_run_step(run_id, tenant_id)
+    is_workflow = link.get("target_kind") == "workflow"
     with run_span(
-        run_id, tenant_id, str(link.get("agent_id") or ""), link.get("agent_version") or DRAFT_VERSION,
+        run_id, tenant_id, str(link.get("agent_id") or ""),
+        (link.get("workflow_version") or 0) if is_workflow else (link.get("agent_version") or DRAFT_VERSION),
         traceparent=link.get("traceparent"),
     ) as span:
         span.set_attribute("eap.run_kind", "eval")
-        log.info("eval run %s started: tenant=%s agent=%s", run_id, tenant_id, link.get("agent_id"))
+        if is_workflow:
+            span.set_attribute("eap.workflow_id", str(link.get("workflow_id") or ""))
+        log.info(
+            "eval run %s started: tenant=%s %s=%s", run_id, tenant_id,
+            "workflow" if is_workflow else "agent", link.get("workflow_id") if is_workflow else link.get("agent_id"),
+        )
         result = await _eval_body(run_id, tenant_id, input_json, link)
         set_run_outcome(span, result["status"], result.get("error_code"))
         log.info("eval run %s %s", run_id, result["status"])
@@ -471,11 +610,17 @@ async def _eval_body(run_id: str, tenant_id: str, input_json: str, link: dict[st
         snapshot = EvalSuiteSnapshot.model_validate_json(input_json)
     except ValidationError:
         snapshot = None
-    started: dict[str, Any] = {"kind": "eval", "agent_id": link.get("agent_id")}
-    if link.get("is_draft"):
-        started["draft"] = True
+    is_workflow = link.get("target_kind") == "workflow"
+    if is_workflow:
+        started: dict[str, Any] = {
+            "kind": "eval", "workflow_id": link.get("workflow_id"), "workflow_version": link.get("workflow_version"),
+        }
     else:
-        started["agent_version"] = link.get("agent_version")
+        started = {"kind": "eval", "agent_id": link.get("agent_id")}
+        if link.get("is_draft"):
+            started["draft"] = True
+        else:
+            started["agent_version"] = link.get("agent_version")
     if snapshot is not None:
         started.update(
             suite_id=str(snapshot.suite_id), suite_hash=snapshot.suite_hash(), cases=len(snapshot.cases),
@@ -485,7 +630,7 @@ async def _eval_body(run_id: str, tenant_id: str, input_json: str, link: dict[st
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))
     try:
         if not link.get("found"):
-            raise EvalRunError("eval_agent_not_found")
+            raise EvalRunError("eval_workflow_not_found" if is_workflow else "eval_agent_not_found")
         if snapshot is None:
             from eap_schemas.evals import EvalSuiteInvalid
 
@@ -521,6 +666,7 @@ async def _eval_body(run_id: str, tenant_id: str, input_json: str, link: dict[st
 __all__ = [
     "EVAL_NS",
     "CASE_AGENT_ARCHIVED",
+    "CASE_WORKFLOW_ARCHIVED",
     "EVAL_WORKFLOW_NAME",
     "JUDGE_NAME",
     "eval_child_run_id",

@@ -301,6 +301,11 @@ EVAL_FAILURES: dict[str, tuple[str, str]] = {
     # The agent was archived while the eval run ran: the cases not yet started were stopped (each a
     # result with status `error` and error_code `agent_archived`); unarchive the agent to run it again.
     "eval_agent_archived": ("failed", "the agent was archived during the eval run; its remaining cases were stopped"),
+    # Workflow targets (parity round 2): the same two failures for a workflow suite's run.
+    "eval_workflow_not_found": ("failed", "the workflow version of the eval run was not found"),
+    "eval_workflow_archived": (
+        "failed", "the workflow was archived during the eval run; its remaining cases were stopped"
+    ),
 }
 
 
