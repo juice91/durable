@@ -198,7 +198,7 @@ describe("Experiments", () => {
     const rows = await screen.findAllByTestId("experiment-row");
     expect(within(rows[0]).getByTestId("experiment-target")).toHaveTextContent("workflow · Triage");
     expect(within(rows[1]).getByTestId("experiment-target")).toHaveTextContent("agent · Support bot");
-    expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s7" }));
+    expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s7", run: "er2" }));
     expect(within(rows[0]).getByText("v3")).toBeInTheDocument();
   });
 

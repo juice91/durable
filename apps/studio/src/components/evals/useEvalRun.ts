@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getRun, subscribeRun } from "@/lib/runs";
-import { getEvalRun, isFinishedStatus, listAllResults, type EvalCaseResult, type EvalRun } from "@/lib/evals";
+import { getEvalRun, isFinishedStatus, listAllResults, type EvalCaseResult, type EvalRun, type EvalTargetKind } from "@/lib/evals";
 
 export interface EvalRunState {
   run: EvalRun | null;
@@ -46,7 +46,7 @@ export const LIVE_REFRESH_INTERVAL_MS = 750;
  * LIVE_REFRESH_INTERVAL_MS while running, and belong to one run id: a read for an earlier run id
  * is dropped. `onFinished` is called once when a run seen running reaches a finished status.
  */
-export function useEvalRun(agentId: string, runId: string, onFinished?: () => void): EvalRunState {
+export function useEvalRun(agentId: string, runId: string, onFinished?: () => void, kind: EvalTargetKind = "agent"): EvalRunState {
   const [run, setRun] = useState<EvalRun | null>(null);
   const [results, setResults] = useState<EvalCaseResult[] | null>(null);
   const [total, setTotal] = useState<number | null>(() => knownCaseCounts.get(runId) ?? null);
@@ -74,7 +74,7 @@ export function useEvalRun(agentId: string, runId: string, onFinished?: () => vo
         again.current = false;
         lastStart.current = Date.now();
         try {
-          const [loaded, items] = await Promise.all([getEvalRun(agentId, runId), listAllResults(agentId, runId)]);
+          const [loaded, items] = await Promise.all([getEvalRun(agentId, runId, undefined, kind), listAllResults(agentId, runId, undefined, kind)]);
           if (gen !== generation.current) return;
           setRun(loaded);
           setResults(items);
@@ -93,7 +93,7 @@ export function useEvalRun(agentId: string, runId: string, onFinished?: () => vo
       // A newer generation's read may have started meanwhile; it owns the flag then.
       if (gen === generation.current) inFlight.current = false;
     }
-  }, [agentId, runId]);
+  }, [agentId, runId, kind]);
 
   /** A live re-read: at once when the last one started long enough ago, else once at the interval's end. */
   const refresh = useCallback(

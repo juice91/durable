@@ -1197,12 +1197,13 @@ class EvalStore:
         agent_id: UUID | str | None = None,
         after: tuple[int, str] | None = None,
         limit: int | None = None,
+        workflow_id: UUID | str | None = None,
     ) -> list[EvalCaseResult]:
         """The eval run's results by position, then case id; with `after` = (position, case_id)
         only those past it, and at most `limit` (1..MAX_LIST_RESULTS) when given. EvalRunNotFound
         if not the tenant's (or the agent's) eval run."""
         with self.Session() as session:
-            self._eval_run(session, tenant_id, run_id, agent_id)
+            self._eval_run(session, tenant_id, run_id, agent_id, workflow_id)
             return [
                 _result_record(r) for r in self._results(session, tenant_id, str(run_id), after=after, limit=limit)
             ]
@@ -1224,9 +1225,13 @@ class EvalStore:
                 by_run[row.run_id].append(_result_record(row))
         return {run_id: aggregate_results(results) for run_id, results in by_run.items()}
 
-    def aggregates(self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None) -> dict[str, Any]:
-        """See `aggregate_results`. EvalRunNotFound if not the tenant's (or the agent's) eval run."""
-        return aggregate_results(self.list_case_results(tenant_id, run_id, agent_id=agent_id))
+    def aggregates(
+        self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None,
+        workflow_id: UUID | str | None = None,
+    ) -> dict[str, Any]:
+        """See `aggregate_results`. EvalRunNotFound if not the tenant's (or the agent's, or the
+        workflow's) eval run."""
+        return aggregate_results(self.list_case_results(tenant_id, run_id, agent_id=agent_id, workflow_id=workflow_id))
 
     def list_runs(
         self,
@@ -1236,14 +1241,16 @@ class EvalStore:
         suite_id: UUID | str | None = None,
         limit: int = 50,
         before: RunCursor | None = None,
+        workflow: bool = False,
     ) -> list[dict[str, Any]]:
         """The agent's eval runs (optionally one suite's), newest first by (created_at, id), as
         RunStore run dicts; with `before` (RunCursor.after(last row of the previous page)) only the
-        runs past it."""
+        runs past it. `workflow`: `agent_id` names a workflow, whose eval runs are listed."""
         limit = max(1, min(int(limit), MAX_LIST_RUNS))
+        target = RunModel.workflow_id if workflow else RunModel.agent_id
         stmt = (
             select(RunModel)
-            .where(RunModel.tenant_id == tenant_id, RunModel.kind == "eval", RunModel.agent_id == str(agent_id))
+            .where(RunModel.tenant_id == tenant_id, RunModel.kind == "eval", target == str(agent_id))
             .order_by(RunModel.created_at.desc(), RunModel.id.desc())
             .limit(limit)
         )
@@ -1498,12 +1505,14 @@ class EvalStore:
         )
 
     @staticmethod
-    def _eval_run(session, tenant_id: str, run_id, agent_id) -> RunModel:
+    def _eval_run(session, tenant_id: str, run_id, agent_id, workflow_id=None) -> RunModel:
         stmt = select(RunModel).where(
             RunModel.tenant_id == tenant_id, RunModel.id == str(run_id), RunModel.kind == "eval"
         )
         if agent_id is not None:
             stmt = stmt.where(RunModel.agent_id == str(agent_id))
+        if workflow_id is not None:
+            stmt = stmt.where(RunModel.workflow_id == str(workflow_id))
         run = session.execute(stmt).scalar_one_or_none()
         if run is None:
             raise EvalRunNotFound(tenant_id, run_id)

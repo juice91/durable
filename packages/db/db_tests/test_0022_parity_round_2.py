@@ -172,6 +172,11 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
             assert conn.execute(text(
                 "SELECT parent_run_id, parent_step_id FROM runs WHERE id = 'evwc'"
             )).one() == (None, None)
+            # ck_runs_parent_link is 0007's again: a parented workflow run is refused.
+            assert "'workflow'" not in conn.execute(text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                " WHERE conname = 'ck_runs_parent_link' AND conrelid = CAST('runs' AS regclass)"
+            )).scalar_one()
             assert conn.execute(text("SELECT count(*) FROM execution_events WHERE run_id = 'evw'")).scalar() == 0
             assert conn.execute(text("SELECT count(*) FROM run_model_requests WHERE run_id = 'evw'")).scalar() == 0
             assert {"workflow_schedules", "spans"}.isdisjoint(_tables(conn))
@@ -180,6 +185,13 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
             assert conn.execute(text("SELECT id FROM runs ORDER BY id")).scalars().all() == ["eva", "evwc", "old"]
             assert conn.execute(text("SELECT id::text FROM eval_suites")).scalars().all() == [SUITE_A]
 
+        with pytest.raises(IntegrityError, match="ck_runs_parent_link"):
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "INSERT INTO runs (id, tenant_id, kind, workflow_id, workflow_version, status, input,"
+                    " parent_run_id, parent_step_id, created_at, updated_at)"
+                    " VALUES ('wchild', 't1', 'workflow', 'wf', 1, 'completed', '{}', 'old', 'x', now(), now())"
+                ))
         with engine.begin() as conn:
             command.upgrade(alembic_config(conn), "head")
         with engine.connect() as conn:

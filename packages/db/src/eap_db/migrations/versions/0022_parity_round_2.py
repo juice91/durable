@@ -157,10 +157,6 @@ def downgrade() -> None:
         "UPDATE runs SET parent_run_id = NULL, parent_step_id = NULL"
         " WHERE kind = 'workflow' AND parent_run_id IS NOT NULL"
     )
-    op.execute(
-        "UPDATE runs c SET parent_run_id = NULL, parent_step_id = NULL FROM runs p"
-        " WHERE p.kind = 'eval' AND p.agent_id IS NULL AND c.tenant_id = p.tenant_id AND c.parent_run_id = p.id"
-    )
     op.drop_constraint("ck_runs_parent_link", "runs", type_="check")
     op.create_check_constraint("ck_runs_parent_link", "runs", _PARENT_LINK_CHECK_0007)
     op.execute(

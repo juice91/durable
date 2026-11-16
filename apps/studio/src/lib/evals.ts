@@ -420,29 +420,32 @@ export function startEvalRun(
   return call<StartedEvalRun>(`/api/v1/agents/${seg(agentId)}/evals/runs`, { method: "POST", body: JSON.stringify(body) });
 }
 
+/** The eval run routes of an agent or of a workflow (the same shapes). */
+const evalRunsBase = (targetId: string, kind: EvalTargetKind) => `/api/v1/${kind === "workflow" ? "workflows" : "agents"}/${seg(targetId)}/evals/runs`;
+
 export function listEvalRuns(
   agentId: string,
-  opts: { suiteId?: string | null; limit?: number; before?: string | null; signal?: AbortSignal } = {},
+  opts: { suiteId?: string | null; limit?: number; before?: string | null; signal?: AbortSignal; kind?: EvalTargetKind } = {},
 ): Promise<EvalRunPage> {
   const params = new URLSearchParams();
   if (opts.suiteId) params.set("suite_id", opts.suiteId);
   params.set("limit", String(opts.limit ?? RUNS_PAGE_LIMIT));
   if (opts.before) params.set("before", opts.before);
-  return call<EvalRunPage>(`/api/v1/agents/${seg(agentId)}/evals/runs?${params}`, { signal: opts.signal });
+  return call<EvalRunPage>(`${evalRunsBase(agentId, opts.kind ?? "agent")}?${params}`, { signal: opts.signal });
 }
 
-export function getEvalRun(agentId: string, runId: string, signal?: AbortSignal): Promise<EvalRun> {
-  return call<EvalRun>(`/api/v1/agents/${seg(agentId)}/evals/runs/${seg(runId)}`, { signal });
+export function getEvalRun(agentId: string, runId: string, signal?: AbortSignal, kind: EvalTargetKind = "agent"): Promise<EvalRun> {
+  return call<EvalRun>(`${evalRunsBase(agentId, kind)}/${seg(runId)}`, { signal });
 }
 
 /** Every result of the run, by position (follows `next_cursor`). */
-export async function listAllResults(agentId: string, runId: string, signal?: AbortSignal): Promise<EvalCaseResult[]> {
+export async function listAllResults(agentId: string, runId: string, signal?: AbortSignal, kind: EvalTargetKind = "agent"): Promise<EvalCaseResult[]> {
   const out: EvalCaseResult[] = [];
   let after: string | null = null;
   for (let page = 0; page < 10; page += 1) {
     const params = new URLSearchParams({ limit: String(RESULTS_PAGE_LIMIT) });
     if (after) params.set("after", after);
-    const data: EvalResultPage = await call<EvalResultPage>(`/api/v1/agents/${seg(agentId)}/evals/runs/${seg(runId)}/results?${params}`, { signal });
+    const data: EvalResultPage = await call<EvalResultPage>(`${evalRunsBase(agentId, kind)}/${seg(runId)}/results?${params}`, { signal });
     out.push(...data.items);
     if (!data.next_cursor) break;
     after = data.next_cursor;

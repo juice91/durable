@@ -1077,6 +1077,74 @@ def eval_warnings(
     )
 
 
+@_json_router.get("/workflows/{workflow_id}/evals/runs")
+def list_workflow_eval_runs(
+    workflow_id: uuid.UUID,
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    suite_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RUNS)] = 50,
+    before: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The workflow's eval runs, as `GET /agents/{id}/evals/runs` lists an agent's."""
+    tenant_id = principal.tenant_id
+    _workflow_or_404(db, tenant_id, workflow_id)
+    cursor = None
+    if before is not None:
+        try:
+            cursor = RunCursor.decode(before)
+        except InvalidRunCursor:
+            raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    runs = store.list_runs(tenant_id, workflow_id, suite_id=suite_id, limit=limit, before=cursor, workflow=True)
+    aggregates = store.aggregates_for_runs(tenant_id, [r["id"] for r in runs])
+    items = [eval_run_json(run, aggregates[str(run["id"])]) for run in runs]
+    next_cursor = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+def _workflow_eval_run_or_404(run_store, tenant_id: str, workflow_id: uuid.UUID, run_id: uuid.UUID) -> dict[str, Any]:
+    run = run_store.get_run(tenant_id, run_id)
+    if run is None or run.get("kind") != "eval" or run.get("workflow_id") != str(workflow_id):
+        raise _http(status.HTTP_404_NOT_FOUND, str(EvalRunNotFound(tenant_id, run_id)))
+    return run
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/runs/{run_id}")
+def get_workflow_eval_run(
+    workflow_id: uuid.UUID, run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, store: EvalStoreDep
+) -> JSONResponse:
+    """The workflow eval run with its aggregates (404 when it is another workflow's)."""
+    run_store, _ = stores
+    run = _workflow_eval_run_or_404(run_store, principal.tenant_id, workflow_id, run_id)
+    try:
+        aggregates = store.aggregates(principal.tenant_id, run_id, workflow_id=workflow_id)
+    except _STORE_ERRORS as exc:
+        raise _store_error(exc) from None
+    return JSONResponse(content=eval_run_json(run, aggregates))
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/runs/{run_id}/results")
+def list_workflow_eval_results(
+    workflow_id: uuid.UUID,
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    store: EvalStoreDep,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RESULTS)] = 100,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The workflow eval run's per-case results by position, paged as the agent route's."""
+    position_after = _decode_result_cursor(after) if after is not None else None
+    try:
+        results = store.list_case_results(
+            principal.tenant_id, run_id, workflow_id=workflow_id, after=position_after, limit=limit
+        )
+    except _STORE_ERRORS as exc:
+        raise _store_error(exc) from None
+    next_cursor = _result_cursor(results[-1]) if len(results) == limit else None
+    return JSONResponse(content={"items": [result_json(r) for r in results], "next_cursor": next_cursor})
+
+
 @_json_router.get("/agents/{agent_id}/evals/runs")
 def list_eval_runs(
     agent_id: uuid.UUID,

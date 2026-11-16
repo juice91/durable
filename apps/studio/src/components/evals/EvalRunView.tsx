@@ -25,6 +25,7 @@ import {
   type EvalCaseResult,
   type EvalOutcome,
   type EvalRun,
+  type EvalTargetKind,
 } from "@/lib/evals";
 import { useEvalRun } from "./useEvalRun";
 import { CaseStatusBadge, Kpi, ProgressBar, alertClass, cardClass, fieldClass, hintClass, kpiGridClass, labelClass, sectionTitleClass } from "./evalsUi";
@@ -33,7 +34,10 @@ import { CaseStatusBadge, Kpi, ProgressBar, alertClass, cardClass, fieldClass, h
 export const RESULT_PARAM = "result";
 
 interface EvalRunViewProps {
+  /** The agent's or the workflow's id (see `kind`). */
   agentId: string;
+  /** What the run is against; default an agent. A workflow run has no compare view. */
+  kind?: EvalTargetKind;
   suiteId: string;
   runId: string;
   /** Other runs of the suite, newest first, for "Compare with". */
@@ -50,9 +54,10 @@ function scoresText(result: EvalCaseResult): string {
 
 /** One eval run: progress while it runs, the aggregates, and the per-case results (a row opens its
  * details: every evaluator's outcome and reason, the output, and the case's trace). */
-export function EvalRunView({ agentId, suiteId, runId, otherRuns, onFinished }: EvalRunViewProps) {
+export function EvalRunView({ agentId, kind = "agent", suiteId, runId, otherRuns, onFinished }: EvalRunViewProps) {
+  const isWorkflow = kind === "workflow";
   const router = useRouter();
-  const { run, results, total, error, reload } = useEvalRun(agentId, runId, onFinished);
+  const { run, results, total, error, reload } = useEvalRun(agentId, runId, onFinished, kind);
   const sheet = useUrlSheet(RESULT_PARAM, { history: "push" });
   const [compareWith, setCompareWith] = useState("");
   const others = otherRuns.filter((r) => r.run_id !== runId);
@@ -82,7 +87,7 @@ export function EvalRunView({ agentId, suiteId, runId, otherRuns, onFinished }: 
     <div className="min-w-0 space-y-4" data-testid="eval-run-view">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Button asChild variant="ghost" size="sm">
-          <Link href={routes.agentTests(agentId, { suite: suiteId })} data-testid="eval-run-back">
+          <Link href={isWorkflow ? routes.workflowTests(agentId, { suite: suiteId, run: null }) : routes.agentTests(agentId, { suite: suiteId })} data-testid="eval-run-back">
             <ArrowLeft strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
             Suite
           </Link>
@@ -119,7 +124,7 @@ export function EvalRunView({ agentId, suiteId, runId, otherRuns, onFinished }: 
         </div>
       ) : null}
 
-      {others.length > 0 ? (
+      {others.length > 0 && !isWorkflow ? (
         <div className="flex min-w-0 flex-wrap items-end gap-2">
           <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
             <label htmlFor="eval-compare-with" className={labelClass}>Compare with</label>

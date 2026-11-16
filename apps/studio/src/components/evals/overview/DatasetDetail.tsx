@@ -18,8 +18,6 @@ interface Loaded {
   versions: Array<Pick<AgentVersion, "version"> & Partial<Pick<AgentVersion, "spec">>>;
 }
 
-const NO_RUNS: EvalRun[] = [];
-
 /**
  * `/datasets/:id`: one dataset, i.e. a test suite of an agent or a workflow. The header names the
  * dataset; below it the suite view has New item, Import CSV, Import JSON and Schema, the evaluators,
@@ -61,12 +59,13 @@ export function DatasetDetail({ suiteId }: { suiteId: string }) {
     return () => controller.abort();
   }, [suiteId]);
 
-  const agentId = loaded?.target.kind === "agent" ? loaded.target.id : null;
+  const agentId = loaded?.target.id ?? null;
+  const runKind = loaded?.target.kind ?? "agent";
   useEffect(() => {
     if (agentId === null) return;
     const controller = new AbortController();
     setRunsError(null);
-    listEvalRuns(agentId, { suiteId, signal: controller.signal })
+    listEvalRuns(agentId, { suiteId, kind: runKind, signal: controller.signal })
       .then((page) => {
         if (!controller.signal.aborted) setRuns(page.items);
       })
@@ -76,7 +75,7 @@ export function DatasetDetail({ suiteId }: { suiteId: string }) {
         setRunsError(reason instanceof Error && reason.message ? reason.message : "Eval runs could not be loaded");
       });
     return () => controller.abort();
-  }, [agentId, suiteId, runsKey]);
+  }, [agentId, runKind, suiteId, runsKey]);
   const reloadRuns = useCallback(() => setRunsKey((k) => k + 1), []);
 
   const name = loaded?.suite.name ?? null;
@@ -104,7 +103,7 @@ export function DatasetDetail({ suiteId }: { suiteId: string }) {
               dataset
               backHref={routes.datasets()}
               hasMemory={loaded.agent ? agentHasMemory(loaded.agent, loaded.versions as AgentVersion[]) : false}
-              runs={loaded.target.kind === "agent" ? runs : NO_RUNS}
+              runs={runs}
               runsError={runsError}
               reloadRuns={reloadRuns}
             />

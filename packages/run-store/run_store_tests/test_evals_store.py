@@ -623,12 +623,15 @@ def test_cancelling_a_workflow_eval_run_cascades_to_its_queued_workflow_child(en
     snapshot = EvalStore(engine).snapshot(tenant, suite.id, workflow_id="wf").canonical_json()
     rs.create_workflow_eval_run(tenant, "wf", 1, suite.id, snapshot, eval_run)
     rs.create_eval_workflow_child_run(tenant, eval_run, case.id, "wf", 1, "{}", child)
+    grandchild = uuid4()
+    rs.create_child_agent_run(tenant, "ag", 1, "in", grandchild, child, "ask")
     row = rs.get_run(tenant, child)
     assert (row["kind"], row["parent_run_id"], row["parent_step_id"]) == ("workflow", str(eval_run), f"case:{case.id}")
 
     result = rs.cancel_run_tree(tenant, str(eval_run))
     assert str(child) in result.statuses and result.statuses[str(child)] == "failed"
     assert rs.get_run(tenant, child)["status"] == "failed"
+    assert result.statuses[str(grandchild)] == "failed" and rs.get_run(tenant, grandchild)["status"] == "failed"
 
 
 def test_the_cost_roll_up_includes_workflow_children_and_their_agent_steps(engine, tenant):

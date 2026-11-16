@@ -51,7 +51,7 @@ export function ExperimentsPage() {
     <>
       <PageHeader crumbs={[navCrumb("experiments", { current: true })]} />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
-        <p className="text-body text-muted-foreground">Eval runs across all agents and workflows, newest first. Open an agent run for its per-case results.</p>
+        <p className="text-body text-muted-foreground">Eval runs across all agents and workflows, newest first. Open a run for its per-case results.</p>
         <DataList<OverviewRun>
           label="Experiments"
           testId="experiments-list"
@@ -60,7 +60,7 @@ export function ExperimentsPage() {
           getRowId={(r) => r.run_id}
           getRowHref={(r) =>
             r.target_kind === "workflow"
-              ? routes.workflowTests(r.workflow_id ?? r.target_id, { suite: r.suite_id })
+              ? routes.workflowTests(r.workflow_id ?? r.target_id, { suite: r.suite_id, run: r.run_id })
               : routes.agentTests(r.agent_id ?? "", { suite: r.suite_id, run: r.run_id })
           }
           getRowLabel={(r) => `Eval run of ${r.suite_name ?? "a deleted dataset"} on ${new Date(r.created_at).toLocaleString()}`}

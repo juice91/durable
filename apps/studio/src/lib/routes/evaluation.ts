@@ -9,7 +9,7 @@ export const evaluationRoutes = {
   scorers: (): string => "/scorers",
   /** `/experiments`: the eval runs of every agent and workflow, newest first. */
   experiments: (): string => "/experiments",
-  /** `/workflows/:id/tests?suite=`: a workflow's test suites. */
-  workflowTests: (id: string, opts: { suite?: string | null } = {}): string =>
-    withQuery(`/workflows/${seg(id)}/tests`, { suite: opts.suite }),
+  /** `/workflows/:id/tests?suite=&run=`: a workflow's test suites, and one eval run of a suite. */
+  workflowTests: (id: string, opts: { suite?: string | null; run?: string | null } = {}): string =>
+    withQuery(`/workflows/${seg(id)}/tests`, { suite: opts.suite, run: opts.run }),
 };

@@ -81,9 +81,9 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
   const router = useRouter();
   const target: EvalTargetRef = givenTarget ?? { kind: "agent", id: agent?.id ?? "", name: agent?.name ?? "" };
   const isWorkflow = target.kind === "workflow";
-  // The Tests tab of the target (a workflow has no run view yet: its runs are read on Experiments).
+  // The Tests tab of the target (a workflow's runs open in the same run view; only compare is agent-only).
   const testsHref = (opts: { suite?: string; run?: string; compare?: string } = {}) =>
-    isWorkflow ? routes.workflowTests(target.id, { suite: opts.suite }) : routes.agentTests(target.id, opts);
+    isWorkflow ? routes.workflowTests(target.id, { suite: opts.suite, run: opts.run }) : routes.agentTests(target.id, opts);
   const home = backHref ?? testsHref();
   const [schemaOpen, setSchemaOpen] = useState(false);
   const [suite, setSuite] = useState<EvalSuiteWithCases | null>(null);
@@ -335,12 +335,7 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
 
       <section className="min-w-0 space-y-2" aria-labelledby="eval-history-title">
         <h3 id="eval-history-title" className={sectionTitleClass}>Run history</h3>
-        {isWorkflow ? (
-          <p className={hintClass} data-testid="eval-history-experiments">
-            A workflow suite&apos;s runs are listed on <Link href={routes.experiments()} className="underline underline-offset-4">Experiments</Link>.
-          </p>
-        ) : null}
-        {isWorkflow ? null : suiteRuns.length >= 2 ? (
+        {!isWorkflow && suiteRuns.length >= 2 ? (
           <div className="flex min-w-0 flex-wrap items-end gap-2" data-testid="eval-history-compare">
             <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
               <label htmlFor="eval-compare-base" className={labelClass}>Base</label>
@@ -369,7 +364,7 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
             </Button>
           </div>
         ) : null}
-        {isWorkflow ? null : (
+        {(
           <DataList<EvalRun>
             label="Eval runs"
             rows={suiteRuns}
@@ -400,11 +395,6 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
             rememberCaseCount(started.run_id, started.cases);
             reloadRuns();
             if (started.warnings.length > 0) toast.warning(`${started.warnings.length} tool(s) with side effects run for real`);
-            if (isWorkflow) {
-              toast.success("Run started: follow it on Experiments");
-              router.push(routes.experiments());
-              return;
-            }
             router.push(testsHref({ suite: suiteId, run: started.run_id }));
           }}
         />

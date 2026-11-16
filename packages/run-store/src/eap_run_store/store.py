@@ -106,10 +106,10 @@ RUN_KIND_TARGET_CHECK = (
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
-# Invariant: runs nest at most two levels. Only an agent or workflow run can have a parent (a workflow run's
-# parent is a workflow suite's eval run), and its parent is a
-# workflow run or an eval run (an eval case's child, 0015_evals), which never has one; so a child's parent is its root run. pending_approvals.root_run_id
-# (0014_approvals) relies on this, and takes the parent's own parent if deeper nesting is ever added.
+# Invariant: runs nest at most three levels: an eval run, its workflow case run (a workflow suite), and
+# that run's agent steps. Only an agent or workflow run can have a parent; every other run is a root.
+# pending_approvals.root_run_id (0014_approvals) takes the parent's own parent when it has one, so it
+# is the top-level run.
 RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
     " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind IN ('agent', 'workflow')"
