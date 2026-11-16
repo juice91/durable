@@ -69,6 +69,10 @@ carries the moderation request's usage row (request key `moderation:input:{i}`, 
 model request) or `output_blocked` (the blocked response's model_message keeps only its usage and
 `"blocked": true`, no text; nothing is stored as output or messages). Failed turns never enter a
 later turn's history. A spec with output processors publishes no NOTIFY deltas.
+Step and stream processors (parity round 2): `step_processors` wrap each tool call (eap_worker.step_processors,
+events `processor:step:{i}:tool:{n}:args|result`); `stream_processors` filter live deltas in `_publish_deltas`
+(nothing recorded there) and, with the output processors, run in the post-step output pass
+(`processor:stream:{i}:model:{n}`), so the stored answer matches what was shown.
 
     eap.start_run
     eap.input_processors | eap-moderator__model.request ...   (input chain, list order)
@@ -422,6 +426,7 @@ from eap_worker.pricing import (
     scrub_failed_attempts_message,
     usage_record,
 )
+from eap_processors import apply_deterministic, compiled_chain
 from eap_worker.processors import (
     ChainRun,
     describe,
@@ -889,14 +894,14 @@ async def _processed_index_text(spec: AgentSpec, text: str | None) -> str | None
     deterministic output processors (pii_redact, regex_blocklist, ...), like the answer they join;
     moderation is not run (the index is not a model answer). Pure and off the event loop, no step.
     A block or a failure leaves the lines out of the index (never indexed unprocessed)."""
-    if not text or not spec.output_processors:
+    if not text or not (spec.output_processors or spec.stream_processors):
         return text
     from eap_schemas.processors import PROCESSOR_SPEC_ADAPTER, ModerationProcessor
     from eap_worker.processors import _apply_segment
 
     segment = [
         PROCESSOR_SPEC_ADAPTER.dump_python(p, mode="json")
-        for p in spec.output_processors
+        for p in _output_specs(spec)
         if not isinstance(p, ModerationProcessor)
     ]
     if not segment:
@@ -1457,6 +1462,32 @@ async def _blocked_response(
     raise chain.error if chain.error is not None else _blocked_error(chain, "output")
 
 
+def _output_specs(spec: AgentSpec) -> tuple[Any, ...]:
+    """Every processor the output pass runs: the stream processors (live-filtered deltas, implicitly
+    also output processors) and then the output processors, in that order."""
+    return (*spec.stream_processors, *spec.output_processors)
+
+
+async def _run_output_phases(
+    run_id: str, tenant_id: str, spec: AgentSpec, text: str, *, moderation: bool, suffix: str
+) -> ChainRun:
+    """The output pass over one response's text: the stream chain (phase `stream`), then the output
+    chain on its result. Both record their `processor_result` events (`processor:stream:{i}{suffix}`,
+    `processor:output:{i}{suffix}`); a block or failure ends the pass and is the returned chain."""
+    chain = ChainRun(text)
+    if spec.stream_processors:
+        chain = await run_chain(run_id, tenant_id, "stream", spec.stream_processors, text, moderation=False)
+        await _record_processor_results(run_id, tenant_id, chain, suffix)
+        if chain.text is None:
+            return chain
+    if spec.output_processors:
+        chain = await run_chain(
+            run_id, tenant_id, "output", spec.output_processors, chain.text, moderation=moderation
+        )
+        await _record_processor_results(run_id, tenant_id, chain, suffix)
+    return chain
+
+
 async def _process_structured_response(
     run_id: str,
     tenant_id: str,
@@ -1474,7 +1505,7 @@ async def _process_structured_response(
     arguments, or native/prompted JSON text), on plain text otherwise. No moderation here: it runs
     once on the final object. Returns the (message, text) to store; a block writes the blocked
     model_message and raises."""
-    processors = spec.output_processors
+    processors = _output_specs(spec)
     suffix = f":model:{n}"
     for k, call in enumerate(output_calls):
         key = suffix if k == 0 else f"{suffix}:{k}"
@@ -1513,7 +1544,7 @@ async def _final_structured_output(run_id: str, tenant_id: str, spec: AgentSpec,
     moderation outcomes (and a block) as `processor:output:{i}:final`."""
     assert spec.output is not None
     final = await run_structured_chain(
-        run_id, tenant_id, spec.output_processors, value, moderation=True, schema=spec.output.json_schema
+        run_id, tenant_id, _output_specs(spec), value, moderation=True, schema=spec.output.json_schema
     )
     shown = [r for r in final.records if r.data.get("processor_type") == "moderation" or r.blocked]
     await _record_processor_results(run_id, tenant_id, ChainRun(final.text, shown, final.error), ":final")
@@ -1593,6 +1624,7 @@ async def _drive_agent(
     }
     request_token = _MODEL_REQUEST.set(request_state)
     pending: list[ToolCallPart] = []
+    has_output = bool(spec.stream_processors or spec.output_processors)  # the output pass runs
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
     stored: dict[int, dict[str, Any]] = {}  # structured + output processors: n -> the stored response
     candidates: dict[int, Any] = {}  # structured: n -> its raw candidate (for output_retry paths)
@@ -1661,7 +1693,7 @@ async def _drive_agent(
                     # (billed) moderation request. Its usage row is still written below.
                     recorded_tokens.add(usage)
                     breach = token_limit_breach(token_caps, recorded_tokens) if token_caps else None
-                    if breach is not None and spec.output_processors:
+                    if breach is not None and has_output:
                         # The text was never checked by the processors: never stored. Usage kept.
                         await append_event_step(
                             run_id, tenant_id, f"model:{n}:final", "model_message",
@@ -1669,24 +1701,23 @@ async def _drive_agent(
                             usage=usage,
                         )
                         raise breach
-                    if spec.output_processors:
+                    if has_output:
                         # Thinking is model text no processor checks: never stored, for every response.
                         message = strip_thinking(message)
-                    if spec.output_processors and structured:
+                    if has_output and structured:
                         message, text = await _process_structured_response(
                             run_id, tenant_id, spec, n, message, text, output_calls, candidate, usage,
                             fallback_data,
                         )
                         stored[n] = message
-                    elif spec.output_processors and text:
+                    elif has_output and text:
                         # Only responses with text: an empty or thinking-only answer has nothing to check
                         # (the agent retries it). Before anything of this response is stored. Moderation
                         # only on the final answer (text and no tool calls).
                         final = not calls
-                        chain = await run_chain(
-                            run_id, tenant_id, "output", spec.output_processors, text, moderation=final
+                        chain = await _run_output_phases(
+                            run_id, tenant_id, spec, text, moderation=final, suffix=f":model:{n}"
                         )
-                        await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
                         if chain.text is None:
                             # Blocked (or failed): keep the request's usage, never its text.
                             await _blocked_response(run_id, tenant_id, n, usage, chain, fallback_data)
@@ -1779,18 +1810,18 @@ async def _drive_agent(
     if pending_client:
         # AGUI.7: no answer yet (the client executes its calls; the next turn continues). The stored
         # messages get the same treatment as an answered turn's.
-        if spec.output is not None and spec.output_processors:
+        if spec.output is not None and has_output:
             new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
-        elif spec.output_processors:
+        elif has_output:
             new_messages = processed_messages(new_messages, processed, strip_thinking_parts=True)
         return None, new_messages, None, pending_client
     if spec.output is not None:
         value = result_output
-        if spec.output_processors:
+        if has_output:
             value = await _final_structured_output(run_id, tenant_id, spec, value)
             new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
         return canonical_json(value), new_messages, value, []
-    if not spec.output_processors:
+    if not has_output:
         return result_output, new_messages, None, []
     if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
         raise OutputBlocked(-1, "unchecked")

@@ -93,6 +93,8 @@ MODERATOR_NAME = "eap-moderator"
 INPUT_STEP = "eap.input_processors"
 OUTPUT_STEP = "eap.output_processors"
 STRUCTURED_OUTPUT_STEP = "eap.output_processors_structured"
+STEP_STEP = "eap.step_processors"
+STREAM_STEP = "eap.stream_processors"
 
 # The fixed platform prompt (not per tenant): the verdict format is the ModerationVerdict contract.
 MODERATION_INSTRUCTIONS = (
@@ -207,6 +209,27 @@ async def output_processors_step(run_id: str, tenant_id: str, processors: list[d
     out = await asyncio.to_thread(_apply_segment, "output", processors, text)
     crash_point("output_processors")
     return out
+
+
+@DBOS.step(name=STEP_STEP)
+async def step_processors_step(run_id: str, tenant_id: str, processors: list[dict[str, Any]], text: str) -> dict[str, Any]:
+    """Deterministic step processors on one tool call's arguments (JSON text) or result text."""
+    return await asyncio.to_thread(_apply_segment, "step", processors, text)
+
+
+@DBOS.step(name=STREAM_STEP)
+async def stream_processors_step(run_id: str, tenant_id: str, processors: list[dict[str, Any]], text: str) -> dict[str, Any]:
+    """Deterministic stream processors on one model response's text (the post-step pass: the same
+    chain the live deltas went through, so the stored answer matches what was shown)."""
+    return await asyncio.to_thread(_apply_segment, "stream", processors, text)
+
+
+_PHASE_STEPS = {
+    "input": input_processors_step,
+    "step": step_processors_step,
+    "stream": stream_processors_step,
+    "output": output_processors_step,
+}
 
 
 # --------------------------------------------------------------------------- structured output (AC.4)
@@ -502,7 +525,7 @@ async def run_chain(
     """Run `specs` in list order on `text`, stopping at the first block. `moderation=False` skips the
     moderation processors (an output response that is not the final answer). Never raises an
     `Exception`: one ends the chain and is returned in `error`."""
-    step = input_processors_step if phase == "input" else output_processors_step
+    step = _PHASE_STEPS[phase]
     records: list[ProcessorResultRecord] = []
     current = text
     i = 0
@@ -592,6 +615,8 @@ __all__ = [
     "MODERATION_INSTRUCTIONS",
     "MODERATOR_NAME",
     "OUTPUT_STEP",
+    "STEP_STEP",
+    "STREAM_STEP",
     "STRUCTURED_OUTPUT_STEP",
     "ChainRun",
     "ProcessorResultRecord",
@@ -609,6 +634,8 @@ __all__ = [
     "replace_responses",
     "run_chain",
     "run_structured_chain",
+    "step_processors_step",
+    "stream_processors_step",
     "scrub_retry_inputs",
     "strip_thinking",
 ]
