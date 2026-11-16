@@ -278,3 +278,36 @@ def test_decision_wakes_the_branch_workflow_that_waits(api, fake):
     r = client.post(f"/api/v1/workflows/runs/{run_id}/steps/a/approve", headers=headers)
     assert r.status_code == 200 and r.json()["notified"] is True
     assert fake.sent == [(f"{run_id}:fan:a", {"decision": "approved"}, "approval:a")]
+
+
+def test_rerun_of_is_stored_and_returned(api, fake):
+    client, app, tenant_of = api
+    _, headers = tenant_of()
+    workflow_id = publish_demo(client, headers)
+    first = client.post(f"/api/v1/workflows/{workflow_id}/runs", json={"input": {"q": "hi"}}, headers=headers).json()["run_id"]
+    assert client.get(f"/api/v1/runs/{first}", headers=headers).json()["rerun_of"] is None
+    r = client.post(
+        f"/api/v1/workflows/{workflow_id}/runs", json={"input": {"q": "hi"}, "rerun_of": first}, headers=headers
+    )
+    assert r.status_code == 202, r.text
+    new_id = r.json()["run_id"]
+    assert client.get(f"/api/v1/runs/{new_id}", headers=headers).json()["rerun_of"] == first
+    # A retry with the same run_id and rerun_of is idempotent; a different rerun_of is a 409.
+    body = {"input": {"q": "hi"}, "run_id": new_id, "rerun_of": first}
+    assert client.post(f"/api/v1/workflows/{workflow_id}/runs", json=body, headers=headers).status_code == 202
+    body["rerun_of"] = None
+    assert client.post(f"/api/v1/workflows/{workflow_id}/runs", json=body, headers=headers).status_code == 409
+
+
+def test_rerun_of_must_be_a_run_of_the_same_workflow_and_tenant(api, fake):
+    client, app, tenant_of = api
+    _, headers = tenant_of()
+    _, other = tenant_of()
+    wf_a = publish_demo(client, headers)
+    wf_b = publish_demo(client, headers)
+    wf_other = publish_demo(client, other)
+    run_b = client.post(f"/api/v1/workflows/{wf_b}/runs", json={"input": {"q": "hi"}}, headers=headers).json()["run_id"]
+    run_other = client.post(f"/api/v1/workflows/{wf_other}/runs", json={"input": {"q": "hi"}}, headers=other).json()["run_id"]
+    for bad in (run_b, run_other, str(uuid.uuid4())):
+        r = client.post(f"/api/v1/workflows/{wf_a}/runs", json={"input": {"q": "hi"}, "rerun_of": bad}, headers=headers)
+        assert r.status_code == 404, (bad, r.text)

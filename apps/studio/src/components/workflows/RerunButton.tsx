@@ -17,7 +17,7 @@ export function parseRunInput(raw: string | null | undefined): Record<string, un
 }
 
 export interface RerunButtonProps {
-  run: Pick<Run, "workflow_id" | "workflow_version" | "input" | "kind">;
+  run: Pick<Run, "run_id" | "workflow_id" | "workflow_version" | "input" | "kind">;
   /** Called with the NEW run's id once the server accepted it (the caller navigates to it). */
   onStarted: (runId: string) => void;
   size?: "sm" | "md";
@@ -43,13 +43,14 @@ export function RerunButton({ run, onStarted, size = "sm" }: RerunButtonProps) {
   if (run.kind !== "workflow" || !run.workflow_id || run.workflow_version == null || input === null) return null;
   const workflowId = run.workflow_id;
   const version = run.workflow_version;
+  const rerunOf = run.run_id;
 
   const rerun = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      const accepted = await startWorkflowRun(workflowId, input, { version });
+      const accepted = await startWorkflowRun(workflowId, input, { version, rerunOf });
       onStarted(accepted.run_id);
     } catch (reason: unknown) {
       if (mounted.current) setError(reason instanceof ToolRunError ? (reason.banner ?? reason.message) : reason instanceof Error ? reason.message : "Failed to start the workflow run");

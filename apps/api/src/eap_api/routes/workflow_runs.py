@@ -98,6 +98,7 @@ class WorkflowRunCreate(BaseModel):
     input: dict[str, Any]
     version: int | None = Field(default=None, ge=1)
     run_id: uuid.UUID | None = None
+    rerun_of: uuid.UUID | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -255,6 +256,10 @@ def start_workflow_run(
             detail=f"input must be at most {MAX_WORKFLOW_INPUT_BYTES // 1024} KiB as JSON",
         )
     run_store, _ = stores
+    if body.rerun_of is not None:
+        original = run_store.get_run(tenant_id, body.rerun_of)
+        if original is None or original["kind"] != "workflow" or original["workflow_id"] != str(workflow.id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run to repeat not found")
     # A retry of a recorded run (same run_id) gets the normal retry handling below (compared with the
     # row, then re-enqueued): the run already committed to its version, and the worker reports a step
     # whose agent was archived since as `agent_archived`. Only a new run is checked up front.
@@ -273,7 +278,8 @@ def start_workflow_run(
     trace_id, traceparent = current_trace_context()
     try:
         _, created = run_store.create_workflow_run(
-            tenant_id, workflow.id, version_row.version, input_json, run_id, trace_id=trace_id, traceparent=traceparent
+            tenant_id, workflow.id, version_row.version, input_json, run_id, trace_id=trace_id, traceparent=traceparent,
+            rerun_of=body.rerun_of,
         )
     except RunIdConflict:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
@@ -284,6 +290,7 @@ def start_workflow_run(
         run["kind"] != "workflow"
         or run["workflow_id"] != str(workflow.id)
         or run["input"] != input_json
+        or run["rerun_of"] != (None if body.rerun_of is None else str(body.rerun_of))
         or (body.version is not None and run["workflow_version"] != body.version)
     ):
         raise HTTPException(

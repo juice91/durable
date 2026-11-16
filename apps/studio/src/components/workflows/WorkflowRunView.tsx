@@ -400,6 +400,12 @@ export function WorkflowRunView({
                 {workflowId && run?.workflow_id && run.workflow_id !== workflowId ? (
                   <p role="status" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">This run belongs to another workflow; showing that workflow&apos;s graph.</p>
                 ) : null}
+                {effectiveWorkflowId && run?.rerun_of ? (
+                  <p data-testid="workflow-run-rerun-of" className="text-label text-muted-foreground">
+                    Re-run of{" "}
+                    <Link href={routes.workflowRun(effectiveWorkflowId, run.rerun_of)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{run.rerun_of.slice(0, 8)}</Link>
+                  </p>
+                ) : null}
                 {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{loadError}</p> : null}
                 {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">Graph unavailable: {specError}</p> : null}
                 {view.status === "needs_attention" ? (

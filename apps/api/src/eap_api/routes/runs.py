@@ -101,6 +101,8 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") is not None else None,
         "parent_run_id": run.get("parent_run_id"),
         "parent_step_id": run.get("parent_step_id"),
+        # The earlier run this one repeats ("Run again"); null otherwise.
+        "rerun_of": run.get("rerun_of"),
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],

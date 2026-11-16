@@ -8,20 +8,20 @@ vi.mock("@/lib/workflows", async (importOriginal) => ({ ...(await importOriginal
 
 import { RerunButton } from "./RerunButton";
 
-const RUN = { kind: "workflow" as const, workflow_id: "wf-1", workflow_version: 3, input: '{"text":"hi","n":[1,2]}' };
+const RUN = { run_id: "past-run", kind: "workflow" as const, workflow_id: "wf-1", workflow_version: 3, input: '{"text":"hi","n":[1,2]}' };
 
 beforeEach(() => wfMock.startWorkflowRun.mockReset());
 afterEach(() => cleanup());
 
 describe("RerunButton", () => {
-  it("posts the same input on the same version and reports the new run id", async () => {
+  it("posts the same input on the same version, sends the past run id as rerun_of, and reports the new run id", async () => {
     wfMock.startWorkflowRun.mockResolvedValue({ run_id: "new-run" });
     const onStarted = vi.fn();
     render(<RerunButton run={RUN} onStarted={onStarted} />);
     fireEvent.click(screen.getByRole("button", { name: "Run again" }));
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith("new-run"));
     expect(wfMock.startWorkflowRun).toHaveBeenCalledTimes(1);
-    expect(wfMock.startWorkflowRun).toHaveBeenCalledWith("wf-1", { text: "hi", n: [1, 2] }, { version: 3 });
+    expect(wfMock.startWorkflowRun).toHaveBeenCalledWith("wf-1", { text: "hi", n: [1, 2] }, { version: 3, rerunOf: "past-run" });
   });
 
   it("is disabled while starting", async () => {

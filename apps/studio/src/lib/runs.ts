@@ -58,6 +58,8 @@ export interface Run {
    * with parent_run_id / parent_step_id set. */
   workflow_id?: string | null;
   workflow_version?: number | null;
+  /** Workflow runs: the earlier run this one repeats ("Run again"), or null. */
+  rerun_of?: string | null;
   parent_run_id?: string | null;
   parent_step_id?: string | null;
   agent_id: string | null;
