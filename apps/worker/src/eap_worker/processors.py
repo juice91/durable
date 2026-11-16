@@ -361,7 +361,7 @@ async def output_processors_structured_step(
 
 async def run_structured_chain(
     run_id: str, tenant_id: str, specs: tuple[Any, ...], value: Any, *, moderation: bool,
-    schema: dict[str, Any] | None = None,
+    schema: dict[str, Any] | None = None, phase: ProcessorPhase = "output",
 ) -> ChainRun:
     """`run_chain` for a structured value: the returned ChainRun's `text` is the processed JSON value
     (None when blocked or failed). Deterministic segments run in `eap.output_processors_structured`;
@@ -374,7 +374,7 @@ async def run_structured_chain(
             spec = specs[i]
             if isinstance(spec, ModerationProcessor):
                 if moderation:
-                    record = await moderate("output", i, spec, canonical_json(current))
+                    record = await moderate(phase, i, spec, canonical_json(current))
                     records.append(record)
                     if record.blocked:
                         return ChainRun(None, records)
@@ -386,7 +386,7 @@ async def run_structured_chain(
             segment = [PROCESSOR_SPEC_ADAPTER.dump_python(s, mode="json") for s in specs[i:j]]
             out = await output_processors_structured_step(run_id, tenant_id, segment, current, schema)
             for k, outcome in enumerate(out["outcomes"]):
-                records.append(ProcessorResultRecord(i + k, {"phase": "output", "index": i + k, **outcome}))
+                records.append(ProcessorResultRecord(i + k, {"phase": phase, "index": i + k, **outcome}))
             if out["value"] is None:
                 return ChainRun(None, records)
             current = out["value"]

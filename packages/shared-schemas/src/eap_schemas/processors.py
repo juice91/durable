@@ -261,7 +261,8 @@ PROCESSOR_DECLARATIONS: dict[str, ProcessorDeclaration] = {
     "max_length": ProcessorDeclaration(
         id="max_length",
         title="Maximum length",
-        description="Blocks or truncates text longer than a number of characters.",
+        description="Blocks or truncates text longer than a number of characters. In the stream phase the live text is "
+        "capped across the whole response, as the finished answer is.",
         phases=PROCESSOR_PHASES,
         actions=("block", "truncate"),
         deterministic=True,

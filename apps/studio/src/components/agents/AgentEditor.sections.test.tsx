@@ -135,7 +135,7 @@ describe("AgentEditor processors and request context", () => {
 
   it("adds a moderation output processor with the model picker and notes that streaming is off", async () => {
     render(<AgentEditor initialData={spec} onSubmit={onSubmit} submitLabel="Save" />);
-    expect(screen.getByText(/not streamed live/)).toBeInTheDocument();
+    expect(screen.getByText(/any output processor holds the answer until it is checked/)).toBeInTheDocument();
     // Scope note (P0.21): tool results are outside the processors.
     expect(screen.getByText(/Request context values are not processed/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Output processor type")).not.toBeDisabled());

@@ -11,6 +11,7 @@ from worker_tests.test_agent_run import DeltaListener
 from worker_tests.test_processors_runtime import echo_spec, keys_types, moderation, run
 
 SECRET = "SECRET"
+PII = {"type": "pii_redact", "config": {"kinds": ["email"], "action": "redact"}}
 BLOCK_SECRET = {"type": "regex_blocklist", "config": {"patterns": [SECRET], "action": "block"}}
 REDACT_SECRET = {"type": "regex_blocklist", "config": {"patterns": [SECRET], "action": "redact"}}
 REDACT_TICKET_KEY = {"type": "regex_blocklist", "config": {"patterns": ["ticket_id"], "action": "redact"}}
@@ -145,3 +146,61 @@ def test_stream_and_output_phases_both_recorded(worker, client, tenant):
     assert row["status"] == "completed", row["error"]
     keys = [k for _, k, _, _ in event_rows(worker.engine, run_id) if k.startswith("processor:")]
     assert keys == ["processor:stream:0:model:0", "processor:output:0:model:0"]
+
+
+# --------------------------------------------------------------------------- follow-ups (10b)
+
+SCHEMA = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"], "additionalProperties": False}
+
+
+def test_logged_tool_call_args_are_redacted_not_raw(worker, client, tenant):
+    run_id, row = run(worker, client, tenant, step_spec([REDACT_SECRET]), f"{SECRET} printer on fire")
+    assert row["status"] == "completed", row["error"]
+    events = event_rows(worker.engine, run_id)
+    call = next(e for e in events if e[2] == "tool_call")
+    assert SECRET not in json.dumps(call[3]["args"])
+    assert SECRET not in json.dumps(event(events, "model:0:final")[3]["message"])
+    assert worker.tickets.call_count(tenant, f"{run_id}:") == 1
+
+
+def test_blocked_tool_call_args_are_withheld_in_the_log(worker, client, tenant):
+    run_id, row = run(worker, client, tenant, step_spec([BLOCK_SECRET]), f"{SECRET} printer on fire")
+    assert row["status"] == "completed", row["error"]
+    events = event_rows(worker.engine, run_id)
+    call = next(e for e in events if e[2] == "tool_call")
+    assert SECRET not in json.dumps(call[3])
+    assert SECRET not in json.dumps(event(events, "model:0:final")[3]["message"])
+
+
+def test_stream_max_length_counts_across_deltas(worker, client, tenant):
+    cap = {"type": "max_length", "config": {"max_chars": 14, "action": "truncate"}}
+    listener = DeltaListener()
+    try:
+        run_id, row = run(worker, client, tenant, stream_spec([cap]), "hello world, this is long")
+    finally:
+        listener.close()
+    assert row["status"] == "completed", row["error"]
+    shown = "".join(d["delta"] for d in listener.for_run(run_id))
+    assert row["output"] == "Echo: hello wo" and shown == row["output"]
+
+
+def structured_spec(stream) -> dict:
+    return ticket_spec(tools=(), model="structured") | {"output": {"json_schema": SCHEMA}, "stream_processors": list(stream)}
+
+
+def test_structured_stream_processor_is_recorded_as_stream_phase(worker, client, tenant):
+    prompt = json.dumps({"output": {"note": f"xx {SECRET} yy"}})
+    run_id, row = run(worker, client, tenant, structured_spec([REDACT_SECRET]), prompt)
+    assert row["status"] == "completed", row["error"]
+    keys = [k for _, k, _, _ in event_rows(worker.engine, run_id) if k.startswith("processor:")]
+    assert keys and all(k.startswith("processor:stream:0") for k in keys), keys
+    assert SECRET not in row["output"]
+
+
+def test_structured_stream_block_reports_its_own_index(worker, client, tenant):
+    prompt = json.dumps({"output": {"note": f"xx {SECRET} yy"}})
+    run_id, row = run(worker, client, tenant, structured_spec([PII, BLOCK_SECRET]), prompt)
+    assert row["status"] == "failed"
+    events = event_rows(worker.engine, run_id)
+    assert event(events, "processor:stream:1:model:0")[3]["action"] == "block"
+    assert not any(k.startswith("processor:output:") for _, k, _, _ in events)

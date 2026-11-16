@@ -35,6 +35,12 @@ describe("ProcessorsEditor phases", () => {
     expect(titles).toEqual(["Input processors", "Step processors", "Stream processors", "Output processors"]);
   });
 
+  it("explains streaming per phase", () => {
+    renderEditor();
+    expect(within(screen.getByTestId("processors-stream")).getByText(/Live streaming stays on/)).toBeInTheDocument();
+    expect(within(screen.getByTestId("processors-output")).getByText(/Without a stream processor, any output processor holds the answer/)).toBeInTheDocument();
+  });
+
   it("offers moderation under Input and Output only", () => {
     renderEditor();
     const options = (label: string) => within(screen.getByLabelText(label)).getAllByRole("option").map((o) => o.textContent);

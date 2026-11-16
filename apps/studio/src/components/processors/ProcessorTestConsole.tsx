@@ -187,7 +187,7 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
           <select id="console-phase" className={inputClass} value={phase} onChange={(event) => changePhase(event.target.value as ProcessorPhase)}>
             {PROCESSOR_PHASES.map((item) => <option key={item} value={item}>{PROCESSOR_PHASE_LABELS[item]}</option>)}
           </select>
-          <p className="mt-1 text-caption text-muted-foreground">Only the types that run in this phase are offered.</p>
+          <p className="mt-1 text-caption text-muted-foreground">Only the types that run in this phase are offered. The test runs the same checks in every phase.</p>
         </div>
         <ol className="space-y-3">
           {steps.map((step, index) => (

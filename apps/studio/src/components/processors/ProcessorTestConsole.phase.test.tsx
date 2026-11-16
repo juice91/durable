@@ -21,6 +21,11 @@ describe("ProcessorTestConsole phase select", () => {
     expect(options).toEqual(["Input", "Step", "Stream", "Output"]);
   });
 
+  it("says the test runs the same checks in every phase", () => {
+    render(<ProcessorTestConsole catalog={catalog} />);
+    expect(screen.getByText(/The test runs the same checks in every phase/)).toBeInTheDocument();
+  });
+
   it("offers only the types that run in the chosen phase", () => {
     render(<ProcessorTestConsole catalog={catalog} />);
     const types = () => within(screen.getByLabelText("Processor 1")).getAllByRole("option").map((o) => o.textContent);

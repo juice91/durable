@@ -200,8 +200,8 @@ const PHASE_NOTES: Record<ProcessorPhase, string | null> = {
   input: null,
   step: "Checks each tool call's arguments before the tool runs and its result before the model sees it. A block replaces the result with a message and the run continues.",
   stream:
-    "Filters the answer as it streams and checks the finished answer again, so the stored answer matches what was shown. A pattern split across two chunks is caught only by the second check.",
-  output: "With any output processor the answer is not streamed live: it appears once it has been checked.",
+    "Live streaming stays on: each chunk is filtered as it streams, and the finished answer is checked again so the stored answer matches what was shown. A pattern split across two chunks is caught only by the second check.",
+  output: "Without a stream processor, any output processor holds the answer until it is checked.",
 };
 
 interface PhaseListProps {

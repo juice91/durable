@@ -11,6 +11,11 @@ continues (the model sees the message and may answer or try something else). A r
 arguments the tool sees, or the result the model sees. Events (`processor_result`, phase `step`):
 `processor:step:{i}:tool:{n}:args` and `...:result`, `n` the call's position among the run's tool calls.
 Only specs with step processors take any of these steps, so other specs keep their step layout.
+
+Scope: the chain checks a result's `return_value` only. `ToolReturn.content` (extra model-visible
+parts a tool may attach) is NOT processed; no built-in tool sets it today. The arguments written to
+the `tool_call` event and the stored messages go through the same chain (eap_worker.workflow
+`_logged_tool_args`), so the log never keeps what the chain blocks or redacts.
 """
 
 from __future__ import annotations
@@ -98,6 +103,8 @@ class StepProcessorCapability(AbstractCapability[Any]):
         chain = await run_chain(run_id, tenant_id, "step", specs, args_text, moderation=False)
         await _record_processor_results(run_id, tenant_id, chain, f":tool:{n}:args")
         if chain.error is not None:
+            # A processor ERROR (not a block) fails the run on purpose: text that could not be checked
+            # must not reach the tool. A block never raises; it replaces the result (below).
             raise chain.error
         if chain.text is None:
             return blocked_message(chain)
@@ -117,7 +124,7 @@ class StepProcessorCapability(AbstractCapability[Any]):
         chain = await run_chain(run_id, tenant_id, "step", specs, text, moderation=False)
         await _record_processor_results(run_id, tenant_id, chain, f":tool:{n}:result")
         if chain.error is not None:
-            raise chain.error
+            raise chain.error  # on purpose, as above: an unchecked result must not reach the model
         if chain.text is None:
             return blocked_message(chain)
         if chain.text != text:
