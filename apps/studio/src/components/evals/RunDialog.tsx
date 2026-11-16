@@ -109,6 +109,8 @@ export function RunDialog({ target: subject, agent = null, versions, suite, hasM
   const hasKnowledge = knowledgeBasesOf(targetSpec).length > 0;
   const hasWarnings = (warnings?.length ?? 0) > 0;
   const noCases = suite.case_count === 0;
+  // A workflow runs only a published version: with none there is nothing to run against.
+  const noVersion = isWorkflow && published.length === 0;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !starting) onClose(); }}>
@@ -185,7 +187,7 @@ export function RunDialog({ target: subject, agent = null, versions, suite, hasM
               type="submit"
               // Side-effect tools: destructive. An unchecked target: not the primary (safe-looking) style.
               variant={hasWarnings ? "destructive" : warningsError ? "secondary" : "primary"}
-              disabled={starting || noCases || warnings === null}
+              disabled={starting || noCases || noVersion || warnings === null}
               data-testid="eval-run-start"
             >
               {starting ? "Starting…" : hasWarnings ? "Run anyway" : "Run"}

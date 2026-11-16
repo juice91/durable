@@ -63,5 +63,6 @@ describe("RunDialog", () => {
   it("says a workflow without a published version has none", () => {
     render(<RunDialog target={{ kind: "workflow", id: "wf1", name: "Triage" }} versions={[]} suite={suite} hasMemory={false} onStarted={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getByText("The workflow has no published version.")).toBeInTheDocument();
+    expect(screen.getByTestId("eval-run-start")).toBeDisabled();
   });
 });

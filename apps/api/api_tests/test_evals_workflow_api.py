@@ -185,3 +185,17 @@ def test_a_case_that_no_longer_fits_the_schema_fails_the_run_start_with_its_name
         f"{API}/workflows/{wf}/evals/runs", json={"run_id": str(uuid.uuid4()), "suite_id": suite, "version": 1}, headers=h
     )
     assert r.status_code == 201, r.text
+
+
+def test_patch_and_import_responses_carry_target_name(wf_api):
+    client, _, _, tenant_of = wf_api
+    _, h = tenant_of()
+    wf = publish_demo(client, h)
+    suite = workflow_suite(client, h, wf)
+    r = client.patch(f"{API}/eval-suites/{suite}", json={"description": "d"}, headers=h)
+    assert r.status_code == 200 and r.json()["target_name"] == "Triage" and r.json()["target_kind"] == "workflow"
+    r = client.post(f"{API}/eval-suites/{suite}/import?format=csv", content=b'name,input\nn,"{""q"": ""x""}"\n', headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["suite"]["target_name"] == "Triage"
+    agent_id, as_ = agent_suite(client, h, name="a2")
+    assert client.patch(f"{API}/eval-suites/{as_}", json={"description": "d"}, headers=h).json()["target_name"] == "Evaluated"

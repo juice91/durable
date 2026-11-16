@@ -153,9 +153,9 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
         # eval run with its events and requests, and keeps the child as a standalone run.
         with engine.begin() as conn:
             conn.execute(text(
-                "INSERT INTO runs (id, tenant_id, kind, agent_id, agent_version, status, input, parent_run_id,"
+                "INSERT INTO runs (id, tenant_id, kind, workflow_id, workflow_version, status, input, parent_run_id,"
                 " parent_step_id, created_at, updated_at)"
-                " VALUES ('evwc', 't1', 'agent', 'ag', 1, 'completed', '{}', 'evw', 'case:c1', now(), now())"
+                " VALUES ('evwc', 't1', 'workflow', 'wf', 1, 'completed', '{}', 'evw', 'case:c1', now(), now())"
             ))
             conn.execute(text(
                 "INSERT INTO execution_events (tenant_id, run_id, seq, event_key, type, data, ts)"

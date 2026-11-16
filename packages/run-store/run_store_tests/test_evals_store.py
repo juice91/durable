@@ -613,3 +613,33 @@ def test_workflow_suite_snapshot_needs_the_workflow(store, tenant):
         store.snapshot(tenant, suite.id, agent_id="ag")
     with pytest.raises(EvalSuiteNotFound):
         store.snapshot(tenant, suite.id, workflow_id="other")
+
+
+def test_cancelling_a_workflow_eval_run_cascades_to_its_queued_workflow_child(engine, tenant):
+    rs = RunStore(engine)
+    suite = EvalStore(engine).create_workflow_suite(tenant, "wf", "s")
+    eval_run, child = uuid4(), uuid4()
+    case = EvalStore(engine).add_case(tenant, suite.id, {"name": "c", "input": "{}"})
+    snapshot = EvalStore(engine).snapshot(tenant, suite.id, workflow_id="wf").canonical_json()
+    rs.create_workflow_eval_run(tenant, "wf", 1, suite.id, snapshot, eval_run)
+    rs.create_eval_workflow_child_run(tenant, eval_run, case.id, "wf", 1, "{}", child)
+    row = rs.get_run(tenant, child)
+    assert (row["kind"], row["parent_run_id"], row["parent_step_id"]) == ("workflow", str(eval_run), f"case:{case.id}")
+
+    result = rs.cancel_run_tree(tenant, str(eval_run))
+    assert str(child) in result.statuses and result.statuses[str(child)] == "failed"
+    assert rs.get_run(tenant, child)["status"] == "failed"
+
+
+def test_the_cost_roll_up_includes_workflow_children_and_their_agent_steps(engine, tenant):
+    rs = RunStore(engine)
+    suite = EvalStore(engine).create_workflow_suite(tenant, "wf", "s")
+    case = EvalStore(engine).add_case(tenant, suite.id, {"name": "c", "input": "{}"})
+    snapshot = EvalStore(engine).snapshot(tenant, suite.id, workflow_id="wf").canonical_json()
+    eval_run, child, grandchild = uuid4(), uuid4(), uuid4()
+    rs.create_workflow_eval_run(tenant, "wf", 1, suite.id, snapshot, eval_run)
+    rs.create_eval_workflow_child_run(tenant, eval_run, case.id, "wf", 1, "{}", child)
+    rs.create_child_agent_run(tenant, "ag", 1, "in", grandchild, child, "ask")
+    EventLog(engine).append(tenant, child, "m:0", "model_message", {}, usage=_usage("m:0", "0.10"))
+    EventLog(engine).append(tenant, grandchild, "m:1", "model_message", {}, usage=_usage("m:1", "0.25"))
+    assert rs.run_tree_cost(tenant, eval_run) == Decimal("0.35")

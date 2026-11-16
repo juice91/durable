@@ -20,12 +20,16 @@ Create Date: 2026-11-17 09:00:00
 - `spans`: a flat, materialised span list filled when a run finishes. PK `(run_id, span_id)`;
   `(tenant_id, start DESC)` indexed. No backfill of older runs.
 
+- `ck_runs_parent_link` is recreated too (NOT VALID, same reason): a parented run may be kind `agent` or
+  `workflow`, so a workflow suite's case runs are children of their eval run (cancel, cost and tree
+  queries follow `parent_run_id`).
+
 Lock footprint: `runs` takes three ADD COLUMNs (constant default, no rewrite), two indexes and one
 constraint swap; the other tables are new or small.
 
 Downgrade: workflow schedules and spans are lost; workflow eval suites (with their cases) and
 workflow eval runs (with their events, usage rows, side effects) are deleted; their child runs stay
-as standalone runs. Agent suites and every other run keep their data.
+as standalone runs (a workflow run's parent link is cleared). Agent suites and every other run keep their data.
 """
 from typing import Sequence, Union
 
@@ -59,6 +63,17 @@ _KIND_TARGET_CHECK = (
     + " OR (kind = 'eval' AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL"
     " AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL AND eval_suite_id IS NOT NULL"
     " AND tool_id IS NULL AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
+)
+# 0007's parent-link check (only an agent run may have a parent), and the widened one: a workflow run
+# may have one too (the child of a workflow suite's eval run; the parent is never itself a child).
+_PARENT_LINK_CHECK_0007 = (
+    "(parent_run_id IS NULL AND parent_step_id IS NULL)"
+    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
+)
+_PARENT_LINK_CHECK = (
+    "(parent_run_id IS NULL AND parent_step_id IS NULL)"
+    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind IN ('agent', 'workflow')"
+    " AND conversation_id IS NULL)"
 )
 _ONE_TARGET_CHECK = "(agent_id IS NULL) <> (workflow_id IS NULL)"
 
@@ -107,6 +122,8 @@ def upgrade() -> None:
 
     op.drop_constraint("ck_runs_kind_target", "runs", type_="check")
     op.create_check_constraint("ck_runs_kind_target", "runs", _KIND_TARGET_CHECK, postgresql_not_valid=True)
+    op.drop_constraint("ck_runs_parent_link", "runs", type_="check")
+    op.create_check_constraint("ck_runs_parent_link", "runs", _PARENT_LINK_CHECK, postgresql_not_valid=True)
 
     op.create_table(
         "spans",
@@ -134,11 +151,18 @@ def downgrade() -> None:
     op.drop_index("ix_spans_tenant_start", table_name="spans")
     op.drop_table("spans")
 
-    # Workflow eval runs go (their child runs stay as standalone runs); then workflow suites.
+    # Workflow eval runs go (their child runs stay as standalone runs); then workflow suites. A workflow
+    # run with a parent is not allowed by 0007's check: every such link is cleared first.
+    op.execute(
+        "UPDATE runs SET parent_run_id = NULL, parent_step_id = NULL"
+        " WHERE kind = 'workflow' AND parent_run_id IS NOT NULL"
+    )
     op.execute(
         "UPDATE runs c SET parent_run_id = NULL, parent_step_id = NULL FROM runs p"
         " WHERE p.kind = 'eval' AND p.agent_id IS NULL AND c.tenant_id = p.tenant_id AND c.parent_run_id = p.id"
     )
+    op.drop_constraint("ck_runs_parent_link", "runs", type_="check")
+    op.create_check_constraint("ck_runs_parent_link", "runs", _PARENT_LINK_CHECK_0007)
     op.execute(
         "DELETE FROM side_effects s USING runs r"
         " WHERE r.kind = 'eval' AND r.agent_id IS NULL AND s.tenant_id = r.tenant_id AND s.key LIKE r.id || ':%'"

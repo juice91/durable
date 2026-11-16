@@ -1544,7 +1544,9 @@ class EvalStore:
         unpriced, 0 without rows."""
         q = RunModelRequestModel
         own = (q.run_id == run_id) & q.request_key.startswith(judge_prefix, autoescape=True)
-        cond = own if child_run_id is None else (own | (q.run_id == child_run_id))
+        # A workflow case's child also has agent-step runs of its own (their rows count too).
+        steps = select(RunModel.id).where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id == child_run_id)
+        cond = own if child_run_id is None else (own | (q.run_id == child_run_id) | q.run_id.in_(steps))
         n, priced, total = session.execute(
             select(func.count(), func.count(q.cost_usd), func.coalesce(func.sum(q.cost_usd), 0)).where(
                 q.tenant_id == tenant_id, cond

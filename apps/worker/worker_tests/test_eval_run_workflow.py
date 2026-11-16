@@ -84,6 +84,14 @@ def test_workflow_suite_runs_each_case_as_a_workflow_child(worker, client, tenan
     kids = child_runs(worker.engine, run_id)
     assert {k.kind for k in kids} == {"workflow"} and len(kids) == 2
     assert {(k.workflow_id, k.workflow_version, k.status) for k in kids} == {(workflow_id, 1, "completed")}
+    # Linked to the eval run as an agent case run is: parent_run_id and parent_step_id.
+    with worker.engine.connect() as conn:
+        links = {tuple(r) for r in conn.execute(
+            text("SELECT id, parent_run_id, parent_step_id FROM runs WHERE parent_run_id = :r"), {"r": str(run_id)})}
+    assert links == {(r.child_run_id, str(run_id), f"case:{r.case_id}") for r in rows}
+    # The eval run's cost covers the case runs, and their agent steps (three levels deep).
+    assert run["cost_usd"] is not None and run["cost_usd"] > 0
+    assert run["cost_usd"] == sum((r.cost_usd for r in rows), type(run["cost_usd"])(0))
     agg = json.loads(run["output"])
     assert agg["cases"] == 2
     events = event_rows(worker.engine, run_id)

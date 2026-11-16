@@ -106,12 +106,14 @@ RUN_KIND_TARGET_CHECK = (
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
-# Invariant: runs nest at most two levels. Only an agent run can have a parent, and its parent is a
+# Invariant: runs nest at most two levels. Only an agent or workflow run can have a parent (a workflow run's
+# parent is a workflow suite's eval run), and its parent is a
 # workflow run or an eval run (an eval case's child, 0015_evals), which never has one; so a child's parent is its root run. pending_approvals.root_run_id
 # (0014_approvals) relies on this, and takes the parent's own parent if deeper nesting is ever added.
 RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
-    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
+    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind IN ('agent', 'workflow')"
+    " AND conversation_id IS NULL)"
 )
 # runs.output_format (0014_approvals): `json` when runs.output is a structured output's canonical
 # JSON text; NULL = text. Same text as migration 0014_approvals.
@@ -811,7 +813,18 @@ def _totals_values(tenant_id: str, run_id: str) -> dict[str, Any]:
     """The usage totals columns (`input_tokens`, `output_tokens`, `cost_usd`) as SQL expressions
     over the run's (and its child runs') `run_model_requests` rows; see _finish_values."""
     children = aliased(RunModel)
-    child_ids = select(children.id).where(children.tenant_id == tenant_id, children.parent_run_id == run_id)
+    # Children, and their children: a workflow suite's eval run has workflow case runs whose agent
+    # steps are runs of their own (three levels).
+    grand = aliased(RunModel)
+    child_ids = select(children.id).where(
+        children.tenant_id == tenant_id,
+        or_(
+            children.parent_run_id == run_id,
+            children.parent_run_id.in_(
+                select(grand.id).where(grand.tenant_id == tenant_id, grand.parent_run_id == run_id)
+            ),
+        ),
+    )
     rows = (
         select(
             func.coalesce(func.sum(RunModelRequestModel.input_tokens), 0).label("input_tokens"),
@@ -1303,6 +1316,34 @@ class RunStore:
             eval_suite_hash=snapshot.suite_hash(),
             input=input,
             trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_eval_workflow_child_run(
+        self,
+        tenant_id: str,
+        eval_run_id: UUID | str,
+        case_id: UUID | str,
+        workflow_id: UUID | str,
+        workflow_version: int,
+        input: str,
+        run_id: UUID,
+        *,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create the workflow run that executes case `case_id` of the workflow eval run
+        `eval_run_id` (same tenant: fk_runs_tenant_parent_run): kind 'workflow', `parent_step_id =
+        case:{case_id}`. Same idempotency rules as create_run, and the parent rules of
+        create_eval_child_run (refused once the eval run ended or its cancel was requested)."""
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="workflow",
+            workflow_id=str(workflow_id),
+            workflow_version=workflow_version,
+            input=input,
+            parent_run_id=str(eval_run_id),
+            parent_step_id=f"case:{case_id}",
             traceparent=traceparent,
         )
 

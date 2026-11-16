@@ -67,6 +67,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.agent_archive import refuse_if_archived
@@ -634,7 +635,7 @@ def get_suite(suite_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, stor
 
 @_json_router.patch("/eval-suites/{suite_id}")
 def update_suite(
-    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, store: EvalStoreDep
+    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
 ) -> JSONResponse:
     """Change the fields present in the body. An archived suite accepts only `archived: false` (409)."""
     fields = body.model_fields_set
@@ -650,7 +651,7 @@ def update_suite(
         suite = store.update_suite(principal.tenant_id, suite_id, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content=suite_json(suite))
+    return JSONResponse(content=suite_json(suite, _target_name(db, principal.tenant_id, suite)))
 
 
 @_json_router.delete("/eval-suites/{suite_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -785,7 +786,7 @@ def export_suite(
 
 
 def _import_sync(
-    store: EvalStore, db, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat
+    store: EvalStore, engine, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat
 ) -> dict[str, Any]:
     """Off the event loop. The suite is checked before the file is parsed: an unknown or foreign
     suite is a 404 and an archived one a 409, whatever the file holds, and no parse runs for them.
@@ -806,7 +807,8 @@ def _import_sync(
     check_regex_evaluators(evaluators, "evaluators")
     _check_case_regexes(cases)
     if suite.workflow_id is not None:
-        spec = _latest_workflow_spec(db, tenant_id, suite.workflow_id)
+        with Session(engine) as db:  # this thread's own short session, not the request's
+            spec = _latest_workflow_spec(db, tenant_id, suite.workflow_id)
         for case in cases:
             problem = workflow_input_problem(spec, case["name"], case["input"])
             if problem is not None:
@@ -814,7 +816,9 @@ def _import_sync(
     kwargs: dict[str, Any] = {} if evaluators is None else {"evaluators": evaluators}
     result = store.upsert_cases(tenant_id, suite_id, cases, keep_case_evaluators=fmt == "csv", **kwargs)
     suite = store.get_suite(tenant_id, suite_id)
-    return {"created": result.created, "updated": result.updated, "suite": suite_json(suite)}
+    with Session(engine) as db:
+        name = _target_name(db, tenant_id, suite)
+    return {"created": result.created, "updated": result.updated, "suite": suite_json(suite, name)}
 
 
 @_file_router.post("/eval-suites/{suite_id}/import")
@@ -822,7 +826,6 @@ async def import_suite(
     suite_id: uuid.UUID,
     request: Request,
     principal: PrincipalDep,
-    db: SessionDep,
     store: EvalStoreDep,
     fmt: Annotated[Literal["yaml", "json", "csv"] | None, Query(alias="format")] = None,
 ) -> JSONResponse:
@@ -846,7 +849,7 @@ async def import_suite(
         content_type = request.headers.get("content-type", "").lower()
         fmt = "csv" if "csv" in content_type else "json" if "json" in content_type else "yaml"
     try:
-        content = await run_in_threadpool(_import_sync, store, db, principal.tenant_id, suite_id, text, fmt)
+        content = await run_in_threadpool(_import_sync, store, request.app.state.database_engine, principal.tenant_id, suite_id, text, fmt)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
     return JSONResponse(content=content)

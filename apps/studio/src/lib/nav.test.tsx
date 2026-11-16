@@ -123,6 +123,7 @@ describe("Navigation", () => {
     test("run pages activate Traces; workflow runs activate Workflows", () => {
       expect(activeNavItem(routes.run("r1"))?.id).toBe("traces");
       expect(activeNavItem(routes.trace("r1"))?.id).toBe("traces");
+      expect(activeNavItem("/datasets/x")?.id).toBe("datasets");
       expect(activeNavItem(routes.workflowRun("w1", "r1"))?.id).toBe("workflows");
     });
 

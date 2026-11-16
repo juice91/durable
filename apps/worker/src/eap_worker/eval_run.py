@@ -288,18 +288,18 @@ async def create_workflow_children_step(
     traceparent: str | None,
 ) -> list[str]:
     """The child workflow run rows of one batch (`cases`: [{id, input}], the input JSON text of an
-    object), idempotent per child id. Returns the child run ids in case order. A workflow child
-    carries no `parent_run_id` (ck_runs_parent_link lets only an agent run have a parent): the
-    link is the case result's `child_run_id`."""
+    object), idempotent per child id. Returns the child run ids in case order. Each child
+    is linked to the eval run as an agent case run is (`parent_run_id`, `parent_step_id` =
+    `case:{id}`), so cancel, cost and tree queries follow it."""
     rt = get_runtime()
 
     def work() -> list[str]:
         ids: list[str] = []
         for case in cases:
             child = eval_child_run_id(run_id, case["id"])
-            rt.run_store.create_workflow_run(
-                tenant_id, workflow_id, workflow_version, canonical_json(json.loads(case["input"])),
-                uuid.UUID(child), traceparent=traceparent,
+            rt.run_store.create_eval_workflow_child_run(
+                tenant_id, run_id, case["id"], workflow_id, workflow_version,
+                canonical_json(json.loads(case["input"])), uuid.UUID(child), traceparent=traceparent,
             )
             ids.append(child)
         return ids
