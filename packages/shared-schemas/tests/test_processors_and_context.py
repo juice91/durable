@@ -91,7 +91,7 @@ def test_processor_limits():
 def test_declarations_and_config_schemas_fit_the_form_subset():
     assert set(PROCESSOR_DECLARATIONS) == {"pii_redact", "regex_blocklist", "max_length", "moderation"}
     for decl in PROCESSOR_DECLARATIONS.values():
-        assert decl.phases == ("input", "output")
+        assert decl.phases == (("input", "output") if decl.id == "moderation" else ("input", "step", "stream", "output"))
         schema = decl.config_json_schema()
         text = repr(schema)
         assert "$ref" not in text and "$defs" not in text and "'const'" not in text and "'title'" not in text

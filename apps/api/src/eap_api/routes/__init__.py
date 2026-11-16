@@ -368,7 +368,9 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_ru
 
     # Regex blocklist patterns must compile with RE2 (no backreferences or lookarounds, bounded
     # size, not matching empty text); eap_schemas only bounds their count and length.
-    processor_problems = processor_errors(spec.input_processors, spec.output_processors)
+    processor_problems = processor_errors(
+        spec.input_processors, spec.step_processors, spec.stream_processors, spec.output_processors
+    )
     if processor_problems:
         raise HTTPException(status_code=422, detail=processor_problems[0])
 

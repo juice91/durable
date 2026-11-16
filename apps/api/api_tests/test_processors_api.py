@@ -38,6 +38,20 @@ def test_catalog_lists_every_type_with_config_schema(client, tenant, user) -> No
     assert body["limits"]["max_test_sample_bytes"] == 32 * 1024
 
 
+def test_catalog_returns_four_phases_and_phase_filter(client, tenant, user) -> None:
+    body = client.get("/api/v1/processors", headers=get_auth_header(tenant, user)).json()
+    by_id = {item["id"]: item for item in body["items"]}
+    assert by_id["pii_redact"]["phases"] == ["input", "step", "stream", "output"]
+    assert by_id["moderation"]["phases"] == ["input", "output"]
+    for phase in ("step", "stream"):
+        response = client.get(
+            "/api/v1/processor-results", params={"phase": phase}, headers=get_auth_header(tenant, user)
+        )
+        assert response.status_code == 200, response.text
+    bad = client.get("/api/v1/processor-results", params={"phase": "nope"}, headers=get_auth_header(tenant, user))
+    assert bad.status_code == 422
+
+
 def test_catalog_requires_auth(client) -> None:
     assert client.get("/api/v1/processors").status_code == 401
 

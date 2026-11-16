@@ -42,6 +42,7 @@ from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid, OutputSpec
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
     PROCESSOR_DECLARATIONS,
+    PROCESSOR_PHASES,
     ModerationVerdict,
     ProcessorDeclaration,
     ProcessorSpec,
@@ -210,6 +211,10 @@ class AgentSpec(BaseModel):
     # canonical_spec_hash of every spec stored before they existed stay exactly the same.
     input_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     output_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    # Step phase (tool-call arguments and results) and stream phase (live deltas, and implicitly the
+    # final answer). Same rule: omitted from dumps while empty.
+    step_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    stream_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     context_fields: Tuple[ContextField, ...] = Field(default=(), max_length=MAX_CONTEXT_FIELDS)
     # Knowledge and memory (RAG and memory milestone, RM.2). Same rule: left out of every dump while
     # empty (no knowledge bases; memory None), so every stored spec keeps its JSON and hash. Inside
@@ -234,6 +239,15 @@ class AgentSpec(BaseModel):
                 if not getattr(self, name):
                     data.pop(name, None)
         return data
+
+    @model_validator(mode="after")
+    def check_processor_phases(self):
+        """A processor type runs only in the phases its declaration lists (moderation not in step or stream)."""
+        for phase in PROCESSOR_PHASES:
+            for processor in getattr(self, f"{phase}_processors"):
+                if phase not in PROCESSOR_DECLARATIONS[processor.type].phases:
+                    raise ValueError(f"processor_phase_unsupported: {processor.type} cannot run in the {phase} phase")
+        return self
 
     @model_validator(mode="after")
     def check_context_fields(self):
@@ -382,6 +396,8 @@ _OMIT_WHEN_EMPTY = (
     "mcp_tools",
     "input_processors",
     "output_processors",
+    "step_processors",
+    "stream_processors",
     "context_fields",
     "knowledge_bases",
     "memory",

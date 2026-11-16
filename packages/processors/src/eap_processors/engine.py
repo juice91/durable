@@ -333,11 +333,21 @@ def compiled_chain(specs: Sequence[Any], location: str = "processors") -> tuple[
     return compile_processors(specs, location)
 
 
-def processor_errors(input_processors: Sequence[Any], output_processors: Sequence[Any]) -> list[str]:
+def processor_errors(
+    input_processors: Sequence[Any],
+    step_processors: Sequence[Any],
+    stream_processors: Sequence[Any],
+    output_processors: Sequence[Any],
+) -> list[str]:
     """Every reason an agent spec's processors cannot run, as `<field>[i].config...: <reason>`
     (empty when they all compile). Used by publish, restore and draft-run validation."""
     errors: list[str] = []
-    for name, specs in (("input_processors", input_processors), ("output_processors", output_processors)):
+    for name, specs in (
+        ("input_processors", input_processors),
+        ("step_processors", step_processors),
+        ("stream_processors", stream_processors),
+        ("output_processors", output_processors),
+    ):
         for i, spec in enumerate(specs):
             try:
                 _compile_one(spec, f"{name}[{i}]")

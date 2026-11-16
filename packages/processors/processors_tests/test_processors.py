@@ -143,7 +143,7 @@ def test_regex_unicode_offsets() -> None:
 def test_re2_rejects_backtracking_constructs_and_empty_matches(pattern: str) -> None:
     assert re2_pattern_error(pattern) is not None
     errors = processor_errors(
-        [], [spec({"type": "regex_blocklist", "config": {"patterns": ["ok", pattern]}})]
+        [], [], [], [spec({"type": "regex_blocklist", "config": {"patterns": ["ok", pattern]}})]
     )
     assert len(errors) == 1 and errors[0].startswith("output_processors[0].config.patterns[1]: ")
 
@@ -155,7 +155,7 @@ def test_valid_specs_have_no_errors() -> None:
         spec({"type": "max_length", "config": {"max_chars": 10}}),
         spec({"type": "moderation", "config": {"model": {"provider": "test", "name": "moderation"}}}),
     ]
-    assert processor_errors(procs, procs) == []
+    assert processor_errors(procs, procs, procs, procs) == []
 
 
 @pytest.mark.parametrize("action", ["block", "redact"])
