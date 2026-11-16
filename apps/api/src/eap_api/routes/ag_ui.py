@@ -1148,20 +1148,29 @@ def _load_agent_or_404(c: _Ctx) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
 
+def feedback_viewer(principal: Any) -> str | None:
+    """The user whose own feedback may be shown, or None: API keys have no user, so they see none."""
+    if not principal.user_id or principal.is_api_key:
+        return None
+    return principal.user_id
+
+
 def _viewer_feedback(c: _Ctx, run_id: str) -> list[dict[str, Any]]:
     """The viewing user's own feedback on one turn, for the replay (a tenant-mate's rating or comment
     is never sent). API keys have no user, so they see none."""
-    if not c.principal.user_id or c.principal.is_api_key:
+    viewer = feedback_viewer(c.principal)
+    if viewer is None:
         return []
-    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, [run_id], created_by=c.principal.user_id)
+    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, [run_id], created_by=viewer)
     return [{"message_id": r.message_id, "rating": r.rating, "comment": r.comment} for r in rows]
 
 
 def _thread_feedback(c: _Ctx, conversation_id: str) -> dict[str, Any]:
-    if not c.principal.user_id:
+    viewer = feedback_viewer(c.principal)
+    if viewer is None:
         return {}
     ids = [str(t["id"]) for t in c.run_store.list_turns(c.tenant_id, conversation_id)]
-    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, ids, created_by=c.principal.user_id)
+    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, ids, created_by=viewer)
     return {
         r.message_id: {"rating": r.rating, "comment": r.comment, "updated_at": r.updated_at.isoformat()}
         for r in rows

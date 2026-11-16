@@ -280,6 +280,25 @@ def test_deleting_missing_feedback_is_idempotent_and_writes_nothing(ag, tenant, 
     h = get_auth_header(tenant, "alice")
     _, conv = _answered_thread(client, h, worker)
     url = f"/api/v1/conversations/{conv}/messages/r1-m0/feedback"
+    run_id = client.put(url, json={"rating": "up"}, headers=h).json()["run_id"]
+    assert client.delete(url, headers=h).status_code == 204  # removes the row
+    before_events = client.get(f"/api/v1/runs/{run_id}/events", headers=h).json()
+    before_feedback = client.get(f"/api/v1/conversations/{conv}/feedback", headers=h).json()
     assert client.delete(url, headers=h).status_code == 204
     assert client.delete(url, headers=h).status_code == 204
     assert client.get(f"/api/v1/conversations/{conv}/feedback", headers=h).json()["feedback"] == {}
+    assert client.get(f"/api/v1/conversations/{conv}/feedback", headers=h).json() == before_feedback
+    assert client.get(f"/api/v1/runs/{run_id}/events", headers=h).json() == before_events
+
+
+def test_api_key_principal_with_a_user_id_sees_no_feedback_anywhere():
+    from types import SimpleNamespace
+
+    from eap_api.routes import ag_ui
+
+    principal = SimpleNamespace(tenant_id="t", user_id="svc-user", is_api_key=True)
+    assert ag_ui.feedback_viewer(principal) is None
+    assert ag_ui.feedback_viewer(SimpleNamespace(tenant_id="t", user_id="u", is_api_key=False)) == "u"
+    c = SimpleNamespace(principal=principal, tenant_id="t", engine=None, run_store=None)
+    assert ag_ui._viewer_feedback(c, "r") == []
+    assert ag_ui._thread_feedback(c, "conv") == {}

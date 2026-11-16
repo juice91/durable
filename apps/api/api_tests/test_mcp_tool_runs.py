@@ -274,3 +274,57 @@ def test_mcp_tool_run_row_never_stays_running_when_the_event_log_fails(
     assert len(rows) == 1 and rows[0]["status"] == "failed", rows
     run = client.get(f"/api/v1/runs/{rows[0]['run_id']}", headers=h).json()
     assert run["error"] == f"MCP tool '{server['name']}/add' is unavailable (mcp_call_failed)"
+
+
+def _run_row(client, h, server, tool="add"):
+    rows = ledger(client, h, f"mcp:{server['id']}/{tool}")
+    assert len(rows) == 1, rows
+    return client.get(f"/api/v1/runs/{rows[0]['run_id']}", headers=h).json()
+
+
+def _fail_once_then_work(obj, attr, match=lambda *a, **k: True):
+    original = getattr(obj, attr)
+
+    def flaky(*a, **k):
+        if match(*a, **k):
+            raise RuntimeError("db went away")
+        return original(*a, **k)
+
+    return flaky
+
+
+@pytest.mark.parametrize("failing", ["mark_running", "run_started", "tool_call", "tool_result", "end", "set_status"])
+def test_mcp_tool_run_row_never_stays_running_on_any_store_failure(
+    app_client, tenant_headers, dev_allow_loopback, monkeypatch, failing
+):
+    client, app = app_client
+    run_store, event_log = app.state.run_stores
+    if failing in ("mark_running", "set_status"):
+        monkeypatch.setattr(run_store, failing, _fail_once_then_work(run_store, failing))
+    else:
+        types = {"run_started": "run_started", "tool_call": "tool_call", "tool_result": "tool_result",
+                 "end": "run_completed"}
+        monkeypatch.setattr(
+            event_log, "append",
+            _fail_once_then_work(event_log, "append", lambda t, r, k, ty, d: ty == types[failing]),
+        )
+    _, h = tenant_headers()
+    with hard_timeout(60), ToolServer() as mcp:
+        server = register(client, h, url=mcp.url).json()
+        with pytest.raises(RuntimeError):
+            client.post(runs_url(server["id"], "add"), json={"input": {"a": 1}}, headers=h)
+    run = _run_row(client, h, server)
+    run_id = ledger(client, h, f"mcp:{server['id']}/add")[0]["run_id"]
+    assert run["status"] != "running", run
+    if failing in ("tool_result", "end", "set_status"):
+        # The call was sent: the tool may have run, unless the end event already fixed the outcome.
+        assert run["status"] in ("needs_attention", "completed"), run
+    if failing == "tool_result":
+        assert run["status"] == "needs_attention"
+        assert run["error"] == "a tool's external side effect may or may not have happened; check the external system"
+        events = client.get(f"/api/v1/runs/{run_id}/events", headers=h).json()
+        items = events["items"] if isinstance(events, dict) else events
+        end = [e for e in items if e["type"] == "run_failed"][0]
+        assert end["data"]["error_code"] == "side_effect_outcome_unknown"
+    if failing == "set_status":
+        assert run["status"] == "completed", run  # the end event fixed completed

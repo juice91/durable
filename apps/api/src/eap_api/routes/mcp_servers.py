@@ -559,6 +559,9 @@ async def run_mcp_tool(
                                                            "display_status": "running", "trace_id": trace_id}))
 
         finished = False
+        end_recorded = False
+        called = False
+        final_status, output, error, error_code = "failed", None, None, code
         try:
             call_data = {"tool_call_id": "tool_run", "tool_name": mcp_tool_name(name, tool), "tool_id": tool_id}
 
@@ -568,8 +571,6 @@ async def run_mcp_tool(
             await run_in_threadpool(run_store.mark_running, tenant_id, run_id)
             await run_in_threadpool(record, "start", "run_started", {"kind": "tool", "tool_id": tool_id, "input": body.input})
 
-            final_status, output, error, error_code = "failed", None, None, code
-            called = False
             content: Any = None
             if code is None:
                 await run_in_threadpool(record, "tool:tool_run:call", "tool_call", {**call_data, "args": body.input})
@@ -608,12 +609,14 @@ async def run_mcp_tool(
             if final_status == "completed":
                 await run_in_threadpool(record, "tool:tool_run:result", "tool_result", {**call_data, "status": "ok", "content": content})
                 await run_in_threadpool(record, "end", "run_completed", {"output": output, "result": content})
+                end_recorded = True
             else:
                 if called:
                     await run_in_threadpool(record, "tool:tool_run:result", "tool_result",
                                             {**call_data, "status": "error", "error": error, "error_code": error_code})
                 await run_in_threadpool(record, "end", "run_failed",
                                         {"status": final_status, "error": error, "error_code": error_code})
+                end_recorded = True
             await run_in_threadpool(run_store.set_status, tenant_id, run_id, final_status, output, error)
             finished = True
             run = await run_in_threadpool(run_store.get_run, tenant_id, run_id)
@@ -622,15 +625,24 @@ async def run_mcp_tool(
         finally:
             headers.clear()
             if not finished:  # a store error must not leave the row `running` (best effort)
-                fallback = f"MCP tool '{name}/{tool}' is unavailable (mcp_call_failed)"
+                if end_recorded:  # the end event fixes the status: finish with what it says
+                    fb_status, fb_output, fb_error, fb_code = final_status, output, error, error_code
+                elif called:  # the call went out, so the tool may have run
+                    fb_status, fb_output, fb_code = "needs_attention", None, "side_effect_outcome_unknown"
+                    fb_error = "a tool's external side effect may or may not have happened; check the external system"
+                else:
+                    fb_status, fb_output, fb_code = "failed", None, "mcp_call_failed"
+                    fb_error = f"MCP tool '{name}/{tool}' is unavailable (mcp_call_failed)"
                 try:
                     # A terminal status needs the run's `end` event: write both in one transaction.
-                    await run_in_threadpool(
+                    written = await run_in_threadpool(
                         lambda: run_store.finish_with_end(
-                            tenant_id, run_id, "failed", None, fallback,
-                            end_data={"error_code": "mcp_call_failed"},
+                            tenant_id, run_id, fb_status, fb_output, fb_error,
+                            end_data={"error_code": fb_code},
                         )
                     )
+                    if not written:
+                        log.warning("mcp tool run fallback did not write the status: run_id=%s", run_id)
                 except Exception as exc:  # noqa: BLE001
                     log_failure(log, "mcp tool run could not be marked failed", exc, code="mcp_call_failed",
                                 tenant_id=tenant_id, server_id=sid, run_id=str(run_id))

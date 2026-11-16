@@ -23,6 +23,7 @@ import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
+import { listWorkflowRuns } from "@/lib/workflows";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowFloatingPanel";
 import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
@@ -273,6 +274,23 @@ export function WorkflowRunView({
     <span data-testid="workflow-run-cancelled-secondary" className="text-caption text-muted-foreground">cancelled</span>
   ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
+  // The newest later run that re-ran this one, from the workflow's run history (no extra API).
+  const [rerunId, setRerunId] = useState<string | null>(null);
+  useEffect(() => {
+    setRerunId(null);
+    if (!effectiveWorkflowId) return;
+    let active = true;
+    listWorkflowRuns(effectiveWorkflowId)
+      .then((page) => {
+        if (!active) return;
+        const newest = (page?.items ?? [])
+          .filter((r) => r.rerun_of === runId)
+          .reduce<Run | null>((a, r) => (a === null || r.created_at > a.created_at ? r : a), null);
+        setRerunId(newest?.run_id ?? null);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [effectiveWorkflowId, runId]);
   const control = useWorkflowLayout();
   const { layout, prefs, update } = control;
   const toggleStep = useCallback((id: string) => setSelected((cur) => (cur === id ? null : id)), []);
@@ -404,6 +422,12 @@ export function WorkflowRunView({
                   <p data-testid="workflow-run-rerun-of" className="text-label text-muted-foreground">
                     Re-run of{" "}
                     <Link href={routes.workflowRun(effectiveWorkflowId, run.rerun_of)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{run.rerun_of.slice(0, 8)}</Link>
+                  </p>
+                ) : null}
+                {effectiveWorkflowId && rerunId ? (
+                  <p data-testid="workflow-run-rerun-as" className="text-label text-muted-foreground">
+                    Re-run as{" "}
+                    <Link href={routes.workflowRun(effectiveWorkflowId, rerunId)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{rerunId.slice(0, 8)}</Link>
                   </p>
                 ) : null}
                 {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{loadError}</p> : null}
