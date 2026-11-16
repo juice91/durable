@@ -104,6 +104,50 @@ export async function listRunScores(runId: string, signal?: AbortSignal): Promis
   return scores;
 }
 
+export type ScoreRunErrorCode = "run_not_finished" | "already_scored";
+
+/** A refused score request (409) with a sentence a viewer can read. */
+export class ScoreRunError extends Error {
+  constructor(public code: ScoreRunErrorCode, message: string) {
+    super(message);
+    this.name = "ScoreRunError";
+  }
+}
+
+const SCORE_RUN_MESSAGES: Record<ScoreRunErrorCode, string> = {
+  run_not_finished: "This run has not finished. Only completed runs can be scored.",
+  already_scored: "Every selected scorer has already scored this run.",
+};
+
+/** The 409 code in a response body: `detail` as a string or as an object's `error` / `code`. */
+function conflictCode(body: unknown): ScoreRunErrorCode | null {
+  const detail = body && typeof body === "object" ? (body as { detail?: unknown }).detail : null;
+  const candidates = [detail, detail && typeof detail === "object" ? (detail as { error?: unknown; code?: unknown }).error : null, detail && typeof detail === "object" ? (detail as { code?: unknown }).code : null];
+  for (const value of candidates) {
+    if (value === "run_not_finished" || value === "already_scored") return value;
+  }
+  return null;
+}
+
+/**
+ * Ask the worker to score a completed run with these scorers now (`POST /runs/{id}/score`, 202).
+ * Scorers that already scored the run are skipped by the API (a partial request still resolves);
+ * the scores arrive later as `score` events (`listRunScores`). Throws ScoreRunError for the two 409s.
+ */
+export async function scoreRun(runId: string, scorerIds: string[]): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/v1/runs/${encodeURIComponent(runId)}/score`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    body: JSON.stringify({ scorer_ids: scorerIds }),
+  });
+  if (response.ok) return;
+  if (response.status === 409) {
+    const code = conflictCode(await response.clone().json().catch(() => null));
+    if (code) throw new ScoreRunError(code, SCORE_RUN_MESSAGES[code]);
+  }
+  throw await apiErrorFromResponse(response);
+}
+
 /** The evaluator as a short line for lists. */
 export function describeEvaluator(evaluator: ScorerEvaluator): string {
   switch (evaluator.kind) {

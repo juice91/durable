@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Copy, Maximize2, Minimize2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Download, Gauge, Maximize2, Minimize2 } from "lucide-react";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { buildLogsLink, buildTraceLink } from "@/lib/grafana";
 import { routes } from "@/lib/routes";
@@ -26,7 +26,9 @@ import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
 import { TraceSpans } from "./TraceSpans";
 import { TraceFeedback } from "./TraceFeedback";
-import { TraceScores } from "./TraceScores";
+import { TraceScores, type PendingScores } from "./TraceScores";
+import { ScoreTraceDialog } from "./ScoreTraceDialog";
+import { downloadJson } from "@/lib/download";
 import { AddToDataset } from "./AddToDataset";
 import type { SpanTreeMode } from "./TraceWaterfall";
 import { renderedSheetWidth, spanDetailBeside, traceSheetWidth } from "./traceSheetModel";
@@ -160,6 +162,8 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
   const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId, initialSpanId);
   const baseNames = useNames();
   const [mode, setMode] = useState<SpanTreeMode>("timeline");
+  const [scoreOpen, setScoreOpen] = useState(false);
+  const [requested, setRequested] = useState<PendingScores | null>(null);
   const root = trace?.spans[0] ?? null;
   const selected = trace?.spans.find((s) => s.id === selectedId) ?? null;
   const run = trace?.run ?? null;
@@ -185,6 +189,18 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
             {/* No tooltips here: the first of these can take focus when the Sheet opens, and an
                 open tooltip would take the first Escape (as on the kit's Close button). */}
             <IconButton label="Copy run id" size="sm" tooltip={false} icon={icon(Copy)} onClick={copyId} />
+            {/* Scoring needs a completed run; a disabled button takes no hover, so the reason is the wrapper's title. */}
+            <span title={run && run.status !== "completed" ? "Only completed runs can be scored" : undefined} className="inline-flex">
+              <IconButton label="Score trace" size="sm" tooltip={false} icon={icon(Gauge)} disabled={!run || run.status !== "completed"} onClick={() => setScoreOpen(true)} />
+            </span>
+            <IconButton
+              label="Download trace"
+              size="sm"
+              tooltip={false}
+              icon={icon(Download)}
+              disabled={!trace}
+              onClick={() => trace && downloadJson(`trace-${runId}.json`, trace)}
+            />
             {navigation ? (
               <>
                 <IconButton
@@ -220,6 +236,18 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
           </>
         }
       />
+      {run ? (
+        <ScoreTraceDialog
+          runId={runId}
+          agentId={run.agent_id ?? null}
+          open={scoreOpen}
+          onOpenChange={setScoreOpen}
+          onRequested={(request) => {
+            setRequested({ key: Date.now(), ...request });
+            onTabChange("scores");
+          }}
+        />
+      ) : null}
       <SheetBody className="flex flex-col gap-4">
         {run ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2" data-testid="trace-sheet-meta">
@@ -290,7 +318,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
           </TabsContent>
 
           <TabsContent value="scores">
-            <TraceScores runId={runId} />
+            <TraceScores runId={runId} requested={requested} />
           </TabsContent>
 
           <TabsContent value="logs">

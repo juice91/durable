@@ -295,6 +295,30 @@ export function flattenSpans(spans: TraceSpan[], collapsed: ReadonlySet<string> 
   return rows;
 }
 
+/**
+ * The rows whose label (`spanLabel`) or kind contains `query`, case-insensitively, plus the
+ * ancestors of every match so the tree stays readable. `rows` come from `flattenSpans` (depth first).
+ * A blank query keeps all rows.
+ */
+export function filterSpanRows(rows: SpanRow[], query: string, names: NameMaps = {}): SpanRow[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return rows;
+  const keep = new Set<number>();
+  rows.forEach((row, index) => {
+    const label = spanLabel(row.span, names).toLowerCase();
+    if (!label.includes(needle) && !row.span.kind.toLowerCase().includes(needle)) return;
+    keep.add(index);
+    let depth = row.depth;
+    for (let i = index - 1; i >= 0 && depth > 0; i--) {
+      if (rows[i].depth < depth) {
+        keep.add(i);
+        depth = rows[i].depth;
+      }
+    }
+  });
+  return rows.filter((_, index) => keep.has(index));
+}
+
 // ---------------------------------------------------------------------------- geometry
 
 function ms(value: string | null | undefined): number | null {
