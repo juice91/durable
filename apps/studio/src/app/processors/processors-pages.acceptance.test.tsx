@@ -199,7 +199,7 @@ describe("processor detail: every catalog type", () => {
     expect(within(card).getByText(item.description)).toBeInTheDocument();
     const fields = within(within(card).getByTestId("processor-config-fields")).getAllByRole("listitem");
     expect(fields.map((li) => li.querySelector(".font-mono")?.textContent)).toEqual(Object.keys(item.config_schema.properties));
-    expect(within(card).getByTestId("processor-scope-note")).toHaveTextContent("Tool results and request context values are not processed");
+    expect(within(card).getByTestId("processor-scope-note")).toHaveTextContent("Request context values are not processed");
     if (item.deterministic) {
       expect(screen.getByRole("form", { name: "Processor test console" })).toBeInTheDocument();
       expect(screen.queryByTestId("console-unavailable")).toBeNull();

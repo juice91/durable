@@ -2,9 +2,8 @@
 
 import React, { useMemo } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
-import { PhaseMarks } from "@/components/processors/ProcessorCatalog";
 import { formatOutcomeCount, type OutcomeCount } from "@/components/processors/processorData";
-import type { ProcessorDeclaration, ProcessorType, ProcessorUsage } from "@/lib/processors";
+import { PROCESSOR_PHASE_LABELS, PROCESSOR_PHASES, type ProcessorDeclaration, type ProcessorType, type ProcessorUsage } from "@/lib/processors";
 import { routes } from "@/lib/routes";
 
 /** "3 agents", "1 agent", "1 agent (1 unknown)"; null while unknown. */
@@ -27,7 +26,7 @@ export interface ProcessorListProps {
 }
 
 /**
- * The processor catalog as a DataList: Type, Description, Phases, Used by, Outcomes (24 h). A row
+ * The processor catalog as a DataList: Type, Description, Input, Step, Stream, Output, Used by, Outcomes (24 h). A row
  * opens `/processors/[type]`.
  */
 export function ProcessorList({ items, usage, usageLoading, usageError, outcomeCounts, loading = false }: ProcessorListProps) {
@@ -51,12 +50,17 @@ export function ProcessorList({ items, usage, usageLoading, usageError, outcomeC
       cell: (item) => <span className="line-clamp-2 text-muted-foreground">{item.description}</span>,
       className: "hidden min-w-48 md:table-cell",
     },
-    {
-      id: "phases",
-      header: "Phases",
-      cell: (item) => <PhaseMarks phases={item.phases} />,
-      className: "whitespace-nowrap",
-    },
+    ...PROCESSOR_PHASES.map((phase): DataListColumn<ProcessorDeclaration> => ({
+      id: `phase-${phase}`,
+      header: PROCESSOR_PHASE_LABELS[phase],
+      cell: (item) =>
+        item.phases.includes(phase) ? (
+          <span data-testid={`phase-${phase}`} role="img" aria-label={`Runs in the ${phase} phase`}>✓</span>
+        ) : (
+          <span data-testid={`phase-${phase}`} role="img" aria-label={`Does not run in the ${phase} phase`} className="text-muted-foreground">—</span>
+        ),
+      className: "whitespace-nowrap text-center",
+    })),
     {
       id: "used-by",
       header: "Used by",

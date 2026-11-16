@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Agent, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { PROCESSOR_PHASES, PROCESSOR_PHASE_LABELS } from "@/lib/processors";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
 import { Button, focusRing } from "@/components/ui/Button";
@@ -259,11 +260,11 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
               <p className={muted}>None</p>
             ) : (
               <dl className="space-y-1 text-caption">
-                {(["input", "output"] as const).map((phase) => {
-                  const list = phase === "input" ? sections.input_processors : sections.output_processors;
+                {PROCESSOR_PHASES.map((phase) => {
+                  const list = sections[`${phase}_processors`];
                   return (
                     <div key={phase}>
-                      <dt className={muted}>{phase === "input" ? "Input" : "Output"}</dt>
+                      <dt className={muted}>{PROCESSOR_PHASE_LABELS[phase]}</dt>
                       <dd className="font-mono">{list.length === 0 ? <span className={muted}>None</span> : list.map((p) => p.type).join(", ")}</dd>
                     </div>
                   );

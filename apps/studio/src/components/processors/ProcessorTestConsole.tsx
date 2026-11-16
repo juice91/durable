@@ -10,7 +10,10 @@ import {
   formatMatchCounts,
   isModerationRefusal,
   MODERATION_TEST_MESSAGE,
+  PROCESSOR_PHASE_LABELS,
+  PROCESSOR_PHASES,
   processors as processorsApi,
+  type ProcessorPhase,
   type ProcessorCatalog,
   type ProcessorTestResult,
   type ProcessorType,
@@ -51,7 +54,10 @@ function actionVariant(action: string): "destructive" | "neutral" | "info" {
  * column with the result (outcomes, processed text, response JSON) beside it; stacked below 1024 px.
  */
 export function ProcessorTestConsole({ catalog, initialType }: { catalog: ProcessorCatalog; initialType?: ProcessorType }) {
-  const testable = catalog.items.filter((item) => item.deterministic);
+  // The phase only narrows which types are offered (the test runs the same deterministic chain in
+  // every phase); a type that does not run in the phase cannot be chosen.
+  const [phase, setPhase] = useState<ProcessorPhase>("input");
+  const testable = catalog.items.filter((item) => item.deterministic && item.phases.includes(phase));
   const untestable = catalog.items.filter((item) => !item.deterministic);
   const schemaOf = (type: ProcessorType) => catalog.items.find((item) => item.id === type)?.config_schema ?? {};
   const firstType = initialType && testable.some((item) => item.id === initialType) ? initialType : testable[0]?.id;
@@ -69,7 +75,7 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
   const maxBytes = catalog.limits.max_test_sample_bytes;
   const sampleBytes = new TextEncoder().encode(text).length;
 
-  if (testable.length === 0) {
+  if (!catalog.items.some((item) => item.deterministic)) {
     return <p className="text-sm text-muted-foreground">No processor type can run in the test console.</p>;
   }
 
@@ -79,6 +85,17 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
     setError(null);
   };
 
+  const changePhase = (next: ProcessorPhase) => {
+    changed();
+    setPhase(next);
+    const allowed = catalog.items.filter((item) => item.deterministic && item.phases.includes(next));
+    setSteps((current) =>
+      allowed.length === 0
+        ? current
+        : current.map((step) => (allowed.some((item) => item.id === step.type) ? step : { ...step, type: allowed[0].id, config: defaultConfig(schemaOf(allowed[0].id)) })),
+    );
+  };
+
   const update = (key: number, change: Partial<Step>) => {
     changed();
     setSteps((current) => current.map((step) => (step.key === key ? { ...step, ...change } : step)));
@@ -86,7 +103,7 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
 
   const addStep = () => {
     changed();
-    const type = testable[0].id;
+    const type = (testable[0] ?? catalog.items.find((item) => item.deterministic)!).id;
     setSteps((current) => [...current, { key: nextKey, type, config: defaultConfig(schemaOf(type)) }]);
     setNextKey((key) => key + 1);
   };
@@ -165,6 +182,13 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
   return (
     <div data-testid="console-layout" className="grid min-w-0 gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
       <form onSubmit={(event) => void run(event)} aria-label="Processor test console" className="min-w-0 space-y-4">
+        <div className="min-w-0">
+          <label htmlFor="console-phase" className="block text-label font-medium text-foreground">Phase</label>
+          <select id="console-phase" className={inputClass} value={phase} onChange={(event) => changePhase(event.target.value as ProcessorPhase)}>
+            {PROCESSOR_PHASES.map((item) => <option key={item} value={item}>{PROCESSOR_PHASE_LABELS[item]}</option>)}
+          </select>
+          <p className="mt-1 text-caption text-muted-foreground">Only the types that run in this phase are offered.</p>
+        </div>
         <ol className="space-y-3">
           {steps.map((step, index) => (
             <li key={step.key} data-testid="console-step" className="min-w-0 rounded-lg border border-border bg-surface p-3">

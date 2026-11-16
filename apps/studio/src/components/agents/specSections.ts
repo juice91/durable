@@ -18,7 +18,7 @@ import {
   limitsProblems,
 } from "./agentCapabilities";
 
-export type ProcessorPhase = "input" | "output";
+export type ProcessorPhase = "input" | "step" | "stream" | "output";
 export type ProcessorType = "pii_redact" | "regex_blocklist" | "max_length" | "moderation";
 
 /** One processor as stored in the spec: `{"type": ..., "config": {...}}`. */
@@ -61,12 +61,16 @@ export interface ContextField {
 
 export type AgentSpecWithSections = AgentSpec & {
   input_processors?: ProcessorSpec[];
+  step_processors?: ProcessorSpec[];
+  stream_processors?: ProcessorSpec[];
   output_processors?: ProcessorSpec[];
   context_fields?: ContextField[];
 };
 
 export interface SpecSections {
   input_processors: ProcessorSpec[];
+  step_processors: ProcessorSpec[];
+  stream_processors: ProcessorSpec[];
   output_processors: ProcessorSpec[];
   context_fields: ContextField[];
 }
@@ -144,6 +148,8 @@ export function sectionsOf(spec: AgentSpec | undefined): SpecSections {
   const s = spec as AgentSpecWithSections | undefined;
   return {
     input_processors: s?.input_processors ?? [],
+    step_processors: s?.step_processors ?? [],
+    stream_processors: s?.stream_processors ?? [],
     output_processors: s?.output_processors ?? [],
     context_fields: s?.context_fields ?? [],
   };
@@ -175,13 +181,17 @@ export function normalizeContextField(field: ContextField): Required<ContextFiel
 export function withSpecSections<T extends AgentSpec>(spec: T, sections: SpecSections): T & Partial<SpecSections> {
   const {
     input_processors: _i,
+    step_processors: _s,
+    stream_processors: _t,
     output_processors: _o,
     context_fields: _c,
     ...rest
   } = spec as T & Partial<SpecSections>;
-  void _i; void _o; void _c;
+  void _i; void _s; void _t; void _o; void _c;
   const out = { ...rest } as T & Partial<SpecSections>;
   if (sections.input_processors.length > 0) out.input_processors = sections.input_processors.map(normalizeProcessor);
+  if (sections.step_processors.length > 0) out.step_processors = sections.step_processors.map(normalizeProcessor);
+  if (sections.stream_processors.length > 0) out.stream_processors = sections.stream_processors.map(normalizeProcessor);
   if (sections.output_processors.length > 0) out.output_processors = sections.output_processors.map(normalizeProcessor);
   if (sections.context_fields.length > 0) out.context_fields = sections.context_fields.map(normalizeContextField);
   return out;
@@ -200,6 +210,8 @@ function stableJson(value: unknown): string {
 export function sectionsDiffer(a: SpecSections, b: SpecSections): boolean {
   const norm = (s: SpecSections) => stableJson({
     i: s.input_processors.map(normalizeProcessor),
+    s: s.step_processors.map(normalizeProcessor),
+    t: s.stream_processors.map(normalizeProcessor),
     o: s.output_processors.map(normalizeProcessor),
     c: s.context_fields.map(normalizeContextField),
   });
@@ -278,7 +290,7 @@ export type ErrorTarget =
   | null;
 
 export function errorTarget(message: string): ErrorTarget {
-  const proc = /^(input|output)_processors\[(\d+)\]/.exec(message);
+  const proc = /^(input|step|stream|output)_processors\[(\d+)\]/.exec(message);
   if (proc) return { kind: "processor", phase: proc[1] as ProcessorPhase, index: Number(proc[2]) };
   if (message.startsWith("instructions:")) return { kind: "instructions" };
   if (message.startsWith("processor model")) return { kind: "processors" };
@@ -349,7 +361,7 @@ export function stepStatus(stepId: string, spec: AgentSpec | null | undefined): 
       return { text: fields.length === 0 ? "None" : plural(fields.length, "field"), valid: true };
     }
     case "processors": {
-      const count = sections.input_processors.length + sections.output_processors.length;
+      const count = sections.input_processors.length + sections.step_processors.length + sections.stream_processors.length + sections.output_processors.length;
       return { text: count === 0 ? "None" : plural(count, "processor"), valid: true };
     }
     default:

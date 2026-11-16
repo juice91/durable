@@ -13,7 +13,7 @@ import {
 import { modelsFixture, processorCatalogFixture } from "./specSections.fixtures";
 
 const base: AgentSpec = { spec_version: 1, name: "a", instructions: "hi", model: { provider: "test", name: "echo" }, tools: [] };
-const empty = { input_processors: [], output_processors: [], context_fields: [] };
+const empty = { input_processors: [], step_processors: [], stream_processors: [], output_processors: [], context_fields: [] };
 
 describe("withSpecSections", () => {
   it("leaves every empty list out of the spec", () => {
@@ -24,6 +24,8 @@ describe("withSpecSections", () => {
   it("writes the lists in the server's dump shape", () => {
     const spec = withSpecSections(base, {
       input_processors: [{ type: "regex_blocklist", config: { patterns: ["a", "", "b"], action: "block" } }],
+      step_processors: [],
+      stream_processors: [],
       output_processors: [],
       context_fields: [
         { name: "tier", type: "enum", values: ["gold", "", "silver"], max_length: 5 },
@@ -89,5 +91,29 @@ describe("errorTarget", () => {
     expect(errorTarget("instructions: placeholder {{context.x}} names no context field")).toEqual({ kind: "instructions" });
     expect(errorTarget("processor model 'x:y' is not allowed on this platform")).toEqual({ kind: "processors" });
     expect(errorTarget("Agent not found")).toBeNull();
+  });
+});
+
+describe("step and stream processor sections", () => {
+  const four = { input_processors: [], step_processors: [], stream_processors: [], output_processors: [], context_fields: [] };
+
+  it("reads absent lists as empty and the stored ones as they are", () => {
+    expect(sectionsOf(base)).toMatchObject({ step_processors: [], stream_processors: [] });
+    const stored = { ...base, step_processors: [{ type: "pii_redact", config: {} }], stream_processors: [{ type: "max_length", config: { max_chars: 5 } }] } as AgentSpec;
+    expect(sectionsOf(stored).step_processors).toHaveLength(1);
+    expect(sectionsOf(stored).stream_processors[0].type).toBe("max_length");
+  });
+
+  it("writes the two lists only while non-empty, and treats them as a change", () => {
+    expect(Object.keys(withSpecSections(base, four)).sort()).toEqual(["instructions", "model", "name", "spec_version", "tools"]);
+    const spec = withSpecSections(base, { ...four, stream_processors: [{ type: "pii_redact", config: {} }] });
+    expect(spec.stream_processors).toEqual([{ type: "pii_redact", config: {} }]);
+    expect("step_processors" in spec).toBe(false);
+    expect(sectionsDiffer({ ...four, step_processors: [{ type: "pii_redact", config: {} }] }, sectionsOf(base))).toBe(true);
+  });
+
+  it("routes API errors for step and stream processors to the processors step", () => {
+    expect(errorTarget("stream_processors[1].config.patterns[0]: bad")).toEqual({ kind: "processor", phase: "stream", index: 1 });
+    expect(errorTarget("step_processors[0]: x")).toEqual({ kind: "processor", phase: "step", index: 0 });
   });
 });

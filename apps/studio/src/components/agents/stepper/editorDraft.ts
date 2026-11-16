@@ -24,6 +24,8 @@ export interface EditorDraft {
   /** The other model settings as typed (top_p, top_k, penalties, seed, max_steps, max_retries): "" leaves one out of the spec. */
   modelExtras: Pick<ModelSettingsText, (typeof EXTRA_SETTING_KEYS)[number]>;
   inputProcessors: EditableProcessor[];
+  stepProcessors: EditableProcessor[];
+  streamProcessors: EditableProcessor[];
   outputProcessors: EditableProcessor[];
   contextFields: ContextField[];
   /**
@@ -48,6 +50,8 @@ export function draftFromSpec(spec: AgentSpec | undefined): EditorDraft {
     maxTokens: spec?.model_settings?.max_tokens?.toString() || "",
     modelExtras: extrasFromSettings(spec?.model_settings),
     inputProcessors: withClientIds(sections.input_processors),
+    stepProcessors: withClientIds(sections.step_processors),
+    streamProcessors: withClientIds(sections.stream_processors),
     outputProcessors: withClientIds(sections.output_processors),
     contextFields: sections.context_fields,
     extra: {},
@@ -100,6 +104,8 @@ export function draftToSpec(draft: EditorDraft, base?: AgentSpec): AgentSpec {
   } as AgentSpec;
   const spec = withSpecSections(withMcpTools(core, draft.mcpTools), {
     input_processors: draft.inputProcessors,
+    step_processors: draft.stepProcessors,
+    stream_processors: draft.streamProcessors,
     output_processors: draft.outputProcessors,
     context_fields: draft.contextFields,
   }) as unknown as Record<string, unknown>;
@@ -126,6 +132,8 @@ export const FORM_OWNED_KEYS: ReadonlySet<string> = new Set([
   "mcp_tools",
   "model_settings",
   "input_processors",
+  "step_processors",
+  "stream_processors",
   "output_processors",
   "context_fields",
 ]);

@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { ModelPicker } from "@/components/shared/ModelPicker";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
+import { PROCESSOR_PHASE_LABELS, PROCESSOR_PHASES } from "@/lib/processors";
 import type { JsonSchema } from "@/lib/tools";
 import {
   DEFAULT_MAX_PROCESSORS_PER_PHASE,
@@ -195,6 +196,14 @@ export function ProcessorConfigForm({ idPrefix, declaration, config, models, mod
   );
 }
 
+const PHASE_NOTES: Record<ProcessorPhase, string | null> = {
+  input: null,
+  step: "Checks each tool call's arguments before the tool runs and its result before the model sees it. A block replaces the result with a message and the run continues.",
+  stream:
+    "Filters the answer as it streams and checks the finished answer again, so the stored answer matches what was shown. A pattern split across two chunks is caught only by the second check.",
+  output: "With any output processor the answer is not streamed live: it appears once it has been checked.",
+};
+
 interface PhaseListProps {
   phase: ProcessorPhase;
   value: EditableProcessor[];
@@ -210,7 +219,8 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
   const [adding, setAdding] = useState("");
   const max = catalog?.limits.max_processors_per_phase ?? DEFAULT_MAX_PROCESSORS_PER_PHASE;
   const available = (catalog?.items ?? []).filter((item) => item.phases.includes(phase));
-  const title = phase === "input" ? "Input processors" : "Output processors";
+  const label = PROCESSOR_PHASE_LABELS[phase];
+  const title = `${label} processors`;
 
   const move = (index: number, delta: number) => {
     const next = [...value];
@@ -232,11 +242,7 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
         <h2 className="text-sm font-medium text-card-foreground">{title}</h2>
         <span className="text-xs text-muted-foreground">{value.length} of {max}, run in order</span>
       </div>
-      {phase === "output" ? (
-        <p className="text-xs text-muted-foreground">
-          With any output processor the answer is not streamed live: it appears once it has been checked.
-        </p>
-      ) : null}
+      {PHASE_NOTES[phase] ? <p className="text-xs text-muted-foreground">{PHASE_NOTES[phase]}</p> : null}
       {value.length === 0 ? <p className="text-xs text-muted-foreground">None.</p> : null}
       <ol className="space-y-3">
         {value.map((processor, index) => {
@@ -274,7 +280,7 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
         })}
       </ol>
       <div className="flex gap-2">
-        <select aria-label={`${phase === "input" ? "Input" : "Output"} processor type`} className={inputClass} value={adding} onChange={(e) => setAdding(e.target.value)} disabled={!catalog || value.length >= max}>
+        <select aria-label={`${label} processor type`} className={inputClass} value={adding} onChange={(e) => setAdding(e.target.value)} disabled={!catalog || value.length >= max}>
           <option value="">Choose a processor type…</option>
           {available.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
         </select>
@@ -286,8 +292,12 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
 
 interface ProcessorsEditorProps {
   inputProcessors: EditableProcessor[];
+  stepProcessors: EditableProcessor[];
+  streamProcessors: EditableProcessor[];
   outputProcessors: EditableProcessor[];
   onInputChange: (value: EditableProcessor[]) => void;
+  onStepChange: (value: EditableProcessor[]) => void;
+  onStreamChange: (value: EditableProcessor[]) => void;
   onOutputChange: (value: EditableProcessor[]) => void;
   catalog: ProcessorCatalog | null;
   catalogError: string | null;
@@ -297,8 +307,12 @@ interface ProcessorsEditorProps {
   sectionError?: string | null;
   /** API messages for single processors, keyed by `clientId`. */
   inputErrors?: Record<string, string>;
+  stepErrors?: Record<string, string>;
+  streamErrors?: Record<string, string>;
   outputErrors?: Record<string, string>;
 }
+
+const PHASE_CHANGE = { input: "onInputChange", step: "onStepChange", stream: "onStreamChange", output: "onOutputChange" } as const;
 
 /** Processors (guardrails) section of the agent editor. */
 export function ProcessorsEditor(props: ProcessorsEditorProps) {
@@ -306,13 +320,23 @@ export function ProcessorsEditor(props: ProcessorsEditorProps) {
     <fieldset className="space-y-4 rounded-md border border-border p-4">
       <legend className="px-1 text-sm font-medium text-card-foreground">Processors</legend>
       <p className="text-xs text-muted-foreground">
-        Guardrails on the user&apos;s input and on the model&apos;s output. Blocked input or output fails the turn with a fixed message.
-        Tool results and request context values are not processed; moderation checks only the final answer.
+        Guardrails on the user&apos;s input, on tool calls and their results, on the streamed answer and on the model&apos;s output.
+        Blocked input or output fails the turn with a fixed message. Request context values are not processed; moderation checks only the final answer.
       </p>
       {props.catalogError ? <p role="alert" className="text-xs text-destructive-text">Could not load the processor catalog: {props.catalogError}</p> : null}
       {props.sectionError ? <p role="alert" data-testid="processors-error" className="text-xs text-destructive-text">{props.sectionError}</p> : null}
-      <PhaseList phase="input" value={props.inputProcessors} onChange={props.onInputChange} catalog={props.catalog} models={props.models} modelsError={props.modelsError} errors={props.inputErrors ?? {}} />
-      <PhaseList phase="output" value={props.outputProcessors} onChange={props.onOutputChange} catalog={props.catalog} models={props.models} modelsError={props.modelsError} errors={props.outputErrors ?? {}} />
+      {PROCESSOR_PHASES.map((phase) => (
+        <PhaseList
+          key={phase}
+          phase={phase}
+          value={props[`${phase}Processors`]}
+          onChange={props[PHASE_CHANGE[phase]]}
+          catalog={props.catalog}
+          models={props.models}
+          modelsError={props.modelsError}
+          errors={props[`${phase}Errors`] ?? {}}
+        />
+      ))}
     </fieldset>
   );
 }
