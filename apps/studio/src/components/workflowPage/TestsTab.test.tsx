@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { TooltipProvider } from "@/components/ui/Tooltip";
+import { routes } from "@/lib/routes";
 import { TestsTab } from "./TestsTab";
 
 let query = "suite=s1&run=r1";
@@ -30,6 +31,7 @@ beforeEach(() => {
     paths.push(path);
     if (path === "/workflows/wf1/versions") return json([{ workflow_id: "wf1", version: 2, spec: {}, spec_hash: "h", created_at: T, created_by: "u" }]);
     if (path === "/workflows/wf1/evals/runs") return json({ items: [run], next_cursor: null });
+    if (path === "/eval-suites/s1") return json({ id: "s1", agent_id: null, workflow_id: "wf1", target_kind: "workflow", target_id: "wf1", target_name: "Triage", name: "Suite", description: null, evaluators: [], case_count: 0, archived: false, archived_at: null, created_at: T, updated_at: T, cases: [] });
     if (path === "/workflows/wf1/evals/runs/r1") return json(run);
     if (path === "/workflows/wf1/evals/runs/r1/results") return json({ items: [result(0, "passed"), result(1, "failed")], next_cursor: null });
     return json({ detail: "missing" }, 404);
@@ -44,13 +46,20 @@ afterEach(() => {
 describe("workflow Tests tab", () => {
   it("opens a run in the run view through the workflow routes, with a back link to the suite", async () => {
     render(<TooltipProvider><TestsTab workflowId="wf1" name="Triage" /></TooltipProvider>);
-    const rows = await screen.findAllByTestId("eval-result-row", {}, { timeout: 4000 }).catch(() => []);
+    expect(await screen.findAllByTestId("eval-result-row")).toHaveLength(2);
     expect(paths).toContain("/workflows/wf1/evals/runs/r1");
     expect(paths).toContain("/workflows/wf1/evals/runs/r1/results");
     expect(paths.some((p) => p.startsWith("/agents/"))).toBe(false);
-    expect(await screen.findByText("Case 1")).toBeInTheDocument();
-    expect(rows.length === 0 || rows.length === 2).toBe(true);
+    expect(screen.getByText("Case 1")).toBeInTheDocument();
     expect(screen.getByTestId("eval-run-back")).toHaveAttribute("href", "/workflows/wf1/tests?suite=s1");
     expect(screen.queryByTestId("eval-compare-go")).toBeNull();
+  });
+
+  it("lists the suite's runs, each linking to the run view", async () => {
+    query = "suite=s1";
+    render(<TooltipProvider><TestsTab workflowId="wf1" name="Triage" /></TooltipProvider>);
+    const rows = await screen.findAllByTestId("eval-history-row");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByRole("link")).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s1", run: "r1" }));
   });
 });

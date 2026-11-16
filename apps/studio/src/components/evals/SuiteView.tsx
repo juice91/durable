@@ -364,22 +364,21 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
             </Button>
           </div>
         ) : null}
-        {(
-          <DataList<EvalRun>
-            label="Eval runs"
-            rows={suiteRuns}
-            columns={runColumns}
-            getRowId={(r) => r.run_id}
-            getRowHref={(r) => testsHref({ suite: suiteId, run: r.run_id })}
-            getRowLabel={(r) => `Eval run ${runTargetLabel(r)} ${new Date(r.created_at).toLocaleString()}`}
-            getRowTestId={() => "eval-history-row"}
-            loading={runs === null && !runsError}
-            error={runsError}
-            onRetry={reloadRuns}
-            empty={{ title: "No runs yet", description: "Run the suite against a published version or the draft to see results here." }}
-            testId="eval-history"
-          />
-        )}
+        <DataList<EvalRun>
+          label="Eval runs"
+          rows={suiteRuns}
+          columns={runColumns}
+          getRowId={(r) => r.run_id}
+          getRowHref={(r) => testsHref({ suite: suiteId, run: r.run_id })}
+          getRowLabel={(r) => `Eval run ${runTargetLabel(r)} ${new Date(r.created_at).toLocaleString()}`}
+          getRowTestId={() => "eval-history-row"}
+          loading={runs === null && !runsError}
+          error={runsError}
+          onRetry={reloadRuns}
+          empty={{ title: "No runs yet", description: "Run the suite against a published version or the draft to see results here." }}
+          testId="eval-history"
+        />
+
       </section>
 
       {running && suite ? (

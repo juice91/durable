@@ -9,7 +9,6 @@ import { EvalRunView } from "@/components/evals/EvalRunView";
 import { alertClass, hintClass } from "@/components/evals/evalsUi";
 import { listEvalRuns, type EvalRun } from "@/lib/evals";
 
-
 /**
  * The workflow page's Tests tab (`/workflows/:id/tests?suite=`): the same suites, cases, imports and
  * Run dialog as an agent's Tests tab, against a published version of the workflow. A case's input is
@@ -26,6 +25,7 @@ export function TestsTab({ workflowId, name }: { workflowId: string; name: strin
   useEffect(() => {
     if (!suiteId) return;
     const controller = new AbortController();
+    setRuns(null); // a suite change must not show the previous suite's runs
     setRunsError(null);
     listEvalRuns(workflowId, { suiteId, kind: "workflow", signal: controller.signal })
       .then((page) => {
@@ -37,7 +37,7 @@ export function TestsTab({ workflowId, name }: { workflowId: string; name: strin
         setRunsError(reason instanceof Error && reason.message ? reason.message : "Eval runs could not be loaded");
       });
     return () => controller.abort();
-  }, [workflowId, suiteId, runsKey, runId]);
+  }, [workflowId, suiteId, runsKey]);
   const [versions, setVersions] = useState<WorkflowVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
