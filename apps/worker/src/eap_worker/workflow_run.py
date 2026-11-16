@@ -366,6 +366,15 @@ def approval_poll_seconds() -> float:
         return 3600.0
 
 
+def pause_cancel_check_seconds() -> float:
+    """EAP_PAUSE_CANCEL_CHECK_SECONDS (default 30): how often a paused run looks for its `cancel`
+    event (never longer than the approval poll)."""
+    try:
+        return max(0.1, float(os.environ.get("EAP_PAUSE_CANCEL_CHECK_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
 def pause_timeout_hours() -> float:
     """EAP_PAUSE_TIMEOUT_HOURS (default 24): how long a step-by-step run waits at a pause."""
     try:
@@ -386,6 +395,7 @@ def read_limits() -> dict[str, Any]:
         "hour_seconds": hour_seconds(),
         "approval_poll_seconds": approval_poll_seconds(),
         "pause_timeout_hours": pause_timeout_hours(),
+        "pause_cancel_check_seconds": pause_cancel_check_seconds(),
         **{key: _env_int(env, default) for key, (env, default) in WORKFLOW_LOOP_LIMIT_DEFAULTS.items()},
     }
 
@@ -693,18 +703,20 @@ async def approval_begin_step(
 async def pause_cancel_check_step(run_id: str, tenant_id: str, step_id: str) -> bool:
     """A pause's cooperative cancel (D3): does the run have its `cancel` event? When it does, the
     pause's decision is recorded `step_rejected` by `system:run_cancelled` (which closes its
-    pending_approvals row; a decision that raced in first stays) and True is returned, so the
-    waiting run ends `run_cancelled` even when the DBOS cancel never landed."""
+    pending_approvals row) and True is returned, so the waiting run ends `run_cancelled` even when
+    the DBOS cancel never landed. When a decision got there first (an approval or the timeout:
+    "exists" / "not_waiting") it stands: False, and the normal cancel handling of the next tick
+    stops the run."""
     rt = get_runtime()
 
     def work() -> bool:
         cancel = rt.event_log.get_event(tenant_id, run_id, CANCEL_EVENT_KEY)
         if cancel is None or cancel.type != "cancel_requested":
             return False
-        rt.event_log.append_step_decision(
+        outcome, _event = rt.event_log.append_step_decision(
             tenant_id, run_id, step_id, "step_rejected", {"step_id": step_id, "decided_by": "system:run_cancelled"}
         )
-        return True
+        return outcome == "created"
 
     return await asyncio.to_thread(work)
 
@@ -1479,6 +1491,8 @@ class _Interpreter:
         )
         crash_point("workflow_waiting", event_key=f"step:{step_id}:waiting")
         poll = self.limits["approval_poll_seconds"]
+        if cancel_aware:  # a pause also looks for its cancel, far more often than the approval poll
+            poll = min(poll, self.limits.get("pause_cancel_check_seconds", 30.0))
         timed_out = False
         max_rounds = math.ceil(timeout_seconds / poll) + 16
         decision: dict[str, Any] | None = None

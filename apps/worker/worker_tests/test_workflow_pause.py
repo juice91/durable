@@ -160,3 +160,61 @@ def test_cooperative_cancel_wakes_a_pause_within_one_poll_round(worker, client, 
     end = event_rows(worker.engine, run_id)[-1][3]
     assert end["error_code"] == "run_cancelled" and end["step_id"] == "first_pause"
     assert _open_rows(worker, tenant) == 0
+
+
+def test_pause_cancel_check_cadence_is_its_own_knob_not_the_approval_poll(worker, client, tenant, defs, monkeypatch):
+    monkeypatch.setenv("EAP_APPROVAL_POLL_SECONDS", "3600")
+    monkeypatch.setenv("EAP_PAUSE_CANCEL_CHECK_SECONDS", "1")
+    run_id = _start(worker, client, tenant, TWO)
+    wait_event(worker.engine, run_id, "step:first_pause:waiting")
+    worker.event_log.append(tenant, run_id, "cancel", "cancel_requested", {"requested_by": "alice"})
+    run = wait_terminal(worker.run_store, tenant, run_id, timeout=15)
+    assert run["status"] == "failed"
+    assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "run_cancelled"
+    assert _open_rows(worker, tenant) == 0
+
+
+def test_pause_cancel_check_returns_false_when_the_decision_was_not_created(monkeypatch):
+    import asyncio
+
+    from eap_worker import workflow_run as wr
+
+    class Event:
+        type = "cancel_requested"
+
+    class Log:
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def get_event(self, tenant_id, run_id, key):
+            return Event()
+
+        def append_step_decision(self, *args, **kwargs):
+            return self.outcome, None
+
+    class Runtime:
+        def __init__(self, outcome):
+            self.event_log = Log(outcome)
+
+    for outcome, expected in (("created", True), ("exists", False), ("not_waiting", False)):
+        monkeypatch.setattr(wr, "get_runtime", lambda outcome=outcome: Runtime(outcome))
+        assert asyncio.run(wr.pause_cancel_check_step("r", "t", "first_pause")) is expected
+
+
+def test_approve_racing_a_cancel_stands_and_the_run_cancels_at_the_next_tick(worker, client, tenant, defs):
+    spec = {
+        "name": "Race", "input_schema": {"type": "object"}, "start": "first",
+        "steps": [{"id": "first", "type": "tool", "tool_id": "clock.now", "input": {}, "next": "lp"}, LOOP["steps"][0]],
+    }
+    run_id = _start(worker, client, tenant, spec)
+    wait_event(worker.engine, run_id, "step:first_pause:waiting")
+    worker.event_log.append(tenant, run_id, "cancel", "cancel_requested", {"requested_by": "alice"})
+    decide(worker.event_log, client, tenant_id=tenant, run_id=run_id, step_id="first_pause")
+    run = wait_terminal(worker.run_store, tenant, run_id, timeout=30)
+    assert run["status"] == "failed"
+    rows = event_rows(worker.engine, run_id)
+    by_key = {k: (t, d) for _, k, t, d in rows}
+    assert by_key["step:first_pause:decision"][0] == "step_approved"
+    assert not [1 for _, _, t, _ in rows if t == "step_rejected"]
+    end = rows[-1][3]
+    assert end["error_code"] == "run_cancelled" and end["step_id"] == "lp"
