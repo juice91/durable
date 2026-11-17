@@ -1,29 +1,63 @@
-# The API and the worker run managed MCP servers through the ToolHive operator: they write MCPServer
-# custom resources and their Secret, NetworkPolicy, ResourceQuota and LimitRange in per-tenant
-# namespaces named mcp-tenant-<hash>. RBAC cannot match namespaces by prefix, so the ClusterRole is
-# limited by resource type and verbs instead; namespaces may be created and read, never deleted.
+# Managed MCP servers run through the ToolHive operator in per-tenant namespaces `mcp-tenant-<hash>`.
+#
+# Two ServiceAccounts, least privilege:
+#   pydanticos-mcp-worker  creates and manages the runtimes (writes).
+#   pydanticos-mcp-api     reads status and logs only.
+#
+# Nothing is granted cluster wide except what is needed to create a tenant namespace and to bind the
+# per-tenant roles inside it. Everything else (the MCPServer, its Secret, its NetworkPolicies, quota,
+# pods, logs) is granted by a RoleBinding that the adapter creates in each mcp-tenant-* namespace to
+# the static ClusterRoles below, so neither account can reach a Secret or pod in `pydanticos`,
+# `kube-system` or any other namespace. A ValidatingAdmissionPolicy keeps the worker's namespace and
+# RoleBinding writes inside mcp-tenant-* names (RBAC cannot match a name prefix).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: pydanticos-mcp
+  name: pydanticos-mcp-worker
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pydanticos-mcp-api
+---
+# Granted inside one tenant namespace to the worker, by the adapter's RoleBinding.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pydanticos-mcp
+  name: pydanticos-mcp-tenant
 rules:
-  - apiGroups: [""]
-    resources: [namespaces]
-    verbs: [create, get, patch]
   - apiGroups: [toolhive.stacklok.dev]
     resources: [mcpservers]
     verbs: [get, list, watch, create, update, patch, delete]
+  # By name only: no list or watch, so one tenant's Secrets cannot be enumerated.
   - apiGroups: [""]
-    resources: [secrets, resourcequotas, limitranges]
-    verbs: [get, create, update, patch, delete]
+    resources: [secrets]
+    verbs: [create, get, update, patch, delete]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
-    verbs: [get, create, update, patch, delete]
+    verbs: [create, get, update, patch, delete]
+  - apiGroups: [""]
+    resources: [resourcequotas, limitranges]
+    verbs: [create, get, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
+---
+# Granted inside one tenant namespace to the API: status and logs, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pydanticos-mcp-tenant-read
+rules:
+  - apiGroups: [toolhive.stacklok.dev]
+    resources: [mcpservers]
+    verbs: [get, list]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
@@ -31,15 +65,68 @@ rules:
     resources: [pods/log]
     verbs: [get]
 ---
+# The only cluster-wide grant. `bind` is limited to the two roles above, so the worker cannot hand
+# out anything else; the admission policy below limits where it can bind them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pydanticos-mcp-tenant-admin
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, patch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create, get, update, patch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [pydanticos-mcp-tenant, pydanticos-mcp-tenant-read]
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pydanticos-mcp
+  name: pydanticos-mcp-tenant-admin
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: pydanticos-mcp
+  name: pydanticos-mcp-tenant-admin
 subjects:
   - kind: ServiceAccount
-    name: pydanticos-mcp
+    name: pydanticos-mcp-worker
     namespace: pydanticos
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pydanticos-mcp-tenant-names
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["", rbac.authorization.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [namespaces, rolebindings]
+  matchConditions:
+    - name: the-mcp-worker
+      expression: request.userInfo.username == 'system:serviceaccount:pydanticos:pydanticos-mcp-worker'
+  validations:
+    - expression: >-
+        request.resource.resource == 'namespaces'
+        ? object.metadata.name.startsWith('mcp-tenant-')
+        : object.metadata.namespace.startsWith('mcp-tenant-')
+      message: the MCP worker may only write namespaces and rolebindings named mcp-tenant-*
+    - expression: >-
+        request.resource.resource != 'rolebindings'
+        || (object.roleRef.kind == 'ClusterRole'
+            && object.roleRef.name in ['pydanticos-mcp-tenant', 'pydanticos-mcp-tenant-read'])
+      message: the MCP worker may only bind the pydanticos-mcp-tenant roles
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pydanticos-mcp-tenant-names
+spec:
+  policyName: pydanticos-mcp-tenant-names
+  validationActions: [Deny]

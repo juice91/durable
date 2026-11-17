@@ -14,6 +14,10 @@ Verified facts (`kubectl get crd mcpservers.toolhive.stacklok.dev`, operator 0.6
   `http://mcp-<cr>-proxy.<ns>.svc.cluster.local:8080/mcp`.
 * Operator-created objects: Service `mcp-<cr>-proxy` (proxy port), Deployment `<cr>` (proxy),
   StatefulSet `<cr>` (backend, pod `<cr>-0`). Every pod carries `toolhive-name=<cr>`.
+* The proxy and backend pods are told apart by labels: the proxy runner pod has `app=mcpserver`
+  (and `app.kubernetes.io/name=mcpserver`), the backend pod `app=<cr>` plus `toolhive-basename`,
+  `toolhive-port` and `toolhive-transport`; both have `toolhive-name=<cr>`. Only the proxy talks to
+  the API server (`attach`), and only it has a service account token; the backend has none.
 * `spec.resources` only reaches the proxy Deployment; limits for the MCP container go through
   `spec.podTemplateSpec.spec.containers[name=mcp]` (MR.0 spike).
 """

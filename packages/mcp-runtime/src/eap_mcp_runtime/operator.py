@@ -16,7 +16,23 @@ from eap_mcp_runtime.k8s_models import MANAGED_BY
 from eap_mcp_runtime.models import RuntimeHandle, RuntimeSpec, RuntimeStatus
 
 FIELD_MANAGER = "pydanticos-mcp-runtime"
-PRIVATE_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10")
+# Excluded from the pod's public egress: private, link-local, CGNAT, loopback, "this network",
+# IETF protocol assignments, benchmarking, multicast and reserved space.
+PRIVATE_RANGES = (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
+    "0.0.0.0/8", "127.0.0.0/8", "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/3",
+)
+API_SERVER_PORTS_ENV = "EAP_MCP_API_SERVER_PORTS"
+# The Service port (443) and the endpoint port the packet has after Service NAT: 6443 on stock
+# Kubernetes, but not everywhere (colima's k3s listens on 57345). up.sh reads the real one.
+DEFAULT_API_SERVER_PORTS = (443, 6443)
+WORKER_SA_ENV = "EAP_MCP_WORKER_SERVICE_ACCOUNT"
+API_SA_ENV = "EAP_MCP_API_SERVICE_ACCOUNT"
+TENANT_ROLE = "pydanticos-mcp-tenant"  # ClusterRoles in deploy/k8s/rbac-mcp.yaml
+TENANT_READ_ROLE = "pydanticos-mcp-tenant-read"
+DEFAULT_CALLER_LABELS = ({"app.kubernetes.io/name": "worker"}, {"app.kubernetes.io/name": "api"})
+POD_TMP_ENV = "EAP_MCP_POD_TMP_SIZE"
+DEFAULT_POD_TMP = "512Mi"
 POD_CPU_ENV = "EAP_MCP_POD_CPU"
 POD_MEMORY_ENV = "EAP_MCP_POD_MEMORY"
 API_SERVER_CIDRS_ENV = "EAP_MCP_API_SERVER_CIDRS"
@@ -62,6 +78,34 @@ def pod_resources(cpu: str, memory: str) -> dict[str, dict[str, str]]:
     return {"requests": {"cpu": req_cpu, "memory": req_mem}, "limits": {"cpu": cpu, "memory": memory}}
 
 
+def resolve_tmp_size(tmp: str | None, memory: str) -> str:
+    """Size of the memory-backed /tmp. tmpfs pages count against the container's memory limit, so an
+    explicit size must leave at least half the limit for the process; the default shrinks to fit."""
+    limit = _memory_bytes(memory, POD_MEMORY_ENV)
+    if tmp is None:
+        want = _memory_bytes(DEFAULT_POD_TMP, POD_TMP_ENV)
+        if want * 2 <= limit:
+            return DEFAULT_POD_TMP
+        return f"{max(limit // 2 // 1024**2, 1)}Mi"
+    tmp = tmp.strip()
+    if _memory_bytes(tmp, POD_TMP_ENV) * 2 > limit:
+        raise ValueError(f"{POD_TMP_ENV}={tmp!r} leaves no memory headroom under {POD_MEMORY_ENV}={memory!r}: "
+                         "it must be at most half the memory limit")
+    return tmp
+
+
+def ports_from_env(value: str) -> tuple[int, ...]:
+    out: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit() or not 0 < int(part) < 65536:
+            raise ValueError(f"{API_SERVER_PORTS_ENV} entry {part!r} is not a port number")
+        out.append(int(part))
+    return tuple(out)
+
+
 def cidrs_from_env(value: str) -> tuple[str, ...]:
     out = []
     for part in value.split(","):
@@ -89,8 +133,33 @@ def namespace_doc(namespace: str, tenant_id: str) -> dict[str, Any]:
         "kind": "Namespace",
         "metadata": {
             "name": namespace,
-            "labels": {**MANAGED_BY, "pydanticos.io/mcp-tenant": hashlib.sha256(tenant_id.encode()).hexdigest()[:12]},
+            "labels": {
+                **MANAGED_BY,
+                "pydanticos.io/mcp-tenant": hashlib.sha256(tenant_id.encode()).hexdigest()[:12],
+                # Pods the operator creates here must run unprivileged: the namespace rejects the rest.
+                "pod-security.kubernetes.io/enforce": "restricted",
+            },
         },
+    }
+
+
+def role_binding_doc(namespace: str, name: str, role: str, sa: str, sa_namespace: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": {"name": name, "namespace": namespace, "labels": MANAGED_BY},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": role},
+        "subjects": [{"kind": "ServiceAccount", "name": sa, "namespace": sa_namespace}],
+    }
+
+
+def default_deny_doc(namespace: str) -> dict[str, Any]:
+    """Every pod in the namespace, including ones nothing else selects, starts with no traffic."""
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": "default-deny", "namespace": namespace, "labels": MANAGED_BY},
+        "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
     }
 
 
@@ -145,8 +214,7 @@ def network_policy_doc(
     cr: str,
     *,
     platform_namespace: str,
-    worker_label: dict[str, str],
-    api_server_cidrs: Sequence[str],
+    caller_labels: Sequence[dict[str, str]],
 ) -> dict[str, Any]:
     own = {"podSelector": {"matchLabels": {m.POD_LABEL: cr}}}
     egress: list[dict[str, Any]] = [
@@ -162,8 +230,6 @@ def network_policy_doc(
         },
         {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]},
     ]
-    if api_server_cidrs:  # the proxy runner attaches to the backend through the API server
-        egress.append({"to": [{"ipBlock": {"cidr": c}} for c in api_server_cidrs]})
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -177,13 +243,38 @@ def network_policy_doc(
                     "from": [
                         {
                             "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": platform_namespace}},
-                            "podSelector": {"matchLabels": worker_label},
+                            "podSelector": {"matchLabels": dict(labels)},
                         }
+                        for labels in caller_labels
                     ],
                     "ports": [{"protocol": "TCP", "port": m.PROXY_PORT}],
                 },
             ],
             "egress": egress,
+        },
+    }
+
+
+PROXY_POD_LABELS = {"app": "mcpserver"}  # the operator's proxy runner pod; the backend is `app=<cr>`
+
+
+def api_server_policy_doc(
+    namespace: str, cr: str, api_server_cidrs: Sequence[str], ports: Sequence[int] = DEFAULT_API_SERVER_PORTS
+) -> dict[str, Any]:
+    """The proxy runner attaches to the backend through the API server; the backend never does."""
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": f"{cr}-proxy-api-server", "namespace": namespace, "labels": {**MANAGED_BY, m.POD_LABEL: cr}},
+        "spec": {
+            "podSelector": {"matchLabels": {m.POD_LABEL: cr, **PROXY_POD_LABELS}},
+            "policyTypes": ["Egress"],
+            "egress": [
+                {
+                    "to": [{"ipBlock": {"cidr": c}} for c in api_server_cidrs],
+                    "ports": [{"protocol": "TCP", "port": p} for p in ports],
+                }
+            ],
         },
     }
 
@@ -204,6 +295,7 @@ def mcpserver_doc(
     replicas: int = 1,
     cpu: str = DEFAULT_POD_CPU,
     memory: str = DEFAULT_POD_MEMORY,
+    tmp_size: str = DEFAULT_POD_TMP,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "image": image,
@@ -241,7 +333,7 @@ def mcpserver_doc(
                         "volumeMounts": [{"name": "work", "mountPath": "/tmp"}],
                     }
                 ],
-                "volumes": [{"name": "work", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}],
+                "volumes": [{"name": "work", "emptyDir": {"medium": "Memory", "sizeLimit": tmp_size}}],
             }
         },
     }
@@ -302,6 +394,7 @@ class LightkubeApi:
     def _cls(self, kind: str) -> Any:
         from lightkube.resources.core_v1 import LimitRange, Namespace, Pod, ResourceQuota, Secret
         from lightkube.resources.networking_v1 import NetworkPolicy
+        from lightkube.resources.rbac_authorization_v1 import RoleBinding
 
         return {
             "Namespace": Namespace,
@@ -309,6 +402,7 @@ class LightkubeApi:
             "ResourceQuota": ResourceQuota,
             "LimitRange": LimitRange,
             "NetworkPolicy": NetworkPolicy,
+            "RoleBinding": RoleBinding,
             "Pod": Pod,
             m.KIND: self._mcpserver,
         }[kind]
@@ -377,14 +471,23 @@ class OperatorRuntime:
         api: KubeApi | None = None,
         *,
         platform_namespace: str = "pydanticos",
-        worker_label: dict[str, str] | None = None,
+        ingress_labels: Sequence[dict[str, str]] | None = None,
+        worker_service_account: str | None = None,
+        api_service_account: str | None = None,
+        pod_tmp_size: str | None = None,
         api_server_cidrs: Sequence[str] | None = None,
+        api_server_ports: Sequence[int] | None = None,
         pod_cpu: str | None = None,
         pod_memory: str | None = None,
     ) -> None:
         self._api = api or LightkubeApi()
         self._platform_namespace = platform_namespace
-        self._worker_label = worker_label or {"app.kubernetes.io/name": "worker"}
+        # Platform pods that may call the proxy port: the worker and the API, by label.
+        self._ingress_labels = tuple(ingress_labels) if ingress_labels else DEFAULT_CALLER_LABELS
+        self._worker_sa = worker_service_account or os.environ.get(WORKER_SA_ENV) or "pydanticos-mcp-worker"
+        self._api_sa = api_service_account or os.environ.get(API_SA_ENV) or "pydanticos-mcp-api"
+        self._poll_interval = 1.0
+        self._delete_timeout = 120.0
         # The proxy runner reaches the backend through the Kubernetes API server, whose address is
         # cluster specific: `kubectl get endpoints kubernetes -n default` (and the `kubernetes`
         # Service ClusterIP), as comma separated CIDRs, e.g. "10.43.0.1/32,192.168.5.3/32".
@@ -393,13 +496,28 @@ class OperatorRuntime:
             if api_server_cidrs is not None
             else cidrs_from_env(os.environ.get(API_SERVER_CIDRS_ENV, ""))
         )
+        self._api_server_ports = (
+            tuple(api_server_ports)
+            if api_server_ports is not None
+            else ports_from_env(os.environ.get(API_SERVER_PORTS_ENV, "")) or DEFAULT_API_SERVER_PORTS
+        )
         self._cpu = (pod_cpu or os.environ.get(POD_CPU_ENV) or DEFAULT_POD_CPU).strip()
         self._memory = (pod_memory or os.environ.get(POD_MEMORY_ENV) or DEFAULT_POD_MEMORY).strip()
         pod_resources(self._cpu, self._memory)  # validate now rather than at the first start
+        self._tmp = resolve_tmp_size(pod_tmp_size or os.environ.get(POD_TMP_ENV) or None, self._memory)
 
     async def start(self, spec: RuntimeSpec) -> RuntimeHandle:
         h = RuntimeHandle(m.namespace_name(spec.tenant_id), m.cr_name(spec.server_id))
         await self._api.apply(namespace_doc(h.namespace, spec.tenant_id))
+        # The per-tenant grants first: the worker's cluster-wide role cannot touch anything inside the
+        # namespace, these bindings are what let it (and the API, read-only) work in this one.
+        await self._api.apply(
+            role_binding_doc(h.namespace, f"{TENANT_ROLE}-worker", TENANT_ROLE, self._worker_sa, self._platform_namespace)
+        )
+        await self._api.apply(
+            role_binding_doc(h.namespace, f"{TENANT_ROLE}-api", TENANT_READ_ROLE, self._api_sa, self._platform_namespace)
+        )
+        await self._api.apply(default_deny_doc(h.namespace))
         await self._api.apply(limit_range_doc(h.namespace))
         await self._api.apply(quota_doc(h.namespace))
         if spec.secret_refs:
@@ -409,10 +527,12 @@ class OperatorRuntime:
                 h.namespace,
                 h.cr_name,
                 platform_namespace=self._platform_namespace,
-                worker_label=self._worker_label,
-                api_server_cidrs=self._api_server_cidrs,
+                caller_labels=self._ingress_labels,
             )
         )
+        if self._api_server_cidrs:
+            await self._api.apply(api_server_policy_doc(h.namespace, h.cr_name, self._api_server_cidrs, self._api_server_ports)
+            )
         await self._api.apply(
             mcpserver_doc(
                 h.namespace,
@@ -428,6 +548,7 @@ class OperatorRuntime:
                 server_id=spec.server_id,
                 cpu=self._cpu,
                 memory=self._memory,
+                tmp_size=self._tmp,
             )
         )
         return h
@@ -442,8 +563,24 @@ class OperatorRuntime:
     async def delete(self, handle: RuntimeHandle) -> None:
         # Idempotent: each step ignores a missing object, so a crash midway is repaired by re-running.
         await self._api.delete(m.KIND, handle.namespace, handle.cr_name)
+        # The pods keep running until the operator has torn them down; removing their NetworkPolicy
+        # first would leave them unisolated. On timeout the policies stay and delete() can be re-run.
+        await self._wait_gone(handle)
         await self._api.delete("Secret", handle.namespace, m.secret_name(handle.cr_name))
+        await self._api.delete("NetworkPolicy", handle.namespace, f"{handle.cr_name}-proxy-api-server")
         await self._api.delete("NetworkPolicy", handle.namespace, f"{handle.cr_name}-isolation")
+
+    async def _wait_gone(self, handle: RuntimeHandle) -> None:
+        deadline = time.monotonic() + self._delete_timeout
+        selector = f"{m.POD_LABEL}={handle.cr_name}"
+        while True:
+            if await self._api.get(m.KIND, handle.namespace, handle.cr_name) is None and not await self._api.pod_names(
+                handle.namespace, selector
+            ):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{handle.namespace}/{handle.cr_name} still has pods; its NetworkPolicy was kept")
+            await asyncio.sleep(self._poll_interval)
 
     async def status(self, handle: RuntimeHandle) -> RuntimeStatus:
         endpoint = self.endpoint(handle)

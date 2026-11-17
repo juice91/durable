@@ -39,12 +39,41 @@ def api_server_cidrs() -> list[str]:
     return [f"{ip}/32" for ip in [svc, *eps.split()] if ip]
 
 
-def make_runtime() -> OperatorRuntime:
-    from lightkube import AsyncClient, KubeConfig
+def _kubeconfig_as(token: str | None) -> Any:
+    """The test cluster's kubeconfig; with `token`, the same cluster as that ServiceAccount."""
+    import yaml
+    from lightkube import KubeConfig
 
-    path = os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
-    cfg = KubeConfig.from_file(path).get(context_name=CONTEXT)
-    return OperatorRuntime(LightkubeApi(AsyncClient(config=cfg)), api_server_cidrs=api_server_cidrs())
+    raw = yaml.safe_load(kubectl("config", "view", "--raw", "--minify"))
+    if token:
+        raw["users"][0]["user"] = {"token": token}
+    return KubeConfig.from_dict(raw).get()
+
+
+def api_server_ports() -> list[int]:
+    port = kubectl("get", "endpoints", "kubernetes", "-n", "default", "-o", "jsonpath={.subsets[0].ports[0].port}")
+    return [443, int(port)]
+
+
+def kubectl_as(token: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """kubectl authenticated only as the ServiceAccount token (the admin client certificate is dropped)."""
+    import tempfile
+
+    import yaml
+
+    raw = yaml.safe_load(kubectl("config", "view", "--raw", "--minify"))
+    raw["users"][0]["user"] = {"token": token}
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+        yaml.safe_dump(raw, f)
+        f.flush()
+        return subprocess.run(["kubectl", "--kubeconfig", f.name, *args], capture_output=True, text=True, timeout=60)
+
+
+def make_runtime(token: str | None = None) -> OperatorRuntime:
+    from lightkube import AsyncClient
+
+    api = LightkubeApi(AsyncClient(config=_kubeconfig_as(token)))
+    return OperatorRuntime(api, api_server_cidrs=api_server_cidrs(), api_server_ports=api_server_ports())
 
 
 class PortForward:
@@ -274,8 +303,10 @@ async def test_platform_is_unreachable_from_the_pod(tenant: str, control_listene
             f"{t['name']} not blocked from the pod: {results}"
         )
 
-    # The block is the pod's NetworkPolicy and nothing else: the same live listener answers once it is gone.
+    # The block is the namespace's NetworkPolicies and nothing else: the same live listener answers once
+    # they are gone (the namespace default-deny alone also keeps the pod isolated).
     kubectl("-n", h.namespace, "delete", "networkpolicy", f"{h.cr_name}-isolation")
+    kubectl("-n", h.namespace, "delete", "networkpolicy", "default-deny")
     time.sleep(5)
     after = probe(h.namespace, _first_pod(h.namespace, h.cr_name), [{"name": "other-pod", "host": ctl_ip, "port": 9999}])
     assert after["other-pod"] == "ok", after
@@ -383,3 +414,96 @@ async def test_pypi_server_runs_on_the_python_runner(tenant: str) -> None:
 
     pkg = PackageSpec("pypi", "mcp-server-time", "2026.11.11")
     await _run_package_and_list_tools(tenant, pkg, "get_current_time")
+
+
+# --- Task 5b: per-tenant RBAC, proxy-only API-server egress ---------------------------------------
+
+
+RBAC_MANIFEST = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "k8s", "rbac-mcp.yaml")
+
+
+@pytest.fixture(scope="module")
+def platform_rbac() -> None:
+    kubectl("apply", "-n", "pydanticos", "-f", RBAC_MANIFEST)
+    # A new admission policy binding takes a few seconds to be enforced: wait (server-side dry run).
+    token = sa_token("pydanticos-mcp-worker")
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        r = kubectl_as(token, "label", "namespace", "pydanticos", "x-probe=1", "--dry-run=server", "--overwrite")
+        if r.returncode != 0 and "mcp-tenant-" in r.stderr:
+            return
+        time.sleep(1)
+    raise AssertionError("the admission policy is not enforced")
+
+
+def sa_token(sa: str) -> str:
+    return kubectl("-n", "pydanticos", "create", "token", sa, "--duration=1h").strip()
+
+
+def can_i(sa: str, verb: str, resource: str, namespace: str) -> bool:
+    out = kubectl("auth", "can-i", verb, resource, "-n", namespace, "--as", f"system:serviceaccount:pydanticos:{sa}", check=False)
+    return out.strip() == "yes"
+
+
+def test_the_api_service_account_cannot_read_platform_secrets(platform_rbac: None) -> None:
+    """Item 1: a Secret in `pydanticos` or `kube-system`, pod logs and writes are all refused for the API."""
+    api = "pydanticos-mcp-api"
+    for ns in ("pydanticos", "kube-system", "default"):
+        for verb, res in (("get", "secrets"), ("list", "secrets"), ("get", "pods/log"), ("create", "secrets"), ("create", "networkpolicies")):
+            assert not can_i(api, verb, res, ns), (api, verb, res, ns)
+    out = kubectl_as(sa_token(api), "-n", "pydanticos", "get", "secret", "pydanticos-secrets")
+    assert out.returncode != 0 and "forbidden" in out.stderr.lower(), out.stderr
+
+
+def test_the_worker_service_account_has_no_cluster_wide_secret_or_pod_access(platform_rbac: None) -> None:
+    worker = "pydanticos-mcp-worker"
+    for ns in ("pydanticos", "kube-system"):
+        for verb, res in (("get", "secrets"), ("create", "secrets"), ("delete", "secrets"), ("get", "pods/log"),
+                          ("create", "networkpolicies"), ("delete", "networkpolicies"), ("create", "mcpservers.toolhive.stacklok.dev")):
+            assert not can_i(worker, verb, res, ns), (worker, verb, res, ns)
+
+
+def test_the_worker_cannot_touch_namespaces_or_bind_outside_mcp_tenant(platform_rbac: None) -> None:
+    token = sa_token("pydanticos-mcp-worker")
+
+    def as_worker(*args: str) -> subprocess.CompletedProcess[str]:
+        return kubectl_as(token, *args)
+
+    relabel = as_worker("label", "namespace", "pydanticos", "x-test=1", "--overwrite")
+    assert relabel.returncode != 0 and "mcp-tenant-" in relabel.stderr, relabel.stderr
+    create = as_worker("create", "namespace", "not-a-tenant-" + uuid.uuid4().hex[:6])
+    assert create.returncode != 0 and "mcp-tenant-" in create.stderr, create.stderr
+    bind = as_worker("create", "rolebinding", "evil", "--clusterrole=pydanticos-mcp-tenant", "--serviceaccount=pydanticos:pydanticos-mcp-worker", "-n", "pydanticos")
+    assert bind.returncode != 0, bind.stdout
+    admin = as_worker("create", "rolebinding", "evil", "--clusterrole=cluster-admin", "--serviceaccount=pydanticos:pydanticos-mcp-worker", "-n", "mcp-tenant-000000000000")
+    assert admin.returncode != 0, admin.stdout
+
+
+async def test_the_lifecycle_runs_with_only_the_per_tenant_grants(tenant: str, platform_rbac: None) -> None:
+    """The adapter, authenticated as the worker ServiceAccount, starts a server, the API account reads
+    its status and logs but not its Secret, and delete leaves the namespace baseline."""
+    worker = make_runtime(sa_token("pydanticos-mcp-worker"))
+    reader = make_runtime(sa_token("pydanticos-mcp-api"))
+    h = await worker.start(
+        RuntimeSpec(tenant_id=tenant, server_id=str(uuid.uuid4()), name="Rbac", image=ECHO_IMAGE, secret_refs={"T": CANARY})
+    )
+    try:
+        st = await worker.wait_for(h, "running", timeout=240)
+        assert st.state == "running", st
+        assert (await reader.status(h)).state == "running"
+        assert isinstance(await reader.logs(h, tail=5), list)
+        assert not can_i("pydanticos-mcp-api", "get", "secrets", h.namespace)
+        assert can_i("pydanticos-mcp-api", "get", "pods/log", h.namespace)
+        assert not can_i("pydanticos-mcp-api", "delete", "mcpservers.toolhive.stacklok.dev", h.namespace)
+        assert not can_i("pydanticos-mcp-worker", "list", "secrets", h.namespace)
+        assert (
+            kubectl("-n", h.namespace, "get", "namespace", h.namespace, "-o", "jsonpath={.metadata.labels.pod-security\\.kubernetes\\.io/enforce}").strip()
+            == "restricted"
+        )
+        # item 4: the proxy runner pod is addressable apart from the backend, which has no API-server rule
+        proxy = kubectl("-n", h.namespace, "get", "pods", "-l", f"toolhive-name={h.cr_name},app=mcpserver", "-o", "name").split()
+        assert len(proxy) == 1 and not proxy[0].endswith("-0"), proxy
+    finally:
+        await worker.delete(h)
+    left = kubectl("-n", h.namespace, "get", "mcpserver,networkpolicy,secret,pods", "-o", "name").split()
+    assert set(left) == {"networkpolicy.networking.k8s.io/default-deny"}, left

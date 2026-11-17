@@ -324,13 +324,45 @@ if [[ ! "$host_gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   exit 1
 fi
 
+# The API server addresses NetworkPolicies see (after Service NAT): the `kubernetes` Service ClusterIP
+# and its endpoint, read from the cluster rather than assumed. networkpolicy.yaml and configmap.yaml
+# carry the k3s/colima defaults (10.43.0.1, 192.168.5.3), replaced here via tokens so one value
+# cannot be rewritten by another's substitution. Exported for anything run from this script.
+api_service_ip=$(kubectl_for_profile --namespace=default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+api_endpoint_ips=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+[[ "$api_service_ip" =~ $ipv4_re ]] || {
+  printf 'Refusing to continue: could not read the kubernetes Service address (kubectl get svc kubernetes).\n' >&2
+  exit 1
+}
+read -r -a api_endpoint_list <<<"$api_endpoint_ips"
+if [[ ${#api_endpoint_list[@]} -ne 1 || ! "${api_endpoint_list[0]}" =~ $ipv4_re ]]; then
+  printf 'Refusing to continue: expected exactly one kubernetes endpoint address (kubectl get endpoints kubernetes), got: %s\n' "${api_endpoint_ips:-none}" >&2
+  exit 1
+fi
+api_endpoint_ip=${api_endpoint_list[0]}
+# Policies see the endpoint port after Service NAT: 6443 on stock Kubernetes, 57345 on colima's k3s.
+api_endpoint_port=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || true)
+[[ "$api_endpoint_port" =~ ^[0-9]{1,5}$ ]] || {
+  printf 'Refusing to continue: could not read the kubernetes endpoint port (kubectl get endpoints kubernetes).\n' >&2
+  exit 1
+}
+export EAP_MCP_API_SERVER_CIDRS="${api_service_ip}/32,${api_endpoint_ip}/32"
+export EAP_MCP_API_SERVER_PORTS="443,${api_endpoint_port}"
+
 make_tmp rendered rendered_file
 kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
   | sed \
     -e "s|pydanticos-python:dev|${python_image}|g" \
     -e "s|pydanticos-studio:dev|${studio_image}|g" \
     -e "s|/var/lib/pydanticos-backups|${PYDANTICOS_BACKUP_DIR}|g" \
+    -e "s|10\.43\.0\.1/32|@@API_SERVICE_CIDR@@|g" \
+    -e "s|192\.168\.5\.3/32|@@API_ENDPOINT_CIDR@@|g" \
     -e "s|192.168.5.2|${host_gateway}|g" \
+    -e "s|@@API_SERVICE_CIDR@@|${api_service_ip}/32|g" \
+    -e "s|@@API_ENDPOINT_CIDR@@|${api_endpoint_ip}/32|g" \
+    -e "s|{protocol: TCP, port: 6443}|{protocol: TCP, port: ${api_endpoint_port}}|g" \
+    -e "s|EAP_MCP_API_SERVER_PORTS: 443,6443|EAP_MCP_API_SERVER_PORTS: 443,${api_endpoint_port}|g" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"

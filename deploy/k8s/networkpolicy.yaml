@@ -204,11 +204,12 @@ spec:
         - {protocol: TCP, port: 443}
 ---
 # The worker and API create, inspect and delete MCP runtimes through the Kubernetes API server
-# (serviceAccount pydanticos-mcp, rbac-mcp.yaml). Policies see the API server after Service NAT, so
-# both addresses are allowed: the `kubernetes` Service ClusterIP (kubectl get svc kubernetes) and the
-# endpoint (kubectl get endpoints kubernetes -n default). Replace these with the cluster's own values
-# and set the same list as EAP_MCP_API_SERVER_CIDRS (the per-tenant policies need it too).
-# 10.43.0.1 is the k3s default; 192.168.5.3 is the colima-pydanticos node.
+# (serviceAccounts pydanticos-mcp-worker and -api, rbac-mcp.yaml). Policies see the API server after
+# Service NAT, so both addresses are allowed: the `kubernetes` Service ClusterIP and its endpoint.
+# 10.43.0.1/32 and 192.168.5.3/32 are the k3s / colima-pydanticos defaults; up.sh replaces them with
+# the values it reads from the cluster (kubectl get svc|endpoints kubernetes) and exports the same
+# list as EAP_MCP_API_SERVER_CIDRS (configmap.yaml), which the per-tenant policies use. Port 6443 is
+# likewise replaced by the endpoint port (57345 on colima's k3s) and exported as EAP_MCP_API_SERVER_PORTS.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

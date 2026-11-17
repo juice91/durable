@@ -15,6 +15,8 @@ pytestmark = pytest.mark.anyio
 TENANT = "tenant-a"
 SERVER = str(uuid.UUID("0123456789ab4cde8f01234567890abc"))
 CANARY = "s3cr3t-canary-value-9f2"
+# What stays in a tenant namespace after its last server is deleted.
+TENANT_BASELINE = {"Namespace", "ResourceQuota", "LimitRange", "RoleBinding", "NetworkPolicy"}
 
 
 def spec(**kw) -> RuntimeSpec:
@@ -53,7 +55,7 @@ async def test_start_writes_cr_secret_policy_and_quota() -> None:
     rt, api = runtime()
     h = await rt.start(spec())
     kinds = {k[0] for k in api.objects}
-    assert kinds == {"Namespace", "ResourceQuota", "LimitRange", "Secret", "NetworkPolicy", "MCPServer"}
+    assert kinds == TENANT_BASELINE | {"Secret", "MCPServer"}
     assert ("Namespace", None, h.namespace) in api.objects
     cr = api.objects[("MCPServer", h.namespace, h.cr_name)]
     assert cr["apiVersion"] == "toolhive.stacklok.dev/v1beta1"
@@ -165,7 +167,7 @@ async def test_delete_removes_cr_secret_and_policy_and_can_be_rerun() -> None:
     h = await rt.start(spec())
     await rt.delete(h)
     left = {k[0] for k in api.objects}
-    assert left == {"Namespace", "ResourceQuota", "LimitRange"}
+    assert left == TENANT_BASELINE
     await rt.delete(h)  # crash recovery: re-running changes nothing and raises nothing
 
 
@@ -174,7 +176,7 @@ async def test_delete_after_a_crash_between_steps_finishes_the_job() -> None:
     h = await rt.start(spec())
     del api.objects[("MCPServer", h.namespace, h.cr_name)]  # the first step already ran
     await rt.delete(h)
-    assert {k[0] for k in api.objects} == {"Namespace", "ResourceQuota", "LimitRange"}
+    assert {k[0] for k in api.objects} == TENANT_BASELINE
 
 
 async def test_logs_tail_the_backend_pod_only() -> None:
@@ -239,7 +241,7 @@ async def test_api_server_cidrs_come_from_the_environment(monkeypatch: pytest.Mo
     api = FakeKube()
     rt = OperatorRuntime(api)
     h = await rt.start(spec())
-    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server")]["spec"]
     cidrs = [t["ipBlock"]["cidr"] for r in np["egress"] for t in r["to"] if "ipBlock" in t]
     assert "10.43.0.1/32" in cidrs and "192.168.5.3/32" in cidrs
 
@@ -249,7 +251,7 @@ async def test_an_explicit_cidr_argument_wins_over_the_environment(monkeypatch: 
     api = FakeKube()
     rt = OperatorRuntime(api, api_server_cidrs=("172.20.0.5/32",))
     h = await rt.start(spec())
-    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server")]["spec"]
     cidrs = [t["ipBlock"]["cidr"] for r in np["egress"] for t in r["to"] if "ipBlock" in t]
     assert "172.20.0.5/32" in cidrs and "10.43.0.1/32" not in cidrs
 
@@ -266,3 +268,191 @@ async def test_pod_never_gets_service_account_token_or_host_access() -> None:
     pod = api.objects[("MCPServer", h.namespace, h.cr_name)]["spec"]["podTemplateSpec"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert not any(pod.get(k) for k in ("hostNetwork", "hostPID", "hostIPC"))
+
+
+# --- Task 5b: RBAC, default deny, API-server egress, tmp size ---------------------------------
+
+
+def _doc(api: FakeKube, kind: str, namespace: str | None, name: str) -> dict:
+    return api.objects[(kind, namespace, name)]
+
+
+async def test_each_tenant_namespace_gets_rolebindings_for_the_platform_service_accounts() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    worker = _doc(api, "RoleBinding", h.namespace, "pydanticos-mcp-tenant-worker")
+    reader = _doc(api, "RoleBinding", h.namespace, "pydanticos-mcp-tenant-api")
+    assert worker["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "pydanticos-mcp-tenant"}
+    assert worker["subjects"] == [{"kind": "ServiceAccount", "name": "pydanticos-mcp-worker", "namespace": "pydanticos"}]
+    assert reader["roleRef"]["name"] == "pydanticos-mcp-tenant-read"
+    assert reader["subjects"] == [{"kind": "ServiceAccount", "name": "pydanticos-mcp-api", "namespace": "pydanticos"}]
+
+
+async def test_bindings_exist_before_anything_else_is_written_into_the_namespace() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    order = [c[1] for c in api.calls if c[0] == "apply"]
+    assert order[0] == "Namespace" and set(order[1:3]) == {"RoleBinding"}
+
+
+async def test_namespace_enforces_the_restricted_pod_security_standard() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    labels = _doc(api, "Namespace", None, h.namespace)["metadata"]["labels"]
+    assert labels["pod-security.kubernetes.io/enforce"] == "restricted"
+
+
+async def test_namespace_has_a_default_deny_policy_for_every_pod() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    deny = _doc(api, "NetworkPolicy", h.namespace, "default-deny")["spec"]
+    assert deny["podSelector"] == {} and set(deny["policyTypes"]) == {"Ingress", "Egress"}
+    assert not deny.get("ingress") and not deny.get("egress")
+    applied = [c[1:] for c in api.calls if c[0] == "apply"]
+    assert applied.index(("NetworkPolicy", h.namespace, "default-deny")) < applied.index(("MCPServer", h.namespace, h.cr_name))
+
+
+async def test_default_deny_survives_delete() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    await rt.delete(h)
+    assert ("NetworkPolicy", h.namespace, "default-deny") in api.objects
+
+
+async def test_ingress_on_the_proxy_port_admits_the_worker_and_the_api() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    np = _doc(api, "NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")["spec"]
+    (rule,) = [r for r in np["ingress"] if r.get("ports")]
+    assert [f["podSelector"]["matchLabels"] for f in rule["from"]] == [
+        {"app.kubernetes.io/name": "worker"},
+        {"app.kubernetes.io/name": "api"},
+    ]
+    assert all(f["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "pydanticos"} for f in rule["from"])
+
+
+async def test_ingress_selectors_are_configurable() -> None:
+    api = FakeKube()
+    rt = OperatorRuntime(api, api_server_cidrs=(), ingress_labels=[{"a": "b"}])
+    h = await rt.start(spec())
+    (rule,) = [r for r in _doc(api, "NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")["spec"]["ingress"] if r.get("ports")]
+    assert [f["podSelector"]["matchLabels"] for f in rule["from"]] == [{"a": "b"}]
+
+
+async def test_api_server_egress_is_limited_to_the_proxy_pod_and_to_https_ports() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    main = _doc(api, "NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")["spec"]
+    # the backend (and the shared policy) has no rule for the API server at all
+    assert not [t for r in main["egress"] for t in r["to"] if t.get("ipBlock", {}).get("cidr") == "10.43.0.1/32"]
+    proxy = _doc(api, "NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server")["spec"]
+    assert proxy["podSelector"] == {"matchLabels": {"toolhive-name": h.cr_name, "app": "mcpserver"}}
+    assert proxy["policyTypes"] == ["Egress"]
+    (rule,) = proxy["egress"]
+    assert rule["to"] == [{"ipBlock": {"cidr": "10.43.0.1/32"}}]
+    assert rule["ports"] == [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 6443}]
+
+
+async def test_no_api_server_policy_without_configured_cidrs() -> None:
+    api = FakeKube()
+    h = await OperatorRuntime(api, api_server_cidrs=()).start(spec())
+    assert ("NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server") not in api.objects
+
+
+async def test_public_egress_excludes_special_purpose_ranges() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    np = _doc(api, "NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")["spec"]
+    (internet,) = [t for r in np["egress"] for t in r["to"] if t.get("ipBlock", {}).get("cidr") == "0.0.0.0/0"]
+    assert {"0.0.0.0/8", "127.0.0.0/8", "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/3"} <= set(internet["ipBlock"]["except"])
+
+
+async def test_delete_removes_the_policy_only_after_the_pods_are_gone() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    api.pods[h.namespace] = [f"{h.cr_name}-0"]
+    gone_after = 3
+    polls = 0
+    real = api.pod_names
+
+    async def pod_names(ns: str, sel: str) -> list[str]:
+        nonlocal polls
+        polls += 1
+        if polls > gone_after:
+            api.pods[ns] = []
+        return await real(ns, sel)
+
+    api.pod_names = pod_names  # type: ignore[method-assign]
+    rt._poll_interval = 0  # noqa: SLF001
+    await rt.delete(h)
+    deletes = [c[1] for c in api.calls if c[0] == "delete"]
+    assert deletes.index("MCPServer") < deletes.index("NetworkPolicy")
+    assert polls > gone_after
+    assert ("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation") not in api.objects
+    assert ("NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server") not in api.objects
+
+
+async def test_delete_keeps_the_policy_when_the_pods_do_not_go_away() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    api.pods[h.namespace] = [f"{h.cr_name}-0"]
+    rt._poll_interval = 0  # noqa: SLF001
+    rt._delete_timeout = 0.05  # noqa: SLF001
+    with pytest.raises(TimeoutError):
+        await rt.delete(h)
+    assert ("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation") in api.objects
+    api.pods[h.namespace] = []
+    await rt.delete(h)  # retry finishes the job
+    assert ("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation") not in api.objects
+
+
+def _tmp_volume(api: FakeKube, h) -> dict:
+    pod = api.objects[("MCPServer", h.namespace, h.cr_name)]["spec"]["podTemplateSpec"]["spec"]
+    return pod["volumes"][0]["emptyDir"]
+
+
+async def test_tmp_defaults_to_512mi_memory_backed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EAP_MCP_POD_TMP_SIZE", raising=False)
+    monkeypatch.delenv("EAP_MCP_POD_MEMORY", raising=False)
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert _tmp_volume(api, h) == {"medium": "Memory", "sizeLimit": "512Mi"}
+
+
+async def test_tmp_size_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_POD_TMP_SIZE", "256Mi")
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert _tmp_volume(api, h)["sizeLimit"] == "256Mi"
+
+
+async def test_default_tmp_shrinks_to_leave_memory_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EAP_MCP_POD_TMP_SIZE", raising=False)
+    monkeypatch.setenv("EAP_MCP_POD_MEMORY", "256Mi")
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert _tmp_volume(api, h)["sizeLimit"] == "128Mi"
+
+
+def test_an_explicit_tmp_size_without_memory_headroom_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_POD_MEMORY", "512Mi")
+    monkeypatch.setenv("EAP_MCP_POD_TMP_SIZE", "512Mi")
+    with pytest.raises(ValueError, match="EAP_MCP_POD_TMP_SIZE"):
+        OperatorRuntime(FakeKube())
+    monkeypatch.setenv("EAP_MCP_POD_TMP_SIZE", "lots")
+    with pytest.raises(ValueError, match="EAP_MCP_POD_TMP_SIZE"):
+        OperatorRuntime(FakeKube())
+
+
+async def test_api_server_ports_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_API_SERVER_PORTS", "443, 57345")
+    api = FakeKube()
+    h = await OperatorRuntime(api, api_server_cidrs=("10.43.0.1/32",)).start(spec())
+    (rule,) = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-proxy-api-server")]["spec"]["egress"]
+    assert rule["ports"] == [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 57345}]
+
+
+def test_an_invalid_api_server_port_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_API_SERVER_PORTS", "443,https")
+    with pytest.raises(ValueError, match="EAP_MCP_API_SERVER_PORTS"):
+        OperatorRuntime(FakeKube())
