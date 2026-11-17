@@ -36,6 +36,7 @@ from eap_schemas.embedding_policy import EmbeddingModelNotAllowed, EmbeddingMode
 from eap_schemas.tools import HIDDEN_TOOL_DECLARATIONS
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.processors import processor_models
+from eap_schemas.model_settings_support import unsupported_settings
 from eap_schemas.request_context import placeholder_errors
 
 # Body cap, UTF-8, depth, unstorable strings and compact 422s: eap_api.request_guard.
@@ -327,14 +328,15 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_ru
             ),
         )
 
-    # Current Anthropic models (Claude Opus 5.5 and later) reject sampling parameters with a 400,
-    # so a spec that sets temperature would fail on every run: refuse it at publish instead.
-    if spec.model.provider == "anthropic" and spec.model_settings.temperature is not None:
+    # Current Anthropic models (Claude Opus 5.5 and later) reject sampling parameters with a 400, and
+    # a provider can lack a setting altogether (Anthropic: penalties and seed; OpenAI: top_k), so a
+    # spec that sets one would fail on every run: refuse it at publish instead.
+    for name in unsupported_settings(spec.model.provider, spec.model_settings):
         raise HTTPException(
             status_code=422,
             detail=(
-                f"model '{spec.model.provider}:{spec.model.name}' does not accept a temperature "
-                "setting; remove temperature from the agent's model settings"
+                f"model '{spec.model.provider}:{spec.model.name}' does not accept a {name} "
+                f"setting; remove {name} from the agent's model settings"
             ),
         )
 
@@ -366,7 +368,9 @@ def _check_publishable(db: Session, tenant_id: str, spec: AgentSpec, *, draft_ru
 
     # Regex blocklist patterns must compile with RE2 (no backreferences or lookarounds, bounded
     # size, not matching empty text); eap_schemas only bounds their count and length.
-    processor_problems = processor_errors(spec.input_processors, spec.output_processors)
+    processor_problems = processor_errors(
+        spec.input_processors, spec.step_processors, spec.stream_processors, spec.output_processors
+    )
     if processor_problems:
         raise HTTPException(status_code=422, detail=processor_problems[0])
 
@@ -395,12 +399,12 @@ def _check_fallback_models(policy: ModelPolicy, spec: AgentSpec) -> None:
                     "(not in the EAP_ALLOWED_MODELS allowlist)"
                 ),
             )
-        if ref.provider == "anthropic" and spec.model_settings.temperature is not None:
+        for name in unsupported_settings(ref.provider, spec.model_settings):
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"fallback_models[{i}]: model '{ref.provider}:{ref.name}' does not accept a temperature "
-                    "setting; remove model_settings.temperature or this fallback model"
+                    f"fallback_models[{i}]: model '{ref.provider}:{ref.name}' does not accept a {name} "
+                    f"setting; remove model_settings.{name} or this fallback model"
                 ),
             )
 

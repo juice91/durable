@@ -107,7 +107,10 @@ def test_non_text_parts_are_422(part: dict[str, Any]) -> None:
     err = refused(body(messages=[{"id": "u1", "role": "user", "content": [{"type": "text", "text": "x"}, part]}]))
     assert err.status_code == 422
     assert err.detail[0]["type"] == "unsupported_content"
-    assert err.detail[0]["loc"] == ["body", "messages", 0, "content", 1, "type"]
+    # An image/document part is refused at its `source` (only an uploaded attachment reference is
+    # accepted, W2.4); any other part type at its `type`.
+    leaf = "source" if part["type"] == "image" else "type"
+    assert err.detail[0]["loc"] == ["body", "messages", 0, "content", 1, leaf]
 
 
 @pytest.mark.parametrize(

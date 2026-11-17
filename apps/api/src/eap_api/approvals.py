@@ -36,7 +36,7 @@ log = logging.getLogger("eap_api")
 ApprovalKind = Literal["tool", "step"]
 # The route's word: a workflow step is "approved" | "rejected", a tool call "approved" | "denied".
 Decision = Literal["approved", "rejected", "denied"]
-DecisionOutcome = Literal["created", "exists", "not_waiting", "run_not_found"]
+DecisionOutcome = Literal["created", "exists", "not_waiting", "run_not_found", "data_required", "no_data_expected"]
 
 _EVENT_TYPES: dict[tuple[str, str], str] = {
     ("step", "approved"): "step_approved",
@@ -52,7 +52,10 @@ class DecisionResult:
     decision was already recorded, by a person or by the timeout), `not_waiting` (no waiting event
     for this key, or the run has ended) or `run_not_found` (unknown run or another tenant's).
     `waiting` tells, for `not_waiting`, whether the waiting event exists at all (so a route can
-    answer 404 for a key that never waited and 409 for one that no longer does). `notified` is True
+    answer 404 for a key that never waited and 409 for one that no longer does). `data_required`:
+    the step is an input step (its waiting event carries a `resume_schema`) and an approval came
+    without data; `no_data_expected`: data came for a step that takes none. Neither records
+    anything. `notified` is True
     only when the wake-up was sent. `event` is the decision event: the one this call wrote
     (`created`) or the earlier one (`exists`), else None."""
 
@@ -86,6 +89,7 @@ def decide(
     decision: Decision,
     decided_by: str,
     comment: str | None,
+    resume_data: Any = None,
 ) -> DecisionResult:
     """Record `decision` on the approval (`kind`, `key`) of the tenant's run, then wake the waiting
     workflow. Never raises for an ordinary outcome; see DecisionResult. A failed wake-up is logged
@@ -96,6 +100,17 @@ def decide(
         raise ValueError(f"{decision!r} is not a decision for a {kind} approval") from None
     id_field = "tool_call_id" if kind == "tool" else "step_id"
     data = {id_field: key, "decided_by": decided_by, "comment": comment}
+    if kind == "step":
+        # An input step (its waiting event holds a resume_schema) is answered with data, never
+        # approved bare; an approval step takes none. A rejection is fine for both.
+        first = event_log.get_event(tenant_id, run_id, waiting_event_key("step", key))
+        takes_data = first is not None and isinstance(first.data, dict) and "resume_schema" in first.data
+        if decision == "approved" and takes_data and resume_data is None:
+            return DecisionResult("data_required", waiting=True)
+        if resume_data is not None and first is not None and not takes_data:
+            return DecisionResult("no_data_expected", waiting=True)
+    if resume_data is not None:
+        data["resume_data"] = resume_data
     append = event_log.append_tool_decision if kind == "tool" else event_log.append_step_decision
     try:
         outcome, event = append(tenant_id, run_id, key, event_type, data)

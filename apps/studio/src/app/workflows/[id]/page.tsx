@@ -144,7 +144,7 @@ function WorkflowDetail() {
 
         {workflow && tab === "runs" ? (
           <div className="min-w-0 p-4">
-            <WorkflowRunHistory workflowId={workflow.id} />
+            <WorkflowRunHistory workflowId={workflow.id} onRerunStarted={(newRunId) => router.push(routes.workflowRun(workflow.id, newRunId))} />
           </div>
         ) : null}
       </div>

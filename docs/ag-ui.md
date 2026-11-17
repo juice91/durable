@@ -102,7 +102,10 @@ tool results, resume entries, client tools and run options, not ids, history or 
 The server keeps the conversation. From your `messages` it reads only the **tail after the last
 `assistant` message**:
 
-- `user` messages: the new input (text only; other content parts are 422 `unsupported_content`);
+- `user` messages: the new input: text, plus `image` / `document` parts that reference a file uploaded
+  with `POST /api/v1/attachments` (a `url` source `/api/v1/attachments/{id}`; see
+  [Attachments and feedback](#attachments-and-feedback)). Inline data, other URLs and other part
+  types are 422 `unsupported_content`;
 - `tool` messages: results of the frontend tool calls the previous turn left pending.
 
 Everything before the tail, and `assistant`, `system`, `developer` and `reasoning` messages in it,
@@ -112,6 +115,26 @@ system prompt. You may send the whole history (what `HttpAgent` does) or only th
 A user message the server already recorded for this thread (a plain client re-sends it after a lost
 stream) is not run twice. Re-sending the latest recorded user message alone under a new `runId` is a
 **regenerate**: the turn runs again, and snapshots then show the new answer in place of the old one.
+
+### Attachments and feedback
+
+- **Attachments.** Upload a file (image PNG/JPEG/GIF/WebP, PDF, plain text, Markdown, CSV, JSON) as
+  multipart field `file` to `POST /api/v1/attachments` (dev bearer): `{id, name, media_type, size}`.
+  413 over `EAP_CHAT_ATTACHMENT_MAX_BYTES` (default 10 MiB), 415 for another type. Send it in a user
+  message as `{"type": "image" | "document", "source": {"type": "url", "value": "/api/v1/attachments/{id}",
+  "mimeType": ...}, "metadata": {"filename": ...}}`. Up to 5 per message; one attachment belongs to one
+  message. 422 `attachment_not_found`, `attachment_in_use`, `attachment_unsupported_by_model` (images and
+  PDFs need a model that takes them; text files are inlined for any model). Thread GET and snapshots
+  return the same parts on the user message. `GET /api/v1/attachments/{id}` returns the bytes
+  (tenant-scoped, `nosniff`).
+- **Feedback.** `PUT|DELETE /api/v1/conversations/{id}/messages/{messageId}/feedback`
+  (`{rating: "up"|"down", comment?}`) rates an assistant message (`{runId}-m{n}`), one row per user.
+  The thread GET adds `feedback: {messageId: {rating, comment, updated_at}}` for the caller. Feedback is
+  private to its author and is not a run event. An attach or replay of the run sends the viewer's own
+  current feedback, read from the feedback rows (the latest state after up, down, delete), as the custom
+  event `pydanticos.message_feedback` `{message_id, rating: "up"|"down", comment}` just before the
+  terminal frame, with no SSE id. Another user of the tenant, and an API key, receive none. A message
+  with no feedback sends no event, and `DELETE` of absent feedback is a no-op (204).
 
 ### `MESSAGES_SNAPSHOT` and how `@ag-ui/client` merges it
 

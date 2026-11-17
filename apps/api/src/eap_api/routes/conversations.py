@@ -2,10 +2,11 @@
 
 - POST /agents/{agent_id}/conversations   create (idempotent on an optional client conversation_id)
 - GET  /conversations                     the tenant's conversations, most recently active first,
-                                          paged (?agent_id=&limit=&before=)
+                                          paged (?agent_id=&q=&limit=&before=)
 - GET  /conversations/{id}                one conversation with its runs in turn order
 - PATCH /conversations/{id}               rename (title 1–200 characters)
 - POST /conversations/{id}/runs           start the next turn
+- POST /conversations/{id}/clone          copy the thread into a new conversation (W1.2)
 - DELETE /conversations/{id}              delete the conversation and its derived memory (RM.9)
 
 A turn is an ordinary run (same enqueue, same events, same SSE) whose row also carries
@@ -59,7 +60,7 @@ from eap_api.routes.runs import (
 )
 from eap_api.run_options import RunOptions, resolve_run_options, same_options
 from eap_api.schemas import ConversationCreate, ConversationRename, ErrorDetail, TurnCreate
-from eap_schemas import ModelRef
+from eap_schemas import ModelRef, ModelSettings
 from eap_run_store import (
     ConversationCursor,
     ConversationIdConflict,
@@ -164,12 +165,14 @@ def new_turn_options(
     request_context: dict[str, Any] | None,
     model: ModelRef | None,
     input_text: str,
+    model_settings: ModelSettings | None = None,
 ) -> RunOptions:
     """A new turn's validated options: 409 AGENT_ARCHIVED for an archived agent (a recorded turn
     is replayed, never refused; eap_api.agent_archive), then resolve_run_options (404/409/422/413)."""
     refuse_if_archived(agent)
     return resolve_run_options(
-        db, tenant_id, agent, version=version, request_context=request_context, model=model, input_text=input_text
+        db, tenant_id, agent, version=version, request_context=request_context, model=model, input_text=input_text,
+        model_settings=model_settings,
     )
 
 
@@ -278,6 +281,9 @@ def list_conversations(
     principal: PrincipalDep,
     stores: StoresDep,
     agent_id: uuid.UUID | None = None,
+    q: Annotated[
+        str | None, Query(min_length=1, max_length=200, description="Case-insensitive title substring")
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[
         str | None,
@@ -298,7 +304,9 @@ def list_conversations(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="before is not a valid cursor; pass the previous page's next_before verbatim",
             )
-    conversations = run_store.list_conversations(principal.tenant_id, agent_id, limit=limit, before=cursor)
+    conversations = run_store.list_conversations(
+        principal.tenant_id, agent_id, limit=limit, before=cursor, title_contains=q
+    )
     next_before = (
         ConversationCursor.after(conversations[-1]).encode() if len(conversations) == limit else None
     )
@@ -330,6 +338,44 @@ def rename_conversation(
     except ConversationNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     return JSONResponse(content=_conversation_json(conv))
+
+
+CLONE_SUFFIX = " (copy)"
+TITLE_MAX_LENGTH = 200
+
+
+def clone_title(title: str | None) -> str:
+    """"<title> (copy)", within the 200-character title limit; an untitled thread reads
+    "Untitled conversation (copy)" (the Studio's label for it)."""
+    base = (title or "").strip() or "Untitled conversation"
+    return base[: TITLE_MAX_LENGTH - len(CLONE_SUFFIX)] + CLONE_SUFFIX
+
+
+@router.post(
+    "/conversations/{conversation_id}/clone",
+    status_code=status.HTTP_201_CREATED,
+    responses={409: {"model": ErrorDetail}},
+)
+def clone_conversation(
+    conversation_id: str, principal: PrincipalDep, db: SessionDep, stores: StoresDep
+) -> JSONResponse:
+    """Clone the thread into a NEW conversation on the same agent and resource_id, titled
+    "<title> (copy)". The terminal turns (completed, failed, needs_attention) are copied in order
+    with their messages and events, renumbered from 1; a queued or running turn is not copied, and
+    the source is not changed. The copies carry no usage or cost (the source keeps the record), and
+    derived memory (observations, conversation working memory, recall index) is not copied. 201
+    with the new conversation (the create/get shape, `runs` excluded); 404 for an unknown, another
+    tenant's, malformed or deleted conversation; 409 AGENT_ARCHIVED for an archived agent."""
+    run_store, _ = stores
+    tenant_id = principal.tenant_id
+    conv_id = canonical_uuid_or_404(conversation_id, "Conversation not found")
+    conv = _conversation_or_404(run_store, tenant_id, uuid.UUID(conv_id))
+    refuse_if_archived(lock_agent(db, tenant_id, conv["agent_id"]))
+    try:
+        cloned = run_store.clone_conversation(tenant_id, conv_id, clone_title(conv["title"]))
+    except ConversationNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_conversation_json(cloned))
 
 
 @router.post(
@@ -364,7 +410,10 @@ def start_turn(
         return (
             run["conversation_id"] == conv["id"]
             and run["input"] == body.input
-            and same_options(db, run, version=body.version, request_context=body.request_context, model=body.model)
+            and same_options(
+                db, run, version=body.version, request_context=body.request_context, model=body.model,
+                model_settings=body.model_settings,
+            )
         )
 
     try:
@@ -374,6 +423,7 @@ def start_turn(
             new_options=lambda: new_turn_options(
                 db, tenant_id, agent,
                 version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
+                model_settings=body.model_settings,
             ),
             input_text=body.input,
             same_request=same_request,

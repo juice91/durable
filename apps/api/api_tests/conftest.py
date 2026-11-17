@@ -21,6 +21,25 @@ def allowed_models(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*,openai:gpt-4")
 
 
+@pytest.fixture(autouse=True)
+def no_provider_discovery(monkeypatch: pytest.MonkeyPatch):
+    """Provider keys and URLs never leak into API tests, and no test reaches a real provider: the
+    model discovery cache starts empty and its HTTP call fails unless a test installs a stub."""
+    from eap_api import model_discovery
+
+    for name in ("EAP_LITELLM_BASE_URL", "OPENAI_BASE_URL", "EAP_LITELLM_API_KEY", "LITELLM_API_KEY",
+                 "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    def refuse(url, headers, timeout_s):
+        raise AssertionError("a test reached the network through model discovery")
+
+    monkeypatch.setattr(model_discovery, "http_get", refuse)
+    model_discovery.clear_cache()
+    yield
+    model_discovery.clear_cache()
+
+
 def get_auth_header(tenant: str, user: str) -> dict[str, str]:
     """Generate an Authorization header for testing."""
     return {"Authorization": f"Bearer dev:{tenant}:{user}"}

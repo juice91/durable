@@ -209,7 +209,7 @@ def _harvest_py(path: Path) -> list[dict]:
 def harvest_specs() -> list[dict]:
     seen: dict[str, dict] = {}
     for path in sorted(REPO.rglob("*.py")):
-        if _SKIP_DIRS & set(path.parts) or path == HERE or path.name == "test_ac1_contracts.py":
+        if _SKIP_DIRS & set(path.parts) or path == HERE or path.name in OWN:
             continue
         if not ("test" in path.name or "tests" in " ".join(path.parts)):
             continue
@@ -251,7 +251,8 @@ AgentSpec.__init__ = init
 atexit.register(lambda: open(os.environ["AC1_RECORD"], "w").write(json.dumps(rows)))
 '''
 SUITES = ("packages/shared-schemas/tests", "packages/agent-runtime/runtime_tests")
-OWN = ("test_ac1_contracts.py", "test_ac1_contracts_acceptance.py")
+# test_model_settings.py builds specs with model settings that main (the comparison base) rejects.
+OWN = ("test_ac1_contracts.py", "test_ac1_contracts_acceptance.py", "test_model_settings.py", "test_processors.py")
 
 
 @pytest.fixture(scope="module")

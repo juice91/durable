@@ -84,6 +84,7 @@ from eap_api.streams.native import (
     DurableEvent,
     EndReason,
     Heartbeat,
+    FeedbackItems,
     RunSummary,
     Status,
     StreamItem,
@@ -116,7 +117,12 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 # client as `RUN_FINISHED{outcome: cancelled}` (D17).
 SILENT_EVENT_TYPES = frozenset(
     {"embedding", "memory_updated", "memory_observe_failed", "memory_observe_trimmed", "post_turn_done",
-     "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested"}
+     "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested",
+     # `score` is read by Studio's Scores tab from /runs/{id}/events, never from the AG-UI stream.
+     "score",
+     # `message_feedback` run events are legacy and no longer written: feedback is per user, so the
+     # replay sends the viewer's own rows (FeedbackItems), never the shared run event.
+     "message_feedback"}
 )
 STEP_DECISIONS = {"step_approved": "approved", "step_rejected": "rejected", "step_timed_out": "timed_out"}
 TOOL_DECISIONS = {"tool_approved": "approved", "tool_denied": "denied", "tool_approval_timed_out": "timed_out"}
@@ -778,6 +784,9 @@ class AgUiFormatter:
         if isinstance(item, Delta):
             turn = self._child(item.scope) if item.scope is not None else self._turn
             return self._frames(turn.on_delta(item)) if turn is not None else []
+        if isinstance(item, FeedbackItems):
+            # The viewer's own feedback precedes the terminal frame: no frame id.
+            return self._frames([custom("message_feedback", dict(row)) for row in item.rows])
         if isinstance(item, DurableEvent):
             events = self._on_durable(item)
             return self._frames(events, item.seq if item.scope is None else None)

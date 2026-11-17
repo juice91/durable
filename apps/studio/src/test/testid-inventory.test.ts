@@ -38,6 +38,8 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "kpi-": "KpiCard testId={`kpi-${id}`} (MetricsKpis, the Metrics Overview KPI row), plus its -value and -delta children: one card per KPI id",
   "chart-": "TimeSeriesChart data-testid={`chart-${title}`}: one per chart title",
   "breakdown-row-": "BreakdownTable rows: breakdown-row-<agent|model|provider>",
+  "breakdown-change-": "BreakdownTable p99/change cell per breakdown and key: breakdown-change-<agent|model|provider>-<key> (Task 18)",
+  "phase-": "ProcessorList row per processor phase id: phase-<phase> (Task 11)",
   "workflow-row-": "Workflows list row per workflow id",
   "workflow-step-": "WorkflowGraph node per step id",
   "workflow-node-": "WorkflowRunView graph node per step id",

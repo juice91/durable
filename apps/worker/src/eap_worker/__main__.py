@@ -13,6 +13,8 @@ from eap_observability import shutdown_telemetry
 from eap_worker.app import launch
 # Registers eap.cancel_reconcile and its steps before DBOS.launch() (loops D12 step 4, LP.8).
 from eap_worker import cancel_reconcile
+# Registers eap.schedule_tick (parity round 2, Task 5).
+from eap_worker import schedule_tick
 
 
 def main() -> int:
@@ -27,9 +29,11 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
     # An invalid EAP_CANCEL_RECONCILE_* setting fails here, before DBOS launches or recovers anything.
     reconcile_config = cancel_reconcile.ReconcileConfig.from_env()
+    tick_config = schedule_tick.ScheduleTickConfig.from_env()  # an invalid EAP_SCHEDULE_TICK fails here too
     settings = launch()
     # Every worker applies the same schedule (an upsert by name); one workflow runs per tick.
     cancel_reconcile.apply_cancel_reconcile_schedule(reconcile_config)
+    schedule_tick.apply_schedule_tick(tick_config)
     logging.getLogger("eap_worker").info(
         "eap-worker ready: executor_id=%s app_version=%s schema=%s",
         settings.executor_id,

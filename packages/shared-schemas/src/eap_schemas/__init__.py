@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Tuple
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
 from eap_schemas.approvals import ApprovalPolicy
@@ -24,7 +24,7 @@ from eap_schemas.knowledge import (
     check_knowledge_base_refs,
 )
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid
-from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
+from eap_schemas.limits import MAX_REQUESTS, RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.mcp import McpToolRef, mcp_tool_name
 from eap_schemas.memory import (
     HistoryConfig,
@@ -42,6 +42,7 @@ from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid, OutputSpec
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
     PROCESSOR_DECLARATIONS,
+    PROCESSOR_PHASES,
     ModerationVerdict,
     ProcessorDeclaration,
     ProcessorSpec,
@@ -145,6 +146,18 @@ __all__ = (
 MAX_FALLBACK_MODELS = 3
 
 
+MAX_MODEL_RETRIES = 10
+MODEL_SETTINGS_OMIT_WHEN_NONE = (
+    "top_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+    "max_steps",
+    "max_retries",
+)
+
+
 class ModelSettings(BaseModel):
     """Settings for model inference."""
 
@@ -152,6 +165,31 @@ class ModelSettings(BaseModel):
 
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, gt=0)
+    # Added after specs were first stored: an unset one is left out of every dump (as `mcp_tools` is
+    # on AgentSpec), so a spec without them keeps its exact JSON and canonical_spec_hash.
+    # `temperature` and `max_tokens` stay in the dump as null, as they always were.
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    seed: StrictInt | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
+    # Caps the agent loop (model requests of one run; Pydantic AI `request_limit`) and sets the
+    # agent's tool and output retry budgets (`retries`).
+    max_steps: int | None = Field(default=None, ge=1, le=MAX_REQUESTS)
+    max_retries: int | None = Field(default=None, ge=0, le=MAX_MODEL_RETRIES)
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_new_fields(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            for name in MODEL_SETTINGS_OMIT_WHEN_NONE:
+                if getattr(self, name) is None:
+                    data.pop(name, None)
+        return data
+
+    def set_values(self) -> dict[str, Any]:
+        """The settings that are set, by name."""
+        return {name: getattr(self, name) for name in type(self).model_fields if getattr(self, name) is not None}
 
 
 class AgentSpec(BaseModel):
@@ -173,6 +211,10 @@ class AgentSpec(BaseModel):
     # canonical_spec_hash of every spec stored before they existed stay exactly the same.
     input_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     output_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    # Step phase (tool-call arguments and results) and stream phase (live deltas, and implicitly the
+    # final answer). Same rule: omitted from dumps while empty.
+    step_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
+    stream_processors: Tuple[ProcessorSpec, ...] = Field(default=(), max_length=MAX_PROCESSORS_PER_PHASE)
     context_fields: Tuple[ContextField, ...] = Field(default=(), max_length=MAX_CONTEXT_FIELDS)
     # Knowledge and memory (RAG and memory milestone, RM.2). Same rule: left out of every dump while
     # empty (no knowledge bases; memory None), so every stored spec keeps its JSON and hash. Inside
@@ -197,6 +239,15 @@ class AgentSpec(BaseModel):
                 if not getattr(self, name):
                     data.pop(name, None)
         return data
+
+    @model_validator(mode="after")
+    def check_processor_phases(self):
+        """A processor type runs only in the phases its declaration lists (moderation not in step or stream)."""
+        for phase in PROCESSOR_PHASES:
+            for processor in getattr(self, f"{phase}_processors"):
+                if phase not in PROCESSOR_DECLARATIONS[processor.type].phases:
+                    raise ValueError(f"processor_phase_unsupported: {processor.type} cannot run in the {phase} phase")
+        return self
 
     @model_validator(mode="after")
     def check_context_fields(self):
@@ -345,6 +396,8 @@ _OMIT_WHEN_EMPTY = (
     "mcp_tools",
     "input_processors",
     "output_processors",
+    "step_processors",
+    "stream_processors",
     "context_fields",
     "knowledge_bases",
     "memory",
@@ -491,6 +544,12 @@ RunEventType = Literal[
     "loop_iteration_completed",  # key `loop:{S}:completed`: {step_id, scope, index, ...}
     "loop_iteration_failed",  # key `loop:{S}:failed`: {step_id, scope, index, error_code, error}
     "cancel_requested",  # written by the API (POST /runs/{id}/cancel), key `cancel`: {requested_by}
+    # Reusable scorers (W2.3): written by the worker after a run finished, key `score:{scorer_id}`:
+    # {scorer, scorer_id, score, passed, reason}. Never output text.
+    "score",
+    # Message feedback (W2.4): legacy, no longer written. Feedback is per user, so it lives only in
+    # `message_feedback` rows and is replayed to its own author; a shared run event would leak it.
+    "message_feedback",
 ]
 
 

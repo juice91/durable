@@ -161,7 +161,7 @@ export function configCounts(spec: AgentSpec | null | undefined): ConfigCounts {
   return {
     tools: (spec?.tools.length ?? 0) + (spec?.mcp_tools?.length ?? 0),
     contextFields: sections.context_fields.length,
-    processors: sections.input_processors.length + sections.output_processors.length,
+    processors: sections.input_processors.length + sections.step_processors.length + sections.stream_processors.length + sections.output_processors.length,
   };
 }
 

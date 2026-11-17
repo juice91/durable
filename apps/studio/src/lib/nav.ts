@@ -1,12 +1,16 @@
 import {
   AgentsIcon,
   ApprovalsIcon,
+  DatasetsIcon,
+  ExperimentsIcon,
   KnowledgeIcon,
   LogsIcon,
   McpIcon,
   MetricsIcon,
   ProcessorsIcon,
+  ScorersIcon,
   SettingsIcon,
+  ThreadsIcon,
   ToolsIcon,
   TracesIcon,
   WorkflowsIcon,
@@ -19,7 +23,7 @@ import { routes } from "./routes";
  * shortcuts, the shortcut help dialog and the breadcrumbs all read it.
  *
  * Groups render in `NAV_GROUP_ORDER`; a group with no items is not rendered. Approvals (AC.15),
- * Knowledge (RM.16) and Evaluation (AC.16) are added by their tasks, never as empty slots.
+ * Knowledge (RM.16) and Evaluation (W1.5) are added by their tasks, never as empty slots.
  */
 export type NavGroupId = "approvals" | "primitives" | "evaluation" | "observability" | "settings";
 
@@ -83,10 +87,15 @@ export const navItems: readonly NavItem[] = [
   { id: "processors", label: "Processors", href: routes.processors(), icon: ProcessorsIcon, group: "primitives", gKey: "p", keywords: ["guardrails"] },
   // RM.16
   { id: "knowledge", label: "Knowledge", href: routes.knowledge(), icon: KnowledgeIcon, group: "primitives", gKey: "k", keywords: ["knowledge bases", "rag", "documents", "retrieval"] },
+  // Evaluation (W1.5): evals across every agent of the tenant
+  { id: "datasets", label: "Datasets", href: routes.datasets(), icon: DatasetsIcon, group: "evaluation", gKey: "d", keywords: ["test suites", "eval suites", "cases", "evals"] },
+  { id: "scorers", label: "Scorers", href: routes.scorers(), icon: ScorersIcon, group: "evaluation", gKey: "s", keywords: ["evaluators", "judges", "scores", "metrics"] },
+  { id: "experiments", label: "Experiments", href: routes.experiments(), icon: ExperimentsIcon, group: "evaluation", gKey: "e", keywords: ["eval runs", "runs", "results", "compare"] },
   // Observability
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },
-  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t" },
+  { id: "threads", label: "Threads", href: routes.threads(), icon: ThreadsIcon, group: "observability", gKey: "h", keywords: ["conversations", "chats", "messages", "history"] },
+  { id: "traces", label: "Traces", href: routes.traces(), icon: TracesIcon, group: "observability", gKey: "t", match: [routes.spans()] },
   { id: "logs", label: "Logs", href: routes.logs(), icon: LogsIcon, group: "observability", gKey: "l" },
   // Bottom
   { id: "settings", label: "Settings", href: routes.settings(), icon: SettingsIcon, group: "settings", gKey: "," },

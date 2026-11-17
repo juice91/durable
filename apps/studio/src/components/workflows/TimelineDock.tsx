@@ -1,7 +1,9 @@
 "use client";
 
 import React, { useId } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Download } from "lucide-react";
+import { IconButton } from "@/components/ui/IconButton";
+import { downloadJson } from "@/lib/download";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { NodeState } from "@/lib/workflowRunState";
@@ -26,6 +28,8 @@ const BAR_CLASSES: Record<NodeState, string> = {
 };
 
 export interface TimelineDockProps {
+  /** The run's id, in the names of the downloaded files. */
+  runId: string;
   rows: TimelineRow[];
   open: boolean;
   height: number;
@@ -42,7 +46,7 @@ export interface TimelineDockProps {
  * resizable list of per-step rows (state, duration and a bar placed within the run) taken from the
  * run's events. A row selects its step, like a node.
  */
-export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange, selectedStepId, onSelectStep, onSelectIteration }: TimelineDockProps) {
+export function TimelineDock({ runId, rows, open, height, onOpenChange, onHeightChange, selectedStepId, onSelectStep, onSelectIteration }: TimelineDockProps) {
   const listId = useId();
   const { done, total } = timelineSummary(rows);
   return (
@@ -88,6 +92,7 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
                   data-state={row.state}
                   data-depth={row.depth}
                   {...(it ? { "data-shown": String(it.shown) } : {})}
+                  className="flex items-center"
                 >
                   <button
                     type="button"
@@ -95,7 +100,7 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
                     aria-label={it ? `${row.stepId} iteration ${it.index + 1}, ${NODE_STATE_LABELS[row.state]}${it.shown ? ", shown" : ""}` : undefined}
                     onClick={() => (it ? onSelectIteration?.(it.pagerKey, it.index) : onSelectStep(row.stepId))}
                     className={cn(
-                      "grid w-full min-w-0 grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] items-center gap-3 px-3 py-1.5 text-left outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                      "grid min-w-0 flex-1 grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] items-center gap-3 px-3 py-1.5 text-left outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       // A loop's iterations and body rows are indented under it, as in the step list.
                       TIMELINE_INDENT[Math.min(row.depth, TIMELINE_INDENT.length - 1)],
                       pressed && "bg-fill-selected",
@@ -127,6 +132,26 @@ export function TimelineDock({ rows, open, height, onOpenChange, onHeightChange,
                       {row.durationMs !== null ? formatRunDuration(row.startedAt, row.endedAt) : row.state === "running" || row.state === "waiting" ? "in progress" : "—"}
                     </span>
                   </button>
+                  {it ? null : (
+                    <span className="flex shrink-0 items-center gap-0.5 pr-2">
+                      <IconButton
+                        label="Download input"
+                        size="sm"
+                        tooltip={false}
+                        icon={<Download strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
+                        disabled={row.input === undefined}
+                        onClick={() => downloadJson(`${runId}-${row.stepId}-input.json`, row.input)}
+                      />
+                      <IconButton
+                        label="Download output"
+                        size="sm"
+                        tooltip={false}
+                        icon={<Download strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
+                        disabled={!row.hasOutput}
+                        onClick={() => downloadJson(`${runId}-${row.stepId}-output.json`, row.output)}
+                      />
+                    </span>
+                  )}
                 </li>
                 );
               })}

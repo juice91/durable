@@ -116,11 +116,20 @@ def output_type_for(spec: AgentSpec) -> Any | None:
 
 
 def retries_for(spec: AgentSpec) -> dict[str, int] | None:
-    """The per-run `retries` for a structured spec: only the output budget (tool retries keep the
-    agent's default). None without `spec.output`."""
-    if spec.output is None:
+    """The per-run `retries` budgets, or None when the spec sets neither `output` nor
+    `model_settings.max_retries` (the agent's defaults apply). `max_retries` is the tool and output
+    retry budget; a structured spec's own output budget (`output.max_retries`) wins for output."""
+    max_retries = spec.model_settings.max_retries
+    if spec.output is None and max_retries is None:
         return None
-    return {"output": spec.output.effective_max_retries()}
+    retries: dict[str, int] = {}
+    if max_retries is not None:
+        retries["tools"] = max_retries
+    if spec.output is not None:
+        retries["output"] = spec.output.effective_max_retries()
+    elif max_retries is not None:
+        retries["output"] = max_retries
+    return retries
 
 
 # --------------------------------------------------------------------------- schema errors

@@ -6,7 +6,9 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import type { Run } from "@/lib/runs";
 import { listWorkflowRuns } from "@/lib/workflows";
+import { listSchedules } from "@/lib/schedules";
 import { isTerminal } from "@/lib/workflowRunState";
+import { RerunButton } from "./RerunButton";
 import { routes } from "@/lib/routes";
 import { durationBetween, formatDuration } from "@/lib/format";
 
@@ -28,10 +30,12 @@ export interface WorkflowRunHistoryProps {
   footer?: React.ReactNode;
   /** `card`: a bordered card (the Runs tab); `panel`: borderless, inside the floating panel. */
   variant?: "card" | "panel";
+  /** Adds a "Run again" action per terminal run; called with the new run's id. */
+  onRerunStarted?: (runId: string) => void;
 }
 
 /** The runs of one workflow, newest first, each linking to its live execution view. */
-export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = "Run history", footer, variant = "card" }: WorkflowRunHistoryProps) {
+export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = "Run history", footer, variant = "card", onRerunStarted }: WorkflowRunHistoryProps) {
   // Runs are stored with the workflow they were loaded for, so a page reused for another
   // workflow (/workflows/A -> /workflows/B) never lists A's runs under B.
   const [loaded, setLoaded] = useState<{ workflowId: string; runs: Run[] } | null>(null);
@@ -58,6 +62,22 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
       if (!stale()) setLoading(false);
     }
   }, [workflowId, limit]);
+
+  // Schedule names for the "Scheduled: <name>" tag; only fetched when a loaded run came from a schedule.
+  // One request for the first 200 schedules (no paging loop): a schedule that was deleted or sits past
+  // that cap is not in the map, and its runs show plain "Scheduled".
+  const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
+  const hasScheduled = (loadedRuns ?? []).some((r) => r.schedule_id);
+  useEffect(() => {
+    if (!hasScheduled) return;
+    const controller = new AbortController();
+    void listSchedules({ workflowId, limit: 200, signal: controller.signal })
+      .then((page) => {
+        if (!controller.signal.aborted) setScheduleNames(Object.fromEntries(page.items.map((s) => [s.id, s.name])));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [workflowId, hasScheduled]);
 
   useEffect(() => {
     void load();
@@ -91,7 +111,8 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                 <th scope="col" className="py-2 pr-3 font-medium">Status</th>
                 {panel ? null : <th scope="col" className="py-2 pr-3 font-medium">Version</th>}
                 <th scope="col" className="py-2 pr-3 font-medium">Started</th>
-                <th scope="col" className="py-2 font-medium">Duration</th>
+                <th scope="col" className="py-2 pr-3 font-medium">Duration</th>
+                {onRerunStarted ? <th scope="col" className="py-2 font-medium"><span className="sr-only">Actions</span></th> : null}
               </tr>
             </thead>
             <tbody>
@@ -99,6 +120,11 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                 <tr key={run.run_id} data-testid={`workflow-run-row-${run.run_id}`} data-status={run.display_status} className="border-t border-border">
                   <td className="py-2 pr-3">
                     <Link href={routes.workflowRun(workflowId, run.run_id)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{run.run_id.slice(0, 8)}</Link>
+                    {run.schedule_id ? (
+                      <span data-testid={`workflow-run-scheduled-${run.run_id}`} className="ml-2 text-caption text-muted-foreground">
+                        {scheduleNames[run.schedule_id] ? `Scheduled: ${scheduleNames[run.schedule_id]}` : "Scheduled"}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="py-2 pr-3"><StatusPill status={run.display_status} /></td>
                   {panel ? null : <td className="py-2 pr-3">{run.workflow_version != null ? `v${run.workflow_version}` : "—"}</td>}
@@ -106,6 +132,11 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
                   <td className="whitespace-nowrap py-2 tabular-nums text-muted-foreground">
                     {isTerminal(run.display_status) ? formatRunDuration(run.created_at, run.updated_at) : "in progress"}
                   </td>
+                  {onRerunStarted ? (
+                    <td className="py-2">
+                      {isTerminal(run.display_status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>

@@ -78,20 +78,20 @@ def test_zero_width_and_empty_matching_patterns_are_refused(pattern):
     assert re2_pattern_error(pattern) is not None
     with pytest.raises(Re2PatternError):
         compile_re2(pattern)
-    assert processor_errors([spec("regex_blocklist", patterns=[pattern])], [])
+    assert processor_errors([spec("regex_blocklist", patterns=[pattern])], [], [], [])
 
 
 @pytest.mark.parametrize("pattern", [r"\bfoo\b", r"^foo$", r"(?i)secret\d+", r"foo|bar", r"[a-z]+@[a-z]+", r"\p{Greek}+",
                                      "x" * 200])
 def test_ordinary_patterns_compile_and_validate_clean(pattern):
     assert re2_pattern_error(pattern) is None
-    assert processor_errors([spec("regex_blocklist", patterns=[pattern])], [spec("regex_blocklist", patterns=[pattern])]) == []
+    assert processor_errors([spec("regex_blocklist", patterns=[pattern])], [], [], [spec("regex_blocklist", patterns=[pattern])]) == []
 
 
 def test_errors_name_the_phase_index_and_pattern_position():
     good = spec("regex_blocklist", patterns=["ok"])
     bad = spec("regex_blocklist", patterns=["ok", "fine", r"(?=x)"])
-    errors = processor_errors([good, bad], [bad, good, spec("regex_blocklist", patterns=[r"\b"])])
+    errors = processor_errors([good, bad], [], [], [bad, good, spec("regex_blocklist", patterns=[r"\b"])])
     assert [e.split(": ")[0] for e in errors] == [
         "input_processors[1].config.patterns[2]",
         "output_processors[0].config.patterns[2]",
@@ -263,7 +263,7 @@ def test_patterns_over_the_program_size_cap_are_refused_with_the_size(pattern):
     assert re.search(r"program size (\d+), at most 1000\)", reason) and int(re.search(r"size (\d+)", reason)[1]) > 1000
     with pytest.raises(Re2PatternError):
         compile_re2(pattern)
-    (error,) = processor_errors([spec("regex_blocklist", patterns=["ok", pattern])], [])
+    (error,) = processor_errors([spec("regex_blocklist", patterns=["ok", pattern])], [], [], [])
     assert error.startswith("input_processors[0].config.patterns[1]: is too complex (RE2 program size ")
 
 

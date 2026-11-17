@@ -5,6 +5,7 @@
  */
 import { agentRoutes } from "./agents";
 import { approvalRoutes } from "./approvals";
+import { evaluationRoutes } from "./evaluation";
 import { knowledgeRoutes } from "./knowledge";
 import { mcpRoutes } from "./mcp";
 import { observabilityRoutes } from "./observability";
@@ -23,6 +24,7 @@ export const ROUTE_AREAS = {
   mcp: mcpRoutes,
   processors: processorRoutes,
   knowledge: knowledgeRoutes,
+  evaluation: evaluationRoutes,
   observability: observabilityRoutes,
   settings: settingsRoutes,
 } as const;
@@ -35,6 +37,7 @@ export const routes = {
   ...mcpRoutes,
   ...processorRoutes,
   ...knowledgeRoutes,
+  ...evaluationRoutes,
   ...observabilityRoutes,
   ...settingsRoutes,
 } as const;

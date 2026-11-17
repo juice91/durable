@@ -22,6 +22,9 @@ import { focusRing } from "@/components/ui/Button";
 import { TurnFooter, type TurnView } from "@/components/chat/TurnFooter";
 import { MarkdownText, MessageRunsContext, ToolCallCard, ToolCallInfoContext, ToolDecisionsContext, useMessageRunId, useTurnSources, type ToolDecisionEntry } from "@/components/chat/messageParts";
 import { StructuredOutputView } from "@/components/chat/StructuredOutput";
+import { MessageAttachmentList } from "@/components/chat/Attachments";
+import { createAttachmentAdapter } from "@/components/chat/attachmentAdapter";
+import { FeedbackScopeContext, MessageFeedback, isRatableMessage, type FeedbackScope } from "@/components/chat/MessageFeedback";
 import { AgUiApprovals, type AgUiApprovalLookups } from "@/components/chat/AgUiApprovals";
 import { messageRunMap, type RunMaps, type StudioChatAgent } from "@/components/chat/agUiChat";
 import { messageRunId, type ToolCallInfo } from "@/components/chat/toolCalls";
@@ -122,6 +125,7 @@ const NO_ACTIONS: ChatRunActions = { refreshRun: async () => undefined };
 
 function ChatMessage() {
   const messageId = useAuiState((s) => s.message.id);
+  const settled = useAuiState((s) => s.message.status?.type !== "running");
   const turn = useContext(TurnViewsContext).get(messageId);
   const turnStart = useContext(TurnStartsContext).has(messageId);
   const allRetries = useContext(OutputRetriesContext);
@@ -131,6 +135,7 @@ function ChatMessage() {
     <MessagePrimitive.Root className={cn("flex w-full min-w-0 flex-col", turnStart ? "mt-8" : "mt-3 first:mt-0")} data-turn-start={turnStart || undefined}>
       <MessagePrimitive.If user>
         <div data-testid="chat-message-user" className="ml-auto max-w-[85%] min-w-0 break-words rounded-lg bg-fill-selected px-3 py-2 text-body text-foreground">
+          <MessageAttachmentList />
           <MessagePrimitive.Parts components={{ tools: { Fallback: ToolCallCard } }} />
         </div>
       </MessagePrimitive.If>
@@ -138,6 +143,7 @@ function ChatMessage() {
         <div data-testid="chat-message-assistant" className="mr-auto w-full min-w-0 text-foreground">
           {retries?.map((retry, index) => <OutputRetryPart key={index} {...({ data: retry } as React.ComponentProps<typeof OutputRetryPart>)} />)}
           <MessagePrimitive.Parts components={{ Text: ChatText, tools: { Fallback: ToolCallCard }, data: DATA_PARTS }} />
+          {settled && isRatableMessage(messageId) ? <MessageFeedback messageId={messageId} /> : null}
         </div>
       </MessagePrimitive.If>
       {turn ? <TurnFooter turn={turn} /> : null}
@@ -322,9 +328,12 @@ export interface AgUiChatPaneProps extends ChatPaneCommonProps {
   decisions?: ReadonlyMap<string, ToolDecisionEntry>;
   /** Native run id → its output retries (the AC.14 marker). */
   retries?: ReadonlyMap<string, readonly Record<string, unknown>[]>;
+  /** The conversation and the caller's thumbs on it (W2.4); without a conversation no thumbs show. */
+  feedback?: FeedbackScope;
 }
 
 const NO_DECISIONS: ReadonlyMap<string, ToolDecisionEntry> = new Map();
+const NO_FEEDBACK: FeedbackScope = { conversationId: null, initial: {} };
 const NO_RETRIES: ReadonlyMap<string, readonly Record<string, unknown>[]> = new Map();
 
 /** Status and interrupt counts reported from inside the runtime provider. */
@@ -367,9 +376,12 @@ export function AgUiChatPane({
   approvals,
   decisions = NO_DECISIONS,
   retries = NO_RETRIES,
+  feedback = NO_FEEDBACK,
 }: AgUiChatPaneProps) {
   const actions = useRunActions(onRefreshRun);
-  const adapters = React.useMemo(() => ({ history }), [history]);
+  // W2.4: files attached in the composer are uploaded first and sent as AG-UI media parts.
+  const attachments = React.useMemo(() => createAttachmentAdapter(), []);
+  const adapters = React.useMemo(() => ({ history, attachments }), [history, attachments]);
   const errorRef = React.useRef(onError);
   errorRef.current = onError;
   const reportError = React.useCallback((error: Error) => errorRef.current?.(error), []);
@@ -419,6 +431,7 @@ export function AgUiChatPane({
       <StructuredResultsContext.Provider value={structured}>
       <ToolDecisionsContext.Provider value={decisions}>
       <OutputRetriesContext.Provider value={retries}>
+      <FeedbackScopeContext.Provider value={feedback}>
         <AgUiBody
           runMaps={runMaps}
           turnViews={turnViews}
@@ -432,6 +445,7 @@ export function AgUiChatPane({
           onInterrupts={setInterrupts}
           onRefreshRun={onRefreshRun}
         />
+      </FeedbackScopeContext.Provider>
       </OutputRetriesContext.Provider>
       </ToolDecisionsContext.Provider>
       </StructuredResultsContext.Provider>

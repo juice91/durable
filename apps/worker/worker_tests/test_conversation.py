@@ -29,15 +29,20 @@ def start_turn(client, store, tenant: str, conversation_id: str, input_text: str
     return run_id
 
 
-def step_names(schema: str, run_id) -> list[str]:
+def step_names(schema: str, run_id, *, with_spans: bool = False) -> list[str]:
+    """The run's DBOS step names in order. `eap.record_spans`, the last step of every top-level agent
+    run (it can still be pending when the run's status turns terminal), is left out unless
+    `with_spans`: the layout tests pin the steps a feature adds, and only the exact-sequence test of
+    test_processors_runtime pins this one."""
     with psycopg.connect(DBOS_DB_URL, connect_timeout=5) as conn:
-        return [
+        names = [
             r[0]
             for r in conn.execute(
                 f'SELECT function_name FROM "{schema}".operation_outputs WHERE workflow_uuid = %s ORDER BY function_id',
                 (str(run_id),),
             )
         ]
+    return names if with_spans else [n for n in names if n != "eap.record_spans"]
 
 
 def test_turn_three_sees_turns_one_and_two_as_message_history(worker, client, worker_settings, tenant):

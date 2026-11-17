@@ -1,9 +1,11 @@
 "use client";
 
+import { EXTRA_SETTING_KEYS, MODEL_SETTING_FIELDS } from "@/lib/modelSettings";
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import type { Agent, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { PROCESSOR_PHASES, PROCESSOR_PHASE_LABELS } from "@/lib/processors";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
 import { Button, focusRing } from "@/components/ui/Button";
@@ -13,6 +15,7 @@ import type { RunStatus } from "@/lib/runs";
 import { configCounts, effectiveConfig, instructionSegments } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
 import { listKnowledgeBases } from "@/lib/knowledge";
+import { listAgentScorers, type AttachedScorer } from "@/lib/scorers";
 import { knowledgeBasesOf, knowledgeRefSummary, memorySummaryLines } from "@/components/agents/knowledgeMemory";
 import {
   approvalsOf,
@@ -95,6 +98,7 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
   const knowledgeRefs = knowledgeBasesOf(spec);
   const memoryLines = memorySummaryLines(spec);
   const kbNames = useKnowledgeBaseNames(knowledgeRefs.length > 0);
+  const scorers = useAgentScorers(agent.id);
   // AC.13: fallback models and limits under Model, approval marks on tools, and the Output section.
   const fallbacks = fallbackModelsOf(spec);
   const limits = limitsOf(spec);
@@ -144,6 +148,14 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
               <p className={cn("text-caption", muted)}>Temperature {spec.model_settings.temperature}</p>
             ) : null}
             {spec.model_settings?.max_tokens ? <p className={cn("text-caption", muted)}>Max tokens {spec.model_settings.max_tokens}</p> : null}
+            {EXTRA_SETTING_KEYS.map((key) => {
+              const value = spec.model_settings?.[key];
+              return typeof value === "number" ? (
+                <p key={key} className={cn("text-caption", muted)}>
+                  {MODEL_SETTING_FIELDS.find((field) => field.key === key)?.label} {value}
+                </p>
+              ) : null;
+            })}
             {fallbacks.length > 0 ? (
               <div className="mt-1.5 text-caption" data-testid="config-fallback-models">
                 <p className={muted}>Fallback models</p>
@@ -250,16 +262,34 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
               <p className={muted}>None</p>
             ) : (
               <dl className="space-y-1 text-caption">
-                {(["input", "output"] as const).map((phase) => {
-                  const list = phase === "input" ? sections.input_processors : sections.output_processors;
+                {PROCESSOR_PHASES.map((phase) => {
+                  const list = sections[`${phase}_processors`];
                   return (
                     <div key={phase}>
-                      <dt className={muted}>{phase === "input" ? "Input" : "Output"}</dt>
+                      <dt className={muted}>{PROCESSOR_PHASE_LABELS[phase]}</dt>
                       <dd className="font-mono">{list.length === 0 ? <span className={muted}>None</span> : list.map((p) => p.type).join(", ")}</dd>
                     </div>
                   );
                 })}
               </dl>
+            )}
+          </Section>
+
+          <Section id="scorers" title="Scorers" count={scorers.items?.length} editHref={routes.agentEditor(agent.id)}>
+            {scorers.error ? (
+              <p className={muted}>Could not load the scorers</p>
+            ) : scorers.items === null ? (
+              <p className={muted}>Loading…</p>
+            ) : scorers.items.length === 0 ? (
+              <p className={muted}>None</p>
+            ) : (
+              <ul className="space-y-0.5 text-caption" data-testid="config-scorers">
+                {scorers.items.map((scorer) => (
+                  <li key={scorer.id} className="break-words">
+                    {scorer.name} · {Math.round(scorer.sampling_rate * 100)}%
+                  </li>
+                ))}
+              </ul>
             )}
           </Section>
 
@@ -358,6 +388,25 @@ function ApprovalMark() {
 /** The first 8 characters of an id ("1a2b3c4d…"), for a row that has no name to show. */
 function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** The agent's attached scorers (a failed load is shown as such, never thrown). */
+function useAgentScorers(agentId: string): { items: AttachedScorer[] | null; error: boolean } {
+  const [state, setState] = useState<{ items: AttachedScorer[] | null; error: boolean }>({ items: null, error: false });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ items: null, error: false });
+    Promise.resolve()
+      .then(() => listAgentScorers(agentId, controller.signal))
+      .then((items) => {
+        if (!controller.signal.aborted) setState({ items: Array.isArray(items) ? items : [], error: false });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setState({ items: null, error: true });
+      });
+    return () => controller.abort();
+  }, [agentId]);
+  return state;
 }
 
 /** Knowledge base names by id, loaded only when the spec attaches any (null until loaded or on failure: ids show). */

@@ -93,8 +93,10 @@ describe("effectiveConfig: what the Config panel shows", () => {
       context_fields: [{ name: "plan", type: "string" }],
       input_processors: [{ type: "max_length", config: {} }],
       output_processors: [{ type: "regex_blocklist", config: {} }],
+      step_processors: [{ type: "pii_redact", config: {} }],
+      stream_processors: [{ type: "pii_redact", config: {} }],
     });
-    expect(configCounts(full)).toEqual({ tools: 3, contextFields: 1, processors: 2 });
+    expect(configCounts(full)).toEqual({ tools: 3, contextFields: 1, processors: 4 });
     expect(configCounts(null)).toEqual({ tools: 0, contextFields: 0, processors: 0 });
   });
 });

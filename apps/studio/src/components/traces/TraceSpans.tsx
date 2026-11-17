@@ -2,7 +2,7 @@
 
 import React, { useCallback, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
-import { flattenSpans, traceWindow, type NameMaps, type Trace } from "@/lib/traces";
+import { filterSpanRows, flattenSpans, traceWindow, type NameMaps, type Trace } from "@/lib/traces";
 import { SpanDetail } from "./SpanDetail";
 import { TraceTotals } from "./TraceTotals";
 import { TraceWaterfall, type SpanTreeMode } from "./TraceWaterfall";
@@ -37,7 +37,13 @@ interface TraceSpansProps {
 /** A trace's totals, truncation notices, span waterfall (or tree) and the selected span's detail. */
 export function TraceSpans({ trace, names, selectedId, onSelect, error = null, mode = "timeline", detailBeside = false }: TraceSpansProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const rows = useMemo(() => flattenSpans(trace.spans, collapsed), [trace, collapsed]);
+  const [query, setQuery] = useState("");
+  const searching = query.trim() !== "";
+  // A search looks through collapsed branches too; matches keep their ancestors.
+  const rows = useMemo(
+    () => (searching ? filterSpanRows(flattenSpans(trace.spans), query, names) : flattenSpans(trace.spans, collapsed)),
+    [trace, collapsed, query, searching, names],
+  );
   const window = useMemo(() => traceWindow(trace.spans), [trace]);
   const selected = trace.spans.find((s) => s.id === selectedId) ?? null;
   const notices = truncationNotices(trace);
@@ -72,7 +78,16 @@ export function TraceSpans({ trace, names, selectedId, onSelect, error = null, m
         data-detail-beside={String(detailBeside)}
         className={cn("grid min-w-0 gap-4", detailBeside ? SPAN_GRID_BESIDE_CLASS : "grid-cols-1")}
       >
-        <div className="min-w-0">
+        <div className="flex min-w-0 flex-col gap-2">
+          <input
+            type="search"
+            aria-label="Search spans"
+            placeholder="Search spans by name or kind"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="h-8 w-full rounded-md border border-input bg-surface px-2 text-label text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-72"
+          />
+          {searching && rows.length === 0 ? <p className="py-4 text-sm text-muted-foreground">No spans match this search.</p> : (
           <TraceWaterfall
             rows={rows}
             window={window}
@@ -83,9 +98,10 @@ export function TraceSpans({ trace, names, selectedId, onSelect, error = null, m
             names={names}
             mode={mode}
           />
+          )}
         </div>
         <div className="min-w-0">
-          <SpanDetail span={selected} names={names} />
+          <SpanDetail span={selected} names={names} runId={trace.run.run_id} />
         </div>
       </div>
     </>

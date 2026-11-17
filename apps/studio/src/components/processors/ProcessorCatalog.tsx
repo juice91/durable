@@ -5,6 +5,8 @@ import React from "react";
 import { Badge } from "@/components/ui/Badge";
 import {
   describeSchemaType,
+  PROCESSOR_PHASE_LABELS,
+  PROCESSOR_PHASES,
   type ProcessorCatalog,
   type ProcessorDeclaration,
   type ProcessorUsage,
@@ -13,7 +15,7 @@ import { routes } from "@/lib/routes";
 
 /** The scope note every processor page carries (P0.21): what processors do not see. */
 export const PROCESSOR_SCOPE_NOTE =
-  "Processors check the user's input and the model's output. Tool results and request context values are not processed; moderation checks only the final answer.";
+  "Input and output processors check the user's input and the model's output; step processors check tool calls and their results; stream processors filter the answer as it streams. Request context values are not processed; moderation checks only the final answer.";
 
 /** Agents that use one processor type: latest published version (or draft only), and phases. */
 export function ProcessorUsageList({ usage, loading, error }: { usage: ProcessorUsage[] | undefined; loading: boolean; error: string | null }) {
@@ -41,16 +43,16 @@ export function ProcessorUsageList({ usage, loading, error }: { usage: Processor
   );
 }
 
-/** Input and output marks: a badge per supported phase, a muted dash for the other. */
+/** One mark per phase (Input, Step, Stream, Output): a badge per supported phase, a muted struck-through one for the others. */
 export function PhaseMarks({ phases }: { phases: ProcessorDeclaration["phases"] }) {
   return (
     <span className="inline-flex gap-1">
       <span className="sr-only">{phases.length > 0 ? `Phases: ${phases.join(", ")}` : "No phases"}</span>
-      {(["input", "output"] as const).map((phase) =>
+      {PROCESSOR_PHASES.map((phase) =>
         phases.includes(phase) ? (
-          <Badge key={phase} variant="outline" aria-hidden="true">{phase === "input" ? "Input" : "Output"}</Badge>
+          <Badge key={phase} variant="outline" aria-hidden="true">{PROCESSOR_PHASE_LABELS[phase]}</Badge>
         ) : (
-          <Badge key={phase} variant="neutral" aria-hidden="true" className="opacity-50 line-through">{phase === "input" ? "Input" : "Output"}</Badge>
+          <Badge key={phase} variant="neutral" aria-hidden="true" className="opacity-50 line-through">{PROCESSOR_PHASE_LABELS[phase]}</Badge>
         ),
       )}
     </span>

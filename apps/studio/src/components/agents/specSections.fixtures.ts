@@ -10,6 +10,8 @@ export const processorCatalogFixture: ProcessorCatalog = {
       "description": "Detects email addresses, phone numbers, credit card numbers (Luhn-checked), IBANs, IPv4 addresses and US social security numbers; redacts them or blocks the text.",
       "phases": [
         "input",
+        "step",
+        "stream",
         "output"
       ],
       "actions": [
@@ -63,6 +65,8 @@ export const processorCatalogFixture: ProcessorCatalog = {
       "description": "Blocks text matching any of up to 20 RE2 patterns (linear time), or redacts the matches.",
       "phases": [
         "input",
+        "step",
+        "stream",
         "output"
       ],
       "actions": [
@@ -106,6 +110,8 @@ export const processorCatalogFixture: ProcessorCatalog = {
       "description": "Blocks or truncates text longer than a number of characters.",
       "phases": [
         "input",
+        "step",
+        "stream",
         "output"
       ],
       "actions": [

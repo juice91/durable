@@ -123,7 +123,9 @@ class EvalSuiteModel(Base):
 
     id: Mapped[str] = mapped_column("id", PG_UUID(as_uuid=False), primary_key=True)
     tenant_id: Mapped[str] = mapped_column("tenant_id", String, nullable=False)
-    agent_id: Mapped[str] = mapped_column("agent_id", String, nullable=False)
+    # Exactly one of agent_id and workflow_id (ck_eval_suites_one_target, 0022_parity_round_2).
+    agent_id: Mapped[str | None] = mapped_column("agent_id", String, nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column("workflow_id", String, nullable=True)
     name: Mapped[str] = mapped_column("name", String, nullable=False)
     description: Mapped[str | None] = mapped_column("description", Text, nullable=True)
     evaluators: Mapped[list] = mapped_column(
@@ -140,6 +142,8 @@ class EvalSuiteModel(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_eval_suites_tenant_id_id"),
         UniqueConstraint("tenant_id", "agent_id", "name", name="uq_eval_suites_tenant_agent_name"),
+        UniqueConstraint("tenant_id", "workflow_id", "name", name="uq_eval_suites_tenant_workflow_name"),
+        CheckConstraint("(agent_id IS NULL) <> (workflow_id IS NULL)", name="ck_eval_suites_one_target"),
         CheckConstraint(SUITE_EVALUATORS_CHECK, name="ck_eval_suites_evaluators"),
     )
 
@@ -259,15 +263,17 @@ class EvalRunNotFound(LookupError):
 
 
 class EvalSuiteNameConflict(ValueError):
-    """The agent already has a suite with this name (archived suites keep theirs)."""
+    """The target (an agent or a workflow) already has a suite with this name (archived suites
+    keep theirs). `agent_id` is the target's id whichever its kind (`kind`)."""
 
-    def __init__(self, agent_id: str, name: str):
+    def __init__(self, agent_id: str, name: str, kind: str = "agent"):
         self.agent_id = agent_id
         self.name = name
+        self.kind = kind
         super().__init__(agent_id, name)
 
     def __str__(self) -> str:
-        return f"A test suite named {self.name!r} already exists for this agent"
+        return f"A test suite named {self.name!r} already exists for this {self.kind}"
 
 
 class EvalCaseNameConflict(ValueError):
@@ -312,7 +318,7 @@ class EvalSuiteArchived(ValueError):
 class EvalSuiteRecord:
     id: str
     tenant_id: str
-    agent_id: str
+    agent_id: str | None  # exactly one of agent_id and workflow_id is set
     name: str
     description: str | None
     evaluators: tuple[Any, ...]  # eap_schemas.evals evaluator models
@@ -320,10 +326,19 @@ class EvalSuiteRecord:
     updated_at: datetime
     archived_at: datetime | None
     case_count: int
+    workflow_id: str | None = None
 
     @property
     def archived(self) -> bool:
         return self.archived_at is not None
+
+    @property
+    def target_kind(self) -> str:
+        return "workflow" if self.workflow_id is not None else "agent"
+
+    @property
+    def target_id(self) -> str:
+        return str(self.workflow_id if self.workflow_id is not None else self.agent_id)
 
 
 @dataclass(frozen=True)
@@ -488,6 +503,9 @@ def _check_names(suite_evaluators: Sequence[Any], case_evaluators: Sequence[Any]
         seen.add(evaluator.name)
 
 
+NAME_CONFLICT_CONSTRAINTS = ("uq_eval_suites_tenant_agent_name", "uq_eval_suites_tenant_workflow_name")
+
+
 def _constraint(exc: IntegrityError) -> str | None:
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     return getattr(diag, "constraint_name", None)
@@ -498,6 +516,7 @@ def _suite_record(row: EvalSuiteModel, case_count: int) -> EvalSuiteRecord:
         id=str(row.id),
         tenant_id=row.tenant_id,
         agent_id=row.agent_id,
+        workflow_id=row.workflow_id,
         name=row.name,
         description=row.description,
         evaluators=_evaluators(row.evaluators, "evaluators"),
@@ -706,15 +725,46 @@ class EvalStore:
         """Create a suite for `agent_id` (the caller has checked the agent is the tenant's).
         Raises EvalSuiteInvalid (bad name, description or evaluators, at most 10) or
         EvalSuiteNameConflict."""
+        return self._create_suite(
+            tenant_id, ("agent", str(agent_id)), name, description, evaluators, suite_id
+        )
+
+    def create_workflow_suite(
+        self,
+        tenant_id: str,
+        workflow_id: UUID | str,
+        name: str,
+        *,
+        description: str | None = None,
+        evaluators: Sequence[Any] = (),
+        suite_id: UUID | str | None = None,
+    ) -> EvalSuiteRecord:
+        """As `create_suite`, for a suite that targets `workflow_id` (the caller has checked the
+        workflow is the tenant's)."""
+        return self._create_suite(
+            tenant_id, ("workflow", str(workflow_id)), name, description, evaluators, suite_id
+        )
+
+    def _create_suite(
+        self,
+        tenant_id: str,
+        target: tuple[str, str],
+        name: str,
+        description: str | None,
+        evaluators: Sequence[Any],
+        suite_id: UUID | str | None,
+    ) -> EvalSuiteRecord:
         _require_tenant(tenant_id)
         name = _validate_suite_name(name)
         description = _validate_description(description)
         specs = _suite_evaluators(evaluators)
+        kind, target_id = target
         with self.Session() as session:
             row = EvalSuiteModel(
                 id=str(suite_id or uuid4()),
                 tenant_id=tenant_id,
-                agent_id=str(agent_id),
+                agent_id=target_id if kind == "agent" else None,
+                workflow_id=target_id if kind == "workflow" else None,
                 name=name,
                 description=description,
                 evaluators=_dump_evaluators(specs),
@@ -724,23 +774,39 @@ class EvalStore:
                 session.flush()
             except IntegrityError as exc:
                 session.rollback()
-                if _constraint(exc) == "uq_eval_suites_tenant_agent_name":
-                    raise EvalSuiteNameConflict(str(agent_id), name) from None
+                if _constraint(exc) in NAME_CONFLICT_CONSTRAINTS:
+                    raise EvalSuiteNameConflict(target_id, name, kind) from None
                 raise
             session.commit()
             session.refresh(row)
             return _suite_record(row, 0)
 
-    def get_suite(self, tenant_id: str, suite_id: UUID | str, *, agent_id: UUID | str | None = None) -> EvalSuiteRecord:
-        """The suite, or EvalSuiteNotFound (unknown, another tenant's, or another agent's)."""
+    def get_suite(
+        self,
+        tenant_id: str,
+        suite_id: UUID | str,
+        *,
+        agent_id: UUID | str | None = None,
+        workflow_id: UUID | str | None = None,
+    ) -> EvalSuiteRecord:
+        """The suite, or EvalSuiteNotFound (unknown, another tenant's, or another target's)."""
         with self.Session() as session:
-            row = self._suite(session, tenant_id, suite_id, agent_id)
+            row = self._suite(session, tenant_id, suite_id, agent_id, workflow_id=workflow_id)
             return _suite_record(row, self._case_count(session, tenant_id, row.id))
 
     def list_suites(
         self, tenant_id: str, agent_id: UUID | str, *, include_archived: bool = False
     ) -> list[EvalSuiteRecord]:
         """The agent's suites by name, with their case counts."""
+        return self._list_suites(tenant_id, EvalSuiteModel.agent_id == str(agent_id), include_archived)
+
+    def list_workflow_suites(
+        self, tenant_id: str, workflow_id: UUID | str, *, include_archived: bool = False
+    ) -> list[EvalSuiteRecord]:
+        """The workflow's suites by name, with their case counts."""
+        return self._list_suites(tenant_id, EvalSuiteModel.workflow_id == str(workflow_id), include_archived)
+
+    def _list_suites(self, tenant_id: str, target_filter, include_archived: bool) -> list[EvalSuiteRecord]:
         counts = (
             select(EvalCaseModel.suite_id, func.count().label("n"))
             .where(EvalCaseModel.tenant_id == tenant_id)
@@ -750,7 +816,7 @@ class EvalStore:
         stmt = (
             select(EvalSuiteModel, func.coalesce(counts.c.n, 0))
             .outerjoin(counts, counts.c.suite_id == EvalSuiteModel.id)
-            .where(EvalSuiteModel.tenant_id == tenant_id, EvalSuiteModel.agent_id == str(agent_id))
+            .where(EvalSuiteModel.tenant_id == tenant_id, target_filter)
             .order_by(EvalSuiteModel.name, EvalSuiteModel.id)
         )
         if not include_archived:
@@ -803,8 +869,12 @@ class EvalStore:
                     session.flush()
                 except IntegrityError as exc:
                     session.rollback()
-                    if _constraint(exc) == "uq_eval_suites_tenant_agent_name":
-                        raise EvalSuiteNameConflict(row.agent_id, values["name"]) from None
+                    if _constraint(exc) in NAME_CONFLICT_CONSTRAINTS:
+                        raise EvalSuiteNameConflict(
+                            row.workflow_id if row.workflow_id is not None else row.agent_id,
+                            values["name"],
+                            "workflow" if row.workflow_id is not None else "agent",
+                        ) from None
                     raise
             session.commit()
         return self.get_suite(tenant_id, sid)
@@ -943,10 +1013,12 @@ class EvalStore:
         *,
         evaluators: Sequence[Any] = _UNSET,
         agent_id: UUID | str | None = None,
+        keep_case_evaluators: bool = False,
     ) -> ImportResult:
         """Import: upsert `cases` by name in ONE transaction (all or nothing). An existing case keeps
         its id and position; new cases are appended in the given order. `evaluators`, when given,
-        replaces the suite's. Raises EvalSuiteInvalid (a bad case, duplicate names, name clashes),
+        replaces the suite's. `keep_case_evaluators`: an existing case keeps its own evaluators (for
+        a file format that has no place for them, CSV). Raises EvalSuiteInvalid (a bad case, duplicate names, name clashes),
         EvalCaseLimitExceeded, EvalSuiteArchived or EvalSuiteNotFound."""
         valid = [_validate_case(c) for c in cases]
         names = [c.name for c in valid]
@@ -966,14 +1038,16 @@ class EvalStore:
                 raise EvalCaseLimitExceeded(str(suite.id), MAX_SUITE_CASES)
             imported = {c.name for c in valid}
             for case in valid:
+                if keep_case_evaluators and case.name in existing:
+                    continue  # its stored evaluators are checked below
                 _check_names(suite_specs, case.evaluators, f"cases.{case.name}.evaluators")
             for name, row in existing.items():
-                if name not in imported:
+                if name not in imported or keep_case_evaluators:
                     _check_names(suite_specs, _evaluators(row.evaluators, "case"), f"cases.{name}.evaluators")
             position = self._next_position(session, tenant_id, suite.id)
             for case in valid:
                 if case.name in existing:
-                    self._apply_case(existing[case.name], case)
+                    self._apply_case(existing[case.name], case, keep_evaluators=keep_case_evaluators)
                 else:
                     session.add(self._new_case_row(tenant_id, suite.id, case, position, None))
                     position += 1
@@ -992,6 +1066,7 @@ class EvalStore:
         suite_id: UUID | str,
         *,
         agent_id: UUID | str | None = None,
+        workflow_id: UUID | str | None = None,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> EvalSuiteSnapshot:
         """The suite frozen for an eval run: its evaluators and its cases (with ids and positions).
@@ -1001,7 +1076,7 @@ class EvalStore:
         with self.Session() as session:
             # FOR SHARE: every case write locks the suite FOR UPDATE first, so the suite row and its
             # cases are read as one consistent state (no torn snapshot).
-            suite = self._suite(session, tenant_id, suite_id, agent_id, lock="share")
+            suite = self._suite(session, tenant_id, suite_id, agent_id, lock="share", workflow_id=workflow_id)
             if suite.archived_at is not None:
                 raise EvalSuiteArchived(str(suite.id))
             rows = self._cases(session, tenant_id, suite.id)
@@ -1122,12 +1197,13 @@ class EvalStore:
         agent_id: UUID | str | None = None,
         after: tuple[int, str] | None = None,
         limit: int | None = None,
+        workflow_id: UUID | str | None = None,
     ) -> list[EvalCaseResult]:
         """The eval run's results by position, then case id; with `after` = (position, case_id)
         only those past it, and at most `limit` (1..MAX_LIST_RESULTS) when given. EvalRunNotFound
         if not the tenant's (or the agent's) eval run."""
         with self.Session() as session:
-            self._eval_run(session, tenant_id, run_id, agent_id)
+            self._eval_run(session, tenant_id, run_id, agent_id, workflow_id)
             return [
                 _result_record(r) for r in self._results(session, tenant_id, str(run_id), after=after, limit=limit)
             ]
@@ -1149,9 +1225,13 @@ class EvalStore:
                 by_run[row.run_id].append(_result_record(row))
         return {run_id: aggregate_results(results) for run_id, results in by_run.items()}
 
-    def aggregates(self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None) -> dict[str, Any]:
-        """See `aggregate_results`. EvalRunNotFound if not the tenant's (or the agent's) eval run."""
-        return aggregate_results(self.list_case_results(tenant_id, run_id, agent_id=agent_id))
+    def aggregates(
+        self, tenant_id: str, run_id: UUID | str, *, agent_id: UUID | str | None = None,
+        workflow_id: UUID | str | None = None,
+    ) -> dict[str, Any]:
+        """See `aggregate_results`. EvalRunNotFound if not the tenant's (or the agent's, or the
+        workflow's) eval run."""
+        return aggregate_results(self.list_case_results(tenant_id, run_id, agent_id=agent_id, workflow_id=workflow_id))
 
     def list_runs(
         self,
@@ -1161,14 +1241,16 @@ class EvalStore:
         suite_id: UUID | str | None = None,
         limit: int = 50,
         before: RunCursor | None = None,
+        workflow: bool = False,
     ) -> list[dict[str, Any]]:
         """The agent's eval runs (optionally one suite's), newest first by (created_at, id), as
         RunStore run dicts; with `before` (RunCursor.after(last row of the previous page)) only the
-        runs past it."""
+        runs past it. `workflow`: `agent_id` names a workflow, whose eval runs are listed."""
         limit = max(1, min(int(limit), MAX_LIST_RUNS))
+        target = RunModel.workflow_id if workflow else RunModel.agent_id
         stmt = (
             select(RunModel)
-            .where(RunModel.tenant_id == tenant_id, RunModel.kind == "eval", RunModel.agent_id == str(agent_id))
+            .where(RunModel.tenant_id == tenant_id, RunModel.kind == "eval", target == str(agent_id))
             .order_by(RunModel.created_at.desc(), RunModel.id.desc())
             .limit(limit)
         )
@@ -1296,7 +1378,9 @@ class EvalStore:
         }
 
     @staticmethod
-    def _suite(session, tenant_id: str, suite_id, agent_id, *, lock: bool | str = False) -> EvalSuiteModel:
+    def _suite(
+        session, tenant_id: str, suite_id, agent_id, *, lock: bool | str = False, workflow_id=None
+    ) -> EvalSuiteModel:
         try:
             sid = str(UUID(str(suite_id)))
         except ValueError:
@@ -1304,6 +1388,8 @@ class EvalStore:
         stmt = select(EvalSuiteModel).where(EvalSuiteModel.tenant_id == tenant_id, EvalSuiteModel.id == sid)
         if agent_id is not None:
             stmt = stmt.where(EvalSuiteModel.agent_id == str(agent_id))
+        if workflow_id is not None:
+            stmt = stmt.where(EvalSuiteModel.workflow_id == str(workflow_id))
         if lock == "share":
             stmt = stmt.with_for_update(read=True)
         elif lock:
@@ -1391,12 +1477,13 @@ class EvalStore:
         return row
 
     @staticmethod
-    def _apply_case(row: EvalCaseModel, case: EvalCase) -> None:
+    def _apply_case(row: EvalCaseModel, case: EvalCase, keep_evaluators: bool = False) -> None:
         row.name = case.name
         row.input = case.input
         row.expected_output = null() if case.expected_output is None else case.expected_output
         row.metadata_ = dict(case.metadata)
-        row.evaluators = _dump_evaluators(case.evaluators)
+        if not keep_evaluators:
+            row.evaluators = _dump_evaluators(case.evaluators)
         row.updated_at = _now()
 
     @staticmethod
@@ -1418,12 +1505,14 @@ class EvalStore:
         )
 
     @staticmethod
-    def _eval_run(session, tenant_id: str, run_id, agent_id) -> RunModel:
+    def _eval_run(session, tenant_id: str, run_id, agent_id, workflow_id=None) -> RunModel:
         stmt = select(RunModel).where(
             RunModel.tenant_id == tenant_id, RunModel.id == str(run_id), RunModel.kind == "eval"
         )
         if agent_id is not None:
             stmt = stmt.where(RunModel.agent_id == str(agent_id))
+        if workflow_id is not None:
+            stmt = stmt.where(RunModel.workflow_id == str(workflow_id))
         run = session.execute(stmt).scalar_one_or_none()
         if run is None:
             raise EvalRunNotFound(tenant_id, run_id)
@@ -1464,7 +1553,9 @@ class EvalStore:
         unpriced, 0 without rows."""
         q = RunModelRequestModel
         own = (q.run_id == run_id) & q.request_key.startswith(judge_prefix, autoescape=True)
-        cond = own if child_run_id is None else (own | (q.run_id == child_run_id))
+        # A workflow case's child also has agent-step runs of its own (their rows count too).
+        steps = select(RunModel.id).where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id == child_run_id)
+        cond = own if child_run_id is None else (own | (q.run_id == child_run_id) | q.run_id.in_(steps))
         n, priced, total = session.execute(
             select(func.count(), func.count(q.cost_usd), func.coalesce(func.sum(q.cost_usd), 0)).where(
                 q.tenant_id == tenant_id, cond

@@ -666,7 +666,7 @@ OBSERVER_ATTRIBUTES = (
 )
 # `post_turn_done` (P1.C1): shown as the run span's `post_turn` attribute (no span of its own).
 POST_TURN_ATTRIBUTES = ("observe", "index")
-_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed"})
+_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed", "score"})
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
@@ -1883,6 +1883,39 @@ def build_trace(data: TraceInput) -> dict[str, Any]:
     }
 
 
+def flat_spans(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    """The trace's spans as flat rows for the `spans` table (parents first, as the trace lists
+    them): span_id, parent_id, kind, name, start, end (datetimes), status and the run's agent_id and
+    workflow_id plus the span's model. No inputs, outputs or attributes: the table is a filterable
+    index, the trace itself stays the place to read a span. A span without a start takes its
+    parent's (the table's start is not null), one with no parent either is left out."""
+    run = trace["run"]
+    starts: dict[str, datetime | None] = {}
+    rows: list[dict[str, Any]] = []
+    for span in trace["spans"]:
+        start = _parse_datetime(span.get("start")) or starts.get(span.get("parent_id") or "")
+        starts[span["id"]] = start
+        if start is None:
+            continue
+        attrs = span.get("attributes") or {}
+        model = attrs.get("model_id") or attrs.get("model")
+        if span["kind"] == "run" and span["id"] == f"run:{run['id']}":
+            model = model or run.get("model_id")
+        rows.append({
+            "span_id": span["id"],
+            "parent_id": span.get("parent_id"),
+            "kind": span["kind"],
+            "name": span["name"],
+            "start": start,
+            "end": _parse_datetime(span.get("end")),
+            "status": span["status"],
+            "agent_id": run.get("agent_id"),
+            "workflow_id": run.get("workflow_id"),
+            "model": model if isinstance(model, str) else None,
+        })
+    return rows
+
+
 __all__ = [
     "FIELD_MAX_BYTES",
     "MAX_CHILD_RUNS",
@@ -1902,5 +1935,6 @@ __all__ = [
     "load_knowledge_refs",
     "TraceReader",
     "build_trace",
+    "flat_spans",
     "step_parents",
 ]

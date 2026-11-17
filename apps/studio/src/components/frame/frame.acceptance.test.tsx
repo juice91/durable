@@ -148,6 +148,7 @@ const PAGES: PageCase[] = [
     active: "agents",
   },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", active: "metrics" },
+  { name: "threads", path: "/threads", load: () => import("@/app/threads/page"), h1: "Threads", active: "threads" },
   { name: "traces", path: "/traces", load: () => import("@/app/traces/page"), h1: "Traces", active: "traces" },
   // SL.12: `/traces/:runId` and `/runs/:id` are redirects; a run's trace and events are the trace Sheet
   // over the list, checked inside this frame (light and dark, axe) in components/traces/TraceSheet.frame.test.tsx.
@@ -255,7 +256,8 @@ describe("sidebar", () => {
     expect(groups).toEqual(navSections.map((section) => section.group.id));
     // AC.15 fills the untitled approvals group, first.
     expect(groups[0]).toBe("approvals");
-    expect(groups).not.toContain("evaluation");
+    // W1.5 fills the Evaluation group (Datasets, Scorers, Experiments).
+    expect(groups).toContain("evaluation");
     for (const el of sidebar().querySelectorAll("[data-nav-group]")) expect(el.querySelectorAll("li").length).toBeGreaterThan(0);
     expect(groups[groups.length - 1]).toBe("settings");
     expect(within(screen.getByTestId("sidebar-footer")).getByRole("link", { name: "Settings" })).toBeInTheDocument();

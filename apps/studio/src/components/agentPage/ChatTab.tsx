@@ -113,11 +113,15 @@ import { useAgentPage } from "./AgentPageContext";
 import { AgentChatPanes } from "./AgentChatPanes";
 import { AgUiChatPane, ChatPane } from "./ChatPane";
 import { Composer } from "./Composer";
+import type { FeedbackScope } from "@/components/chat/MessageFeedback";
+import type { FeedbackMap } from "@/lib/messageFeedback";
 import { ComposerFieldError } from "./ComposerChip";
 import { ComposerModelChip, MODEL_ERROR_ID } from "./ComposerModelChip";
 import { ComposerVersionChip, VERSION_ERROR_ID } from "./ComposerVersionChip";
 import { ThreadsPanel } from "./ThreadsPanel";
 import { ComposerActAsChip } from "./ComposerActAsChip";
+import { ModelSettingsPopover, modelSettingsInvalid } from "@/components/chat/ModelSettingsPopover";
+import { EMPTY_MODEL_SETTINGS_TEXT, settingsBody, type ModelSettingsText } from "@/lib/modelSettings";
 import { chatUrlFor, effectiveConfig, writeLastAgent, type ChatUrlState } from "./agentPageModel";
 import { memoryOf, OBSERVATIONAL_DEFAULTS } from "@/components/agents/knowledgeMemory";
 import { agentHasMemory, latestPublishedSpec, readActAs, writeActAs } from "@/components/memory/memoryModel";
@@ -323,6 +327,15 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   const [pendingModelId, setPendingModelId] = useState<string | null>(null);
   const [modelNotice, setModelNotice] = useState<string | null>(null);
   const [contextOpen, setContextOpen] = useState(false);
+  // Per-chat model settings (empty = unset), sent with every turn's run options.
+  const [modelSettingsText, setModelSettingsText] = useState<ModelSettingsText>(EMPTY_MODEL_SETTINGS_TEXT);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const modelSettingsBad = modelSettingsInvalid(modelSettingsText);
+  // The settings that are set, as the options' `model_settings` (left out entirely when none is).
+  const modelSettingsBody = useMemo(() => {
+    const body = modelSettingsBad ? {} : settingsBody(modelSettingsText);
+    return Object.keys(body).length > 0 ? { model_settings: body } : {};
+  }, [modelSettingsBad, modelSettingsText]);
   const [contextInfo, setContextInfo] = useState<RequestContextInfo | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadError, setContextLoadError] = useState<string | null>(null);
@@ -360,6 +373,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   aguiRef.current = agui;
   // The AG-UI thread (null until the route is read): its pane, agent and history are made per key.
   const [aguiSession, setAguiSession] = useState<AgUiSession | null>(null);
+  // W2.4: the caller's thumbs on the open thread (from the thread GET), for the message footers.
+  const [threadFeedback, setThreadFeedback] = useState<FeedbackMap>({});
   // Native run ids of the thread's shown turns, oldest first (the AG-UI messages map onto them).
   const [runMaps, setRunMaps] = useState<RunMaps>(EMPTY_RUN_MAPS);
   // Structured output per native run id, from RUN_FINISHED.result.
@@ -459,6 +474,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     setContextValidation(IDLE_VALIDATION);
     setOptionErrors(NO_OPTION_ERRORS);
     setUnsentInput(null);
+    setModelSettingsText(EMPTY_MODEL_SETTINGS_TEXT);
   }, []);
 
   // Follow one turn's run. Only the latest turn can be in flight, so one subscription is enough.
@@ -842,12 +858,20 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
         putBack(input);
         return;
       }
+      if (modelSettingsBad) {
+        // The popover shows which setting is out of range; the text stays in the composer.
+        setModelSettingsOpen(true);
+        setUnsentInput(input);
+        putBack(input);
+        return;
+      }
 
       const options: TurnOptions = {
         version: versionRef,
         model: overrideFor(chosenModelId, defaultModelId),
         // A target without context fields gets none (a remembered value may hold stale keys).
         request_context: contextInfo !== null && contextInfo.fields.length === 0 ? null : contextToSend(contextValue),
+        ...modelSettingsBody,
       };
       const runId = crypto.randomUUID();
       const generation = generationRef.current;
@@ -987,6 +1011,8 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       followRun,
       memoryChip,
       modelChoiceError,
+      modelSettingsBad,
+      modelSettingsBody,
       putBack,
       refreshRail,
       runActive,
@@ -1008,6 +1034,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     model: overrideFor(chosenModelId, defaultModelId),
     // A target without context fields gets none (a remembered value may hold stale keys).
     request_context: contextInfo !== null && contextInfo.fields.length === 0 ? null : contextToSend(contextValue),
+    ...modelSettingsBody,
   };
   const sendOptionsRef = useRef(sendOptions);
   sendOptionsRef.current = sendOptions;
@@ -1242,6 +1269,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       aguiAgent,
       (loaded: AgUiThread) => {
         if (sessionKeyRef.current !== key) return;
+        setThreadFeedback(loaded.feedback ?? {});
         // D13: a turn's message ids carry the AG-UI runId that started it, else its native run id.
         for (const run of loaded.runs) {
           const prefix = run.runId ?? run.run_id;
@@ -1257,6 +1285,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       },
     );
   }, [agentId, aguiAgent, sessionKey]);
+
+  const feedbackScope = useMemo<FeedbackScope>(
+    () => ({ conversationId, initial: threadFeedback }),
+    [conversationId, threadFeedback],
+  );
 
   // Structured output by run: RUN_FINISHED.result, else (history) the run's native output_json.
   const structuredByRun = useMemo(() => {
@@ -1355,6 +1388,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     setOptionErrors((errors) => ({ ...errors, model: null, general: null }));
   };
 
+  const handleModelSettingsChange = (value: ModelSettingsText) => {
+    setModelSettingsText(value);
+    setOptionErrors((errors) => ({ ...errors, modelSettings: null, general: null }));
+  };
+
   const handleContextChange = (value: RequestContextValue) => {
     setContextValue(value);
     setPresetMessage(null);
@@ -1362,7 +1400,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     if (selectedAgentId) savePlaygroundContext(selectedAgentId, value);
   };
 
-  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError) || (agui && (aguiInterrupts > 0 || nativeFollow !== null));
+  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError) || modelSettingsBad || (agui && (aguiInterrupts > 0 || nativeFollow !== null));
   const thread = useMemo(() => (agui ? { messages: [] } : conversationToThread(turns)), [agui, turns]);
 
   // Each turn's badge and notices, by native run id (the pane puts each under its turn's last message).
@@ -1421,7 +1459,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       : status === "failed" && !latestBlocked
         ? latest?.error || "The run failed."
         : null;
-  const optionsRefused = Boolean(optionErrors.context || optionErrors.model || optionErrors.version || optionErrors.general);
+  const optionsRefused = Boolean(optionErrors.context || optionErrors.model || optionErrors.version || optionErrors.general || optionErrors.modelSettings);
 
   // Tool cards: each call's status and duration, from its turn's events, keyed by run and call id
   // (a call id is unique only within its run).
@@ -1556,6 +1594,14 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
           disabled={optionsDisabled}
         />
       ) : null}
+      <ModelSettingsPopover
+        value={modelSettingsText}
+        onChange={handleModelSettingsChange}
+        turnErrors={optionErrors.modelSettings}
+        open={modelSettingsOpen && !optionsDisabled}
+        onOpenChange={setModelSettingsOpen}
+        disabled={optionsDisabled}
+      />
       <RequestContextPopover
         agentId={selectedAgentId}
         versionRef={versionRef}
@@ -1583,6 +1629,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       <ComposerFieldError id={MODEL_ERROR_ID} message={modelError} />
       {!modelError && modelNotice ? <p className="text-caption text-muted-foreground">{modelNotice}</p> : null}
       {!modelError && modelsError ? <p className="text-caption text-muted-foreground">{modelsError}</p> : null}
+      {optionErrors.modelSettings ? (
+        <p role="alert" data-testid="model-settings-error" className="text-caption text-destructive-text">
+          {Object.values(optionErrors.modelSettings).join("; ")}
+        </p>
+      ) : null}
       {optionErrors.general ? (
         <div role="alert" data-testid="turn-options-error" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-label text-destructive-text">
           {optionErrors.general}
@@ -1595,7 +1646,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       ) : null}
     </>
   );
-  const hasNotices = Boolean(optionErrors.version || modelError || modelNotice || modelsError || optionErrors.general || (optionsRefused && unsentInput));
+  const hasNotices = Boolean(optionErrors.version || optionErrors.modelSettings || modelError || modelNotice || modelsError || optionErrors.general || (optionsRefused && unsentInput));
 
   const alert = "rounded-md border px-3 py-2 text-label";
   const header =
@@ -1679,8 +1730,10 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
                 approvals={approvalLookups}
                 decisions={toolDecisionEntries}
                 retries={outputRetries}
+                feedback={feedbackScope}
                 composer={
                   <Composer
+                    attachments
                     chips={chips}
                     outputChecked={hasOutputProcessors(spec)}
                     notices={hasNotices ? notices : null}

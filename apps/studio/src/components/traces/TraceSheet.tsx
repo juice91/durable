@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Copy, Maximize2, Minimize2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Download, Gauge, Maximize2, Minimize2 } from "lucide-react";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { buildLogsLink, buildTraceLink } from "@/lib/grafana";
 import { routes } from "@/lib/routes";
@@ -25,12 +25,17 @@ import { StatusPill } from "@/components/runs/StatusPill";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
 import { TraceSpans } from "./TraceSpans";
+import { TraceFeedback } from "./TraceFeedback";
+import { TraceScores, type PendingScores } from "./TraceScores";
+import { ScoreTraceDialog } from "./ScoreTraceDialog";
+import { downloadJson } from "@/lib/download";
+import { AddToDataset } from "./AddToDataset";
 import type { SpanTreeMode } from "./TraceWaterfall";
 import { renderedSheetWidth, spanDetailBeside, traceSheetWidth } from "./traceSheetModel";
 import { useNames, useTrace } from "./useTrace";
 import { copyText } from "@/lib/clipboard";
 
-const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", logs: "Logs" };
+const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", scores: "Scores", logs: "Logs" };
 const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run", eval: "Eval run" };
 const icon = (Icon: typeof Copy) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
 
@@ -58,6 +63,8 @@ export interface TraceSheetProps {
    * (whatever opened it). The host returns the list row of a run reached with prev / next.
    */
   closeFocusTarget?: (runId: string) => HTMLElement | null;
+  /** The span to select on open (`?span=`, from the Spans list). */
+  initialSpanId?: string | null;
 }
 
 /** The "Open agent" / "Open workflow" / "Open knowledge base" link for a run. A kb_ingest run links
@@ -86,7 +93,7 @@ export function subjectLink(
  * event timeline) and Logs (narrowed to the selected span). Inside it, trace links stack a second
  * Sheet (`TraceLink`).
  */
-export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth = 0, navigation = null, closeFocusTarget }: TraceSheetProps) {
+export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth = 0, navigation = null, closeFocusTarget, initialSpanId = null }: TraceSheetProps) {
   const [expanded, setExpanded] = useState(false);
   const frameState = useFrame();
   const viewport = useViewportWidth(open);
@@ -115,6 +122,7 @@ export function TraceSheet({ runId, open, onOpenChange, tab, onTabChange, depth 
             <TraceSheetBody
               key={runId}
               runId={runId}
+              initialSpanId={initialSpanId}
               tab={tab}
               onTabChange={onTabChange}
               navigation={navigation}
@@ -141,6 +149,7 @@ function TraceLoadError({ message, onRetry }: { message: string; onRetry: () => 
 
 interface TraceSheetBodyProps {
   runId: string;
+  initialSpanId: string | null;
   tab: TraceTab;
   onTabChange: (tab: TraceTab) => void;
   navigation: TraceSheetNavigation | null;
@@ -149,10 +158,12 @@ interface TraceSheetBodyProps {
   detailBeside: boolean;
 }
 
-function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggleExpanded, detailBeside }: TraceSheetBodyProps) {
-  const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId);
+function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, expanded, onToggleExpanded, detailBeside }: TraceSheetBodyProps) {
+  const { trace, error, selectedId, setSelectedId, reload } = useTrace(runId, initialSpanId);
   const baseNames = useNames();
   const [mode, setMode] = useState<SpanTreeMode>("timeline");
+  const [scoreOpen, setScoreOpen] = useState(false);
+  const [requested, setRequested] = useState<PendingScores | null>(null);
   const root = trace?.spans[0] ?? null;
   const selected = trace?.spans.find((s) => s.id === selectedId) ?? null;
   const run = trace?.run ?? null;
@@ -178,6 +189,18 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
             {/* No tooltips here: the first of these can take focus when the Sheet opens, and an
                 open tooltip would take the first Escape (as on the kit's Close button). */}
             <IconButton label="Copy run id" size="sm" tooltip={false} icon={icon(Copy)} onClick={copyId} />
+            {/* Scoring needs a completed run; a disabled button takes no hover, so the reason is the wrapper's title. */}
+            <span title={run && run.status !== "completed" ? "Only completed runs can be scored" : undefined} className="inline-flex">
+              <IconButton label="Score trace" size="sm" tooltip={false} icon={icon(Gauge)} disabled={!run || run.status !== "completed"} onClick={() => setScoreOpen(true)} />
+            </span>
+            <IconButton
+              label="Download trace"
+              size="sm"
+              tooltip={false}
+              icon={icon(Download)}
+              disabled={!trace}
+              onClick={() => trace && downloadJson(`trace-${runId}.json`, trace)}
+            />
             {navigation ? (
               <>
                 <IconButton
@@ -213,6 +236,18 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
           </>
         }
       />
+      {run ? (
+        <ScoreTraceDialog
+          runId={runId}
+          agentId={run.agent_id ?? null}
+          open={scoreOpen}
+          onOpenChange={setScoreOpen}
+          onRequested={(request) => {
+            setRequested({ key: Date.now(), runId, ...request });
+            onTabChange("scores");
+          }}
+        />
+      ) : null}
       <SheetBody className="flex flex-col gap-4">
         {run ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2" data-testid="trace-sheet-meta">
@@ -233,6 +268,16 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
                 </a>
               </span>
             ) : null}
+          </div>
+        ) : null}
+
+        {run ? (
+          <div className="flex min-w-0 flex-col gap-3">
+            {runKind(run) === "agent" && run.input ? <div className="self-start"><AddToDataset run={run} /></div> : null}
+            <details className="rounded-md border border-border p-3" data-testid="trace-feedback-details">
+              <summary className="cursor-pointer text-label font-medium">Trace feedback</summary>
+              <TraceFeedback runId={runId} className="mt-3" />
+            </details>
           </div>
         ) : null}
 
@@ -270,6 +315,10 @@ function TraceSheetBody({ runId, tab, onTabChange, navigation, expanded, onToggl
 
           <TabsContent value="events">
             <RunEventsPanel runId={runId} />
+          </TabsContent>
+
+          <TabsContent value="scores">
+            <TraceScores runId={runId} requested={requested} />
           </TabsContent>
 
           <TabsContent value="logs">

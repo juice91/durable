@@ -52,6 +52,7 @@ export const STEP_TYPE_LABELS: Record<WorkflowStep["type"], string> = {
   branch: "Branch",
   parallel: "Parallel",
   approval: "Approval",
+  input: "Input",
   foreach: "Foreach",
   loop: "Loop",
   evaluate: "Evaluate",
@@ -69,6 +70,7 @@ function stepSubtitle(step: WorkflowStep): string {
     case "tool":
       return step.tool_id;
     case "approval":
+    case "input":
       return `timeout ${step.timeout_hours}h`;
     case "branch":
       return `${step.cases.length} case${step.cases.length === 1 ? "" : "s"} + default`;

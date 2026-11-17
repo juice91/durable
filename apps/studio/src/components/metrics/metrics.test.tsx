@@ -240,7 +240,7 @@ describe("TimeSeriesChart", () => {
     expect(plot).toHaveAccessibleName(/move between days, and Enter to open matching runs\. With a screen reader, use the data table below/);
     fireEvent.focus(plot);
     fireEvent.keyDown(plot, { key: "End" });
-    expect(screen.getByTestId("chart-live")).toHaveTextContent("Nov 12: p50: no data, p95: no data. Press Enter to open matching runs.");
+    expect(screen.getByTestId("chart-live")).toHaveTextContent("Nov 12: p50: no data, p95: no data, p99: no data. Press Enter to open matching runs.");
     fireEvent.keyDown(plot, { key: "ArrowDown" }); // no series selection on line charts
     fireEvent.keyDown(plot, { key: "Enter" });
     expect(onNavigate).toHaveBeenCalledWith(links[2].getAttribute("href"));

@@ -11,6 +11,7 @@ except through `log_failure`'s local-only debug record.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -94,3 +95,82 @@ async def list_server_tools(
         return ProbeResult(status="error", error_code=code, error=exc)
     variants = secret_variants(headers.values())
     return ProbeResult(status="ok", tools=[_tool_json(t, variants) for t in tools[:MAX_TOOLS]])
+
+
+MAX_RESULT_CHARS = 100_000  # a run's stored output; the worker bounds MCP results the same way
+
+
+@dataclass
+class CallResult:
+    """One tools/call. `sent` is True once the request may have reached the server: a failure then
+    leaves the outcome unknown (the tool may have run)."""
+
+    status: str  # "ok" | "error"
+    content: Any = None
+    sent: bool = False
+    error_code: str | None = None
+    error: BaseException | None = None
+
+
+def _result_content(result: Any, variants: SecretVariants) -> Any:
+    """A CallToolResult's content as JSON, secrets scrubbed, bounded (as the worker stores it):
+    structured content wins; text blocks become strings (one block: a bare string); other blocks
+    only their type. An oversized result is cut before redaction."""
+    from pydantic_core import to_jsonable_python
+
+    if result.structured_content is not None:
+        content: Any = to_jsonable_python(result.structured_content, fallback=str)
+    else:
+        parts: list[Any] = [
+            b.text if getattr(b, "type", None) == "text" else {"type": str(getattr(b, "type", "unknown")), "omitted": True}
+            for b in result.content
+        ]
+        content = parts[0] if len(parts) == 1 and isinstance(parts[0], str) else parts
+    content = mask_split_secrets(content, variants)
+    if len(json.dumps(content, default=str)) > MAX_RESULT_CHARS:
+        text = redact(json.dumps(content, default=str)[: MAX_RESULT_CHARS + 256], variants)[:MAX_RESULT_CHARS]
+        return {"truncated": True, "text": text}
+    return redact(content, variants)
+
+
+async def call_server_tool(
+    url: str, headers: dict[str, str], policy: OutboundPolicy, timeout_s: float, tool: str, arguments: dict[str, Any]
+) -> CallResult:
+    """Connect, initialize and call one tool within `timeout_s`; never raises. A tool-reported error
+    (`is_error`) is an error result without the server's text (it may quote anything)."""
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    statuses: list[int] = []
+
+    async def record_status(response: httpx2.Response) -> None:
+        if response.status_code >= 300:
+            statuses.append(response.status_code)
+
+    def client_factory(**kwargs: Any) -> httpx2.AsyncClient:
+        client = policy.httpx_client_factory(**kwargs)
+        client.event_hooks.setdefault("response", []).append(record_status)
+        return client
+
+    sent = False
+    result: Any = None
+    content: Any = None
+    variants = secret_variants(headers.values())
+    try:
+        policy.check_url(url)
+        transport = StreamableHttpTransport(url, headers=headers, httpx_client_factory=client_factory)
+        with anyio.fail_after(timeout_s):
+            async with Client(transport, timeout=timeout_s, init_timeout=timeout_s) as client:
+                sent = True
+                result = await client.call_tool_mcp(tool, arguments)
+                if not result.is_error:
+                    content = _result_content(result, variants)
+    except Exception as exc:  # noqa: BLE001 - reduced to a code; recorded by the caller
+        if result is not None and (result.is_error or content is not None):
+            pass  # the answer arrived; only closing the session failed
+        else:
+            code = error_code(exc, statuses[0] if statuses else None) if not sent else "call_failed"
+            return CallResult(status="error", sent=sent, error_code=code, error=exc)
+    if result.is_error:
+        return CallResult(status="error", sent=True, error_code="tool_error")
+    return CallResult(status="ok", content=content, sent=True)

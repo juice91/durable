@@ -121,7 +121,7 @@ describe("round trip and hash stability", () => {
     const { saved } = setup(FULL);
     expect(await screen.findByRole("heading", { name: "Product docs" })).toBeInTheDocument();
     goTo(/^Memory/);
-    await waitFor(() => expect(screen.getByLabelText("Observer model")).toHaveValue("test:echo"));
+    await waitFor(() => expect(screen.getByLabelText("Observer model")).toHaveTextContent("echo"));
     await save();
     expect(JSON.stringify(saved[0])).toBe(JSON.stringify(FULL));
   });
@@ -320,10 +320,17 @@ describe("Memory step", () => {
 
   it("the observer and embedding pickers list allowlisted models only", async () => {
     setup(FULL, { start: "memory" });
-    const observer = await screen.findByLabelText("Observer model");
-    await waitFor(() => expect(within(observer).getAllByRole("option").length).toBeGreaterThan(1));
-    const observerOptions = within(observer).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
-    expect(observerOptions).toEqual(modelsFixture.map((m) => m.id));
+    // The shared model picker: a provider select, then a searchable list of that provider's models.
+    await waitFor(() => expect(within(screen.getByLabelText("Observer provider")).getAllByRole("option").length).toBeGreaterThan(1));
+    const providerSelect = screen.getByLabelText("Observer provider");
+    const providers = within(providerSelect).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
+    expect(providers).toEqual(Array.from(new Set(modelsFixture.map((m) => m.provider))));
+    fireEvent.click(screen.getByLabelText("Observer model"));
+    const listed = within(await screen.findByRole("listbox")).getAllByRole("option").map((o) => o.textContent ?? "");
+    const concrete = modelsFixture.filter((m) => m.provider === "test" && !m.wildcard);
+    expect(listed).toHaveLength(concrete.length);
+    concrete.forEach((m, i) => expect(listed[i]).toContain(m.name));
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     const embedding = screen.getByLabelText("Embedding model");
     const embeddingOptions = within(embedding).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
     expect(embeddingOptions).toEqual(["test:hash", "litellm:*"]);
@@ -332,14 +339,17 @@ describe("Memory step", () => {
     expect(navButton(/^Memory/)).toHaveTextContent("1 problem");
     fireEvent.change(screen.getByLabelText("Embedding model: litellm model name"), { target: { value: "nomic-embed-text" } });
     expect(navButton(/^Memory/)).toHaveAccessibleName(/complete/);
+    // A wildcard provider asks for the name.
+    fireEvent.change(providerSelect, { target: { value: "litellm" } });
+    expect(screen.getByLabelText("Observer model")).toHaveAttribute("type", "text");
   });
 
   it("a stored model outside the allowlist stays selected and is marked", async () => {
     const spec = { ...FULL, memory: { observational: { model: { provider: "test", name: "gone" }, observe_after_tokens: 12000, keep_recent_turns: 4, reflect_after_tokens: 8000 } } } as unknown as AgentSpec;
     setup(spec, { start: "memory" });
-    const observer = await screen.findByLabelText("Observer model");
-    await waitFor(() => expect(observer).toHaveAccessibleDescription(/Not in the platform allowlist/));
-    expect(observer).toHaveValue("test:gone");
+    await waitFor(() => expect(screen.getByLabelText("Observer model")).toHaveAccessibleDescription(/Not in the platform allowlist/));
+    expect(screen.getByLabelText("Observer model")).toHaveTextContent("gone (not listed)");
+    expect(screen.getByLabelText("Observer provider")).toHaveValue("test");
   });
 
   it("redaction: inherit names the input processor's kinds; custom needs at least one kind", async () => {
@@ -408,7 +418,7 @@ describe("phone width and accessibility", () => {
   it.each(["knowledge", "memory"])("the %s step with everything on has no axe violations", async (step) => {
     const { container } = setup(FULL, { start: step });
     if (step === "knowledge") await screen.findByRole("heading", { name: "Product docs" });
-    else await waitFor(() => expect(screen.getByLabelText("Observer model")).toHaveValue("test:echo"));
+    else await waitFor(() => expect(screen.getByLabelText("Observer model")).toHaveTextContent("echo"));
     await expectNoAxeViolations(container);
   }, AXE_TIMEOUT_MS);
 });

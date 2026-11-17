@@ -13,7 +13,7 @@ import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from eap_observability import dbos_trace_attributes
 # The DBOS topic an agent run's gated tool calls wait on, `tool_approval:{run_id}`: defined in
@@ -57,6 +57,10 @@ LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 # DBOS stores workflow inputs again in its system database. AC.11 may read `runs.input` by run id
 # instead and ignore `input_json`; the argument stays so the hand-off shape matches the plan.
 EVAL_WORKFLOW_NAME = "eap.eval_run"
+# Score on demand (parity round 2): `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)` on the agent-run queue;
+# its workflow id is `score:{run_id}:{random}` (a run can be scored any number of times, and its own
+# workflow id is the run id).
+SCORE_WORKFLOW_NAME = "eap.score_run_on_demand"  # not eap.score_run: that is the per-run scoring step
 
 
 def approval_topic(step_id: str) -> str:
@@ -136,6 +140,8 @@ class RunLauncher(Protocol):
         input_json: str,
         traceparent: str | None = None,
     ) -> None: ...
+
+    def launch_score(self, *, run_id: UUID, tenant_id: str, scorer_ids: list[str]) -> None: ...
 
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None: ...
 
@@ -238,6 +244,13 @@ class DBOSRunLauncher:
         EVAL_WORKFLOW_NAME)."""
         options = self._options(EVAL_WORKFLOW_NAME, run_id, traceparent)
         self._get_client().enqueue(options, str(run_id), tenant_id, input_json)
+
+    def launch_score(self, *, run_id: UUID, tenant_id: str, scorer_ids: list[str]) -> None:
+        """Enqueue `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)`: the worker scores the finished run with
+        those scorers and appends `score` events. Workflow id `score:{run_id}:{random}`."""
+        options = self._options(SCORE_WORKFLOW_NAME, run_id, None)
+        options["workflow_id"] = f"score:{run_id}:{uuid4().hex}"
+        self._get_client().enqueue(options, str(run_id), tenant_id, list(scorer_ids))
 
     def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None:
         """Wake the DBOS workflow waiting on approval step `step_id` (DBOS send on its topic). Only a

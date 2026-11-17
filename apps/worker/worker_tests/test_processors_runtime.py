@@ -25,6 +25,11 @@ from worker_tests.test_conversation import start_turn, step_names
 
 EMAIL = "ada.lovelace@example.com"
 
+# The last step of every top-level agent run (spans table). step_names() leaves it out by default, so
+# the layout tests that build on BASELINE stay about the steps their feature adds; the exact-sequence
+# test below pins it at the end.
+RECORD_SPANS = "eap.record_spans"
+
 # DBOS step names per run shape, captured on the unchanged worker (HEAD 3eff23d) for the same specs.
 BASELINE = {
     "ticket": [
@@ -127,19 +132,23 @@ def test_specs_without_processors_keep_their_exact_step_sequence(worker, client,
     schema = worker_settings.dbos_system_schema
     run_id, row = run(worker, client, tenant, ticket_spec(), "Laptop broken")
     assert row["status"] == "completed"
-    assert step_names(schema, run_id) == BASELINE["ticket"]
+    client.retrieve_workflow(str(run_id)).get_result()  # eap.record_spans runs after the terminal status
+    assert step_names(schema, run_id, with_spans=True) == [*BASELINE["ticket"], RECORD_SPANS]
     run_id, row = run(worker, client, tenant, echo_spec(), f"hi {EMAIL}")
     assert row["status"] == "completed" and row["output"] == f"Echo: hi {EMAIL}"
-    assert step_names(schema, run_id) == BASELINE["echo"]
+    client.retrieve_workflow(str(run_id)).get_result()  # eap.record_spans runs after the terminal status
+    assert step_names(schema, run_id, with_spans=True) == [*BASELINE["echo"], RECORD_SPANS]
     failing = echo_spec() | {"model": {"provider": "openai", "name": "gpt-x"}}
     run_id, row = run(worker, client, tenant, failing, "x")
     assert row["status"] == "failed"
-    assert step_names(schema, run_id) == BASELINE["failed"]
+    client.retrieve_workflow(str(run_id)).get_result()  # eap.record_spans runs after the terminal status
+    assert step_names(schema, run_id, with_spans=True) == [*BASELINE["failed"], RECORD_SPANS]
     conv, _ = worker.run_store.create_conversation(tenant, uuid.uuid4(), title="c")
     for prompt in ("p0", "p1"):
         run_id = start_turn(client, worker.run_store, tenant, conv["id"], prompt)
         assert wait_terminal(worker.run_store, tenant, run_id)["status"] == "completed"
-        assert step_names(schema, run_id) == BASELINE["turn"]
+        client.retrieve_workflow(str(run_id)).get_result()  # eap.record_spans runs after the terminal status
+        assert step_names(schema, run_id, with_spans=True) == [*BASELINE["turn"], RECORD_SPANS]
 
 
 # --------------------------------------------------------------------------- input

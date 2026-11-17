@@ -23,13 +23,18 @@ import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
+import { listWorkflowRuns } from "@/lib/workflows";
+import { listSchedules } from "@/lib/schedules";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "./WorkflowFloatingPanel";
 import { TimelineDock } from "./TimelineDock";
 import { CANVAS_INSET_PX, STEP_PANEL_WIDTH } from "./workflowLayout";
 import { timelineClock, timelineRows } from "./workflowTimeline";
 import { CancelRunButton } from "./CancelRunButton";
+import { RerunButton } from "./RerunButton";
+import { PausedBanner, pausedAfter } from "./PausedBanner";
 import { IterationPager, LoopIterationTable } from "./LoopIterations";
 import { copyText } from "@/lib/clipboard";
+import type { JsonSchema } from "@/lib/tools";
 
 /** How often a live run's open timeline bars grow. */
 const TIMELINE_TICK_MS = 1000;
@@ -72,6 +77,8 @@ interface WorkflowRunViewProps {
   /** Loop instances whose pager steps through failed iterations only (`?failedOnly=`). */
   failedOnlyLoops?: ReadonlySet<string>;
   onFailedOnlyLoopsChange?: (next: Set<string>) => void;
+  /** "Run again" started a new run (its id); the page navigates to it. Omitted, no button. */
+  onRerunStarted?: (runId: string) => void;
 }
 
 /** The "Cancelled" label of a run that ended with `run_cancelled` and status `failed`. (A cancel that
@@ -102,6 +109,7 @@ export function WorkflowRunView({
   onIterationSelectionChange,
   failedOnlyLoops,
   onFailedOnlyLoopsChange,
+  onRerunStarted,
 }: WorkflowRunViewProps) {
   // One collapsed set for the canvas and the step list: the page's URL state, else kept here.
   const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -268,6 +276,38 @@ export function WorkflowRunView({
     <span data-testid="workflow-run-cancelled-secondary" className="text-caption text-muted-foreground">cancelled</span>
   ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
+  // The newest later run that re-ran this one, from the workflow's run history (no extra API).
+  // The "Scheduled: <name>" lookup reads the first 200 schedules (one request, no paging loop); a deleted
+  // or uncached schedule leaves the name null and the tag reads plain "Scheduled".
+  const [scheduleName, setScheduleName] = useState<string | null>(null);
+  const scheduleId = run?.schedule_id ?? null;
+  useEffect(() => {
+    setScheduleName(null);
+    if (!scheduleId || !effectiveWorkflowId) return;
+    const controller = new AbortController();
+    listSchedules({ workflowId: effectiveWorkflowId, limit: 200, signal: controller.signal })
+      .then((page) => {
+        if (!controller.signal.aborted) setScheduleName(page.items.find((s) => s.id === scheduleId)?.name ?? null);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [scheduleId, effectiveWorkflowId]);
+  const [rerunId, setRerunId] = useState<string | null>(null);
+  useEffect(() => {
+    setRerunId(null);
+    if (!effectiveWorkflowId) return;
+    let active = true;
+    listWorkflowRuns(effectiveWorkflowId)
+      .then((page) => {
+        if (!active) return;
+        const newest = (page?.items ?? [])
+          .filter((r) => r.rerun_of === runId)
+          .reduce<Run | null>((a, r) => (a === null || r.created_at > a.created_at ? r : a), null);
+        setRerunId(newest?.run_id ?? null);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [effectiveWorkflowId, runId]);
   const control = useWorkflowLayout();
   const { layout, prefs, update } = control;
   const toggleStep = useCallback((id: string) => setSelected((cur) => (cur === id ? null : id)), []);
@@ -277,6 +317,11 @@ export function WorkflowRunView({
   const statusRef = useRef<HTMLSpanElement>(null);
   const refocusAfterDecision = useRef(false);
   const waitingKey = view.waiting.join("\n");
+  // A step-by-step pause (`<step>_pause`) is a banner, and opens the step it follows in the IO panel.
+  const pausedId = view.waiting.find((id) => view.steps[id]?.pause) ?? null;
+  useEffect(() => {
+    if (pausedId) setSelected(pausedAfter(pausedId));
+  }, [pausedId]);
   useEffect(() => {
     if (!refocusAfterDecision.current) return;
     const active = typeof document !== "undefined" ? document.activeElement : null;
@@ -308,6 +353,7 @@ export function WorkflowRunView({
             )}
           </span>
           {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
+          {run && onRerunStarted && isTerminal(view.status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
         </>
       }
     />
@@ -336,13 +382,26 @@ export function WorkflowRunView({
       <p className="flex items-center gap-2 px-1">
         <Badge variant="warning" data-testid="workflow-needs-input">Needs input</Badge>
         <span className="text-caption text-muted-foreground">
-          {view.waiting.length === 1 ? "A step is waiting for approval." : `${view.waiting.length} steps are waiting for approval.`}
+          {view.waiting.every((id) => view.steps[id]?.pause)
+            ? "Paused. Continue or stop the run."
+            : view.waiting.length === 1 ? "A step is waiting for approval." : `${view.waiting.length} steps are waiting for approval.`}
         </span>
       </p>
-      {view.waiting.map((id) => (
+      {view.waiting.map((id) => view.steps[id]?.pause ? (
+        <PausedBanner
+          key={id}
+          runId={runId}
+          stepId={id}
+          deadline={view.steps[id]?.deadline ?? null}
+          onRefresh={refresh}
+          onDecided={() => {
+            refocusAfterDecision.current = true;
+          }}
+        />
+      ) : (
         <ApprovalCard
           key={id}
-          approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null }}
+          approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null, resumeSchema: (view.steps[id]?.resumeSchema as JsonSchema | null | undefined) ?? null }}
           onRefresh={refresh}
           onDecided={() => {
             refocusAfterDecision.current = true;
@@ -393,6 +452,21 @@ export function WorkflowRunView({
               <div className="mt-3 space-y-2 empty:hidden">
                 {workflowId && run?.workflow_id && run.workflow_id !== workflowId ? (
                   <p role="status" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">This run belongs to another workflow; showing that workflow&apos;s graph.</p>
+                ) : null}
+                {scheduleId ? (
+                  <p data-testid="workflow-run-scheduled" className="text-label text-muted-foreground">{scheduleName ? `Scheduled: ${scheduleName}` : "Scheduled"}</p>
+                ) : null}
+                {effectiveWorkflowId && run?.rerun_of ? (
+                  <p data-testid="workflow-run-rerun-of" className="text-label text-muted-foreground">
+                    Re-run of{" "}
+                    <Link href={routes.workflowRun(effectiveWorkflowId, run.rerun_of)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{run.rerun_of.slice(0, 8)}</Link>
+                  </p>
+                ) : null}
+                {effectiveWorkflowId && rerunId ? (
+                  <p data-testid="workflow-run-rerun-as" className="text-label text-muted-foreground">
+                    Re-run as{" "}
+                    <Link href={routes.workflowRun(effectiveWorkflowId, rerunId)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{rerunId.slice(0, 8)}</Link>
+                  </p>
                 ) : null}
                 {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{loadError}</p> : null}
                 {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">Graph unavailable: {specError}</p> : null}
@@ -504,6 +578,7 @@ export function WorkflowRunView({
 
         {spec ? (
           <TimelineDock
+            runId={runId}
             rows={rows}
             open={prefs.timelineOpen}
             height={prefs.timelineHeight}

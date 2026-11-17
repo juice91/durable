@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from eap_observability import bind_log_context
 from eap_run_store import ApiKeyStore, looks_like_api_key, normalize_origin
@@ -121,6 +121,14 @@ async def current_principal(
     # async dependency runs in the request's own task, so the binding ends with the request.
     bind_log_context(tenant_id=principal.tenant_id)
     return principal
+
+
+def feedback_viewer(principal: Any) -> str | None:
+    """The user whose own feedback may be shown, or None: API keys have no user, so they see none (a plain dev
+    `Principal` is never a key)."""
+    if not principal.user_id or getattr(principal, "is_api_key", False):
+        return None
+    return principal.user_id
 
 
 # --- AG-UI principals: a tenant API key or the dev bearer (AGUI.3; D16 of the AG-UI plan) -------

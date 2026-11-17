@@ -10,17 +10,25 @@ import {
   getWarnings,
   newRunId,
   startEvalRun,
+  startWorkflowEvalRun,
   type EvalSuite,
   type EvalTarget,
+  type EvalTargetRef,
   type SideEffectWarning,
   type StartedEvalRun,
 } from "@/lib/evals";
 import { knowledgeBasesOf } from "@/components/agents/knowledgeMemory";
 import { KnowledgeNote, MemoryNote, WarningIcon, alertClass, fieldClass, hintClass, labelClass, warningClass } from "./evalsUi";
 
+/** A published version to run against: an agent's (with its spec) or a workflow's. */
+export type RunVersion = Pick<AgentVersion, "version"> & Partial<Pick<AgentVersion, "spec">>;
+
 interface RunDialogProps {
-  agent: Agent;
-  versions: AgentVersion[];
+  /** What the run is against: an agent (a draft is allowed) or a workflow (published versions only). */
+  target: EvalTargetRef;
+  /** The agent, for an agent target: its draft, latest version and tools are checked from it. */
+  agent?: Agent | null;
+  versions: RunVersion[];
   suite: EvalSuite;
   hasMemory: boolean;
   onStarted: (run: StartedEvalRun) => void;
@@ -44,10 +52,11 @@ function parseTarget(value: string): EvalTarget {
  * button says "Run anyway" while any are. The memory note shows for an agent with memory, and the
  * knowledge note (retrieval and its embedding cost per case) when the target's spec has knowledge bases.
  */
-export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClose }: RunDialogProps) {
+export function RunDialog({ target: subject, agent = null, versions, suite, hasMemory, onStarted, onClose }: RunDialogProps) {
+  const isWorkflow = subject.kind === "workflow";
   const id = useId();
   const published = [...versions].sort((a, b) => b.version - a.version);
-  const [target, setTarget] = useState<EvalTarget>(published.length > 0 ? published[0].version : "draft");
+  const [target, setTarget] = useState<EvalTarget>(published.length > 0 ? published[0].version : isWorkflow ? null : "draft");
   const [concurrency, setConcurrency] = useState(DEFAULT_MAX_CONCURRENCY);
   const [warnings, setWarnings] = useState<SideEffectWarning[] | null>(null);
   const [warningsError, setWarningsError] = useState<string | null>(null);
@@ -57,10 +66,14 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
   const runIdRef = useRef<{ key: string; id: string } | null>(null);
 
   useEffect(() => {
+    if (isWorkflow) {
+      setWarnings([]); // a workflow's steps are checked when it is published
+      return;
+    }
     const controller = new AbortController();
     setWarnings(null);
     setWarningsError(null);
-    getWarnings(agent.id, target, controller.signal)
+    getWarnings(subject.id, target, controller.signal)
       .then((data) => {
         if (!controller.signal.aborted) setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
       })
@@ -70,7 +83,7 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
         setWarningsError(reason instanceof Error && reason.message ? reason.message : "The target's tools could not be checked");
       });
     return () => controller.abort();
-  }, [agent.id, target]);
+  }, [subject.id, target, isWorkflow]);
 
   const start = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -80,7 +93,10 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
     const key = `${suite.id}:${targetValue(target)}:${concurrency}`;
     if (runIdRef.current?.key !== key) runIdRef.current = { key, id: newRunId() };
     try {
-      const started = await startEvalRun(agent.id, { run_id: runIdRef.current.id, suite_id: suite.id, version: target, max_concurrency: concurrency });
+      const body = { run_id: runIdRef.current.id, suite_id: suite.id, max_concurrency: concurrency };
+      const started = isWorkflow
+        ? await startWorkflowEvalRun(subject.id, { ...body, version: target === "draft" ? null : target })
+        : await startEvalRun(subject.id, { ...body, version: target });
       onStarted(started);
     } catch (reason: unknown) {
       setError(reason instanceof Error && reason.message ? reason.message : "The eval run could not be started");
@@ -89,10 +105,12 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
   };
 
   // The target's spec: the draft, or the chosen published version.
-  const targetSpec = target === "draft" ? agent.draft_spec : published.find((v) => v.version === target)?.spec ?? null;
+  const targetSpec = isWorkflow ? null : target === "draft" ? agent?.draft_spec ?? null : published.find((v) => v.version === target)?.spec ?? null;
   const hasKnowledge = knowledgeBasesOf(targetSpec).length > 0;
   const hasWarnings = (warnings?.length ?? 0) > 0;
   const noCases = suite.case_count === 0;
+  // A workflow runs only a published version: with none there is nothing to run against.
+  const noVersion = isWorkflow && published.length === 0;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !starting) onClose(); }}>
@@ -100,7 +118,7 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
         <DialogHeader>
           <DialogTitle>Run {suite.name}</DialogTitle>
           <DialogDescription>
-            Each of the {suite.case_count} {suite.case_count === 1 ? "case" : "cases"} runs as its own agent run; the results, scores and cost are recorded.
+            Each of the {suite.case_count} {suite.case_count === 1 ? "case" : "cases"} runs as its own {isWorkflow ? "workflow" : "agent"} run; the results, scores and cost are recorded.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={(e) => void start(e)} className="min-w-0 space-y-4" aria-label="Run suite">
@@ -115,10 +133,14 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
                   {i === 0 ? " (latest)" : ""}
                 </option>
               ))}
-              <option value="draft">Draft</option>
+              {isWorkflow ? null : <option value="draft">Draft</option>}
             </select>
             <p className={hintClass}>
-              {target === "draft" ? "The unpublished draft, frozen when the run starts." : agent.latest_version === null ? "The agent has no published version." : "A published version."}
+              {target === "draft"
+                ? "The unpublished draft, frozen when the run starts."
+                : published.length === 0
+                  ? `The ${subject.kind} has no published version.`
+                  : "A published version."}
             </p>
           </div>
           <div className="space-y-1">
@@ -165,7 +187,7 @@ export function RunDialog({ agent, versions, suite, hasMemory, onStarted, onClos
               type="submit"
               // Side-effect tools: destructive. An unchecked target: not the primary (safe-looking) style.
               variant={hasWarnings ? "destructive" : warningsError ? "secondary" : "primary"}
-              disabled={starting || noCases || warnings === null}
+              disabled={starting || noCases || noVersion || warnings === null}
               data-testid="eval-run-start"
             >
               {starting ? "Starting…" : hasWarnings ? "Run anyway" : "Run"}

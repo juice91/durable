@@ -2,6 +2,11 @@ import { beforeAll, beforeEach, expect } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { resetWorkingMemoryCache } from "@/lib/workingMemoryCache";
 import { setChatProtocolDefaultForTests } from "@/components/chat/chatProtocol";
+import { configure } from "@testing-library/react";
+
+// The hosted runner is several times slower than a laptop: findBy/waitFor default to 1 s, which a
+// loading state can outlast there. Assertions still pass as soon as the element appears.
+configure({ asyncUtilTimeout: 5000 });
 
 // The chat suites written before AGUI.12 mock the native run routes: with nothing stored, the Chat
 // tab uses the native protocol in tests. AG-UI suites store "agui" (a stored value wins).
@@ -68,3 +73,8 @@ if (typeof window !== "undefined") {
   define(elementProto, "releasePointerCapture", () => {});
   define(elementProto, "scrollIntoView", () => {});
 }
+
+// axe-core's icon-ligature check probes <canvas>; jsdom has no canvas and logs "Not implemented:
+// HTMLCanvasElement.prototype.getContext" with a stack for every probe. Returning null (the real
+// "unsupported" answer) makes the probe a no-op, without the native canvas package.
+if (typeof HTMLCanvasElement !== "undefined") HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;

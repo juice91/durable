@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from eap_schemas import AgentSpec, ModelRef
+from eap_schemas import AgentSpec, ModelRef, ModelSettings
 from eap_schemas.evals import DEFAULT_MAX_CONCURRENCY, MAX_MAX_CONCURRENCY, EvaluatorSpec
 from eap_schemas.knowledge import (
     ChunkingConfig,
@@ -123,7 +123,9 @@ class RunCreate(BaseModel):
     """Body of POST /agents/{agent_id}/runs. `version` null means the latest published version,
     "draft" a draft test run. `request_context` holds values for the target spec's
     `context_fields` (validated by the API; reserved identity names are refused). `model`
-    overrides the spec's model for this run (allowlist and provider rules apply)."""
+    overrides the spec's model for this run (allowlist and provider rules apply). `model_settings`
+    overrides the spec's model settings for this run, field by field (a field left out keeps the
+    spec's value; ranges and provider rules as at publish)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -132,6 +134,7 @@ class RunCreate(BaseModel):
     version: RunVersion = None
     request_context: dict[str, Any] | None = None
     model: ModelRef | None = None
+    model_settings: ModelSettings | None = None
 
     @field_validator("input")
     @classmethod

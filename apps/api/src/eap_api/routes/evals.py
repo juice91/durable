@@ -28,6 +28,24 @@ Eval runs:
   `GET .../evals/runs/{run_id}/results[?limit=&after=]` (by position, `next_cursor`).
 - `GET  /agents/{agent_id}/evals/compare?base=<run_id>&target=<run_id>`.
 
+Workflow targets (parity round 2, D5): a suite targets an agent or a workflow, never both.
+- `GET | POST /workflows/{workflow_id}/evals/suites`: the workflow's suites (same body as the agent's).
+  A case `input` of a workflow suite is JSON text that must parse to an object valid against the
+  workflow's input schema (422 `{code: "input_schema_errors", case, errors}`).
+- `POST /workflows/{workflow_id}/evals/runs {run_id, suite_id, version, max_concurrency}`: as the
+  agent route, against a published workflow version (null: the latest; `"draft"` is a 422). The eval
+  run is stored with `kind="eval"`, `workflow_id` and `workflow_version`, `agent_id` null.
+The agent routes answer 404 for a workflow suite and the other way round.
+
+Across the tenant's agents (the Studio Datasets, Scorers and Experiments pages; `eap_api.eval_overview`):
+- `GET  /eval-suites[?agent_id=&include_archived=&limit=&after=]`: suites by name with `agent_name`,
+  `case_count` and `last_run` (the suite's newest run with `{cases, passed, failed, errors, pass_rate}`).
+- `GET  /evals/runs[?agent_id=&suite_id=&limit=&before=]`: eval runs newest first with `agent_name`,
+  `suite_name` and aggregates.
+- `GET  /evals/scorers[?limit=&after=]`: evaluators in use by (kind, name) with the suites that use
+  them and recent per-run values (`score`: mean score, `pass_rate`: share of passed assertions).
+All three are paginated with an opaque `next_cursor` (422 for a cursor this API did not issue).
+
 Errors: 404 (agent, suite, case, version or run not found), 409 (name already used, suite archived,
 id already used, no published version or no draft), 413 (an eval case's hand-off payload over
 EAP_MAX_RUN_PAYLOAD_BYTES), 422 (invalid suite, case, evaluator, file or draft), 503 (the run was
@@ -49,16 +67,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.auth import Principal, current_principal
+from eap_api import eval_overview
 from eap_api.eval_format import (
     MAX_IMPORT_BYTES,
+    CsvFormatError,
     EvalFormatError,
     ExportFormat,
     dataset_dict,
     dump_dataset,
+    parse_csv_cases,
     parse_file,
     read_dataset,
 )
@@ -66,7 +88,16 @@ from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute, read_capped_body, unstorable_strings
 from eap_api.routes.runs import SessionDep, StoresDep, _run_json
-from eap_api.run_options import DRAFT, RunTarget, check_spec_payload_size, resolve_target, stored_target
+from eap_api.routes.workflow_runs import input_schema_errors, non_finite_errors
+from eap_api.run_options import (
+    DRAFT,
+    RunTarget,
+    check_spec_payload_size,
+    resolve_target,
+    resolve_workflow_target,
+    stored_target,
+)
+from eap_api.workflows.models import WorkflowModel
 from eap_api.schemas import (
     EvalCaseCreate,
     EvalCaseUpdate,
@@ -99,6 +130,7 @@ from eap_schemas import AgentSpec
 from eap_schemas.evals import EvalSuiteInvalid, EvalSuiteSnapshot
 from eap_schemas.models_policy import ModelNotAllowed, ModelPolicy
 from eap_schemas.tools import TOOL_DECLARATIONS
+from eap_schemas.workflows import WorkflowSpec
 
 log = logging.getLogger("eap_api")
 
@@ -147,10 +179,14 @@ def _dump(evaluators: Any) -> list[dict[str, Any]]:
     return dump_evaluators(evaluators)
 
 
-def suite_json(suite: EvalSuiteRecord) -> dict[str, Any]:
+def suite_json(suite: EvalSuiteRecord, target_name: str | None = None) -> dict[str, Any]:
     return {
         "id": suite.id,
         "agent_id": suite.agent_id,
+        "workflow_id": suite.workflow_id,
+        "target_kind": suite.target_kind,
+        "target_id": suite.target_id,
+        "target_name": target_name,
         "name": suite.name,
         "description": suite.description,
         "evaluators": _dump(suite.evaluators),
@@ -218,6 +254,11 @@ def _store_error(exc: Exception) -> HTTPException:
         return _http(status.HTTP_404_NOT_FOUND, str(exc))
     if isinstance(exc, (EvalSuiteNameConflict, EvalCaseNameConflict, EvalSuiteArchived)):
         return _http(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, CsvFormatError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "csv_invalid", "row": exc.row, "message": exc.message},
+        )
     if isinstance(exc, (EvalSuiteInvalid, EvalCaseLimitExceeded, EvalFormatError)):
         return _http(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     raise exc
@@ -241,6 +282,61 @@ def _agent_or_404(db, tenant_id: str, agent_id: uuid.UUID) -> AgentModel:
     if agent is None:
         raise _http(status.HTTP_404_NOT_FOUND, AGENT_NOT_FOUND)
     return agent
+
+
+WORKFLOW_NOT_FOUND = "Workflow not found"
+
+
+def _workflow_or_404(db, tenant_id: str, workflow_id: uuid.UUID) -> WorkflowModel:
+    workflow = (
+        db.query(WorkflowModel)
+        .filter(WorkflowModel.id == str(workflow_id), WorkflowModel.tenant_id == tenant_id)
+        .first()
+    )
+    if workflow is None or workflow.archived:
+        raise _http(status.HTTP_404_NOT_FOUND, WORKFLOW_NOT_FOUND)
+    return workflow
+
+
+def _target_name(db, tenant_id: str, suite: EvalSuiteRecord) -> str | None:
+    names = eval_overview.target_names(db, tenant_id, [suite])
+    return names.get((suite.target_kind, suite.target_id))
+
+
+def workflow_input_problem(spec: WorkflowSpec | None, case_name: str, text: str) -> HTTPException | None:
+    """A 422 (`{code: "input_schema_errors", case, errors}`) when a workflow case's `input` is not
+    JSON text of an object that satisfies the spec's input_schema (compact errors: input path and
+    failing keyword, never the value); None when it is fine. `spec` None checks only that it is a
+    JSON object (the workflow has no published version yet)."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        errors = [{"loc": ["input"], "msg": "must be JSON text", "type": "json_invalid"}]
+    else:
+        if not isinstance(value, dict):
+            errors = [{"loc": ["input"], "msg": "must be a JSON object", "type": "json_object"}]
+        elif spec is None:
+            return None
+        else:
+            errors = non_finite_errors(value) or input_schema_errors(spec.input_schema, value)
+    if not errors:
+        return None
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={"code": "input_schema_errors", "case": case_name, "errors": errors},
+    )
+
+
+def _latest_workflow_spec(db, tenant_id: str, workflow_id: str) -> WorkflowSpec | None:
+    from eap_api.workflows.models import WorkflowVersionModel
+
+    row = (
+        db.query(WorkflowVersionModel)
+        .filter(WorkflowVersionModel.workflow_id == workflow_id, WorkflowVersionModel.tenant_id == tenant_id)
+        .order_by(WorkflowVersionModel.version.desc())
+        .first()
+    )
+    return None if row is None else WorkflowSpec.model_validate(row.spec)
 
 
 def side_effect_warnings(spec: AgentSpec) -> list[dict[str, str]]:
@@ -313,9 +409,17 @@ def _check_judge_models(snapshot: EvalSuiteSnapshot) -> None:
 
 def _check_case_payloads(target: RunTarget, snapshot: EvalSuiteSnapshot) -> None:
     """413 when a case's child run hand-off (the spec plus the case input) would exceed the run
-    payload limit: checked here, before the eval run exists, for the largest case input."""
+    payload limit: checked here, before the eval run exists, for the largest case input. For a
+    workflow target, 422 when a case input no longer fits the version's input schema."""
     largest = max(snapshot.cases, key=lambda c: len(c.input.encode("utf-8")))
     check_spec_payload_size(target.spec_dict, largest.input)
+    if target.kind == "workflow":
+        # Every case input must still satisfy the target version's input schema (it may have changed
+        # since the case was written): 422 naming the first failing case, before the run exists.
+        for case in snapshot.ordered_cases():
+            problem = workflow_input_problem(target.spec, case.name, case.input)
+            if problem is not None:
+                raise problem
 
 
 def _version_query(version: str | None) -> int | str | None:
@@ -343,41 +447,168 @@ def list_suites(
     return JSONResponse(content={"items": [suite_json(s) for s in suites]})
 
 
+OVERVIEW_MAX_LIMIT = 100
+
+
+def _overview_agent(db, tenant_id: str, agent_id: uuid.UUID | None) -> str | None:
+    if agent_id is None:
+        return None
+    return _agent_or_404(db, tenant_id, agent_id).id
+
+
+@_json_router.get("/eval-suites")
+def list_tenant_suites(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    agent_id: uuid.UUID | None = None,
+    include_archived: bool = False,
+    limit: Annotated[int, Query(ge=1, le=OVERVIEW_MAX_LIMIT)] = 50,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The tenant's suites across agents by name, with the agent's name and the latest run of each."""
+    tenant_id = principal.tenant_id
+    agent = _overview_agent(db, tenant_id, agent_id)
+    try:
+        rows, next_cursor = eval_overview.list_suite_overview(
+            store, db, tenant_id, agent_id=agent, include_archived=include_archived, limit=limit, after=after
+        )
+    except eval_overview.InvalidCursor:
+        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    items = []
+    for row in rows:
+        item = suite_json(row["suite"], row["target_name"])
+        item["agent_name"] = row["agent_name"]
+        item["agent_archived"] = row["agent_archived"]
+        last = row["last_run"]
+        item["last_run"] = None if last is None else {
+            **{k: v for k, v in eval_run_json(last["run"]).items()
+               if k in ("run_id", "version", "status", "display_status", "created_at", "updated_at")},
+            "aggregates": eval_overview.brief_aggregates(last["aggregates"]),
+        }
+        items.append(item)
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+@_json_router.get("/evals/runs")
+def list_tenant_eval_runs(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    agent_id: uuid.UUID | None = None,
+    suite_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RUNS)] = 50,
+    before: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The tenant's eval runs across agents, newest first, each with its aggregates and the agent
+    and suite names. `next_cursor` is set when a full page came back (pass it as `before`)."""
+    tenant_id = principal.tenant_id
+    agent = _overview_agent(db, tenant_id, agent_id)
+    cursor = None
+    if before is not None:
+        try:
+            cursor = RunCursor.decode(before)
+        except InvalidRunCursor:
+            raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    rows, next_cursor = eval_overview.list_run_overview(
+        store, db, tenant_id, agent_id=agent, suite_id=None if suite_id is None else str(suite_id),
+        limit=limit, before=cursor,
+    )
+    items = [
+        {
+            **eval_run_json(row["run"], row["aggregates"]),
+            "agent_name": row["agent_name"],
+            "suite_name": row["suite_name"],
+            "target_kind": row["target_kind"],
+            "target_id": row["target_id"],
+            "target_name": row["target_name"],
+        }
+        for row in rows
+    ]
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+@_json_router.get("/evals/scorers")
+def list_scorers(
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    limit: Annotated[int, Query(ge=1, le=OVERVIEW_MAX_LIMIT)] = 50,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The evaluators the tenant's active suites use, by (kind, name), each with its suites and
+    recent per-run values from their eval runs."""
+    try:
+        rows, next_cursor = eval_overview.list_scorer_overview(store, db, principal.tenant_id, limit=limit, after=after)
+    except eval_overview.InvalidCursor:
+        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    return JSONResponse(content={"items": rows, "next_cursor": next_cursor})
+
+
 @_json_router.post("/agents/{agent_id}/eval-suites", status_code=status.HTTP_201_CREATED)
 def create_suite(
     agent_id: uuid.UUID, body: EvalSuiteCreate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
 ) -> JSONResponse:
     """Create a suite (201). A repeat with the same `suite_id`, agent and name answers 200 with the
     suite; a `suite_id` used otherwise is a 409."""
-    tenant_id = principal.tenant_id
-    _agent_or_404(db, tenant_id, agent_id)
-    existing = _same_suite(store, tenant_id, agent_id, body)
+    agent = _agent_or_404(db, principal.tenant_id, agent_id)
+    return _create_suite(store, principal.tenant_id, "agent", agent_id, agent.name, body)
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/suites")
+def list_workflow_suites(
+    workflow_id: uuid.UUID,
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    include_archived: bool = False,
+) -> JSONResponse:
+    """The workflow's suites by name, with their case counts (archived ones only on request)."""
+    workflow = _workflow_or_404(db, principal.tenant_id, workflow_id)
+    suites = store.list_workflow_suites(principal.tenant_id, workflow_id, include_archived=include_archived)
+    return JSONResponse(content={"items": [suite_json(s, workflow.name) for s in suites]})
+
+
+@_json_router.post("/workflows/{workflow_id}/evals/suites", status_code=status.HTTP_201_CREATED)
+def create_workflow_suite(
+    workflow_id: uuid.UUID, body: EvalSuiteCreate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
+) -> JSONResponse:
+    """Create a suite that targets the workflow (201); idempotent by `suite_id` as the agent route."""
+    workflow = _workflow_or_404(db, principal.tenant_id, workflow_id)
+    return _create_suite(store, principal.tenant_id, "workflow", workflow_id, workflow.name, body)
+
+
+def _create_suite(
+    store: EvalStore, tenant_id: str, kind: str, target_id: uuid.UUID, target_name: str, body: EvalSuiteCreate
+) -> JSONResponse:
+    existing = _same_suite(store, tenant_id, kind, target_id, body)
     if existing is not None:
-        return JSONResponse(status_code=status.HTTP_200_OK, content=suite_json(existing))
+        return JSONResponse(status_code=status.HTTP_200_OK, content=suite_json(existing, target_name))
     try:
         check_regex_evaluators(body.evaluators, "evaluators")
-        suite = store.create_suite(
-            tenant_id, agent_id, body.name, description=body.description, evaluators=body.evaluators,
+        make = store.create_suite if kind == "agent" else store.create_workflow_suite
+        suite = make(
+            tenant_id, target_id, body.name, description=body.description, evaluators=body.evaluators,
             suite_id=body.suite_id,
         )
     except (EvalSuiteNameConflict, IntegrityError) as exc:
         # A concurrent identical request may have won the insert: answer its suite (200). Otherwise
         # the name is taken (409, the store's message) or the id is used elsewhere (409).
-        existing = _same_suite(store, tenant_id, agent_id, body)
+        existing = _same_suite(store, tenant_id, kind, target_id, body)
         if existing is not None:
-            return JSONResponse(status_code=status.HTTP_200_OK, content=suite_json(existing))
+            return JSONResponse(status_code=status.HTTP_200_OK, content=suite_json(existing, target_name))
         if isinstance(exc, EvalSuiteNameConflict):
             raise _store_error(exc) from None
         raise _http(status.HTTP_409_CONFLICT, SUITE_ID_IN_USE) from None
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=suite_json(suite))
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=suite_json(suite, target_name))
 
 
 def _same_suite(
-    store: EvalStore, tenant_id: str, agent_id: uuid.UUID, body: EvalSuiteCreate
+    store: EvalStore, tenant_id: str, kind: str, target_id: uuid.UUID, body: EvalSuiteCreate
 ) -> EvalSuiteRecord | None:
-    """The tenant's suite with the body's `suite_id` when it is this request's suite (same agent and
+    """The tenant's suite with the body's `suite_id` when it is this request's suite (same target and
     name), None when there is none; 409 when the id is used otherwise."""
     if body.suite_id is None:
         return None
@@ -385,25 +616,26 @@ def _same_suite(
         existing = store.get_suite(tenant_id, body.suite_id)
     except EvalSuiteNotFound:
         return None
-    if existing.agent_id != str(agent_id) or existing.name != body.name:
+    if existing.target_kind != kind or existing.target_id != str(target_id) or existing.name != body.name:
         raise _http(status.HTTP_409_CONFLICT, SUITE_ID_IN_USE)
     return existing
 
 
 @_json_router.get("/eval-suites/{suite_id}")
-def get_suite(suite_id: uuid.UUID, principal: PrincipalDep, store: EvalStoreDep) -> JSONResponse:
+def get_suite(suite_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep) -> JSONResponse:
     """The suite with its cases in execution order."""
     try:
         suite = store.get_suite(principal.tenant_id, suite_id)
         cases = store.list_cases(principal.tenant_id, suite_id)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content={**suite_json(suite), "cases": [case_json(c) for c in cases]})
+    name = _target_name(db, principal.tenant_id, suite)
+    return JSONResponse(content={**suite_json(suite, name), "cases": [case_json(c) for c in cases]})
 
 
 @_json_router.patch("/eval-suites/{suite_id}")
 def update_suite(
-    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, store: EvalStoreDep
+    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
 ) -> JSONResponse:
     """Change the fields present in the body. An archived suite accepts only `archived: false` (409)."""
     fields = body.model_fields_set
@@ -419,7 +651,7 @@ def update_suite(
         suite = store.update_suite(principal.tenant_id, suite_id, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content=suite_json(suite))
+    return JSONResponse(content=suite_json(suite, _target_name(db, principal.tenant_id, suite)))
 
 
 @_json_router.delete("/eval-suites/{suite_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -435,6 +667,21 @@ def delete_suite(suite_id: uuid.UUID, principal: PrincipalDep, store: EvalStoreD
 # ---------------------------------------------------------------------------- cases
 
 
+def _check_workflow_case_input(db, store: EvalStore, tenant_id: str, suite_id, name: str, text: str) -> None:
+    """For a workflow suite, 422 unless `text` is a JSON object valid for the latest published
+    version's input schema (only the object check while the workflow has none). Agent suites: no-op;
+    an unknown suite is left to the store's 404."""
+    try:
+        suite = store.get_suite(tenant_id, suite_id)
+    except EvalSuiteNotFound:
+        return
+    if suite.workflow_id is None:
+        return
+    problem = workflow_input_problem(_latest_workflow_spec(db, tenant_id, suite.workflow_id), name, text)
+    if problem is not None:
+        raise problem
+
+
 @_json_router.get("/eval-suites/{suite_id}/cases")
 def list_cases(suite_id: uuid.UUID, principal: PrincipalDep, store: EvalStoreDep) -> JSONResponse:
     try:
@@ -445,11 +692,15 @@ def list_cases(suite_id: uuid.UUID, principal: PrincipalDep, store: EvalStoreDep
 
 
 @_json_router.post("/eval-suites/{suite_id}/cases", status_code=status.HTTP_201_CREATED)
-def add_case(suite_id: uuid.UUID, body: EvalCaseCreate, principal: PrincipalDep, store: EvalStoreDep) -> JSONResponse:
+def add_case(
+    suite_id: uuid.UUID, body: EvalCaseCreate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
+) -> JSONResponse:
     """Add a case (201): 409 for a name already in the suite or an archived suite, 422 for an
-    invalid case or past the 500-case cap."""
+    invalid case (for a workflow suite, an input that is not a JSON object valid for the workflow's
+    input schema) or past the 500-case cap."""
     case = body.model_dump(exclude={"case_id", "position"})
     try:
+        _check_workflow_case_input(db, store, principal.tenant_id, suite_id, body.name, body.input)
         check_regex_evaluators(body.evaluators, "case.evaluators")
         record = store.add_case(
             principal.tenant_id, suite_id, case, position=body.position, case_id=body.case_id
@@ -472,13 +723,23 @@ def get_case(suite_id: uuid.UUID, case_id: uuid.UUID, principal: PrincipalDep, s
 
 @_json_router.patch("/eval-suites/{suite_id}/cases/{case_id}")
 def update_case(
-    suite_id: uuid.UUID, case_id: uuid.UUID, body: EvalCaseUpdate, principal: PrincipalDep, store: EvalStoreDep
+    suite_id: uuid.UUID,
+    case_id: uuid.UUID,
+    body: EvalCaseUpdate,
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
 ) -> JSONResponse:
     """Change the fields present in the body; the merged case is validated (422)."""
     kwargs = {k: getattr(body, k) for k in body.model_fields_set}
     if kwargs.get("position", 0) is None:
         kwargs.pop("position")
     try:
+        if isinstance(kwargs.get("input"), str):
+            name = kwargs.get("name")
+            if not isinstance(name, str):
+                name = store.get_case(principal.tenant_id, case_id, suite_id=suite_id).name
+            _check_workflow_case_input(db, store, principal.tenant_id, suite_id, name, kwargs["input"])
         check_regex_evaluators(kwargs.get("evaluators"), "case.evaluators")
         record = store.update_case(principal.tenant_id, case_id, suite_id=suite_id, **kwargs)
     except _STORE_ERRORS as exc:
@@ -524,23 +785,40 @@ def export_suite(
     )
 
 
-def _import_sync(store: EvalStore, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat) -> dict[str, Any]:
+def _import_sync(
+    store: EvalStore, engine, tenant_id: str, suite_id: uuid.UUID, text: str, fmt: ExportFormat
+) -> dict[str, Any]:
     """Off the event loop. The suite is checked before the file is parsed: an unknown or foreign
-    suite is a 404 and an archived one a 409, whatever the file holds, and no parse runs for them."""
+    suite is a 404 and an archived one a 409, whatever the file holds, and no parse runs for them.
+    Everything is validated before the one transaction that writes (all or nothing)."""
     suite = store.get_suite(tenant_id, suite_id)
     if suite.archived:
         raise EvalSuiteArchived(suite.id)
-    data = parse_file(text, fmt)
-    issues = unstorable_strings(data)
+    if fmt == "csv":
+        cases, evaluators = parse_csv_cases(text), None
+        issues = unstorable_strings(cases)
+    else:
+        data = parse_file(text, fmt)
+        issues = unstorable_strings(data)
+        if not issues:
+            cases, evaluators = read_dataset(data)
     if issues:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=issues)
-    cases, evaluators = read_dataset(data)
     check_regex_evaluators(evaluators, "evaluators")
     _check_case_regexes(cases)
+    if suite.workflow_id is not None:
+        with Session(engine) as db:  # this thread's own short session, not the request's
+            spec = _latest_workflow_spec(db, tenant_id, suite.workflow_id)
+        for case in cases:
+            problem = workflow_input_problem(spec, case["name"], case["input"])
+            if problem is not None:
+                raise problem
     kwargs: dict[str, Any] = {} if evaluators is None else {"evaluators": evaluators}
-    result = store.upsert_cases(tenant_id, suite_id, cases, **kwargs)
+    result = store.upsert_cases(tenant_id, suite_id, cases, keep_case_evaluators=fmt == "csv", **kwargs)
     suite = store.get_suite(tenant_id, suite_id)
-    return {"created": result.created, "updated": result.updated, "suite": suite_json(suite)}
+    with Session(engine) as db:
+        name = _target_name(db, tenant_id, suite)
+    return {"created": result.created, "updated": result.updated, "suite": suite_json(suite, name)}
 
 
 @_file_router.post("/eval-suites/{suite_id}/import")
@@ -549,13 +827,17 @@ async def import_suite(
     request: Request,
     principal: PrincipalDep,
     store: EvalStoreDep,
-    fmt: Annotated[Literal["yaml", "json"] | None, Query(alias="format")] = None,
+    fmt: Annotated[Literal["yaml", "json", "csv"] | None, Query(alias="format")] = None,
 ) -> JSONResponse:
-    """Import a `pydantic_evals` dataset file (the raw body, at most 1 MiB): cases are upserted by
-    name in one transaction, all or nothing (an existing case keeps its id and position, new ones
-    are appended); the file's `evaluators`, when present, replace the suite's. 200
-    `{created, updated, suite}`; 422 for a file that is too large, not UTF-8, not parseable, an
-    unknown evaluator or an invalid case; 404 / 409 as for the other suite routes."""
+    """Import a `pydantic_evals` dataset file, or a CSV file (the raw body, at most 1 MiB): cases are
+    upserted by name in one transaction, all or nothing (an existing case keeps its id and position,
+    new ones are appended); the dataset file's `evaluators`, when present, replace the suite's. A CSV
+    file (`?format=csv`, or Content-Type text/csv) has the columns `name,input[,expected_output]
+    [,metadata]` and leaves the evaluators alone. 200 `{created, updated, suite}`; 422 for a file
+    that is too large, not UTF-8, not parseable, an unknown evaluator or an invalid case (a CSV
+    problem is `{code: "csv_invalid", row, message}`; for a workflow suite a case input that does not
+    fit the workflow's input schema is `{code: "input_schema_errors", case, errors}`); 404 / 409 as
+    for the other suite routes."""
     body = await read_capped_body(request, MAX_IMPORT_BYTES)
     if body is None:
         raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, IMPORT_TOO_LARGE)
@@ -564,9 +846,10 @@ async def import_suite(
     except UnicodeDecodeError:
         raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, IMPORT_NOT_UTF8) from None
     if fmt is None:
-        fmt = "json" if "json" in request.headers.get("content-type", "").lower() else "yaml"
+        content_type = request.headers.get("content-type", "").lower()
+        fmt = "csv" if "csv" in content_type else "json" if "json" in content_type else "yaml"
     try:
-        content = await run_in_threadpool(_import_sync, store, principal.tenant_id, suite_id, text, fmt)
+        content = await run_in_threadpool(_import_sync, store, request.app.state.database_engine, principal.tenant_id, suite_id, text, fmt)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
     return JSONResponse(content=content)
@@ -619,7 +902,10 @@ def _launch(launcher: RunLauncher, run_store, tenant_id: str, run: dict[str, Any
     run = run_store.get_run(tenant_id, run_id) or run
     if run["error"] == ENQUEUE_FAILED_ERROR:
         run = {**run, "status": "queued", "display_status": "queued", "error": None}
-    log.info("eval run %s queued: tenant=%s agent=%s suite=%s", run["id"], tenant_id, run["agent_id"], run["eval_suite_id"])
+    log.info(
+        "eval run %s queued: tenant=%s target=%s suite=%s",
+        run["id"], tenant_id, run["agent_id"] or run.get("workflow_id"), run["eval_suite_id"],
+    )
     return run
 
 
@@ -690,6 +976,91 @@ def start_eval_run(
     )
 
 
+def _same_workflow_request(run: dict[str, Any], workflow_id: uuid.UUID, body: EvalRunCreate) -> bool:
+    """Whether a retry (same run_id) asks for the workflow eval run as recorded."""
+    if run.get("kind") != "eval" or run.get("workflow_id") != str(workflow_id):
+        return False
+    if run.get("eval_suite_id") != str(body.suite_id):
+        return False
+    if body.version is not None and run.get("workflow_version") != body.version:
+        return False
+    try:
+        recorded = json.loads(run["input"]).get("max_concurrency")
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return recorded == body.max_concurrency
+
+
+@_json_router.post(
+    "/workflows/{workflow_id}/evals/runs",
+    status_code=status.HTTP_201_CREATED,
+    responses={413: {"model": ErrorDetail}, 503: {"model": ErrorDetail}},
+)
+def start_workflow_eval_run(
+    workflow_id: uuid.UUID,
+    body: EvalRunCreate,
+    principal: PrincipalDep,
+    db: SessionDep,
+    stores: StoresDep,
+    store: EvalStoreDep,
+    launcher: LauncherDep,
+) -> JSONResponse:
+    """Record an eval run of a workflow suite against a published workflow version and enqueue
+    `eap.eval_run`. A workflow has no draft target: `version: "draft"` is a 422."""
+    run_store, _ = stores
+    tenant_id = principal.tenant_id
+    if body.version == DRAFT:
+        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, "a workflow is evaluated at a published version, not a draft")
+    workflow = _workflow_or_404(db, tenant_id, workflow_id)
+    run = run_store.get_run(tenant_id, body.run_id)
+    created = False
+    if run is None:
+        target = resolve_workflow_target(db, tenant_id, workflow.id, body.version)
+        try:
+            snapshot = store.snapshot(
+                tenant_id, body.suite_id, workflow_id=workflow_id, max_concurrency=body.max_concurrency
+            )
+        except _STORE_ERRORS as exc:
+            raise _store_error(exc) from None
+        _check_judge_models(snapshot)
+        _check_case_payloads(target, snapshot)
+        trace_id, traceparent = current_trace_context()
+        try:
+            run_id, created = run_store.create_workflow_eval_run(
+                tenant_id, workflow_id, target.version, body.suite_id, snapshot.canonical_json(), body.run_id,
+                trace_id=trace_id, traceparent=traceparent,
+            )
+        except RunIdConflict:
+            raise _http(status.HTTP_409_CONFLICT, RUN_ID_IN_USE) from None
+        run = run_store.get_run(tenant_id, run_id)
+        if run is None:  # pragma: no cover - the row was just written
+            raise _http(status.HTTP_404_NOT_FOUND, "Run not found")
+    if not created and not _same_workflow_request(run, workflow_id, body):
+        raise _http(status.HTTP_409_CONFLICT, RUN_ID_OTHER_REQUEST)
+
+    run = _launch(launcher, run_store, tenant_id, run, created)
+    snapshot_meta = json.loads(run["input"])
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        content={
+            "run_id": str(run["id"]),
+            "status": run["status"],
+            "display_status": run["display_status"],
+            "agent_id": None,
+            "workflow_id": str(run["workflow_id"]),
+            "target_kind": "workflow",
+            "version": run["workflow_version"],
+            "draft": False,
+            "suite_id": run["eval_suite_id"],
+            "suite_hash": run["eval_suite_hash"],
+            "cases": len(snapshot_meta.get("cases") or ()),
+            "max_concurrency": snapshot_meta.get("max_concurrency"),
+            "trace_id": run["trace_id"],
+            "warnings": [],
+        },
+    )
+
+
 @_json_router.get("/agents/{agent_id}/evals/warnings")
 def eval_warnings(
     agent_id: uuid.UUID,
@@ -704,6 +1075,74 @@ def eval_warnings(
     return JSONResponse(
         content={"version": target.version, "draft": target.is_draft, "warnings": side_effect_warnings(target.spec)}
     )
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/runs")
+def list_workflow_eval_runs(
+    workflow_id: uuid.UUID,
+    principal: PrincipalDep,
+    db: SessionDep,
+    store: EvalStoreDep,
+    suite_id: uuid.UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RUNS)] = 50,
+    before: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The workflow's eval runs, as `GET /agents/{id}/evals/runs` lists an agent's."""
+    tenant_id = principal.tenant_id
+    _workflow_or_404(db, tenant_id, workflow_id)
+    cursor = None
+    if before is not None:
+        try:
+            cursor = RunCursor.decode(before)
+        except InvalidRunCursor:
+            raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_CURSOR) from None
+    runs = store.list_runs(tenant_id, workflow_id, suite_id=suite_id, limit=limit, before=cursor, workflow=True)
+    aggregates = store.aggregates_for_runs(tenant_id, [r["id"] for r in runs])
+    items = [eval_run_json(run, aggregates[str(run["id"])]) for run in runs]
+    next_cursor = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+
+
+def _workflow_eval_run_or_404(run_store, tenant_id: str, workflow_id: uuid.UUID, run_id: uuid.UUID) -> dict[str, Any]:
+    run = run_store.get_run(tenant_id, run_id)
+    if run is None or run.get("kind") != "eval" or run.get("workflow_id") != str(workflow_id):
+        raise _http(status.HTTP_404_NOT_FOUND, str(EvalRunNotFound(tenant_id, run_id)))
+    return run
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/runs/{run_id}")
+def get_workflow_eval_run(
+    workflow_id: uuid.UUID, run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, store: EvalStoreDep
+) -> JSONResponse:
+    """The workflow eval run with its aggregates (404 when it is another workflow's)."""
+    run_store, _ = stores
+    run = _workflow_eval_run_or_404(run_store, principal.tenant_id, workflow_id, run_id)
+    try:
+        aggregates = store.aggregates(principal.tenant_id, run_id, workflow_id=workflow_id)
+    except _STORE_ERRORS as exc:
+        raise _store_error(exc) from None
+    return JSONResponse(content=eval_run_json(run, aggregates))
+
+
+@_json_router.get("/workflows/{workflow_id}/evals/runs/{run_id}/results")
+def list_workflow_eval_results(
+    workflow_id: uuid.UUID,
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    store: EvalStoreDep,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST_RESULTS)] = 100,
+    after: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> JSONResponse:
+    """The workflow eval run's per-case results by position, paged as the agent route's."""
+    position_after = _decode_result_cursor(after) if after is not None else None
+    try:
+        results = store.list_case_results(
+            principal.tenant_id, run_id, workflow_id=workflow_id, after=position_after, limit=limit
+        )
+    except _STORE_ERRORS as exc:
+        raise _store_error(exc) from None
+    next_cursor = _result_cursor(results[-1]) if len(results) == limit else None
+    return JSONResponse(content={"items": [result_json(r) for r in results], "next_cursor": next_cursor})
 
 
 @_json_router.get("/agents/{agent_id}/evals/runs")

@@ -9,11 +9,13 @@ import type { JsonSchema } from "./tools";
 import { loadAgentLatestSpecs } from "./agentUsage";
 
 export type ProcessorType = "pii_redact" | "regex_blocklist" | "max_length" | "moderation";
-export type ProcessorPhase = "input" | "output";
+export type ProcessorPhase = "input" | "step" | "stream" | "output";
 export type ProcessorAction = "allow" | "redact" | "block" | "truncate";
 
 export const PROCESSOR_TYPES: ProcessorType[] = ["pii_redact", "regex_blocklist", "max_length", "moderation"];
-export const PROCESSOR_PHASES: ProcessorPhase[] = ["input", "output"];
+export const PROCESSOR_PHASES: ProcessorPhase[] = ["input", "step", "stream", "output"];
+
+export const PROCESSOR_PHASE_LABELS: Record<ProcessorPhase, string> = { input: "Input", step: "Step", stream: "Stream", output: "Output" };
 export const PROCESSOR_ACTIONS: ProcessorAction[] = ["allow", "redact", "block", "truncate"];
 
 /** A JSON schema node as the catalog serves it (a superset of the tools form subset). */
@@ -231,6 +233,8 @@ export function describeSchemaType(schema: ProcessorConfigSchema): string {
 /** The processor fields of an agent spec (left out of the spec while empty). */
 export interface SpecProcessors {
   input_processors?: ProcessorSpec[];
+  step_processors?: ProcessorSpec[];
+  stream_processors?: ProcessorSpec[];
   output_processors?: ProcessorSpec[];
 }
 
@@ -246,10 +250,7 @@ export interface ProcessorUsage {
 
 function phasesUsing(spec: SpecProcessors | null | undefined, type: ProcessorType): ProcessorPhase[] {
   if (!spec) return [];
-  const phases: ProcessorPhase[] = [];
-  if ((spec.input_processors || []).some((p) => p.type === type)) phases.push("input");
-  if ((spec.output_processors || []).some((p) => p.type === type)) phases.push("output");
-  return phases;
+  return PROCESSOR_PHASES.filter((phase) => (spec[`${phase}_processors`] || []).some((p) => p.type === type));
 }
 
 export interface AgentProcessorSpecs {

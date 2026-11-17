@@ -64,6 +64,9 @@ class WorkerDeps(RunDeps):
     spec: AgentSpec
     allowed_tools: frozenset[str]
     retrieve_tally: RetrieveTally = field(default_factory=RetrieveTally, kw_only=True, compare=False, repr=False)
+    # Step processors: (model request n, tool_call id) -> the arguments the tool ran with (or a
+    # withheld marker), set by StepProcessorCapability. Per workflow execution, like retrieve_tally.
+    step_decisions: dict = field(default_factory=dict, kw_only=True, compare=False, repr=False)
 
 
 class _CrashAfterCallTicketService:

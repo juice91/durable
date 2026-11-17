@@ -940,7 +940,7 @@ def test_invalid_utf8_and_encoded_surrogates_in_guarded_reads_are_never_5xx(pg, 
 
 
 def test_unguarded_p0_routers_handle_nul_and_bad_utf8_query_strings_safely(pg, tenant_of, logs):
-    """logs, models and traces are not on the guard. Recorded behaviour: NUL in `q` is escaped into
+    """logs and models are not on the guard; traces is since W2.2 (NUL in any query parameter is a 422). Recorded behaviour: NUL in `q` is escaped into
     the LogQL literal (never raw); NUL in a UUID parameter is a 422; unknown parameters (NUL
     included) are ignored; nothing is a 5xx and nothing echoes the NUL."""
     client, app = pg
@@ -965,7 +965,7 @@ def test_unguarded_p0_routers_handle_nul_and_bad_utf8_query_strings_safely(pg, t
         assert r.status_code == 200 and "\x00" not in r.text, url
     unknown = uuid.uuid4()
     for url, expected in (
-        (f"/api/v1/runs/{unknown}/trace?x=%00", 404),
+        (f"/api/v1/runs/{unknown}/trace?x=%00", 422),  # the traces router is guarded since W2.2: NUL anywhere is a 422
         (f"/api/v1/runs/{unknown}/trace?%ED%A0%80=1", 404),
         ("/api/v1/runs/%00/trace", 422),
         (f"/api/v1/runs/{str(unknown)[:-1]}%00/trace", 422),

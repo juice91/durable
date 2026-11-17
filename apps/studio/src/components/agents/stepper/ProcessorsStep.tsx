@@ -10,11 +10,12 @@ import {
   stepStatus,
   type ModelOption,
   type ProcessorCatalog,
+  type ProcessorPhase,
 } from "../specSections";
 import type { EditorStepDefinition, StepProps } from "./types";
 import { readableError } from "@/components/agents/readableError";
 
-/** Step 5: input and output processors (guardrails). */
+/** Step 5: input, step, stream and output processors (guardrails). */
 export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
   const [catalog, setCatalog] = useState<ProcessorCatalog | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -22,7 +23,7 @@ export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
   const [modelsError, setModelsError] = useState<string | null>(null);
   // A server error naming `<phase>_processors[i]` is pinned to that processor's clientId when it
   // arrives, so it follows the processor through reordering and disappears when it is removed.
-  const [pinned, setPinned] = useState<{ phase: "input" | "output"; clientId: string; message: string } | null>(null);
+  const [pinned, setPinned] = useState<{ phase: ProcessorPhase; clientId: string; message: string } | null>(null);
   const { serverError } = errors;
 
   useEffect(() => {
@@ -53,20 +54,24 @@ export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
       setPinned(null);
       return;
     }
-    const list = target.phase === "input" ? draft.inputProcessors : draft.outputProcessors;
+    const list = draft[`${target.phase}Processors`];
     const processor = list[target.index];
     setPinned(processor ? { phase: target.phase, clientId: processor.clientId, message: serverError } : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverError]);
 
-  const pinnedErrors = (phase: "input" | "output"): Record<string, string> =>
+  const pinnedErrors = (phase: ProcessorPhase): Record<string, string> =>
     pinned && pinned.phase === phase ? { [pinned.clientId]: readableError(pinned.message) } : {};
 
   return (
     <ProcessorsEditor
       inputProcessors={draft.inputProcessors}
+      stepProcessors={draft.stepProcessors}
+      streamProcessors={draft.streamProcessors}
       outputProcessors={draft.outputProcessors}
       onInputChange={(inputProcessors) => onChange({ inputProcessors })}
+      onStepChange={(stepProcessors) => onChange({ stepProcessors })}
+      onStreamChange={(streamProcessors) => onChange({ streamProcessors })}
       onOutputChange={(outputProcessors) => onChange({ outputProcessors })}
       catalog={catalog}
       catalogError={catalogError}
@@ -74,6 +79,8 @@ export function ProcessorsStep({ draft, onChange, errors }: StepProps) {
       modelsError={modelsError}
       sectionError={errors.target?.kind === "processors" && serverError ? readableError(serverError) : null}
       inputErrors={pinnedErrors("input")}
+      stepErrors={pinnedErrors("step")}
+      streamErrors={pinnedErrors("stream")}
       outputErrors={pinnedErrors("output")}
     />
   );

@@ -1,5 +1,6 @@
 """Postgres store for durable runs and event logging."""
 
+from eap_run_store.schedules import ScheduleNameConflict, ScheduleStore
 from eap_run_store.cursor import ConversationCursor, InvalidRunCursor, RunCursor
 from eap_run_store.store import (
     AppendResult,
@@ -47,6 +48,11 @@ from eap_run_store.ag_ui import (
     AgUiStore,
     PendingClientToolCall,
 )
+from eap_run_store.scorers import (  # noqa: F401  W2.3: registers the scorer tables
+    ScorerNameConflict,
+    ScorerNotFound,
+    ScorerStore,
+)
 from eap_run_store.api_keys import (
     API_KEY_PREFIX,
     API_KEY_SCOPES,
@@ -59,6 +65,18 @@ from eap_run_store.api_keys import (
     normalize_origin,
     parse_api_key,
 )
+from eap_run_store.trace_feedback import (  # noqa: F401  0019_trace_feedback: registers the table
+    TraceFeedbackModel,
+    TraceFeedbackStore,
+)
+from eap_run_store.chat_attachments import (  # 0021_chat_attachments
+    ChatAttachmentModel,
+    ChatAttachmentStore,
+    MessageFeedbackModel,
+    MessageFeedbackStore,
+)
+from eap_run_store.schedules import WorkflowScheduleModel  # noqa: F401  0022: registers the table
+from eap_run_store.spans import SpanModel  # noqa: F401  0022: registers the table
 from eap_run_store.approvals import (
     APPROVAL_ARGS_MAX_BYTES,
     APPROVAL_DECISIONS,
@@ -167,6 +185,8 @@ __all__ = [
     "API_KEY_SCOPES",
     "ApiKeyLimitExceeded",
     "ApiKeyModel",
+    "TraceFeedbackModel",
+    "TraceFeedbackStore",
     "ApiKeyRecord",
     "ApiKeyStore",
     "CreatedApiKey",
@@ -189,6 +209,11 @@ __all__ = [
     "EvalCaseResultModel",
     "EvalRunNotFound",
     "EvalStore",
+    "ScheduleNameConflict",
+    "ScheduleStore",
+    "ScorerNameConflict",
+    "ScorerNotFound",
+    "ScorerStore",
     "EvalSuiteArchived",
     "EvalSuiteModel",
     "EvalSuiteNameConflict",

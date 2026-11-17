@@ -69,6 +69,20 @@ describe("MCP server detail page", () => {
     expect(screen.getByRole("link", { name: "MCP Servers" })).toHaveAttribute("href", routes.mcp());
   });
 
+  it("has a Run tab that lists the tested server's tools", async () => {
+    vi.mocked(mcpServers.test).mockResolvedValue({
+      status: "ok",
+      tools: [{ name: "search", description: "Search docs", input_schema: { type: "object", properties: { q: { type: "string" } } } }],
+    });
+    render(<McpServerDetailPage />);
+    await screen.findByRole("heading", { level: 1, name: "docs" });
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Run" }), { button: 0, ctrlKey: false });
+    const empty = await screen.findByTestId("mcp-run-empty");
+    fireEvent.click(within(empty).getByRole("button", { name: "Test connection" }));
+    const select = await screen.findByLabelText("Tool");
+    expect(within(select).getByRole("option", { name: "search" })).toBeInTheDocument();
+  });
+
   it("gives a not-found state for an unknown id", async () => {
     vi.mocked(mcpServers.get).mockRejectedValue(new ApiError(404, "not found"));
     render(<McpServerDetailPage />);

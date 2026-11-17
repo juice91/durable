@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -53,6 +53,8 @@ from eap_run_store import (
     RunStore,
 )
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
+from eap_run_store.spans import SpanStore
+from eap_run_store.store import run_tags
 
 log = logging.getLogger("eap_api")
 
@@ -100,6 +102,10 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") is not None else None,
         "parent_run_id": run.get("parent_run_id"),
         "parent_step_id": run.get("parent_step_id"),
+        # The earlier run this one repeats ("Run again"); null otherwise.
+        "rerun_of": run.get("rerun_of"),
+        # A step-by-step run: the worker waits after every top-level step.
+        "pause_after_each_step": bool(run.get("pause_after_each_step")),
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],
@@ -134,6 +140,9 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         # request context ({} when none).
         "draft": run.get("draft_spec") is not None,
         "request_context": run.get("request_context") or {},
+        "model_settings": run.get("model_settings") or {},
+        # W2.2: tags derived from what the run records (eap_run_store.store.run_tags).
+        "tags": run_tags({**run, "kind": run.get("kind") or "agent"}),
     }
 
 
@@ -304,6 +313,7 @@ def start_run(
         options = resolve_run_options(
             db, tenant_id, agent,
             version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
+            model_settings=body.model_settings,
         )
         # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
         trace_id, traceparent = current_trace_context()
@@ -320,7 +330,10 @@ def start_run(
         run["agent_id"] != str(agent_id)
         or run["input"] != body.input
         or run["conversation_id"] is not None
-        or not same_options(db, run, version=body.version, request_context=body.request_context, model=body.model)
+        or not same_options(
+            db, run, version=body.version, request_context=body.request_context, model=body.model,
+            model_settings=body.model_settings,
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
@@ -347,6 +360,20 @@ def _status_filter(values: list[str] | None) -> list[str] | None:
     return statuses or None
 
 
+def _list_param(values: list[str] | None, name: str, *, split: bool) -> list[str] | None:
+    """A repeated query parameter, de-duplicated, at most 10 entries of at most 200 characters (422)."""
+    if not values:
+        return None
+    items = [s.strip() for v in values for s in (v.split(",") if split else [v]) if s.strip()]
+    items = list(dict.fromkeys(items))
+    if len(items) > 10 or any(len(i) > 200 for i in items):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"at most 10 {name} values of at most 200 characters are allowed",
+        )
+    return items or None
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -371,6 +398,11 @@ def list_runs(
     created_to: Annotated[datetime | None, Query(alias="to")] = None,
     model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    tags: Annotated[list[str] | None, Query(description="Run tags, repeated or comma-separated; all must match")] = None,
+    metadata: Annotated[
+        list[str] | None, Query(description="key=value pairs of the request context, repeated; all must match")
+    ] = None,
+    q: Annotated[str | None, Query(min_length=1, max_length=200, description="Free text")] = None,
 ) -> JSONResponse:
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
@@ -383,8 +415,17 @@ def list_runs(
     Metrics drill-down (P0.6), same meaning as in GET /metrics/*: `status` may be repeated or
     comma-separated (any of them; at most 10), `from` / `to` bound `created_at` to `[from, to)`
     (ISO 8601, UTC without an offset; `from` must be before `to`), `model` (`provider:name`) and
-    `provider` keep runs that used that model, including through a workflow's child runs."""
+    `provider` keep runs that used that model, including through a workflow's child runs.
+
+    Trace list filters (W2.2): `tags` (repeated or comma-separated, at most 10, all must match; runs
+    carry derived tags, see eap_run_store.store.run_tags: `kind:agent`, `agent:<id>`, `model:<id>`,
+    `draft`, `model-override`, `ctx:<key>`), `metadata=key=value` (repeated, at most 10; matches the
+    run's request context value as text) and `q`, a case-insensitive substring of the run's input,
+    output, error, tool id or model id (span names and trace payloads are not searched). `q` runs
+    under the metrics statement timeout (503 when it fires)."""
     statuses = _status_filter(run_status)
+    tag_list = _list_param(tags, "tags", split=True)
+    metadata_map = metadata_filter(metadata) or {}
     start = _utc(created_from) if created_from is not None else None
     end = _utc(created_to) if created_to is not None else None
     if start is not None and end is not None and start >= end:
@@ -404,15 +445,98 @@ def list_runs(
             principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=statuses, kind=kind,
             tool_id=tool_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
             parent_run_id=parent_run_id, created_from=start, created_to=end, model=model, provider=provider,
+            tags=tag_list, metadata=metadata_map or None, text_query=q.strip() if q and q.strip() else None,
         )
     except MetricsQueryTimeout:
-        # Only with `model` / `provider`: that filter runs under the metrics statement timeout.
+        # Only with `model` / `provider` / `q`: those filters run under the metrics statement timeout.
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
     next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
     chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
     return JSONResponse(
         content={"items": [_run_json(r, chat.get(str(r["id"]))) for r in runs], "next_before": next_before}
     )
+
+
+HISTOGRAM_DEFAULT_RANGE = timedelta(days=7)
+HISTOGRAM_HOURLY_UNDER = timedelta(hours=72)
+HISTOGRAM_MAX_RANGE = timedelta(days=366)
+
+
+def get_span_store(request: Request, stores: StoresDep) -> SpanStore:
+    """The tenant-agnostic span store (every call takes the tenant), one per app."""
+    store = getattr(request.app.state, "span_store", None)
+    if store is None:
+        run_store, _ = stores
+        store = request.app.state.span_store = SpanStore(run_store.engine)
+    return store
+
+
+SpanStoreDep = Annotated[SpanStore, Depends(get_span_store)]
+
+
+def metadata_filter(metadata: list[str] | None) -> dict[str, str] | None:
+    """`?metadata=key=value` pairs as a dict (422 for a malformed pair); None when absent."""
+    found: dict[str, str] = {}
+    for pair in _list_param(metadata, "metadata", split=False) or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip() or len(key) > 64 or len(value) > 256:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="metadata must be key=value pairs (key up to 64 and value up to 256 characters)",
+            )
+        found[key.strip()] = value
+    return found or None
+
+
+@router.get("/runs/histogram")
+def runs_histogram(
+    principal: PrincipalDep,
+    spans: SpanStoreDep,
+    agent_id: uuid.UUID | None = None,
+    run_status: Annotated[list[str] | None, Query(alias="status")] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
+    tool_id: Annotated[str | None, Query(max_length=64)] = None,
+    workflow_id: uuid.UUID | None = None,
+    knowledge_base_id: uuid.UUID | None = None,
+    parent_run_id: uuid.UUID | None = None,
+    created_from: Annotated[datetime | None, Query(alias="from")] = None,
+    created_to: Annotated[datetime | None, Query(alias="to")] = None,
+    model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+    provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    tags: Annotated[list[str] | None, Query()] = None,
+    metadata: Annotated[list[str] | None, Query()] = None,
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+) -> JSONResponse:
+    """Runs per bucket over the `GET /runs` filters (same meaning), for the Traces page strip:
+    `{interval, buckets: [{start, runs, failed}]}`, one bucket per UTC hour (a range under 72 hours)
+    or day, zero-filled from the bucket holding `from` up to `to`. The range is `[from, to)`,
+    default the last 7 days; `from` must be before `to` and the range at most 366 days (422)."""
+    now = datetime.now(UTC)
+    end = _utc(created_to) if created_to is not None else now
+    start = _utc(created_from) if created_from is not None else end - HISTOGRAM_DEFAULT_RANGE
+    if start >= end:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
+    if end - start > HISTOGRAM_MAX_RANGE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the range is at most 366 days"
+        )
+    interval = "hour" if end - start < HISTOGRAM_HOURLY_UNDER else "day"
+    filters = {
+        "agent_id": agent_id, "status": _status_filter(run_status), "kind": kind, "tool_id": tool_id,
+        "workflow_id": workflow_id, "knowledge_base_id": knowledge_base_id, "parent_run_id": parent_run_id,
+        "model": model, "provider": provider, "tags": _list_param(tags, "tags", split=True),
+        "metadata": metadata_filter(metadata), "text_query": q.strip() if q and q.strip() else None,
+    }
+    try:
+        buckets = spans.runs_histogram(
+            principal.tenant_id, start, end, interval, {k: v for k, v in filters.items() if v is not None}
+        )
+    except MetricsQueryTimeout:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
+    return JSONResponse(content={
+        "interval": interval,
+        "buckets": [{**b, "start": b["start"].isoformat()} for b in buckets],
+    })
 
 
 @router.get("/runs/{run_id}")

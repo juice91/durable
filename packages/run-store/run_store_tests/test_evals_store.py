@@ -567,3 +567,82 @@ def test_field_equals_null_value_round_trips(store, tenant, engine):
         {"kind": "equals_expected"},
         {"kind": "contains", "case_sensitive": True, "name": "c"},
     ]
+
+
+# ---------------------------------------------------------------------------- workflow targets (parity round 2)
+
+
+def test_workflow_suites_have_no_agent_and_conflict_per_target(store, tenant, other):
+    wsuite = store.create_workflow_suite(tenant, "wf", "smoke")
+    assert (wsuite.agent_id, wsuite.workflow_id, wsuite.target_kind, wsuite.target_id) == (None, "wf", "workflow", "wf")
+    with pytest.raises(EvalSuiteNameConflict) as info:
+        store.create_workflow_suite(tenant, "wf", "smoke")
+    assert "workflow" in str(info.value) and info.value.agent_id == "wf"
+    store.create_workflow_suite(tenant, "wf2", "smoke")  # another workflow, the same name
+    agent = store.create_suite(tenant, "ag", "smoke")  # an agent suite with the same name is no conflict
+    assert (agent.workflow_id, agent.target_kind) == (None, "agent")
+
+    assert [s.id for s in store.list_workflow_suites(tenant, "wf")] == [wsuite.id]
+    assert [s.id for s in store.list_suites(tenant, "ag")] == [agent.id]
+    assert store.list_suites(tenant, "wf") == []
+    # Each target sees only its own suites by id.
+    assert store.get_suite(tenant, wsuite.id, workflow_id="wf").id == wsuite.id
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(tenant, wsuite.id, agent_id="ag")
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(tenant, agent.id, workflow_id="wf")
+    with pytest.raises(EvalSuiteNotFound):
+        store.get_suite(other, wsuite.id)
+
+
+def test_renaming_a_workflow_suite_onto_a_taken_name_is_a_name_conflict(store, tenant):
+    store.create_workflow_suite(tenant, "wf", "one")
+    two = store.create_workflow_suite(tenant, "wf", "two")
+    with pytest.raises(EvalSuiteNameConflict) as info:
+        store.update_suite(tenant, two.id, name="one")
+    assert info.value.agent_id == "wf" and info.value.kind == "workflow"
+    assert store.update_suite(tenant, two.id, name="three").name == "three"
+    assert store.update_suite(tenant, two.id, archived=True).archived  # no agent id needed to update
+
+
+def test_workflow_suite_snapshot_needs_the_workflow(store, tenant):
+    suite = store.create_workflow_suite(tenant, "wf", "snap")
+    store.add_case(tenant, suite.id, {"name": "c", "input": '{"q": 1}'})
+    assert store.snapshot(tenant, suite.id, workflow_id="wf").cases[0].name == "c"
+    with pytest.raises(EvalSuiteNotFound):
+        store.snapshot(tenant, suite.id, agent_id="ag")
+    with pytest.raises(EvalSuiteNotFound):
+        store.snapshot(tenant, suite.id, workflow_id="other")
+
+
+def test_cancelling_a_workflow_eval_run_cascades_to_its_queued_workflow_child(engine, tenant):
+    rs = RunStore(engine)
+    suite = EvalStore(engine).create_workflow_suite(tenant, "wf", "s")
+    eval_run, child = uuid4(), uuid4()
+    case = EvalStore(engine).add_case(tenant, suite.id, {"name": "c", "input": "{}"})
+    snapshot = EvalStore(engine).snapshot(tenant, suite.id, workflow_id="wf").canonical_json()
+    rs.create_workflow_eval_run(tenant, "wf", 1, suite.id, snapshot, eval_run)
+    rs.create_eval_workflow_child_run(tenant, eval_run, case.id, "wf", 1, "{}", child)
+    grandchild = uuid4()
+    rs.create_child_agent_run(tenant, "ag", 1, "in", grandchild, child, "ask")
+    row = rs.get_run(tenant, child)
+    assert (row["kind"], row["parent_run_id"], row["parent_step_id"]) == ("workflow", str(eval_run), f"case:{case.id}")
+
+    result = rs.cancel_run_tree(tenant, str(eval_run))
+    assert str(child) in result.statuses and result.statuses[str(child)] == "failed"
+    assert rs.get_run(tenant, child)["status"] == "failed"
+    assert result.statuses[str(grandchild)] == "failed" and rs.get_run(tenant, grandchild)["status"] == "failed"
+
+
+def test_the_cost_roll_up_includes_workflow_children_and_their_agent_steps(engine, tenant):
+    rs = RunStore(engine)
+    suite = EvalStore(engine).create_workflow_suite(tenant, "wf", "s")
+    case = EvalStore(engine).add_case(tenant, suite.id, {"name": "c", "input": "{}"})
+    snapshot = EvalStore(engine).snapshot(tenant, suite.id, workflow_id="wf").canonical_json()
+    eval_run, child, grandchild = uuid4(), uuid4(), uuid4()
+    rs.create_workflow_eval_run(tenant, "wf", 1, suite.id, snapshot, eval_run)
+    rs.create_eval_workflow_child_run(tenant, eval_run, case.id, "wf", 1, "{}", child)
+    rs.create_child_agent_run(tenant, "ag", 1, "in", grandchild, child, "ask")
+    EventLog(engine).append(tenant, child, "m:0", "model_message", {}, usage=_usage("m:0", "0.10"))
+    EventLog(engine).append(tenant, grandchild, "m:1", "model_message", {}, usage=_usage("m:1", "0.25"))
+    assert rs.run_tree_cost(tenant, eval_run) == Decimal("0.35")

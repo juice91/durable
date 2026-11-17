@@ -36,6 +36,7 @@ from eap_api.routes.logs import (
 )
 
 from .conftest import create_agent, get_auth_header, publish_version
+from .loki_gate import SKIP_REASON, should_skip_live
 
 SELECTOR = '{service_name=~"eap-api|eap-worker"}'
 LOKI_URL = os.environ.get("EAP_LOKI_URL", "http://127.0.0.1:3100").rstrip("/")
@@ -521,6 +522,13 @@ def _provider(service: str):
         obs.LogContextProcessor(RedactingLogProcessor(BatchLogRecordProcessor(exporter, schedule_delay_millis=200)))
     )
     return provider
+
+
+@pytest.fixture(autouse=True)
+def _skip_live_without_loki(request):
+    """test_live_* need a real Loki; skip when it is unreachable unless EAP_REQUIRE_LOKI=1."""
+    if request.node.name.startswith("test_live_") and should_skip_live(LOKI_URL, os.environ):
+        pytest.skip(SKIP_REASON)
 
 
 @pytest.fixture

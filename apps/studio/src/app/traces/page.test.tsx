@@ -23,7 +23,8 @@ vi.mock("@/lib/traces", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   api: { agents: { list: vi.fn() } },
 }));
 
@@ -95,7 +96,7 @@ describe("TracesPage", () => {
     render(<TracesPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Traces")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Traces" })).toBeInTheDocument();
     });
   });
 
@@ -214,6 +215,7 @@ describe("TracesPage", () => {
     expect((listRuns as any).mock.calls[0][0]).toEqual({
       status: ["failed", "needs_attention"], model: "openai:gpt-4.1", provider: null,
       from: "2026-11-01T00:00:00", to: "2026-11-02T00:00:00", agent_id: "agent-1", kind: "agent",
+      tags: [], metadata: [], q: null,
     });
     expect((screen.getByLabelText(/model/i) as HTMLInputElement).value).toBe("openai:gpt-4.1");
 

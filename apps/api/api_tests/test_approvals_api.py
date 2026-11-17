@@ -103,6 +103,28 @@ def waiting_step(client, app, tenant, headers, step_id="approve"):
     return run_id
 
 
+def test_pause_shows_in_the_inbox_as_a_step_item_with_the_pause_flag(api, fake):
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    run_id = waiting_step(client, app, tenant, headers, step_id="first_pause")
+    _, event_log = app.state.run_stores
+    # The waiting event of waiting_step has no flag; a pause's carries `pause: true`.
+    plain = client.get("/api/v1/approvals", headers=headers).json()["items"][0]
+    assert plain["pause"] is False
+    other = waiting_step(client, app, tenant, headers, step_id="x")
+    event_log.append_approval_waiting(
+        tenant, other, "step", "x_pause",
+        {"step_id": "x_pause", "prompt": "Paused after x", "pause": True, "workflow_id": str(other),
+         "deadline": _deadline()},
+    )
+    items = {i["step_id"]: i for i in client.get("/api/v1/approvals", headers=headers).json()["items"]}
+    assert items["x_pause"]["kind"] == "step" and items["x_pause"]["pause"] is True
+    assert items["x_pause"]["prompt"] == "Paused after x"
+    one = client.get(f"/api/v1/approvals/{other}/step/x_pause", headers=headers).json()
+    assert one["pause"] is True
+    assert run_id
+
+
 def tool_url(run_id, call_id, action):
     return f"/api/v1/runs/{run_id}/tool-approvals/{call_id}/{action}"
 

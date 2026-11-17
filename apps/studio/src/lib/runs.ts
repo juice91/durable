@@ -58,6 +58,12 @@ export interface Run {
    * with parent_run_id / parent_step_id set. */
   workflow_id?: string | null;
   workflow_version?: number | null;
+  /** Workflow runs: the earlier run this one repeats ("Run again"), or null. */
+  rerun_of?: string | null;
+  /** The run was started step by step: it waits for Continue after each top-level step. */
+  pause_after_each_step?: boolean;
+  /** Workflow runs: the schedule that started this run, or null. */
+  schedule_id?: string | null;
   parent_run_id?: string | null;
   parent_step_id?: string | null;
   agent_id: string | null;
@@ -123,7 +129,11 @@ export interface RunEvent {
     // Workflow loops (loops D4, D12): one per iteration (`loop:{S}:started|completed|failed`), and
     // the durable cancel request (key `cancel`, {requested_by}).
     | "loop_iteration_started" | "loop_iteration_completed" | "loop_iteration_failed"
-    | "cancel_requested";
+    | "cancel_requested"
+    // Reusable scorers (W2.3): written by the worker after a run, key `score:{scorer_id}`.
+    | "score"
+    // Message feedback (W2.4): legacy, no longer written (feedback is per user; see docs/ag-ui.md).
+    | "message_feedback";
   data: RunEventData;
   ts: string;
 }

@@ -173,28 +173,30 @@ describe("evaluator validation", () => {
 });
 
 describe("the judge model picker", () => {
-  it("offers the allowlisted concrete models only, never a wildcard", async () => {
+  it("offers the listed providers, and a provider's concrete models in a searchable list", async () => {
     const sheet = await openSuiteSheet();
     const judge = await addEvaluator(sheet, "llm_judge");
-    const select = await within(judge).findByTestId("evaluator-model");
-    expect(within(select).getAllByRole("option").map((o) => o.getAttribute("value"))).toEqual(["test:judge", "openai:gpt-4.1-mini"]);
-    expect(select).toHaveValue("test:judge");
+    const provider = await within(judge).findByTestId("model-picker-provider");
+    expect(within(provider).getAllByRole("option").map((o) => o.getAttribute("value"))).toEqual(["", "test", "openai"]);
+    expect(provider).toHaveValue("test");
+    expect(within(judge).getByTestId("model-picker-model")).toHaveTextContent("judge");
   });
 
   it("reopens a stored allowlisted judge model in the picker, not as typed text", async () => {
     const sheet = await openSuiteSheet([{ kind: "llm_judge", rubric: "r", model: { provider: "test", name: "judge" } }]);
     const row = within(sheet).getByTestId("evaluator-row");
-    expect(await within(row).findByTestId("evaluator-model")).toHaveValue("test:judge");
+    expect(await within(row).findByTestId("model-picker-provider")).toHaveValue("test");
+    expect(within(row).getByTestId("model-picker-model")).toHaveTextContent("judge");
   });
 
-  it("lets a provider:name be typed, and keeps a stored model that is no longer allowed", async () => {
+  it("keeps a stored model that is no longer allowed, and lets another provider and name be chosen", async () => {
     const sheet = await openSuiteSheet([{ kind: "llm_judge", rubric: "r", model: { provider: "anthropic", name: "claude-x" } }]);
     const row = within(sheet).getByTestId("evaluator-row");
-    expect(await within(row).findByTestId("evaluator-model-text")).toHaveValue("anthropic:claude-x");
-    fireEvent.click(within(row).getByTestId("evaluator-model-toggle"));
-    expect(within(row).getByTestId("evaluator-model")).toHaveValue("");
-    fireEvent.click(within(row).getByTestId("evaluator-model-toggle"));
-    set(within(row).getByTestId("evaluator-model-text"), "openai:gpt-4.1");
+    const provider = await within(row).findByTestId("model-picker-provider");
+    expect(provider).toHaveValue("anthropic");
+    expect(within(provider).getByRole("option", { name: "anthropic (not in the allowlist)" })).toBeInTheDocument();
+    set(provider, "openai");
+    set(await within(row).findByLabelText("Judge model"), "gpt-4.1");
     fireEvent.click(within(sheet).getByTestId("eval-suite-save"));
     await waitFor(() => expect(callsTo(fake.state, "PATCH", /eval-suites\/s1$/)).toHaveLength(1));
     expect((patchBody(/eval-suites\/s1$/).evaluators as { model: unknown }[])[0].model).toEqual({ provider: "openai", name: "gpt-4.1" });
@@ -203,7 +205,7 @@ describe("the judge model picker", () => {
   it("refuses a judge without a usable model", async () => {
     const sheet = await openSuiteSheet([{ kind: "llm_judge", rubric: "r", model: { provider: "anthropic", name: "claude-x" } }]);
     const row = within(sheet).getByTestId("evaluator-row");
-    set(await within(row).findByTestId("evaluator-model-text"), "nocolon");
+    set(await within(row).findByTestId("model-picker-provider"), "openai"); // the name is cleared with the provider
     fireEvent.click(within(sheet).getByTestId("eval-suite-save"));
     expect(await within(row).findByTestId("evaluator-error")).toHaveTextContent("Choose a judge model");
   });

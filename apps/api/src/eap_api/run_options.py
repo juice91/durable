@@ -13,6 +13,11 @@ A run start (`POST /agents/{id}/runs`, `POST /conversations/{id}/runs`) may carr
 - `model`: an override of the spec's model, checked against the platform allowlist and the provider
   rules publish applies (Anthropic refuses a temperature). The effective model is always recorded
   on `runs.model_id`, with `runs.model_overridden` when it differs from the spec's model.
+- `model_settings`: per-run overrides of the spec's model settings (temperature, top_p, top_k,
+  penalties, seed, max_tokens, max_steps, max_retries; a set field replaces the spec's value, an
+  unset one keeps it). The same range checks and provider rules as publish apply to the EFFECTIVE
+  settings on the effective model (422); the overrides are stored on `runs.model_settings` (NULL
+  when none), and the worker merges them over the spec's.
 
 The worker reads all of it back from the row in `eap.start_run`; the hand-off arguments are
 unchanged.
@@ -28,7 +33,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -37,7 +42,8 @@ from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.routes import _check_publishable, validate_stored_draft
-from eap_schemas import AgentSpec, ModelRef
+from eap_schemas import AgentSpec, ModelRef, ModelSettings
+from eap_schemas.model_settings_support import merge_model_settings, unsupported_settings
 from eap_schemas.models_policy import ModelNotAllowed, ModelPolicy
 from eap_schemas.request_context import RequestContextError, validate_request_context
 
@@ -68,12 +74,16 @@ def resolve_version(db: Session, agent_id: uuid.UUID | str, requested: int | Non
 
 @dataclass(frozen=True)
 class RunTarget:
-    """What a run executes: a published version (`version` set) or a draft snapshot (`draft_spec`)."""
+    """What a run executes: a published version (`version` set) or a draft snapshot (`draft_spec`).
+    `kind` is "agent" (`spec` an AgentSpec) or "workflow" (`spec` a WorkflowSpec, never a draft,
+    `workflow_version_id` the row the worker starts)."""
 
     version: int | None
-    spec: AgentSpec
+    spec: Any
     spec_dict: dict[str, Any]
     draft_spec: dict[str, Any] | None
+    kind: Literal["agent", "workflow"] = "agent"
+    workflow_version_id: str | None = None
 
     @property
     def is_draft(self) -> bool:
@@ -111,6 +121,33 @@ def resolve_target(db: Session, tenant_id: str, agent: AgentModel, requested: in
     return _published_target(db, agent.id, resolve_version(db, agent.id, requested))
 
 
+def resolve_workflow_target(db: Session, tenant_id: str, workflow_id: uuid.UUID | str, requested: int | None) -> RunTarget:
+    """The published workflow version an eval run executes (latest when `requested` is None; 409
+    when the workflow has none, 404 for an unknown number)."""
+    from eap_api.workflows.models import WorkflowVersionModel
+    from eap_schemas.workflows import WorkflowSpec
+
+    query = db.query(WorkflowVersionModel).filter(
+        WorkflowVersionModel.workflow_id == str(workflow_id), WorkflowVersionModel.tenant_id == tenant_id
+    )
+    if requested is None:
+        row = query.order_by(WorkflowVersionModel.version.desc()).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Workflow has no published version")
+    else:
+        row = query.filter(WorkflowVersionModel.version == requested).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return RunTarget(
+        version=row.version,
+        spec=WorkflowSpec.model_validate(row.spec),
+        spec_dict=row.spec,
+        draft_spec=None,
+        kind="workflow",
+        workflow_version_id=str(row.id),
+    )
+
+
 def stored_target(db: Session, run: dict[str, Any]) -> RunTarget:
     """The target an existing run was recorded with (its draft snapshot or its version)."""
     if run.get("draft_spec") is not None:
@@ -139,6 +176,12 @@ def validate_context(spec: AgentSpec, value: dict[str, Any] | None) -> dict[str,
         ) from None
 
 
+def settings_json(settings: ModelSettings | None) -> dict[str, Any] | None:
+    """The per-run settings as stored: only the fields that are set, None when none is."""
+    values = settings.set_values() if settings is not None else {}
+    return values or None
+
+
 def effective_model(spec: AgentSpec, override: ModelRef | None) -> tuple[str, bool]:
     """(model id `provider:name`, overridden): the override when given, else the spec's model.
     `overridden` is True only when the override differs from the spec's model."""
@@ -147,23 +190,39 @@ def effective_model(spec: AgentSpec, override: ModelRef | None) -> tuple[str, bo
     return f"{model.provider}:{model.name}", overridden
 
 
-def check_model_override(spec: AgentSpec, override: ModelRef | None) -> None:
-    """422 unless the override passes the allowlist and the provider rules publish applies."""
-    if override is None:
-        return
-    if not ModelPolicy.from_env().allows(override.provider, override.name):
+def _refuse_setting(model: ModelRef, name: str, where: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=(
+            f"model '{model.provider}:{model.name}' does not accept a {name} setting; "
+            f"remove {name} from {where} or choose another model"
+        ),
+    )
+
+
+def check_model_override(
+    spec: AgentSpec, override: ModelRef | None, settings_override: ModelSettings | None = None
+) -> None:
+    """422 unless the override passes the allowlist and the provider rules publish applies, and
+    unless the EFFECTIVE model settings (the spec's with the per-run overrides on top) are accepted
+    by the effective model. Without a model override the spec's model and its fallbacks (which
+    answer with the same settings) are checked for the settings the run adds; the spec's own were
+    checked at publish."""
+    if override is not None and not ModelPolicy.from_env().allows(override.provider, override.name):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(ModelNotAllowed(override.provider, override.name)),
         )
-    if override.provider == "anthropic" and spec.model_settings.temperature is not None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"model '{override.provider}:{override.name}' does not accept a temperature setting; "
-                "remove temperature from the agent's model settings or choose another model"
-            ),
-        )
+    effective = merge_model_settings(spec.model_settings, settings_override)
+    if override is not None:
+        for name in unsupported_settings(override.provider, effective):
+            raise _refuse_setting(override, name, "the agent's model settings")
+        return
+    if settings_override is None:
+        return
+    for model in (spec.model, *spec.fallback_models):
+        for name in unsupported_settings(model.provider, settings_override):
+            raise _refuse_setting(model, name, "the run's model settings")
 
 
 def check_spec_payload_size(spec_dict: dict[str, Any], input_text: str) -> None:
@@ -185,6 +244,7 @@ class RunOptions:
     request_context: dict[str, Any]
     model_id: str
     model_overridden: bool
+    model_settings: dict[str, Any] | None = None
 
     def store_kwargs(self) -> dict[str, Any]:
         return {
@@ -192,6 +252,7 @@ class RunOptions:
             "draft_spec": self.target.draft_spec,
             "model_id": self.model_id,
             "model_overridden": self.model_overridden,
+            "model_settings": self.model_settings,
         }
 
 
@@ -204,15 +265,22 @@ def resolve_run_options(
     request_context: dict[str, Any] | None,
     model: ModelRef | None,
     input_text: str,
+    model_settings: ModelSettings | None = None,
 ) -> RunOptions:
     """Validate a new run's options, in this order: target (404/409, 422 for an invalid draft),
-    request context (422 list), model override (422), payload size (413)."""
+    request context (422 list), model override and settings (422), payload size (413)."""
     target = resolve_target(db, tenant_id, agent, version)
     context = validate_context(target.spec, request_context)
-    check_model_override(target.spec, model)
+    check_model_override(target.spec, model, model_settings)
     check_spec_payload_size(target.spec_dict, input_text)
     model_id, overridden = effective_model(target.spec, model)
-    return RunOptions(target=target, request_context=context, model_id=model_id, model_overridden=overridden)
+    return RunOptions(
+        target=target,
+        request_context=context,
+        model_id=model_id,
+        model_overridden=overridden,
+        model_settings=settings_json(model_settings),
+    )
 
 
 def _comparable(field_type: str, value: Any) -> Any:
@@ -246,10 +314,11 @@ def same_options(
     version: int | str | None,
     request_context: dict[str, Any] | None,
     model: ModelRef | None,
+    model_settings: ModelSettings | None = None,
 ) -> bool:
     """Whether a retry (same run_id) asks for the run as recorded: same kind of target (a draft run
     only for `"draft"`, the same version number when one is given), the same validated context and
-    the same effective model. A draft run is compared with its own snapshot, not the live draft, so
+    the same effective model and per-run model settings. A draft run is compared with its own snapshot, not the live draft, so
     an edit of the draft after the first attempt does not turn a retry into a different run."""
     if run.get("agent_id") is None:
         return False
@@ -268,6 +337,8 @@ def same_options(
     if not _same_context(target.spec, context, run.get("request_context") or {}):
         return False
     model_id, overridden = effective_model(target.spec, model)
+    if settings_json(model_settings) != (run.get("model_settings") or None):
+        return False
     if run.get("model_id") is None:  # recorded before run options existed: only "no override" matches
         return model is None
     return (model_id, overridden) == (run["model_id"], bool(run.get("model_overridden")))

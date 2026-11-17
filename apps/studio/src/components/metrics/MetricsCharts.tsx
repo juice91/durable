@@ -51,6 +51,7 @@ export function chartSpecs(ts: MetricsTimeseries, filters: MetricsFilters, ids: 
   const failed = b.map((x) => x.failed);
   const p50 = b.map((x) => x.latency_p50_ms);
   const p95 = b.map((x) => x.latency_p95_ms);
+  const p99 = b.map((x) => x.latency_p99_ms);
   const input = b.map((x) => x.input_tokens);
   const output = b.map((x) => x.output_tokens);
   const cost = b.map((x) => parseCost(x.cost_usd) ?? 0);
@@ -73,15 +74,16 @@ export function chartSpecs(ts: MetricsTimeseries, filters: MetricsFilters, ids: 
     latency: {
       id: "latency",
       title: "Latency",
-      description: "p50 and p95 of finished runs, by start time",
+      description: "p50, p95 and p99 of finished runs, by start time",
       type: "line",
       series: [
         { key: "p50", label: "p50", color: "var(--viz-series-1-color)", values: p50 },
         { key: "p95", label: "p95", color: "var(--viz-series-2-color)", values: p95 },
+        { key: "p99", label: "p99", color: "var(--viz-critical-color)", values: p99 },
       ],
       formatValue: formatLatency,
       bucketHref,
-      summary: `${summarize("Latency p50", p50, formatLatency, "none")} ${summarize("Latency p95", p95, formatLatency, "none")}`,
+      summary: `${summarize("Latency p50", p50, formatLatency, "none")} ${summarize("Latency p95", p95, formatLatency, "none")} ${summarize("Latency p99", p99, formatLatency, "none")}`,
     },
     tokens: {
       id: "tokens",

@@ -730,11 +730,20 @@ def test_delete_conversation_deletes_every_side_effect_of_its_runs(store, runs, 
 
 
 def test_run_side_effect_prefix_delete_uses_the_pattern_index(engine, tenant):
-    with engine.begin() as conn:
+    # Rows and fresh statistics inside a rolled-back transaction: on an empty table the planner's
+    # choice between the primary key and the pattern index depends on leftover statistics.
+    with engine.connect() as conn:
+        tx = conn.begin()
+        conn.execute(text(
+            "INSERT INTO side_effects (tenant_id, key, state, result, created_at)"
+            " SELECT :t, 'k:' || g, 'completed', CAST('{}' AS jsonb), now() FROM generate_series(1, 3000) g"),
+            {"t": tenant})
+        conn.execute(text("ANALYZE side_effects"))
         conn.execute(text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join(conn.execute(text(
             "EXPLAIN DELETE FROM side_effects WHERE tenant_id = :t AND key LIKE 'wm:abc:%' ESCAPE '\\'"),
             {"t": tenant}).scalars())
+        tx.rollback()
     assert "ix_side_effects_tenant_key_pattern" in plan, plan
 
 

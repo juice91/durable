@@ -195,7 +195,7 @@ def test_every_type_is_allowed_in_both_phases_and_declarations_are_consistent():
     assert spec.input_processors == spec.output_processors
     assert {k for k, d in PROCESSOR_DECLARATIONS.items() if not d.deterministic} == {"moderation"}
     for key, decl in PROCESSOR_DECLARATIONS.items():
-        assert decl.id == key and decl.phases == ("input", "output") and decl.title and decl.description
+        assert decl.id == key and decl.phases == (("input", "output") if key == "moderation" else ("input", "step", "stream", "output")) and decl.title and decl.description
     assert PROCESSOR_DECLARATIONS["moderation"].actions == ("block",)
     assert set(PROCESSOR_DECLARATIONS["max_length"].actions) == {"block", "truncate"}
 

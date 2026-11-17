@@ -169,7 +169,7 @@ def test_not_null_columns_are_enforced():
 def test_a_single_head_that_is_0017_over_0016_and_check_is_clean():
     script = ScriptDirectory.from_config(alembic_config())
     heads = script.get_heads()
-    assert heads == ["0017_api_keys"]
+    assert len(heads) == 1  # later revisions build on 0017; test_migrations pins the head
     assert script.get_revision("0017_api_keys").down_revision == "0016_ag_ui"
     with throwaway() as engine:
         _to(engine, "head")

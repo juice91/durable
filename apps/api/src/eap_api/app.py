@@ -91,6 +91,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.include_router(tools_router, prefix="/api/v1")
 
     # A malformed workflow loop cap (EAP_WORKFLOW_MAX_*, LP.5) fails startup here.
+    # Schedules first: `/workflows/schedules` must not be read as a workflow id.
+    from eap_api.routes.schedules import router as schedules_router
+
+    app.include_router(schedules_router, prefix="/api/v1")
     from eap_api.routes.workflows import check_workflow_configuration, router as workflows_router
 
     check_workflow_configuration()
@@ -109,6 +113,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.evals import router as evals_router
 
     app.include_router(evals_router, prefix="/api/v1")
+    # Reusable scorers (W2.3): /scorers CRUD and /agents/{id}/scorers attachments.
+    from eap_api.routes.scorers import router as scorers_router
+
+    app.include_router(scorers_router, prefix="/api/v1")
     # Log search over Loki (EAP_LOKI_URL), tenant-scoped: GET /logs.
     from eap_api.routes.logs import router as logs_router
 
@@ -131,6 +139,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.traces import router as traces_router
 
     app.include_router(traces_router, prefix="/api/v1")
+    from eap_api.routes.spans import router as spans_router  # parity round 2: GET /spans
+
+    app.include_router(spans_router, prefix="/api/v1")
     # Knowledge bases (RM.7): CRUD, document upload, ingest and reindex runs, GET /embedding-models.
     # A malformed embedding allowlist or knowledge base limit fails startup here.
     from eap_api.routes.knowledge import check_knowledge_configuration, router as knowledge_router
@@ -150,6 +161,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.ag_ui_workflows import router as ag_ui_workflows_router  # AGUI.8: /ag-ui/workflows/...
 
     app.include_router(ag_ui_workflows_router, prefix="/api/v1")
+    from eap_api.routes.attachments import router as attachments_router  # W2.4: attachments, message feedback
+
+    app.include_router(attachments_router, prefix="/api/v1")
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

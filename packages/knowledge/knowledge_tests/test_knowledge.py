@@ -634,7 +634,8 @@ def _assert_linear(make, *, limit: float = 2.0) -> None:
         return time.perf_counter() - started
 
     run(_MIB // 64)  # warm up
-    small, large = run(_MIB // 4), run(_MIB)
+    # Best of three: a pause (GC, a busy machine) inflates one timing, a quadratic path all of them.
+    small, large = min(run(_MIB // 4) for _ in range(3)), min(run(_MIB) for _ in range(3))
     assert large < limit, (small, large)
     assert large <= 8 * small + 0.1, (small, large)
 

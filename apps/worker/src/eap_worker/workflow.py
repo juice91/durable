@@ -69,6 +69,10 @@ carries the moderation request's usage row (request key `moderation:input:{i}`, 
 model request) or `output_blocked` (the blocked response's model_message keeps only its usage and
 `"blocked": true`, no text; nothing is stored as output or messages). Failed turns never enter a
 later turn's history. A spec with output processors publishes no NOTIFY deltas.
+Step and stream processors (parity round 2): `step_processors` wrap each tool call (eap_worker.step_processors,
+events `processor:step:{i}:tool:{n}:args|result`); `stream_processors` filter live deltas in `_publish_deltas`
+(nothing recorded there) and, with the output processors, run in the post-step output pass
+(`processor:stream:{i}:model:{n}`), so the stored answer matches what was shown.
 
     eap.start_run
     eap.input_processors | eap-moderator__model.request ...   (input chain, list order)
@@ -336,9 +340,10 @@ from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
 from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
-from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore
+from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore, ScorerStore
 from eap_schemas import AgentSpec, approval_required_tool_names
-from eap_schemas.limits import RunBudgetExceeded
+from eap_schemas import ModelSettings as ModelSettingsSpec
+from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
 from eap_schemas.request_context import RequestContextError, render_instructions, validate_request_context
@@ -406,7 +411,10 @@ from eap_worker.memory import (
 )
 from eap_worker.observational import observe_after_turn
 from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
+from eap_worker.scoring import score_run_step
+from eap_worker.spans_step import record_spans
 from eap_worker.recall import index_after_turn, recall_before_turn
+from eap_worker.step_processors import StepProcessorCapability
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
 from eap_worker.pricing import (
@@ -418,6 +426,7 @@ from eap_worker.pricing import (
     scrub_failed_attempts_message,
     usage_record,
 )
+from eap_processors import compiled_chain
 from eap_worker.processors import (
     ChainRun,
     describe,
@@ -699,13 +708,56 @@ async def _publish_deltas(ctx: RunContext[WorkerDeps], events: Any) -> None:
     # UI waits for the checked model_message. Structured output (AC.4): no deltas either (native and
     # prompted modes would stream raw JSON fragments). The crash point stays where the delta would go.
     live = not ctx.deps.spec.output_processors and ctx.deps.spec.output is None
+    # Stream processors (parity round 2): a live filter on each delta. Nothing is recorded here (this
+    # runs inside the model-request step): the post-step output pass runs the same processors on the
+    # whole response and writes the events, so the stored answer agrees with what was shown. A
+    # modified delta is published modified; a block stops publishing for the rest of this response.
+    # A pattern split across two deltas is only caught by that post-step pass.
+    stream_chain = None
+    passed: dict[int, int] = {}  # max_length processors: characters let through so far (whole response)
+    if live and ctx.deps.spec.stream_processors:
+        try:
+            stream_chain = compiled_chain(ctx.deps.spec.stream_processors, "stream_processors")
+        except Exception:  # noqa: BLE001 - fail closed: no unfiltered text goes out
+            live = False
     async for event in events:
         text = _text_of(event)
         if text:
             await asyncio.to_thread(crash_gate, "model_request")  # crash tests only (EAP_CRASH_GATE_FILE)
-            if live:
+            if live and stream_chain is not None:
+                try:
+                    text = await asyncio.to_thread(_filter_delta, stream_chain, text, passed)
+                except Exception:  # noqa: BLE001 - never publish what the chain could not check
+                    text = None
+                if text is None:  # blocked: the client sees the stream end early
+                    live = False
+            if live and text:
                 await asyncio.to_thread(rt.publish_delta, run_id, model_request, attempt, text)
             crash_point("model_request")
+
+
+def _filter_delta(chain: Any, text: str, passed: dict[int, int]) -> str | None:
+    """One live delta through the stream chain; None when a processor blocks. `max_length` counts
+    characters across the deltas of the response (`passed`), so the live text is capped exactly where
+    the post-step pass caps the whole answer; the other processors act per delta."""
+    from eap_processors.engine import MaxLength, new_budget
+
+    budget = new_budget()
+    for i, processor in enumerate(chain):
+        if isinstance(processor, MaxLength):
+            seen = passed.get(i, 0)
+            limit = processor.config.max_chars
+            if seen + len(text) > limit:
+                if processor.config.action == "block":
+                    return None
+                text = text[: max(limit - seen, 0)]
+            passed[i] = seen + len(text)
+            continue
+        result = processor.apply(text, budget)
+        if result.blocked:
+            return None
+        text = result.text
+    return text
 
 
 agent: Agent[WorkerDeps, str] = Agent(
@@ -721,6 +773,9 @@ agent: Agent[WorkerDeps, str] = Agent(
         ResolveModelId(_recording_resolver(make_resolver(lambda: get_runtime().settings, fallback=True))),
         # Run-wide source numbers for retrieve (a workflow-side hook around the call_tool step: no step).
         RetrieveNumbering(),
+        # Step processors (parity round 2): arguments and results of each tool call; a no-op without
+        # `step_processors` (workflow-side hook, steps only for specs that list them).
+        StepProcessorCapability(),
         # The run spec's behaviour (eap_worker.capabilities; AC.4: the output schema check). Workflow-side
         # hooks only: no step. Before DBOSDurability, which stays last.
         SpecCapability(),
@@ -780,6 +835,7 @@ async def start_run_step(
         # Raises RunIdConflict if the run_id belongs to another tenant: nothing of theirs is touched.
         # A draft run (version 0) is stored like the API stores it: no version, the snapshot instead.
         draft = version == DRAFT_VERSION and spec_json is not None
+        draft_run = draft
         rt.run_store.create_run(
             tenant_id,
             UUID(agent_id),
@@ -825,6 +881,11 @@ async def start_run_step(
                 # `{S}/{step_id}`; a top-level step id never contains `/`). It never waits.
                 approval_mode = "deny"
                 approval_deny_reason = LOOP_BODY_DENY_REASON
+        # W2.3: the agent's attached scorers, only for a top-level run that has any (an agent
+        # without scorers keeps its recorded link and step layout exactly).
+        scorers: list[dict[str, Any]] = []
+        if run.get("parent_run_id") is None and not draft_run:
+            scorers = ScorerStore(rt.engine).attached_to_agent(tenant_id, agent_id)
         return {
             "conversation_id": run.get("conversation_id"),
             "turn": run.get("turn"),
@@ -833,6 +894,7 @@ async def start_run_step(
             "superseded": not started,
             "model_id": run.get("model_id"),
             "request_context": run.get("request_context") or {},
+            "model_settings": run.get("model_settings") or {},
             "is_draft": run.get("draft_spec") is not None,
             "approval_mode": approval_mode,
             "approval_timing": read_approval_timing(),
@@ -841,6 +903,7 @@ async def start_run_step(
             "client_tool_results": run.get("client_tool_results") or None,
             "client_tool_pending": client_pending,
             "client_turn_chain": client_chain,
+            **({"scorers": scorers} if scorers else {}),
         }
 
     return await asyncio.to_thread(work)
@@ -855,14 +918,14 @@ async def _processed_index_text(spec: AgentSpec, text: str | None) -> str | None
     deterministic output processors (pii_redact, regex_blocklist, ...), like the answer they join;
     moderation is not run (the index is not a model answer). Pure and off the event loop, no step.
     A block or a failure leaves the lines out of the index (never indexed unprocessed)."""
-    if not text or not spec.output_processors:
+    if not text or not (spec.output_processors or spec.stream_processors):
         return text
     from eap_schemas.processors import PROCESSOR_SPEC_ADAPTER, ModerationProcessor
     from eap_worker.processors import _apply_segment
 
     segment = [
         PROCESSOR_SPEC_ADAPTER.dump_python(p, mode="json")
-        for p in spec.output_processors
+        for p in _output_specs(spec)
         if not isinstance(p, ModerationProcessor)
     ]
     if not segment:
@@ -1235,7 +1298,8 @@ def _blocked_error(chain: ChainRun, phase: str) -> Exception:
         return InputBlocked(index, processor_type)
     # AC.4: two object keys that processing made equal: the object no longer fits its schema.
     reason = SCHEMA_INVALID_AFTER_PROCESSING if record and record.data.get("reason") == SCHEMA_INVALID_AFTER_PROCESSING else None
-    return OutputBlocked(index, processor_type, reason)
+    phase_name = str(record.data.get("phase")) if record and record.data.get("phase") in ("stream", "output") else "output"
+    return OutputBlocked(index, processor_type, reason, phase_name)
 
 
 def _spec_or_none(spec_json: str | dict[str, Any]) -> AgentSpec | None:
@@ -1270,6 +1334,27 @@ class RecordedTokens:
         for item in [usage, *(usage.get("failed") or [])]:
             self.input_tokens += int(item.get("input_tokens") or 0)
             self.output_tokens += int(item.get("output_tokens") or 0)
+
+
+def apply_run_model_settings(spec: AgentSpec, override: dict[str, Any] | None) -> AgentSpec:
+    """The spec the run executes: its model settings with the run's overrides (`runs.model_settings`,
+    validated by the API, so again here) on top, and `max_steps` folded into the request cap
+    (`limits.max_requests`, the smaller of the two), so that a run stopped by it fails
+    `usage_limit_exceeded` naming `max_requests`. The spec itself is returned when nothing changes."""
+    settings = spec.model_settings
+    if override:
+        settings = ModelSettingsSpec(**{**settings.set_values(), **ModelSettingsSpec.model_validate(override).set_values()})
+    steps = settings.max_steps
+    if settings is spec.model_settings and steps is None:
+        return spec
+    update: dict[str, Any] = {"model_settings": settings}
+    if steps is not None:
+        current = spec.limits
+        cap = steps if current is None or current.max_requests is None else min(steps, current.max_requests)
+        update["limits"] = (
+            UsageLimitsSpec(max_requests=cap) if current is None else current.model_copy(update={"max_requests": cap})
+        )
+    return spec.model_copy(update=update)
 
 
 def usage_limits_for(spec: AgentSpec) -> UsageLimits | None:
@@ -1402,6 +1487,111 @@ async def _blocked_response(
     raise chain.error if chain.error is not None else _blocked_error(chain, "output")
 
 
+def _output_specs(spec: AgentSpec) -> tuple[Any, ...]:
+    """Every processor the output pass runs: the stream processors (live-filtered deltas, implicitly
+    also output processors) and then the output processors, in that order."""
+    return (*spec.stream_processors, *spec.output_processors)
+
+
+async def _run_output_phases(
+    run_id: str, tenant_id: str, spec: AgentSpec, text: str, *, moderation: bool, suffix: str
+) -> ChainRun:
+    """The output pass over one response's text: the stream chain (phase `stream`), then the output
+    chain on its result. Both record their `processor_result` events (`processor:stream:{i}{suffix}`,
+    `processor:output:{i}{suffix}`); a block or failure ends the pass and is the returned chain."""
+    chain = ChainRun(text)
+    if spec.stream_processors:
+        chain = await run_chain(run_id, tenant_id, "stream", spec.stream_processors, text, moderation=False)
+        await _record_processor_results(run_id, tenant_id, chain, suffix)
+        if chain.text is None:
+            return chain
+    if spec.output_processors:
+        chain = await run_chain(
+            run_id, tenant_id, "output", spec.output_processors, chain.text, moderation=moderation
+        )
+        await _record_processor_results(run_id, tenant_id, chain, suffix)
+    return chain
+
+
+def _patch_logged_args(
+    messages: list[dict[str, Any]], logged: dict[tuple[int, str], Any], executed: dict[tuple[int, str], Any]
+) -> list[dict[str, Any]]:
+    """`messages` with each tool call's arguments replaced by what the log keeps, keyed by (the
+    response's request number n, tool_call id) so a provider that reuses ids cannot overwrite an
+    earlier response's call. `executed` (StepProcessorCapability's decisions) wins over `logged`."""
+    if not logged and not executed:
+        return messages
+    out: list[dict[str, Any]] = []
+    n = 0
+    for message in messages:
+        if message.get("kind") == "response":
+            for part in message.get("parts", []):
+                if part.get("part_kind") == "tool-call":
+                    key = (n, part.get("tool_call_id"))
+                    if key in executed or key in logged:
+                        message = processed_output_call(message, key[1], executed.get(key, logged.get(key)))
+            n += 1
+        out.append(message)
+    return out
+
+
+async def _phase_chains(
+    run_id: str, tenant_id: str, spec: AgentSpec, *, key: str, value: Any = None, text: str | None = None
+) -> ChainRun:
+    """The deterministic output pass of a structured spec over one value (a JSON value) or text: the
+    stream chain (phase `stream`), then the output chain, each recorded under its own phase and
+    indexes (`processor:stream:{i}{key}`, `processor:output:{i}{key}`). No moderation here."""
+    assert spec.output is not None
+    structured = value is not None
+    chain = ChainRun(value if structured else text)
+    for phase, specs in (("stream", spec.stream_processors), ("output", spec.output_processors)):
+        if not specs:
+            continue
+        if structured:
+            chain = await run_structured_chain(
+                run_id, tenant_id, specs, chain.text, moderation=False, schema=spec.output.json_schema, phase=phase
+            )
+        else:
+            chain = await run_chain(run_id, tenant_id, phase, specs, chain.text, moderation=False)
+        await _record_processor_results(run_id, tenant_id, chain, key)
+        if chain.text is None:
+            break
+    return chain
+
+
+async def _logged_tool_args(
+    spec: AgentSpec, calls: list[ToolCallPart], client_names: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    """tool_call id -> the arguments the log may keep: the step processors' deterministic chain over
+    each call's arguments (what the tool will run with), `{"withheld": ...}` when the chain blocks or
+    cannot be applied. Pure (no step, nothing recorded: `StepProcessorCapability` records the
+    outcomes); empty without step processors."""
+    from eap_schemas.processors import PROCESSOR_SPEC_ADAPTER, ModerationProcessor
+    from eap_worker.processors import _apply_segment
+
+    segment = [
+        PROCESSOR_SPEC_ADAPTER.dump_python(p, mode="json")
+        for p in spec.step_processors
+        if not isinstance(p, ModerationProcessor)
+    ]
+    out: dict[str, Any] = {}
+    if not segment:
+        return out
+    for call in calls:
+        # Client (frontend) tool calls never run on the worker and never pass wrap_tool_execute: the
+        # client executes the raw arguments, so the log keeps them raw too (it must show what ran).
+        if call.tool_name in client_names:
+            continue
+        args = to_jsonable_python(call.args_as_dict(), fallback=str)
+        try:
+            done = await asyncio.to_thread(_apply_segment, "step", segment, canonical_json(args))
+            new = json.loads(done["text"]) if done["text"] is not None else None
+        except Exception:  # noqa: BLE001 - never log what the chain could not check
+            new = None
+        out[call.tool_call_id] = new if isinstance(new, dict) else {"withheld": "step_processor"}
+    return out
+
+
 async def _process_structured_response(
     run_id: str,
     tenant_id: str,
@@ -1419,18 +1609,14 @@ async def _process_structured_response(
     arguments, or native/prompted JSON text), on plain text otherwise. No moderation here: it runs
     once on the final object. Returns the (message, text) to store; a block writes the blocked
     model_message and raises."""
-    processors = spec.output_processors
     suffix = f":model:{n}"
     for k, call in enumerate(output_calls):
         key = suffix if k == 0 else f"{suffix}:{k}"
         args = _structured_args(call)
         if args is not None:
-            chain = await run_structured_chain(
-                run_id, tenant_id, processors, args, moderation=False, schema=spec.output.json_schema
-            )
+            chain = await _phase_chains(run_id, tenant_id, spec, key=key, value=args)
         else:  # not a finite JSON object: processed as text, stored as the (processed) string
-            chain = await run_chain(run_id, tenant_id, "output", processors, _args_text(call), moderation=False)
-        await _record_processor_results(run_id, tenant_id, chain, key)
+            chain = await _phase_chains(run_id, tenant_id, spec, key=key, text=_args_text(call))
         if chain.text is None:
             await _blocked_response(run_id, tenant_id, n, usage, chain, extra)
         message = processed_output_call(message, call.tool_call_id, chain.text)
@@ -1438,13 +1624,7 @@ async def _process_structured_response(
         return message, text
     value = _parse_json_text(text) if candidate and not output_calls else None
     key = f"{suffix}:text" if output_calls else suffix
-    if value is not None:
-        chain = await run_structured_chain(
-            run_id, tenant_id, processors, value, moderation=False, schema=spec.output.json_schema
-        )
-    else:
-        chain = await run_chain(run_id, tenant_id, "output", processors, text, moderation=False)
-    await _record_processor_results(run_id, tenant_id, chain, key)
+    chain = await _phase_chains(run_id, tenant_id, spec, key=key, value=value, text=text)
     if chain.text is None:
         await _blocked_response(run_id, tenant_id, n, usage, chain, extra)
     text = canonical_json(chain.text) if value is not None else chain.text
@@ -1457,16 +1637,24 @@ async def _final_structured_output(run_id: str, tenant_id: str, spec: AgentSpec,
     they give what the stored candidate holds), then re-validation against the schema. Records the
     moderation outcomes (and a block) as `processor:output:{i}:final`."""
     assert spec.output is not None
-    final = await run_structured_chain(
-        run_id, tenant_id, spec.output_processors, value, moderation=True, schema=spec.output.json_schema
-    )
-    shown = [r for r in final.records if r.data.get("processor_type") == "moderation" or r.blocked]
-    await _record_processor_results(run_id, tenant_id, ChainRun(final.text, shown, final.error), ":final")
+    final = ChainRun(value)
+    for phase, specs in (("stream", spec.stream_processors), ("output", spec.output_processors)):
+        if not specs or final.text is None:
+            continue
+        # Moderation only exists in the output chain (the schema refuses it in the stream phase).
+        final = await run_structured_chain(
+            run_id, tenant_id, specs, final.text, moderation=True, schema=spec.output.json_schema, phase=phase
+        )
+        shown = [r for r in final.records if r.data.get("processor_type") == "moderation" or r.blocked]
+        await _record_processor_results(run_id, tenant_id, ChainRun(final.text, shown, final.error), ":final")
     if final.text is None:
         raise final.error if final.error is not None else _blocked_error(final, "output")
     if schema_errors(spec.output.json_schema, final.text):
         raise OutputBlocked(-1, "output_schema", SCHEMA_INVALID_AFTER_PROCESSING)
     return final.text
+
+
+from eap_worker.attachments import resolve_prompt  # noqa: E402 (W2.4)
 
 
 async def _drive_agent(
@@ -1478,6 +1666,7 @@ async def _drive_agent(
     approvals: ApprovalSettings | None = None,
     client: ClientToolsRun | None = None,
     resume: ClientResume | None = None,
+    prompt: Any = None,
 ) -> tuple[str | None, list[dict[str, Any]], Any, list[str]]:
     """Run the agent on `model_id` (default: the spec's model); returns (output, this run's new
     messages as JSON, output_json, pending client call ids). `approvals` (AC.6): the run's recorded approval options, for
@@ -1490,10 +1679,11 @@ async def _drive_agent(
     spec = deps.spec
     tenant_id = deps.tenant_id
     settings = ModelSettings(max_retries=0)
-    if spec.model_settings.temperature is not None:
-        settings["temperature"] = spec.model_settings.temperature
-    if spec.model_settings.max_tokens is not None:
-        settings["max_tokens"] = spec.model_settings.max_tokens
+    # max_steps (the request limit) and max_retries (the agent's retry budgets) are not request
+    # settings: usage_limits_for and retries_for read them from the spec.
+    for name, value in spec.model_settings.set_values().items():
+        if name not in ("max_steps", "max_retries"):
+            settings[name] = value
 
     if model_id is None:
         model_id = model_id_for(spec.model.provider, spec.model.name)
@@ -1502,7 +1692,10 @@ async def _drive_agent(
     mode = spec.output.effective_mode() if spec.output is not None else None
     run_options: dict[str, Any] = {}
     if structured:
-        run_options = {"output_type": output_type_for(spec), "retries": retries_for(spec)}
+        run_options = {"output_type": output_type_for(spec)}
+    retries = retries_for(spec)
+    if retries is not None:
+        run_options["retries"] = retries
     if client is not None:
         # AGUI.7 (D10): a client call ends the run with DeferredToolRequests (never executed here).
         run_options["output_type"] = [run_options.get("output_type") or str, DeferredToolRequests]
@@ -1530,6 +1723,8 @@ async def _drive_agent(
     }
     request_token = _MODEL_REQUEST.set(request_state)
     pending: list[ToolCallPart] = []
+    has_output = bool(spec.stream_processors or spec.output_processors)  # the output pass runs
+    logged_all: dict[tuple[int, str], Any] = {}  # step processors: (model request n, tool_call id) -> logged arguments
     processed: dict[int, str] = {}  # model request n -> its processed text (output processors only)
     stored: dict[int, dict[str, Any]] = {}  # structured + output processors: n -> the stored response
     candidates: dict[int, Any] = {}  # structured: n -> its raw candidate (for output_retry paths)
@@ -1546,7 +1741,7 @@ async def _drive_agent(
     client_token = set_client_tools(client)
     try:
         async with agent.iter(
-            None if resume is not None and not input_text else input_text,
+            None if resume is not None and not input_text else (prompt if prompt is not None else input_text),
             message_history=history or None,
             deps=deps,
             model=model_id,
@@ -1598,7 +1793,7 @@ async def _drive_agent(
                     # (billed) moderation request. Its usage row is still written below.
                     recorded_tokens.add(usage)
                     breach = token_limit_breach(token_caps, recorded_tokens) if token_caps else None
-                    if breach is not None and spec.output_processors:
+                    if breach is not None and has_output:
                         # The text was never checked by the processors: never stored. Usage kept.
                         await append_event_step(
                             run_id, tenant_id, f"model:{n}:final", "model_message",
@@ -1606,24 +1801,23 @@ async def _drive_agent(
                             usage=usage,
                         )
                         raise breach
-                    if spec.output_processors:
+                    if has_output:
                         # Thinking is model text no processor checks: never stored, for every response.
                         message = strip_thinking(message)
-                    if spec.output_processors and structured:
+                    if has_output and structured:
                         message, text = await _process_structured_response(
                             run_id, tenant_id, spec, n, message, text, output_calls, candidate, usage,
                             fallback_data,
                         )
                         stored[n] = message
-                    elif spec.output_processors and text:
+                    elif has_output and text:
                         # Only responses with text: an empty or thinking-only answer has nothing to check
                         # (the agent retries it). Before anything of this response is stored. Moderation
                         # only on the final answer (text and no tool calls).
                         final = not calls
-                        chain = await run_chain(
-                            run_id, tenant_id, "output", spec.output_processors, text, moderation=final
+                        chain = await _run_output_phases(
+                            run_id, tenant_id, spec, text, moderation=final, suffix=f":model:{n}"
                         )
-                        await _record_processor_results(run_id, tenant_id, chain, f":model:{n}")
                         if chain.text is None:
                             # Blocked (or failed): keep the request's usage, never its text.
                             await _blocked_response(run_id, tenant_id, n, usage, chain, fallback_data)
@@ -1632,6 +1826,12 @@ async def _drive_agent(
                         processed[n] = text
                         if final:
                             final_text = text
+                    # Step processors: the log keeps the arguments the chain let through, never the raw ones
+                    # (the model saw them; this is about what is stored).
+                    logged_args = await _logged_tool_args(spec, calls, client_names)
+                    for call_id, args in logged_args.items():
+                        message = processed_output_call(message, call_id, args)
+                        logged_all[(n, call_id)] = args
                     data: dict[str, Any] = {"model_request": n, "text": text, "message": message, **fallback_data}
                     if candidate:
                         data["output_candidate"] = True
@@ -1651,7 +1851,9 @@ async def _drive_agent(
                                 "tool_call_id": call.tool_call_id,
                                 "tool_name": call.tool_name,
                                 "args": scrub_memory_tool_args(
-                                    call.tool_name, to_jsonable_python(call.args_as_dict(), fallback=str), memory
+                                    call.tool_name,
+                                    logged_args.get(call.tool_call_id, to_jsonable_python(call.args_as_dict(), fallback=str)),
+                                    memory,
                                 ),
                             },
                         )
@@ -1682,6 +1884,9 @@ async def _drive_agent(
                 scrub_failed_attempts(ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")),
                 memory,
             )
+            # The stored messages keep the logged arguments too; what the tool really ran with (the
+            # capability's decision on the validated arguments) wins over the pre-run recomputation.
+            new_messages = _patch_logged_args(new_messages, logged_all, deps.step_decisions)
             result_output = run.result.output
             if isinstance(result_output, DeferredToolRequests):
                 # AGUI.7: only client calls end a run this way (SpecCapability resolves approvals).
@@ -1716,18 +1921,18 @@ async def _drive_agent(
     if pending_client:
         # AGUI.7: no answer yet (the client executes its calls; the next turn continues). The stored
         # messages get the same treatment as an answered turn's.
-        if spec.output is not None and spec.output_processors:
+        if spec.output is not None and has_output:
             new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
-        elif spec.output_processors:
+        elif has_output:
             new_messages = processed_messages(new_messages, processed, strip_thinking_parts=True)
         return None, new_messages, None, pending_client
     if spec.output is not None:
         value = result_output
-        if spec.output_processors:
+        if has_output:
             value = await _final_structured_output(run_id, tenant_id, spec, value)
             new_messages = scrub_retry_inputs(replace_responses(new_messages, stored))
         return canonical_json(value), new_messages, value, []
-    if not spec.output_processors:
+    if not has_output:
         return result_output, new_messages, None, []
     if final_text is None:  # the answer was never checked: fail closed (not expected to happen)
         raise OutputBlocked(-1, "unchecked")
@@ -1758,9 +1963,21 @@ async def agent_run(
     with run_span(run_id, tenant_id, agent_id, version, traceparent=link.get("traceparent")) as span:
         log.info("run %s started: tenant=%s agent=%s version=%s", run_id, tenant_id, agent_id, version)
         result = await _run_body(run_id, tenant_id, agent_id, version, spec_json, input_text, link)
+        await record_spans(run_id, tenant_id)  # Task 16: the finished run's spans (any outcome)
         set_run_outcome(span, result["status"], result.get("error_code"))
         log.info("run %s %s", run_id, result["status"])
         return result
+
+
+async def _score_run(run_id: str, tenant_id: str, scorers: list[dict[str, Any]], spec: AgentSpec) -> None:
+    """Apply the attached scorers (step `eap.score_run`); never fails the completed run."""
+    from eap_worker.observational import is_dbos_control_flow
+    try:
+        await score_run_step(run_id, tenant_id, scorers, spec.output.json_schema if spec.output is not None else None)
+    except Exception as exc:  # noqa: BLE001 - the run is completed; scoring is best effort
+        if is_dbos_control_flow(exc):
+            raise
+        log_failure(log, "scoring failed", exc, code=classify(exc).code, run_id=run_id, tenant_id=tenant_id)
 
 
 def _check_request_context(spec: AgentSpec, request_context: dict[str, Any] | None) -> None:
@@ -1819,7 +2036,7 @@ async def _run_body(
         if pre is not None and pre.text is None:  # blocked or failed: the main model is never called
             raise pre.error if pre.error is not None else _blocked_error(pre, "input")
         rt = get_runtime()
-        spec = _parse_spec(spec_json)
+        spec = apply_run_model_settings(_parse_spec(spec_json), link.get("model_settings"))
         # Model governance: the effective model (an override recorded on the run, else the spec's)
         # is re-checked here, not only at publish or run start, because the policy may have changed
         # since. Fails before any model request is made.
@@ -1873,8 +2090,10 @@ async def _run_body(
         if resume is not None:
             for data in resume.events:  # before the first model request (D10)
                 await append_event_step(run_id, tenant_id, f"tool:{data['tool_call_id']}:result", "tool_result", data)
+        # W2.4: the turn's attached files as prompt parts (text files inlined; images and PDFs binary).
+        prompt = await resolve_prompt(rt.run_store.engine, tenant_id, run_id, input_text, model_id) if input_text else None
         output, new_messages, output_json, pending_client = await _drive_agent(
-            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume
+            run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume, prompt
         )
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
         failure = classify(exc)
@@ -1914,6 +2133,9 @@ async def _run_body(
         run_id, tenant_id, "completed", output, None, new_messages,
         output_format="json" if spec.output is not None else None,
     )
+    if link.get("scorers"):
+        # W2.3: the agent's reusable scorers, as `score` events after the run's end.
+        await _score_run(run_id, tenant_id, link["scorers"], spec)
     if link.get("conversation_id") is None or not has_post_turn_steps(spec):
         return result
     conversation_id, turn = str(link["conversation_id"]), int(link["turn"])

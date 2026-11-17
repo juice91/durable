@@ -117,6 +117,7 @@ def cleanup_tenant(engine, tenant_id: str) -> None:
             conn.execute(text("DELETE FROM execution_events WHERE run_id = :r"), {"r": run_id})
         conn.execute(text("DELETE FROM fake_external_tickets WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM fake_external_ticket_calls WHERE tenant_id = :t"), {"t": tenant_id})
+        conn.execute(text("DELETE FROM spans WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM run_model_requests WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": tenant_id})
         conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t"), {"t": tenant_id})

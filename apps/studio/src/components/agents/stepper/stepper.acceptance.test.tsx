@@ -210,8 +210,11 @@ describe("step navigation", () => {
     fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "" } });
     expect(identity()).toHaveTextContent("Required");
     expect(identity()).toHaveAccessibleName(/needs attention/);
-    fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "openai" } });
-    expect(identity()).toHaveTextContent("openai:echo");
+    // The picker clears the model when the provider changes; a wildcard provider takes a typed name.
+    fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "litellm" } });
+    expect(identity()).toHaveTextContent("Required");
+    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "echo" } });
+    expect(identity()).toHaveTextContent("litellm:echo");
     expect(identity()).toHaveAccessibleName(/complete/);
     fireEvent.click(instructions());
     const box = screen.getByRole("textbox", { name: "Instructions" });
@@ -294,9 +297,18 @@ describe("saving", () => {
     ["instructions", "Instructions", "Instructions"],
   ])("Save with %s empty opens its step, focuses the field and sends nothing", async (_id, fieldLabel, stepLabel) => {
     nav.search = "step=processors";
+    // A second provider with a listed model, so clearing the model leaves a combobox (not free text).
+    vi.mocked(fetchModels).mockResolvedValue([...modelsFixture, { id: "other:x", provider: "other", name: "x", wildcard: false, source: "allowlist", description: null }]);
     await renderEditor();
     fireEvent.click(navButton(/^Identity and model/));
-    if (fieldLabel === "Instructions") {
+    if (fieldLabel === "Model name") {
+      await waitFor(() => expect(within(screen.getByLabelText("Model provider")).getAllByRole("option").length).toBeGreaterThan(1));
+      // Changing the provider clears the model; the picker has no way to type a blank into it.
+      fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "other" } });
+      expect(screen.getByLabelText("Model name")).toHaveTextContent("Select a model…");
+    } else if (fieldLabel === "Model provider") {
+      fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "" } });
+    } else if (fieldLabel === "Instructions") {
       fireEvent.click(navButton(/^Instructions/));
       fireEvent.change(screen.getByRole("textbox", { name: "Instructions" }), { target: { value: " " } });
     } else {

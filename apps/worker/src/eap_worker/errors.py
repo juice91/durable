@@ -86,15 +86,17 @@ class OutputBlocked(Exception):
     SCHEMA_INVALID_AFTER_PROCESSING when the processed structured output no longer matches the
     output schema (e.g. a redaction broke a `const` or `minLength`)."""
 
-    def __init__(self, index: int, processor_type: str, reason: str | None = None) -> None:
+    def __init__(self, index: int, processor_type: str, reason: str | None = None, phase: str = "output") -> None:
         self.index = index
         self.processor_type = processor_type
         self.reason = reason
-        super().__init__(index, processor_type, reason)  # pickle-safe
+        # `stream` or `output`: with a structured output both lists are checked, so the index alone is ambiguous.
+        self.phase = phase
+        super().__init__(index, processor_type, reason, phase)  # pickle-safe
 
     def __str__(self) -> str:
         suffix = f": {self.reason}" if self.reason else ""
-        return f"output blocked by output_processors[{self.index}] ({self.processor_type}){suffix}"
+        return f"output blocked by {self.phase}_processors[{self.index}] ({self.processor_type}){suffix}"
 
 
 SCHEMA_INVALID_AFTER_PROCESSING = "schema_invalid_after_processing"
@@ -242,6 +244,8 @@ WORKFLOW_FAILURES: dict[str, tuple[str, str]] = {
     # code: (status, message)
     "approval_rejected": ("failed", "the approval was rejected"),
     "approval_timeout": ("failed", "the approval was not decided before its timeout"),
+    "cancelled_by_user": ("failed", "the run was stopped at a step-by-step pause"),
+    "pause_timed_out": ("failed", "the step-by-step pause was not continued before its timeout"),
     "agent_not_found": ("failed", "the agent was not found or has no published version"),
     "agent_archived": ("failed", "the step's agent is archived; unarchive it to run this workflow"),
     "input_invalid": ("failed", "the workflow input is not valid JSON (e.g. NaN or Infinity)"),
@@ -299,6 +303,11 @@ EVAL_FAILURES: dict[str, tuple[str, str]] = {
     # The agent was archived while the eval run ran: the cases not yet started were stopped (each a
     # result with status `error` and error_code `agent_archived`); unarchive the agent to run it again.
     "eval_agent_archived": ("failed", "the agent was archived during the eval run; its remaining cases were stopped"),
+    # Workflow targets (parity round 2): the same two failures for a workflow suite's run.
+    "eval_workflow_not_found": ("failed", "the workflow version of the eval run was not found"),
+    "eval_workflow_archived": (
+        "failed", "the workflow was archived during the eval run; its remaining cases were stopped"
+    ),
 }
 
 
@@ -443,6 +452,10 @@ def _data(code: str, exc: BaseException) -> dict[str, Any] | None:
         return usage_limit_data(exc)
     if code == "run_budget_exceeded":
         return budget_data(exc)
+    if code == "output_blocked":
+        phase, index = getattr(exc, "phase", None), getattr(exc, "index", None)
+        if phase in ("stream", "output") and type(index) is int and index >= 0:
+            return {"processor_phase": phase, "processor_index": index}
     if code == "fallback_exhausted":
         data: dict[str, Any] = {"cause": _first_member_code(exc)}
         described = getattr(exc, "eap_fallback", None)

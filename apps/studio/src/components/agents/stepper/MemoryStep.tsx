@@ -36,6 +36,7 @@ import {
   type WorkingScope,
   type WorkingSpec,
 } from "../knowledgeMemory";
+import { ModelPicker } from "@/components/shared/ModelPicker";
 import { fieldClass, labelClass } from "./fieldStyles";
 import {
   AllowlistSelect,
@@ -55,14 +56,10 @@ import type { EditorStepDefinition, MissingField, StepProps } from "./types";
 /** Element id of a memory field (`memory-<field>`), matching `memoryProblems` fields. */
 const fieldId = (field: string) => `memory-${field}`;
 
-function chatOptions(models: ModelOption[]): AllowlistOption[] {
-  return models.map((m) => ({
-    id: m.id,
-    provider: m.provider,
-    name: m.name,
-    wildcard: m.wildcard,
-    label: m.wildcard ? `${m.provider}: any model (type a name)` : `${m.id}${m.description ? ` — ${m.description}` : ""}`,
-  }));
+/** A stored model the loaded list no longer offers (and no wildcard entry of its provider covers). */
+function outsideAllowlist(models: ModelOption[] | null, model: { provider: string; name: string } | null | undefined): boolean {
+  if (!models || !model || !model.provider || !model.name) return false;
+  return !models.some((m) => m.provider === model.provider && (m.wildcard || m.name === model.name));
 }
 
 function embeddingOptions(models: EmbeddingModel[]): AllowlistOption[] {
@@ -278,16 +275,18 @@ export function MemoryStep({ spec, draft, onSpecChange }: StepProps) {
             />
             {observational ? (
               <>
-                <AllowlistSelect
-                  id={fieldId("observational-model")}
-                  label="Observer model"
-                  options={models ? chatOptions(models) : null}
-                  loadError={modelsError}
+                <ModelPicker
+                  providerId={fieldId("observational-provider")}
+                  modelId={fieldId("observational-model")}
+                  providerLabel="Observer provider"
+                  modelLabel="Observer model"
                   provider={observational.model?.provider ?? ""}
                   name={observational.model?.name ?? ""}
-                  onChange={(provider, name) => setObservational({ model: { provider, name } })}
-                  problem={problemFor("observational-model")}
+                  models={models}
+                  loadError={modelsError}
+                  problem={problemFor("observational-model") ?? (outsideAllowlist(models, observational.model) ? "Not in the platform allowlist: publishing will fail" : null)}
                   hint="From the platform's model allowlist."
+                  onChange={({ provider, name }) => setObservational({ model: { provider, name } })}
                 />
                 <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-3">
                   <NumberField

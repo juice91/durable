@@ -11,6 +11,7 @@ import {
 } from "@/components/agentPage/agentPageModel";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
 import { MEMORY_CARD_KEY } from "@/components/memory/memoryModel";
+import { TRACE_COLUMNS_STORAGE_KEY } from "@/lib/traces";
 import { CHAT_PROTOCOL_EVENT, CHAT_PROTOCOL_STORAGE_KEY } from "@/components/chat/chatProtocol";
 
 /**
@@ -83,6 +84,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Workflow page layout",
     description: "The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height.",
     keys: [WORKFLOW_LAYOUT_STORAGE_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "trace-columns",
+    label: "Trace list columns",
+    description: "Which columns the Traces list shows.",
+    keys: [TRACE_COLUMNS_STORAGE_KEY],
     prefixes: [],
     clearGroup: "layout",
   },

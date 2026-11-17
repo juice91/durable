@@ -234,11 +234,13 @@ from eap_schemas.workflow_scope import (
 )
 from eap_schemas.workflows import (
     LOOP_STEP_TYPES,
+    PAUSE_STEP_SUFFIX,
     AgentStep,
     ApprovalStep,
     BranchStep,
     EvaluateStep,
     ForeachStep,
+    InputStep,
     LoopStep,
     MAX_STEPS,
     ParallelStep,
@@ -272,6 +274,7 @@ from eap_worker.evaluators import (
 from eap_worker.pricing import usage_record
 from eap_worker.errors import LoopTickFailed, RunFailure, WorkflowStepError, classify
 from eap_worker.runtime import get_runtime
+from eap_worker.spans_step import record_spans
 from eap_worker.tool_run import _REJECTIONS, call_tool_guarded, check_tool_step
 from eap_worker.workflow import _heartbeat, agent_run, append_event_step, finish_run_step
 from eap_worker.workflow_eval import (
@@ -364,6 +367,24 @@ def approval_poll_seconds() -> float:
         return 3600.0
 
 
+def pause_cancel_check_seconds() -> float:
+    """EAP_PAUSE_CANCEL_CHECK_SECONDS (default 30): how often a paused run looks for its `cancel`
+    event (never longer than the approval poll)."""
+    try:
+        return max(0.1, float(os.environ.get("EAP_PAUSE_CANCEL_CHECK_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
+def pause_timeout_hours() -> float:
+    """EAP_PAUSE_TIMEOUT_HOURS (default 24): how long a step-by-step run waits at a pause."""
+    try:
+        value = float(os.environ.get("EAP_PAUSE_TIMEOUT_HOURS", "24"))
+    except ValueError:
+        return 24.0
+    return value if value > 0 else 24.0
+
+
 def read_limits() -> dict[str, Any]:
     """Every environment knob of a run, read ONCE inside eap.start_workflow_run and checkpointed
     with it; workflow code (and branch workflows, which receive it as an argument) only ever uses
@@ -374,6 +395,8 @@ def read_limits() -> dict[str, Any]:
         "max_run_seconds": max_run_seconds(),
         "hour_seconds": hour_seconds(),
         "approval_poll_seconds": approval_poll_seconds(),
+        "pause_timeout_hours": pause_timeout_hours(),
+        "pause_cancel_check_seconds": pause_cancel_check_seconds(),
         **{key: _env_int(env, default) for key, (env, default) in WORKFLOW_LOOP_LIMIT_DEFAULTS.items()},
     }
 
@@ -426,6 +449,7 @@ async def start_workflow_run_step(
         run = rt.run_store.get_run(tenant_id, uuid.UUID(run_id)) or {}
         return {
             "started": bool(started),
+            "pause_after_each_step": bool(run.get("pause_after_each_step")),
             "traceparent": run.get("traceparent"),
             "workflow_id": row.workflow_id if row is not None else run.get("workflow_id"),
             "workflow_version": row.version if row is not None else run.get("workflow_version"),
@@ -676,6 +700,28 @@ async def approval_begin_step(
     return deadline
 
 
+@DBOS.step(name="eap.workflow_pause_cancel_check")
+async def pause_cancel_check_step(run_id: str, tenant_id: str, step_id: str) -> bool:
+    """A pause's cooperative cancel (D3): does the run have its `cancel` event? When it does, the
+    pause's decision is recorded `step_rejected` by `system:run_cancelled` (which closes its
+    pending_approvals row) and True is returned, so the waiting run ends `run_cancelled` even when
+    the DBOS cancel never landed. When a decision got there first (an approval or the timeout:
+    "exists" / "not_waiting") it stands: False, and the normal cancel handling of the next tick
+    stops the run."""
+    rt = get_runtime()
+
+    def work() -> bool:
+        cancel = rt.event_log.get_event(tenant_id, run_id, CANCEL_EVENT_KEY)
+        if cancel is None or cancel.type != "cancel_requested":
+            return False
+        outcome, _event = rt.event_log.append_step_decision(
+            tenant_id, run_id, step_id, "step_rejected", {"step_id": step_id, "decided_by": "system:run_cancelled"}
+        )
+        return outcome == "created"
+
+    return await asyncio.to_thread(work)
+
+
 @DBOS.step(name="eap.workflow_approval_decision")
 async def approval_decision_step(run_id: str, tenant_id: str, step_id: str, timed_out: bool) -> dict[str, Any] | None:
     """The step's recorded decision {"type", "data"}, or None while there is none. With
@@ -749,6 +795,7 @@ class _Interpreter:
         scope: Scope = EMPTY_SCOPE,
         loops: dict[str, dict[str, Any]] | None = None,
         workflow_version_id: str | None = None,
+        pause_after_each_step: bool = False,
     ) -> None:
         self.run_id = run_id
         self.tenant_id = tenant_id
@@ -767,6 +814,9 @@ class _Interpreter:
         self.scope_text = scope_string(scope)
         self.loops = loops or {}
         self.workflow_version_id = workflow_version_id
+        # Step by step: only the run's root interpreter pauses (a loop iteration or a parallel
+        # branch builds its own interpreter, which never gets the flag).
+        self.pause_after_each_step = pause_after_each_step
         self._warnings: list[dict[str, Any]] = []
         # The cost cap (D11): the spec's `limits`, empty or absent for every spec published before
         # LP.11, so their runs never tick outside loops.
@@ -806,6 +856,8 @@ class _Interpreter:
             step = self.by_id[current]
             output = await self.run_step(step)
             last = (step.id, output)
+            if self.pause_after_each_step:
+                await self._pause(step)
             if isinstance(step, BranchStep):
                 current = output["next"]
             elif isinstance(step, ParallelStep):
@@ -821,7 +873,7 @@ class _Interpreter:
         problem: WorkflowStepError | None = None
         if step_id in self.executed or len(self.executed) >= MAX_STEPS:
             problem = WorkflowStepError("step_limit_exceeded", step_id)
-        elif self.scope and isinstance(step, (ApprovalStep, ParallelStep)):
+        elif self.scope and isinstance(step, (ApprovalStep, InputStep, ParallelStep)):
             problem = WorkflowStepError("loop_body_step_not_allowed", step_id)  # the schema forbids it
         self.executed.add(step_id)
         resolved: dict[str, Any] | None = None
@@ -982,7 +1034,7 @@ class _Interpreter:
             return await self._foreach(step)
         if isinstance(step, ParallelStep):
             return await self._parallel(step)
-        if isinstance(step, ApprovalStep):
+        if isinstance(step, (ApprovalStep, InputStep)):
             return await self._approval(step)
         if isinstance(step, EvaluateStep):
             return await self._evaluate(step)
@@ -1374,43 +1426,91 @@ class _Interpreter:
             raise WorkflowStepError("workflow_context_too_large", step.id)
         return None
 
-    async def _approval(self, step: ApprovalStep) -> Any:
-        timeout_seconds = step.timeout_hours * self.limits["hour_seconds"]
-        deadline = await approval_begin_step(
-            self.run_id, self.tenant_id, step.id,
+    async def _approval(self, step: ApprovalStep | InputStep) -> Any:
+        """An approval step, or an input step (the same wait; it also records its `resume_schema` in
+        the waiting event so the API validates a submission against what the run waits for, and
+        outputs the submitted object as `data`)."""
+        is_input = isinstance(step, InputStep)
+        decision = await self._wait_decision(
+            step.id,
             {
                 "step_id": step.id,
                 "prompt": step.prompt,
                 "timeout_hours": step.timeout_hours,
-                # The DBOS workflow that waits (the run, or a parallel branch's child workflow):
-                # the API sends the wake-up here.
-                "workflow_id": DBOS.workflow_id,
+                **({"resume_schema": step.resume_schema} if isinstance(step, InputStep) else {}),
             },
-            timeout_seconds,
+            step.timeout_hours * self.limits["hour_seconds"],
         )
-        crash_point("workflow_waiting", event_key=f"step:{step.id}:waiting")
-        poll = self.limits["approval_poll_seconds"]
-        timed_out = False
-        max_rounds = math.ceil(timeout_seconds / poll) + 16
-        decision: dict[str, Any] | None = None
-        for _ in range(max_rounds):
-            decision = await approval_decision_step(self.run_id, self.tenant_id, step.id, timed_out)
-            if decision is not None:
-                break
-            remaining = deadline - await clock_step()
-            if remaining <= 0:
-                timed_out = True
-                continue
-            await DBOS.recv_async(approval_topic(step.id), timeout_seconds=min(remaining, poll))
-        if decision is None:
-            decision = await approval_decision_step(self.run_id, self.tenant_id, step.id, True)
         kind = (decision or {}).get("type")
         info = (decision or {}).get("data") or {}
+        if kind == "step_approved" and is_input:
+            return {"data": info.get("resume_data"), "decided_by": info.get("decided_by"),
+                    "comment": info.get("comment")}
         if kind == "step_approved":
             return {"approved": True, "decided_by": info.get("decided_by"), "comment": info.get("comment")}
         if kind == "step_rejected":
             raise WorkflowStepError("approval_rejected", step.id)
         raise WorkflowStepError("approval_timeout", step.id)
+
+    async def _pause(self, step: Any) -> None:
+        """Step by step (D3): after a top-level step, wait exactly as an approval does under the
+        reserved id `{step.id}_pause` (prompt "Paused after {step.id}", no `resume_schema`, waiting
+        data carries `pause: true`). Approve continues; reject fails the run `cancelled_by_user`;
+        the timeout (EAP_PAUSE_TIMEOUT_HOURS, default 24) fails it `pause_timed_out`."""
+        pause_id = f"{step.id}{PAUSE_STEP_SUFFIX}"
+        hours = self.limits.get("pause_timeout_hours", 24.0)
+        try:
+            decision = await self._wait_decision(
+                pause_id,
+                {"step_id": pause_id, "prompt": f"Paused after {step.id}", "pause": True, "timeout_hours": hours},
+                hours * self.limits["hour_seconds"],
+                cancel_aware=True,
+            )
+            kind = (decision or {}).get("type")
+            if kind == "step_approved":
+                return
+            if kind == "step_rejected":
+                raise WorkflowStepError("cancelled_by_user", pause_id)
+            raise WorkflowStepError("pause_timed_out", pause_id)
+        except WorkflowStepError as exc:
+            # The pause runs outside run_step: name the pause step in step_failed and run_failed.
+            failure = classify(exc)
+            failure = dataclasses.replace(failure, status=_failure_status(exc, failure))
+            await self._record_failure(pause_id, failure)
+            raise StepFailed(pause_id, failure) from None
+
+    async def _wait_decision(
+        self, step_id: str, data: dict[str, Any], timeout_seconds: float, cancel_aware: bool = False
+    ) -> dict[str, Any] | None:
+        """Record `step_id`'s waiting event (and inbox row) and wait for its decision or timeout."""
+        deadline = await approval_begin_step(
+            self.run_id, self.tenant_id, step_id,
+            # The DBOS workflow that waits (the run, or a parallel branch's child workflow): the API
+            # sends the wake-up here.
+            {**data, "workflow_id": DBOS.workflow_id},
+            timeout_seconds,
+        )
+        crash_point("workflow_waiting", event_key=f"step:{step_id}:waiting")
+        poll = self.limits["approval_poll_seconds"]
+        if cancel_aware:  # a pause also looks for its cancel, far more often than the approval poll
+            poll = min(poll, self.limits.get("pause_cancel_check_seconds", 30.0))
+        timed_out = False
+        max_rounds = math.ceil(timeout_seconds / poll) + 16
+        decision: dict[str, Any] | None = None
+        for _ in range(max_rounds):
+            decision = await approval_decision_step(self.run_id, self.tenant_id, step_id, timed_out)
+            if decision is not None:
+                break
+            if cancel_aware and await pause_cancel_check_step(self.run_id, self.tenant_id, step_id):
+                raise WorkflowStepError("run_cancelled", step_id)
+            remaining = deadline - await clock_step()
+            if remaining <= 0:
+                timed_out = True
+                continue
+            await DBOS.recv_async(approval_topic(step_id), timeout_seconds=min(remaining, poll))
+        if decision is None:
+            decision = await approval_decision_step(self.run_id, self.tenant_id, step_id, True)
+        return decision
 
 
 def _resolve_operand(value: Any, context: dict[str, Any]) -> Any:
@@ -1611,6 +1711,7 @@ async def _workflow_body(
         interp = _Interpreter(
             run_id, tenant_id, spec, input_value, {}, link["limits"], link.get("traceparent"),
             workflow_version_id=workflow_version_id,
+            pause_after_each_step=bool(link.get("pause_after_each_step")),
         )
         _last_step, last_output = await interp.run_path(spec.start, None)
         output = final_output(spec, last_output)
@@ -1629,6 +1730,7 @@ async def _workflow_body(
         # End event before the terminal status, as in agent and tool runs.
         await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output_text, "result": output})
         await finish_run_step(run_id, tenant_id, "completed", output_text, None)
+        await record_spans(run_id, tenant_id)
         return {"status": "completed", "output": output_text}
     finally:
         heartbeat.cancel()
@@ -1638,6 +1740,7 @@ async def _workflow_body(
          "step_id": failed_step},
     )
     await finish_run_step(run_id, tenant_id, failure.status, None, failure.error)
+    await record_spans(run_id, tenant_id)
     return {"status": failure.status, "error": failure.error, "error_code": failure.code, "step_id": failed_step}
 
 

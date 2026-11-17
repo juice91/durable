@@ -25,8 +25,10 @@ MAX_REGEX_PATTERNS = 20
 MAX_REGEX_PATTERN_LENGTH = 200
 MAX_LENGTH_LIMIT = 1_000_000
 
-ProcessorPhase = Literal["input", "output"]
-PROCESSOR_PHASES: tuple[ProcessorPhase, ...] = ("input", "output")
+ProcessorPhase = Literal["input", "step", "stream", "output"]
+PROCESSOR_PHASES: tuple[ProcessorPhase, ...] = ("input", "step", "stream", "output")
+# Moderation is a model call, so it runs only before the model and on the final answer.
+MODEL_CALL_PHASES: tuple[ProcessorPhase, ...] = ("input", "output")
 
 ProcessorType = Literal["pii_redact", "regex_blocklist", "max_length", "moderation"]
 
@@ -259,7 +261,8 @@ PROCESSOR_DECLARATIONS: dict[str, ProcessorDeclaration] = {
     "max_length": ProcessorDeclaration(
         id="max_length",
         title="Maximum length",
-        description="Blocks or truncates text longer than a number of characters.",
+        description="Blocks or truncates text longer than a number of characters. In the stream phase the live text is "
+        "capped across the whole response, as the finished answer is.",
         phases=PROCESSOR_PHASES,
         actions=("block", "truncate"),
         deterministic=True,
@@ -270,7 +273,7 @@ PROCESSOR_DECLARATIONS: dict[str, ProcessorDeclaration] = {
         title="Moderation",
         description="Asks an allowlisted model for a verdict over a fixed category set and blocks flagged "
         "text. On output it checks the final answer once.",
-        phases=PROCESSOR_PHASES,
+        phases=MODEL_CALL_PHASES,
         actions=("block",),
         deterministic=False,
         config_model=ModerationConfig,
@@ -285,6 +288,7 @@ def processor_models(processors: tuple[BaseModel, ...]) -> tuple[ModelRef, ...]:
 
 __all__ = [
     "MAX_LENGTH_LIMIT",
+    "MODEL_CALL_PHASES",
     "MAX_PROCESSORS_PER_PHASE",
     "MAX_REGEX_PATTERNS",
     "MAX_REGEX_PATTERN_LENGTH",

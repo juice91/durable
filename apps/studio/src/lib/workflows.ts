@@ -58,6 +58,15 @@ export interface ApprovalStep extends StepBase {
   next?: string | null;
 }
 
+/** A step that waits for a person to submit data matching `resume_schema` (a JSON Schema object). */
+export interface InputStep extends StepBase {
+  type: "input";
+  prompt: string;
+  timeout_hours: number;
+  resume_schema: JsonSchema;
+  next?: string | null;
+}
+
 export interface BranchStep extends StepBase {
   type: "branch";
   cases: { when: Expression; next: string }[];
@@ -125,6 +134,7 @@ export type WorkflowStep =
   | AgentStep
   | ToolStep
   | ApprovalStep
+  | InputStep
   | BranchStep
   | ParallelStep
   | ForeachStep
@@ -239,11 +249,13 @@ const WORKFLOW_RUN_FALLBACKS: Record<number, string> = {
 export async function startWorkflowRun(
   workflowId: string,
   input: Record<string, unknown>,
-  { version, runId }: { version?: number | null; runId?: string } = {},
+  { version, runId, rerunOf, pauseAfterEachStep }: { version?: number | null; runId?: string; rerunOf?: string | null; pauseAfterEachStep?: boolean } = {},
 ): Promise<WorkflowRunAccepted> {
-  const body: { input: Record<string, unknown>; version?: number; run_id?: string } = { input };
+  const body: { input: Record<string, unknown>; version?: number; run_id?: string; rerun_of?: string; pause_after_each_step?: boolean } = { input };
   if (version != null) body.version = version;
   if (runId) body.run_id = runId;
+  if (rerunOf) body.rerun_of = rerunOf;
+  if (pauseAfterEachStep) body.pause_after_each_step = true;
   const response = await fetch(`${BASE_URL}/api/v1/workflows/${enc(workflowId)}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...apiHeaders() },
@@ -277,6 +289,24 @@ export async function decideApproval(
       body: JSON.stringify(trimmed ? { comment: trimmed } : {}),
     },
   );
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** Answer a waiting input step with `data` (POST .../steps/{id}/resume). Throws ApiError (404, 409
+ * not waiting or already decided, 422 with `detail` [{loc, msg, type}]). */
+export async function resumeStep(
+  runId: string,
+  stepId: string,
+  data: Record<string, unknown>,
+  comment?: string,
+): Promise<ApprovalDecisionResult> {
+  const trimmed = comment?.trim();
+  const response = await fetch(`${BASE_URL}/api/v1/workflows/runs/${enc(runId)}/steps/${enc(stepId)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    body: JSON.stringify(trimmed ? { data, comment: trimmed } : { data }),
+  });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
 }

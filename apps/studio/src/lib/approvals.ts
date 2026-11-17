@@ -7,6 +7,7 @@
 import { useSyncExternalStore } from "react";
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
 import { routes } from "./routes";
+import type { JsonSchema } from "./tools";
 
 export type ApprovalKind = "tool" | "step";
 export type ApprovalStatus = "pending" | "decided";
@@ -42,6 +43,13 @@ export interface Approval {
   decision: ApprovalDecision | null;
   decided_by: string | null;
   run_status: string | null;
+  /** An input step: the JSON Schema of the data it waits for; null for any other approval. */
+  resume_schema?: JsonSchema | null;
+  /** A step-by-step pause (the run waits after a step, id `<step>_pause`): Continue, not Approve. */
+  pause?: boolean;
+  /** The decision's audit (single read, decided steps): the comment and the submitted data. */
+  comment?: string | null;
+  resume_data?: unknown;
 }
 
 export interface ApprovalPage {

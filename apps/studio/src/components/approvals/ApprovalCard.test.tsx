@@ -22,6 +22,15 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe("ApprovalCard pause", () => {
+  it("titles a pause approval and offers Continue instead of Approve", () => {
+    render(<ApprovalCard approval={{ ...step, stepId: "classify_pause", prompt: "Paused after classify", pause: true }} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: /Paused after step/ })).toHaveTextContent("classify");
+    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+});
+
 describe("ApprovalCard", () => {
   it("stays disabled after a decision until the refresh finishes", async () => {
     const refresh = deferred();

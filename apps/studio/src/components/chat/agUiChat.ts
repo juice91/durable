@@ -9,6 +9,8 @@ import { tap, type Observable } from "rxjs";
 import { BASE_URL, apiHeaders } from "@/lib/api";
 import { AgUiHttpError, ResumableHttpAgent, type ResumableHttpAgentConfig } from "@/lib/agui";
 import type { RunStatus } from "@/lib/runs";
+import type { FeedbackMap } from "@/lib/messageFeedback";
+import { hasSettings, type ModelSettingsBody } from "@/lib/modelSettings";
 import type { ModelRefBody, TurnOptions } from "./runOptions";
 
 /** `POST /api/v1/ag-ui/agents/{id}`: the agent's one AG-UI URL (D2). */
@@ -21,6 +23,8 @@ export interface PydanticosOptions {
   version?: number | "draft" | null;
   model?: ModelRefBody;
   requestContext?: Record<string, unknown>;
+  /** Per-run model settings (snake_case keys, as in the native run options). */
+  modelSettings?: ModelSettingsBody;
   resourceId?: string;
 }
 
@@ -33,6 +37,7 @@ export function pydanticosOptions(options: TurnOptions, resourceId: string | nul
   const out: PydanticosOptions = { version: options.version };
   if (options.model) out.model = options.model;
   if (options.request_context !== null) out.requestContext = options.request_context;
+  if (hasSettings(options.model_settings)) out.modelSettings = options.model_settings!;
   if (resourceId) out.resourceId = resourceId;
   return out;
 }
@@ -143,6 +148,8 @@ export interface AgUiThread {
   runs: AgUiThreadRun[];
   /** The AG-UI runId of an unfinished turn to attach to, else null. */
   activeRunId: string | null;
+  /** The caller's thumbs on this thread's assistant messages, by message id (W2.4). */
+  feedback: FeedbackMap;
 }
 
 export class AgUiThreadLoadError extends Error {
@@ -165,6 +172,7 @@ export async function fetchAgUiThread(agentId: string, threadId: string, signal?
     messages: Array.isArray(body.messages) ? body.messages : [],
     runs: Array.isArray(body.runs) ? body.runs : [],
     activeRunId: typeof body.activeRunId === "string" ? body.activeRunId : null,
+    feedback: body.feedback && typeof body.feedback === "object" ? (body.feedback as FeedbackMap) : {},
   };
 }
 

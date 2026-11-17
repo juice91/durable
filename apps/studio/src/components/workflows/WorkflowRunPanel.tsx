@@ -8,6 +8,7 @@ import { canonicalInputKey, type PendingRun } from "@/lib/toolRunLedger";
 import { ToolRunError } from "@/lib/toolRuns";
 import { startWorkflowRun, workflowRunLedger, type WorkflowSpec } from "@/lib/workflows";
 import { routes } from "@/lib/routes";
+import { Switch } from "@/components/ui/Switch";
 
 export const UNCERTAIN_MESSAGE = "The request may have reached the server; running again will reuse the same run id.";
 
@@ -44,6 +45,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [stepByStep, setStepByStep] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [ledgerReady, setLedgerReady] = useState(false);
   const [, setLedgerVersion] = useState(0);
@@ -88,7 +90,7 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
     setBanner(null);
     setFieldErrors({});
     try {
-      const accepted = await startWorkflowRun(workflowId, input, { version, runId });
+      const accepted = await startWorkflowRun(workflowId, input, { version, runId, pauseAfterEachStep: stepByStep });
       workflowRunLedger.forget(workflowId, key, runId);
       if (isCurrent()) onStartedRef.current(accepted.run_id);
       else workflowRunLedger.addNote({ runId: accepted.run_id, toolId: workflowId, toolTitle: workflowName });
@@ -175,6 +177,13 @@ export function WorkflowRunPanel({ workflowId, workflowName, version, spec, onSt
       ) : null}
       <div className="mt-4 space-y-3 border-t border-border pt-3">
         {banner ? <p role="alert" data-testid="workflow-run-banner" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{banner}</p> : null}
+        <div className="flex items-start gap-3">
+          <Switch id="workflow-step-by-step" checked={stepByStep} onCheckedChange={setStepByStep} aria-describedby="workflow-step-by-step-help" className="mt-0.5" />
+          <div className="min-w-0">
+            <label htmlFor="workflow-step-by-step" className="text-label font-medium text-foreground">Step by step</label>
+            <p id="workflow-step-by-step-help" className="text-caption text-muted-foreground">Pause to inspect outputs</p>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"

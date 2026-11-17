@@ -84,10 +84,12 @@ __all__ = (
     "MAX_SPEC_BYTES",
     "MAX_SPEC_DEPTH",
     "MAX_STEPS",
+    "PAUSE_STEP_SUFFIX",
     "AgentStep",
     "AllCondition",
     "AnyCondition",
     "ApprovalStep",
+    "InputStep",
     "BranchCase",
     "BranchStep",
     "Condition",
@@ -119,6 +121,7 @@ MAX_SPEC_BYTES = 64 * 1024
 MAX_LITERAL_DEPTH = 32  # nesting levels of one template value or condition literal
 MAX_SPEC_DEPTH = 64  # nesting levels of the whole spec document
 STEP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+PAUSE_STEP_SUFFIX = "_pause"  # reserved: a step-by-step run waits under `{step_id}_pause`
 TOOL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SEGMENT = r"[A-Za-z0-9_-]{1,64}"
 REF_PATTERN = re.compile(
@@ -365,7 +368,7 @@ def _check_step_id(value: str, what: str = "step id") -> str:
     return value
 
 
-_STEP_TAGS = frozenset({"agent", "tool", "branch", "parallel", "approval", "foreach", "loop", "evaluate"})
+_STEP_TAGS = frozenset({"agent", "tool", "branch", "parallel", "approval", "input", "foreach", "loop", "evaluate"})
 
 
 def _json_loc(loc: tuple[Any, ...]) -> list[Any]:
@@ -461,6 +464,40 @@ class ApprovalStep(_Sequential):
     type: Literal["approval"] = "approval"
     prompt: str = Field(min_length=1, max_length=2000)
     timeout_hours: int = Field(ge=1, le=168)
+
+
+MAX_RESUME_SCHEMA_BYTES = 16 * 1024
+
+
+class InputStep(_Sequential):
+    """Pause until a person submits data that satisfies ``resume_schema`` (a JSON Schema object),
+    or the timeout passes. The submitted object is the step's output under ``data`` (``decided_by``
+    names who submitted it). Unlike an approval step this is a data form, not an approve/reject
+    decision; a person may still reject it (the run then fails ``approval_rejected``)."""
+
+    type: Literal["input"] = "input"
+    prompt: str = Field(min_length=1, max_length=2000)
+    timeout_hours: int = Field(ge=1, le=168)
+    resume_schema: dict[str, Any]
+
+    @field_validator("resume_schema")
+    @classmethod
+    def _resume_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        import json
+
+        import jsonschema
+
+        if value.get("type") != "object":
+            raise ValueError("resume_schema must be a JSON Schema with type 'object'")
+        if len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_RESUME_SCHEMA_BYTES:
+            raise ValueError(f"resume_schema must be at most {MAX_RESUME_SCHEMA_BYTES // 1024} KiB as JSON")
+        if "$ref" in json.dumps(value):
+            raise ValueError("resume_schema must not use $ref")
+        try:
+            jsonschema.validators.validator_for(value).check_schema(value)
+        except jsonschema.SchemaError:
+            raise ValueError("resume_schema is not a valid JSON Schema") from None
+        return value
 
 
 class BranchCase(BaseModel):
@@ -658,7 +695,7 @@ class EvaluateStep(_Sequential):
 
 
 Step = Annotated[
-    Union[AgentStep, ToolStep, BranchStep, ParallelStep, ApprovalStep, ForeachStep, LoopStep, EvaluateStep],
+    Union[AgentStep, ToolStep, BranchStep, ParallelStep, ApprovalStep, InputStep, ForeachStep, LoopStep, EvaluateStep],
     Field(discriminator="type"),
 ]
 
@@ -1321,6 +1358,11 @@ class WorkflowSpec(BaseModel):
 
     @model_validator(mode="after")
     def _graph(self) -> WorkflowSpec:
+        for _, step in walk_steps(self.steps):
+            if step.id.endswith(PAUSE_STEP_SUFFIX):
+                raise ValueError(
+                    f"step_id_reserved_suffix: step id '{step.id}' must not end in '{PAUSE_STEP_SUFFIX}'"
+                )
         info, top, graphs = _check_graphs(self.steps, self.start)
         _check_refs(top, graphs, info)
         if _spec_bytes(self.model_dump(mode="json")) > MAX_SPEC_BYTES:
@@ -1332,3 +1374,39 @@ def canonical_workflow_hash(spec: WorkflowSpec) -> str:
     """SHA-256 of the spec's JSON with sorted keys: equal specs hash equal, any change changes it."""
     payload = json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+class WorkflowScheduleSpec(BaseModel):
+    """Body of POST /workflows/{id}/schedules: a named cron (5 fields) that runs the latest
+    published version with a fixed input. The routes validate cron, timezone and input."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    cron: str = Field(min_length=1, max_length=100)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    input: Any = Field(default_factory=dict)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+class WorkflowScheduleUpdate(BaseModel):
+    """Body of PATCH /workflows/schedules/{id}: any subset of the fields (and `active`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    cron: str | None = Field(default=None, min_length=1, max_length=100)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    input: Any = None
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def _not_null(self) -> "WorkflowScheduleUpdate":
+        for key in self.model_fields_set:
+            if getattr(self, key) is None:
+                raise ValueError(f"{key} cannot be null")
+        return self

@@ -102,7 +102,7 @@ describe("Processors list and detail", () => {
     expect(card).toHaveAttribute("data-processor-type", "pii_redact");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("PII redaction");
     expect(within(card).getByTestId("processor-config-fields")).toHaveTextContent("kinds");
-    expect(within(card).getByTestId("processor-scope-note")).toHaveTextContent("Tool results and request context values are not processed");
+    expect(within(card).getByTestId("processor-scope-note")).toHaveTextContent("Request context values are not processed");
     const usage = await screen.findByTestId("processor-usage");
     expect(within(usage).getByRole("link", { name: "Support bot" })).toHaveAttribute("href", routes.agentEditor("agent-1"));
     expect(usage).toHaveTextContent("v2");

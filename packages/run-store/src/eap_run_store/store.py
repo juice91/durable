@@ -29,6 +29,7 @@ from sqlalchemy import (
     text,
     func,
     case,
+    false,
     null,
     or_,
     tuple_,
@@ -81,8 +82,8 @@ ENQUEUE_FAILED_ERROR = (
 # run), and no tool or workflow; a tool run names its tool only and is never a conversation turn
 # (it may name a knowledge base: the search tester); a workflow run names its published workflow
 # version only; a kb_ingest run names its knowledge base only; an eval run (0015_evals) names its
-# agent with exactly one of its version and a draft snapshot, and its test suite. Same text as
-# migration 0015_evals.
+# agent with exactly one of its version and a draft snapshot, and its test suite; a workflow suite's
+# eval run names the workflow and its version instead of an agent. Same text as migration 0022.
 RUN_KIND_TARGET_CHECK = (
     "(kind = 'agent' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
     " AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL AND knowledge_base_id IS NULL)"
@@ -97,17 +98,22 @@ RUN_KIND_TARGET_CHECK = (
     " OR (kind = 'eval' AND agent_id IS NOT NULL AND (agent_version IS NULL) <> (draft_spec IS NULL)"
     " AND eval_suite_id IS NOT NULL AND tool_id IS NULL AND workflow_id IS NULL AND workflow_version IS NULL"
     " AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
+    " OR (kind = 'eval' AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL"
+    " AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL AND eval_suite_id IS NOT NULL"
+    " AND tool_id IS NULL AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
 )
 # run_model_requests.operation (0011_knowledge_bases): a chat model request or an embedding call.
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
 # A workflow's agent step runs as a child agent run linked to its workflow run and step (never a
 # conversation turn). Same text as migration 0007_workflow_runs.
-# Invariant: runs nest at most two levels. Only an agent run can have a parent, and its parent is a
-# workflow run or an eval run (an eval case's child, 0015_evals), which never has one; so a child's parent is its root run. pending_approvals.root_run_id
-# (0014_approvals) relies on this, and takes the parent's own parent if deeper nesting is ever added.
+# Invariant: runs nest at most three levels: an eval run, its workflow case run (a workflow suite), and
+# that run's agent steps. Only an agent or workflow run can have a parent; every other run is a root.
+# pending_approvals.root_run_id (0014_approvals) takes the parent's own parent when it has one, so it
+# is the top-level run.
 RUN_PARENT_LINK_CHECK = (
     "(parent_run_id IS NULL AND parent_step_id IS NULL)"
-    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind = 'agent' AND conversation_id IS NULL)"
+    " OR (parent_run_id IS NOT NULL AND parent_step_id IS NOT NULL AND kind IN ('agent', 'workflow')"
+    " AND conversation_id IS NULL)"
 )
 # runs.output_format (0014_approvals): `json` when runs.output is a structured output's canonical
 # JSON text; NULL = text. Same text as migration 0014_approvals.
@@ -238,6 +244,9 @@ class RunModel(Base):
     # fields only; NULL = none). draft_spec: the agent draft snapshot of a draft test run
     # (agent_version NULL); a retry relaunches from it, never from the live draft.
     request_context: Mapped[dict | None] = mapped_column("request_context", JSONB, nullable=True)
+    # Per-run model settings overrides (0018_run_model_settings): only the fields the caller set
+    # (NULL = none); the worker merges them over the spec's model settings.
+    model_settings: Mapped[dict | None] = mapped_column("model_settings", JSONB, nullable=True)
     draft_spec: Mapped[dict | None] = mapped_column("draft_spec", JSONB, nullable=True)
     # The knowledge base a kb_ingest run ingests into (0011_knowledge_bases; a tool run of the search
     # tester may name one too). No FK: the run outlives a deleted knowledge base as its audit and
@@ -254,6 +263,14 @@ class RunModel(Base):
     # The snapshot's suite_hash (sha256 hex), recorded once at creation: compare uses it, never
     # re-validating an old snapshot.
     eval_suite_hash: Mapped[str | None] = mapped_column("eval_suite_hash", String, nullable=True)
+    # Parity round 2 (0022_parity_round_2). rerun_of: the run this one repeats; schedule_id: the
+    # workflow schedule that started it (no FKs, the run outlives both); pause_after_each_step: the
+    # workflow run pauses after each top-level step.
+    rerun_of: Mapped[str | None] = mapped_column("rerun_of", PG_UUID(as_uuid=False), nullable=True)
+    schedule_id: Mapped[str | None] = mapped_column("schedule_id", PG_UUID(as_uuid=False), nullable=True)
+    pause_after_each_step: Mapped[bool] = mapped_column(
+        "pause_after_each_step", Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # AG-UI client (frontend) tools (0016_ag_ui, D10): the turn's declarations (a JSON array of
     # eap_schemas ClientToolDecl dumps) and the client's results for the previous turn's pending
     # calls (a JSON array of ClientToolResult dumps). NULL for every other run.
@@ -288,6 +305,9 @@ class RunModel(Base):
         Index("ix_runs_tenant_tool_created", "tenant_id", "tool_id", "created_at"),
         Index("ix_runs_tenant_workflow_created", "tenant_id", "workflow_id", "created_at"),
         Index("ix_runs_parent_run", "parent_run_id"),
+        Index("ix_runs_rerun_of", "rerun_of"),
+        Index("ix_runs_schedule_id", "schedule_id"),
+        Index("ix_runs_updated_at", "updated_at"),
         # A knowledge base's runs (ingest progress, summed cost), newest first.
         Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
         # A test suite's eval runs, newest first (0015_evals).
@@ -633,6 +653,103 @@ def _status_condition(statuses: list[str]) -> Any:
     return or_(*conditions)
 
 
+def run_tags(run: dict[str, Any]) -> list[str]:
+    """The tags a run carries (W2.2). Runs have no stored tags; they are derived from what the run
+    already records: `kind:<kind>`, `agent:<id>` / `workflow:<id>` / `tool:<id>`, `model:<id>`,
+    `draft` (a draft test run), `model-override`, and `ctx:<key>` per request context key."""
+    tags = [f"kind:{run['kind']}"]
+    for label, key in (("agent", "agent_id"), ("workflow", "workflow_id"), ("tool", "tool_id"), ("model", "model_id")):
+        if run.get(key):
+            tags.append(f"{label}:{run[key]}")
+    if run.get("draft_spec") is not None:
+        tags.append("draft")
+    if run.get("model_overridden"):
+        tags.append("model-override")
+    tags.extend(f"ctx:{k}" for k in sorted(run.get("request_context") or {}))
+    return tags
+
+
+def run_tag_condition(tag: str) -> Any:
+    """The SQL condition for one derived tag (see `run_tags`); an unknown tag matches nothing."""
+    if tag == "draft":
+        return RunModel.draft_spec.is_not(None)
+    if tag == "model-override":
+        return RunModel.model_overridden.is_(True)
+    label, _, value = tag.partition(":")
+    columns = {
+        "kind": RunModel.kind, "agent": RunModel.agent_id, "workflow": RunModel.workflow_id,
+        "tool": RunModel.tool_id, "model": RunModel.model_id,
+    }
+    if label in columns and value:
+        return columns[label] == value
+    if label == "ctx" and value:
+        return RunModel.request_context.has_key(value)
+    return false()
+
+
+def _like_pattern(value: str) -> str:
+    return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def run_filter_conditions(
+    tenant_id: str,
+    *,
+    agent_id: UUID | str | None = None,
+    workflow_id: UUID | str | None = None,
+    knowledge_base_id: UUID | str | None = None,
+    parent_run_id: UUID | str | None = None,
+    status: str | list[str] | tuple[str, ...] | None = None,
+    kind: str | None = None,
+    tool_id: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict[str, str] | None = None,
+    text_query: str | None = None,
+) -> tuple[list[Any], bool]:
+    """The one builder of the `GET /runs` filters, shared by `RunStore.list_runs`, `SpanStore.list` and the
+    runs histogram, as SQL conditions on `RunModel` (tenant, top-level unless
+    `parent_run_id` is given), and whether the query should run under the metrics statement timeout
+    (`model`, `provider` and `text_query` walk far back in history)."""
+    conds: list[Any] = [RunModel.tenant_id == tenant_id]
+    conds.append(RunModel.parent_run_id == str(parent_run_id) if parent_run_id is not None
+                 else RunModel.parent_run_id.is_(None))
+    for tag in tags or ():
+        conds.append(run_tag_condition(tag))
+    for key, value in (metadata or {}).items():
+        conds.append(RunModel.request_context[key].astext == value)
+    if workflow_id is not None:
+        conds.append(RunModel.workflow_id == str(workflow_id))
+    if knowledge_base_id is not None:
+        conds.append(RunModel.knowledge_base_id == str(knowledge_base_id))
+    if agent_id is not None:
+        conds.append(RunModel.agent_id == str(agent_id))
+    if status is not None:
+        conds.append(_status_condition([status] if isinstance(status, str) else list(status)))
+    if created_from is not None:
+        conds.append(RunModel.created_at >= created_from)
+    if created_to is not None:
+        conds.append(RunModel.created_at < created_to)
+    slow = False
+    if text_query:
+        conds.append(or_(*(col.ilike(_like_pattern(text_query), escape="\\") for col in (
+            RunModel.input, RunModel.output, RunModel.error, RunModel.tool_id, RunModel.model_id,
+        ))))
+        slow = True
+    if model is not None or provider is not None:
+        from eap_run_store.metrics import run_model_condition
+
+        conds.append(run_model_condition(RunModel, tenant_id, model, provider))
+        slow = True
+    if kind is not None:
+        conds.append(RunModel.kind == kind)
+    if tool_id is not None:
+        conds.append(RunModel.tool_id == tool_id)
+    return conds, slow
+
+
 def _run_select() -> Any:
     """SELECT runs plus whether each has an open approval (for _run_dict's display status)."""
     from eap_run_store.approvals import open_approval_exists
@@ -672,11 +789,15 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "request_context": run.request_context,
+        "model_settings": run.model_settings,
         "draft_spec": run.draft_spec,
         "knowledge_base_id": run.knowledge_base_id,
         "output_format": run.output_format,
         "eval_suite_id": run.eval_suite_id,
         "eval_suite_hash": run.eval_suite_hash,
+        "rerun_of": run.rerun_of,
+        "schedule_id": run.schedule_id,
+        "pause_after_each_step": run.pause_after_each_step,
         "client_tools": run.client_tools,
         "client_tool_results": run.client_tool_results,
     }
@@ -756,7 +877,18 @@ def _totals_values(tenant_id: str, run_id: str) -> dict[str, Any]:
     """The usage totals columns (`input_tokens`, `output_tokens`, `cost_usd`) as SQL expressions
     over the run's (and its child runs') `run_model_requests` rows; see _finish_values."""
     children = aliased(RunModel)
-    child_ids = select(children.id).where(children.tenant_id == tenant_id, children.parent_run_id == run_id)
+    # Children, and their children: a workflow suite's eval run has workflow case runs whose agent
+    # steps are runs of their own (three levels).
+    grand = aliased(RunModel)
+    child_ids = select(children.id).where(
+        children.tenant_id == tenant_id,
+        or_(
+            children.parent_run_id == run_id,
+            children.parent_run_id.in_(
+                select(grand.id).where(grand.tenant_id == tenant_id, grand.parent_run_id == run_id)
+            ),
+        ),
+    )
     rows = (
         select(
             func.coalesce(func.sum(RunModelRequestModel.input_tokens), 0).label("input_tokens"),
@@ -789,9 +921,12 @@ END_EVENT_KEY = "end"
 
 # Events a completed conversation turn's post-turn steps append after its `end` (RM.13
 # observational memory, RM.14 semantic-recall indexing, their `:failed` events, and the P1.C1
-# `post_turn_done` marker at `memory:post_turn:{turn}`). They describe work done after the answer,
+# `post_turn_done` marker at `memory:post_turn:{turn}`, and the W2.3 `score:{scorer_id}` events). They describe work done after the answer,
 # never change the status, and stay allowed after `end`.
-POST_END_EVENT_KEY_PREFIXES = ("memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:")
+POST_END_EVENT_KEY_PREFIXES = (
+    "memory:observe:", "memory:reflect:", "embed:index:", "memory:post_turn:", "score:",
+    "feedback:",
+)
 
 # The key of the cancel request (`cancel_requested`, written by POST /runs/{id}/cancel).
 CANCEL_EVENT_KEY = "cancel"
@@ -863,6 +998,7 @@ def _run_option_values(
     draft_spec: dict[str, Any] | None,
     model_id: str | None,
     model_overridden: bool,
+    model_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Insert values for the run options of an agent run (0010_run_options; model_id from 0008).
     An empty context is stored as NULL, like a run recorded before request context existed. SQL
@@ -872,6 +1008,7 @@ def _run_option_values(
         "draft_spec": null() if draft_spec is None else draft_spec,
         "model_id": model_id,
         "model_overridden": bool(model_overridden),
+        "model_settings": model_settings or null(),
     }
 
 
@@ -1051,6 +1188,7 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        model_settings: dict[str, Any] | None = None,
     ) -> tuple[UUID, bool]:
         """Create a new agent run. Idempotent: same run_id returns existing without creating second row.
 
@@ -1073,7 +1211,7 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
-            **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+            **_run_option_values(request_context, draft_spec, model_id, model_overridden, model_settings),
         )
 
     def create_tool_run(
@@ -1114,9 +1252,16 @@ class RunStore:
         run_id: UUID,
         trace_id: str | None = None,
         traceparent: str | None = None,
+        *,
+        rerun_of: UUID | str | None = None,
+        schedule_id: UUID | str | None = None,
+        pause_after_each_step: bool = False,
     ) -> tuple[UUID, bool]:
         """Create a workflow run (kind 'workflow': published version `workflow_version` of
-        `workflow_id`, `input` = the workflow input as canonical JSON text).
+        `workflow_id`, `input` = the workflow input as canonical JSON text). `rerun_of`: the earlier
+        run this one repeats (the caller has checked it is the same tenant's and workflow's).
+        `schedule_id`: the schedule whose tick created the run. `pause_after_each_step`: a
+        step-by-step run (the worker waits after every top-level step).
 
         Same idempotency and tenant rules as create_run."""
         return self._insert_run(
@@ -1128,6 +1273,9 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
+            rerun_of=None if rerun_of is None else str(rerun_of),
+            schedule_id=None if schedule_id is None else str(schedule_id),
+            pause_after_each_step=pause_after_each_step,
         )
 
     def create_kb_ingest_run(
@@ -1195,6 +1343,72 @@ class RunStore:
             trace_id=trace_id,
             traceparent=traceparent,
             draft_spec=null() if draft_spec is None else draft_spec,
+        )
+
+    def create_workflow_eval_run(
+        self,
+        tenant_id: str,
+        workflow_id: UUID | str,
+        workflow_version: int,
+        eval_suite_id: UUID | str,
+        input: str,
+        run_id: UUID,
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create an eval run of a workflow suite (kind 'eval', `workflow_id` and `workflow_version`
+        set, `agent_id` NULL: ck_runs_kind_target of 0022_parity_round_2). `input` is the suite
+        snapshot as for create_eval_run. The caller has checked that the workflow and the suite
+        belong to `tenant_id`. Same idempotency and tenant rules as create_run."""
+        from pydantic import ValidationError
+
+        from eap_schemas.evals import EvalSuiteSnapshot
+
+        try:
+            snapshot = EvalSuiteSnapshot.model_validate_json(input)
+        except ValidationError as exc:
+            raise ValueError(f"input is not a valid suite snapshot: {exc.errors()[0]['msg']}") from None
+        if str(snapshot.suite_id) != str(eval_suite_id):
+            raise ValueError("input is a snapshot of another suite")
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="eval",
+            workflow_id=str(workflow_id),
+            workflow_version=workflow_version,
+            eval_suite_id=str(eval_suite_id),
+            eval_suite_hash=snapshot.suite_hash(),
+            input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_eval_workflow_child_run(
+        self,
+        tenant_id: str,
+        eval_run_id: UUID | str,
+        case_id: UUID | str,
+        workflow_id: UUID | str,
+        workflow_version: int,
+        input: str,
+        run_id: UUID,
+        *,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create the workflow run that executes case `case_id` of the workflow eval run
+        `eval_run_id` (same tenant: fk_runs_tenant_parent_run): kind 'workflow', `parent_step_id =
+        case:{case_id}`. Same idempotency rules as create_run, and the parent rules of
+        create_eval_child_run (refused once the eval run ended or its cancel was requested)."""
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="workflow",
+            workflow_id=str(workflow_id),
+            workflow_version=workflow_version,
+            input=input,
+            parent_run_id=str(eval_run_id),
+            parent_step_id=f"case:{case_id}",
+            traceparent=traceparent,
         )
 
     def create_eval_child_run(
@@ -1746,6 +1960,9 @@ class RunStore:
         created_to: datetime | None = None,
         model: str | None = None,
         provider: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+        text_query: str | None = None,
         statement_timeout_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
@@ -1764,36 +1981,26 @@ class RunStore:
         keep runs that used that model (eap_run_store.metrics.run_model_condition). That filter is
         two EXISTS lookups per run and may walk far back in history to fill a page, so the query
         then runs under the metrics `statement_timeout` (`statement_timeout_ms`, default 5 s) and
-        raises MetricsQueryTimeout when it fires."""
-        query = _run_select().where(RunModel.tenant_id == tenant_id)
-        if parent_run_id is not None:
-            query = query.where(RunModel.parent_run_id == str(parent_run_id))
-        else:
-            query = query.where(RunModel.parent_run_id.is_(None))
-        if workflow_id is not None:
-            query = query.where(RunModel.workflow_id == str(workflow_id))
-        if knowledge_base_id is not None:
-            query = query.where(RunModel.knowledge_base_id == str(knowledge_base_id))
+        raises MetricsQueryTimeout when it fires.
+
+        Trace list filters (W2.2): `tags` (all of them; see `run_tag_condition`), `metadata` (every
+        key=value pair equals the run's request context value, as text) and `text_query` (a
+        case-insensitive substring of the run's input, output, error, tool id or model id; it runs
+        under the same statement timeout as `model`)."""
+        conditions, slow = run_filter_conditions(
+            tenant_id, agent_id=agent_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
+            parent_run_id=parent_run_id, status=status, kind=kind, tool_id=tool_id, created_from=created_from,
+            created_to=created_to, model=model, provider=provider, tags=tags, metadata=metadata,
+            text_query=text_query,
+        )
+        query = _run_select().where(*conditions)
         if before is not None:
             query = query.where(tuple_(RunModel.created_at, RunModel.id) < tuple_(before.created_at, before.id))
-        if agent_id is not None:
-            query = query.where(RunModel.agent_id == str(agent_id))
-        if status is not None:
-            query = query.where(_status_condition([status] if isinstance(status, str) else list(status)))
-        if created_from is not None:
-            query = query.where(RunModel.created_at >= created_from)
-        if created_to is not None:
-            query = query.where(RunModel.created_at < created_to)
         timeout_ms = None
-        if model is not None or provider is not None:
-            from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS, run_model_condition
+        if slow:
+            from eap_run_store.metrics import DEFAULT_STATEMENT_TIMEOUT_MS
 
-            query = query.where(run_model_condition(RunModel, tenant_id, model, provider))
             timeout_ms = int(statement_timeout_ms or DEFAULT_STATEMENT_TIMEOUT_MS)
-        if kind is not None:
-            query = query.where(RunModel.kind == kind)
-        if tool_id is not None:
-            query = query.where(RunModel.tool_id == tool_id)
         query = query.order_by(RunModel.created_at.desc(), RunModel.id.desc()).limit(limit)
         with self.Session() as session:
             if timeout_ms is None:
@@ -2032,6 +2239,7 @@ class RunStore:
         agent_id: UUID | str | None = None,
         limit: int = 100,
         before: ConversationCursor | None = None,
+        title_contains: str | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's conversations ordered (updated_at DESC, id DESC), at most `limit`, strictly
         after the `before` position (ConversationCursor.after(last row of the previous page)).
@@ -2042,6 +2250,9 @@ class RunStore:
         query = self._conversation_select().where(ConversationModel.tenant_id == tenant_id)
         if agent_id is not None:
             query = query.where(ConversationModel.agent_id == str(agent_id))
+        if title_contains:
+            escaped = title_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(ConversationModel.title.ilike(f"%{escaped}%", escape="\\"))
         if before is not None:
             query = query.where(
                 tuple_(ConversationModel.updated_at, ConversationModel.id) < tuple_(before.updated_at, before.id)
@@ -2096,6 +2307,7 @@ class RunStore:
         draft_spec: dict[str, Any] | None = None,
         model_id: str | None = None,
         model_overridden: bool = False,
+        model_settings: dict[str, Any] | None = None,
         client_tools: list[dict[str, Any]] | None = None,
         client_tool_results: list[dict[str, Any]] | None = None,
         ag_ui_run: Any = None,
@@ -2174,7 +2386,7 @@ class RunStore:
                     updated_at=now,
                     trace_id=trace_id,
                     traceparent=traceparent,
-                    **_run_option_values(request_context, draft_spec, model_id, model_overridden),
+                    **_run_option_values(request_context, draft_spec, model_id, model_overridden, model_settings),
                     # SQL NULL explicitly (JSONB binds Python None as the JSON value `null`).
                     client_tools=null() if client_tools is None else client_tools,
                     client_tool_results=null() if client_tool_results is None else client_tool_results,
@@ -2230,6 +2442,90 @@ class RunStore:
                 }
                 for r in runs
             ]
+
+    def clone_conversation(self, tenant_id: str, conversation_id: UUID | str, title: str | None) -> dict[str, Any]:
+        """Copy a conversation into a NEW one (same agent, same resource_id), in one transaction.
+
+        Only terminal turns are copied (completed, failed, needs_attention); a queued or running
+        turn is skipped. The copies are renumbered gap-free from 1 in the source's order and keep
+        what the chat view and the next turn's history read: input, output, error, messages,
+        status, run options, and the run's events (same seq, key, type, data, ts). They do NOT
+        keep trace ids, usage totals or cost, and no `run_model_requests` rows, so the metrics and
+        the cost record count each model call once (the source). Observations, conversation
+        working memory and recall embeddings are derived and are not copied; resource-scoped
+        memory is shared by resource_id as before. The source is read under its row lock (a
+        concurrent create_turn waits) and is not changed. Returns the new conversation (get_conversation's
+        shape). Raises ConversationNotFound for another tenant's or an unknown conversation.
+        """
+        src_id = str(conversation_id)
+        new_id = str(uuid4())
+        with self.Session() as session:
+            src = session.execute(
+                select(ConversationModel)
+                .where(ConversationModel.id == src_id, ConversationModel.tenant_id == tenant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if src is None:
+                session.rollback()
+                raise ConversationNotFound(tenant_id, src_id)
+            now = datetime.now(timezone.utc)
+            session.add(
+                ConversationModel(
+                    id=new_id, tenant_id=tenant_id, agent_id=src.agent_id, title=title,
+                    resource_id=src.resource_id, created_at=now, updated_at=now,
+                )
+            )
+            session.flush()
+            runs = session.execute(
+                select(RunModel)
+                .where(
+                    RunModel.tenant_id == tenant_id,
+                    RunModel.conversation_id == src_id,
+                    RunModel.status.in_(sorted(TERMINAL_RUN_STATUSES)),
+                )
+                .order_by(RunModel.turn)
+            ).scalars().all()
+            for turn, run in enumerate(runs, start=1):
+                copy_id = str(uuid4())
+                session.add(
+                    RunModel(
+                        id=copy_id, tenant_id=tenant_id, kind=run.kind, agent_id=run.agent_id,
+                        agent_version=run.agent_version, status=run.status, input=run.input,
+                        output=run.output, error=run.error, created_at=run.created_at,
+                        updated_at=run.updated_at, conversation_id=new_id, turn=turn,
+                        # SQL NULL, not the JSON value `null`, for an absent JSONB column.
+                        messages=_sql_null_if_none(run.messages), model_id=run.model_id,
+                        model_overridden=run.model_overridden,
+                        started_at=run.started_at, finished_at=run.finished_at,
+                        request_context=_sql_null_if_none(run.request_context),
+                        draft_spec=_sql_null_if_none(run.draft_spec),
+                        model_settings=_sql_null_if_none(run.model_settings),
+                        output_format=run.output_format, client_tools=_sql_null_if_none(run.client_tools),
+                        client_tool_results=_sql_null_if_none(run.client_tool_results),
+                        event_order_next=run.event_order_next,
+                    )
+                )
+                session.flush()
+                events = session.execute(
+                    select(ExecutionEventModel)
+                    .where(ExecutionEventModel.tenant_id == tenant_id, ExecutionEventModel.run_id == run.id)
+                    .order_by(ExecutionEventModel.seq)
+                ).scalars().all()
+                for e in events:
+                    session.add(
+                        ExecutionEventModel(
+                            tenant_id=tenant_id, run_id=copy_id, seq=e.seq, event_key=e.event_key,
+                            type=e.type, data=e.data, ts=e.ts, root_order=e.root_order,
+                        )
+                    )
+            session.commit()
+        cloned = self.get_conversation(tenant_id, new_id)
+        assert cloned is not None
+        return cloned
+
+
+def _sql_null_if_none(value: Any) -> Any:
+    return null() if value is None else value
 
 
 def _recorded_cost_in_session(session, tenant_id: str, run_ids: list[str]) -> Decimal:

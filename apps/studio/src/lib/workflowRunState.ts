@@ -42,6 +42,10 @@ export interface StepDetail {
   prompt: string | null;
   deadline: string | null;
   timeoutHours: number | null;
+  /** An input step's JSON Schema (from its waiting event); null otherwise. */
+  resumeSchema?: Record<string, unknown> | null;
+  /** A step-by-step pause (`<step>_pause`, from the waiting event's `pause: true`). */
+  pause?: boolean;
   decision: StepDecision | null;
   /** Why a `skipped` step was skipped: an untaken branch arm, the run completed before reaching it
    * (the completion sweep), or (a loop body step) its iteration ended without it. Null unless
@@ -158,6 +162,7 @@ function emptyDetail(stepId: string, stepType: StepType | null): StepDetail {
     prompt: null,
     deadline: null,
     timeoutHours: null,
+    resumeSchema: null,
     decision: null,
     skipReason: null,
     startedAt: null,
@@ -234,7 +239,11 @@ function applyStepEvent(d: StepDetail, event: RunEvent, chosen: Map<string, stri
       if (d.state === "pending" || d.state === "running") d.state = "waiting";
       d.prompt = str(data.prompt) ?? d.prompt;
       d.deadline = str(data.deadline) ?? d.deadline;
+      if (data.resume_schema && typeof data.resume_schema === "object" && !Array.isArray(data.resume_schema)) {
+        d.resumeSchema = data.resume_schema as Record<string, unknown>;
+      }
       d.timeoutHours = typeof data.timeout_hours === "number" ? data.timeout_hours : d.timeoutHours;
+      if (data.pause === true) d.pause = true;
       if (waitingOrder && !waitingOrder.includes(d.stepId)) waitingOrder.push(d.stepId);
       break;
     }

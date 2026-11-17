@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { McpDeleteConfirm } from "@/components/mcp/McpDeleteConfirm";
+import { McpRunTab } from "@/components/mcp/McpRunTab";
 import { McpLastTest } from "@/components/mcp/McpLastTest";
 import { McpServerDialog } from "@/components/mcp/McpServerDialog";
 import { McpTestResult } from "@/components/mcp/McpTestResult";
@@ -14,6 +15,7 @@ import { DataList } from "@/components/shared/DataList";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ApiError } from "@/lib/api";
 import {
   describeMcpApiMessage,
@@ -226,7 +228,15 @@ export default function McpServerDetailPage() {
         {!server && !loadError ? <p className="text-body text-muted-foreground" role="status">Loading MCP server…</p> : null}
 
         {server ? (
-          <>
+          <Tabs defaultValue="overview" className="flex min-w-0 flex-col gap-6">
+            <TabsList aria-label="MCP server sections">
+              <TabsTrigger value="overview" data-testid="mcp-tab-overview">Overview</TabsTrigger>
+              <TabsTrigger value="run" data-testid="mcp-tab-run">Run</TabsTrigger>
+            </TabsList>
+            <TabsContent value="run">
+              <McpRunTab server={server} tools={tools} onLoadTools={() => void testServer(server)} loadingTools={busy} />
+            </TabsContent>
+            <TabsContent value="overview" className="flex min-w-0 flex-col gap-8">
             <Section
               title="Connection"
               testId="mcp-connection"
@@ -320,7 +330,8 @@ export default function McpServerDetailPage() {
                 ) : null}
               </div>
             </Section>
-          </>
+            </TabsContent>
+          </Tabs>
         ) : null}
       </div>
 

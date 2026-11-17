@@ -308,6 +308,40 @@ def test_bad_step_id_pattern_rejected():
         )
 
 
+def test_step_id_ending_in_pause_is_rejected():
+    with pytest.raises(ValueError, match="step_id_reserved_suffix"):
+        WorkflowSpec(
+            name="Test",
+            input_schema={"type": "object"},
+            steps=(ToolStep(id="a_pause", tool_id="clock.now"),),
+            start="a_pause",
+        )
+
+
+def test_loop_body_step_id_ending_in_pause_is_rejected():
+    spec = {
+        "name": "Test", "input_schema": {"type": "object"}, "start": "lp",
+        "steps": [{
+            "id": "lp", "type": "loop", "max_iterations": 2,
+            "until": {"op": "eq", "left": {"$ref": "loop.lp.index"}, "right": 1},
+            "body": {"start": "tick_pause",
+                     "steps": [{"id": "tick_pause", "type": "tool", "tool_id": "clock.now", "input": {}}]},
+        }],
+    }
+    with pytest.raises(ValueError, match="step_id_reserved_suffix"):
+        WorkflowSpec.model_validate(spec)
+
+
+def test_step_id_containing_pause_but_not_ending_in_it_is_accepted():
+    spec = WorkflowSpec(
+        name="Test",
+        input_schema={"type": "object"},
+        steps=(ToolStep(id="pause_x", tool_id="clock.now"),),
+        start="pause_x",
+    )
+    assert spec.start == "pause_x"
+
+
 def test_missing_start_rejected():
     with pytest.raises(ValueError, match="start step 'missing' does not exist"):
         WorkflowSpec(
@@ -700,3 +734,28 @@ def test_agent_step_uuid_validation():
     """agent_id must be a valid UUID, and the message names the step."""
     with pytest.raises(ValueError, match="step 's1': agent_id: Input should be a valid UUID"):
         AgentStep(id="s1", agent_id="not-a-uuid")
+
+
+# --------------------------------------------------------------------------- input steps (W2.1)
+
+
+def _input_spec(schema, *, in_loop=False):
+    step = {"id": "ask", "type": "input", "prompt": "Details?", "timeout_hours": 1, "resume_schema": schema}
+    return {"name": "W", "input_schema": {"type": "object"}, "start": "ask", "steps": [step]}
+
+
+def test_input_step_validates_its_resume_schema():
+    from eap_schemas.workflows import InputStep, WorkflowSpec
+
+    ok = WorkflowSpec.model_validate(_input_spec({"type": "object", "properties": {"a": {"type": "string"}}}))
+    assert isinstance(ok.steps[0], InputStep)
+    for bad in ({"type": "string"}, {"type": "object", "properties": 5},
+                {"type": "object", "properties": {"a": {"$ref": "http://x/y"}}}):
+        with pytest.raises(Exception):
+            WorkflowSpec.model_validate(_input_spec(bad))
+    with pytest.raises(Exception):  # an input step is a person's data form: no input in a loop body
+        WorkflowSpec.model_validate({
+            "name": "W", "input_schema": {"type": "object"}, "start": "f",
+            "steps": [{"id": "f", "type": "foreach", "items": {"$ref": "input.xs"}, "concurrency": 1, "max_items": 2,
+                       "body": {"start": "ask", "steps": [_input_spec({"type": "object"})["steps"][0]]}}],
+        })

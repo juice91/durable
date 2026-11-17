@@ -121,10 +121,33 @@ def approval_json(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _step_extras(event_log: Any, tenant_id: str, row: dict[str, Any], *, detail: bool) -> dict[str, Any]:
+    """What a workflow step's item adds from its events: `resume_schema` (an input step: the
+    schema the person fills in; every item), and for a decided one (`detail`, the single read) the
+    audit of the decision: `comment` and `resume_data` (what was submitted) beside who and when."""
+    if row["kind"] != "step":
+        return {}
+    waiting = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:waiting")
+    wdata = waiting.data if waiting is not None and isinstance(waiting.data, dict) else {}
+    schema = wdata.get("resume_schema")
+    # `pause`: a step-by-step run's pause ("Paused after {step}", answered with Continue or Stop).
+    extras: dict[str, Any] = {
+        "resume_schema": schema if isinstance(schema, dict) else None,
+        "pause": wdata.get("pause") is True,
+    }
+    if detail:
+        decision = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:decision")
+        data = decision.data if decision is not None and isinstance(decision.data, dict) else {}
+        extras["comment"] = data.get("comment")
+        extras["resume_data"] = data.get("resume_data")
+    return extras
+
+
 @router.get("/approvals", responses={422: {"model": ErrorDetail}})
 def list_approvals(
     principal: PrincipalDep,
     store: ApprovalStoreDep,
+    stores: StoresDep,
     approval_status: Annotated[Literal["pending", "decided"], Query(alias="status")] = "pending",
     kind: Annotated[Literal["tool", "step"] | None, Query()] = None,
     agent_id: uuid.UUID | None = None,
@@ -150,7 +173,9 @@ def list_approvals(
         )
     except InvalidRunCursor:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=INVALID_CURSOR_DETAIL)
-    return JSONResponse(content={"items": [approval_json(r) for r in rows], "next_cursor": next_cursor})
+    _, event_log = stores
+    items = [{**approval_json(r), **_step_extras(event_log, principal.tenant_id, r, detail=True)} for r in rows]
+    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
 
 
 @router.get("/approvals/{run_id}/{kind}/{key}", responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}})
@@ -160,15 +185,19 @@ def get_approval(
     key: Annotated[str, Path(min_length=1, max_length=MAX_TOOL_CALL_ID_CHARS, pattern=TOOL_CALL_ID_PATTERN)],
     principal: PrincipalDep,
     store: ApprovalStoreDep,
+    stores: StoresDep,
 ) -> JSONResponse:
     """One approval, pending or decided, in the inbox item's shape. `key` is the tool call id (kind
     tool) or the step id (kind step). A pending item of a run that has ended keeps `status:
     "pending"` with the run's terminal `run_status` (it can no longer be decided). 404 unknown, or
-    another tenant's; 422 a malformed run id, kind or key."""
+    another tenant's; 422 a malformed run id, kind or key. A workflow step also has `resume_schema`
+    (set for an input step), and `comment` and `resume_data` once decided (the audit of the
+    decision, with `decided_by` and `decided_at`)."""
     row = store.get(principal.tenant_id, str(run_id), kind, key)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=APPROVAL_NOT_FOUND_DETAIL)
-    return JSONResponse(content=approval_json(row))
+    _, event_log = stores
+    return JSONResponse(content={**approval_json(row), **_step_extras(event_log, principal.tenant_id, row, detail=True)})
 
 
 ToolCallIdPath = Annotated[

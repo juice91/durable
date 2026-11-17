@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
 from eap_run_store.evals import CaseResultWrite, EvalStore
+from eap_run_store.spans import SpanStore
 
 from eap_api.app import create_app
 from eap_api.launcher import DBOSRunLauncher, LauncherSettings, get_run_launcher
@@ -30,7 +32,7 @@ from eap_api.launcher import DBOSRunLauncher, LauncherSettings, get_run_launcher
 from .conftest import get_auth_header
 from .run_helpers import PG_URL, cleanup_tenant, hard_timeout, requires_pg
 from .test_approvals_api import tool_url, waiting_step, waiting_tool_call
-from .test_workflow_runs_api import FakeClient
+from .test_workflow_runs_api import FakeClient, publish_demo
 
 pytestmark = requires_pg
 API = "/api/v1"
@@ -54,12 +56,32 @@ NEW_ROUTES = {
     ("DELETE", "/api/v1/eval-suites/{suite_id}/cases/{case_id}"),
     ("GET", "/api/v1/eval-suites/{suite_id}/export"),
     ("POST", "/api/v1/eval-suites/{suite_id}/import"),
+    ("GET", "/api/v1/workflows/{workflow_id}/evals/suites"),
+    ("POST", "/api/v1/workflows/{workflow_id}/evals/suites"),
+    ("POST", "/api/v1/workflows/{workflow_id}/evals/runs"),
+    ("GET", "/api/v1/workflows/{workflow_id}/evals/runs"),
+    ("GET", "/api/v1/workflows/{workflow_id}/evals/runs/{run_id}"),
+    ("GET", "/api/v1/workflows/{workflow_id}/evals/runs/{run_id}/results"),
     ("POST", "/api/v1/agents/{agent_id}/evals/runs"),
     ("GET", "/api/v1/agents/{agent_id}/evals/runs"),
     ("GET", "/api/v1/agents/{agent_id}/evals/runs/{run_id}"),
     ("GET", "/api/v1/agents/{agent_id}/evals/runs/{run_id}/results"),
     ("GET", "/api/v1/agents/{agent_id}/evals/compare"),
     ("GET", "/api/v1/agents/{agent_id}/evals/warnings"),
+    # W1.5: tenant-wide lists behind the Evaluation pages (cross-tenant cases in test_evals_overview_api.py).
+    ("GET", "/api/v1/eval-suites"),
+    ("GET", "/api/v1/evals/runs"),
+    ("GET", "/api/v1/evals/scorers"),
+    # Parity round 2, D2: workflow schedules.
+    ("GET", "/api/v1/workflows/schedules"),
+    ("GET", "/api/v1/workflows/{workflow_id}/schedules"),
+    ("POST", "/api/v1/workflows/{workflow_id}/schedules"),
+    ("PATCH", "/api/v1/workflows/schedules/{schedule_id}"),
+    ("DELETE", "/api/v1/workflows/schedules/{schedule_id}"),
+    # Parity round 2, D7: spans list, runs histogram, score on demand.
+    ("GET", "/api/v1/spans"),
+    ("GET", "/api/v1/runs/histogram"),
+    ("POST", "/api/v1/runs/{run_id}/score"),
 }
 # Pre-milestone decision routes that now go through the shared decision helper (AC.8).
 CHANGED_DECISION_ROUTES = {
@@ -95,6 +117,8 @@ def api(fake):
     engine = app.state.database_engine
     for t in tenants:
         with engine.begin() as conn:
+            conn.execute(text("DELETE FROM spans WHERE tenant_id = :t"), {"t": t})
+            conn.execute(text("DELETE FROM workflow_schedules WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM eval_suites WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM workflow_versions WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM workflows WHERE tenant_id = :t"), {"t": t})
@@ -112,8 +136,8 @@ def test_the_inventory_is_every_approval_eval_and_output_schema_route(api):
     routes = app_routes(app)
     assert NEW_ROUTES <= routes, NEW_ROUTES - routes
     assert CHANGED_DECISION_ROUTES <= routes
-    kinds = ("approval", "eval", "output-schema")
-    of_kind = {(m, p) for m, p in routes if any(k in p for k in kinds)}
+    kinds = ("approval", "eval", "output-schema", "schedules", "spans", "histogram")
+    of_kind = {(m, p) for m, p in routes if any(k in p for k in kinds) or p.endswith("/score")}
     assert of_kind <= NEW_ROUTES | CHANGED_DECISION_ROUTES, of_kind - NEW_ROUTES - CHANGED_DECISION_ROUTES
 
 
@@ -145,7 +169,15 @@ def owner_world(client, app, tenant: str, h: dict[str, str]) -> dict[str, Any]:
             " cache_read_tokens, cache_write_tokens, usage_measured, created_at, operation)"
             " VALUES (:t, :r, :k, 'test:judge', 200, 50, 0, 0, true, now() - interval '1 hour', 'chat')"),
             {"t": tenant, "r": eval_run, "k": f"judge:{case_id}:1"})
-    return {"run": str(run_id), "agent": agent_id, "step_run": str(step_run), "structured": structured,
+    SpanStore(app.state.database_engine).replace_for_run(tenant, run_id, [{
+        "span_id": f"run:{run_id}", "parent_id": None, "kind": "run", "name": "Secret span", "start": datetime.now(timezone.utc),
+        "end": None, "status": "ok", "agent_id": agent_id, "workflow_id": None, "model": None}])
+    workflow = publish_demo(client, h)
+    r = client.post(f"{API}/workflows/{workflow}/schedules", headers=h,
+                    json={"name": "nightly", "cron": "0 3 * * *", "input": {"q": "x"}})
+    assert r.status_code == 201, r.text
+    return {"workflow": workflow, "schedule": r.json()["id"],
+            "run": str(run_id), "agent": agent_id, "step_run": str(step_run), "structured": structured,
             "suite": suite_id, "case": case_id, "eval_run": eval_run}
 
 
@@ -186,10 +218,39 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
         (("GET", "/api/v1/agents/{agent_id}/evals/compare"), "GET", f"/agents/{a}/evals/compare?base={e}&target={e}",
          None, 404),
         (("GET", "/api/v1/agents/{agent_id}/evals/warnings"), "GET", f"/agents/{a}/evals/warnings", None, 404),
+        # W1.5 tenant-wide lists: another tenant sees an empty page; naming A's agent or suite is a 404.
+        (("GET", "/api/v1/eval-suites"), "GET", "/eval-suites", None, 200),
+        (("GET", "/api/v1/eval-suites"), "GET", f"/eval-suites?agent_id={a}", None, 404),
+        (("GET", "/api/v1/evals/runs"), "GET", "/evals/runs", None, 200),
+        (("GET", "/api/v1/evals/runs"), "GET", f"/evals/runs?agent_id={a}", None, 404),
+        (("GET", "/api/v1/evals/scorers"), "GET", "/evals/scorers", None, 200),
         (("POST", "/api/v1/workflows/runs/{run_id}/steps/{step_id}/approve"), "POST",
          f"/workflows/runs/{w['step_run']}/steps/approve/approve", {"comment": "x"}, 404),
         (("POST", "/api/v1/workflows/runs/{run_id}/steps/{step_id}/reject"), "POST",
          f"/workflows/runs/{w['step_run']}/steps/approve/reject", {}, 404),
+        (("GET", "/api/v1/workflows/{workflow_id}/evals/suites"), "GET", f"/workflows/{w['workflow']}/evals/suites",
+         None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/evals/suites"), "POST", f"/workflows/{w['workflow']}/evals/suites",
+         {"name": "x"}, 404),
+        (("GET", "/api/v1/workflows/{workflow_id}/evals/runs"), "GET", f"/workflows/{w['workflow']}/evals/runs", None, 404),
+        (("GET", "/api/v1/workflows/{workflow_id}/evals/runs/{run_id}"), "GET",
+         f"/workflows/{w['workflow']}/evals/runs/{e}", None, 404),
+        (("GET", "/api/v1/workflows/{workflow_id}/evals/runs/{run_id}/results"), "GET",
+         f"/workflows/{w['workflow']}/evals/runs/{e}/results", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/evals/runs"), "POST", f"/workflows/{w['workflow']}/evals/runs",
+         {"run_id": str(uuid.uuid4()), "suite_id": s}, 404),
+        (("GET", "/api/v1/workflows/schedules"), "GET", "/workflows/schedules", None, 200),
+        (("GET", "/api/v1/workflows/{workflow_id}/schedules"), "GET", f"/workflows/{w['workflow']}/schedules", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/schedules"), "POST", f"/workflows/{w['workflow']}/schedules",
+         {"name": "x", "cron": "* * * * *", "input": {"priority": "low"}}, 404),
+        (("PATCH", "/api/v1/workflows/schedules/{schedule_id}"), "PATCH", f"/workflows/schedules/{w['schedule']}",
+         {"active": False}, 404),
+        (("DELETE", "/api/v1/workflows/schedules/{schedule_id}"), "DELETE", f"/workflows/schedules/{w['schedule']}",
+         None, 404),
+        (("GET", "/api/v1/spans"), "GET", "/spans", None, 200),
+        (("GET", "/api/v1/spans"), "GET", f"/spans?agent_id={a}", None, 200),
+        (("GET", "/api/v1/runs/histogram"), "GET", "/runs/histogram", None, 200),
+        (("POST", "/api/v1/runs/{run_id}/score"), "POST", f"/runs/{w['run']}/score", {"scorer_ids": [str(uuid.uuid4())]}, 404),
         (("GET", "/api/v1/runs/{run_id}"), "GET", f"/runs/{e}", None, 404),
         (("GET", "/api/v1/runs/{run_id}/trace"), "GET", f"/runs/{e}/trace", None, 404),
     ]
@@ -210,7 +271,7 @@ def test_another_tenant_reaches_nothing_on_any_new_route(api, fake):
         else:
             r = client.request(method, API + path, json=body, headers=other)
         assert r.status_code == expected, (route, path, r.status_code, r.text)
-        for value in (w["suite"], w["case"], "Triage", "tickets__create", "Ship"):
+        for value in (w["suite"], w["case"], "Triage", "tickets__create", "Ship", "Secret span", w["run"]):
             assert expected != 200 or value not in r.text, (route, value)
     for status in ("pending", "decided"):
         assert client.get(f"{API}/approvals?status={status}", headers=other).json()["items"] == []
@@ -229,6 +290,9 @@ def test_another_tenant_reaches_nothing_on_any_new_route(api, fake):
     assert sorted((i["kind"], i["approval_key"], i["decision"]) for i in pending) == [
         ("step", "approve", None), ("tool", "call_1", None)]
     assert fake.sent == sent_before  # no wake-up for a refused decision
+    mine = client.get(f"{API}/workflows/schedules", headers=h).json()["items"]
+    assert [(i["id"], i["active"], i["name"]) for i in mine] == [(w["schedule"], True, "nightly")]
+    assert client.get(f"{API}/workflows/schedules", headers=other).json()["items"] == []
     assert client.get(f"{API}/eval-suites/{w['suite']}", headers=h).json()["case_count"] == 1
     assert client.get(f"{API}/eval-suites/{w['suite']}/cases/{w['case']}", headers=h).json()["input"] == "hi"
     runs = client.get(f"{API}/agents/{w['agent']}/evals/runs", headers=h).json()["items"]

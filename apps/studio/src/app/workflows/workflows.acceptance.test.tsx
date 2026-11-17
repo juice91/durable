@@ -180,23 +180,25 @@ async function renderDetail() {
 }
 
 describe("Workflows list acceptance", () => {
-  it("lists each workflow on its own row and marks an unpublished workflow Draft only", async () => {
+  it("lists each workflow on its own row with its step count", async () => {
     render(<WorkflowsPage />);
     const table = await screen.findByRole("table", { name: "Workflows" });
     const published = await screen.findByTestId("workflow-row-wf-1");
     const draft = screen.getByTestId("workflow-row-wf-2");
 
     expect(within(published).getByRole("link", { name: "Triage" })).toHaveAttribute("href", routes.workflow("wf-1"));
-    // SL.14: the name is the row's one link (the duplicate "Open" column is gone).
+    // The name is the row's one link (the duplicate "Open" column is gone).
     expect(within(published).getAllByRole("link")).toHaveLength(1);
-    expect(published).toHaveTextContent("v2");
+    expect(published).toHaveTextContent("5");
     expect(published).not.toHaveTextContent("Draft only");
 
     expect(within(draft).getByRole("link", { name: "Draft" })).toHaveAttribute("href", routes.workflow("wf-2"));
     expect(within(draft).getAllByRole("link")).toHaveLength(1);
-    expect(draft).toHaveTextContent("Draft only");
-    expect(draft).not.toHaveTextContent("vnull");
+    expect(draft).toHaveTextContent("5");
     expect(within(table).getAllByRole("row")).toHaveLength(3);
+    expect(screen.getByRole("columnheader", { name: "Running" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Pending input" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Number of steps" })).toBeInTheDocument();
   });
 });
 

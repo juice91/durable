@@ -431,6 +431,7 @@ describe("RunDetailPage (the trace Sheet's Events tab)", () => {
     render(<RunDetailPage />);
     const events = await screen.findByRole("tab", { name: "Events" });
     const spans = screen.getByRole("tab", { name: "Spans" });
+    const scores = screen.getByRole("tab", { name: "Scores" });
     const logs = screen.getByRole("tab", { name: "Logs" });
     // Radix tabs: the tab list is the one tab stop and hands focus to the selected tab, which then
     // holds tabIndex 0 while the others hold -1.
@@ -440,6 +441,10 @@ describe("RunDetailPage (the trace Sheet's Events tab)", () => {
     expect(spans).toHaveAttribute("tabindex", "-1");
     // Radix moves focus on the next tick; focusing a tab selects it (automatic activation).
     fireEvent.keyDown(events, { key: "ArrowRight" });
+    await waitFor(() => expect(scores).toHaveAttribute("aria-selected", "true"));
+    expect(scores).toHaveAttribute("tabindex", "0");
+    expect(document.activeElement).toBe(scores);
+    fireEvent.keyDown(scores, { key: "ArrowRight" });
     await waitFor(() => expect(logs).toHaveAttribute("aria-selected", "true"));
     expect(logs).toHaveAttribute("tabindex", "0");
     expect(document.activeElement).toBe(logs);

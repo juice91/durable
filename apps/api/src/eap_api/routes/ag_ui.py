@@ -120,9 +120,10 @@ from eap_api.ag_ui.resume_entries import (
     waiting_seq,
 )
 from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
+from eap_run_store.chat_attachments import ChatAttachmentStore, MessageFeedbackStore, model_accepts
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
 from eap_api.agent_archive import AGENT_ARCHIVED
-from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, get_api_key_store, require_agui_agent
+from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, get_api_key_store, require_agui_agent
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
@@ -477,6 +478,7 @@ def _thread_view(
         )
         if t["status"] not in TERMINAL_STATUSES and rec is not None:
             view.active_run_id = rec.external_run_id
+    view.messages = _with_attachment_parts(c, view.messages)
     return view
 
 
@@ -498,7 +500,7 @@ def _history(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord) -> list[dict[s
     if run.get("input"):
         client_id = starter.input_message_ids[0] if starter.input_message_ids else None
         out.append(user_message(starter.external_run_id, run["input"], client_id))
-    return out
+    return _with_attachment_parts(c, out)
 
 
 def _run_info(run: dict[str, Any]) -> dict[str, Any]:
@@ -747,6 +749,63 @@ def _ensure_conversation(c: _Ctx, thread: AgentThread, mapped: AgUiInput) -> Non
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
 
 
+def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> None:
+    """422 before anything is written: every referenced attachment exists in this tenant, is not
+    already sent in another message, and the run's model takes its media type (W2.4)."""
+    if not mapped.attachments:
+        return
+    provider, _, name = model_id.partition(":")
+    metas = ChatAttachmentStore(c.engine).metas(c.tenant_id, [i for _, ids in mapped.attachments for i in ids])
+    for message_id, ids in mapped.attachments:
+        for attachment_id in ids:
+            meta = metas.get(attachment_id)
+            if meta is None:
+                raise AgUiInputError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_not_found", ["messages"],
+                    f"attachment {attachment_id} was not found; upload it with POST /attachments",
+                )
+            if meta.message_id is not None and meta.message_id != message_id:
+                raise AgUiInputError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_in_use", ["messages"],
+                    f"attachment {attachment_id} was already sent in another message",
+                )
+            if not model_accepts(provider, name, meta.media_type):
+                raise AgUiInputError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_unsupported_by_model", ["messages"],
+                    f"model {model_id} does not accept {meta.media_type}; text files are always accepted",
+                )
+
+
+def _link_attachments(c: _Ctx, mapped: AgUiInput) -> None:
+    store = ChatAttachmentStore(c.engine)
+    for message_id, ids in mapped.attachments:
+        store.link(c.tenant_id, ids, message_id=message_id)
+
+
+def _with_attachment_parts(c: _Ctx, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """User messages that sent attachments carry AG-UI 1.0 media parts (text first)."""
+    ids = [m["id"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    by_message = ChatAttachmentStore(c.engine).for_messages(c.tenant_id, ids)
+    if not by_message:
+        return messages
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        files = by_message.get(m.get("id")) if m.get("role") == "user" else None
+        if not files:
+            out.append(m)
+            continue
+        parts: list[dict[str, Any]] = [{"type": "text", "text": m["content"]}] if m["content"] else []
+        for f in files:
+            kind = "image" if f.media_type.startswith("image/") else "document"
+            parts.append({
+                "type": kind,
+                "source": {"type": "url", "value": f"/api/v1/attachments/{f.id}", "mimeType": f.media_type},
+                "metadata": {"attachmentId": f.id, "filename": f.name, "size": f.size},
+            })
+        out.append({**m, "content": parts})
+    return out
+
+
 def _tool_dicts(mapped: AgUiInput) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
     tools = [t.model_dump(mode="json") for t in mapped.client_tools] or None
     results = [r.model_dump(mode="json") for r in mapped.tool_results] or None
@@ -771,6 +830,7 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
         return record.fingerprint == new.fingerprint
 
     tools, results = _tool_dicts(effective)
+    _link_attachments(c, effective)  # before the launch: the worker reads them through the turn's message ids
     with Session(c.engine) as db:
         agent = lock_agent(db, c.tenant_id, c.agent_id)
         try:
@@ -782,6 +842,7 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
                     version=effective.options.version,
                     request_context=effective.options.request_context,
                     model=effective.options.model,
+                    model_settings=effective.options.model_settings,
                     input_text=effective.input_text,
                 ),
                 input_text=effective.input_text,
@@ -852,9 +913,11 @@ def _prepare_post(
             version=effective.options.version,
             request_context=effective.options.request_context,
             model=effective.options.model,
+            model_settings=effective.options.model_settings,
             input_text=effective.input_text,
         )
         check_client_tool_clashes(effective.client_tools, options.target.spec)
+        _check_attachments(c, effective, options.model_id)
         if thread.exists:
             assert thread.conversation is not None
             check_thread_resource(thread.conversation, effective.options)
@@ -940,6 +1003,7 @@ def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncI
         delta_source=d.delta_source,
         settings=d.settings,
         load_summary=lambda: _model_requests(c, p.record.run_id),
+        load_feedback=lambda: _viewer_feedback(c, p.record.run_id),
     )
     formatter = AgUiFormatter(
         AgUiStreamContext(
@@ -1084,6 +1148,28 @@ def _load_agent_or_404(c: _Ctx) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
 
+def _viewer_feedback(c: _Ctx, run_id: str) -> list[dict[str, Any]]:
+    """The viewing user's own feedback on one turn, for the replay (a tenant-mate's rating or comment
+    is never sent). API keys have no user, so they see none."""
+    viewer = feedback_viewer(c.principal)
+    if viewer is None:
+        return []
+    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, [run_id], created_by=viewer)
+    return [{"message_id": r.message_id, "rating": r.rating, "comment": r.comment} for r in rows]
+
+
+def _thread_feedback(c: _Ctx, conversation_id: str) -> dict[str, Any]:
+    viewer = feedback_viewer(c.principal)
+    if viewer is None:
+        return {}
+    ids = [str(t["id"]) for t in c.run_store.list_turns(c.tenant_id, conversation_id)]
+    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, ids, created_by=viewer)
+    return {
+        r.message_id: {"rating": r.rating, "comment": r.comment, "updated_at": r.updated_at.isoformat()}
+        for r in rows
+    }
+
+
 def _thread_json(c: _Ctx, thread_id: str) -> dict[str, Any]:
     _load_agent_or_404(c)
     thread = resolve_agent_thread(c.run_store, c.tenant_id, c.agent_id, thread_key(thread_id))
@@ -1094,6 +1180,8 @@ def _thread_json(c: _Ctx, thread_id: str) -> dict[str, Any]:
         "messages": view.messages,
         "runs": view.runs,
         "activeRunId": view.active_run_id,
+        # The caller's thumbs on this thread's assistant messages: {messageId: {rating, comment, updated_at}}.
+        "feedback": _thread_feedback(c, thread.conversation_id) if thread.exists else {},
     }
 
 

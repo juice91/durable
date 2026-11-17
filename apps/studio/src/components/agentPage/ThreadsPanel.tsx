@@ -27,7 +27,7 @@ export interface ThreadsPanelProps {
 
 /**
  * The threads pane's content (decision "Agent chat panes", left): "New conversation", the recent
- * conversations with rename and delete, and the memory card pinned at the bottom, which expands into
+ * conversations with rename, clone and delete, and the memory card pinned at the bottom, which expands into
  * the open conversation's memory inspector. While a working memory edit is unsaved, opening another
  * conversation (or a new one) asks first (the chat's Discard dialog).
  */
@@ -45,6 +45,7 @@ export function ThreadsPanel({ agentId, selectedId, refreshKey, onSelect, onNew,
           onSelect={(conversation) => (conversation.id === selectedId ? onSelect(conversation) : ask(() => onSelect(conversation)))}
           onNew={() => ask(onNew)}
           onDeleted={onDeleted}
+          onCloned={(conversation) => ask(() => onSelect(conversation))}
         />
       </div>
       <MemoryCard spec={memorySpec} inspector={memoryInspector} />

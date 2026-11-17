@@ -32,6 +32,10 @@ export interface TimelineRow {
   bar: { offset: number; width: number } | null;
   /** The enclosing loop step's id (a loop body step or an iteration row), or null at the top level. */
   parentId: string | null;
+  /** A step row's input and output, for the dock's downloads (`hasOutput`: the step produced one). */
+  input?: unknown;
+  hasOutput?: boolean;
+  output?: unknown;
   /** The indent level: 0 at the top level; a loop's iteration rows and body rows go one deeper each. */
   depth: number;
 }
@@ -91,6 +95,9 @@ export function timelineRows(spec: WorkflowSpec | null, view: WorkflowRunView, c
       bar: null,
       parentId,
       depth: 0,
+      input: detail?.input,
+      hasOutput: detail?.hasOutput ?? false,
+      output: detail?.output,
     };
   };
   const iterationRow = (it: IterationDetail, selected: IterationDetail | null): TimelineRow => ({

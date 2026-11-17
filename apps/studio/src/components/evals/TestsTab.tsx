@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { FlaskConical, Plus } from "lucide-react";
 import { api, type Agent, type AgentVersion } from "@/lib/api";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
-import { formatRate, listEvalRuns, listSuites, parseRunCompare, runTargetLabel, createSuite, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, type EvalRun, type EvalSuite } from "@/lib/evals";
+import { formatRate, listEvalRuns, listSuites, listWorkflowSuites, parseRunCompare, runTargetLabel, createSuite, createWorkflowSuite, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, type EvalRun, type EvalSuite, type EvalTargetRef } from "@/lib/evals";
 import { routes } from "@/lib/routes";
 import { Button } from "@/components/ui/Button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
@@ -128,7 +128,7 @@ export function TestsTab({ agentId }: { agentId: string }) {
   } else if (suiteId) {
     body = <SuiteView agent={agent} versions={versions} suiteId={suiteId} hasMemory={hasMemory} runs={evalRuns.runs} runsError={evalRuns.error} reloadRuns={evalRuns.reload} />;
   } else {
-    body = <SuiteList agentId={agentId} runs={evalRuns.runs} />;
+    body = <SuiteList target={{ kind: "agent", id: agentId, name: agent.name }} runs={evalRuns.runs} />;
   }
 
   return (
@@ -144,8 +144,12 @@ export function TestsTab({ agentId }: { agentId: string }) {
 
 // ---------------------------------------------------------------------------- suite list
 
-function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null }) {
+/** The suites of an agent or a workflow, with the newest run of each (agent runs only: a workflow's
+ * runs are read on Experiments). A row opens the suite on the target's Tests tab. */
+export function SuiteList({ target, runs }: { target: EvalTargetRef; runs: EvalRun[] | null }) {
   const router = useRouter();
+  const isWorkflow = target.kind === "workflow";
+  const testsHref = (suite?: string) => (isWorkflow ? routes.workflowTests(target.id, { suite }) : routes.agentTests(target.id, { suite }));
   const [suites, setSuites] = useState<EvalSuite[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [key, setKey] = useState(0);
@@ -155,7 +159,7 @@ function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null 
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
-    listSuites(agentId, { signal: controller.signal })
+    (isWorkflow ? listWorkflowSuites : listSuites)(target.id, { signal: controller.signal })
       .then((items) => {
         if (!controller.signal.aborted) setSuites(items);
       })
@@ -163,7 +167,7 @@ function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null 
         if (!controller.signal.aborted) setError(reason instanceof Error && reason.message ? reason.message : "Test suites could not be loaded");
       });
     return () => controller.abort();
-  }, [agentId, key]);
+  }, [target.id, isWorkflow, key]);
 
   // The newest run of each suite (runs come newest first).
   const lastRun = new Map<string, EvalRun>();
@@ -199,7 +203,7 @@ function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null 
         rows={suites ?? []}
         columns={columns}
         getRowId={(s) => s.id}
-        getRowHref={(s) => routes.agentTests(agentId, { suite: s.id })}
+        getRowHref={(s) => testsHref(s.id)}
         getRowTestId={() => "eval-suite-row"}
         loading={suites === null && !error}
         error={error}
@@ -209,18 +213,20 @@ function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null 
         toolbar={newSuiteButton}
         empty={{
           title: "No test suites yet",
-          description: "A suite holds cases (an input and the output you expect) and the evaluators that score the agent's answers. Run it against a version or the draft, then compare runs.",
+          description: isWorkflow
+            ? "A suite holds cases (the JSON input of a run and the output you expect) and the evaluators that score the workflow's output. Run it against a published version."
+            : "A suite holds cases (an input and the output you expect) and the evaluators that score the agent's answers. Run it against a version or the draft, then compare runs.",
           action: newSuiteButton,
         }}
         testId="eval-suites"
       />
       {creating ? (
         <NewSuiteDialog
-          agentId={agentId}
+          target={target}
           onClose={() => setCreating(false)}
           onCreated={(suite) => {
             setCreating(false);
-            router.push(routes.agentTests(agentId, { suite: suite.id }));
+            router.push(testsHref(suite.id));
           }}
         />
       ) : null}
@@ -228,7 +234,7 @@ function SuiteList({ agentId, runs }: { agentId: string; runs: EvalRun[] | null 
   );
 }
 
-function NewSuiteDialog({ agentId, onCreated, onClose }: { agentId: string; onCreated: (suite: EvalSuite) => void; onClose: () => void }) {
+function NewSuiteDialog({ target, onCreated, onClose }: { target: EvalTargetRef; onCreated: (suite: EvalSuite) => void; onClose: () => void }) {
   const id = useId();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -241,7 +247,8 @@ function NewSuiteDialog({ agentId, onCreated, onClose }: { agentId: string; onCr
     setSaving(true);
     setError(null);
     try {
-      onCreated(await createSuite(agentId, { name: name.trim(), description: description.trim() || null, evaluators: [{ kind: "equals_expected" }] }));
+      const body = { name: name.trim(), description: description.trim() || null, evaluators: [{ kind: "equals_expected" as const }] };
+      onCreated(await (target.kind === "workflow" ? createWorkflowSuite : createSuite)(target.id, body));
     } catch (reason: unknown) {
       setError(reason instanceof Error && reason.message ? reason.message : "The suite could not be created");
       setSaving(false);
