@@ -106,6 +106,8 @@ value stops the worker instead of failing each run.
 | `EAP_MEMORY_RETENTION_SCHEDULE` | `0 3 * * *` | Cron (UTC) of `eap.memory_retention` |
 | `EAP_MEMORY_RETENTION_BATCH_SIZE` | 500 (max 10000) | Rows or conversations per batch (one transaction, one step) |
 | `EAP_MEMORY_RETENTION_MAX_STEPS` | 2000 | Steps per run, shared round-robin by the kinds |
+| `EAP_ATTACHMENT_ORPHAN_HOURS` | 24 (1 to 8760) | Age in hours after which an unsent chat upload (no message references it) is deleted, row and blob, by `eap.attachment_retention`; linked attachments are never touched |
+| `EAP_ATTACHMENT_RETENTION_SCHEDULE` | `0 30 3 * * *` | Cron of `eap.attachment_retention`, seconds first (daily 03:30 UTC); `off` removes the shared schedule. The BlobStore cannot list keys, so a blob whose row is already gone (a crash between the two deletes) is not found by this pass: use a bucket lifecycle rule on `attachments/` |
 
 Configure every worker alike: a stored retention schedule with other settings is replaced (with a
 warning) by the next worker that starts.

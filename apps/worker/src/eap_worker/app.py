@@ -26,6 +26,7 @@ from eap_worker import workflow_run as _workflow_run  # noqa: F401  (eap.workflo
 from eap_worker import kb_ingest as _kb_ingest  # noqa: F401  (eap.kb_ingest and its steps, RM.10)
 from eap_worker import observational as _observational  # noqa: F401  (eap-observer, eap.memory_observe*, RM.13)
 from eap_worker import retention as _retention  # noqa: F401  (eap.memory_retention and its steps, RM.15)
+from eap_worker import attachment_retention as _attachment_retention  # noqa: F401  (eap.attachment_retention)
 from eap_worker import eval_run as _eval_run  # noqa: F401  (eap.eval_run, its steps and eap-judge, AC.11)
 
 APP_NAME = "eap-worker"
@@ -103,6 +104,8 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     )
     # eap.memory_retention (RM.15): scheduled when EAP_MEMORY_RETENTION_* is set, removed on =off.
     _retention.apply_retention_schedule()
+    # eap.attachment_retention: unsent uploads expire (EAP_ATTACHMENT_ORPHAN_HOURS, default 24 h); on by default.
+    _attachment_retention.apply_attachment_retention_schedule()
     return settings
 
 
@@ -119,6 +122,7 @@ def validate_startup(settings: WorkerSettings) -> None:
     check_exact_search_max_chunks()
     kb_ingest_concurrency()
     _retention.RetentionConfig.from_env()
+    _attachment_retention.AttachmentRetentionConfig.from_env()
     queue_polling_interval()
     problem = embedding_endpoint_problem(settings)
     if problem is not None:
