@@ -428,6 +428,7 @@ ARCHITECT_ROUTES = {
     ("GET", "/api/v1/architect/options"),
     ("POST", "/api/v1/architect/draft"),
     ("POST", "/api/v1/architect/draft-workflow"),  # tenant scoping of what it offers: test_architect_api drop tests
+    ("PUT", "/api/v1/architect/model"),
     ("POST", "/api/v1/architect/agents"),
     ("POST", "/api/v1/architect/workflows"),
 }
@@ -454,6 +455,10 @@ def test_architect_routes_are_in_the_inventory_and_closed_to_another_tenant(api)
     mine = client.post(f"{API}/architect", headers=other).json()
     assert mine["architect_agent_id"] != seeded["architect_agent_id"]
     assert client.get(f"{API}/agents/{seeded['architect_agent_id']}", headers=other).status_code == 404
+    # the model route touches only the caller's own built-in rows
+    assert client.put(f"{API}/architect/model", json={"model": "test:history"}, headers=other).status_code == 200
+    assert client.get(f"{API}/architect", headers=other).json()["model"] == "test:history"
+    assert client.get(f"{API}/architect", headers=h).json()["model"] == seeded["model"]
 
     theirs = {**spec, "instructions": "Mallory's greeter."}
     assert client.post(f"{API}/architect/agents", json={"spec": theirs, "publish": False}, headers=other).status_code == 200
