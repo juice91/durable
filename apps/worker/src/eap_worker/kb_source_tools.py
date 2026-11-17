@@ -157,6 +157,7 @@ def approval_summary_text(engine: Any, tenant_id: str, args: dict[str, Any]) -> 
 async def kb_source_sync(
     ctx: RunContext[RunDeps], source_id: str, mode: Literal["targeted", "incremental", "full"],
     part_numbers: list[str] = [],  # noqa: B006 - matches the declaration's default
+    restart: bool = False,
 ) -> dict[str, Any]:
     """Start a sync of a knowledge-base source; `{run_id, status: "queued"}`. Once per (calling run, tool call)."""
     if ctx.tool_call_id is None:
@@ -172,7 +173,7 @@ async def kb_source_sync(
     def call() -> dict[str, Any]:
         try:
             return launch_sync(
-                _engine(), _Launcher(), tenant_id=tenant_id, source_id=sid, mode=mode, part_numbers=parts,
+                _engine(), _Launcher(), tenant_id=tenant_id, source_id=sid, mode=mode, part_numbers=parts, restart=restart,
                 run_id=run_id, parent_run_id=parent, created_by="tool",
             )
         except SourceLaunchError as exc:  # a deterministic refusal: recorded, so a replay answers the same
@@ -286,7 +287,7 @@ def _report(run: dict[str, Any], sync: Any) -> dict[str, Any]:
         "checkpoint": report.get("checkpoint") if isinstance(report.get("checkpoint"), dict) else {},
         "errors": (errors if isinstance(errors, list) else list(sync.bounded_errors or []))[:MAX_REPORT_ERRORS],
     }
-    for name in ("complete", "stop_reason", "error_code"):
+    for name in ("complete", "stop_reason", "error_code", "removed", "budget", "source_revision"):
         if name in report:
             out[name] = report[name]
     return out

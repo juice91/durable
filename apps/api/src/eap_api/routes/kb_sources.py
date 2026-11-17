@@ -6,7 +6,7 @@
 - GET  /knowledge-bases/{kb}/sources/{id}              the source (config is non-secret; the checkpoint as a summary)
 - PATCH /knowledge-bases/{kb}/sources/{id}             any of name, config, enabled
 - POST /knowledge-bases/{kb}/sources/{id}/sync         202 {run_id, status: "queued"} through the shared launch
-                                                       (eap_run_store.kb_source_launch); body {mode, part_numbers?, run_id?}
+                                                       (eap_run_store.kb_source_launch); body {mode, part_numbers?, restart?, run_id?}
 - GET  /knowledge-bases/{kb}/sources/{id}/syncs        {items: [sync]}, newest first (`limit` 1-100, default 20)
 - GET  /knowledge-bases/{kb}/sources/{id}/syncs/{run}  the sync plus `report` (the run's bounded report once it ends)
                                                        and `run_status`
@@ -24,7 +24,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Body, Depends, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from eap_api.auth import Principal, current_principal
 from eap_api.launcher import RunLauncher, get_run_launcher
@@ -76,6 +76,7 @@ class SyncCreate(BaseModel):
 
     mode: Literal["targeted", "incremental", "full"]
     part_numbers: list[str] = Field(default_factory=list, max_length=1000)
+    restart: StrictBool = False  # full / incremental: a new walk instead of resuming the stored cursor
     run_id: uuid.UUID | None = None
 
 
@@ -215,7 +216,7 @@ async def start_sync(
         out = await run_in_threadpool(
             lambda: launch_sync(
                 _engine(request), launcher, tenant_id=tenant_id, source_id=source.id, mode=body.mode,
-                part_numbers=body.part_numbers, run_id=body.run_id or uuid.uuid4(), created_by=principal.user_id,
+                part_numbers=body.part_numbers, restart=body.restart, run_id=body.run_id or uuid.uuid4(), created_by=principal.user_id,
                 traceparent=traceparent, trace_id=trace_id,
             )
         )

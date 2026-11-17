@@ -190,6 +190,20 @@ def test_sync_starts_once_per_tool_call_with_a_deterministic_run_id(env):
     assert other_call["run_id"] != out["run_id"] and len(env.launched) == 2
 
 
+def test_sync_restart_is_part_of_the_request_for_a_walk_only(env):
+    assert TOOL_DECLARATIONS["kb.source.sync"].input_model(source_id="s", mode="full", restart=True).restart is True
+    assert TOOL_DECLARATIONS["kb.source.sync"].input_model(source_id="s", mode="full").restart is False
+    out = call("kb.source.sync", ctx(env, call="r1"), source_id=env.source.id, mode="full", restart=True)
+    assert out["status"] == "queued"
+    assert json.loads(env.launched[-1]["request_json"]) == {"mode": "full", "part_numbers": [], "restart": True}
+    call("kb.source.sync", ctx(env, call="r2"), source_id=env.source.id, mode="full")
+    assert "restart" not in json.loads(env.launched[-1]["request_json"])
+    n = len(env.launched)
+    refused = call("kb.source.sync", ctx(env, call="r3"), source_id=env.source.id, mode="targeted",
+                   part_numbers=["LM317"], restart=True)
+    assert code(refused) == "invalid_request" and len(env.launched) == n
+
+
 def test_sync_refusals_are_stable_codes_and_start_nothing(env):
     sync = lambda mode="full", parts=(), tenant=None, source=None: call(  # noqa: E731
         "kb.source.sync", ctx(env, tenant=tenant, call=uuid.uuid4().hex), source_id=source or env.source.id, mode=mode,
@@ -378,6 +392,15 @@ def test_result_is_tenant_scoped_and_limited_to_the_calling_workflows_children(e
     # a run started outside any workflow (no parent) is refused to a calling workflow, readable to an agent
     assert code(call("workflow.run.result", ctx(env, run_id=wf_a), run_id=str(rid))) == "run_not_found"
     assert call("workflow.run.result", ctx(env), run_id=str(rid))["status"] == "completed"
+
+
+def test_the_report_carries_removed_budget_and_source_revision(env):
+    rep = {**REPORT, "removed": 2, "budget": {"date": "2026-11-18", "used": 5}, "source_revision": "r9"}
+    rid = mk_run(env, status="completed", report=rep)
+    out = call("workflow.run.result", ctx(env), run_id=str(rid))
+    assert (out["removed"], out["budget"], out["source_revision"]) == (2, {"date": "2026-11-18", "used": 5}, "r9")
+    plain = call("workflow.run.result", ctx(env), run_id=str(mk_run(env, status="completed", report=REPORT)))
+    assert "removed" not in plain and "budget" not in plain
 
 
 def test_the_approval_summary_names_the_source(env):

@@ -88,6 +88,28 @@
         "errors": {
           "type": "array",
           "maxItems": 50
+        },
+        "removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "budget": {
+          "type": "object"
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "stop_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -103,7 +125,8 @@
         "failed",
         "checkpoint",
         "errors"
-      ]
+      ],
+      "additionalProperties": false
     },
     "start": "source",
     "steps": [

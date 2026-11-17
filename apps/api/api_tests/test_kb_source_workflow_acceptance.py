@@ -111,6 +111,19 @@ def test_the_example_is_a_valid_spec_without_agents():
     assert "ti." not in json.dumps(example["spec"]).replace("mi.", "")  # no provider identifier
 
 
+def test_the_output_schema_allows_the_report_keys_and_nothing_else():
+    schema = load_example()["spec"]["output_schema"]
+    base = {"run_id": "r", "status": "completed", "source_id": "s", "mode": "full", "discovered": 1, "inserted": 1,
+            "updated": 0, "unchanged": 0, "documents_queued": 0, "failed": 0, "checkpoint": {}, "errors": []}
+    jsonschema.validate(base, schema)
+    jsonschema.validate({**base, "removed": 2, "budget": {"date": "2026-11-18", "used": 3, "remaining": 9},
+                         "source_revision": None, "complete": True, "stop_reason": None}, schema)
+    jsonschema.validate({**base, "source_revision": "r1"}, schema)
+    for bad in ({**base, "extra": 1}, {**base, "status": "failed"}, {**base, "errors": [0] * 51}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, schema)
+
+
 def test_the_guide_quotes_the_example_and_every_snippet_matches():
     guide = GUIDE.read_text()
     snippets = list(SNIPPET.finditer(guide))

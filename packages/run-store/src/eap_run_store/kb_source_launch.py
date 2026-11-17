@@ -67,10 +67,20 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def validate_request(mode: str, part_numbers: list[str] | tuple[str, ...] | None) -> dict[str, Any]:
-    """The canonical request `{mode, part_numbers}`; SourceLaunchError 422 for anything the worker would refuse."""
+def validate_request(
+    mode: str, part_numbers: list[str] | tuple[str, ...] | None, restart: bool = False
+) -> dict[str, Any]:
+    """The canonical request `{mode, part_numbers}` (plus `restart: true` when set, which starts a new walk instead
+    of resuming the stored cursor; only for an incremental or full sync); SourceLaunchError 422 for anything the
+    worker would refuse."""
     if mode not in MODES:
         raise SourceLaunchError("invalid_request", 422, "mode must be targeted, incremental or full")
+    if not isinstance(restart, bool):
+        raise SourceLaunchError("invalid_request", 422, "restart must be true or false")
+    if restart and mode == "targeted":
+        raise SourceLaunchError("invalid_request", 422, "restart is only for a full or incremental sync")
+    if restart:
+        return {**validate_request(mode, part_numbers), "restart": True}
     parts = list(part_numbers or [])
     if mode != "targeted":
         if parts:
@@ -102,6 +112,7 @@ def launch_sync(
     mode: str,
     part_numbers: list[str] | tuple[str, ...] | None,
     run_id: uuid.UUID | str,
+    restart: bool = False,
     parent_run_id: str | None = None,
     created_by: str | None = None,
     traceparent: str | None = None,
@@ -116,7 +127,7 @@ def launch_sync(
         raise SourceLaunchError("source_not_found", 404, "source not found")
     if not source.enabled:
         raise SourceLaunchError("source_disabled", 409, "the source is disabled")
-    request = validate_request(mode, part_numbers)
+    request = validate_request(mode, part_numbers, restart)
     digest = request_hash(source.id, request)
     runs, syncs = RunStore(engine), SyncStore(engine)
     try:

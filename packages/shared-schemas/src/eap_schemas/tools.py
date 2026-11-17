@@ -100,6 +100,7 @@ class KbSourceSyncInput(BaseModel):
     source_id: str
     mode: Literal["targeted", "incremental", "full"]
     part_numbers: list[str] = []
+    restart: bool = False  # incremental / full: a new walk instead of resuming the stored cursor
 
 
 class WorkflowRunWaitInput(BaseModel):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 
@@ -272,6 +273,21 @@ def test_sync_route_queues_through_the_shared_launch(env):
     client.patch(f"{API}/knowledge-bases/{kb}/sources/{src['id']}", json={"enabled": False}, headers=h)
     off = client.post(url, json={"mode": "full"}, headers=h)
     assert off.status_code == 409 and off.json()["code"] == "source_disabled"
+
+
+def test_sync_route_accepts_restart_for_a_walk_only(env):
+    client, _, launcher, tenant = env
+    _, h = tenant()
+    kb = mk_kb(client, h)
+    src = mk_source(client, h, kb, mk_conn(client, h)["id"])
+    url = f"{API}/knowledge-bases/{kb}/sources/{src['id']}/sync"
+    assert client.post(url, json={"mode": "full", "restart": True}, headers=h).status_code == 202
+    assert json.loads(launcher.calls[-1]["request_json"]) == {"mode": "full", "part_numbers": [], "restart": True}
+    assert client.post(url, json={"mode": "full"}, headers=h).status_code == 202
+    assert "restart" not in json.loads(launcher.calls[-1]["request_json"])
+    bad = client.post(url, json={"mode": "targeted", "part_numbers": ["LM317"], "restart": True}, headers=h)
+    assert bad.status_code == 422 and bad.json()["code"] == "invalid_request"
+    assert client.post(url, json={"mode": "full", "restart": "yes"}, headers=h).status_code == 422
 
 
 def test_sync_enqueue_failure_is_503_and_retry_requeues(env):

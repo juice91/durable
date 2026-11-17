@@ -112,7 +112,7 @@ the run's own limits allow 14 days). `report_targeted` is `workflow.run.result` 
 ## Read the report
 
 The run output is the sync's bounded report: `{run_id, status, source_id, mode, discovered, inserted,
-updated, unchanged, documents_queued, failed, checkpoint, errors (at most 50)}`, validated by the spec's
+updated, unchanged, documents_queued, failed, checkpoint, errors (at most 50)}` and, when the sync reports them, `removed`, `budget {date, used, remaining?}`, `source_revision`, `complete` and `stop_reason`, validated by the spec's
 `output_schema` and always far under the 32 KiB output cap. `GET /api/v1/knowledge-bases/{kb}/sources/{source}/syncs/{run_id}`
 reads the same report from the sync's own run. `complete: false` in it means the run stopped on a budget and
 the next run resumes from the stored checkpoint.
