@@ -31,6 +31,10 @@ across another:
    takes the run-row lock (m7);
 3. the guarded terminal write: `RunStore.cancel_run_tree` (an `end` run_failed `run_cancelled`
    for every run of the tree that has none, the status from `end`, the open approvals closed).
+A workflow run that started knowledge-base source syncs (`kb.source.sync`; `kb_source_syncs.parent_run_id` is the
+run) cancels them too, each the same three steps (`cancel_requested` on the sync run, the DBOS cascade of its
+workflow tree, the guarded terminal write), after the run's own cascade: the sync is a separate DBOS workflow, not
+a child of the run's, and `workflow.run.wait` sees the run's `cancel` event meanwhile.
 A failure after step 1 answers 503 and leaves the durable request: the scheduled
 `eap.cancel_reconcile` (worker) re-runs steps 2 and 3 for it, and a retried POST does so at once.
 """
@@ -46,7 +50,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from eap_api.agent_archive import archived_step_problems
@@ -564,6 +568,32 @@ def _cascade(launcher: RunLauncher, run_id: uuid.UUID) -> None:
     launcher.cancel_workflow_tree(workflow_id=str(run_id))
 
 
+def _child_sync_runs(run_store: Any, tenant_id: str, parent_id: uuid.UUID) -> list[uuid.UUID]:
+    """The knowledge-base source sync runs the workflow run `parent_id` started (same tenant) that have not ended,
+    oldest first."""
+    with run_store.Session() as session:
+        rows = session.execute(
+            text(
+                "SELECT s.run_id FROM kb_source_syncs s JOIN runs r ON r.tenant_id = s.tenant_id AND r.id::text = s.run_id"
+                " WHERE s.tenant_id = :t AND s.parent_run_id = :p AND r.status NOT IN ('completed', 'failed', 'needs_attention')"
+                " ORDER BY s.started_at, s.id"
+            ),
+            {"t": tenant_id, "p": str(parent_id)},
+        ).scalars().all()
+    return [uuid.UUID(str(r)) for r in rows]
+
+
+def _cancel_child_syncs(
+    run_store: Any, event_log: Any, launcher: RunLauncher, tenant_id: str, parent_id: uuid.UUID, requested_by: str
+) -> None:
+    """Cancel the sync runs of a workflow run: each gets `cancel_requested` (a sync that already ended drops it),
+    the DBOS cancel of its tree and the guarded terminal write. Idempotent; the caller maps a raise to 503."""
+    for child in _child_sync_runs(run_store, tenant_id, parent_id):
+        event_log.append(tenant_id, child, CANCEL_EVENT_KEY, "cancel_requested", {"requested_by": requested_by})
+        _cascade(launcher, child)
+        _finish_cancel(run_store, tenant_id, child)
+
+
 def _finish_cancel(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> Any:
     """D12 step 3 (a seam the tests replace to inject a crash after the cascade)."""
     return run_store.cancel_run_tree(tenant_id, run_id)
@@ -616,6 +646,8 @@ def cancel_run(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ALREADY_ENDED_DETAIL)
     try:
         _cascade(launcher, run_id)  # step 2: no eap_app lock or transaction is held here
+        if kind == "workflow":
+            _cancel_child_syncs(run_store, event_log, launcher, tenant_id, run_id, principal.user_id)
         result = _finish_cancel(run_store, tenant_id, run_id)  # step 3
     except Exception as exc:  # noqa: BLE001 - the durable request stands; the reconciler finishes it
         log_failure(

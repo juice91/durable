@@ -257,6 +257,69 @@ def test_wait_returns_at_once_for_a_finished_run_and_hides_other_tenants(env):
     assert code(call("workflow.run.wait", ctx(env), run_id=str(uuid.uuid4()), wait_seconds=1)) == "run_not_found"
 
 
+def cancel_parent(env, parent: uuid.UUID) -> None:
+    """What POST /runs/{parent}/cancel records first: the parent's `cancel_requested` event."""
+    env.rt.event_log.append(env.tenant, parent, "cancel", "cancel_requested", {"requested_by": "alice"})
+
+
+def test_wait_returns_cancelled_at_once_when_the_parent_run_is_cancelled(env):
+    parent = uuid.uuid4()
+    env.rt.run_store.create_workflow_run(env.tenant, uuid.uuid4(), 1, "{}", parent)
+    child = mk_run(env, status="running", parent=parent)
+    cancel_parent(env, parent)
+    t0 = datetime.now(timezone.utc)
+    out = call("workflow.run.wait", ctx(env, run_id=parent), run_id=str(child), wait_seconds=60)
+    assert (datetime.now(timezone.utc) - t0).total_seconds() < 2  # promptly, not after 60 s
+    assert out["status"] == "cancelled" and out["terminal"] is True and out["updated_at"]
+
+
+def test_wait_sees_a_cancel_that_arrives_while_it_waits(env):
+    parent = uuid.uuid4()
+    env.rt.run_store.create_workflow_run(env.tenant, uuid.uuid4(), 1, "{}", parent)
+    child = mk_run(env, status="running", parent=parent)
+
+    async def go():
+        async def cancel():
+            await asyncio.sleep(0.3)
+            await asyncio.to_thread(cancel_parent, env, parent)
+        task = asyncio.create_task(cancel())
+        c = ctx(env, run_id=parent)
+        out = await env_registry_get(c, "workflow.run.wait")(c, run_id=str(child), wait_seconds=30)
+        await task
+        return out
+
+    t0 = datetime.now(timezone.utc)
+    out = asyncio.new_event_loop().run_until_complete(go())
+    assert out["status"] == "cancelled" and out["terminal"] is True
+    assert (datetime.now(timezone.utc) - t0).total_seconds() < 3
+
+
+def test_a_cancel_of_another_run_does_not_cancel_the_wait(env):
+    parent, other_parent = uuid.uuid4(), uuid.uuid4()
+    for wf in (parent, other_parent):
+        env.rt.run_store.create_workflow_run(env.tenant, uuid.uuid4(), 1, "{}", wf)
+    child = mk_run(env, status="running", parent=parent)
+    cancel_parent(env, other_parent)
+    out = call("workflow.run.wait", ctx(env, run_id=parent), run_id=str(child), wait_seconds=1)
+    assert out["status"] == "running" and out["terminal"] is False
+
+
+def test_result_reports_run_cancelled_when_the_parent_run_is_cancelled(env):
+    parent = uuid.uuid4()
+    env.rt.run_store.create_workflow_run(env.tenant, uuid.uuid4(), 1, "{}", parent)
+    child = mk_run(env, status="running", parent=parent)
+    cancel_parent(env, parent)
+    # the child has not ended yet (the cancel is still being applied): the parent's cancel answers
+    out = call("workflow.run.result", ctx(env, run_id=parent), run_id=str(child), require_success=True)
+    assert code(out) == "run_cancelled"
+    plain = call("workflow.run.result", ctx(env, run_id=parent), run_id=str(child))
+    assert plain["status"] == "cancelled"
+    # once the cancel ended the child (`end` run_failed run_cancelled, as cancel_run_tree writes it) it is the same
+    env.rt.run_store.cancel_run_tree(env.tenant, child)
+    assert code(call("workflow.run.result", ctx(env, run_id=parent), run_id=str(child), require_success=True)) == "run_cancelled"
+    assert call("workflow.run.result", ctx(env, run_id=parent), run_id=str(child))["status"] == "cancelled"
+
+
 # ---------------------------------------------------------------------------------------- workflow.run.result
 
 REPORT = {"source_id": "s", "mode": "full", "status": "completed", "discovered": 5, "inserted": 3, "updated": 1,

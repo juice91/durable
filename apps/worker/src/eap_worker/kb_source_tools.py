@@ -6,8 +6,11 @@
                                `eap_run_store.kb_source_launch.launch_sync` under `run_side_effect` keyed
                                `{run_id}:{tool_call_id}`; the sync's run id is `tool_run_id(...)`, so a replay
                                names the same run
-    workflow.run.wait          cooperative polling of the run row (asyncio.sleep, 3 s apart), at most 300 s
+    workflow.run.wait          cooperative polling of the run row (asyncio.sleep, 3 s apart), at most 300 s; answers
+                               `{status: "cancelled", terminal: true}` at once when the calling workflow run has
+                               a `cancel` event (the parent was cancelled: the sync is being cancelled with it)
     workflow.run.result        the bounded report of a sync run, with stable error codes for `require_success`
+                               (`run_cancelled` also when the calling workflow run was cancelled)
 
 A refusal is a result `{"error": {"code", "message"}}`, never an exception text: the codes are stable and carry
 nothing a provider, a database or a credential said. Every read is scoped by `ctx.deps.tenant_id`; another
@@ -28,7 +31,7 @@ from pydantic_ai import RunContext
 
 from eap_kb_sources.check import check_connection
 from eap_kb_sources.errors import CONNECTION_NOT_FOUND, SOURCE_NOT_FOUND, SourceError
-from eap_run_store import RunStore
+from eap_run_store import CANCEL_EVENT_KEY, RunStore
 from eap_run_store.kb_source_launch import (
     LaunchFailed,
     SourceLaunchError,
@@ -198,6 +201,17 @@ def _visible_sync(engine: Any, tenant_id: str, caller: Any, run_id: str) -> Any:
     return sync
 
 
+def _parent_cancelled(tenant_id: str, caller: Any, sync: Any) -> bool:
+    """Whether `sync` was started by the calling run and that run has a `cancel` event (POST /runs/{caller}/cancel
+    writes it before anything else, so the sync is cancelled even while its own end is still being written)."""
+    if sync is None or caller is None or sync.parent_run_id != str(caller):
+        return False
+    from eap_worker.runtime import get_runtime
+
+    event = get_runtime().event_log.get_event(tenant_id, caller, CANCEL_EVENT_KEY)
+    return event is not None and event.type == "cancel_requested"
+
+
 def _poll(engine: Any, tenant_id: str, caller: Any, run_id: str) -> dict[str, Any] | None:
     run = RunStore(engine).get_run(tenant_id, uuid.UUID(run_id))
     if run is None:
@@ -206,10 +220,12 @@ def _poll(engine: Any, tenant_id: str, caller: Any, run_id: str) -> dict[str, An
     if sync is not None and _visible_sync(engine, tenant_id, caller, run_id) is None:
         return None
     updated = run["updated_at"]
+    terminal = run["status"] in TERMINAL_RUN_STATUSES
+    cancelled = not terminal and _parent_cancelled(tenant_id, caller, sync)
     return {
-        "status": run["status"],
+        "status": "cancelled" if cancelled else run["status"],
         "updated_at": updated.isoformat() if updated is not None else None,
-        "terminal": run["status"] in TERMINAL_RUN_STATUSES,
+        "terminal": terminal or cancelled,
     }
 
 
@@ -276,12 +292,25 @@ def _report(run: dict[str, Any], sync: Any) -> dict[str, Any]:
     return out
 
 
+def _ended_cancelled(tenant_id: str, run_id: str) -> bool:
+    from eap_worker.runtime import get_runtime
+
+    end = get_runtime().event_log.get_event(tenant_id, uuid.UUID(run_id), "end")
+    return end is not None and (end.data or {}).get("error_code") == RUN_CANCELLED
+
+
 def _result(engine: Any, tenant_id: str, caller: Any, run_id: str, require_success: bool) -> dict[str, Any]:
     run = RunStore(engine).get_run(tenant_id, uuid.UUID(run_id))
     sync = _visible_sync(engine, tenant_id, caller, run_id)
     if run is None or sync is None:
         return _error(RUN_NOT_FOUND, "run not found")
     out = _report(run, sync)
+    if run["status"] in TERMINAL_RUN_STATUSES and out["status"] != "cancelled" and _ended_cancelled(tenant_id, run_id):
+        out["status"] = "cancelled"  # a cancel from the API ends the run `failed` with `end.error_code = run_cancelled`
+    if run["status"] not in TERMINAL_RUN_STATUSES and _parent_cancelled(tenant_id, caller, sync):
+        out["status"] = "cancelled"  # the parent was cancelled: this sync is being cancelled with it
+        if require_success:
+            return _error(RUN_CANCELLED, "the sync was cancelled")
     if require_success:
         if run["status"] not in TERMINAL_RUN_STATUSES:
             return _error(SYNC_NOT_FINISHED, "the sync has not finished")

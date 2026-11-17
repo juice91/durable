@@ -375,3 +375,27 @@ def test_a_workflow_schedule_fires_an_incremental_sync(stack, workflow):
     assert (output["mode"], output["status"]) == ("incremental", "completed")
     [child] = stack.children(str(run_id))
     assert child["run_id"] == output["run_id"] and child["status"] == "completed"
+
+
+@requires_pg
+def test_cancelling_the_parent_run_cancels_the_child_sync(stack, workflow):
+    source = stack.source()
+    run_id = stack.start(workflow, {"source_id": source, "mode": "targeted", "part_numbers": ["SLOW0001"]})
+    deadline = time.monotonic() + 60
+    while not stack.children(run_id):  # the sync is started and its segment sleeps 8 s
+        assert time.monotonic() < deadline, "the sync was never started"
+        time.sleep(0.2)
+    [child] = stack.children(run_id)
+    started = time.monotonic()
+    r = stack.client.post(f"{API}/runs/{run_id}/cancel", headers=stack.h)
+    assert r.status_code == 202, r.text
+    run = stack.wait(run_id, timeout=10)
+    assert run["status"] == "failed" and stack.error_code(run_id) == "run_cancelled"
+    assert time.monotonic() - started < 6, "the cancel waited for the slow segment"
+    events = stack.events(child["run_id"])
+    assert events["cancel"][0] == "cancel_requested"
+    assert events["end"][1]["error_code"] == "run_cancelled"
+    assert stack.client.get(f"{API}/runs/{child['run_id']}", headers=stack.h).json()["status"] == "failed"
+    time.sleep(9)  # the cancelled segment finishes in the background: the child stays cancelled
+    assert stack.client.get(f"{API}/runs/{child['run_id']}", headers=stack.h).json()["status"] == "failed"
+    assert stack.events(child["run_id"])["end"][1]["error_code"] == "run_cancelled"
