@@ -7,9 +7,11 @@ read through the BlobStore (eap_blob_store, built from EAP_BLOB_* at worker star
 is deterministic on replay.
 
 Text files (plain text, Markdown, CSV, JSON) are inlined as `TextContent` for any model. Images and
-PDFs go as `BinaryContent` to a model that takes them (`model_accepts`); for another model the run
-fails with a compact error (the API already answers 422 at run start, this is the re-check for a
-model changed since).
+PDFs go as `BinaryContent` to a model that takes them. Whether it does was decided once at run start from model discovery and
+recorded on the run (`runs.model_settings.attachment_capabilities`: `{image, pdf, source}`); the
+worker only reads that and never calls discovery. A run recorded without a decision falls back to
+`model_accepts`, the assumed provider rules. For a model that does not take the type the run fails
+with a compact error (the API already answers 422 at run start; this is the re-check).
 """
 
 from __future__ import annotations
@@ -20,7 +22,14 @@ from typing import Any
 from pydantic_ai import BinaryContent, TextContent
 
 from eap_blob_store import BlobStore, blob_store_from_env
-from eap_run_store.chat_attachments import AttachmentMeta, ChatAttachmentStore, is_text_type, model_accepts
+from eap_run_store.chat_attachments import (
+    ATTACHMENT_CAPABILITIES_KEY,
+    AttachmentMeta,
+    ChatAttachmentStore,
+    accepts_by_capabilities,
+    is_text_type,
+    model_accepts,
+)
 
 _store: BlobStore | None = None
 
@@ -45,9 +54,22 @@ class AttachmentUnsupported(ValueError):
     """The run's model does not accept an attached file's media type."""
 
 
-async def build_prompt(text: str, metas: list[AttachmentMeta], model_id: str, store: BlobStore) -> str | list[Any]:
+def recorded_capabilities(model_settings: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The run's recorded attachment decision `{image, pdf, source}`, or None when it has none."""
+    value = (model_settings or {}).get(ATTACHMENT_CAPABILITIES_KEY)
+    return value if isinstance(value, dict) and value else None
+
+
+async def build_prompt(
+    text: str,
+    metas: list[AttachmentMeta],
+    model_id: str,
+    store: BlobStore,
+    capabilities: dict[str, Any] | None = None,
+) -> str | list[Any]:
     """`text` alone when there are no files, else [text, one part per file], the bytes read through
-    `store`. Raises AttachmentUnsupported for a model that cannot take a file, BlobNotFound for a file
+    `store`. `capabilities` is the run's recorded decision (recorded_capabilities); without one the
+    assumed rules apply. Raises AttachmentUnsupported for a model that cannot take a file, BlobNotFound for a file
     whose blob is gone."""
     if not metas:
         return text
@@ -58,13 +80,20 @@ async def build_prompt(text: str, metas: list[AttachmentMeta], model_id: str, st
             body = (await _read(store, meta.storage_key)).decode("utf-8", errors="replace")
             parts.append(TextContent(content=f"Attached file {meta.name}:\n{body}", metadata={"attachment_id": meta.id}))
             continue
-        if not model_accepts(provider, name, meta.media_type):
+        accepted = (
+            accepts_by_capabilities(capabilities, meta.media_type)
+            if capabilities
+            else model_accepts(provider, name, meta.media_type)
+        )
+        if not accepted:
             raise AttachmentUnsupported(f"model {model_id} does not accept {meta.media_type} attachments")
         data = await _read(store, meta.storage_key)
         parts.append(BinaryContent(data=data, media_type=meta.media_type, identifier=meta.id))
     return parts
 
 
-async def resolve_prompt(engine: Any, tenant_id: str, run_id: str, text: str, model_id: str) -> str | list[Any]:
+async def resolve_prompt(
+    engine: Any, tenant_id: str, run_id: str, text: str, model_id: str, model_settings: dict[str, Any] | None = None
+) -> str | list[Any]:
     metas = await asyncio.to_thread(ChatAttachmentStore(engine).for_run, tenant_id, run_id)
-    return await build_prompt(text, metas, model_id, blob_store())
+    return await build_prompt(text, metas, model_id, blob_store(), recorded_capabilities(model_settings))

@@ -1342,6 +1342,9 @@ def apply_run_model_settings(spec: AgentSpec, override: dict[str, Any] | None) -
     (`limits.max_requests`, the smaller of the two), so that a run stopped by it fails
     `usage_limit_exceeded` naming `max_requests`. The spec itself is returned when nothing changes."""
     settings = spec.model_settings
+    # The attachment decision rides along in the same JSON but is not a model setting (the worker
+    # reads it in eap_worker.attachments).
+    override = {k: v for k, v in (override or {}).items() if k != ATTACHMENT_CAPABILITIES_KEY}
     if override:
         settings = ModelSettingsSpec(**{**settings.set_values(), **ModelSettingsSpec.model_validate(override).set_values()})
     steps = settings.max_steps
@@ -1654,6 +1657,7 @@ async def _final_structured_output(run_id: str, tenant_id: str, spec: AgentSpec,
     return final.text
 
 
+from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY  # noqa: E402 (W2.4)
 from eap_worker.attachments import resolve_prompt  # noqa: E402 (W2.4)
 
 
@@ -2091,7 +2095,7 @@ async def _run_body(
             for data in resume.events:  # before the first model request (D10)
                 await append_event_step(run_id, tenant_id, f"tool:{data['tool_call_id']}:result", "tool_result", data)
         # W2.4: the turn's attached files as prompt parts (text files inlined; images and PDFs binary).
-        prompt = await resolve_prompt(rt.run_store.engine, tenant_id, run_id, input_text, model_id) if input_text else None
+        prompt = await resolve_prompt(rt.run_store.engine, tenant_id, run_id, input_text, model_id, link.get("model_settings")) if input_text else None
         output, new_messages, output_json, pending_client = await _drive_agent(
             run_id, deps, input_text, history, model_id, ApprovalSettings.from_link(link), client, resume, prompt
         )

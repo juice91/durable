@@ -212,6 +212,103 @@ def test_pdf_refused_for_a_model_that_cannot_take_it(ag, tenant, worker):
     assert post(client, agent_id, body("t", "r2", msg), h)[0] == 200
 
 
+GATEWAY_INFO = {
+    "data": [
+        {"model_name": "no-pdf", "model_info": {"supports_vision": True, "supports_pdf_input": False}},
+        {"model_name": "with-pdf", "model_info": {"supports_vision": True, "supports_pdf_input": True}},
+    ]
+}
+
+
+@pytest.fixture
+def gateway(monkeypatch):
+    """A fake LiteLLM gateway: /model/info says what each model takes."""
+    from eap_api import model_discovery
+
+    monkeypatch.setenv("EAP_LITELLM_BASE_URL", "https://gw.example.test")
+    monkeypatch.setenv("EAP_LITELLM_API_KEY", "sk-test")
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*,litellm:*")
+
+    def get(url, headers, timeout_s):
+        if "/model/info" in url:
+            return GATEWAY_INFO
+        return {"data": [{"id": "no-pdf"}, {"id": "with-pdf"}]}
+
+    monkeypatch.setattr(model_discovery, "http_get", get)
+    model_discovery.clear_cache()
+    yield
+    model_discovery.clear_cache()
+
+
+def litellm_model(name: str) -> dict[str, Any]:
+    return {"pydanticos": {"model": {"provider": "litellm", "name": name}}}
+
+
+def pdf_message(client, h, mid="u1"):
+    meta = upload(client, h, "d.pdf", b"%PDF-1.4 x", "application/pdf").json()
+    return {"id": mid, "role": "user", "content": [{"type": "text", "text": "read"}, part(meta, "document")]}
+
+
+def recorded_settings(app, tenant) -> list[dict | None]:
+    with app.state.database_engine.connect() as conn:
+        return [r[0] for r in conn.execute(
+            text("SELECT model_settings FROM runs WHERE tenant_id = :t ORDER BY created_at"), {"t": tenant}
+        )]
+
+
+def test_pdf_refused_by_gateway_capability_names_the_source(ag, tenant, worker, gateway):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    payload = body("t", "r1", pdf_message(client, h), forwardedProps=litellm_model("no-pdf"))
+    status, detail, _ = post(client, agent_id, payload, h)
+    assert status == 422, detail
+    item = detail["detail"][0]
+    assert item["type"] == "attachment_unsupported_by_model"
+    assert item["media_type"] == "application/pdf" and item["source"] == "gateway"
+    assert "does not accept" in item["msg"]
+    assert worker.calls == []
+
+
+def test_assumed_capability_is_named_in_the_422(ag, tenant, worker, gateway):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    # test:ticket is not a gateway model: the old provider rules apply, and the answer says so.
+    payload = body("t", "r1", pdf_message(client, h), forwardedProps={"pydanticos": {"model": {"provider": "test", "name": "ticket"}}})
+    status, detail, _ = post(client, agent_id, payload, h)
+    assert status == 422
+    item = detail["detail"][0]
+    assert item["source"] == "assumed"
+    assert "assumed" in item["msg"] and "does not accept" not in item["msg"]
+
+
+def test_run_records_the_capability_decision(ag, tenant, worker, gateway):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    status, detail, _ = post(client, agent_id, body("t", "r1", pdf_message(client, h), forwardedProps=litellm_model("with-pdf")), h)
+    assert status == 200, detail
+    assert recorded_settings(app, tenant) == [{"attachment_capabilities": {"image": True, "pdf": True, "source": "gateway"}}]
+    # A turn without files records nothing, and the decision is the run's own: it keeps what it was.
+    assert post(client, agent_id, body("t", "r2", user("u2", "hi")), h)[0] == 200
+    assert recorded_settings(app, tenant)[1] is None
+
+
+def test_the_recorded_decision_merges_with_the_callers_model_settings(ag, tenant, worker, gateway):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    props = {"pydanticos": {"model": {"provider": "litellm", "name": "with-pdf"}, "modelSettings": {"temperature": 0.3}}}
+    status, detail, _ = post(client, agent_id, body("t", "r1", pdf_message(client, h), forwardedProps=props), h)
+    assert status == 200, detail
+    settings = recorded_settings(app, tenant)[0]
+    assert settings["temperature"] == 0.3 and settings["attachment_capabilities"]["source"] == "gateway"
+    # The run reads back through the API with the decision in it.
+    run_id = worker.calls[0][0]
+    assert client.get(f"/api/v1/runs/{run_id}", headers=h).json()["model_settings"]["attachment_capabilities"]["pdf"] is True
+
+
 def test_attachment_cannot_be_reused_in_another_message(ag, tenant, worker):
     client, _ = ag
     h = get_auth_header(tenant, "alice")

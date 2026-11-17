@@ -64,6 +64,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -121,8 +122,9 @@ from eap_api.ag_ui.resume_entries import (
 )
 from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
 from eap_run_store.chat_attachments import max_attachment_bytes
-from eap_run_store.chat_attachments import ChatAttachmentStore, MessageFeedbackStore, model_accepts
+from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY, ChatAttachmentStore, MessageFeedbackStore, accepts_by_capabilities
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
+from eap_api import model_discovery
 from eap_api.agent_archive import AGENT_ARCHIVED
 from eap_api.attachments_shared import (
     attachment_response,
@@ -136,6 +138,7 @@ from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
 from eap_api.routes.conversations import new_turn_options, record_and_launch_turn
+from eap_api.run_options import RunOptions
 from eap_api.routes.runs import launch_recorded_run, lock_agent
 from eap_api.schemas import ErrorDetail
 from eap_api.sse import (
@@ -613,6 +616,8 @@ class _NewTurn:
     conversation_id: str
     native_run_id: str
     fingerprint: str
+    # Decided once when the request was validated (before any previous-turn wait); recorded on the run.
+    attachment_capabilities: dict[str, Any] | None = None
 
 
 def _without_users(body: dict[str, Any], messages: list[Any], drop: set[str]) -> AgUiInput:
@@ -757,12 +762,19 @@ def _ensure_conversation(c: _Ctx, thread: AgentThread, mapped: AgUiInput) -> Non
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
 
 
-def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> None:
+def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> dict[str, Any] | None:
     """422 before anything is written: every referenced attachment exists in this tenant, is not
-    already sent in another message, and the run's model takes its media type (W2.4)."""
+    already sent in another message, and the run's model takes its media type (W2.4).
+
+    Returns the run's attachment capabilities `{image, pdf, source}`, decided here once from
+    discovery (eap_api.model_discovery.capabilities_for); the run records them on
+    `runs.model_settings.attachment_capabilities` and the worker reads them back. None when the
+    request sends no file. A model whose capabilities are only `assumed` is refused with words that
+    say so, not as a fact about the model."""
     if not mapped.attachments:
-        return
+        return None
     provider, _, name = model_id.partition(":")
+    capabilities = model_discovery.capabilities_for(provider, name).public()
     metas = ChatAttachmentStore(c.engine).metas(c.tenant_id, [i for _, ids in mapped.attachments for i in ids])
     for message_id, ids in mapped.attachments:
         for attachment_id in ids:
@@ -777,11 +789,31 @@ def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> None:
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_in_use", ["messages"],
                     f"attachment {attachment_id} was already sent in another message",
                 )
-            if not model_accepts(provider, name, meta.media_type):
-                raise AgUiInputError(
+            if not accepts_by_capabilities(capabilities, meta.media_type):
+                error = AgUiInputError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_unsupported_by_model", ["messages"],
-                    f"model {model_id} does not accept {meta.media_type}; text files are always accepted",
+                    _unsupported_message(model_id, meta.media_type, capabilities["source"]),
                 )
+                error.detail[0].update({"media_type": meta.media_type, "source": capabilities["source"]})
+                raise error
+    return capabilities
+
+
+def _with_attachment_capabilities(options: RunOptions, capabilities: dict[str, Any] | None) -> RunOptions:
+    """The run's options with the attachment decision recorded among its model settings (the JSON
+    the worker reads; absent for a turn without files)."""
+    if capabilities is None:
+        return options
+    return dataclasses.replace(options, model_settings={**(options.model_settings or {}), ATTACHMENT_CAPABILITIES_KEY: capabilities})
+
+
+def _unsupported_message(model_id: str, media_type: str, source: str) -> str:
+    if source == "assumed":
+        return (
+            f"model {model_id} is assumed not to accept {media_type} (its provider did not report file "
+            "support, so this is a guess from the provider); text files are always accepted"
+        )
+    return f"model {model_id} does not accept {media_type} ({source} capabilities); text files are always accepted"
 
 
 def _link_attachments(c: _Ctx, mapped: AgUiInput) -> None:
@@ -847,13 +879,16 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
             run, created = record_and_launch_turn(
                 db, c.launcher, c.run_store, c.tenant_id, new.conversation_id,
                 run_id=new.native_run_id,
-                new_options=lambda: new_turn_options(
-                    db, c.tenant_id, agent,
-                    version=effective.options.version,
-                    request_context=effective.options.request_context,
-                    model=effective.options.model,
-                    model_settings=effective.options.model_settings,
-                    input_text=effective.input_text,
+                new_options=lambda: _with_attachment_capabilities(
+                    new_turn_options(
+                        db, c.tenant_id, agent,
+                        version=effective.options.version,
+                        request_context=effective.options.request_context,
+                        model=effective.options.model,
+                        model_settings=effective.options.model_settings,
+                        input_text=effective.input_text,
+                    ),
+                    new.attachment_capabilities,
                 ),
                 input_text=effective.input_text,
                 same_request=same_fingerprint,
@@ -927,7 +962,7 @@ def _prepare_post(
             input_text=effective.input_text,
         )
         check_client_tool_clashes(effective.client_tools, options.target.spec)
-        _check_attachments(c, effective, options.model_id)
+        attachment_capabilities = _check_attachments(c, effective, options.model_id)
         if thread.exists:
             assert thread.conversation is not None
             check_thread_resource(thread.conversation, effective.options)
@@ -957,7 +992,7 @@ def _prepare_post(
 
     new = _NewTurn(
         mapped=mapped, effective=effective, conversation_id=thread.conversation_id,
-        native_run_id=native_run_id, fingerprint=fp,
+        native_run_id=native_run_id, fingerprint=fp, attachment_capabilities=attachment_capabilities,
     )
     try:
         prepared = _record(c, new)

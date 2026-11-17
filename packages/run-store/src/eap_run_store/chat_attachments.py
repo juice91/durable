@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any, Iterable
 from uuid import uuid4
 
@@ -74,9 +75,11 @@ def is_text_type(media_type: str) -> bool:
 
 
 def model_accepts(provider: str, name: str, media_type: str) -> bool:
-    """Whether a model takes this media type as binary input. Text types are always fine (the
-    worker inlines them). Real providers take images; PDFs only where the provider reads them.
-    Scripted `test:` models: only `echo` and `history` take binary (so a test can see the input)."""
+    """The ASSUMED answer to whether a model takes this media type as binary input: the fallback for
+    a model whose capabilities discovery could not report (eap_api.model_discovery builds its
+    `assumed` capabilities from this) and for a run recorded before capabilities were decided at
+    run start. Text types are always fine (the worker inlines them). Real providers take images;
+    PDFs only where the provider reads them. Scripted `test:` models: only `echo` and `history` take binary (so a test can see the input)."""
     if is_text_type(media_type):
         return True
     if provider == "test":
@@ -85,6 +88,21 @@ def model_accepts(provider: str, name: str, media_type: str) -> bool:
         return True
     if media_type == PDF_TYPE:
         return provider in ("anthropic", "openai", "google-gla", "google-vertex", "google", "litellm", "bedrock")
+    return False
+
+
+ATTACHMENT_CAPABILITIES_KEY = "attachment_capabilities"  # in runs.model_settings: {image, pdf, source}
+
+
+def accepts_by_capabilities(capabilities: Mapping[str, Any], media_type: str) -> bool:
+    """Whether a model with these capabilities (`{"image": bool, "pdf": bool, ...}`) takes the media
+    type as binary input. Text types are always fine (inlined)."""
+    if is_text_type(media_type):
+        return True
+    if media_type in IMAGE_TYPES:
+        return bool(capabilities.get("image"))
+    if media_type == PDF_TYPE:
+        return bool(capabilities.get("pdf"))
     return False
 
 

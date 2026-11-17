@@ -31,8 +31,8 @@ class Files:
             asyncio.run(self.store.put(key, chunks(), len(data), media_type))
         return AttachmentMeta(id=f"id-{name}", name=name, media_type=media_type, size=len(data), storage_key=key)
 
-    def prompt(self, text, metas, model_id):
-        return asyncio.run(build_prompt(text, metas, model_id, self.store))
+    def prompt(self, text, metas, model_id, capabilities=None):
+        return asyncio.run(build_prompt(text, metas, model_id, self.store, capabilities))
 
 
 @pytest.fixture
@@ -77,3 +77,40 @@ def test_a_model_that_cannot_take_images_or_pdfs_is_refused_but_text_is_inlined(
     with pytest.raises(AttachmentUnsupported):
         files.prompt("x", [files.meta("a.pdf", "application/pdf", b"%PDF-1")], "mistral:small")
     assert isinstance(files.prompt("x", [files.meta("n.md", "text/markdown", b"# t")], "test:ticket")[1], TextContent)
+
+
+def test_build_prompt_uses_the_recorded_capabilities_not_the_guess(files):
+    # The guess says test:ticket takes no images; the run recorded that the model does.
+    recorded = {"image": True, "pdf": False, "source": "gateway"}
+    prompt = files.prompt("x", [files.meta("a.png", "image/png", PNG)], "test:ticket", recorded)
+    assert isinstance(prompt[1], BinaryContent)
+    # The guess says a litellm model takes PDFs; the run recorded that it does not.
+    with pytest.raises(AttachmentUnsupported):
+        files.prompt("x", [files.meta("a.pdf", "application/pdf", b"%PDF-1")], "litellm:m", recorded)
+    # Text is inlined whatever was recorded.
+    none = {"image": False, "pdf": False, "source": "static"}
+    assert isinstance(files.prompt("x", [files.meta("n.md", "text/markdown", b"# t")], "litellm:m", none)[1], TextContent)
+
+
+def test_without_a_recorded_decision_the_old_guess_applies(files):
+    with pytest.raises(AttachmentUnsupported):
+        files.prompt("x", [files.meta("a.png", "image/png", PNG)], "test:ticket", None)
+    assert isinstance(files.prompt("x", [files.meta("a.png", "image/png", PNG)], "test:echo", {})[1], BinaryContent)
+
+
+def test_the_capabilities_come_out_of_the_runs_model_settings():
+    from eap_worker.attachments import recorded_capabilities
+
+    caps = {"image": True, "pdf": False, "source": "gateway"}
+    assert recorded_capabilities({"temperature": 0.2, "attachment_capabilities": caps}) == caps
+    assert recorded_capabilities({"temperature": 0.2}) is None
+    assert recorded_capabilities(None) is None
+
+
+def test_the_attachment_decision_is_not_a_model_setting():
+    from eap_worker.workflow import apply_run_model_settings
+    from eap_schemas import AgentSpec
+
+    spec = AgentSpec(name="a", model={"provider": "test", "name": "echo"})
+    out = apply_run_model_settings(spec, {"temperature": 0.5, "attachment_capabilities": {"image": True, "pdf": True, "source": "static"}})
+    assert out.model_settings.temperature == 0.5
