@@ -1501,7 +1501,7 @@ class RunStore:
             stmt = (
                 insert(RunModel)
                 .values(id=str(run_id), tenant_id=tenant_id, status="queued", **values)
-                .on_conflict_do_nothing(constraint="runs_pkey")
+                .on_conflict_do_nothing()  # no target: runs_pkey and uq_runs_tenant_id_id both fire in a race
                 .returning(RunModel.id, RunModel.tenant_id)
             )
             result = session.execute(stmt).fetchone()
@@ -2391,7 +2391,7 @@ class RunStore:
                     client_tools=null() if client_tools is None else client_tools,
                     client_tool_results=null() if client_tool_results is None else client_tool_results,
                 )
-                .on_conflict_do_nothing(constraint="runs_pkey")
+                .on_conflict_do_nothing()  # no target: runs_pkey and uq_runs_tenant_id_id both fire in a race
                 .returning(RunModel.id)
             ).fetchone()
             if inserted is None:
