@@ -78,6 +78,10 @@ case "$tool" in
         pending) printf '%s' '0 0' ;;
         *) printf '%s' '1 ' ;;
       esac
+    elif [[ "$verb" == get && " $* " == *" get svc kubernetes "* ]]; then
+      printf '%s' '10.43.0.1'
+    elif [[ "$verb" == get && " $* " == *" get endpoints kubernetes "* ]]; then
+      if [[ " $* " == *".ports"* ]]; then printf '%s' '57345'; else printf '%s' '192.168.5.3'; fi
     elif [[ "$verb" == logs && " $* " == *" job/migrate "* ]]; then
       if [[ "${STUB_MIGRATE_STATUS:-}" == failed ]]; then
         printf '%s\n' 'ALEMBIC_ERROR_SENTINEL migration failed at revision'

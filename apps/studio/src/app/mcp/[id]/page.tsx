@@ -8,6 +8,7 @@ import { McpRunTab } from "@/components/mcp/McpRunTab";
 import { McpLastTest } from "@/components/mcp/McpLastTest";
 import { McpServerDialog } from "@/components/mcp/McpServerDialog";
 import { McpTestResult } from "@/components/mcp/McpTestResult";
+import { RuntimePanel } from "@/components/mcp/RuntimePanel";
 import { McpToolSheet } from "@/components/mcp/McpToolSheet";
 import { describeUsage, useMcpUsage } from "@/components/mcp/mcpUsage";
 import { PageHeader } from "@/components/frame/PageHeader";
@@ -232,7 +233,13 @@ export default function McpServerDetailPage() {
             <TabsList aria-label="MCP server sections">
               <TabsTrigger value="overview" data-testid="mcp-tab-overview">Overview</TabsTrigger>
               <TabsTrigger value="run" data-testid="mcp-tab-run">Run</TabsTrigger>
+              {server.runtime === "managed" ? <TabsTrigger value="runtime" data-testid="mcp-tab-runtime">Runtime</TabsTrigger> : null}
             </TabsList>
+            {server.runtime === "managed" ? (
+              <TabsContent value="runtime">
+                <RuntimePanel serverId={server.id} enabled={server.enabled} onChanged={() => void load()} />
+              </TabsContent>
+            ) : null}
             <TabsContent value="run">
               <McpRunTab server={server} tools={tools} onLoadTools={() => void testServer(server)} loadingTools={busy} />
             </TabsContent>

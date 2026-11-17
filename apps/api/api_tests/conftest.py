@@ -1,5 +1,6 @@
 """Shared test fixtures."""
 
+import os
 import sys
 import uuid
 
@@ -7,6 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from eap_api.app import create_app
+
+# An in-process worker must never schedule the hourly registry mirror (it would reach the real registry).
+os.environ.setdefault("EAP_MCP_CATALOG_SCHEDULE", "off")
 
 
 @pytest.fixture(autouse=True)

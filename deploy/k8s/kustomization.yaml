@@ -8,6 +8,7 @@ resources:
   - postgres.yaml
   - backup.yaml
   - lgtm.yaml
+  - rbac-mcp.yaml
   - migrate.yaml
   - worker.yaml
   - api.yaml

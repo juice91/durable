@@ -317,7 +317,8 @@ def test_the_sweep_sees_every_route(client):
     api = [(path, r) for path, r, _ in routes if isinstance(r, APIRoute)]
     assert [path for path, r, shown in routes if isinstance(r, APIRoute) and not shown] == []
     schema_ops = {(m, p) for p, item in client.app.openapi()["paths"].items() for m in item}
-    route_ops = {(m.lower(), path) for path, r in api for m in r.methods - {"HEAD", "OPTIONS"}}
+    # OpenAPI drops a path converter: `/x/{name:path}` is `/x/{name}` in the schema.
+    route_ops = {(m.lower(), re.sub(r"\{(\w+):\w+\}", r"{\1}", path)) for path, r in api for m in r.methods - {"HEAD", "OPTIONS"}}
     assert route_ops == schema_ops and len(route_ops) > 50
     assert {path for path, r, _ in routes if not isinstance(r, APIRoute)} <= set(DOC_PATHS)
 
