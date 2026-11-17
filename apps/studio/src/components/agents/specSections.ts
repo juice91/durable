@@ -109,6 +109,14 @@ export interface ProcessorCatalog {
   moderation_categories: string[];
 }
 
+/** What a model takes as input (GET /models `capabilities`); `source` says how sure that is. */
+export interface ModelCapabilities {
+  image: boolean;
+  pdf: boolean;
+  /** "assumed": a guess from the provider, not a fact. */
+  source: "gateway" | "static" | "assumed";
+}
+
 export interface ModelOption {
   id: string;
   provider: string;
@@ -117,6 +125,8 @@ export interface ModelOption {
   wildcard: boolean;
   source: "allowlist" | "scripted" | "discovered" | string;
   description: string | null;
+  /** Absent on a wildcard entry (the name is not known yet). */
+  capabilities?: ModelCapabilities;
   /** On a wildcard entry whose provider's model list could not be loaded: why. */
   discovery_error?: string | null;
 }

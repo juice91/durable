@@ -49,15 +49,17 @@ def model_items(policy: ModelPolicy) -> list[dict[str, Any]]:
         provider, _, name = entry.partition(":")
         if name == "*" and provider in model_discovery.PROVIDER_BY_ID:
             status = model_discovery.provider_status(provider)
-            discovered = [n for n in status.models if policy.allows(provider, n)] if status.status == "ok" else []
+            discovered = [m for m in status.models if policy.allows(provider, m.name)] if status.status == "ok" else []
             if discovered:
-                for found in discovered:
+                for entry_found in discovered:
+                    found = entry_found.name
                     if f"{provider}:{found}" in seen or f"{provider}:{found}" in policy.entries:
                         continue
                     seen.add(f"{provider}:{found}")
                     items.append({
                         "id": f"{provider}:{found}", "provider": provider, "name": found, "wildcard": False,
                         "source": "discovered", "description": None,
+                        "capabilities": entry_found.capabilities.public(),
                     })
                 continue
             items.append({
@@ -70,6 +72,7 @@ def model_items(policy: ModelPolicy) -> list[dict[str, Any]]:
         items.append({
             "id": entry, "provider": provider, "name": name, "wildcard": name == "*",
             "source": "allowlist", "description": None,
+            **({} if name == "*" else {"capabilities": model_discovery.capabilities_for(provider, name).public()}),
         })
     listed = set(policy.entries)
     for name, description in SCRIPTED_TEST_MODELS:
@@ -78,13 +81,14 @@ def model_items(policy: ModelPolicy) -> list[dict[str, Any]]:
             items.append({
                 "id": model_id, "provider": "test", "name": name, "wildcard": False,
                 "source": "scripted", "description": description,
+                "capabilities": model_discovery.capabilities_for("test", name).public(),
             })
     return items
 
 
 @router.get("/models")
 def list_models(principal: Annotated[Principal, Depends(current_principal)]) -> JSONResponse:
-    """{"items": [{"id", "provider", "name", "wildcard", "source" ('allowlist' | 'scripted' | 'discovered'), "description", "discovery_error"?}]}."""
+    """{"items": [{"id", "provider", "name", "wildcard", "source" ('allowlist' | 'scripted' | 'discovered'), "description", "capabilities" {"image", "pdf", "source" ('gateway' | 'static' | 'assumed')} (absent on a wildcard), "discovery_error"?}]}."""
     return JSONResponse(content={"items": model_items(ModelPolicy.from_env())})
 
 

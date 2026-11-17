@@ -12,6 +12,12 @@ Providers (the same environment the worker reads; see eap_worker.models / config
 - `anthropic`: ANTHROPIC_API_KEY, https://api.anthropic.com/v1/models.
 - `openai`: OPENAI_API_KEY, https://api.openai.com/v1/models.
 
+Each discovered model carries `Capabilities` (image and PDF input, and where that came from):
+`gateway` (LiteLLM `GET <root>/model/info`: `supports_vision`, `supports_pdf_input`, fetched with the
+model list and cached with it), `static` (a table of the Anthropic and OpenAI families) or `assumed`
+(the old provider rules of eap_run_store.chat_attachments.model_accepts, used for anything else and
+whenever `/model/info` fails). A failed `/model/info` never fails discovery.
+
 A successful check is cached per provider for CACHE_TTL_S. A failed or unconfigured check is
 kept only for FAILURE_TTL_S, so a transient outage does not leave wildcard providers in free-text
 mode for the full TTL. POST /providers/{id}/test refreshes the cache, but a result younger than
@@ -20,7 +26,9 @@ REFRESH_COOLDOWN_S is reused so repeated tests cannot hammer the provider.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -28,6 +36,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
+
+from eap_run_store.chat_attachments import IMAGE_TYPES, PDF_TYPE, model_accepts
+
+log = logging.getLogger(__name__)
 
 CACHE_TTL_S = 300.0
 REQUEST_TIMEOUT_S = 5.0
@@ -79,6 +91,49 @@ PROVIDER_BY_ID: dict[str, ProviderDef] = {p.id: p for p in PROVIDERS}
 
 
 @dataclass(frozen=True)
+class Capabilities:
+    """Whether a model takes images and PDFs as input, and the basis: "gateway" | "static" | "assumed"."""
+
+    image: bool
+    pdf: bool
+    source: str
+
+    def public(self) -> dict[str, Any]:
+        return {"image": self.image, "pdf": self.pdf, "source": self.source}
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    name: str
+    capabilities: Capabilities
+
+
+# Families known to take images and PDFs (first match wins), per provider.
+STATIC_CAPABILITIES: dict[str, tuple[tuple[re.Pattern[str], bool, bool], ...]] = {
+    "anthropic": ((re.compile(r"^claude-"), True, True),),
+    "openai": (
+        (re.compile(r"^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|chatgpt-4o|o1|o3|o4)"), True, True),
+    ),
+}
+
+
+def static_capabilities(provider: str, name: str) -> Capabilities | None:
+    for pattern, image, pdf in STATIC_CAPABILITIES.get(provider, ()):
+        if pattern.match(name):
+            return Capabilities(image, pdf, "static")
+    return None
+
+
+def assumed_capabilities(provider: str, name: str) -> Capabilities:
+    """The old rules (model_accepts): images for any real provider, PDFs where the provider reads them."""
+    return Capabilities(
+        image=model_accepts(provider, name, next(iter(sorted(IMAGE_TYPES)))),
+        pdf=model_accepts(provider, name, PDF_TYPE),
+        source="assumed",
+    )
+
+
+@dataclass(frozen=True)
 class ProviderStatus:
     id: str
     label: str
@@ -86,7 +141,7 @@ class ProviderStatus:
     env_var: str
     base_url_host: str | None
     status: str
-    models: tuple[str, ...]
+    models: tuple[ModelEntry, ...]
     checked_at: str | None
     error: str | None
 
@@ -133,8 +188,53 @@ def _model_names(body: Any) -> list[str]:
     return sorted(names)
 
 
+def _info_url(base: str) -> str:
+    """The gateway root's `/model/info` (the base's trailing `/v1` is dropped)."""
+    base = base.rstrip("/")
+    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    return f"{root}/model/info"
+
+
+def _gateway_info(body: Any) -> dict[str, dict[str, Any]]:
+    """`model_name` -> `model_info` out of a LiteLLM /model/info body."""
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("unexpected response")
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        info = row.get("model_info") if isinstance(row, dict) else None
+        if isinstance(row, dict) and isinstance(row.get("model_name"), str) and isinstance(info, dict):
+            out.setdefault(row["model_name"], info)
+    return out
+
+
+def _entry(provider: str, name: str, gateway: dict[str, dict[str, Any]]) -> ModelEntry:
+    assumed = assumed_capabilities(provider, name)
+    info = gateway.get(name)
+    if info is not None and (info.get("supports_vision") is not None or info.get("supports_pdf_input") is not None):
+        vision, pdf = info.get("supports_vision"), info.get("supports_pdf_input")
+        return ModelEntry(name, Capabilities(
+            image=assumed.image if vision is None else bool(vision),
+            pdf=assumed.pdf if pdf is None else bool(pdf),
+            source="gateway",
+        ))
+    return ModelEntry(name, static_capabilities(provider, name) or assumed)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _fetch_gateway_info(provider: ProviderDef, base: str, headers: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    """The LiteLLM gateway's per-model capability info, once per refresh and with the model list's
+    timeout. Any failure is logged (no detail: it may carry a URL) and leaves the models `assumed`."""
+    if provider.id != "litellm":
+        return {}
+    try:
+        return _gateway_info(http_get(_info_url(base), headers, REQUEST_TIMEOUT_S))
+    except Exception as exc:  # noqa: BLE001 - never fail discovery for the capability lookup
+        log.warning("model capability lookup failed (%s); models are assumed", type(exc).__name__)
+        return {}
 
 
 def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
@@ -155,6 +255,7 @@ def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
     url = _list_url(base) + ("?limit=1000" if provider.id == "anthropic" else "")
     try:
         names = _model_names(http_get(url, headers, REQUEST_TIMEOUT_S))
+        gateway = _fetch_gateway_info(provider, base, headers)
     except HttpStatusError as exc:
         error = "the provider rejected the server's key" if exc.status in (401, 403) else f"the provider answered HTTP {exc.status}"
         return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=(), checked_at=_now(), error=error)
@@ -165,7 +266,8 @@ def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
         name = type(exc).__name__.lower()
         error = "the provider did not answer in time" if "timeout" in name else "could not connect to the provider"
         return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=(), checked_at=_now(), error=error)
-    return ProviderStatus(**common, configured=True, status=OK, models=tuple(names), checked_at=_now(), error=None)
+    models = tuple(_entry(provider.id, n, gateway) for n in names)
+    return ProviderStatus(**common, configured=True, status=OK, models=models, checked_at=_now(), error=None)
 
 
 FAILURE_TTL_S = 30.0
@@ -207,3 +309,21 @@ def provider_status(provider_id: str, *, refresh: bool = False, environ: Mapping
 
 def all_provider_statuses(*, refresh: bool = False) -> list[ProviderStatus]:
     return [provider_status(p.id, refresh=refresh) for p in PROVIDERS]
+
+
+def model_names(status: ProviderStatus) -> list[str]:
+    return [m.name for m in status.models]
+
+
+def capabilities_for(provider: str, name: str) -> Capabilities:
+    """What a model takes as input. A discoverable provider's cached listing answers first (one
+    discovery refresh serves the model list and these, same TTLs); a model it does not list, a failed
+    or missing discovery and every other provider (`test:`, ...) fall back to the static table, then
+    the assumed old provider rules."""
+    if provider in PROVIDER_BY_ID:
+        status = provider_status(provider)
+        if status.status == OK:
+            for entry in status.models:
+                if entry.name == name:
+                    return entry.capabilities
+    return static_capabilities(provider, name) or assumed_capabilities(provider, name)

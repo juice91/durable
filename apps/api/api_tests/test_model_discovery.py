@@ -20,11 +20,15 @@ OPENAI_KEY = "sk-openai-SECRET-789"
 class Stub:
     def __init__(self, bodies=None, failures=None):
         self.calls: list[tuple[str, dict]] = []
+        self.info_calls: list[str] = []  # GET /model/info (capabilities) is counted apart from the model lists
         self.bodies = bodies or {}
         self.failures = failures or {}
 
     def __call__(self, url, headers, timeout_s):
-        self.calls.append((url, dict(headers)))
+        if "/model/info" in url:
+            self.info_calls.append(url)
+        else:
+            self.calls.append((url, dict(headers)))
         assert timeout_s <= 10
         for fragment, failure in self.failures.items():
             if fragment in url:
@@ -63,7 +67,8 @@ def test_wildcard_is_expanded_with_the_discovered_models(client, tenant, litellm
     assert [i["id"] for i in items] == ["test:echo", "litellm:gpt-x", "litellm:qwen3.8"]
     found = items[1]
     assert found == {"id": "litellm:gpt-x", "provider": "litellm", "name": "gpt-x", "wildcard": False,
-                     "source": "discovered", "description": None}
+                     "source": "discovered", "description": None,
+                     "capabilities": {"image": True, "pdf": True, "source": "assumed"}}
     assert items[0]["source"] == "allowlist"
     url, headers = stub.calls[0]
     assert url == "https://user:pw@gateway.example.test:4000/v1/models"  # a base ending in /v1 is not doubled
@@ -227,3 +232,69 @@ def test_a_missing_key_is_not_cached_for_the_full_success_interval(client, tenan
 
 def test_test_unknown_provider_is_404(client, tenant):
     assert client.post("/api/v1/providers/nope/test", headers=get_auth_header(tenant, "alice")).status_code == 404
+
+
+# --------------------------------------------------------------------------- capabilities
+
+
+def info_body(**models):
+    """LiteLLM GET /model/info: {model_name: model_info dict}."""
+    return {"data": [{"model_name": n, "model_info": info} for n, info in models.items()]}
+
+
+def test_litellm_model_info_fills_capabilities(client, tenant, litellm_env, monkeypatch):
+    stub = install(monkeypatch, Stub({
+        "/model/info": info_body(**{"vision-pdf": {"supports_vision": True, "supports_pdf_input": True},
+                                    "vision-only": {"supports_vision": True, "supports_pdf_input": False},
+                                    "text-only": {"supports_vision": False, "supports_pdf_input": False}}),
+        "/models": models_body("vision-pdf", "vision-only", "text-only"),
+    }))
+    by_name = {i["name"]: i["capabilities"] for i in get_models(client, tenant) if i["provider"] == "litellm"}
+    assert by_name["vision-pdf"] == {"image": True, "pdf": True, "source": "gateway"}
+    assert by_name["vision-only"] == {"image": True, "pdf": False, "source": "gateway"}
+    assert by_name["text-only"] == {"image": False, "pdf": False, "source": "gateway"}
+    assert stub.info_calls == ["https://user:pw@gateway.example.test:4000/model/info"]  # once, root of the base
+    assert model_discovery.capabilities_for("litellm", "vision-only").pdf is False
+    assert len(stub.info_calls) == 1  # capabilities_for is served by the same cache
+
+
+def test_a_gateway_model_without_the_flags_uses_the_assumed_values_for_them(client, tenant, litellm_env, monkeypatch):
+    install(monkeypatch, Stub({"/model/info": info_body(odd={"supports_vision": False, "supports_pdf_input": None}),
+                               "/models": models_body("odd")}))
+    caps = model_discovery.capabilities_for("litellm", "odd")
+    assert (caps.image, caps.pdf, caps.source) == (False, True, "gateway")  # pdf unknown: the old provider rule
+
+
+def test_static_table_covers_claude_and_gpt4o():
+    for provider, name in (("anthropic", "claude-sonnet-4-5"), ("openai", "gpt-4o-mini"), ("openai", "gpt-4.1")):
+        assert model_discovery.static_capabilities(provider, name) == model_discovery.Capabilities(True, True, "static")
+    assert model_discovery.static_capabilities("openai", "gpt-3.5-turbo") is None
+    assert model_discovery.static_capabilities("litellm", "claude-x") is None
+
+
+def test_unknown_model_is_assumed_with_the_old_provider_rules(monkeypatch):
+    install(monkeypatch, Stub())
+    caps = model_discovery.capabilities_for("litellm", "mystery")
+    assert caps == model_discovery.Capabilities(True, True, "assumed")  # not configured: nothing discovered
+    assert model_discovery.capabilities_for("test", "ticket") == model_discovery.Capabilities(False, False, "assumed")
+    assert model_discovery.capabilities_for("test", "echo") == model_discovery.Capabilities(True, True, "assumed")
+    assert model_discovery.capabilities_for("mistral", "x") == model_discovery.Capabilities(True, False, "assumed")
+
+
+def test_model_info_outage_falls_back_to_assumed(client, tenant, litellm_env, monkeypatch):
+    install(monkeypatch, Stub({"/model/info": None, "/models": models_body("a", "b")},
+                              failures={"/model/info": ConnectionError("gateway down")}))
+    items = get_models(client, tenant)  # still 200, the models are still listed
+    caps = [i["capabilities"] for i in items if i["provider"] == "litellm"]
+    assert caps == [{"image": True, "pdf": True, "source": "assumed"}] * 2
+
+
+def test_get_models_items_carry_capabilities(client, tenant, litellm_env, monkeypatch):
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:ticket,test:echo,litellm:*,anthropic:claude-sonnet-4-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    install(monkeypatch, Stub({"/model/info": info_body(), "/models": models_body("a")}))
+    items = {i["id"]: i for i in get_models(client, tenant)}
+    assert items["test:ticket"]["capabilities"] == {"image": False, "pdf": False, "source": "assumed"}
+    assert items["test:echo"]["capabilities"]["image"] is True  # a scripted item
+    assert items["litellm:a"]["capabilities"]["source"] == "assumed"  # the gateway lists no info for it
+    assert items["anthropic:claude-sonnet-4-5"]["capabilities"] == {"image": True, "pdf": True, "source": "static"}
