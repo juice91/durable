@@ -9,7 +9,7 @@ data:
   EAP_DBOS_SYSTEM_SCHEMA: dbos
   EAP_LITELLM_BASE_URL: http://host.lima.internal:4001
   EAP_LITELLM_EMBEDDING_BASE_URL: http://host.lima.internal:4001
-  EAP_ALLOWED_MODELS: "litellm:*"
+  EAP_ALLOWED_MODELS: "litellm:*,anthropic:*"
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
   EAP_ALLOWED_TOOLS: "ticket.create"
   EAP_LOKI_URL: http://lgtm:3100
