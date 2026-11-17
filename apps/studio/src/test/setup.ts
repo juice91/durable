@@ -73,3 +73,8 @@ if (typeof window !== "undefined") {
   define(elementProto, "releasePointerCapture", () => {});
   define(elementProto, "scrollIntoView", () => {});
 }
+
+// axe-core's icon-ligature check probes <canvas>; jsdom has no canvas and logs "Not implemented:
+// HTMLCanvasElement.prototype.getContext" with a stack for every probe. Returning null (the real
+// "unsupported" answer) makes the probe a no-op, without the native canvas package.
+HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;
