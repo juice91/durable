@@ -143,7 +143,8 @@ def test_the_sweep_lists_every_ag_ui_route(api):
     # The attachment twins have no agent or workflow in their path; test_agui_attachments_api and
     # test_ac18_cross_tenant cover them (keys, scope, tenant, linking).
     attachments = {r for r in found if "/ag-ui/attachments" in r[1]}
-    assert attachments == {("POST", "/api/v1/ag-ui/attachments"), ("GET", "/api/v1/ag-ui/attachments/{attachment_id}")}
+    assert attachments == {("POST", "/api/v1/ag-ui/attachments"), ("GET", "/api/v1/ag-ui/attachments/{attachment_id}"),
+                           ("DELETE", "/api/v1/ag-ui/attachments/{attachment_id}")}
     assert found - attachments == ROUTES
 
 

@@ -266,7 +266,7 @@ def test_every_agui_route_authenticates(client):
     """Only /ag-ui/* and /healthz are outside the sweep, and every /ag-ui/* route asks for
     credentials (agui_principal) before anything else."""
     agui = [(m, p) for m, p in _api_routes(client.app) if is_agui_path(p)]
-    assert {m for m, _ in agui} == {"GET", "POST"} and len(agui) >= 3
+    assert {m for m, _ in agui} == {"GET", "POST", "DELETE"} and len(agui) >= 3
     for method, path in agui:
         r = client.request(method, path)
         assert r.status_code == 401 and r.json() == {"detail": "Missing Authorization header"}, path
