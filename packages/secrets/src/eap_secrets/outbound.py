@@ -18,6 +18,11 @@ One module, used by the API (registration and connection test) and the worker (t
 Hosts in EAP_MCP_DEV_ALLOW_HOSTS (comma-separated, exact host names or IP literals, for local
 development and tests only) may use http and may resolve to any address.
 
+`OutboundPolicy.for_managed_runtime(runtime_id, endpoint)` is the policy of a platform-managed MCP
+pod: it allows exactly that endpoint's scheme, host and port (the in-cluster service name resolves to
+a private address, which is allowed for that one host by identity) and nothing else. It never
+consults EAP_MCP_DEV_ALLOW_HOSTS. The grant is logged.
+
 Errors are `OutboundBlocked` with a stable `code` (and `address_class` for blocked addresses); the
 message never contains the URL, so it is safe to log and to return.
 """
@@ -25,6 +30,7 @@ message never contains the URL, so it is safe to log and to return.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import socket
 import typing
@@ -35,6 +41,8 @@ from urllib.parse import urlsplit
 import anyio
 import httpcore2
 import httpx2
+
+log = logging.getLogger("eap_secrets.outbound")
 
 DEV_ALLOW_HOSTS_ENV = "EAP_MCP_DEV_ALLOW_HOSTS"
 MAX_URL_LENGTH = 2048
@@ -129,11 +137,31 @@ class OutboundPolicy:
         self.dev_allow_hosts = frozenset(h.strip().lower().rstrip(".") for h in dev_allow_hosts if h.strip())
         self._resolver = resolver or system_resolver
         self.max_url_length = max_url_length
+        self._managed: tuple[str, Target] | None = None  # (runtime id, the one allowed endpoint)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, **kwargs: typing.Any) -> OutboundPolicy:
         env = os.environ if env is None else env
         return cls(dev_allow_hosts=env.get(DEV_ALLOW_HOSTS_ENV, "").split(","), **kwargs)
+
+    def for_managed_runtime(self, runtime_id: str, endpoint: str) -> OutboundPolicy:
+        """The policy for one managed runtime: exactly `endpoint`'s scheme, host and port, by identity.
+
+        No dev allowlist (EAP_MCP_DEV_ALLOW_HOSTS is for hand-entered servers only), no other host,
+        no other port. The endpoint comes from the platform's runtime adapter, never from a tenant."""
+        try:
+            parts = urlsplit(endpoint)
+            port = parts.port
+        except ValueError:
+            raise OutboundBlocked("managed_endpoint_invalid") from None
+        scheme = parts.scheme.lower()
+        if scheme not in _DEFAULT_PORTS or not parts.hostname or parts.username is not None or parts.password is not None:
+            raise OutboundBlocked("managed_endpoint_invalid")
+        target = Target(scheme=scheme, host=_normalise_host(parts.hostname), port=port or _DEFAULT_PORTS[scheme])
+        policy = OutboundPolicy(resolver=self._resolver, max_url_length=self.max_url_length)
+        policy._managed = (runtime_id, target)
+        log.info("outbound policy: managed runtime %s may reach %s:%d", runtime_id, target.host, target.port)
+        return policy
 
     def _dev_allowed(self, host: str) -> bool:
         return host in self.dev_allow_hosts
@@ -159,6 +187,12 @@ class OutboundPolicy:
         host = _normalise_host(parts.hostname)
         if not host:
             raise OutboundBlocked("url_host_missing")
+        if self._managed is not None:
+            allowed = self._managed[1]
+            target = Target(scheme=scheme, host=host, port=port or _DEFAULT_PORTS[scheme])
+            if target != allowed:
+                raise OutboundBlocked("managed_endpoint_mismatch")
+            return target
         if scheme not in _ALLOWED_SCHEMES and not self._dev_allowed(host):
             raise OutboundBlocked("url_scheme_not_allowed")
         return Target(scheme=scheme, host=host, port=port or _DEFAULT_PORTS[scheme])
@@ -182,8 +216,12 @@ class OutboundPolicy:
                 raise OutboundBlocked("host_unresolvable") from None
             if not addresses:
                 raise OutboundBlocked("host_unresolvable")
-        if self._dev_allowed(host):
+        if self._dev_allowed(host) or (
+            self._managed is not None and (host, port) == (self._managed[1].host, self._managed[1].port)
+        ):
             return addresses
+        if self._managed is not None:
+            raise OutboundBlocked("managed_endpoint_mismatch")
         for address in addresses:
             try:
                 ip = ipaddress.ip_address(address.split("%", 1)[0])

@@ -137,7 +137,7 @@ def test_downgrade_re_adds_a_nullable_data_column_without_the_bytes(schema_engin
     monkeypatch.setenv("EAP_BLOB_DIR", str(tmp_path))
     _upgrade(schema_engine, "0023_attachments_r2")
     with schema_engine.begin() as conn:
-        command.downgrade(alembic_config(conn), "0022_parity_round_2")
+        command.downgrade(alembic_config(conn), "0024_mcp_runtime")  # the chain is 0022 -> 0024 -> 0023
     with schema_engine.connect() as conn:
         cols = _columns(conn)
         assert cols["data"] == ("bytea", "YES") and "storage_key" not in cols

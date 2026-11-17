@@ -9,6 +9,8 @@ import time
 
 from dbos import DBOS, DBOSConfig, SetWorkflowID
 
+os.environ.setdefault("EAP_MCP_CATALOG_SCHEDULE", "off")
+
 mode, url, wf_id = sys.argv[1:4]
 config: DBOSConfig = {
     "name": "pgvector-upgrade-probe",

@@ -53,9 +53,11 @@ import contextlib
 import functools
 import json
 import logging
+import math
 import os
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import anyio
@@ -71,10 +73,11 @@ from pydantic_core import SchemaValidator, core_schema, to_jsonable_python
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
+from eap_mcp_runtime import McpRuntime, RuntimeHandle, RuntimeSpec
 from eap_observability import log_failure, redact as redact_text
 from eap_runtime import SideEffectOutcomeUnknown, run_side_effect
 from eap_schemas import McpToolRef, mcp_tool_name
-from eap_secrets import SecretsError, load_keyring, mcp_header_context
+from eap_secrets import SecretsError, load_keyring, mcp_env_context, mcp_header_context
 from eap_secrets.redaction import (  # shared with the API's connection test
     REDACTED as REDACTED,  # re-exported; worker tests import it from here
     leaves_with_kind as _leaves_with_kind,  # re-exported; same leaf order the mask uses
@@ -126,28 +129,87 @@ def timeout_s() -> float:
 
 @dataclass(frozen=True)
 class McpServerConn:
-    """A registered server ready to connect to: its URL and decrypted headers (never in repr)."""
+    """A registered server ready to connect to: its URL and decrypted headers (never in repr).
+
+    A managed server (`runtime_id` set) has the in-cluster endpoint its runtime adapter reports as
+    `url`; the outbound policy then allows exactly that endpoint, by identity."""
 
     name: str
     url: str
     headers: dict[str, str] = field(repr=False)
+    runtime_id: str | None = None
+    server_id: str = ""
+
+
+START_TIMEOUT_ENV = "EAP_MCP_START_TIMEOUT_SECONDS"
+START_POLL_ENV = "EAP_MCP_START_POLL_SECONDS"
+DEFAULT_START_TIMEOUT_S = 120.0
+DEFAULT_START_POLL_S = 1.0
+_STARTABLE = ("pending", "stopped", "idle", "failed")
+
+_mcp_runtime: McpRuntime | None = None
+
+
+def set_mcp_runtime(runtime: McpRuntime | None) -> None:
+    """Replace the process's runtime adapter (tests); None restores the lazily built operator adapter."""
+    global _mcp_runtime
+    _mcp_runtime = runtime
+
+
+def get_mcp_runtime() -> McpRuntime:
+    """The managed-server runtime adapter, built on first use (a worker without managed servers never
+    needs a cluster connection)."""
+    global _mcp_runtime
+    if _mcp_runtime is None:
+        from eap_mcp_runtime import OperatorRuntime
+
+        _mcp_runtime = OperatorRuntime()
+    return _mcp_runtime
+
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        value = default
+    if not math.isfinite(value):
+        value = default
+    return min(max(value, low), high)
+
+
+def start_timeout_s() -> float:
+    """EAP_MCP_START_TIMEOUT_SECONDS: how long a call waits for a managed server to be running; 120 by default."""
+    return _env_float(START_TIMEOUT_ENV, DEFAULT_START_TIMEOUT_S, 1.0, 900.0)
+
+
+def start_poll_s() -> float:
+    return _env_float(START_POLL_ENV, DEFAULT_START_POLL_S, 0.01, 10.0)
 
 
 _SERVERS = text(
-    "SELECT id, name, url, enabled FROM mcp_servers WHERE tenant_id = :t AND name IN :names"
+    "SELECT id, name, url, enabled, runtime FROM mcp_servers WHERE tenant_id = :t AND name IN :names"
 ).bindparams(bindparam("names", expanding=True))
 _SECRETS = text(
     "SELECT server_id, header_name, ciphertext, key_id FROM mcp_server_secrets "
-    "WHERE tenant_id = :t AND server_id IN :ids"
+    "WHERE tenant_id = :t AND kind = 'header' AND server_id IN :ids"
+).bindparams(bindparam("ids", expanding=True))
+_RUNTIMES = text(
+    "SELECT id, server_id, namespace, cr_name FROM mcp_runtimes WHERE tenant_id = :t AND server_id IN :ids"
 ).bindparams(bindparam("ids", expanding=True))
 
 
-def load_servers(engine: Engine, tenant_id: str, refs: Sequence[McpToolRef]) -> dict[str, McpServerConn]:
+def load_servers(
+    engine: Engine, tenant_id: str, refs: Sequence[McpToolRef], runtime: McpRuntime | None = None
+) -> dict[str, McpServerConn]:
     """The tenant's servers named by `refs`, with header secrets decrypted (blocking; run in a thread).
 
+    A managed server's endpoint comes from its `mcp_runtimes` row (same tenant) through
+    `McpRuntime.endpoint`; nothing is started here (see `ensure_managed_running`).
+
     Raises McpToolUnavailable (for the first tool of the server) when a server is not registered in
-    this tenant (`server_not_found`), is disabled (`server_disabled`) or its secrets cannot be
-    decrypted (`secret_unreadable`, also when EAP_SECRETS_KEY is unset or wrong)."""
+    this tenant (`server_not_found`), is disabled (`server_disabled`), is managed without a runtime
+    row of this tenant (`runtime_missing`) or its secrets cannot be decrypted (`secret_unreadable`,
+    also when EAP_SECRETS_KEY is unset or wrong)."""
     first_tool = {}
     for ref in refs:
         first_tool.setdefault(ref.server, ref.tool)
@@ -159,6 +221,22 @@ def load_servers(engine: Engine, tenant_id: str, refs: Sequence[McpToolRef]) -> 
             if not rows[name].enabled:
                 raise McpToolUnavailable(name, tool, "server_disabled")
         secrets = conn.execute(_SECRETS, {"t": tenant_id, "ids": [r.id for r in rows.values()]}).all()
+        managed_ids = [r.id for r in rows.values() if r.runtime == "managed"]
+        runtimes = (
+            {r.server_id: r for r in conn.execute(_RUNTIMES, {"t": tenant_id, "ids": managed_ids})} if managed_ids else {}
+        )
+    urls: dict[str, tuple[str, str | None]] = {}
+    for r in rows.values():
+        if r.runtime != "managed":
+            if not r.url:
+                raise McpToolUnavailable(r.name, first_tool[r.name], "server_url_missing")
+            urls[r.id] = (r.url, None)
+            continue
+        if r.id not in runtimes:
+            raise McpToolUnavailable(r.name, first_tool[r.name], "runtime_missing")
+        row = runtimes[r.id]
+        endpoint = (runtime or get_mcp_runtime()).endpoint(RuntimeHandle(row.namespace, row.cr_name))
+        urls[r.id] = (endpoint, str(row.id))
     headers: dict[str, dict[str, str]] = {r.id: {} for r in rows.values()}
     if secrets:
         by_id = {r.id: r.name for r in rows.values()}
@@ -173,7 +251,165 @@ def load_servers(engine: Engine, tenant_id: str, refs: Sequence[McpToolRef]) -> 
             log_failure(log, "mcp server secret could not be decrypted", exc, code="secret_unreadable",
                         tenant_id=tenant_id, server=name)
             raise McpToolUnavailable(name, first_tool[name], "secret_unreadable") from None
-    return {r.name: McpServerConn(r.name, r.url, headers[r.id]) for r in rows.values()}
+    return {r.name: McpServerConn(r.name, urls[r.id][0], headers[r.id], urls[r.id][1], r.id) for r in rows.values()}
+
+
+# --------------------------------------------------------------------------- start on demand
+
+_RUNTIME_ROW = text(
+    "SELECT id, state, image, package, namespace, cr_name FROM mcp_runtimes WHERE id = :r AND tenant_id = :t AND server_id = :s"
+)
+_CLAIM_START = text(
+    "UPDATE mcp_runtimes SET state = 'starting', last_error = NULL, last_used_at = :now, updated_at = :now "
+    "WHERE id = :r AND tenant_id = :t AND state IN ('pending', 'stopped', 'idle', 'failed') RETURNING id"
+)
+_SET_STATE = text(
+    "UPDATE mcp_runtimes SET state = :state, last_error = :err, updated_at = :now "
+    "WHERE id = :r AND tenant_id = :t AND state = :was"
+)
+_SET_RUNNING = text(
+    "UPDATE mcp_runtimes SET state = 'running', endpoint = :ep, last_error = NULL, last_used_at = :now, updated_at = :now "
+    "WHERE id = :r AND tenant_id = :t AND state = 'starting'"
+)
+_TOUCH = text(
+    "UPDATE mcp_runtimes SET last_used_at = :now "
+    "WHERE id = :r AND tenant_id = :t AND state IN ('running', 'idle') RETURNING id"
+)
+_ENV_SECRETS = text(
+    "SELECT header_name, ciphertext, key_id FROM mcp_server_secrets WHERE tenant_id = :t AND server_id = :s AND kind = 'env'"
+)
+_SERVER_NAME = text("SELECT name FROM mcp_servers WHERE id = :s AND tenant_id = :t")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _exec(engine: Engine, stmt: Any, **params: Any) -> int:
+    with engine.begin() as conn:
+        return conn.execute(stmt, params).rowcount
+
+
+def _build_spec(engine: Engine, tenant_id: str, conn: McpServerConn, row: Any) -> RuntimeSpec:
+    """The RuntimeSpec for starting this runtime: image from its row, env from the package document
+    (`args`, `env`, `transport`, `port`), secret env values decrypted here and only here."""
+    package = row.package if isinstance(row.package, dict) else json.loads(row.package or "{}")
+    with engine.connect() as db:
+        name = db.execute(_SERVER_NAME, {"s": conn.server_id, "t": tenant_id}).scalar_one()
+        sealed = db.execute(_ENV_SECRETS, {"s": conn.server_id, "t": tenant_id}).all()
+    ring = load_keyring()
+    secret_refs = {
+        var: ring.decrypt(bytes(ciphertext), key_id, context=mcp_env_context(tenant_id, conn.server_id, var))
+        for var, ciphertext, key_id in sealed
+    }
+    return RuntimeSpec(
+        tenant_id=tenant_id,
+        server_id=conn.server_id,
+        name=name,
+        image=row.image,
+        args=tuple(package.get("args") or ()),
+        env=dict(package.get("env") or {}),
+        secret_refs=secret_refs,
+        transport=package.get("transport") or "stdio",
+        port=package.get("port"),
+    )
+
+
+async def ensure_managed_running(
+    engine: Engine,
+    tenant_id: str,
+    conn: McpServerConn,
+    tool: str,
+    runtime: McpRuntime | None = None,
+) -> None:
+    """Before connecting to a managed server: start it when it is stopped, idle, pending or failed, and
+    wait (up to EAP_MCP_START_TIMEOUT_SECONDS, polling status) while it is `starting`, whoever started it.
+    Records last_used_at, which the idle sweep reads. External servers return at once.
+
+    One caller wins the `starting` claim (a conditional UPDATE) and calls `McpRuntime.start`; the others
+    poll. Raises McpToolUnavailable with `runtime_start_failed`, `runtime_failed`, `runtime_start_timeout`,
+    `secret_unreadable` or `runtime_missing`; never with exception text. A timed-out row stays `starting`
+    (the sweep fails it after ten minutes)."""
+    if conn.runtime_id is None:
+        return
+    rt = runtime or get_mcp_runtime()
+    rid, server = conn.runtime_id, conn.name
+
+    def read() -> Any:
+        with engine.connect() as db:
+            return db.execute(_RUNTIME_ROW, {"r": rid, "t": tenant_id, "s": conn.server_id}).first()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + start_timeout_s()
+    poll = start_poll_s()
+
+    def remaining() -> float:
+        return max(deadline - loop.time(), 0.001)
+
+    first = True
+    while True:
+        if not first and loop.time() >= deadline:
+            raise McpToolUnavailable(server, tool, "runtime_start_timeout")
+        first = False
+        row = await asyncio.to_thread(read)
+        if row is None:
+            raise McpToolUnavailable(server, tool, "runtime_missing")
+        handle = RuntimeHandle(row.namespace, row.cr_name)
+        state = row.state
+        if state in _STARTABLE:
+            claimed = await asyncio.to_thread(_exec_returning, engine, _CLAIM_START, now=_now(), r=rid, t=tenant_id)
+            if not claimed:
+                continue  # somebody else moved it; look again
+            try:
+                spec = await asyncio.to_thread(_build_spec, engine, tenant_id, conn, row)
+                await asyncio.wait_for(rt.start(spec), remaining())
+            except SecretsError as exc:
+                await asyncio.to_thread(_fail, engine, tenant_id, rid, "secret_unreadable")
+                log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",
+                            tenant_id=tenant_id, server=server)
+                raise McpToolUnavailable(server, tool, "secret_unreadable") from None
+            except Exception as exc:  # noqa: BLE001 - reduced to a stable code
+                await asyncio.to_thread(_fail, engine, tenant_id, rid, f"start_failed: {type(exc).__name__}")
+                log_failure(log, "mcp runtime start failed", exc, code="runtime_start_failed", tenant_id=tenant_id,
+                            server=server)
+                raise McpToolUnavailable(server, tool, "runtime_start_failed") from None
+            state = "starting"
+        if state == "stopping":  # the idle sweep is scaling it down; wait for `stopped`, then start it
+            await asyncio.sleep(min(poll, remaining()))
+            continue
+        if state == "starting":
+            try:
+                status = await asyncio.wait_for(rt.status(handle), remaining())
+            except Exception as exc:  # noqa: BLE001 - a status hiccup is retried until the deadline
+                log_failure(log, "mcp runtime status failed", exc, code="runtime_status_failed",
+                            level=logging.INFO, tenant_id=tenant_id, server=server)
+                status = None
+            if status is not None and status.state == "running":
+                await asyncio.to_thread(_exec, engine, _SET_RUNNING, ep=status.endpoint or None, now=_now(), r=rid, t=tenant_id)
+                continue
+            if status is not None and status.state == "failed":
+                await asyncio.to_thread(_fail, engine, tenant_id, rid, "runtime_failed", was="starting")
+                raise McpToolUnavailable(server, tool, "runtime_failed")
+            if loop.time() >= deadline:
+                raise McpToolUnavailable(server, tool, "runtime_start_timeout")
+            await asyncio.sleep(min(poll, remaining()))
+            current = await asyncio.to_thread(read)  # the starter may have failed the row meanwhile
+            if current is not None and current.state == "failed":
+                raise McpToolUnavailable(server, tool, "runtime_failed")
+            continue
+        touched = await asyncio.to_thread(_exec_returning, engine, _TOUCH, now=_now(), r=rid, t=tenant_id)
+        if touched:
+            return
+        # the row left running/idle (the sweep claimed it): start/wait again
+
+
+def _exec_returning(engine: Engine, stmt: Any, **params: Any) -> bool:
+    with engine.begin() as conn:
+        return conn.execute(stmt, params).first() is not None
+
+
+def _fail(engine: Engine, tenant_id: str, runtime_id: str, error: str, was: str = "starting") -> None:
+    _exec(engine, _SET_STATE, state="failed", err=error, now=_now(), r=runtime_id, t=tenant_id, was=was)
 
 
 def failure_code(exc: BaseException, http_status: int | None = None) -> str:
@@ -341,6 +577,9 @@ def _client(
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
+    if conn.runtime_id is not None:
+        # A managed pod: exactly its own endpoint, by identity. The dev allowlist never applies.
+        policy = policy.for_managed_runtime(conn.runtime_id, conn.url)
     policy.check_url(conn.url)  # raises OutboundBlocked; the transport re-checks on every request
     transport = StreamableHttpTransport(
         conn.url, headers=dict(conn.headers), httpx_client_factory=_http_client_factory(policy, statuses)
@@ -415,6 +654,7 @@ def _result_json(result: Any, variants: Sequence[str]) -> dict[str, Any]:
 
 
 Loader = Callable[[Sequence[McpToolRef]], dict[str, McpServerConn]]
+Ensure = Callable[[str, McpServerConn, str], Awaitable[None]]  # (tenant_id, conn, tool): start a managed server
 
 
 class McpToolset(AbstractToolset[Any]):
@@ -423,7 +663,10 @@ class McpToolset(AbstractToolset[Any]):
     replayed step (recorded get_tools, or a call whose key is already reserved/completed) needs
     neither the database nor the platform key. One short MCP session per listing or call."""
 
-    def __init__(self, refs: Sequence[McpToolRef], load: Loader, timeout: float) -> None:
+    def __init__(
+        self, refs: Sequence[McpToolRef], load: Loader, timeout: float, ensure: Ensure | None = None
+    ) -> None:
+        self._ensure = ensure
         self.refs = {mcp_tool_name(r.server, r.tool): r for r in refs}
         self._load = load
         self._timeout = timeout
@@ -459,6 +702,8 @@ class McpToolset(AbstractToolset[Any]):
         for server, conn in servers.items():
             first = next(r.tool for r in self.refs.values() if r.server == server)
             statuses: list[int] = []
+            if self._ensure is not None:  # start a stopped managed server, wait for a starting one
+                await self._ensure(ctx.deps.tenant_id, conn, first)
             try:
                 with anyio.fail_after(self._timeout):
                     async with _session(conn, policy, self._timeout, statuses) as client:
@@ -527,6 +772,8 @@ class McpToolset(AbstractToolset[Any]):
         result: Any = None
         stored: dict[str, Any] | None = None
         statuses: list[int] = []
+        if self._ensure is not None:  # nothing is sent yet: a failure here is McpToolUnavailable
+            await self._ensure(ctx.deps.tenant_id, conn, ref.tool)
         variants = secret_variants(conn.headers.values())
         try:
             with anyio.fail_after(self._timeout):
@@ -561,7 +808,16 @@ class McpToolset(AbstractToolset[Any]):
 
 def mcp_toolset_for_run(engine: Engine, tenant_id: str, refs: Sequence[McpToolRef]) -> McpToolset:
     """The run's MCP toolset. No I/O here: it is built inside every step that evaluates the factory."""
-    return McpToolset(refs, functools.partial(load_servers, engine, tenant_id), timeout_s())
+    return McpToolset(
+        refs,
+        functools.partial(load_servers, engine, tenant_id),
+        timeout_s(),
+        functools.partial(_ensure_for, engine),
+    )
+
+
+async def _ensure_for(engine: Engine, tenant_id: str, conn: McpServerConn, tool: str) -> None:
+    await ensure_managed_running(engine, tenant_id, conn, tool)
 
 
 class RunToolset(AbstractToolset[Any]):
@@ -627,4 +883,15 @@ class RunToolset(AbstractToolset[Any]):
             member.apply(visitor)
 
 
-__all__ = ["McpServerConn", "McpToolUnavailable", "McpToolset", "RunToolset", "failure_code", "load_servers", "mcp_toolset_for_run"]
+__all__ = [
+    "McpServerConn",
+    "McpToolUnavailable",
+    "McpToolset",
+    "RunToolset",
+    "ensure_managed_running",
+    "failure_code",
+    "get_mcp_runtime",
+    "load_servers",
+    "mcp_toolset_for_run",
+    "set_mcp_runtime",
+]

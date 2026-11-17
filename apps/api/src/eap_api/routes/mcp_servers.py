@@ -7,6 +7,11 @@
 - DELETE /mcp-servers/{id}         delete (204), with its secrets
 - POST   /mcp-servers/{id}/test    connect, list tools, record last_status (200 with status ok|error)
 - POST   /mcp-servers/{id}/tools/{tool}/runs   run one tool of the server as a recorded tool run
+- POST   /mcp-servers/from-catalog         install a catalog entry: a package runs as a managed pod
+                                           (runtime = managed), a remote registers as an external server
+- GET    /mcp-servers/{id}/runtime         a managed server's runtime state (reconciled with the pod)
+- POST   /mcp-servers/{id}/runtime/{start|stop|restart}
+- GET    /mcp-servers/{id}/runtime/logs?tail=200   the pod's log tail, secrets masked
 
 Every lookup is tenant-scoped: another tenant's or an unknown id is a 404. Only remote servers over
 Streamable HTTP; the URL must pass the outbound policy (eap_secrets.outbound) on create and on every
@@ -21,15 +26,16 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -43,12 +49,22 @@ from eap_secrets import (
     load_keyring,
     mcp_header_context,
 )
+from eap_mcp_runtime import McpRuntime, RuntimeHandle, handle_for
+from eap_mcp_runtime.images import UnsupportedPackage
+from eap_run_store.mcp_catalog import CatalogStore
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
 from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
-from eap_api.mcp_servers.models import TRANSPORT_STREAMABLE_HTTP, McpServerModel, McpServerSecretModel
+from eap_api.mcp_servers import managed
+from eap_api.mcp_servers.managed import get_mcp_runtime
+from eap_api.mcp_servers.models import (
+    TRANSPORT_STREAMABLE_HTTP,
+    McpRuntimeModel,
+    McpServerModel,
+    McpServerSecretModel,
+)
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import StoresDep
 from eap_api.routes.tools import MAX_TOOL_INPUT_BYTES, ToolRunCreate, _canonical_json, _tool_run_body
@@ -115,6 +131,7 @@ def get_outbound_policy() -> OutboundPolicy:
 
 
 PolicyDep = Annotated[OutboundPolicy, Depends(get_outbound_policy)]
+RuntimeDep = Annotated[McpRuntime, Depends(get_mcp_runtime)]
 
 
 def _keyring() -> Keyring:
@@ -197,7 +214,8 @@ def _seal(ring: Keyring, tenant_id: str, server_id: str, headers: dict[str, str]
 def _header_names(db: Session, tenant_id: str, server_id: str) -> list[str]:
     return list(db.scalars(
         select(McpServerSecretModel.header_name)
-        .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server_id)
+        .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server_id,
+               McpServerSecretModel.kind == "header")
         .order_by(McpServerSecretModel.header_name)
     ))
 
@@ -206,8 +224,43 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def _server_json(server: McpServerModel, header_names: list[str]) -> dict[str, Any]:
+def _runtime_rows(db: Session, tenant_id: str) -> dict[str, McpRuntimeModel]:
+    return {r.server_id: r for r in db.scalars(select(McpRuntimeModel).where(McpRuntimeModel.tenant_id == tenant_id))}
+
+
+def _env_names_by_server(db: Session, tenant_id: str) -> dict[str, list[str]]:
+    """Names of a managed server's environment variables, sealed ones included (never values)."""
+    names: dict[str, list[str]] = {}
+    for server_id, name in db.execute(
+        select(McpServerSecretModel.server_id, McpServerSecretModel.header_name)
+        .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.kind == "env")
+    ):
+        names.setdefault(server_id, []).append(name)
+    for row in db.scalars(select(McpRuntimeModel).where(McpRuntimeModel.tenant_id == tenant_id)):
+        plain = (row.package or {}).get("env") or {}
+        names.setdefault(row.server_id, []).extend(n for n in plain if n != managed.PACKAGE_ENV)
+    return {k: sorted(set(v)) for k, v in names.items()}
+
+
+def _json_of(db: Session, tenant_id: str, server: McpServerModel) -> dict[str, Any]:
+    row = db.scalar(select(McpRuntimeModel).where(
+        McpRuntimeModel.tenant_id == tenant_id, McpRuntimeModel.server_id == server.id))
+    return _server_json(server, _header_names(db, tenant_id, server.id), row,
+                        _env_names_by_server(db, tenant_id).get(server.id, []) if row else [])
+
+
+def _server_json(
+    server: McpServerModel,
+    header_names: list[str],
+    runtime: McpRuntimeModel | None = None,
+    env_names: list[str] | None = None,
+) -> dict[str, Any]:
     return {
+        "runtime": server.runtime,
+        "runtime_state": runtime.state if runtime is not None else None,
+        "runtime_error": runtime.last_error if runtime is not None else None,
+        "catalog_name": runtime.catalog_name if runtime is not None else None,
+        "env_names": env_names or [],
         "id": server.id,
         "name": server.name,
         "url": server.url,
@@ -278,17 +331,21 @@ def list_mcp_servers(principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     names: dict[str, list[str]] = {}
     for server_id, header_name in db.execute(
         select(McpServerSecretModel.server_id, McpServerSecretModel.header_name)
-        .where(McpServerSecretModel.tenant_id == tenant_id)
+        .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.kind == "header")
         .order_by(McpServerSecretModel.header_name)
     ):
         names.setdefault(server_id, []).append(header_name)
-    return JSONResponse(content=[_server_json(s, names.get(s.id, [])) for s in servers])
+    runtimes = _runtime_rows(db, tenant_id)
+    envs = _env_names_by_server(db, tenant_id)
+    return JSONResponse(content=[
+        _server_json(s, names.get(s.id, []), runtimes.get(s.id), envs.get(s.id, [])) for s in servers
+    ])
 
 
 @router.get("/mcp-servers/{server_id}")
 def get_mcp_server(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     server = _get_or_404(db, principal.tenant_id, server_id)
-    return JSONResponse(content=_server_json(server, _header_names(db, principal.tenant_id, server.id)))
+    return JSONResponse(content=_json_of(db, principal.tenant_id, server))
 
 
 @router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}})
@@ -305,6 +362,8 @@ def update_mcp_server(
     assert isinstance(body, McpServerUpdate)
     tenant_id = principal.tenant_id
     server = _get_or_404(db, tenant_id, server_id)
+    if server.runtime == "managed" and (body.url is not None or body.headers is not None):
+        raise _unprocessable("a managed server has no url or headers; its endpoint is the platform's")
     headers = _validate_headers(body.headers) if body.headers is not None else None
     if body.url is not None:
         _check_url_sync(policy, body.url)
@@ -319,7 +378,8 @@ def update_mcp_server(
         server.last_status = server.last_error_code = server.last_checked_at = None
     if headers is not None:
         db.execute(delete(McpServerSecretModel).where(
-            McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id
+            McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id,
+            McpServerSecretModel.kind == "header",
         ))
         if ring is not None:
             db.add_all(_seal(ring, tenant_id, server.id, headers))
@@ -327,25 +387,392 @@ def update_mcp_server(
     server.updated_at = datetime.now(timezone.utc)
     _commit_or_409(db)
     db.refresh(server)
-    return JSONResponse(content=_server_json(server, _header_names(db, tenant_id, server.id)))
+    return JSONResponse(content=_json_of(db, tenant_id, server))
 
 
-@router.delete("/mcp-servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_mcp_server(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> Response:
-    server = _get_or_404(db, principal.tenant_id, server_id)
-    db.delete(server)  # mcp_server_secrets rows go with it (ON DELETE CASCADE)
+@router.delete(
+    "/mcp-servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT, responses={502: {"model": ErrorDetail}}
+)
+def delete_mcp_server(
+    server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, runtime: RuntimeDep
+) -> Response:
+    """Delete the server and its secrets; a managed server's CR, Secret and NetworkPolicy go first.
+    Re-running a delete that failed or crashed midway finishes it: the server is disabled before its
+    objects are removed (nothing starts it meanwhile), removing a missing object is fine, and the rows
+    are removed last (secrets and the runtime row cascade). 502 when the cluster could not be reached
+    (nothing is lost; retry)."""
+    tenant_id = principal.tenant_id
+    server = _get_or_404(db, tenant_id, server_id)
+    row = _runtime_of(db, tenant_id, server.id)
+    if row is not None:
+        if server.enabled:
+            server.enabled = False
+            db.commit()
+        try:
+            anyio.from_thread.run(runtime.delete, managed.handle_of(row))
+        except Exception as exc:  # noqa: BLE001 - the cluster is unreachable or refused; rows stay for a retry
+            log_failure(log, "mcp runtime delete failed", exc, code="runtime_delete_failed",
+                        tenant_id=tenant_id, server_id=str(server_id))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="the runtime could not be removed from the cluster; the server is disabled, retry the delete",
+            ) from None
+    db.delete(server)  # mcp_server_secrets and mcp_runtimes rows go with it (ON DELETE CASCADE)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _load_for_test(request: Request, tenant_id: str, server_id: uuid.UUID) -> tuple[str, list[tuple[str, bytes, str]]]:
+@dataclass(frozen=True)
+class _Target:
+    """Where a server is reached: an external server's URL, or a managed server's runtime row."""
+
+    url: str | None
+    runtime_id: str | None = None
+    state: str | None = None
+    namespace: str | None = None
+    cr_name: str | None = None
+
+    @property
+    def managed(self) -> bool:
+        return self.runtime_id is not None
+
+
+def _runtime_of(db: Session, tenant_id: str, server_id: str) -> McpRuntimeModel | None:
+    return db.scalar(select(McpRuntimeModel).where(
+        McpRuntimeModel.tenant_id == tenant_id, McpRuntimeModel.server_id == server_id))
+
+
+def _target(db: Session, server: McpServerModel) -> _Target:
+    if server.runtime != "managed":
+        return _Target(url=server.url)
+    row = _runtime_of(db, server.tenant_id, server.id)
+    if row is None:
+        return _Target(url=None, runtime_id="", state="missing")
+    return _Target(url=None, runtime_id=str(row.id), state=row.state, namespace=row.namespace, cr_name=row.cr_name)
+
+
+def _managed_row(db: Session, tenant_id: str, server_id: uuid.UUID) -> tuple[McpServerModel, McpRuntimeModel]:
+    server = _get_or_404(db, tenant_id, server_id)
+    row = _runtime_of(db, tenant_id, server.id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="this server has no managed runtime")
+    return server, row
+
+
+def _start_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, runtime: McpRuntime) -> bool:
+    """Start a pending, stopped, idle or failed runtime: claim `starting` (one conditional UPDATE, so the
+    worker's on-demand start and this one never both run), decrypt the env secrets and call the adapter.
+    A failure is recorded as `failed` with a code (`secret_unreadable`, `start_failed: <class>`), never
+    the exception text, and returns False. The worker moves `starting` to `running` once the pod is ready
+    (or GET runtime does)."""
+    if not managed.claim(db, row, "starting", managed.STARTABLE):
+        return True
+    try:
+        secrets = managed.open_env(db, load_keyring(), server.tenant_id, server.id)
+    except SecretsError as exc:
+        log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",
+                    tenant_id=server.tenant_id, server_id=server.id)
+        managed.set_failed(db, row, "secret_unreadable")
+        return False
+    try:
+        anyio.from_thread.run(runtime.start, managed.build_spec(row, server, secrets))
+    except Exception as exc:  # noqa: BLE001 - reduced to a code
+        log_failure(log, "mcp runtime start failed", exc, code="runtime_start_failed",
+                    tenant_id=server.tenant_id, server_id=server.id)
+        managed.set_failed(db, row, f"start_failed: {type(exc).__name__}")
+        return False
+    return True
+
+
+def _stop_runtime(db: Session, row: McpRuntimeModel, runtime: McpRuntime, allowed: tuple[str, ...]) -> str:
+    """Stop the pod (its objects stay), the way the idle sweep does: claim `stopping` (so no start can
+    claim the row meanwhile), call the adapter, then `stopped` only if the row is still `stopping`.
+    Returns `stopped`, `skipped` (another caller owned the row, or it moved on during the stop) or
+    `failed` (the adapter raised: the row is `failed` with `stop_failed: <class>`)."""
+    if not managed.claim(db, row, "stopping", allowed):
+        return "skipped"
+    try:
+        anyio.from_thread.run(runtime.stop, managed.handle_of(row))
+    except Exception as exc:  # noqa: BLE001
+        log_failure(log, "mcp runtime stop failed", exc, code="runtime_stop_failed", tenant_id=row.tenant_id)
+        managed.set_failed(db, row, f"stop_failed: {type(exc).__name__}")
+        return "failed"
+    return "stopped" if managed.finish_stop(db, row) else "skipped"
+
+
+def _reconcile(db: Session, row: McpRuntimeModel, runtime: McpRuntime) -> tuple[bool, str]:
+    """Compare a `starting` or `running` row with the pod: ready becomes `running`, failed becomes
+    `failed`. Returns (adapter reachable, the adapter's message)."""
+    try:
+        live = anyio.from_thread.run(runtime.status, managed.handle_of(row))
+    except Exception as exc:  # noqa: BLE001
+        log_failure(log, "mcp runtime status failed", exc, code="runtime_status_failed",
+                    level=logging.INFO, tenant_id=row.tenant_id)
+        return False, ""
+    values: dict[str, Any] | None = None
+    if row.state == "starting" and live.state == "running":
+        values = {"state": "running", "endpoint": live.endpoint or None, "last_error": None,
+                  "last_used_at": datetime.now(timezone.utc)}
+    elif row.state in ("starting", "running", "idle") and live.state == "failed":
+        values = {"state": "failed", "last_error": "runtime_failed"}
+    if values is not None:
+        db.execute(update(McpRuntimeModel).where(
+            McpRuntimeModel.id == row.id, McpRuntimeModel.state == row.state
+        ).values(updated_at=datetime.now(timezone.utc), **values))
+        db.commit()
+        db.refresh(row)
+    return True, managed.redact_lines([live.message], {})[0] if live.message else ""
+
+
+def _runtime_body(row: McpRuntimeModel, reachable: bool = True, message: str = "") -> dict[str, Any]:
+    package = row.package or {}
+    return {
+        "state": row.state,
+        "message": message,
+        "reachable": reachable,
+        "last_error": row.last_error,
+        "last_used_at": _iso(row.last_used_at),
+        "updated_at": _iso(row.updated_at),
+        "image": row.image,
+        "catalog_name": row.catalog_name,
+        "package": {k: package.get(k) for k in ("registry_type", "identifier", "version", "transport")},
+    }
+
+
+async def _resolve_target(
+    request: Request, tenant_id: str, server_id: str, target: _Target, runtime: McpRuntime, policy: OutboundPolicy
+) -> tuple[str | None, OutboundPolicy, str | None]:
+    """`(url, policy, error_code)` to connect to a server. A managed server is reached at its runtime's
+    endpoint under a policy that allows exactly that endpoint; it must be running (a startable one is
+    started for the next try, and `runtime_not_running` is the code meanwhile). `running` and `idle` are
+    both ready; using one records `last_used_at`."""
+    if not target.managed:
+        return target.url, policy, None
+    if not target.runtime_id:
+        return None, policy, "runtime_missing"
+
+    def check() -> str | None:
+        with Session(request.app.state.database_engine) as db:
+            row = _runtime_of(db, tenant_id, server_id)
+            server = db.scalar(select(McpServerModel).where(
+                McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id))
+            if row is None or server is None:
+                return "runtime_missing"
+            if row.state in ("starting", "running", "idle"):
+                _reconcile(db, row, runtime)
+            elif row.state in managed.STARTABLE and server.enabled:
+                _start_runtime(db, server, row, runtime)
+            if row.state in ("running", "idle"):
+                managed.touch(db, row)
+                return None
+            return "runtime_not_running"
+
+    code = await run_in_threadpool(check)
+    if code is not None:
+        return None, policy, code
+    url = runtime.endpoint(RuntimeHandle(target.namespace or "", target.cr_name or ""))
+    try:
+        return url, policy.for_managed_runtime(target.runtime_id, url), None
+    except OutboundBlocked:
+        return None, policy, "managed_endpoint_invalid"
+
+
+# --- the catalog: install a registry entry ---------------------------------------------------------
+
+
+class FromCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_name: Annotated[str, Field(min_length=1, max_length=300)]
+    package_index: Annotated[int, Field(ge=0)] | None = None
+    remote_index: Annotated[int, Field(ge=0)] | None = None
+    name: Annotated[str, Field(pattern=NAME_PATTERN)] | None = None
+    env: Any = None  # {VARIABLE: value}, validated by managed.check_env (no value echo)
+    headers: Any = None  # remote entries only
+
+
+def _default_name(catalog_name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "-", catalog_name.rsplit("/", 1)[-1]).strip("-._") or "server"
+    return base[:64]
+
+
+@router.post(
+    "/mcp-servers/from-catalog",
+    status_code=status.HTTP_201_CREATED,
+    responses={409: {"model": ErrorDetail}},
+)
+def install_from_catalog(
+    request: Request, principal: PrincipalDep, db: SessionDep, policy: PolicyDep, runtime: RuntimeDep,
+    payload: Annotated[Any, Body()] = None,
+) -> JSONResponse:
+    """Install a mirrored registry entry. Body `{catalog_name, package_index?, remote_index?, name?, env?, headers?}`.
+
+    A package (the default when the entry has one; `package_index` picks which) becomes a managed
+    server: `runtime = "managed"`, no url; variables the entry marks `secret` are sealed (write-only),
+    the others stored in the runtime's package document; the pod is started at once (201 carries the
+    resulting `runtime_state`, `starting` or `failed` with `runtime_error`). A remote (`remote_index`,
+    or the entry's first remote when it has no package) registers as an external server with the
+    remote's URL and optional `headers`, exactly like POST /mcp-servers. 404 unknown entry; 409 name
+    taken; 422 a removed entry, an index out of range, an env variable not declared or missing, a
+    package that cannot be run safely, or a remote that is not Streamable HTTP."""
+    body = _parse(FromCatalog, payload)
+    assert isinstance(body, FromCatalog)
+    entry = CatalogStore(request.app.state.database_engine).get(body.catalog_name)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="catalog entry not found")
+    if entry.status != "active":
+        raise _unprocessable("this catalog entry is no longer offered by the registry")
+    if body.package_index is not None and body.remote_index is not None:
+        raise _unprocessable("give package_index or remote_index, not both")
+    as_remote = body.remote_index is not None or (body.package_index is None and not entry.packages)
+    tenant_id = principal.tenant_id
+    name = body.name or _default_name(entry.name)
+    server_id = str(uuid.uuid4())
+
+    if as_remote:
+        index = body.remote_index or 0
+        if index >= len(entry.remotes):
+            raise _unprocessable("remote_index: this entry has no such remote")
+        remote = entry.remotes[index]
+        url = remote.get("url") if isinstance(remote, dict) else None
+        if not isinstance(url, str) or str(remote.get("type", "")).lower() != "streamable-http":
+            raise _unprocessable("remote: only Streamable HTTP remotes can be registered")
+        if body.env:
+            raise _unprocessable("env: a remote entry takes headers, not environment variables")
+        headers = _validate_headers(body.headers) if body.headers is not None else {}
+        _check_url_sync(policy, url)
+        ring = _keyring() if headers else None
+        db.add(McpServerModel(id=server_id, tenant_id=tenant_id, name=name, url=url,
+                              transport=TRANSPORT_STREAMABLE_HTTP, enabled=True))
+        _flush_or_409(db)
+        if ring is not None:
+            db.add_all(_seal(ring, tenant_id, server_id, headers))
+        _commit_or_409(db)
+        server = _get_or_404(db, tenant_id, uuid.UUID(server_id))
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content=_json_of(db, tenant_id, server))
+
+    index = body.package_index or 0
+    if index >= len(entry.packages):
+        raise _unprocessable("package_index: this entry has no such package")
+    package = entry.packages[index]
+    if body.headers:
+        raise _unprocessable("headers: a managed server takes environment variables, not headers")
+    env = body.env if body.env is not None else {}
+    if not isinstance(env, dict):
+        raise _unprocessable("env must be an object of variable name to string value")
+    try:
+        plain, secret = managed.check_env(package, env)
+        image, document = managed.package_document(package)
+    except ValueError as exc:  # check_env messages and UnsupportedPackage (a ValueError) carry no values
+        raise _unprocessable(str(exc)) from None
+    document["env"] = {**document["env"], **plain}
+    ring = _keyring() if secret else None
+    handle = handle_for(tenant_id, server_id)
+    db.add(McpServerModel(id=server_id, tenant_id=tenant_id, name=name, url=None, runtime="managed",
+                          transport=TRANSPORT_STREAMABLE_HTTP, enabled=True))
+    _flush_or_409(db)
+    if ring is not None:
+        db.add_all(managed.seal_env(ring, tenant_id, server_id, secret))
+    row = McpRuntimeModel(
+        id=uuid.uuid4(), tenant_id=tenant_id, server_id=server_id, catalog_name=entry.name, package=document,
+        image=image, namespace=handle.namespace, cr_name=handle.cr_name, state="pending",
+    )
+    db.add(row)
+    _commit_or_409(db)
+    server = _get_or_404(db, tenant_id, uuid.UUID(server_id))
+    _start_runtime(db, server, row, runtime)
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_json_of(db, tenant_id, server))
+
+
+# --- a managed server's runtime ---------------------------------------------------------------------
+
+
+@router.get("/mcp-servers/{server_id}/runtime", responses={409: {"model": ErrorDetail}})
+def get_runtime(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, runtime: RuntimeDep) -> JSONResponse:
+    """`{state, message, reachable, last_error, last_used_at, updated_at, image, catalog_name, package}`.
+    `state` is pending|starting|running|idle|stopped|failed; a `starting` row is compared with the pod
+    first. `reachable` false means the cluster could not be asked (the stored state is shown)."""
+    _server, row = _managed_row(db, principal.tenant_id, server_id)
+    reachable, message = _reconcile(db, row, runtime) if row.state in ("starting", "running", "idle") else (True, "")
+    return JSONResponse(content=_runtime_body(row, reachable, message))
+
+
+@router.post("/mcp-servers/{server_id}/runtime/{action}",
+             responses={409: {"model": ErrorDetail}, 502: {"model": ErrorDetail}})
+def control_runtime(
+    server_id: uuid.UUID,
+    action: Literal["start", "stop", "restart"],
+    principal: PrincipalDep,
+    db: SessionDep,
+    runtime: RuntimeDep,
+) -> JSONResponse:
+    """Start (a pending, stopped, idle or failed pod; otherwise a no-op), stop (scale to zero, objects
+    stay; the next tool call starts it again) or restart (stop, then start). Answers the runtime body
+    of GET .../runtime. 409 for an external server or a disabled one (start, restart). 502 when the
+    adapter (or the sealed env) fails: the row is then `failed` with `last_error` set, read it with
+    GET .../runtime; the error text is never returned."""
+    server, row = _managed_row(db, principal.tenant_id, server_id)
+    if action != "stop" and not server.enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="the server is disabled")
+    ok = True
+    if action == "start":
+        ok = _start_runtime(db, server, row, runtime)
+    elif action == "stop":
+        ok = _stop_runtime(db, row, runtime, managed.STOPPABLE) != "failed"
+    else:
+        outcome = _stop_runtime(db, row, runtime, ("pending", "starting", "running", "idle", "stopped", "failed"))
+        ok = outcome != "failed"
+        if outcome == "stopped":
+            ok = _start_runtime(db, server, row, runtime)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"the runtime could not be {action}ed"
+                            if action != "stop" else "the runtime could not be stopped")
+    return JSONResponse(content=_runtime_body(row))
+
+
+@router.get("/mcp-servers/{server_id}/runtime/logs", responses={409: {"model": ErrorDetail}, 502: {"model": ErrorDetail}})
+def get_runtime_logs(
+    server_id: uuid.UUID,
+    principal: PrincipalDep,
+    db: SessionDep,
+    runtime: RuntimeDep,
+    tail: Annotated[int, Query(ge=1, le=managed.MAX_LOG_TAIL)] = managed.DEFAULT_LOG_TAIL,
+) -> JSONResponse:
+    """`{lines: [...], tail}`: the last `tail` (1 to 1000, default 200) log lines of the pod, with every
+    sealed env value (any encoding) and `token=`, `key=`, `secret=`, `password=` assignments masked."""
+    server, row = _managed_row(db, principal.tenant_id, server_id)
+    try:
+        lines = anyio.from_thread.run(runtime.logs, managed.handle_of(row), tail)
+    except Exception as exc:  # noqa: BLE001
+        log_failure(log, "mcp runtime logs failed", exc, code="runtime_logs_failed",
+                    tenant_id=principal.tenant_id, server_id=str(server_id))
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="the logs could not be read") from None
+    try:
+        secrets = managed.open_env(db, load_keyring(), principal.tenant_id, server.id)
+    except SecretsError:
+        secrets = {}  # unreadable secrets cannot be matched by value; the pattern mask still applies
+    return JSONResponse(content={"lines": managed.redact_lines(list(lines), secrets), "tail": tail})
+
+
+def _flush_or_409(db: Session) -> None:
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="an MCP server with this name already exists"
+        ) from None
+
+
+def _load_for_test(request: Request, tenant_id: str, server_id: uuid.UUID) -> tuple[_Target, list[tuple[str, bytes, str]]]:
     with Session(request.app.state.database_engine) as db:
         server = _get_or_404(db, tenant_id, server_id)
         secrets = db.execute(
             select(McpServerSecretModel.header_name, McpServerSecretModel.ciphertext, McpServerSecretModel.key_id)
-            .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id)
+            .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id,
+                   McpServerSecretModel.kind == "header")
         ).all()
-        return server.url, [(name, bytes(ct), key_id) for name, ct, key_id in secrets]
+        return _target(db, server), [(name, bytes(ct), key_id) for name, ct, key_id in secrets]
 
 
 def _record_result(request: Request, tenant_id: str, server_id: uuid.UUID, outcome: str, code: str | None) -> None:
@@ -363,14 +790,14 @@ def _record_result(request: Request, tenant_id: str, server_id: uuid.UUID, outco
 
 @router.post("/mcp-servers/{server_id}/test")
 async def run_mcp_server_test(
-    server_id: uuid.UUID, request: Request, principal: PrincipalDep, policy: PolicyDep
+    server_id: uuid.UUID, request: Request, principal: PrincipalDep, policy: PolicyDep, runtime: RuntimeDep
 ) -> JSONResponse:
     """Connect over Streamable HTTP, initialize and list tools, within a bounded time
     (EAP_MCP_TEST_TIMEOUT_SECONDS, default 10, at most 30). Answers 200 with
     {status: "ok", tools: [{name, description, input_schema}]} or
     {status: "error", error_code, tools: []}; the outcome is stored as last_status/last_error_code."""
     tenant_id = principal.tenant_id
-    url, secrets = await run_in_threadpool(_load_for_test, request, tenant_id, server_id)
+    target, secrets = await run_in_threadpool(_load_for_test, request, tenant_id, server_id)
 
     headers: dict[str, str] = {}
     code: str | None = None
@@ -384,7 +811,13 @@ async def run_mcp_server_test(
             log_failure(log, "mcp server secret could not be decrypted", exc, code=code,
                         tenant_id=tenant_id, server_id=str(server_id))
 
+    url: str | None = None
     if code is None:
+        # A managed server is reached at its runtime's endpoint and must be running (see _resolve_target).
+        url, policy, code = await _resolve_target(request, tenant_id, str(server_id), target, runtime, policy)
+
+    if code is None:
+        assert url is not None
         result = await list_server_tools(url, headers, policy, connection_timeout_s())
         headers.clear()
         if result.status == "ok":
@@ -465,6 +898,7 @@ async def run_mcp_tool(
     body: Annotated[ToolRunCreate, Depends(_tool_run_body)],
     stores: StoresDep,
     policy: PolicyDep,
+    runtime: RuntimeDep,
 ) -> JSONResponse:
     """Run one tool of a registered MCP server and record it on the tool-run ledger (the same runs,
     list/get endpoints and fields as POST /tools/{id}/runs; `tool_id` is `mcp:<server id>/<tool>`).
@@ -485,16 +919,17 @@ async def run_mcp_tool(
     sid = str(server_id)
     tool_id = mcp_run_tool_id(sid, tool)
 
-    def load() -> tuple[str, str, bool, list[tuple[str, bytes, str]]]:
+    def load() -> tuple[str, _Target, bool, list[tuple[str, bytes, str]]]:
         with Session(request.app.state.database_engine) as db:
             server = _get_or_404(db, tenant_id, server_id)
             secrets = db.execute(
                 select(McpServerSecretModel.header_name, McpServerSecretModel.ciphertext, McpServerSecretModel.key_id)
-                .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id)
+                .where(McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id,
+                       McpServerSecretModel.kind == "header")
             ).all()
-            return server.name, server.url, server.enabled, [(n, bytes(c), k) for n, c, k in secrets]
+            return server.name, _target(db, server), server.enabled, [(n, bytes(c), k) for n, c, k in secrets]
 
-    name, url, enabled, secrets = await run_in_threadpool(load)
+    name, target, enabled, secrets = await run_in_threadpool(load)
     if not enabled:
         raise _unprocessable("MCP server is disabled")
     input_json = _canonical_json(body.input)
@@ -523,7 +958,11 @@ async def run_mcp_tool(
 
     timeout = connection_timeout_s()
     schema: dict[str, Any] = {}
+    url: str | None = None
     if code is None:
+        url, policy, code = await _resolve_target(request, tenant_id, sid, target, runtime, policy)
+    if code is None:
+        assert url is not None
         listed = await list_server_tools(url, headers, policy, timeout)
         if listed.status == "ok":
             found = next((t for t in listed.tools if t["name"] == tool), None)

@@ -16,6 +16,8 @@ dependencies = [
     "eap-db",
     "eap-observability",
     "eap-secrets",
+    # Managed MCP servers: the runtime contract the worker starts and stops them through.
+    "eap-mcp-runtime",
     # Input and output processors (P0.17): the deterministic chains run in the worker's steps.
     "eap-processors",
     # Knowledge base extraction and chunking (RM.10, eap.kb_ingest).
@@ -61,6 +63,7 @@ eap-blob-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
+eap-mcp-runtime = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
 eap-api = { workspace = true }

@@ -19,6 +19,9 @@ data:
   EAP_BLOB_S3_ENDPOINT: https://9a497744238ab16a1060dc3ae8abd102.r2.cloudflarestorage.com
   EAP_BLOB_S3_BUCKET: pydanticos-attachments
   EAP_BLOB_S3_REGION: auto
+  # up.sh replaces these with the cluster's `kubernetes` Service and endpoint addresses.
+  EAP_MCP_API_SERVER_CIDRS: 10.43.0.1/32,192.168.5.3/32
+  EAP_MCP_API_SERVER_PORTS: 443,6443
   OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
 ---
 apiVersion: v1

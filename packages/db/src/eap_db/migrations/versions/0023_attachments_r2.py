@@ -1,7 +1,7 @@
 """Attachments round 2: chat attachment bytes move from Postgres to the BlobStore.
 
 Revision ID: 0023_attachments_r2
-Revises: 0022_parity_round_2
+Revises: 0024_mcp_runtime
 Create Date: 2026-11-17 12:00:00
 
 - `chat_attachments.storage_key TEXT` is added, every existing row's bytes are written to the
@@ -36,7 +36,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "0023_attachments_r2"
-down_revision: Union[str, Sequence[str], None] = "0022_parity_round_2"
+down_revision: Union[str, Sequence[str], None] = "0024_mcp_runtime"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

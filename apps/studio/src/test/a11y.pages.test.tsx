@@ -198,6 +198,7 @@ function respond(url: URL): unknown {
   if (p === "/processor-results") return PROCESSOR_RESULTS;
   if (p === "/tools") return TOOLS;
   if (p.startsWith("/tools/")) return TOOLS.find((tool) => `/tools/${tool.id}` === p) ?? TOOLS[0];
+  if (p === "/mcp-catalog") return { items: [{ name: "io.example/files", title: "Files", description: "Read and write files.", version: "1.0.0", status: "active", licence: "MIT", packages: [], remotes: [{ type: "streamable-http", url: "https://files.example.test/mcp" }], local: false, remote: true, fetched_at: T0 }], next_after: null };
   if (p === "/mcp-servers") return [MCP_SERVER];
   if (p === "/mcp-servers/m1") return MCP_SERVER;
   if (p === "/knowledge-bases") return { items: [KB] };
@@ -294,6 +295,7 @@ const PAGES: PageCase[] = [
   { name: "workflow run paused", path: "/workflows/w1/runs/wr2", params: { id: "w1", runId: "wr2" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr2", shows: "#workflow-paused-banner" },
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", shows: "Current time" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", shows: "Docs" },
+  { name: "mcp browse", path: "/mcp/browse", load: () => import("@/app/mcp/browse/page"), h1: "Browse", shows: "Files" },
   { name: "mcp detail", path: "/mcp/m1", params: { id: "m1" }, load: () => import("@/app/mcp/[id]/page"), h1: "Docs", shows: "https://docs.example.test/mcp" },
   { name: "knowledge", path: "/knowledge", load: () => import("@/app/knowledge/page"), h1: "Knowledge", shows: "Product docs" },
   { name: "knowledge base", path: "/knowledge/kb1", params: { id: "kb1" }, load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "#knowledge-document-row" },

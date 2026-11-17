@@ -161,6 +161,14 @@ def mcp_header_context(tenant_id: str, server_id: str, header_name: str) -> byte
     return f"{tenant_id}/{server_id}/{header_name}".encode()
 
 
+def mcp_env_context(tenant_id: str, server_id: str, name: str) -> bytes:
+    """The associated data binding a managed MCP server's environment secret to its row.
+
+    Distinct from `mcp_header_context` (the `env:` marker cannot occur in an HTTP header name), so a
+    sealed header can never be opened as an environment value or the reverse."""
+    return f"{tenant_id}/{server_id}/env:{name}".encode()
+
+
 def load_keyring(env: Mapping[str, str] | None = None) -> Keyring:
     """The platform keyring from the environment; raises a clear SecretsKeyMissing when unset."""
     return Keyring.from_env(env)
@@ -179,5 +187,6 @@ __all__ = [
     "generate_key",
     "key_id_for",
     "load_keyring",
+    "mcp_env_context",
     "mcp_header_context",
 ]

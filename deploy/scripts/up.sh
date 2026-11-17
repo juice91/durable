@@ -144,9 +144,27 @@ fi
 
 guard_contexts
 
+# The ToolHive operator runs managed MCP servers; idempotent, installs helm on macOS if missing.
+# PYDANTICOS_SKIP_TOOLHIVE=1 skips it (the stub-based script tests, which have no helm).
+if [[ "${PYDANTICOS_SKIP_TOOLHIVE:-}" != 1 ]]; then
+  "${SCRIPT_DIR}/toolhive.sh" install --context "$EXPECTED_CONTEXT"
+fi
+
 git_sha=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
 python_image="pydanticos-python:${git_sha}"
 studio_image="pydanticos-studio:${git_sha}"
+# Platform runner images for managed MCP servers (npm and pypi packages install at pod start). The
+# worker finds them through EAP_MCP_RUNNER_NODE_IMAGE / EAP_MCP_RUNNER_PYTHON_IMAGE.
+# Their tag is a hash of the files each image is built from (the same one
+# eap_mcp_runtime.images computes), not the commit: a code commit does not rebuild or retag them.
+runner_hash() { # FILE... (relative to deploy/docker)
+  local f
+  for f in "$@"; do cat "$REPO_ROOT/deploy/docker/$f"; done | shasum -a 256 | cut -c1-12
+}
+runner_node_tag=$(runner_hash mcp-runner-node.Dockerfile)
+runner_python_tag=$(runner_hash mcp-runner-python.Dockerfile mcp-run-python.sh)
+runner_node_image="pydanticos-mcp-runner-node:${runner_node_tag}"
+runner_python_image="pydanticos-mcp-runner-python:${runner_python_tag}"
 
 # Right after the VM (re)starts its network can lag: a deploy failed with an i/o timeout to
 # registry-1.docker.io that worked seconds later. Wait (bounded) until the VM reaches the
@@ -173,6 +191,19 @@ build_image() { # DOCKERFILE TAG
 }
 build_image python.Dockerfile "$python_image"
 build_image studio.Dockerfile "$studio_image"
+# The runner Dockerfiles need no repo files; a small context keeps the builds fast.
+build_runner_image() { # DOCKERFILE TAG
+  local attempt
+  for attempt in 1 2; do
+    if docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/$1" -t "$2" "$REPO_ROOT/deploy/docker"; then
+      return 0
+    fi
+    (( attempt == 2 )) || { printf 'Image build for %s failed; retrying once in 15 seconds.\n' "$1" >&2; sleep 15; }
+  done
+  return 1
+}
+build_runner_image mcp-runner-node.Dockerfile "$runner_node_image"
+build_runner_image mcp-runner-python.Dockerfile "$runner_python_image"
 
 kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/namespace.yaml"
 
@@ -306,13 +337,45 @@ if [[ ! "$host_gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   exit 1
 fi
 
+# The API server addresses NetworkPolicies see (after Service NAT): the `kubernetes` Service ClusterIP
+# and its endpoint, read from the cluster rather than assumed. networkpolicy.yaml and configmap.yaml
+# carry the k3s/colima defaults (10.43.0.1, 192.168.5.3), replaced here via tokens so one value
+# cannot be rewritten by another's substitution. Exported for anything run from this script.
+api_service_ip=$(kubectl_for_profile --namespace=default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+api_endpoint_ips=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+[[ "$api_service_ip" =~ $ipv4_re ]] || {
+  printf 'Refusing to continue: could not read the kubernetes Service address (kubectl get svc kubernetes).\n' >&2
+  exit 1
+}
+read -r -a api_endpoint_list <<<"$api_endpoint_ips"
+if [[ ${#api_endpoint_list[@]} -ne 1 || ! "${api_endpoint_list[0]}" =~ $ipv4_re ]]; then
+  printf 'Refusing to continue: expected exactly one kubernetes endpoint address (kubectl get endpoints kubernetes), got: %s\n' "${api_endpoint_ips:-none}" >&2
+  exit 1
+fi
+api_endpoint_ip=${api_endpoint_list[0]}
+# Policies see the endpoint port after Service NAT: 6443 on stock Kubernetes, 57345 on colima's k3s.
+api_endpoint_port=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || true)
+[[ "$api_endpoint_port" =~ ^[0-9]{1,5}$ ]] || {
+  printf 'Refusing to continue: could not read the kubernetes endpoint port (kubectl get endpoints kubernetes).\n' >&2
+  exit 1
+}
+export EAP_MCP_API_SERVER_CIDRS="${api_service_ip}/32,${api_endpoint_ip}/32"
+export EAP_MCP_API_SERVER_PORTS="443,${api_endpoint_port}"
+
 make_tmp rendered rendered_file
 kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
   | sed \
     -e "s|pydanticos-python:dev|${python_image}|g" \
     -e "s|pydanticos-studio:dev|${studio_image}|g" \
     -e "s|/var/lib/pydanticos-backups|${PYDANTICOS_BACKUP_DIR}|g" \
+    -e "s|10\.43\.0\.1/32|@@API_SERVICE_CIDR@@|g" \
+    -e "s|192\.168\.5\.3/32|@@API_ENDPOINT_CIDR@@|g" \
     -e "s|192.168.5.2|${host_gateway}|g" \
+    -e "s|@@API_SERVICE_CIDR@@|${api_service_ip}/32|g" \
+    -e "s|@@API_ENDPOINT_CIDR@@|${api_endpoint_ip}/32|g" \
+    -e "s|{protocol: TCP, port: 6443}|{protocol: TCP, port: ${api_endpoint_port}}|g" \
+    -e "s|EAP_MCP_API_SERVER_PORTS: 443,6443|EAP_MCP_API_SERVER_PORTS: 443,${api_endpoint_port}|g" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"

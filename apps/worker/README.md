@@ -104,6 +104,10 @@ value stops the worker instead of failing each run.
 | `EAP_MEMORY_RETENTION_EMBEDDING_DAYS`, `_OBSERVATION_DAYS`, `_WORKING_MEMORY_DAYS` | `EAP_MEMORY_RETENTION_DAYS` | Per-kind override: days (1 to 36500) or `keep` |
 | `EAP_MEMORY_RETENTION_RESOURCE_WORKING_MEMORY_DAYS` | unset (kept) | Opt-in retention of resource working memory, by `updated_at` |
 | `EAP_MEMORY_RETENTION_SCHEDULE` | `0 3 * * *` | Cron (UTC) of `eap.memory_retention` |
+| `EAP_MCP_CATALOG_SCHEDULE` | `0 15 * * * *` | Cron (UTC, with seconds) of `eap.mcp_catalog_mirror`, the hourly mirror of the official MCP registry into `mcp_catalog_entries`; `off` removes the schedule |
+| `EAP_MCP_CATALOG_URL` | `https://registry.modelcontextprotocol.io/v0/servers` | Registry list endpoint (fetched through the outbound guard) |
+| `EAP_MCP_CATALOG_PAGE_SIZE` | `100` | `limit` per registry page (1 to 100) |
+| `EAP_MCP_CATALOG_MAX_PAGES` | `200` | Pages per run; a run that stops here marks nothing removed |
 | `EAP_MEMORY_RETENTION_BATCH_SIZE` | 500 (max 10000) | Rows or conversations per batch (one transaction, one step) |
 | `EAP_MEMORY_RETENTION_MAX_STEPS` | 2000 | Steps per run, shared round-robin by the kinds |
 | `EAP_ATTACHMENT_ORPHAN_HOURS` | 24 (1 to 8760) | Age in hours after which an unsent chat upload (no message references it) is deleted, row and blob, by `eap.attachment_retention`; linked attachments are never touched |

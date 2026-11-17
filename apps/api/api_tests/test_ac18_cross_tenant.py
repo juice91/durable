@@ -368,3 +368,45 @@ def test_agui_attachment_routes_are_in_the_inventory_and_closed_to_another_tenan
     assert client.get(path, headers=h).content == png  # untouched
     with app.state.database_engine.begin() as conn:
         conn.execute(text("DELETE FROM chat_attachments WHERE tenant_id = :t"), {"t": tenant})
+
+
+def test_another_tenant_reaches_no_managed_mcp_server_route(api, monkeypatch):
+    """Managed MCP servers: every runtime route, test, tool run, patch and delete of tenant A's server
+    is a 404 for tenant B, B's list shows nothing, and A's server is untouched."""
+    from eap_api.mcp_servers.managed import get_mcp_runtime
+
+    from .mcp_runtime_helpers import FakeRuntime, make_entry
+
+    from eap_secrets import KEY_ENV, generate_key
+
+    monkeypatch.setenv(KEY_ENV, generate_key())
+    client, app, tenant_of = api
+    fake = FakeRuntime()
+    app.dependency_overrides[get_mcp_runtime] = lambda: fake
+    tenant, h = tenant_of()
+    _other, other = tenant_of("mallory")
+    entry = make_entry()
+    from eap_run_store.mcp_catalog import CatalogStore
+
+    CatalogStore(app.state.database_engine).upsert([entry])
+    try:
+        r = client.post(f"{API}/mcp-servers/from-catalog", headers=h, json={
+            "catalog_name": entry.name, "env": {"API_TOKEN": "sntl-x-secret"}})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        calls = [("GET", f"/mcp-servers/{sid}"), ("PATCH", f"/mcp-servers/{sid}"), ("DELETE", f"/mcp-servers/{sid}"),
+                 ("POST", f"/mcp-servers/{sid}/test"), ("GET", f"/mcp-servers/{sid}/runtime"),
+                 ("POST", f"/mcp-servers/{sid}/runtime/start"), ("POST", f"/mcp-servers/{sid}/runtime/stop"),
+                 ("POST", f"/mcp-servers/{sid}/runtime/restart"), ("GET", f"/mcp-servers/{sid}/runtime/logs"),
+                 ("POST", f"/mcp-servers/{sid}/tools/t/runs")]
+        for method, path in calls:
+            resp = client.request(method, API + path, json={"enabled": False} if method == "PATCH" else {"input": {}} if method == "POST" else None,
+                                  headers=other)
+            assert resp.status_code == 404, (method, path, resp.status_code, resp.text)
+        assert client.get(f"{API}/mcp-servers", headers=other).json() == []
+        assert fake.calls == [("start", fake.calls[0][1])]  # nothing but A's own install touched the cluster
+        assert client.get(f"{API}/mcp-servers/{sid}", headers=h).json()["runtime_state"] == "starting"
+    finally:
+        with app.state.database_engine.begin() as conn:
+            conn.execute(text("DELETE FROM mcp_catalog_entries WHERE name = :n"), {"n": entry.name})
+            conn.execute(text("DELETE FROM mcp_servers WHERE tenant_id = :t"), {"t": tenant})
