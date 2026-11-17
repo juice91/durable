@@ -910,6 +910,24 @@ class RecordStore:
                 raise ValueError("source not found") from exc
             raise
 
+    def is_unchanged(
+        self, tenant_id: str, source_id: str, external_id: str, record_type: str, payload: dict[str, Any]
+    ) -> bool:
+        """Read-only: an ACTIVE record with exactly this payload (by canonical-JSON hash) is stored. An
+        oversized payload cannot be stored, so it is never unchanged."""
+        body = canonical_json(payload)
+        if len(body.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+            return False
+        with self._engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT 1 FROM kb_source_records WHERE tenant_id = :t AND source_id = :s AND external_id = :ext"
+                    " AND record_type = :type AND status = 'active' AND content_hash = :hash"
+                ),
+                {"t": tenant_id, "s": source_id, "ext": external_id, "type": record_type,
+                 "hash": hashlib.sha256(body.encode("utf-8")).hexdigest()},
+            ).first() is not None
+
     def get(self, tenant_id: str, source_id: str, external_id: str, record_type: str) -> SourceRecord | None:
         with self._engine.connect() as conn:
             row = conn.execute(

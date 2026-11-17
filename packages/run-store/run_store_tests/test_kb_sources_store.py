@@ -203,6 +203,21 @@ def test_record_upsert_hash_semantics_and_isolation(engine, tenants, kb):
         records.upsert(b, s.id, "LM317", "generic", {"b": 3}, observed_at=NOW)  # not b's source
 
 
+def test_is_unchanged_is_a_read_only_hash_check_of_an_active_record(engine, tenants, kb):
+    a, b = tenants
+    s = _source(engine, a, kb[a], _conn(engine, a).id)
+    records = RecordStore(engine)
+    assert records.is_unchanged(a, s.id, "LM317", "listing", {"x": 1}) is False  # nothing stored
+    records.upsert(a, s.id, "LM317", "listing", {"x": 1, "y": [2]}, observed_at=NOW)
+    assert records.is_unchanged(a, s.id, "LM317", "listing", {"y": [2], "x": 1}) is True  # canonical JSON
+    assert records.is_unchanged(a, s.id, "LM317", "listing", {"x": 2}) is False
+    assert records.is_unchanged(a, s.id, "LM317", "detail", {"x": 1, "y": [2]}) is False  # another record type
+    assert records.is_unchanged(b, s.id, "LM317", "listing", {"x": 1, "y": [2]}) is False  # another tenant
+    assert records.get(a, s.id, "LM317", "listing").raw_payload == {"x": 1, "y": [2]}  # nothing was written
+    records.mark_removed_except(a, s.id, ["OTHER"])
+    assert records.is_unchanged(a, s.id, "LM317", "listing", {"x": 1, "y": [2]}) is False  # a removed row is not "unchanged"
+
+
 def test_mark_removed_except_only_touches_unseen_active_rows(engine, tenants, kb):
     a, b = tenants
     s = _source(engine, a, kb[a], _conn(engine, a).id)

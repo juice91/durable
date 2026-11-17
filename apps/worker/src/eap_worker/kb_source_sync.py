@@ -310,6 +310,9 @@ class WorkerStoreFacade:
             source_updated_at=source_updated_at, observed_at=_now(),
         )
 
+    def record_unchanged(self, external_id: str, record_type: str, payload: dict[str, Any]) -> bool:
+        return self._records.is_unchanged(self.tenant_id, self.source_id, external_id, record_type, payload)
+
     def upsert_entity(
         self,
         external_id: str,
