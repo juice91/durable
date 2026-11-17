@@ -55,7 +55,6 @@ from eap_run_store.definition_errors import DefinitionError
 from eap_runtime import RunDeps, ToolRegistry, run_side_effect
 from eap_schemas import reserved_tool_name_conflicts
 from eap_schemas.architect import (
-    AGENT_ID_PATTERN,
     ARCHITECT_GATED_TOOL_IDS,
     RESERVED_AGENT_IDS,
     Allowlist,
@@ -63,6 +62,7 @@ from eap_schemas.architect import (
     ArchitectWorkflowSpec,
     compile_agent,
     compile_workflow,
+    slugify,
 )
 
 from eap_worker.architect_allowlist import approved_for_tenant
@@ -135,13 +135,6 @@ def _code(exc: ValueError) -> tuple[str, str]:
     if sep and re.fullmatch(r"[a-z_]+", head):
         return head, message
     return "invalid_spec", message
-
-
-def slugify(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48].strip("-")
-    if not slug or not slug[0].isalpha():
-        slug = f"a-{slug}".strip("-")[:48].strip("-")
-    return slug if AGENT_ID_PATTERN.fullmatch(slug) else "definition"
 
 
 def _marked(created_via: str | None) -> bool:

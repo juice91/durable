@@ -1,6 +1,7 @@
 """What a created agent or workflow of a tenant may use: the Architect's allowlist (Task 3, D6).
 
-`approved_for_tenant` is the single source. The read tool `architect.list_approved_tools` returns it,
+`approved_for_tenant` is the single source (the per-tool rule, `offer_tool`, is shared with the API's
+`GET /architect/options` through eap_schemas.architect). The read tool `architect.list_approved_tools` returns it,
 the Architect page's pickers (Task 5) show it, and `compile_agent` / `compile_workflow`
 (`eap_schemas.architect`) validate every save against it, so the Architect cannot grant what this
 list did not offer.
@@ -44,7 +45,7 @@ from eap_schemas.architect import (
     AllowlistMcpServer,
     AllowlistModel,
     AllowlistTool,
-    is_denied_tool,
+    offer_tool,
 )
 
 log = logging.getLogger("eap_worker.architect_allowlist")
@@ -62,20 +63,19 @@ def registry_tools(registry: Any, allowed: frozenset[str]) -> tuple[AllowlistToo
     """The registry's tools that survive the allowed set and the denylist, sorted by id."""
     found: list[AllowlistTool] = []
     for tool_id in sorted(registry.tool_ids()):
-        if tool_id not in allowed or is_denied_tool(tool_id):
+        if tool_id not in allowed:
             continue
         meta = registry.get_metadata(tool_id)
-        if meta.get("host_only"):
-            continue
         try:
             declaration = registry.get_declaration(tool_id)
             title, description = declaration.title, declaration.description
         except ValueError:  # registered with a string id: metadata only
             title, description = tool_id, str(meta.get("description") or tool_id)
-        found.append(AllowlistTool(
-            id=tool_id, title=title, description=description or title,
-            requires_approval=bool(meta.get("side_effect")) or tool_id in GATED_TOOL_IDS,
-        ))
+        offered = offer_tool(
+            tool_id, title, description, side_effect=bool(meta.get("side_effect")), host_only=bool(meta.get("host_only"))
+        )
+        if offered is not None:
+            found.append(offered)
     return tuple(found)
 
 

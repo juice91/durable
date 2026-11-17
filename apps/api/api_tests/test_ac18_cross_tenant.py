@@ -420,3 +420,53 @@ def test_another_tenant_reaches_no_managed_mcp_server_route(api, monkeypatch):
         with app.state.database_engine.begin() as conn:
             conn.execute(text("DELETE FROM mcp_catalog_entries WHERE name = :n"), {"n": entry.name})
             conn.execute(text("DELETE FROM mcp_servers WHERE tenant_id = :t"), {"t": tenant})
+
+
+ARCHITECT_ROUTES = {
+    ("GET", "/api/v1/architect"),
+    ("POST", "/api/v1/architect"),
+    ("GET", "/api/v1/architect/options"),
+    ("POST", "/api/v1/architect/draft"),
+    ("POST", "/api/v1/architect/agents"),
+    ("POST", "/api/v1/architect/workflows"),
+}
+
+
+def test_architect_routes_are_in_the_inventory_and_closed_to_another_tenant(api):
+    """Every Architect route is listed here (a new one fails this test until it gets a check). Tenant A
+    seeds the Architect and makes an agent and a workflow; tenant B sees none of it: its own state is
+    empty, its seed makes its own rows, a save under A's id makes B's own row (ids are per tenant) and
+    leaves A's untouched, and a workflow of B cannot run A's agent."""
+    client, app, tenant_of = api
+    assert {(m, p) for m, p in app_routes(app) if p.startswith("/api/v1/architect")} == ARCHITECT_ROUTES
+    tenant, h = tenant_of()
+    _other, other = tenant_of("mallory")
+    seeded = client.post(f"{API}/architect", headers=h).json()
+    spec = {"name": "Greeter", "id": "greeter", "instructions": "Greet people.", "model": "test:echo"}
+    assert client.post(f"{API}/architect/agents", json={"spec": spec, "publish": True}, headers=h).status_code == 200
+    wf = {"name": "Flow", "id": "flow", "steps": [{"kind": "agent", "id": "s", "agent": "greeter", "prompt": "{{input}}"}]}
+    assert client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": True}, headers=h).status_code == 200
+
+    state = client.get(f"{API}/architect", headers=other).json()
+    assert state["seeded"] is False and state["agents"] == [] and state["workflows"] == []
+    assert client.get(f"{API}/architect/options", headers=other).json()["agents"] == []
+    mine = client.post(f"{API}/architect", headers=other).json()
+    assert mine["architect_agent_id"] != seeded["architect_agent_id"]
+    assert client.get(f"{API}/agents/{seeded['architect_agent_id']}", headers=other).status_code == 404
+
+    theirs = {**spec, "instructions": "Mallory's greeter."}
+    assert client.post(f"{API}/architect/agents", json={"spec": theirs, "publish": False}, headers=other).status_code == 200
+    r = client.post(f"{API}/architect/agents", json={"spec": theirs, "publish": False, "expected_version": 1}, headers=other)
+    assert r.status_code == 409  # B's greeter has no version: it is B's row, not A's v1
+    bad = {**wf, "id": "steal", "steps": [{"kind": "agent", "id": "s", "agent": "greeter", "prompt": "x"}]}
+    state_b = client.get(f"{API}/architect", headers=other).json()
+    assert [a["id"] for a in state_b["agents"]] == ["greeter"] and state_b["agents"][0]["versions"] == 0
+    r = client.post(f"{API}/architect/workflows", json={"spec": bad, "publish": True}, headers=other)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"  # B's greeter has no published version
+
+    a_row = client.get(f"{API}/architect", headers=h).json()
+    assert [a["versions"] for a in a_row["agents"]] == [1] and [w["versions"] for w in a_row["workflows"]] == [1]
+    with app.state.database_engine.connect() as conn:
+        draft = conn.execute(text("SELECT draft_spec->>'instructions' FROM agents WHERE tenant_id = :t AND slug = 'greeter'"),
+                             {"t": tenant}).scalar()
+    assert draft == "Greet people."

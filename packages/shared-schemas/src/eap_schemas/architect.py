@@ -70,6 +70,20 @@ ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
     "architect.set_workflow_schedule",
 )
 
+# Every tool of the Architect agent (Tasks 3 and 4): the read tools, the two draft tools, then the gated
+# ones. The seed lists all of them in the Architect's `tools`; the worker registers exactly these ids.
+ARCHITECT_TOOL_IDS: tuple[str, ...] = (
+    "architect.list_approved_tools",
+    "architect.list_created_agents",
+    "architect.list_agent_versions",
+    "architect.list_created_workflows",
+    "architect.list_workflow_versions",
+    "architect.list_workflow_step_kinds",
+    "architect.save_agent",
+    "architect.save_workflow",
+    *ARCHITECT_GATED_TOOL_IDS,
+)
+
 
 def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] | None) -> list[str]:
     """The gated Architect tools in `tools` that `approval_tools` (spec.approvals.tools) does not list."""
@@ -84,8 +98,31 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63})$")
 
 
+def slugify(name: str) -> str:
+    """A slug (`AGENT_ID_PATTERN`) from a name: lowercase words joined by dashes, at most 48 characters."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48].strip("-")
+    if not slug or not slug[0].isalpha():
+        slug = f"a-{slug}".strip("-")[:48].strip("-")
+    return slug if AGENT_ID_PATTERN.fullmatch(slug) else "definition"
+
+
 def is_denied_tool(tool_id: str) -> bool:
     return any(tool_id == p or tool_id.startswith(p) for p in ARCHITECT_DENIED_TOOL_PREFIXES)
+
+
+def offer_tool(
+    tool_id: str, title: str, description: str, *, side_effect: bool = False, host_only: bool = False
+) -> "AllowlistTool | None":
+    """The allowlist entry for one platform tool, or None when the code denylist or `host_only` keeps it
+    from created agents. `requires_approval` is the tool's side effect or its place in GATED_TOOL_IDS.
+    The one rule both the worker (its registry) and the API (the tool declarations) apply, so the two
+    allowlists cannot drift apart."""
+    if host_only or is_denied_tool(tool_id):
+        return None
+    return AllowlistTool(
+        id=tool_id, title=title, description=description or title,
+        requires_approval=bool(side_effect) or tool_id in GATED_TOOL_IDS,
+    )
 
 
 # ------------------------------------------------------------------------------------- allowlist
@@ -471,10 +508,13 @@ __all__ = [
     "ArchitectToolStep",
     "ArchitectWorkflowSpec",
     "ARCHITECT_GATED_TOOL_IDS",
+    "ARCHITECT_TOOL_IDS",
     "GATED_TOOL_IDS",
     "RESERVED_AGENT_IDS",
     "compile_agent",
     "compile_workflow",
     "is_denied_tool",
+    "offer_tool",
+    "slugify",
     "ungated_architect_tools",
 ]

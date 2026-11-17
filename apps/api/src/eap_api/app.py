@@ -177,6 +177,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.attachments import router as attachments_router  # W2.4: attachments, message feedback
 
     app.include_router(attachments_router, prefix="/api/v1")
+    from eap_api.routes.architect import router as architect_router  # Architect: seed, options, draft, page save
+
+    app.include_router(architect_router, prefix="/api/v1")
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])
