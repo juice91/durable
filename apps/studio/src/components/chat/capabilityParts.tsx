@@ -65,6 +65,7 @@ export function ToolApprovalPart({ data: raw }: DataMessagePartProps<ToolApprova
         toolName={data.toolName}
         toolCallId={data.toolCallId}
         decision={data.decision}
+        summary={data.summary ?? null}
         lostRace={Boolean(lostRaces?.has(toolCallInfoKey(runId, data.toolCallId)))}
       />
     );
@@ -72,7 +73,7 @@ export function ToolApprovalPart({ data: raw }: DataMessagePartProps<ToolApprova
   return (
     <div className="my-2" data-testid="tool-approval-waiting" data-tool-call-id={data.toolCallId}>
       <ApprovalCard
-        approval={{ kind: "tool", runId, toolCallId: data.toolCallId, toolName: data.toolName, args: data.args, deadline: data.deadline }}
+        approval={{ kind: "tool", runId, toolCallId: data.toolCallId, toolName: data.toolName, args: data.args, deadline: data.deadline, summary: data.summary ?? null }}
         onRefresh={() => refreshRun(runId)}
         onConflict={() => noteLostRace?.(toolCallInfoKey(runId, data.toolCallId))}
       />

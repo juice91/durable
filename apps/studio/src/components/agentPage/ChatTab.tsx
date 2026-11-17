@@ -1315,7 +1315,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
       details: (runId, toolCallId) => {
         const turn = byRun.get(runId);
         const approval = turn ? toolApprovals(turn.events).find((item) => item.toolCallId === toolCallId) : undefined;
-        return approval ? { toolName: approval.toolName, args: approval.args, deadline: approval.deadline } : null;
+        return approval ? { toolName: approval.toolName, args: approval.args, deadline: approval.deadline, summary: approval.summary ?? null } : null;
       },
       decision: (runId, toolCallId) => {
         const turn = byRun.get(runId);
@@ -1674,7 +1674,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
             {nativeWaiting.map((approval) => (
               <ApprovalCard
                 key={approval.toolCallId}
-                approval={{ kind: "tool", runId: nativeFollow, toolCallId: approval.toolCallId, toolName: approval.toolName, args: approval.args, deadline: approval.deadline }}
+                approval={{ kind: "tool", runId: nativeFollow, toolCallId: approval.toolCallId, toolName: approval.toolName, args: approval.args, deadline: approval.deadline, summary: approval.summary ?? null }}
                 onRefresh={() => refreshTurn(nativeFollow, true)}
               />
             ))}

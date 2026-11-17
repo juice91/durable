@@ -20,7 +20,7 @@ export const APPROVAL_POLL_MS = 5000;
 
 /** What the native data knows about a gated call (its card's arguments and deadline, a decision). */
 export interface AgUiApprovalLookups {
-  details: (runId: string, toolCallId: string) => { toolName: string; args: unknown; deadline: string | null } | null;
+  details: (runId: string, toolCallId: string) => { toolName: string; args: unknown; deadline: string | null; summary?: string | null } | null;
   decision: (runId: string, toolCallId: string) => ToolDecision | null;
 }
 
@@ -171,6 +171,7 @@ export function AgUiApprovals({ lookups, onCount, onRefreshRun }: { lookups: AgU
                 toolName: details?.toolName ?? target.toolName ?? "tool",
                 args: details?.args ?? {},
                 deadline: details?.deadline ?? interrupt.expiresAt ?? null,
+                summary: details?.summary ?? null,
               }}
               submit={async (decision, comment) => decide(interrupt.id, decision === "approve", comment)}
               onRefresh={() => onRefreshRun?.(target.runId)}

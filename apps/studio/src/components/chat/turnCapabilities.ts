@@ -199,6 +199,8 @@ export interface ToolApprovalState {
   toolName: string;
   args: unknown;
   deadline: string | null;
+  /** The registry's words for what the call would do; absent for tools without a summariser. */
+  summary?: string | null;
   /** Null while the call waits. */
   decision: ToolDecision | null;
 }
@@ -240,6 +242,7 @@ export function toolApprovals(events: readonly RunEvent[]): ToolApprovalState[] 
       toolName: typeof event.data.tool_name === "string" ? event.data.tool_name : "tool",
       args: event.data.args ?? {},
       deadline: typeof event.data.deadline === "string" ? event.data.deadline : null,
+      summary: typeof event.data.summary === "string" && event.data.summary ? event.data.summary : null,
       decision: decisions.get(id) ?? null,
     });
   }

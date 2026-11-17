@@ -12,7 +12,7 @@ export const LOST_RACE_MESSAGE = "Your decision was not recorded: this call had 
  * the lost-race notice when this page's decision lost. Shared by the native ToolApprovalPart and the
  * AG-UI chat's tool cards.
  */
-export function ToolDecisionView({ toolName, toolCallId, decision, lostRace = false }: { toolName: string; toolCallId: string; decision: ToolDecision; lostRace?: boolean }) {
+export function ToolDecisionView({ toolName, toolCallId, decision, lostRace = false, summary = null }: { toolName: string; toolCallId: string; decision: ToolDecision; lostRace?: boolean; summary?: string | null }) {
   const approved = decision.kind === "approved";
   const Icon = approved ? ShieldCheck : ShieldX;
   return (
@@ -32,6 +32,11 @@ export function ToolDecisionView({ toolName, toolCallId, decision, lostRace = fa
             </>
           ) : null}
         </p>
+        {summary ? (
+          <p data-testid="tool-approval-summary" className="mt-0.5 whitespace-pre-wrap text-foreground">
+            {summary}
+          </p>
+        ) : null}
         {decision.comment ? <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">{decision.comment}</p> : null}
         {lostRace ? (
           <p role="status" data-testid="tool-approval-lost-race" className="mt-0.5 text-warning-text">

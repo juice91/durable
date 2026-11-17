@@ -55,6 +55,9 @@ class RetrieveTally:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+ARCHITECT_TOOL_PREFIX = "architect."
+
+
 @dataclass(frozen=True)
 class WorkerDeps(RunDeps):
     """Run deps for the generic agent: the runtime's RunDeps (with the run's read-only
@@ -110,8 +113,35 @@ class WorkerRuntime:
             return frozenset(self.registry.tool_ids()) - HIDDEN_TOOL_IDS
         return self.settings.allowed_tools - HIDDEN_TOOL_IDS
 
+    def allowed_tools_for(self, *, builtin: bool) -> frozenset[str]:
+        """The tools one run may use. The Architect's `architect.*` tools belong to built-in agent
+        rows only: for any other agent they are removed here, so a spec that lists one fails the
+        run's tool check (ToolNotAllowedError) before the model is called."""
+        if builtin:
+            return self.allowed_tools
+        return frozenset(t for t in self.allowed_tools if not t.startswith(ARCHITECT_TOOL_PREFIX))
+
+    def agent_is_builtin(self, tenant_id: str, agent_id: str) -> bool:
+        """Whether the run's agent row has builtin = true (false for a missing row)."""
+        try:
+            UUID(str(agent_id))
+        except ValueError:
+            return False
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT builtin FROM agents WHERE id = :a AND tenant_id = :t"),
+                {"a": str(agent_id), "t": tenant_id},
+            ).first()
+        return bool(row[0]) if row is not None else False
+
     def deps_for(
-        self, run_id: str, tenant_id: str, spec: AgentSpec, request_context: dict[str, Any] | None = None
+        self,
+        run_id: str,
+        tenant_id: str,
+        spec: AgentSpec,
+        request_context: dict[str, Any] | None = None,
+        *,
+        builtin: bool = False,
     ) -> WorkerDeps:
         return WorkerDeps(
             tenant_id=tenant_id,
@@ -119,7 +149,7 @@ class WorkerRuntime:
             side_effects=PostgresSideEffectStore(self.engine, tenant_id),
             ticket_service=_CrashAfterCallTicketService(self.tickets.for_tenant(tenant_id)),
             spec=spec,
-            allowed_tools=self.allowed_tools,
+            allowed_tools=self.allowed_tools_for(builtin=builtin),
             request_context=RequestContext(declared_context(spec, request_context)),
         )
 

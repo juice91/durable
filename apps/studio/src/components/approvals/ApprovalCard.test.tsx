@@ -77,3 +77,20 @@ describe("ApprovalCard", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());
   });
 });
+
+describe("ApprovalCard summary", () => {
+  const tool = { kind: "tool" as const, runId: "run-1", toolCallId: "call-1", toolName: "architect__publish_agent", args: { id: "a1" }, deadline: null };
+
+  it("shows the summary above the arguments when present", () => {
+    render(<ApprovalCard approval={{ ...tool, summary: "Publish agent Support triage as version 3" }} onRefresh={vi.fn()} />);
+    const summary = screen.getByTestId("approval-summary-tool-call-1");
+    expect(summary).toHaveTextContent("Publish agent Support triage as version 3");
+    const args = screen.getByTestId("approval-args-tool-call-1");
+    expect(summary.compareDocumentPosition(args) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("shows no summary block when there is none", () => {
+    render(<ApprovalCard approval={tool} onRefresh={vi.fn()} />);
+    expect(screen.queryByTestId("approval-summary-tool-call-1")).toBeNull();
+  });
+});

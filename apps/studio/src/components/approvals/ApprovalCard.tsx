@@ -19,7 +19,7 @@ export const TOOL_NOT_WAITING_MESSAGE =
   "This tool call is no longer waiting for approval (already decided, timed out, or the run ended). The view was refreshed.";
 
 export type ApprovalTarget =
-  | { kind: "tool"; runId: string; toolCallId: string; toolName: string; args: unknown; deadline: string | null }
+  | { kind: "tool"; runId: string; toolCallId: string; toolName: string; args: unknown; deadline: string | null; /** What the call would do, in words (a tool with a registry summariser). */ summary?: string | null }
   | {
       kind: "step";
       runId: string;
@@ -202,6 +202,11 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       </div>
       {tool ? (
         <div>
+          {approval.summary ? (
+            <p data-testid={`approval-summary-${key}`} className="mb-2 whitespace-pre-wrap text-sm font-medium text-foreground">
+              {approval.summary}
+            </p>
+          ) : null}
           <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
           <pre
             data-testid={`approval-args-${key}`}

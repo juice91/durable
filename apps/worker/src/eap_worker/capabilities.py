@@ -388,6 +388,21 @@ def _call_args(call: ToolCallPart) -> Any:
         return {}
 
 
+def _approval_summary(call: ToolCallPart) -> str | None:
+    """The registry's summary of a gated call, or None (no summariser, an MCP or client tool, or a
+    summariser that fails: the card then shows the arguments alone)."""
+    from eap_worker.runtime import get_runtime
+
+    registry = get_runtime().registry
+    tool_id = registry.tool_id_for_name(call.tool_name)
+    if tool_id is None:
+        return None
+    try:
+        return registry.summary_for(tool_id, _call_args(call))
+    except Exception:  # noqa: BLE001 - a summary is a courtesy, never a reason to fail the run
+        return None
+
+
 @DBOS.step(name="eap.tool_approval_begin")
 async def tool_approval_begin_step(
     run_id: str,
@@ -531,12 +546,18 @@ async def wait_for_tool_approvals(
         deadline: float | None = None
         begun: list[str] = []
         for call in waiting:
+            payload: dict[str, Any] = {
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "args": _call_args(call),
+            }
+            summary = _approval_summary(call)
+            if summary is not None:  # only tools with a summariser: other payloads are unchanged
+                payload["summary"] = summary
             recorded = await tool_approval_begin_step(
                 run_id, tenant_id, call.tool_call_id,
                 {
-                    "tool_call_id": call.tool_call_id,
-                    "tool_name": call.tool_name,
-                    "args": _call_args(call),
+                    **payload,
                     # The DBOS workflow that waits: the API sends the wake-up here.
                     "workflow_id": DBOS.workflow_id,
                     # AG-UI (Q7): every waiting call of this deferred batch, for one interrupt per batch.

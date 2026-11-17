@@ -994,6 +994,13 @@ def _turn_messages(turn: dict[str, Any]) -> list[dict[str, Any]]:
     return ModelMessagesTypeAdapter.dump_python(fallback, mode="json")
 
 
+@DBOS.step(name="eap.agent_is_builtin")
+async def agent_is_builtin_step(tenant_id: str, agent_id: str) -> bool:
+    """Whether the run's agent row is built in (recorded, so a replay decides the same way):
+    only built-in agents may use `architect.*` tools (WorkerRuntime.allowed_tools_for)."""
+    return await asyncio.to_thread(get_runtime().agent_is_builtin, tenant_id, agent_id)
+
+
 @DBOS.step(name="eap.load_history")
 async def load_history_step(run_id: str, tenant_id: str, conversation_id: str, turn: int) -> list[dict[str, Any]]:
     """The message history for turn `turn`: the conversation's earlier COMPLETED turns, oldest first.
@@ -2052,10 +2059,11 @@ async def _run_body(
             fallback_provider, _, fallback_name = member.partition(":")
             rt.settings.allowed_models.check(fallback_provider, fallback_name)
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
-        check_spec_tools(spec, rt.registry, rt.allowed_tools)
+        builtin = await agent_is_builtin_step(tenant_id, agent_id)
+        check_spec_tools(spec, rt.registry, rt.allowed_tools_for(builtin=builtin))
         request_context = link.get("request_context") or None
         _check_request_context(spec, request_context)
-        deps = rt.deps_for(run_id, tenant_id, spec, request_context)
+        deps = rt.deps_for(run_id, tenant_id, spec, request_context, builtin=builtin)
         if spec.memory is not None and link.get("conversation_id") is not None:
             # RM.12: the turn's memory snapshot (recorded), then its instructions block and tools.
             loaded = await load_memory_step(
