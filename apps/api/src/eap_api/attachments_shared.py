@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from fastapi import HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
+import anyio.from_thread
 from starlette.concurrency import run_in_threadpool
 
 from eap_blob_store import BlobNotFound, BlobStore, attachment_key
@@ -231,3 +232,25 @@ async def attachment_response(request: Request, meta: AttachmentMeta) -> Respons
     )
 
 
+
+
+async def delete_unsent_attachment(request: Request, tenant_id: str, attachment_id: str, created_by: str) -> Response:
+    """Discard an upload that no message references: 204; 409 `attachment_in_use` once a message
+    references it; 404 when it is unknown, another tenant's or another creator's. The row is read
+    locked, then the blob is deleted, then the row (see `ChatAttachmentStore.delete_unsent`)."""
+    store = blob_store(request)
+
+    def remove_blob(key: str) -> None:  # runs in the worker thread that holds the row lock
+        anyio.from_thread.run(store.delete, key)
+
+    outcome = await run_in_threadpool(
+        attachment_store(request).delete_unsent, tenant_id, attachment_id, created_by, remove_blob=remove_blob
+    )
+    if outcome == "missing":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    if outcome == "in_use":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "attachment_in_use", "message": "The attachment is already sent in a message"},
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

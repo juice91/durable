@@ -170,3 +170,47 @@ def test_a_key_upload_over_the_json_body_cap_still_works(agui_client_with_key):
     r = key_upload(client, key, "big.txt", data, "text/plain")
     assert r.status_code == 201, r.text
     assert client.get(f"{UP}/{r.json()['id']}", headers=kh(key)).content == data
+
+
+def test_key_deletes_its_own_unsent_upload(agui_client_with_key):
+    client, _agent, _key_id, key = agui_client_with_key
+    meta = key_upload(client, key).json()
+    assert client.delete(f"{UP}/{meta['id']}", headers=kh(key)).status_code == 204
+    assert client.get(f"{UP}/{meta['id']}", headers=kh(key)).status_code == 404
+    assert client.delete(f"{UP}/{meta['id']}", headers=kh(key)).status_code == 404
+
+
+def test_key_delete_refuses_a_linked_attachment(agui_client_with_key, worker):
+    client, agent_id, _key_id, key = agui_client_with_key
+    meta = key_upload(client, key).json()
+    msg = {"id": "u1", "role": "user", "content": [{"type": "text", "text": "x"}, ref(meta)]}
+    assert post(client, agent_id, body("t-d", "r-d", msg), kh(key))[0] == 200
+    got = client.delete(f"{UP}/{meta['id']}", headers=kh(key))
+    assert got.status_code == 409 and got.json()["detail"]["code"] == "attachment_in_use"
+    assert client.get(f"{UP}/{meta['id']}", headers=kh(key)).status_code == 200
+
+
+def test_key_cannot_delete_what_another_key_or_the_dev_user_uploaded(ag, tenant):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_a, agent_b = make_agent(client, h), make_agent(client, h)
+    _, key_a = _key(client, tenant, agent_ids=[agent_a])
+    _, key_b = _key(client, tenant, agent_ids=[agent_b])
+    mine = key_upload(client, key_a).json()
+    dev = upload(client, h).json()
+    assert client.delete(f"{UP}/{mine['id']}", headers=kh(key_b)).status_code == 404
+    assert client.delete(f"{UP}/{dev['id']}", headers=kh(key_a)).status_code == 404
+    other = f"t{uuid.uuid4().hex[:10]}"
+    ag[1].state.test_tenants.append(other)
+    _, key_o = _key(client, other)
+    assert client.delete(f"{UP}/{mine['id']}", headers=kh(key_o)).status_code == 404
+    assert client.get(f"{UP}/{mine['id']}", headers=kh(key_a)).status_code == 200  # still there
+
+
+def test_delete_needs_the_scope_and_credentials(ag, tenant):
+    client, app = ag
+    assert client.delete(f"{UP}/{uuid.uuid4()}").status_code == 401
+    key_id, key = _key(client, tenant)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE api_keys SET scopes = '[]'::jsonb WHERE id = :i"), {"i": key_id})
+    assert client.delete(f"{UP}/{uuid.uuid4()}", headers=kh(key)).status_code == 403

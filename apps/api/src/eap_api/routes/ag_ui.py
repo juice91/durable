@@ -130,6 +130,7 @@ from eap_api.attachments_shared import (
     attachment_response,
     attachment_store,
     created_by_for,
+    delete_unsent_attachment,
     read_upload,
     store_upload,
 )
@@ -1324,6 +1325,18 @@ async def get_attachment(attachment_id: str, request: Request, principal: AgUiPr
     if meta is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
     return await attachment_response(request, meta)
+
+
+@_attachment_routes.delete(
+    "/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={409: {"model": ErrorDetail}},
+)
+async def delete_attachment(attachment_id: str, request: Request, principal: AgUiPrincipalDep) -> Response:
+    """Discard an upload of the caller (the key that made it) before a message sends it: 204; 409
+    `attachment_in_use` once a message references it; 404 when unknown, another tenant's or another
+    caller's."""
+    return await delete_unsent_attachment(request, principal.tenant_id, attachment_id, created_by_for(principal))
 
 
 router.include_router(_attachment_routes)

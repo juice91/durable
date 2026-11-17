@@ -3,6 +3,7 @@ import {
   acceptFor,
   attachmentPath,
   attachmentRefusal,
+  deleteAttachment,
   fileMediaType,
   uploadAttachment,
   type Attachment,
@@ -44,8 +45,10 @@ export function createAttachmentAdapter(
       yield { ...base, status: { type: "requires-action", reason: "composer-send" } } as PendingAttachment;
     },
     async remove(attachment) {
-      // The upload stays on the server unreferenced; it is only reachable by its id.
+      // Discard the upload on the server too (best effort: an unsent upload expires on its own).
+      const stored = uploaded.get(attachment.id);
       uploaded.delete(attachment.id);
+      if (stored) void deleteAttachment(stored.id).catch(() => undefined);
     },
     async send(attachment): Promise<CompleteAttachment> {
       const stored = uploaded.get(attachment.id);

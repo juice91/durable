@@ -7,6 +7,9 @@
 - GET  /attachments/{id}             the bytes, tenant-scoped (another tenant's id is 404), with the stored
                                      content type, `Content-Disposition` and `X-Content-Type-Options: nosniff`.
                                      410 `attachment_gone` when the row exists but its blob does not.
+- DELETE /attachments/{id}           discard the caller's own unsent upload: 204; 409 `attachment_in_use`
+                                     once a message references it; 404 unknown, another tenant's or another
+                                     user's. Unsent uploads also expire (EAP_ATTACHMENT_ORPHAN_HOURS, 24 h).
 
 The bytes live in the BlobStore (`app.state.blob_store`, built from EAP_BLOB_* at startup), never in
 Postgres: an upload is validated (size, type, sniff) and then streamed into the store, the row records
@@ -36,6 +39,7 @@ from eap_api.attachments_shared import (
     attachment_response,
     attachment_store,
     created_by_for,
+    delete_unsent_attachment,
     read_upload,
     store_upload,
 )
@@ -80,6 +84,17 @@ async def get_attachment(attachment_id: str, request: Request, principal: Princi
     if meta is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
     return await attachment_response(request, meta)
+
+
+@router.delete(
+    "/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={409: {"model": ErrorDetail}},
+)
+async def delete_attachment(attachment_id: str, request: Request, principal: PrincipalDep) -> Response:
+    """Discard the caller's own upload before it is sent: 204; 409 `attachment_in_use` once a message
+    references it; 404 when unknown, another tenant's or another user's."""
+    return await delete_unsent_attachment(request, principal.tenant_id, attachment_id, created_by_for(principal))
 
 
 # --------------------------------------------------------------------------- message feedback

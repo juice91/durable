@@ -15,8 +15,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from collections.abc import Mapping
-from typing import Any, Iterable
+from collections.abc import Callable, Mapping
+from typing import Any, Iterable, Literal
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -299,6 +299,61 @@ class ChatAttachmentStore:
                 )
                 .values(message_id=message_id)
             )
+
+    def delete_unsent(
+        self, tenant_id: str, attachment_id: str, created_by: str, *, remove_blob: Callable[[str], None]
+    ) -> Literal["deleted", "in_use", "missing"]:
+        """Discard an upload its creator no longer wants. Order (spec D0): read the row `FOR UPDATE`
+        (a concurrent `link` waits), refuse when it is already tied to a message (`in_use`), delete the
+        blob through `remove_blob(storage_key)` (idempotent), then the row. A crash after the blob and
+        before the row leaves a row without a blob (a download is 410); the retention pass deletes it.
+        `missing`: no such row in this tenant, or another creator's."""
+        if not _is_uuid(attachment_id):
+            return "missing"
+        with self.Session() as session, session.begin():
+            row = session.execute(
+                select(ChatAttachmentModel)
+                .where(ChatAttachmentModel.tenant_id == tenant_id, ChatAttachmentModel.id == attachment_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if row is None or row.created_by != created_by:
+                return "missing"
+            if row.message_id is not None:
+                return "in_use"
+            remove_blob(row.storage_key)
+            session.delete(row)
+        return "deleted"
+
+    def unsent_before(self, cutoff: datetime, limit: int) -> list[str]:
+        """Ids of up to `limit` unsent uploads created before `cutoff`, oldest first."""
+        with self.Session() as session:
+            rows = session.execute(
+                select(ChatAttachmentModel.id)
+                .where(ChatAttachmentModel.message_id.is_(None), ChatAttachmentModel.created_at < cutoff)
+                .order_by(ChatAttachmentModel.created_at, ChatAttachmentModel.id)
+                .limit(limit)
+            ).all()
+        return [str(r[0]) for r in rows]
+
+    def delete_unsent_ids(self, ids: Iterable[str]) -> list[tuple[str, str]]:
+        """Delete these rows where they are still unsent (`message_id IS NULL` is part of the DELETE, so
+        a row linked since it was listed survives). Returns `(tenant_id, storage_key)` of each deleted
+        row; the caller deletes the blobs afterwards (row first: a crash leaves a blob without a row,
+        never a message pointing at nothing)."""
+        wanted = [i for i in ids if _is_uuid(i)]
+        if not wanted:
+            return []
+        with self.Session() as session, session.begin():
+            rows = session.execute(
+                delete(ChatAttachmentModel)
+                .where(ChatAttachmentModel.id.in_(wanted), ChatAttachmentModel.message_id.is_(None))
+                .returning(ChatAttachmentModel.tenant_id, ChatAttachmentModel.storage_key)
+            ).all()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    def delete_unsent_before(self, cutoff: datetime, limit: int) -> list[tuple[str, str]]:
+        """`unsent_before` then `delete_unsent_ids`: one batch of expired uploads."""
+        return self.delete_unsent_ids(self.unsent_before(cutoff, limit))
 
     def for_run(self, tenant_id: str, run_id: str) -> list[AttachmentMeta]:
         """The attachments of a turn's user messages (its `ag_ui_runs.input_message_ids`); the bytes

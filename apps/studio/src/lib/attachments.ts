@@ -130,3 +130,10 @@ export async function fetchAttachmentBlob(urlOrId: string, signal?: AbortSignal)
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.blob();
 }
+
+/** Discard an upload no message references (DELETE /attachments/{id}). Best effort: the caller
+ * ignores failure, because an unsent upload expires on its own (24 h). */
+export async function deleteAttachment(id: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}${attachmentPath(id)}`, { method: "DELETE", headers: apiHeaders() });
+  if (!response.ok && response.status !== 404) throw await apiErrorFromResponse(response);
+}

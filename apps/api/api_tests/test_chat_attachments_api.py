@@ -471,3 +471,61 @@ def test_an_api_key_principal_with_a_user_id_sees_no_feedback_over_http_or_repla
     assert feedback_viewer(key) is None
     assert feedback_viewer(AgUiPrincipal(tenant_id=tenant, kind="dev", user_id="alice")) == "alice"
     assert run_id
+
+
+# --------------------------------------------------------------------------- delete (unsent uploads)
+
+
+def _blob_exists(app, tenant, attachment_id) -> bool:
+    import asyncio
+
+    return asyncio.run(app.state.blob_store.exists(f"attachments/{tenant}/{attachment_id}"))
+
+
+def test_delete_unsent_by_creator(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    assert _blob_exists(app, tenant, meta["id"])
+    assert client.delete(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 204
+    assert not _blob_exists(app, tenant, meta["id"])
+    assert client.get(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 404
+    assert client.delete(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 404  # not idempotent-204
+
+
+def test_delete_refuses_a_linked_attachment(ag, tenant, worker):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_id = make_agent(client, h)
+    meta = upload(client, h).json()
+    msg = {"id": "u1", "role": "user", "content": [{"type": "text", "text": "look"}, part(meta)]}
+    status, detail, _ = post(client, agent_id, body("t-del", "r-del", msg), h)
+    assert status == 200, detail
+    got = client.delete(f"/api/v1/attachments/{meta['id']}", headers=h)
+    assert got.status_code == 409 and got.json()["detail"]["code"] == "attachment_in_use"
+    assert _blob_exists(app, tenant, meta["id"])
+    assert client.get(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 200
+
+
+def test_delete_is_404_for_another_user_or_tenant(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    other_user = get_auth_header(tenant, "bob")
+    assert client.delete(f"/api/v1/attachments/{meta['id']}", headers=other_user).status_code == 404
+    other_tenant = get_auth_header(f"{tenant}-other", "alice")
+    assert client.delete(f"/api/v1/attachments/{meta['id']}", headers=other_tenant).status_code == 404
+    assert client.delete("/api/v1/attachments/not-a-uuid", headers=h).status_code == 404
+    assert _blob_exists(app, tenant, meta["id"])  # nothing was removed
+    assert client.get(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 200
+
+
+def test_delete_with_the_blob_already_gone_still_removes_the_row(ag, tenant):
+    import asyncio
+
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    asyncio.run(app.state.blob_store.delete(f"attachments/{tenant}/{meta['id']}"))
+    assert client.delete(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 204
+    assert client.get(f"/api/v1/attachments/{meta['id']}", headers=h).status_code == 404
