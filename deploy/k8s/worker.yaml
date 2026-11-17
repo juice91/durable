@@ -64,6 +64,9 @@ spec:
             - name: EAP_LITELLM_EMBEDDING_API_KEY
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_LITELLM_EMBEDDING_API_KEY}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY}
             - name: EAP_AUDIT_HASH_SALT
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_AUDIT_HASH_SALT}
