@@ -16,7 +16,12 @@ def register_adapter(kind: str, provider: str, factory: Callable[[], SourceAdapt
     _FACTORIES[(kind, provider)] = factory
 
 
+def _load_providers() -> None:
+    import eap_kb_sources.providers  # noqa: F401  (each provider registers itself on import)
+
+
 def adapter_for(kind: str, provider: str) -> SourceAdapter:
+    _load_providers()
     factory = _FACTORIES.get((kind, provider))
     if factory is None:
         raise SourceError(SOURCE_ADAPTER_NOT_FOUND, "no adapter for this source's kind and provider")
@@ -24,4 +29,5 @@ def adapter_for(kind: str, provider: str) -> SourceAdapter:
 
 
 def registered() -> list[tuple[str, str]]:
+    _load_providers()
     return sorted(_FACTORIES)
