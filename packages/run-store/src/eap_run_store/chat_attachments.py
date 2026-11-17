@@ -120,7 +120,7 @@ class ChatAttachmentModel(Base):
     # The native run whose user message linked this upload (set with message_id by `link`). A key may
     # read a linked upload only through a run of an agent it may use, never by the bare client-chosen
     # message id, which two agents' runs can share.
-    run_id: Mapped[str | None] = mapped_column("run_id", String, nullable=True)
+    run_id: Mapped[str | None] = mapped_column("run_id", Text, nullable=True)
     created_by: Mapped[str] = mapped_column("created_by", String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
