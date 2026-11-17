@@ -78,6 +78,10 @@ NEW_ROUTES = {
     ("POST", "/api/v1/workflows/{workflow_id}/schedules"),
     ("PATCH", "/api/v1/workflows/schedules/{schedule_id}"),
     ("DELETE", "/api/v1/workflows/schedules/{schedule_id}"),
+    # Architect milestone: workflow archive, unarchive and restore (shared with the Architect's tools).
+    ("POST", "/api/v1/workflows/{workflow_id}/archive"),
+    ("POST", "/api/v1/workflows/{workflow_id}/unarchive"),
+    ("POST", "/api/v1/workflows/{workflow_id}/versions/{version_num}/restore"),
     # Parity round 2, D7: spans list, runs histogram, score on demand.
     ("GET", "/api/v1/spans"),
     ("GET", "/api/v1/runs/histogram"),
@@ -247,6 +251,10 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
          {"active": False}, 404),
         (("DELETE", "/api/v1/workflows/schedules/{schedule_id}"), "DELETE", f"/workflows/schedules/{w['schedule']}",
          None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/archive"), "POST", f"/workflows/{w['workflow']}/archive", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/unarchive"), "POST", f"/workflows/{w['workflow']}/unarchive", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/versions/{version_num}/restore"), "POST",
+         f"/workflows/{w['workflow']}/versions/1/restore", {"discard_draft": True}, 404),
         (("GET", "/api/v1/spans"), "GET", "/spans", None, 200),
         (("GET", "/api/v1/spans"), "GET", f"/spans?agent_id={a}", None, 200),
         (("GET", "/api/v1/runs/histogram"), "GET", "/runs/histogram", None, 200),
@@ -290,6 +298,8 @@ def test_another_tenant_reaches_nothing_on_any_new_route(api, fake):
     assert sorted((i["kind"], i["approval_key"], i["decision"]) for i in pending) == [
         ("step", "approve", None), ("tool", "call_1", None)]
     assert fake.sent == sent_before  # no wake-up for a refused decision
+    # The refused archive changed nothing: A's workflow is still listed and its schedule still active.
+    assert w["workflow"] in [i["id"] for i in client.get(f"{API}/workflows", headers=h).json()]
     mine = client.get(f"{API}/workflows/schedules", headers=h).json()["items"]
     assert [(i["id"], i["active"], i["name"]) for i in mine] == [(w["schedule"], True, "nightly")]
     assert client.get(f"{API}/workflows/schedules", headers=other).json()["items"] == []
@@ -410,3 +420,54 @@ def test_another_tenant_reaches_no_managed_mcp_server_route(api, monkeypatch):
         with app.state.database_engine.begin() as conn:
             conn.execute(text("DELETE FROM mcp_catalog_entries WHERE name = :n"), {"n": entry.name})
             conn.execute(text("DELETE FROM mcp_servers WHERE tenant_id = :t"), {"t": tenant})
+
+
+ARCHITECT_ROUTES = {
+    ("GET", "/api/v1/architect"),
+    ("POST", "/api/v1/architect"),
+    ("GET", "/api/v1/architect/options"),
+    ("POST", "/api/v1/architect/draft"),
+    ("POST", "/api/v1/architect/draft-workflow"),  # tenant scoping of what it offers: test_architect_api drop tests
+    ("POST", "/api/v1/architect/agents"),
+    ("POST", "/api/v1/architect/workflows"),
+}
+
+
+def test_architect_routes_are_in_the_inventory_and_closed_to_another_tenant(api):
+    """Every Architect route is listed here (a new one fails this test until it gets a check). Tenant A
+    seeds the Architect and makes an agent and a workflow; tenant B sees none of it: its own state is
+    empty, its seed makes its own rows, a save under A's id makes B's own row (ids are per tenant) and
+    leaves A's untouched, and a workflow of B cannot run A's agent."""
+    client, app, tenant_of = api
+    assert {(m, p) for m, p in app_routes(app) if p.startswith("/api/v1/architect")} == ARCHITECT_ROUTES
+    tenant, h = tenant_of()
+    _other, other = tenant_of("mallory")
+    seeded = client.post(f"{API}/architect", headers=h).json()
+    spec = {"name": "Greeter", "id": "greeter", "instructions": "Greet people.", "model": "test:echo"}
+    assert client.post(f"{API}/architect/agents", json={"spec": spec, "publish": True}, headers=h).status_code == 200
+    wf = {"name": "Flow", "id": "flow", "steps": [{"kind": "agent", "id": "s", "agent": "greeter", "prompt": "{{input}}"}]}
+    assert client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": True}, headers=h).status_code == 200
+
+    state = client.get(f"{API}/architect", headers=other).json()
+    assert state["seeded"] is False and state["agents"] == [] and state["workflows"] == []
+    assert client.get(f"{API}/architect/options", headers=other).json()["agents"] == []
+    mine = client.post(f"{API}/architect", headers=other).json()
+    assert mine["architect_agent_id"] != seeded["architect_agent_id"]
+    assert client.get(f"{API}/agents/{seeded['architect_agent_id']}", headers=other).status_code == 404
+
+    theirs = {**spec, "instructions": "Mallory's greeter."}
+    assert client.post(f"{API}/architect/agents", json={"spec": theirs, "publish": False}, headers=other).status_code == 200
+    r = client.post(f"{API}/architect/agents", json={"spec": theirs, "publish": False, "expected_version": 1}, headers=other)
+    assert r.status_code == 409  # B's greeter has no version: it is B's row, not A's v1
+    bad = {**wf, "id": "steal", "steps": [{"kind": "agent", "id": "s", "agent": "greeter", "prompt": "x"}]}
+    state_b = client.get(f"{API}/architect", headers=other).json()
+    assert [a["id"] for a in state_b["agents"]] == ["greeter"] and state_b["agents"][0]["versions"] == 0
+    r = client.post(f"{API}/architect/workflows", json={"spec": bad, "publish": True}, headers=other)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"  # B's greeter has no published version
+
+    a_row = client.get(f"{API}/architect", headers=h).json()
+    assert [a["versions"] for a in a_row["agents"]] == [1] and [w["versions"] for w in a_row["workflows"]] == [1]
+    with app.state.database_engine.connect() as conn:
+        draft = conn.execute(text("SELECT draft_spec->>'instructions' FROM agents WHERE tenant_id = :t AND slug = 'greeter'"),
+                             {"t": tenant}).scalar()
+    assert draft == "Greet people."

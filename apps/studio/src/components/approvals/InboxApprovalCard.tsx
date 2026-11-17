@@ -2,7 +2,18 @@
 
 import React, { useCallback, useRef } from "react";
 import type { Approval } from "@/lib/approvals";
+import Link from "next/link";
+import { routes } from "@/lib/routes";
 import { ApprovalCard } from "./ApprovalCard";
+
+const SLUG = /^[a-z][a-z0-9-]{1,47}$/;
+
+/** True for an architect.* call whose arguments name an agent or workflow by slug id. */
+function namesArchitectDefinition(toolName: string | null, args: unknown): boolean {
+  if (!toolName?.startsWith("architect.") || typeof args !== "object" || args === null) return false;
+  const record = args as Record<string, unknown>;
+  return [record.agent_id, record.workflow_id, record.id].some((value) => typeof value === "string" && SLUG.test(value));
+}
 
 export interface InboxApprovalCardProps {
   approval: Approval;
@@ -40,6 +51,7 @@ export function InboxApprovalCard({ approval, onConflict, onDecided }: InboxAppr
           toolName: approval.tool_name ?? approval.approval_key,
           args: approval.args,
           deadline: approval.deadline,
+          summary: approval.summary ?? null,
         }
       : {
           kind: "step" as const,
@@ -50,5 +62,15 @@ export function InboxApprovalCard({ approval, onConflict, onDecided }: InboxAppr
           resumeSchema: approval.resume_schema ?? null,
           pause: approval.pause === true,
         };
-  return <ApprovalCard approval={card} onRefresh={handleRefresh} onDecided={handleDecided} />;
+  const showLink = approval.kind === "tool" && namesArchitectDefinition(approval.tool_name, approval.args);
+  return (
+    <>
+      <ApprovalCard approval={card} onRefresh={handleRefresh} onDecided={handleDecided} />
+      {showLink ? (
+        <Link data-testid="approval-architect-link" href={routes.architect()} className="mt-2 inline-block text-label underline underline-offset-4">
+          Open in Architect
+        </Link>
+      ) : null}
+    </>
+  );
 }

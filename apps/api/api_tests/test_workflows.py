@@ -512,3 +512,116 @@ def test_patch_non_finite_number_is_422_and_leaves_the_draft(client, auth_header
     assert kept.status_code == 200, kept.text
     assert kept.json()["name"] == "Test Workflow"
     assert kept.json()["draft_spec"]["steps"][0]["input"] == {}
+
+
+# --- archive, unarchive and restore (shared with the Architect's tools: eap_run_store.definitions) ---
+
+
+def _published(client, headers, name: str = "Test Workflow") -> str:
+    spec = {**_spec(), "name": name}
+    wid = client.post(BASE, json={"spec": spec}, headers=headers).json()["id"]
+    assert client.post(f"{BASE}/{wid}/versions", headers=headers).status_code == 201
+    return wid
+
+
+def _publish_edit(client, headers, wid: str, name: str) -> dict:
+    """Edit the draft (the name differs, so the hash does) and publish it."""
+    spec = {**_spec(), "name": name}
+    assert client.patch(f"{BASE}/{wid}", json={"spec": spec}, headers=headers).status_code == 200
+    resp = client.post(f"{BASE}/{wid}/versions", headers=headers)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def test_archive_hides_the_workflow_and_is_idempotent(client, auth_header):
+    wid = _published(client, auth_header)
+    resp = client.post(f"{BASE}/{wid}/archive", headers=auth_header)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == wid and body["archived"] is True and body["latest_version"] == 1
+    assert body["paused_schedules"] == []
+    assert wid not in [w["id"] for w in client.get(BASE, headers=auth_header).json()]
+    assert client.get(f"{BASE}/{wid}", headers=auth_header).json()["archived"] is True  # still readable
+    assert client.post(f"{BASE}/{wid}/archive", headers=auth_header).json()["archived"] is True
+
+    back = client.post(f"{BASE}/{wid}/unarchive", headers=auth_header)
+    assert back.status_code == 200 and back.json()["archived"] is False
+    assert wid in [w["id"] for w in client.get(BASE, headers=auth_header).json()]
+    assert client.post(f"{BASE}/{wid}/unarchive", headers=auth_header).json()["archived"] is False
+
+
+def test_archived_workflow_cannot_be_published_or_restored(client, auth_header):
+    wid = _published(client, auth_header)
+    _publish_edit(client, auth_header, wid, "Second")
+    client.post(f"{BASE}/{wid}/archive", headers=auth_header)
+    _set_draft(wid, {**_spec(), "name": "Third"})
+    assert client.post(f"{BASE}/{wid}/versions", headers=auth_header).status_code == 409
+    resp = client.post(f"{BASE}/{wid}/versions/1/restore", json={"discard_draft": True}, headers=auth_header)
+    assert resp.status_code == 409
+    assert "archived" in resp.json()["detail"]
+    client.post(f"{BASE}/{wid}/unarchive", headers=auth_header)
+    assert client.post(f"{BASE}/{wid}/versions", headers=auth_header).status_code == 201
+
+
+def test_archive_pauses_active_schedules_and_unarchive_leaves_them_paused(client, auth_header):
+    wid = _published(client, auth_header)
+    sched = client.post(
+        f"{BASE}/{wid}/schedules", json={"name": "nightly", "cron": "0 3 * * *", "input": {}}, headers=auth_header
+    )
+    assert sched.status_code == 201, sched.text
+    sid = sched.json()["id"]
+    resp = client.post(f"{BASE}/{wid}/archive", headers=auth_header)
+    assert resp.json()["paused_schedules"] == [sid]
+    listed = client.get(f"{BASE}/schedules", headers=auth_header).json()["items"]
+    assert [(i["id"], i["active"]) for i in listed] == [(sid, False)]
+    client.post(f"{BASE}/{wid}/unarchive", headers=auth_header)
+    listed = client.get(f"{BASE}/schedules", headers=auth_header).json()["items"]
+    assert [(i["id"], i["active"]) for i in listed] == [(sid, False)]
+
+
+def test_restore_publishes_an_old_spec_as_the_next_version(client, auth_header):
+    wid = _published(client, auth_header, "First")
+    _publish_edit(client, auth_header, wid, "Second")
+    resp = client.post(f"{BASE}/{wid}/versions/1/restore", headers=auth_header)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["version"] == 3 and body["restored_from"] == 1 and body["warnings"] == []
+    versions = client.get(f"{BASE}/{wid}/versions", headers=auth_header).json()
+    assert [v["version"] for v in versions] == [3, 2, 1]
+    assert versions[0]["spec_hash"] == versions[2]["spec_hash"] and versions[0]["spec"]["name"] == "First"
+    got = client.get(f"{BASE}/{wid}", headers=auth_header).json()
+    assert got["name"] == "First" and got["draft_spec"]["name"] == "First"  # the draft became the restored spec
+
+
+def test_restore_refusals(client, auth_header):
+    wid = _published(client, auth_header, "First")
+    _publish_edit(client, auth_header, wid, "Second")
+    latest = client.post(f"{BASE}/{wid}/versions/2/restore", headers=auth_header)
+    assert latest.status_code == 409 and "already the latest" in latest.json()["detail"]
+    assert client.post(f"{BASE}/{wid}/versions/9/restore", headers=auth_header).status_code == 404
+    # A draft with unpublished changes needs discard_draft.
+    client.patch(f"{BASE}/{wid}", json={"spec": {**_spec(), "name": "Unpublished"}}, headers=auth_header)
+    dirty = client.post(f"{BASE}/{wid}/versions/1/restore", headers=auth_header)
+    assert dirty.status_code == 409 and "unpublished changes" in dirty.json()["detail"]
+    ok = client.post(f"{BASE}/{wid}/versions/1/restore", json={"discard_draft": True}, headers=auth_header)
+    assert ok.status_code == 201 and ok.json()["version"] == 3
+
+
+def test_restore_is_revalidated_under_todays_policy(client, auth_header, monkeypatch):
+    wid = _published(client, auth_header, "First")
+    _publish_edit(client, auth_header, wid, "Second")
+    monkeypatch.setenv("EAP_ALLOWED_TOOLS", "calc.add")  # clock.now is no longer allowed
+    resp = client.post(f"{BASE}/{wid}/versions/1/restore", headers=auth_header)
+    assert resp.status_code == 422 and "clock.now" in resp.json()["detail"]
+    versions = client.get(f"{BASE}/{wid}/versions", headers=auth_header).json()
+    assert [v["version"] for v in versions] == [2, 1]  # nothing written
+
+
+def test_archive_unarchive_restore_404_other_tenant(client, auth_header):
+    wid = _published(client, auth_header)
+    _publish_edit(client, auth_header, wid, "Second")
+    other = get_auth_header(f"t{uuid.uuid4().hex[:10]}", "bob")
+    assert client.post(f"{BASE}/{wid}/archive", headers=other).status_code == 404
+    assert client.post(f"{BASE}/{wid}/unarchive", headers=other).status_code == 404
+    assert client.post(f"{BASE}/{wid}/versions/1/restore", headers=other).status_code == 404
+    assert client.get(f"{BASE}/{wid}", headers=auth_header).json()["archived"] is False

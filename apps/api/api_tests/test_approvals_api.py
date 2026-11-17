@@ -78,13 +78,13 @@ def waiting_tool_call(client, app, tenant, headers, call_id="call_1", tool_name=
     return run_id, agent_id
 
 
-def add_tool_wait(app, tenant, run_id, call_id, tool_name="send_email", args=None):
+def add_tool_wait(app, tenant, run_id, call_id, tool_name="send_email", args=None, summary=None):
     _, event_log = app.state.run_stores
-    event_log.append_approval_waiting(
-        tenant, run_id, "tool", call_id,
-        {"tool_call_id": call_id, "tool_name": tool_name, "args": args if args is not None else {"to": "x"},
-         "deadline": _deadline(), "workflow_id": str(run_id)},
-    )
+    data = {"tool_call_id": call_id, "tool_name": tool_name, "args": args if args is not None else {"to": "x"},
+            "deadline": _deadline(), "workflow_id": str(run_id)}
+    if summary is not None:
+        data["summary"] = summary
+    event_log.append_approval_waiting(tenant, run_id, "tool", call_id, data)
 
 
 def waiting_step(client, app, tenant, headers, step_id="approve"):
@@ -249,7 +249,7 @@ def test_inbox_lists_both_kinds_with_filters_and_a_cursor(api, fake):
         "step_id": None, "root_run_id": str(tool_run), "agent_id": agent_id, "workflow_id": None,
         "tool_name": "send_email", "args": {"to": "a@b.c"}, "prompt": None, "status": "pending",
         "requested_at": None, "deadline": None, "decided_at": None, "decision": None, "decided_by": None,
-        "run_status": "running",
+        "run_status": "running", "summary": None,
     }
     assert step["step_id"] == "approve" and step["tool_call_id"] is None and step["prompt"] == "OK?"
     assert step["workflow_id"] is not None and step["tool_name"] is None and step["args"] is None
@@ -379,3 +379,20 @@ def test_the_launcher_uses_the_shared_tool_approval_topic(fake):
     launcher.notify_tool_approval(run_id="r2", tool_call_id="c2", decision="approved", workflow_id="w2")
     assert fake.sent == [("r1", {"tool_call_id": "c1", "decision": "denied"}, "tool_approval:r1"),
                          ("w2", {"tool_call_id": "c2", "decision": "approved"}, "tool_approval:r2")]
+
+
+def test_a_pending_tool_item_carries_the_summary_of_its_waiting_event(api, fake):
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    run_id, _ = waiting_tool_call(client, app, tenant, headers, call_id="call_s", tool_name="architect.publish_agent")
+    plain = client.get("/api/v1/approvals", headers=headers).json()["items"][0]
+    assert plain["summary"] is None
+    add_tool_wait(app, tenant, run_id, "call_s2", "architect.publish_agent", {"agent_id": "faq-bot"},
+                  summary="Publish faq-bot as version 3. Warnings: none.")
+    items = {i["approval_key"]: i for i in client.get("/api/v1/approvals", headers=headers).json()["items"]}
+    assert items["call_s2"]["summary"] == "Publish faq-bot as version 3. Warnings: none."
+    one = client.get(f"/api/v1/approvals/{run_id}/tool/call_s2", headers=headers).json()
+    assert one["summary"] == "Publish faq-bot as version 3. Warnings: none."
+    step_run = waiting_step(client, app, tenant, headers)
+    step = client.get(f"/api/v1/approvals/{step_run}/step/approve", headers=headers).json()
+    assert step["summary"] is None

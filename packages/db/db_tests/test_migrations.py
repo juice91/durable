@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_attachments_r2_revision():
-    assert head_revisions() == {"0023_attachments_r2"}
+def test_single_head_is_the_architect_revision():
+    assert head_revisions() == {"0026_architect_slugs"}
 
 
 def test_revisions_after_api_keys_form_one_chain():
@@ -135,7 +135,7 @@ def test_revisions_after_api_keys_form_one_chain():
     from eap_db import alembic_config
 
     script = ScriptDirectory.from_config(alembic_config())
-    chain = ["0017_api_keys", "0018_run_model_settings", "0019_trace_feedback", "0020_scorers", "0021_chat_attachments", "0022_parity_round_2", "0024_mcp_runtime", "0023_attachments_r2"]
+    chain = ["0017_api_keys", "0018_run_model_settings", "0019_trace_feedback", "0020_scorers", "0021_chat_attachments", "0022_parity_round_2", "0024_mcp_runtime", "0023_attachments_r2", "0025_architect", "0026_architect_slugs"]
     for down, up in zip(chain, chain[1:]):
         assert script.get_revision(up).down_revision == down
 

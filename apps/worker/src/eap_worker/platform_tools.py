@@ -772,6 +772,9 @@ async def knowledge_search(
 def register_platform_tools(registry: ToolRegistry) -> None:
     """Register the hidden platform tools (tool runs only) in the worker's registry."""
     registry.register(KNOWLEDGE_SEARCH_DECLARATION, knowledge_search)
+    from eap_worker.architect_tools import register_architect_tools
+
+    register_architect_tools(registry)
 
 
 __all__ = [

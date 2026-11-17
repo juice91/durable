@@ -122,16 +122,21 @@ def approval_json(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _step_extras(event_log: Any, tenant_id: str, row: dict[str, Any], *, detail: bool) -> dict[str, Any]:
+    if row["kind"] == "tool":
+        # `summary`: what the call would do, in words, as the waiting event carries it (null when the
+        # tool has no summariser).
+        waiting = event_log.get_event(tenant_id, row["run_id"], f"tool:{row['approval_key']}:approval:waiting")
+        text = waiting.data.get("summary") if waiting is not None and isinstance(waiting.data, dict) else None
+        return {"summary": text if isinstance(text, str) and text else None}
     """What a workflow step's item adds from its events: `resume_schema` (an input step: the
     schema the person fills in; every item), and for a decided one (`detail`, the single read) the
     audit of the decision: `comment` and `resume_data` (what was submitted) beside who and when."""
-    if row["kind"] != "step":
-        return {}
     waiting = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:waiting")
     wdata = waiting.data if waiting is not None and isinstance(waiting.data, dict) else {}
     schema = wdata.get("resume_schema")
     # `pause`: a step-by-step run's pause ("Paused after {step}", answered with Continue or Stop).
     extras: dict[str, Any] = {
+        "summary": None,
         "resume_schema": schema if isinstance(schema, dict) else None,
         "pause": wdata.get("pause") is True,
     }

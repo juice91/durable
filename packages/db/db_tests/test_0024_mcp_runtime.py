@@ -78,7 +78,12 @@ def test_upgrade_constraints_downgrade_and_reupgrade():
             assert conn.execute(text("SELECT runtime, url FROM mcp_servers WHERE id = 'old'")).one() == ("external", "https://x")
             assert conn.execute(text("SELECT kind FROM mcp_server_secrets")).scalar_one() == "header"
             # At 0024 the models already carry 0023's chat_attachments (storage_key, no data); nothing else differs.
-            assert [d for d in schema_diff(conn) if "chat_attachments" not in repr(d)] == []
+            # ...and 0025's builtin and created_via columns.
+            assert [
+                d for d in schema_diff(conn)
+                if "chat_attachments" not in repr(d) and "'builtin'" not in repr(d) and "'created_via'" not in repr(d)
+                and "'slug'" not in repr(d) and "_tenant_slug" not in repr(d)
+            ] == []
 
         # external keeps a URL; managed must not have one.
         with engine.begin() as conn:

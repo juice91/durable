@@ -339,10 +339,11 @@ from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolse
 from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
-from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
+from eap_runtime import RunDeps, SideEffectOutcomeUnknown, ToolNotAllowedError, check_spec_tools, toolset_for_spec
 from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore, ScorerStore
 from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas import ModelSettings as ModelSettingsSpec
+from eap_schemas.architect import ungated_architect_tools
 from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
@@ -904,6 +905,10 @@ async def start_run_step(
             "client_tool_pending": client_pending,
             "client_turn_chain": client_chain,
             **({"scorers": scorers} if scorers else {}),
+            # Architect: whether the agent row is built in (only those may use `architect.*` tools).
+            # Recorded here, not a step of its own (a new step would renumber every later step);
+            # a checkpoint without the key (recorded before the Architect) reads as not built in.
+            "builtin": rt.agent_is_builtin(tenant_id, agent_id),
         }
 
     return await asyncio.to_thread(work)
@@ -2052,10 +2057,15 @@ async def _run_body(
             fallback_provider, _, fallback_name = member.partition(":")
             rt.settings.allowed_models.check(fallback_provider, fallback_name)
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
-        check_spec_tools(spec, rt.registry, rt.allowed_tools)
+        builtin = bool(link.get("builtin"))
+        check_spec_tools(spec, rt.registry, rt.allowed_tools_for(builtin=builtin))
+        # The Architect's gated tools run only behind a recorded approval: a spec that lists one
+        # without its approvals entry never starts (the seed and the API keep them in step).
+        for ungated in ungated_architect_tools(spec.tools, spec.approvals.tools if spec.approvals else None):
+            raise ToolNotAllowedError(ungated)
         request_context = link.get("request_context") or None
         _check_request_context(spec, request_context)
-        deps = rt.deps_for(run_id, tenant_id, spec, request_context)
+        deps = rt.deps_for(run_id, tenant_id, spec, request_context, builtin=builtin)
         if spec.memory is not None and link.get("conversation_id") is not None:
             # RM.12: the turn's memory snapshot (recorded), then its instructions block and tools.
             loaded = await load_memory_step(

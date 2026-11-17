@@ -10,11 +10,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     create_engine,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
@@ -40,6 +42,9 @@ class AgentModel(Base):
     """Model for agents table."""
 
     __tablename__ = "agents"
+    __table_args__ = (
+        Index("uq_agents_tenant_slug", "tenant_id", "slug", unique=True, postgresql_where=text("slug IS NOT NULL")),
+    )
 
     id: Mapped[UUIDAnnotated] = mapped_column(
         "id",
@@ -51,6 +56,13 @@ class AgentModel(Base):
     name: Mapped[StrAnnotated] = mapped_column("name", String, nullable=False)
     draft_spec: Mapped[dict] = mapped_column("draft_spec", JSONB, nullable=True)
     archived: Mapped[bool] = mapped_column("archived", Boolean, default=False)
+    # 0025: a platform-seeded agent (the Architect and its drafter): never archived, and the only
+    # kind whose tools may use the `architect.*` namespace.
+    builtin: Mapped[bool] = mapped_column(
+        "builtin", Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # 0026: the Architect's short id for a definition it made (NULL for hand-made agents).
+    slug: Mapped[str | None] = mapped_column("slug", String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -73,6 +85,7 @@ class AgentModel(Base):
             "name": self.name,
             "draft_spec": self.draft_spec,
             "archived": self.archived,
+            "builtin": bool(self.builtin),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -111,6 +124,8 @@ class AgentVersionModel(Base):
     created_by: Mapped[StrAnnotated] = mapped_column("created_by", String, nullable=False)
     # The version this one was restored from (POST .../versions/{v}/restore); NULL for a publish.
     restored_from: Mapped[int | None] = mapped_column("restored_from", Integer, nullable=True)
+    # 0025: `architect:<run_id>` or `architect-page` for a version the Architect made; NULL otherwise.
+    created_via: Mapped[str | None] = mapped_column("created_via", Text, nullable=True)
 
     agent: Mapped["AgentModel"] = relationship(
         "AgentModel", back_populates="versions", foreign_keys=[agent_id]
@@ -128,6 +143,7 @@ class AgentVersionModel(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "created_by": self.created_by,
             "restored_from": self.restored_from,
+            "created_via": self.created_via,
         }
 
     @classmethod

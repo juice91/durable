@@ -38,6 +38,7 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, tuple[Callable, ToolDeclaration | None, dict]] = {}
         self._tool_names: dict[str, str] = {}  # derived_name -> tool_id
+        self._summarisers: dict[str, Callable[[dict], str]] = {}  # tool_id -> approval summariser
 
     def _derive_tool_name(self, tool_id: str) -> str:
         """Derive tool name from tool_id by replacing '.' with '__'."""
@@ -51,8 +52,12 @@ class ToolRegistry:
         description: str = "",
         side_effect: bool = False,
         external_idempotent: bool = False,
+        approval_summary: Callable[[dict], str] | None = None,
     ) -> None:
         """Bind an implementation to a declaration.
+
+        `approval_summary(args) -> str` words what a gated call would do; the approval card shows it
+        above the arguments (`summary_for`).
 
         String IDs remain supported for dynamically registered test and extension tools. Built-in
         tools use declarations so their public metadata cannot drift from their implementations.
@@ -99,6 +104,19 @@ class ToolRegistry:
         
         self._tools[tool_id] = (func, bound_declaration, metadata)
         self._tool_names[derived_name] = tool_id
+        if approval_summary is not None:
+            self._summarisers[tool_id] = approval_summary
+
+    def tool_id_for_name(self, name: str) -> str | None:
+        """The tool id behind a model-facing tool name (`a__b` for `a.b`), or None."""
+        return self._tool_names.get(name)
+
+    def summary_for(self, tool_id: str, args: dict) -> str | None:
+        """The approval summary for a call, or None when the tool has no summariser."""
+        if tool_id not in self._tools:
+            raise UnknownToolError(tool_id)
+        summariser = self._summarisers.get(tool_id)
+        return summariser(args) if summariser is not None else None
 
     def get(self, tool_id: str) -> Callable:
         """Get a registered tool by ID."""

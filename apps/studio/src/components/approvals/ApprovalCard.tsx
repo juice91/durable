@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
-import { decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, refreshPendingApprovals } from "@/lib/approvals";
+import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, refreshPendingApprovals } from "@/lib/approvals";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import { serverFieldErrors, validateAgainstSchema } from "@/lib/schemaValidation";
@@ -19,7 +19,7 @@ export const TOOL_NOT_WAITING_MESSAGE =
   "This tool call is no longer waiting for approval (already decided, timed out, or the run ended). The view was refreshed.";
 
 export type ApprovalTarget =
-  | { kind: "tool"; runId: string; toolCallId: string; toolName: string; args: unknown; deadline: string | null }
+  | { kind: "tool"; runId: string; toolCallId: string; toolName: string; args: unknown; deadline: string | null; /** What the call would do, in words (a tool with a registry summariser). */ summary?: string | null }
   | {
       kind: "step";
       runId: string;
@@ -142,6 +142,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       }
       setConfirmDeny(false);
       onDecided?.(decision === "approve" ? "approved" : "denied");
+      if (tool) announceToolDecided(decision === "approve" ? "approved" : "denied");
       // The sidebar's pending count (AC.15) drops by one.
       void refreshPendingApprovals().catch(() => undefined);
       // Stay busy until the view has reloaded: the approval is no longer waiting, and a second
@@ -202,6 +203,11 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       </div>
       {tool ? (
         <div>
+          {approval.summary ? (
+            <p data-testid={`approval-summary-${key}`} className="mb-2 whitespace-pre-wrap text-sm font-medium text-foreground">
+              {approval.summary}
+            </p>
+          ) : null}
           <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
           <pre
             data-testid={`approval-args-${key}`}
