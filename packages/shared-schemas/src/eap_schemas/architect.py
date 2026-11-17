@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from eap_schemas import AgentSpec, ApprovalPolicy, KnowledgeBaseRef, McpToolRef, MemoryConfig, ModelRef, ModelSettings
+from eap_schemas.tools import ARCHITECT_GATED_TOOL_IDS, ungated_always_gated_tools
 from eap_schemas.workflows import AgentStep, ParallelStep, ToolStep, WorkflowSpec
 
 AGENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
@@ -60,15 +61,6 @@ GATED_TOOL_IDS: frozenset[str] = frozenset({"tickets.create"})
 # The Architect's tools that change what is live or what runs by itself (Task 4). A built-in agent that
 # lists one must list it in `approvals.tools` too: the API refuses the spec (422 approval_required) and
 # the worker refuses the run, so no path reaches them without a person's recorded approval.
-ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
-    "architect.publish_agent",
-    "architect.restore_agent_version",
-    "architect.archive_agent",
-    "architect.publish_workflow",
-    "architect.restore_workflow_version",
-    "architect.archive_workflow",
-    "architect.set_workflow_schedule",
-)
 
 # Every tool of the Architect agent (Tasks 3 and 4): the read tools, the two draft tools, then the gated
 # ones. The seed lists all of them in the Architect's `tools`; the worker registers exactly these ids.
@@ -87,8 +79,7 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
 
 def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] | None) -> list[str]:
     """The gated Architect tools in `tools` that `approval_tools` (spec.approvals.tools) does not list."""
-    gated = set(approval_tools or ())
-    return [t for t in tools if t in ARCHITECT_GATED_TOOL_IDS and t not in gated]
+    return [t for t in ungated_always_gated_tools(tools, approval_tools) if t in ARCHITECT_GATED_TOOL_IDS]
 
 
 MAX_AGENT_TOOLS = 32

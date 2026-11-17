@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import "@testing-library/jest-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -173,5 +173,19 @@ describe("McpServerForm — GitHub MCP registry paste-in", () => {
     render(<McpServerForm server={server} onSaved={vi.fn()} onCancel={vi.fn()} />);
     expect(screen.queryByTestId("mcp-registry-paste")).toBeNull();
     expect(screen.queryByTestId("mcp-auth-header-hint")).toBeNull();
+  });
+});
+
+describe("McpServerForm secret refs", () => {
+  it("offers stored secrets and fills a header value with secret:<name>", async () => {
+    const secrets = await import("@/lib/secrets");
+    const spy = vi.spyOn(secrets, "listSecrets").mockResolvedValue([{ name: "slack-token", created_at: "a", updated_at: "a" }]);
+    render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add header" }));
+    const picker = await screen.findByLabelText("Header 1 secret");
+    await waitFor(() => expect(within(picker).getByRole("option", { name: "slack-token" })).toBeInTheDocument());
+    fireEvent.change(picker, { target: { value: "slack-token" } });
+    expect(screen.getByLabelText("Header 1 value")).toHaveValue("secret:slack-token");
+    spy.mockRestore();
   });
 });

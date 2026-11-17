@@ -37,6 +37,8 @@ export interface McpRuntime {
   image: string | null;
   catalog_name: string | null;
   package: { registry_type: string; identifier: string; version: string; transport: string } | null;
+  /** Environment variable names; `ref` is `secret:<name>` when the value comes from a stored secret. Never a value. */
+  env?: { name: string; ref: string | null }[];
 }
 
 export interface McpRuntimeLogs {
@@ -66,6 +68,8 @@ export interface McpServerUpdate {
   url?: string;
   enabled?: boolean;
   headers?: Record<string, string>;
+  /** Managed servers only: variable → `secret:<name>` (or a plain value). An env change restarts the server. */
+  env?: Record<string, string>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {

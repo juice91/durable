@@ -69,3 +69,14 @@ def test_offer_tool_and_slugify():
     tool = offer_tool("tickets.create", "Ticket", "", side_effect=False)
     assert tool is not None and tool.requires_approval and tool.description == "Ticket"
     assert slugify("Weekly Report Writer!") == "weekly-report-writer" and slugify("123") == "a-123"
+
+
+def test_secrets_request_is_offerable_and_gated_and_the_instructions_say_how_to_ask():
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+    from eap_schemas.tools import TOOL_DECLARATIONS
+
+    decl = TOOL_DECLARATIONS["secrets.request"]
+    tool = offer_tool("secrets.request", decl.title, decl.description, side_effect=decl.side_effect)
+    assert tool is not None and tool.requires_approval
+    assert "secrets.request" in ARCHITECT_INSTRUCTIONS
+    assert "never ask the person to paste" in ARCHITECT_INSTRUCTIONS

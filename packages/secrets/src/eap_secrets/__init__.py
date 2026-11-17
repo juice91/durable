@@ -169,6 +169,14 @@ def mcp_env_context(tenant_id: str, server_id: str, name: str) -> bytes:
     return f"{tenant_id}/{server_id}/env:{name}".encode()
 
 
+def tenant_secret_context(tenant_id: str, name: str) -> bytes:
+    """The associated data binding a tenant secret (`secret:<name>`) to its row (tenant, name).
+
+    Distinct from the MCP contexts (the `secret/` marker), so a sealed MCP header can never be opened
+    as a tenant secret or the reverse."""
+    return f"{tenant_id}/secret/{name}".encode()
+
+
 def load_keyring(env: Mapping[str, str] | None = None) -> Keyring:
     """The platform keyring from the environment; raises a clear SecretsKeyMissing when unset."""
     return Keyring.from_env(env)
@@ -189,4 +197,5 @@ __all__ = [
     "load_keyring",
     "mcp_env_context",
     "mcp_header_context",
+    "tenant_secret_context",
 ]

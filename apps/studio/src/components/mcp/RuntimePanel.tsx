@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ApiError } from "@/lib/api";
+import { listSecrets, secretRef } from "@/lib/secrets";
 import { mcpServers, runtimeActionsFor, type McpRuntime, type McpRuntimeAction, type McpRuntimeState } from "@/lib/mcpServers";
 
 export const RUNTIME_STATE_LABEL: Record<McpRuntimeState, string> = {
@@ -48,6 +49,76 @@ interface RuntimePanelProps {
   enabled: boolean;
   /** Called after a start, stop or restart so the page can reload the server row. */
   onChanged: () => void;
+}
+
+/** Env variable names of a managed server; a ref-valued one shows `secret:<name>` and can be pointed at another stored secret. */
+function EnvList({ serverId, env, onChanged }: { serverId: string; env: { name: string; ref: string | null }[]; onChanged: () => void }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [names, setNames] = useState<string[]>([]);
+  const [choice, setChoice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const open = (variable: string) => {
+    setEditing(variable);
+    setChoice("");
+    setError(null);
+    listSecrets()
+      .then((items) => setNames(items.map((item) => item.name)))
+      .catch(() => setNames([]));
+  };
+
+  const save = async (variable: string) => {
+    if (!choice || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      // An env change restarts the server through the runtime adapter.
+      await mcpServers.update(serverId, { env: { [variable]: secretRef(choice) } });
+      setEditing(null);
+      onChanged();
+    } catch (reason: unknown) {
+      setError(message(reason, "The variable could not be changed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section aria-labelledby="runtime-env-title" className="flex min-w-0 flex-col gap-3">
+      <h2 id="runtime-env-title" className="text-title font-semibold text-foreground">Environment</h2>
+      <ul aria-label="Environment" className="min-w-0 rounded-lg border border-border bg-surface px-4">
+        {env.map((variable) => (
+          <li key={variable.name} className="flex min-w-0 flex-col gap-2 border-b border-border py-2 last:border-b-0">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <span className="min-w-0 break-all font-mono text-label text-foreground">{variable.name}</span>
+              <span className="min-w-0 break-all font-mono text-caption text-muted-foreground">{variable.ref ?? "Stored with the server"}</span>
+              {editing === variable.name ? null : (
+                <Button size="sm" aria-label={`Change ${variable.name}`} onClick={() => open(variable.name)}>Change</Button>
+              )}
+            </div>
+            {editing === variable.name ? (
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <select
+                  aria-label={`Secret for ${variable.name}`}
+                  value={choice}
+                  onChange={(event) => setChoice(event.target.value)}
+                  className="rounded-md border border-input bg-background px-2 py-1 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="">Choose a secret…</option>
+                  {names.map((storedName) => <option key={storedName} value={storedName}>{storedName}</option>)}
+                </select>
+                <Button size="sm" variant="primary" aria-label={`Save ${variable.name}`} disabled={!choice || saving} onClick={() => void save(variable.name)}>{saving ? "Saving…" : "Save"}</Button>
+                <Button size="sm" disabled={saving} onClick={() => setEditing(null)}>Cancel</Button>
+                <span className="basis-full text-caption text-muted-foreground">Saving restarts the server.</span>
+                {error ? <p role="alert" className="basis-full text-body text-destructive-text">{error}</p> : null}
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps) {
@@ -171,6 +242,18 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
           {actionError ? <p role="alert" className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
         </div>
       </section>
+
+      {runtime?.env && runtime.env.length > 0 ? (
+        <EnvList
+          serverId={serverId}
+          env={runtime.env}
+          onChanged={() => {
+            void loadRuntime();
+            void loadLogs();
+            onChanged();
+          }}
+        />
+      ) : null}
 
       <section aria-labelledby="runtime-logs-title" className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

@@ -7,6 +7,7 @@ import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader } from "@/comp
 import { ApiError } from "@/lib/api";
 import { mcpCatalog, packageLabel, type CatalogEntry, type CatalogInstall } from "@/lib/mcpCatalog";
 import type { McpServer } from "@/lib/mcpServers";
+import { listSecrets, putSecret, secretRef } from "@/lib/secrets";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -22,6 +23,15 @@ export function describeInstallError(reason: unknown): string {
   }
   return reason instanceof Error ? reason.message : "The server could not be created";
 }
+
+/** Suggested stored-secret name: `<server-slug>-<var>`, lowercase, dashes for anything else. */
+export function suggestSecretName(catalogName: string, variable: string): string {
+  const clean = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const slug = clean(catalogName.split("/").pop() ?? catalogName);
+  return [slug, clean(variable)].filter(Boolean).join("-");
+}
+
+type SecretSource = "new" | "stored";
 
 interface CatalogEntrySheetProps {
   entry: CatalogEntry | null;
@@ -48,9 +58,27 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
   const [env, setEnv] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Secret variables: where the value comes from, the stored name picked, and the name a new value is saved under.
+  const [source, setSource] = useState<Record<string, SecretSource>>({});
+  const [stored, setStored] = useState<Record<string, string>>({});
+  const [newNames, setNewNames] = useState<Record<string, string>>({});
+  const [storedNames, setStoredNames] = useState<string[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    listSecrets()
+      .then((items) => live && setStoredNames(items.map((item) => item.name)))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     setEnv({});
+    setSource({});
+    setStored({});
+    setNewNames({});
     setError(null);
   }, [choice?.kind, choice?.index]);
 
@@ -59,22 +87,41 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (busy || !choice) return;
-    const missing = envVars.filter((variable) => variable.required && !(env[variable.name] ?? "").trim());
+    const isStored = (variable: (typeof envVars)[number]) => variable.secret && source[variable.name] === "stored";
+    const given = (variable: (typeof envVars)[number]) => (isStored(variable) ? Boolean(stored[variable.name]) : (env[variable.name] ?? "").trim() !== "");
+    const missing = envVars.filter((variable) => variable.required && !given(variable));
     if (missing.length > 0) {
-      setError(`Enter a value for ${missing.map((variable) => variable.name).join(", ")}.`);
+      setError(`${missing.some(isStored) ? "Enter or choose" : "Enter"} a value for ${missing.map((variable) => variable.name).join(", ")}.`);
+      return;
+    }
+    const nameFor = (variable: (typeof envVars)[number]) => (newNames[variable.name] ?? suggestSecretName(entry.name, variable.name)).trim();
+    const fresh = envVars.filter((variable) => variable.secret && !isStored(variable) && (env[variable.name] ?? "") !== "");
+    const taken = fresh.find((variable) => storedNames.includes(nameFor(variable)));
+    if (taken) {
+      setError(`A secret named ${nameFor(taken)} already exists. Choose it under "Use a stored secret", or give this one another name.`);
       return;
     }
     const body: CatalogInstall = { catalog_name: entry.name };
     if (choice.kind === "package") body.package_index = choice.index;
     else body.remote_index = choice.index;
     if (name.trim()) body.name = name.trim();
-    if (choice.kind === "package") {
-      const filled = Object.fromEntries(envVars.filter((variable) => (env[variable.name] ?? "") !== "").map((variable) => [variable.name, env[variable.name]]));
-      if (Object.keys(filled).length > 0) body.env = filled;
-    }
     setBusy(true);
     setError(null);
     try {
+      if (choice.kind === "package") {
+        // Secret values are stored first and only their refs go in the start body; a raw secret is never sent with it.
+        const filled: Record<string, string> = {};
+        for (const variable of envVars) {
+          if (isStored(variable)) filled[variable.name] = secretRef(stored[variable.name]);
+          else if ((env[variable.name] ?? "") !== "") {
+            if (variable.secret) {
+              await putSecret(nameFor(variable), env[variable.name]);
+              filled[variable.name] = secretRef(nameFor(variable));
+            } else filled[variable.name] = env[variable.name];
+          }
+        }
+        if (Object.keys(filled).length > 0) body.env = filled;
+      }
       onInstalled(await mcpCatalog.install(body));
     } catch (reason: unknown) {
       setError(describeInstallError(reason));
@@ -139,27 +186,63 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
         {envVars.length > 0 ? (
           <fieldset className="flex min-w-0 flex-col gap-3">
             <legend className="mb-1 text-label font-medium text-foreground">Environment</legend>
-            {envVars.map((variable) => (
+            {envVars.map((variable) => {
+              const fromStore = variable.secret && source[variable.name] === "stored";
+              return (
               <div key={variable.name} className="flex min-w-0 flex-col gap-1">
                 <label htmlFor={`env-${variable.name}`} className="flex flex-wrap items-center gap-2 text-label text-foreground">
                   <span className="font-mono">{variable.name}</span>
                   {variable.required ? <Badge variant="neutral">required</Badge> : <span className="text-caption text-muted-foreground">optional</span>}
                   {variable.secret ? <Badge variant="warning">secret</Badge> : null}
                 </label>
-                <input
-                  id={`env-${variable.name}`}
-                  type={variable.secret ? "password" : "text"}
-                  autoComplete="off"
-                  required={variable.required}
-                  value={env[variable.name] ?? ""}
-                  onChange={(event) => setEnv((current) => ({ ...current, [variable.name]: event.target.value }))}
-                  className={inputClass}
-                  aria-describedby={variable.description ? `env-${variable.name}-help` : undefined}
-                />
+                {variable.secret ? (
+                  <select
+                    aria-label={`Source for ${variable.name}`}
+                    value={source[variable.name] ?? "new"}
+                    onChange={(event) => setSource((current) => ({ ...current, [variable.name]: event.target.value as SecretSource }))}
+                    className={inputClass}
+                  >
+                    <option value="new">Enter a new value</option>
+                    <option value="stored" disabled={storedNames.length === 0}>Use a stored secret</option>
+                  </select>
+                ) : null}
+                {fromStore ? (
+                  <select
+                    aria-label={`Stored secret for ${variable.name}`}
+                    value={stored[variable.name] ?? ""}
+                    onChange={(event) => setStored((current) => ({ ...current, [variable.name]: event.target.value }))}
+                    className={inputClass}
+                  >
+                    <option value="">Choose a secret…</option>
+                    {storedNames.map((storedName) => <option key={storedName} value={storedName}>{storedName}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    id={`env-${variable.name}`}
+                    type={variable.secret ? "password" : "text"}
+                    autoComplete="off"
+                    required={variable.required}
+                    value={env[variable.name] ?? ""}
+                    onChange={(event) => setEnv((current) => ({ ...current, [variable.name]: event.target.value }))}
+                    className={inputClass}
+                    aria-describedby={variable.description ? `env-${variable.name}-help` : undefined}
+                  />
+                )}
+                {variable.secret && !fromStore ? (
+                  <input
+                    aria-label={`Secret name for ${variable.name}`}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={newNames[variable.name] ?? suggestSecretName(entry.name, variable.name)}
+                    onChange={(event) => setNewNames((current) => ({ ...current, [variable.name]: event.target.value }))}
+                    className={`${inputClass} font-mono`}
+                  />
+                ) : null}
                 {variable.description ? <span id={`env-${variable.name}-help`} className="text-caption text-muted-foreground">{variable.description}</span> : null}
               </div>
-            ))}
-            <p className="text-caption text-muted-foreground">Secret values are stored sealed and cannot be read back.</p>
+              );
+            })}
+            <p className="text-caption text-muted-foreground">A new secret value is stored encrypted under the name shown and cannot be read back; the server gets a reference to it.</p>
           </fieldset>
         ) : null}
 

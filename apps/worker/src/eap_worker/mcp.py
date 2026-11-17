@@ -93,7 +93,9 @@ from eap_secrets.outbound_errors import (  # shared with the API's connection te
     refuse_redirect,
     walk_chain as _chain,
 )
+from eap_run_store.secrets import SecretStore
 from eap_worker.crash import crash_point
+from eap_worker.secret_refs import SecretRefNotFound, resolve_string
 
 log = logging.getLogger("eap_worker.mcp")
 
@@ -243,10 +245,18 @@ def load_servers(
         name = by_id[secrets[0].server_id]
         try:
             ring = load_keyring()
+            store = SecretStore(engine, ring)
             for server_id, header, ciphertext, key_id in secrets:
                 name = by_id[server_id]
                 context = mcp_header_context(tenant_id, server_id, header)
-                headers[server_id][header] = ring.decrypt(bytes(ciphertext), key_id, context=context)
+                value = ring.decrypt(bytes(ciphertext), key_id, context=context)
+                # A `secret:<name>` value is the tenant's stored secret (eap_worker.secret_refs); the
+                # resolved value then feeds the same header redaction as any other.
+                headers[server_id][header] = resolve_string(value, engine, tenant_id, store)
+        except SecretRefNotFound as exc:
+            log.warning("mcp server header secret reference not found tenant=%s server=%s ref=%s",
+                        tenant_id, name, exc.ref)
+            raise McpToolUnavailable(name, first_tool[name], "secret_not_found") from None
         except SecretsError as exc:
             log_failure(log, "mcp server secret could not be decrypted", exc, code="secret_unreadable",
                         tenant_id=tenant_id, server=name)
@@ -298,8 +308,12 @@ def _build_spec(engine: Engine, tenant_id: str, conn: McpServerConn, row: Any) -
         name = db.execute(_SERVER_NAME, {"s": conn.server_id, "t": tenant_id}).scalar_one()
         sealed = db.execute(_ENV_SECRETS, {"s": conn.server_id, "t": tenant_id}).all()
     ring = load_keyring()
+    store = SecretStore(engine, ring)
     secret_refs = {
-        var: ring.decrypt(bytes(ciphertext), key_id, context=mcp_env_context(tenant_id, conn.server_id, var))
+        var: resolve_string(
+            ring.decrypt(bytes(ciphertext), key_id, context=mcp_env_context(tenant_id, conn.server_id, var)),
+            engine, tenant_id, store,
+        )
         for var, ciphertext, key_id in sealed
     }
     return RuntimeSpec(
@@ -363,6 +377,11 @@ async def ensure_managed_running(
             try:
                 spec = await asyncio.to_thread(_build_spec, engine, tenant_id, conn, row)
                 await asyncio.wait_for(rt.start(spec), remaining())
+            except SecretRefNotFound as exc:
+                await asyncio.to_thread(_fail, engine, tenant_id, rid, "secret_not_found")
+                log.warning("mcp runtime env secret reference not found tenant=%s server=%s ref=%s",
+                            tenant_id, server, exc.ref)
+                raise McpToolUnavailable(server, tool, "secret_not_found") from None
             except SecretsError as exc:
                 await asyncio.to_thread(_fail, engine, tenant_id, rid, "secret_unreadable")
                 log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",

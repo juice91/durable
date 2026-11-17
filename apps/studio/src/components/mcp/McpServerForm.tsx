@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { readText as readClipboardText } from "@/lib/clipboard";
 import {
@@ -13,6 +13,7 @@ import {
   type McpServer,
   type McpServerUpdate,
 } from "@/lib/mcpServers";
+import { listSecrets, secretRef } from "@/lib/secrets";
 import { MCP_REGISTRY_URL, parseRegistryUrl, type RegistryMatch } from "@/lib/mcpRegistry";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -42,6 +43,17 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
   const [pasteValue, setPasteValue] = useState("");
   const [resolution, setResolution] = useState<RegistryMatch | null>(null);
   const [clipboardNote, setClipboardNote] = useState<string | null>(null);
+  // Stored secret names for the "use secret" pickers; a failed list just leaves no picker.
+  const [secretNames, setSecretNames] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    listSecrets()
+      .then((items) => live && setSecretNames(items.map((item) => item.name)))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const applyPaste = (value: string) => {
     setPasteValue(value);
@@ -171,7 +183,7 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
 
       <fieldset className="space-y-2" data-testid="mcp-headers">
         <legend className="text-sm font-medium text-foreground">Headers</legend>
-        <p className="text-xs text-muted-foreground">Values are stored encrypted and are never shown again. Changing any header replaces the whole set.</p>
+        <p className="text-xs text-muted-foreground">Values are stored encrypted and are never shown again. A value of <code>secret:&lt;name&gt;</code> refers to a stored secret. Changing any header replaces the whole set.</p>
         {isCreate ? (
           <p data-testid="mcp-auth-header-hint" className="text-xs text-muted-foreground">Add your own <code>Authorization</code> header (for example <code>Bearer …</code>); the registry never carries credentials.</p>
         ) : null}
@@ -185,6 +197,15 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
                   <>
                     <label htmlFor={`header-value-${row.key}`} className="sr-only">New value for {row.name}</label>
                     <input id={`header-value-${row.key}`} type="password" autoComplete="off" placeholder="New value" value={row.value} onChange={(e) => updateRow(row.key, { value: e.target.value })} className={`${inputClass} max-w-sm`} />
+                    {secretNames.length > 0 ? (
+                      <>
+                        <label htmlFor={`header-secret-${row.key}`} className="sr-only">New value for {row.name} secret</label>
+                        <select id={`header-secret-${row.key}`} value="" onChange={(e) => e.target.value && updateRow(row.key, { value: secretRef(e.target.value) })} className={`${inputClass} max-w-40`}>
+                          <option value="">Use secret…</option>
+                          {secretNames.map((secretName) => <option key={secretName} value={secretName}>{secretName}</option>)}
+                        </select>
+                      </>
+                    ) : null}
                   </>
                 ) : null}
                 {row.state === "removed" ? <span className="text-sm text-muted-foreground">will be removed</span> : null}
@@ -198,6 +219,15 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
                 <input id={`header-name-${row.key}`} placeholder="Header name, e.g. Authorization" value={row.name} onChange={(e) => updateRow(row.key, { name: e.target.value })} className={`${inputClass} max-w-xs font-mono`} />
                 <label htmlFor={`header-value-${row.key}`} className="sr-only">Header {index + 1} value</label>
                 <input id={`header-value-${row.key}`} type="password" autoComplete="off" placeholder="Secret value" value={row.value} onChange={(e) => updateRow(row.key, { value: e.target.value })} className={`${inputClass} max-w-sm`} />
+                {secretNames.length > 0 ? (
+                      <>
+                        <label htmlFor={`header-secret-${row.key}`} className="sr-only">Header {index + 1} secret</label>
+                        <select id={`header-secret-${row.key}`} value="" onChange={(e) => e.target.value && updateRow(row.key, { value: secretRef(e.target.value) })} className={`${inputClass} max-w-40`}>
+                          <option value="">Use secret…</option>
+                          {secretNames.map((secretName) => <option key={secretName} value={secretName}>{secretName}</option>)}
+                        </select>
+                      </>
+                    ) : null}
                 <button type="button" aria-label={`Remove header ${index + 1}`} className={secondaryButton} onClick={() => setRows((current) => current.filter((item) => item.key !== row.key))}>Remove</button>
               </>
             )}

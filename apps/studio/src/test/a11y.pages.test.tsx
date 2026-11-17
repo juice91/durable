@@ -203,6 +203,7 @@ function respond(url: URL): unknown {
   if (p.startsWith("/tools/")) return TOOLS.find((tool) => `/tools/${tool.id}` === p) ?? TOOLS[0];
   if (p === "/mcp-catalog") return { items: [{ name: "io.example/files", title: "Files", description: "Read and write files.", version: "1.0.0", status: "active", licence: "MIT", packages: [], remotes: [{ type: "streamable-http", url: "https://files.example.test/mcp" }], local: false, remote: true, fetched_at: T0 }], next_after: null };
   if (p === "/mcp-servers") return [MCP_SERVER];
+  if (p === "/secrets") return [{ name: "slack-token", created_at: T0, updated_at: T0, used_by: [{ server_id: "m1", name: MCP_SERVER.name }] }];
   if (p === "/mcp-servers/m1") return MCP_SERVER;
   if (p === "/knowledge-bases") return { items: [KB] };
   if (p === "/knowledge-bases/kb1") return { ...KB, ingest_tokens: 4200, ingest_cost_usd: "0.0004", ingest_requests: 3 };

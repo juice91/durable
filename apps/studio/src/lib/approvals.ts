@@ -219,6 +219,23 @@ export async function decideToolApproval(
   return response.json();
 }
 
+// --- The secret request tool ------------------------------------------------------------------
+
+/** What a `secrets__request` call asks for: the secret's name and why. */
+export interface SecretRequest {
+  name: string;
+  purpose: string;
+}
+
+/** The request of a pending `secrets__request` tool call (either spelling of the tool name), else null. */
+export function parseSecretRequest(toolName: string | null | undefined, args: unknown): SecretRequest | null {
+  if (toolName !== "secrets__request" && toolName !== "secrets.request") return null;
+  if (typeof args !== "object" || args === null) return null;
+  const { name, purpose } = args as Record<string, unknown>;
+  if (typeof name !== "string" || !name) return null;
+  return { name, purpose: typeof purpose === "string" ? purpose : "" };
+}
+
 // --- Decisions made on a card ----------------------------------------------------------------
 
 const decisionListeners = new Set<(decision: "approved" | "denied") => void>();

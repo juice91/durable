@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -65,6 +66,15 @@ class TicketsCreateInput(BaseModel):
     body: str
 
 
+class SecretsRequestInput(BaseModel):
+    """Input for ``secrets.request``: the secret's name (the Secrets store's name pattern) and why."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    purpose: str
+
+
 TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
     "clock.now": ToolDeclaration(
         id="clock.now",
@@ -81,6 +91,17 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=True,
         input_model=TicketsCreateInput,
+    ),
+    "secrets.request": ToolDeclaration(
+        id="secrets.request",
+        title="Request a secret",
+        description=(
+            "Ask the person for a credential. They type it into a masked card; you receive only a "
+            "reference (secret:<name>) to pass as an argument, never the value"
+        ),
+        side_effect=True,
+        external_idempotent=False,
+        input_model=SecretsRequestInput,
     ),
 }
 
@@ -154,6 +175,33 @@ KNOWLEDGE_SEARCH_DECLARATION = ToolDeclaration(
     input_model=KnowledgeSearchInput,
 )
 HIDDEN_TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {KNOWLEDGE_SEARCH_TOOL_ID: KNOWLEDGE_SEARCH_DECLARATION}
+
+
+# `secrets.request` (secret input milestone): asks the person for a credential through the approval card.
+SECRETS_REQUEST_TOOL_ID = "secrets.request"
+
+# The Architect's tools that change what is live or what runs by itself. A built-in agent that lists
+# one must list it in `approvals.tools` too (defined here so the shared set below needs no import of
+# `eap_schemas.architect`, which imports this package).
+ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
+    "architect.publish_agent",
+    "architect.restore_agent_version",
+    "architect.archive_agent",
+    "architect.publish_workflow",
+    "architect.restore_workflow_version",
+    "architect.archive_workflow",
+    "architect.set_workflow_schedule",
+)
+
+# Tools that never run without a person's recorded approval: the API refuses a spec that lists one
+# without an `approvals.tools` entry (422 approval_required) and the worker refuses the run.
+ALWAYS_GATED_TOOL_IDS: frozenset[str] = frozenset({SECRETS_REQUEST_TOOL_ID}) | frozenset(ARCHITECT_GATED_TOOL_IDS)
+
+
+def ungated_always_gated_tools(tools: Iterable[str], approvals_tools: Iterable[str] | None) -> list[str]:
+    """The always-gated tools in `tools` that `approvals_tools` (spec.approvals.tools) does not list."""
+    gated = set(approvals_tools or ())
+    return [t for t in tools if t in ALWAYS_GATED_TOOL_IDS and t not in gated]
 
 
 def builtin_tool_name(tool_id: str) -> str:

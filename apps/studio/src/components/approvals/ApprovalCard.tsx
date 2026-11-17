@@ -3,7 +3,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
-import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, refreshPendingApprovals } from "@/lib/approvals";
+import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, parseSecretRequest, refreshPendingApprovals } from "@/lib/approvals";
+import { putSecret } from "@/lib/secrets";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import { serverFieldErrors, validateAgainstSchema } from "@/lib/schemaValidation";
@@ -104,6 +105,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
   const [busy, setBusy] = useState<null | "approve" | "deny">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDeny, setConfirmDeny] = useState(false);
+  // A secrets__request call: the typed value goes to PUT /secrets/{name} only, never to the decision.
+  const secretRequest = approval.kind === "tool" ? parseSecretRequest(approval.toolName, approval.args) : null;
+  const [secretValue, setSecretValue] = useState("");
   const [dialogError, setDialogError] = useState<string | null>(null);
   const tooLong = comment.length > maxComment;
   const commentId = `approval-comment-${key}`;
@@ -127,10 +131,21 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
         return;
       }
     }
+    if (decision === "approve" && secretRequest && !secretValue) return;
     setBusy(decision);
     setError(null);
     setDialogError(null);
     try {
+      if (decision === "approve" && secretRequest) {
+        try {
+          await putSecret(secretRequest.name, secretValue);
+        } catch (reason: unknown) {
+          // Not approved: the agent keeps waiting. The message comes from the response, never the value.
+          setError(reason instanceof Error && reason.message ? reason.message : "The secret could not be saved; try again.");
+          return;
+        }
+        setSecretValue("");
+      }
       if (submit) {
         await submit(decision, comment);
       } else if (approval.kind === "tool") {
@@ -201,7 +216,36 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           ) : null}
         </p>
       </div>
-      {tool ? (
+      {tool && secretRequest ? (
+        <div className="space-y-2">
+          {approval.summary ? (
+            <p data-testid={`approval-summary-${key}`} className="whitespace-pre-wrap text-sm font-medium text-foreground">
+              {approval.summary}
+            </p>
+          ) : null}
+          {secretRequest.purpose ? (
+            <p data-testid={`approval-secret-purpose-${key}`} className="whitespace-pre-wrap text-sm text-foreground">
+              Purpose: {secretRequest.purpose}
+            </p>
+          ) : null}
+          <label htmlFor={`approval-secret-${key}`} className="block text-sm font-medium text-foreground">
+            Value for <span className="font-mono">{secretRequest.name}</span>
+          </label>
+          <input
+            id={`approval-secret-${key}`}
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={secretValue}
+            onChange={(event) => setSecretValue(event.target.value)}
+            aria-describedby={`approval-secret-note-${key}`}
+            className="w-full rounded-md border border-input bg-background p-2 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <p id={`approval-secret-note-${key}`} className="text-xs text-muted-foreground">
+            Stored encrypted and never shown again. The agent receives only a reference to it, not the value.
+          </p>
+        </div>
+      ) : tool ? (
         <div>
           {approval.summary ? (
             <p data-testid={`approval-summary-${key}`} className="mb-2 whitespace-pre-wrap text-sm font-medium text-foreground">
@@ -251,7 +295,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
         <button
           type="button"
           onClick={() => decide("approve")}
-          disabled={Boolean(busy) || tooLong}
+          disabled={Boolean(busy) || tooLong || (secretRequest !== null && !secretValue)}
           aria-busy={busy === "approve"}
           className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
