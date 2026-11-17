@@ -471,3 +471,35 @@ def test_architect_routes_are_in_the_inventory_and_closed_to_another_tenant(api)
         draft = conn.execute(text("SELECT draft_spec->>'instructions' FROM agents WHERE tenant_id = :t AND slug = 'greeter'"),
                              {"t": tenant}).scalar()
     assert draft == "Greet people."
+
+
+SECRET_ROUTES = {
+    ("PUT", "/api/v1/secrets/{name}"),
+    ("GET", "/api/v1/secrets"),
+    ("DELETE", "/api/v1/secrets/{name}"),
+}
+
+
+def test_secret_routes_are_in_the_inventory_and_closed_to_another_tenant(api, monkeypatch):
+    """Secret input: the three routes are exactly these; tenant B cannot list, delete or resolve A's secret."""
+    from eap_run_store.secrets import SecretStore
+    from eap_secrets import KEY_ENV, generate_key, load_keyring
+
+    monkeypatch.setenv(KEY_ENV, generate_key())
+    client, app, tenant_of = api
+    assert {r for r in app_routes(app) if "/secrets" in r[1] and "mcp" not in r[1]} == SECRET_ROUTES
+    tenant, h = tenant_of()
+    other_tenant, other = tenant_of("mallory")
+    try:
+        assert client.put(f"{API}/secrets/slack-token", json={"value": "fake-not-real"}, headers=h).status_code == 204
+        assert client.get(f"{API}/secrets", headers=other).json() == []
+        assert client.delete(f"{API}/secrets/slack-token", headers=other).status_code == 404
+        assert [s["name"] for s in client.get(f"{API}/secrets", headers=h).json()] == ["slack-token"]
+        store = SecretStore(app.state.database_engine, load_keyring())
+        assert store.resolve(other_tenant, "slack-token") is None
+        assert store.names(other_tenant) == []
+        assert store.delete(other_tenant, "slack-token") is False
+        assert store.resolve(tenant, "slack-token") == "fake-not-real"
+    finally:
+        with app.state.database_engine.begin() as conn:
+            conn.execute(text("DELETE FROM tenant_secrets WHERE tenant_id IN (:a, :b)"), {"a": tenant, "b": other_tenant})

@@ -95,6 +95,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     check_secrets_configuration()
     app.include_router(mcp_servers_router, prefix="/api/v1")
+    from eap_api.routes.secrets import router as secrets_router
+
+    app.include_router(secrets_router, prefix="/api/v1")
     from eap_api.routes.mcp_catalog import router as mcp_catalog_router
 
     app.include_router(mcp_catalog_router, prefix="/api/v1")
