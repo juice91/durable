@@ -18,7 +18,9 @@ A source row, run or sync of another tenant answers 404, never 403. Cancelling a
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, Query, Request, status
@@ -50,6 +52,10 @@ router = APIRouter(
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
 BASE = "/knowledge-bases/{kb_id}/sources"
+# The example workflow Studio publishes on request (the repository ships `examples/` in the image).
+TEMPLATE_PATH = Path(
+    os.environ.get("EAP_KB_SOURCE_WORKFLOW_TEMPLATE") or Path(__file__).resolve().parents[5] / "examples" / "workflows" / "kb-source-sync.json"
+)
 
 
 class SourceCreate(BaseModel):
@@ -122,6 +128,24 @@ def sync_view(s: Sync) -> dict[str, Any]:
         "started_at": s.started_at.isoformat(),
         "completed_at": s.completed_at.isoformat() if s.completed_at is not None else None,
     }
+
+
+def load_workflow_template() -> dict[str, Any] | None:
+    """The `spec` of the "KB Source Synchronization" example, or None when it is not shipped or unreadable."""
+    try:
+        spec = json.loads(TEMPLATE_PATH.read_text()).get("spec")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return spec if isinstance(spec, dict) else None
+
+
+@router.get("/kb-sources/workflow-template")
+async def workflow_template(principal: PrincipalDep) -> JSONResponse:
+    """The published-workflow spec for Studio's "Publish the sync workflow" (POST it to /workflows, then publish)."""
+    spec = await run_in_threadpool(load_workflow_template)
+    if spec is None:
+        return problem("workflow_template_unavailable", "the sync workflow template is not available", status.HTTP_503_SERVICE_UNAVAILABLE)
+    return JSONResponse(content=spec)
 
 
 @router.post(BASE, status_code=status.HTTP_201_CREATED)

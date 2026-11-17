@@ -12,6 +12,7 @@ import { KnowledgeDeleteFlow } from "@/components/knowledge/KnowledgeDeleteFlow"
 import { ingestCostLabel, KnowledgeBaseStatusBadge, knowledgeTabs } from "@/components/knowledge/knowledgeUi";
 import { ReindexDialog } from "@/components/knowledge/ReindexDialog";
 import { SearchTab } from "@/components/knowledge/SearchTab";
+import { SourcesTab } from "@/components/knowledge/SourcesTab";
 import { UploadSheet } from "@/components/knowledge/UploadSheet";
 import { useIngestProgress } from "@/components/knowledge/useIngestProgress";
 import { useKnowledgeDocuments } from "@/components/knowledge/useKnowledgeDocuments";
@@ -320,6 +321,7 @@ function KnowledgeBaseDetailView() {
               />
             ) : null}
             {tab === "search" ? <SearchTab kbId={kb.id} /> : null}
+            {tab === "sources" ? <SourcesTab kbId={kb.id} kbName={kb.name} /> : null}
             {tab === "runs" ? <IngestRunsTab kbId={kb.id} documents={docs.documents} refreshKey={runsRefresh} /> : null}
           </>
         ) : null}
@@ -385,7 +387,7 @@ function KnowledgeBaseDetailView() {
 /**
  * `/knowledge/:id` (RM.16): the knowledge base header (switcher; Upload, Reindex, Delete), its
  * totals and ingest cost, and the tabs Documents (default), Search (`?tab=search`) and Ingest runs
- * (`?tab=runs`). `?doc=<key>` opens a document's Sheet; the page hosts the trace Sheet, whose tab
+ * (`?tab=runs`) and Sources (`?tab=sources`). `?doc=<key>` opens a document's Sheet; the page hosts the trace Sheet, whose tab
  * parameter is `traceTab` (`tab` is the page's own).
  */
 export default function KnowledgeBasePage() {

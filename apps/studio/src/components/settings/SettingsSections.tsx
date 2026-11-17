@@ -12,6 +12,7 @@ import { studioVersion } from "@/components/frame/Sidebar";
 import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
 import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
 import { SecretsSection } from "./SecretsSection";
+import { ConnectionsSection } from "./ConnectionsSection";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useChatProtocol, type ChatProtocol } from "@/components/chat/chatProtocol";
@@ -230,6 +231,7 @@ export function SettingsSections() {
       </Section>
       <ProvidersSection />
       <SecretsSection />
+      <ConnectionsSection />
       <ApiKeysSection />
       <BrowserDataSection />
       <AboutSection />

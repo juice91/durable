@@ -14,13 +14,13 @@ import React from "react";
 import fs from "node:fs";
 import path from "node:path";
 
-const nav = vi.hoisted(() => ({ path: "/agents", params: {} as Record<string, string> }));
+const nav = vi.hoisted(() => ({ path: "/agents", params: {} as Record<string, string>, search: "" }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => nav.path,
   useParams: () => nav.params,
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(nav.search),
 }));
 
 import { AXE_TIMEOUT_MS } from "./a11y";
@@ -208,6 +208,8 @@ function respond(url: URL): unknown {
   if (p === "/knowledge-bases") return { items: [KB] };
   if (p === "/knowledge-bases/kb1") return { ...KB, ingest_tokens: 4200, ingest_cost_usd: "0.0004", ingest_requests: 3 };
   if (p === "/knowledge-bases/kb1/documents") return { items: [kbDocument("install.md"), kbDocument("billing.md", { status: "failed", error: "embedding_failed: provider down", chunk_count: 0, active_version: null })], next_after: null };
+  if (p === "/settings/connections") return { items: [{ id: "cn1", name: "ti-prod", kind: "oauth2_client_credentials", base_url: "https://api.vendor.example", config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" }, credential_refs: { client_id: "secret:ti-id", client_secret: "secret:ti-secret" }, enabled: true, last_checked_at: T1, last_status: "ok", last_error_code: null, created_at: T0, updated_at: T1 }] };
+  if (p === "/knowledge-bases/kb1/sources") return { items: [{ id: "src1", knowledge_base_id: "kb1", connection_id: "cn1", kind: "product_catalog", provider: "acme_catalog", name: "TI parts", enabled: true, config: { page_size: 100 }, last_successful_sync_at: T1, last_checkpoint_summary: { segments: 3, has_cursor: true }, last_source_revision: null, created_at: T0, updated_at: T1 }] };
   if (p === "/workflows") return [{ id: "w1", name: demoSpec.name, draft_spec: demoSpec, latest_version: 1 }];
   if (p === "/workflows/w1") return { id: "w1", name: demoSpec.name, draft_spec: demoSpec, latest_version: 1 };
   if (p === "/workflows/w1/versions") return [{ workflow_id: "w1", version: 1, spec: demoSpec, spec_hash: "wh1", created_at: T0, created_by: "dev" }];
@@ -267,6 +269,8 @@ interface PageCase {
   name: string;
   path: string;
   params?: Record<string, string>;
+  /** The URL's query string (`tab=sources`). */
+  search?: string;
   load: () => Promise<{ default: React.ComponentType }>;
   /** The visible h1. */
   h1: string;
@@ -304,6 +308,7 @@ const PAGES: PageCase[] = [
   { name: "mcp detail", path: "/mcp/m1", params: { id: "m1" }, load: () => import("@/app/mcp/[id]/page"), h1: "Docs", shows: "https://docs.example.test/mcp" },
   { name: "knowledge", path: "/knowledge", load: () => import("@/app/knowledge/page"), h1: "Knowledge", shows: "Product docs" },
   { name: "knowledge base", path: "/knowledge/kb1", params: { id: "kb1" }, load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "#knowledge-document-row" },
+  { name: "knowledge base sources", path: "/knowledge/kb1", params: { id: "kb1" }, search: "tab=sources", load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "TI parts" },
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", shows: "#processor-row" },
   { name: "processor detail", path: "/processors/pii_redact", params: { type: "pii_redact" }, load: () => import("@/app/processors/[type]/page"), h1: "PII redaction", shows: "#result-row" },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },
@@ -318,6 +323,7 @@ const PAGES: PageCase[] = [
   { name: "experiments", path: "/experiments", load: () => import("@/app/experiments/page"), h1: "Experiments", shows: "#experiment-row" },
   { name: "providers", path: "/settings/providers", load: () => import("@/app/settings/providers/page"), h1: "Providers", shows: "LiteLLM gateway" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
+  { name: "settings connections", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "ti-prod" },
 ];
 
 describe("PAGES covers every page route in app/", () => {
@@ -355,6 +361,7 @@ describe("every main page with fixtures, inside the frame, light and dark", () =
   test.each(PAGES)("$name: one h1, no axe violations", async (page) => {
     nav.path = page.path;
     nav.params = page.params ?? {};
+    nav.search = page.search ?? "";
     const Page = (await page.load()).default;
     await expectAccessiblePage(() => <Page />, {
       ready: async () => {
@@ -395,6 +402,7 @@ describe("focus order", () => {
     const media = mockMatchMedia(true);
     try {
       nav.path = "/agents";
+      nav.search = "";
       const Page = (await import("@/app/agents/page")).default;
       render(<FrameHarness><Page /></FrameHarness>);
       await screen.findAllByText("Support bot");
@@ -419,6 +427,7 @@ describe("focus order", () => {
     const media = mockMatchMedia(true);
     try {
       nav.path = pathname;
+      nav.search = "";
       nav.params = { ...params };
       const Page = (await load()).default;
       render(<FrameHarness><Page /></FrameHarness>);

@@ -63,11 +63,12 @@ export function formatWhen(iso: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
-/** The knowledge base page's tabs: Documents · Search · Ingest runs. */
+/** The knowledge base page's tabs: Documents · Search · Ingest runs · Sources. */
 export function knowledgeTabs(kbId: string, active: KnowledgeTab): LinkTab[] {
   return [
     { href: routes.knowledgeBase(kbId), label: "Documents", active: active === "documents", testId: "knowledge-tab-documents" },
     { href: routes.knowledgeBase(kbId, { tab: "search" }), label: "Search", active: active === "search", testId: "knowledge-tab-search" },
     { href: routes.knowledgeBase(kbId, { tab: "runs" }), label: "Ingest runs", active: active === "runs", testId: "knowledge-tab-runs" },
+    { href: routes.knowledgeBase(kbId, { tab: "sources" }), label: "Sources", active: active === "sources", testId: "knowledge-tab-sources" },
   ];
 }
