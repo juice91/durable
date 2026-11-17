@@ -4,7 +4,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { McpDeleteConfirm } from "@/components/mcp/McpDeleteConfirm";
 import { McpLastTest } from "@/components/mcp/McpLastTest";
+import { McpSectionTabs } from "@/components/mcp/McpSectionTabs";
 import { McpServerDialog } from "@/components/mcp/McpServerDialog";
+import { RuntimeStateChip } from "@/components/mcp/RuntimePanel";
 import { describeUsage, usageCountLabel, useMcpUsage } from "@/components/mcp/mcpUsage";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Badge } from "@/components/ui/Badge";
@@ -183,6 +185,7 @@ export default function McpServersPage() {
         <span className="inline-flex min-w-0 items-center gap-2">
           <span className="truncate">{server.name}</span>
           <Badge variant={server.enabled ? "success" : "neutral"}>{server.enabled ? "Enabled" : "Disabled"}</Badge>
+          {server.runtime === "managed" && server.runtime_state ? <RuntimeStateChip state={server.runtime_state} testId="mcp-runtime-chip" /> : null}
         </span>
       ),
     },
@@ -276,7 +279,8 @@ export default function McpServersPage() {
         }
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
-        <p className="text-body text-muted-foreground">Remote MCP servers that agents connect to. Register one, test it and see the tools it offers.</p>
+        <McpSectionTabs current="servers" />
+        <p className="text-body text-muted-foreground">MCP servers that agents connect to: remote endpoints you register, and servers run here from the catalog. Test one and see the tools it offers.</p>
 
         {notice ? <p role="status" data-testid="mcp-notice" className="rounded-md border border-border bg-muted/40 p-3 text-body text-foreground">{notice}</p> : null}
         {actionError ? <p role="alert" data-testid="mcp-action-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}

@@ -115,6 +115,7 @@ describe("Navigation", () => {
 
     test("no item is active on / (a redirect since SL.7); Metrics carries the dashboard's palette words", () => {
       expect(navItems.some((item) => item.id === "dashboard")).toBe(false);
+      expect(activeNavItem(routes.mcpBrowse())?.id).toBe("mcp");
       expect(activeNavItem("/")).toBeNull();
       expect(isNavItemActive(byId("metrics"), "/")).toBe(false);
       expect(byId("metrics").keywords).toEqual(expect.arrayContaining(["overview", "dashboard"]));
