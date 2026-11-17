@@ -409,6 +409,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     return (id ? models.find((m) => m.id === id && !m.wildcard)?.capabilities : null) ?? null;
   }, [chosenModelId, defaultModelId, models]);
 
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
   useEffect(() => {
     conversationIdRef.current = conversationId;
@@ -1737,10 +1738,12 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
                 retries={outputRetries}
                 feedback={feedbackScope}
                 attachmentCapabilities={attachmentCapabilities}
+                onAttachmentNotice={setAttachmentNotice}
                 composer={
                   <Composer
                     attachments
                     attachmentCapabilities={attachmentCapabilities}
+                    attachmentNotice={attachmentNotice}
                     chips={chips}
                     outputChecked={hasOutputProcessors(spec)}
                     notices={hasNotices ? notices : null}

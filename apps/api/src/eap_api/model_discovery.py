@@ -108,11 +108,18 @@ class ModelEntry:
     capabilities: Capabilities
 
 
-# Families known to take images and PDFs (first match wins), per provider.
+# Families known to take images (and PDFs), per provider; (pattern, image, pdf), first match wins.
+# Anthropic `^claude-(3|4|opus|sonnet|haiku)`: the Claude 3 and 4 generations and the later
+#   unnumbered-family names (claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5) read images and
+#   PDFs; claude-2 and claude-instant take no files, so they are not matched (they fall to `assumed`).
+# OpenAI `gpt-4o`, `gpt-4.1`, `gpt-4.5`, `gpt-5`, `chatgpt-4o`: vision models; `o1`, `o3`, `o4` reasoning
+#   models with image input (`o1-mini` and `o3-mini` are text-only and excluded by the lookahead).
+#   PDF is False: PDF input over OpenAI's chat API depends on the endpoint, so it is only offered when
+#   the gateway reports `supports_pdf_input` (the plan's wording); the safe side is to refuse the file.
 STATIC_CAPABILITIES: dict[str, tuple[tuple[re.Pattern[str], bool, bool], ...]] = {
-    "anthropic": ((re.compile(r"^claude-"), True, True),),
+    "anthropic": ((re.compile(r"^claude-(3|4|opus|sonnet|haiku)"), True, True),),
     "openai": (
-        (re.compile(r"^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|chatgpt-4o|o1|o3|o4)"), True, True),
+        (re.compile(r"^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|chatgpt-4o|o1(?!-mini)|o3(?!-mini)|o4)"), True, False),
     ),
 }
 
@@ -196,7 +203,11 @@ def _info_url(base: str) -> str:
 
 
 def _gateway_info(body: Any) -> dict[str, dict[str, Any]]:
-    """`model_name` -> `model_info` out of a LiteLLM /model/info body."""
+    """`model_name` -> `model_info` out of a LiteLLM /model/info body. A model served by several
+    deployments has several rows: their `supports_vision` / `supports_pdf_input` flags are ANDed (the
+    most conservative answer, since a request may land on any of them; a flag a row leaves out is
+    ignored). Rows are matched by exact `model_name`, so a wildcard row (`claude-*`) never matches a
+    model and those models fall to the static table or `assumed`."""
     rows = body.get("data") if isinstance(body, dict) else None
     if not isinstance(rows, list):
         raise ValueError("unexpected response")
@@ -204,7 +215,17 @@ def _gateway_info(body: Any) -> dict[str, dict[str, Any]]:
     for row in rows:
         info = row.get("model_info") if isinstance(row, dict) else None
         if isinstance(row, dict) and isinstance(row.get("model_name"), str) and isinstance(info, dict):
-            out.setdefault(row["model_name"], info)
+            name = row["model_name"]
+            if name not in out:
+                out[name] = dict(info)
+                continue
+            merged = out[name]
+            for flag in ("supports_vision", "supports_pdf_input"):
+                a, b = merged.get(flag), info.get(flag)
+                if a is None or b is None:
+                    merged[flag] = b if a is None else a
+                else:
+                    merged[flag] = bool(a) and bool(b)
     return out
 
 

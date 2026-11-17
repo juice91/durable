@@ -2,7 +2,7 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AssistantRuntimeProvider, ComposerPrimitive, MessagePrimitive, ThreadPrimitive, useExternalStoreRuntime, useLocalRuntime, type ChatModelAdapter, type ThreadMessageLike } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, ComposerPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useExternalStoreRuntime, useLocalRuntime, type ChatModelAdapter, type ThreadMessageLike } from "@assistant-ui/react";
 import { ATTACHMENT_MAX_BYTES, attachmentIdFromUrl, attachmentRefusal, type Attachment, type ModelCapabilities } from "@/lib/attachments";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 import { setWindowWidth } from "@/components/frame/frameTesting";
@@ -18,6 +18,17 @@ function png(name = "pic.png", size = 8): File {
 let upload: ReturnType<typeof vi.fn<(file: File) => Promise<Attachment>>>;
 let received: unknown[];
 
+/** Adds a file the way a drop or paste does: straight to the composer, not through the picker. */
+function DropZone() {
+  const aui = useAui();
+  return (
+    <button type="button" data-testid="drop" onClick={() => void aui.composer().addAttachment(PDF_FILE())}>
+      drop
+    </button>
+  );
+}
+const PDF_FILE = () => new File(["%PDF-1.4"], "dropped.pdf", { type: "application/pdf" });
+
 function Harness({ capabilities = null }: { capabilities?: ModelCapabilities | null }) {
   const model = React.useMemo<ChatModelAdapter>(
     () => ({
@@ -30,14 +41,19 @@ function Harness({ capabilities = null }: { capabilities?: ModelCapabilities | n
   );
   const capabilitiesRef = React.useRef(capabilities);
   capabilitiesRef.current = capabilities;
-  const attachments = React.useMemo(() => createAttachmentAdapter((file) => upload(file), () => capabilitiesRef.current), []);
+  const [notice, setNotice] = React.useState<string | null>(null);
+  const attachments = React.useMemo(
+    () => createAttachmentAdapter((file) => upload(file), () => capabilitiesRef.current, setNotice),
+    [],
+  );
   const runtime = useLocalRuntime(model, { adapters: { attachments } });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ComposerPrimitive.Root>
         <ComposerAttachmentList />
         <ComposerPrimitive.Input aria-label="Message" />
-        <AttachButton capabilities={capabilities} />
+        <AttachButton capabilities={capabilities} notice={notice} />
+        <DropZone />
         <ComposerPrimitive.Send aria-label="Send message" />
       </ComposerPrimitive.Root>
     </AssistantRuntimeProvider>
@@ -106,6 +122,23 @@ describe("the attach button follows the model's capabilities", () => {
     rerender(<Harness capabilities={{ image: false, pdf: true, source: "static" }} />);
     attach(png());
     expect(await screen.findByRole("alert")).toHaveTextContent("This model does not accept image files");
+  });
+});
+
+describe("the notice follows every way of adding a file", () => {
+  it("a PDF dropped (not picked) on an assumed model shows the 'may not accept' note", async () => {
+    render(<Harness capabilities={{ image: true, pdf: false, source: "assumed" }} />);
+    fireEvent.click(screen.getByTestId("drop"));
+    expect(await screen.findByTestId("composer-attachment")).toHaveTextContent("dropped.pdf");
+    expect(screen.getByRole("status")).toHaveTextContent("This model may not accept PDF files");
+  });
+
+  it("a later file without a warning clears the note", async () => {
+    render(<Harness capabilities={{ image: true, pdf: false, source: "assumed" }} />);
+    fireEvent.click(screen.getByTestId("drop"));
+    await screen.findByRole("status");
+    attach(png());
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });
 

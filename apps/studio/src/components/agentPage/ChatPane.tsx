@@ -333,6 +333,8 @@ export interface AgUiChatPaneProps extends ChatPaneCommonProps {
   feedback?: FeedbackScope;
   /** What the selected model takes (GET /models), for the attach picker and its refusals. */
   attachmentCapabilities?: ModelCapabilities | null;
+  /** Receives the attachment adapter's soft note (null clears it). */
+  onAttachmentNotice?: (notice: string | null) => void;
 }
 
 const NO_DECISIONS: ReadonlyMap<string, ToolDecisionEntry> = new Map();
@@ -381,13 +383,19 @@ export function AgUiChatPane({
   retries = NO_RETRIES,
   feedback = NO_FEEDBACK,
   attachmentCapabilities = null,
+  onAttachmentNotice,
 }: AgUiChatPaneProps) {
   const actions = useRunActions(onRefreshRun);
   // W2.4: files attached in the composer are uploaded first and sent as AG-UI media parts.
   // The adapter is made once; it reads the selected model's capabilities as they are at each attach.
   const capabilitiesRef = React.useRef(attachmentCapabilities);
   capabilitiesRef.current = attachmentCapabilities;
-  const attachments = React.useMemo(() => createAttachmentAdapter(undefined, () => capabilitiesRef.current), []);
+  const noticeRef = React.useRef(onAttachmentNotice);
+  noticeRef.current = onAttachmentNotice;
+  const attachments = React.useMemo(
+    () => createAttachmentAdapter(undefined, () => capabilitiesRef.current, (notice) => noticeRef.current?.(notice)),
+    [],
+  );
   const adapters = React.useMemo(() => ({ history, attachments }), [history, attachments]);
   const errorRef = React.useRef(onError);
   errorRef.current = onError;

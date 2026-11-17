@@ -325,7 +325,14 @@ def test_the_recorded_decision_merges_with_the_callers_model_settings(ag, tenant
     assert settings["temperature"] == 0.3 and settings["attachment_capabilities"]["source"] == "gateway"
     # The run reads back through the API with the decision in it.
     run_id = worker.calls[0][0]
-    assert client.get(f"/api/v1/runs/{run_id}", headers=h).json()["model_settings"]["attachment_capabilities"]["pdf"] is True
+    got = client.get(f"/api/v1/runs/{run_id}", headers=h).json()
+    assert got["attachment_capabilities"]["pdf"] is True
+    assert got["model_settings"] == {"temperature": 0.3}  # only what the caller sent
+    # Re-posting the returned settings (and even a raw copy of the stored ones) is not a 422.
+    for settings in (got["model_settings"], {**got["model_settings"], "attachment_capabilities": got["attachment_capabilities"]}):
+        again = client.post(f"/api/v1/agents/{agent_id}/runs", headers=h,
+                            json={"run_id": str(uuid.uuid4()), "input": "hi", "model_settings": settings})
+        assert again.status_code != 422, again.text
 
 
 def test_attachment_cannot_be_reused_in_another_message(ag, tenant, worker):

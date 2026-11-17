@@ -35,6 +35,7 @@ from pydantic_core import PydanticCustomError
 from eap_schemas import ModelSettings
 from eap_schemas.json_schema_subset import DRAFT_2020_12, json_depth_exceeds, json_size
 from eap_schemas.model_ref import ModelRef
+from eap_schemas.model_settings_support import drop_recorded_decision
 from eap_schemas.tools import RESERVED_TOOL_NAMES
 
 CLIENT_TOOL_NAME_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
@@ -455,6 +456,11 @@ class AgUiRunOptions(BaseModel):
     request_context: dict[str, Any] | None = None
     resource_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:@-]{1,128}$")
     input: Any = None
+
+    @field_validator("model_settings", mode="before")
+    @classmethod
+    def _drop_recorded_decision(cls, value: Any) -> Any:
+        return drop_recorded_decision(value)  # a run's returned settings can be re-posted as they are
 
     @property
     def has_input(self) -> bool:

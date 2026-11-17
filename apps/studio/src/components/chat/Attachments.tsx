@@ -5,7 +5,7 @@ import { AttachmentPrimitive, ComposerPrimitive, MessagePrimitive, useAui, useAu
 import { FileText, Loader2, Paperclip, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
-import { acceptFor, attachmentIdFromUrl, attachmentNotice, attachmentRefusal, fetchAttachmentBlob, type ModelCapabilities } from "@/lib/attachments";
+import { acceptFor, attachmentIdFromUrl, attachmentRefusal, fetchAttachmentBlob, type ModelCapabilities } from "@/lib/attachments";
 import { focusRing } from "@/components/ui/Button";
 
 /** An image's thumbnail: the route needs the bearer, so the bytes are fetched and shown as a blob URL. */
@@ -72,28 +72,25 @@ export function ComposerAttachmentList() {
 
 /**
  * The paperclip: opens the file picker, which offers what the selected model takes (`capabilities`;
- * all when unknown). A refused file's reason shows under the composer (role=alert); a file the model
- * is only assumed not to take is still attached, with a note (role=status).
+ * all when unknown). A refused file's reason shows under the composer (role=alert). The soft note
+ * for a file the model is only assumed not to take (role=status) comes from the attachment adapter,
+ * which sees every way of adding a file, and arrives as `notice`.
  */
-export function AttachButton({ disabled = false, capabilities = null }: { disabled?: boolean; capabilities?: ModelCapabilities | null }) {
+export function AttachButton({ disabled = false, capabilities = null, notice = null }: { disabled?: boolean; capabilities?: ModelCapabilities | null; notice?: string | null }) {
   const aui = useAui();
   const input = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(0);
   const onFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     setError(null);
-    setNotice(null);
     setUploading((n) => n + files.length);
     for (const file of files) {
       try {
         const refusal = attachmentRefusal(file, capabilities);
         if (refusal) throw new Error(refusal);
-        const warning = attachmentNotice(file, capabilities);
         await aui.composer().addAttachment(file);
-        if (warning) setNotice(warning);
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : `${file.name} could not be attached.`);
       } finally {

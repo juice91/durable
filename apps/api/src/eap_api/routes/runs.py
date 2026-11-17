@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from eap_observability import current_trace_context, log_failure
 
 from eap_api.auth import Principal, current_principal
+from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.agent_archive import refuse_if_archived
@@ -140,7 +141,10 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         # request context ({} when none).
         "draft": run.get("draft_spec") is not None,
         "request_context": run.get("request_context") or {},
-        "model_settings": run.get("model_settings") or {},
+        # The settings as the caller sent them (re-postable as they are); the server's own attachment
+        # decision rides beside them, never inside (ModelSettings is extra="forbid").
+        "model_settings": {k: v for k, v in (run.get("model_settings") or {}).items() if k != ATTACHMENT_CAPABILITIES_KEY},
+        "attachment_capabilities": (run.get("model_settings") or {}).get(ATTACHMENT_CAPABILITIES_KEY),
         # W2.2: tags derived from what the run records (eap_run_store.store.run_tags).
         "tags": run_tags({**run, "kind": run.get("kind") or "agent"}),
     }

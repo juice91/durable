@@ -1,6 +1,7 @@
 import type { AttachmentAdapter, CompleteAttachment, PendingAttachment } from "@assistant-ui/react";
 import {
   acceptFor,
+  attachmentNotice,
   attachmentPath,
   attachmentRefusal,
   deleteAttachment,
@@ -16,11 +17,15 @@ import {
  * `send` turns the uploaded file into the message part the AG-UI runtime sends: a `file` part whose
  * data is the attachment's URL (it becomes an AG-UI `image` or `document` part with a url source).
  * `capabilities` is read at each attach, so the picker's file types and the refusals follow the
- * model chosen now (the adapter is made once per chat).
+ * model chosen now (the adapter is made once per chat). `onNotice` gets the soft "may not accept"
+ * note for a file the model is only assumed not to take (it is still attached), or null when a file
+ * is added without one: the notice comes from here, so every way of adding (picker, drag and drop,
+ * paste) shows it.
  */
 export function createAttachmentAdapter(
   upload: (file: File) => Promise<Attachment> = uploadAttachment,
   capabilities: () => ModelCapabilities | null | undefined = () => null,
+  onNotice: (notice: string | null) => void = () => undefined,
 ): AttachmentAdapter {
   const uploaded = new Map<string, Attachment>();
   return {
@@ -28,8 +33,10 @@ export function createAttachmentAdapter(
       return acceptFor(capabilities());
     },
     async *add({ file }) {
+      onNotice(null);
       const refusal = attachmentRefusal(file, capabilities());
       if (refusal) throw new Error(refusal);
+      const warning = attachmentNotice(file, capabilities());
       const mediaType = fileMediaType(file);
       const base = {
         id: crypto.randomUUID(),
@@ -42,6 +49,7 @@ export function createAttachmentAdapter(
       // paperclip shows the upload in progress.
       const stored = await upload(file);
       uploaded.set(base.id, stored);
+      if (warning) onNotice(warning);
       yield { ...base, status: { type: "requires-action", reason: "composer-send" } } as PendingAttachment;
     },
     async remove(attachment) {

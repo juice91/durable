@@ -266,10 +266,28 @@ def test_a_gateway_model_without_the_flags_uses_the_assumed_values_for_them(clie
 
 
 def test_static_table_covers_claude_and_gpt4o():
-    for provider, name in (("anthropic", "claude-sonnet-4-5"), ("openai", "gpt-4o-mini"), ("openai", "gpt-4.1")):
-        assert model_discovery.static_capabilities(provider, name) == model_discovery.Capabilities(True, True, "static")
+    for name in ("claude-sonnet-4-5", "claude-3-5-haiku", "claude-opus-5-5", "claude-haiku-5-5"):
+        assert model_discovery.static_capabilities("anthropic", name) == model_discovery.Capabilities(True, True, "static")
+    for name in ("gpt-4o-mini", "gpt-4.1", "o3", "o4-mini"):  # OpenAI: images yes, PDFs only if the gateway says so
+        assert model_discovery.static_capabilities("openai", name) == model_discovery.Capabilities(True, False, "static")
+    for provider, name in (("anthropic", "claude-2.1"), ("anthropic", "claude-instant-1.2"),
+                           ("openai", "o1-mini"), ("openai", "o3-mini")):
+        assert model_discovery.static_capabilities(provider, name) is None  # take no files
     assert model_discovery.static_capabilities("openai", "gpt-3.5-turbo") is None
     assert model_discovery.static_capabilities("litellm", "claude-x") is None
+
+
+def test_duplicate_gateway_rows_are_anded_and_wildcards_fall_to_static(client, tenant, litellm_env, monkeypatch):
+    body = {"data": [
+        {"model_name": "dup", "model_info": {"supports_vision": True, "supports_pdf_input": True}},
+        {"model_name": "dup", "model_info": {"supports_vision": True, "supports_pdf_input": False}},
+        {"model_name": "claude-*", "model_info": {"supports_vision": True, "supports_pdf_input": True}},
+    ]}
+    install(monkeypatch, Stub({"/model/info": body, "/models": models_body("dup", "claude-x")}))
+    dup = model_discovery.capabilities_for("litellm", "dup")
+    assert (dup.image, dup.pdf, dup.source) == (True, False, "gateway")
+    wild = model_discovery.capabilities_for("litellm", "claude-x")  # a wildcard row is not matched by name
+    assert wild.source == "assumed"
 
 
 def test_unknown_model_is_assumed_with_the_old_provider_rules(monkeypatch):

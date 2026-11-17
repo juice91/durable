@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from eap_schemas import AgentSpec, ModelRef, ModelSettings
+from eap_schemas.model_settings_support import drop_recorded_decision
 from eap_schemas.evals import DEFAULT_MAX_CONCURRENCY, MAX_MAX_CONCURRENCY, EvaluatorSpec
 from eap_schemas.knowledge import (
     ChunkingConfig,
@@ -135,6 +136,11 @@ class RunCreate(BaseModel):
     request_context: dict[str, Any] | None = None
     model: ModelRef | None = None
     model_settings: ModelSettings | None = None
+
+    @field_validator("model_settings", mode="before")
+    @classmethod
+    def drop_recorded_decision(cls, value: Any) -> Any:
+        return drop_recorded_decision(value)  # a run's returned settings can be re-posted as they are
 
     @field_validator("input")
     @classmethod
