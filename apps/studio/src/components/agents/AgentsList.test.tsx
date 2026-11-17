@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import React from "react";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
@@ -80,5 +80,36 @@ describe("AgentsListUI search", () => {
     await waitFor(() => expect(screen.getByTestId("datalist-status")).toHaveTextContent("No agent name or instructions match this search."));
     expect(screen.getAllByText("No agent name or instructions match this search.")).toHaveLength(2);
     expect(screen.getByTestId("agents-count")).toHaveTextContent("0 of 3 agents");
+  });
+});
+
+describe("AgentsListUI system agents", () => {
+  const rows = [
+    { id: "p", name: "Plain", latest_version: 1, builtin_role: null },
+    { id: "a", name: "Architect", latest_version: 1, builtin: true, builtin_role: "architect" as const },
+    { id: "d", name: "Architect drafter", latest_version: 1, builtin: true, builtin_role: "drafter" as const },
+  ];
+
+  it("marks built-in rows with a Built in chip and drafters as a System helper", () => {
+    render(<AgentsListUI agents={rows} />);
+    const architect = screen.getByRole("link", { name: /Architect$/ }).closest("tr") as HTMLElement;
+    expect(within(architect).getByText("Built in")).toBeInTheDocument();
+    expect(within(architect).queryByText("System helper")).toBeNull();
+    const drafter = screen.getByRole("link", { name: /Architect drafter/ }).closest("tr") as HTMLElement;
+    expect(within(drafter).getByText("Built in")).toBeInTheDocument();
+    expect(within(drafter).getByText("System helper")).toBeInTheDocument();
+    const plain = screen.getByRole("link", { name: "Plain" }).closest("tr") as HTMLElement;
+    expect(within(plain).queryByText("Built in")).toBeNull();
+  });
+
+  it("shows a Show system agents toggle only when wired, and reports changes", () => {
+    const { rerender } = render(<AgentsListUI agents={rows} />);
+    expect(screen.queryByLabelText("Show system agents")).toBeNull();
+    const onChange = vi.fn();
+    rerender(<AgentsListUI agents={rows} showSystem={false} onShowSystemChange={onChange} />);
+    const toggle = screen.getByLabelText("Show system agents") as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalledWith(true);
   });
 });

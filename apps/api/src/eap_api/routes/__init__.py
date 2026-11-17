@@ -87,9 +87,22 @@ def _refuse_architect_tools(spec: AgentSpec, builtin: bool) -> JSONResponse | No
     )
 
 
+def _builtin_role(agent: AgentModel) -> str | None:
+    """`architect` for the Architect, `drafter` for its two helpers (slug `*-drafter`), else None."""
+    if not agent.builtin:
+        return None
+    slug = agent.slug or ""
+    if slug == "architect":
+        return "architect"
+    if slug.endswith("-drafter"):
+        return "drafter"
+    return None
+
+
 def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
     """Convert AgentModel to response dict."""
     return {
+        "builtin_role": _builtin_role(agent),
         "id": str(agent.id),
         "name": agent.name,
         "draft_spec": agent.draft_spec,
@@ -176,9 +189,11 @@ def list_agents(
     principal: Annotated[Principal, Depends(current_principal)],
     db: SessionDep,
     archived: bool = False,
+    include_system: bool = False,
 ) -> list[dict]:
     """List the current tenant's agents: the active ones, or with `?archived=true` the archived
-    ones only (see eap_api.agent_archive)."""
+    ones only (see eap_api.agent_archive). The Architect's drafter helpers (`builtin_role ==
+    "drafter"`) are left out unless `?include_system=true`; they stay reachable by id."""
     agents = (
         db.query(AgentModel)
         .filter(AgentModel.tenant_id == principal.tenant_id, AgentModel.archived.is_(archived))
@@ -187,6 +202,8 @@ def list_agents(
 
     results = []
     for agent in agents:
+        if not include_system and _builtin_role(agent) == "drafter":
+            continue
         latest = (
             db.query(func.max(AgentVersionModel.version))
             .filter(AgentVersionModel.agent_id == agent.id)

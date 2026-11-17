@@ -36,6 +36,10 @@ export interface Agent {
   latest_version: number | null;
   /** Archived agents are hidden from `list`, and refuse new runs, conversations and publishes (409). */
   archived?: boolean;
+  /** A built-in agent (the Architect and its helpers). */
+  builtin?: boolean;
+  /** "architect" for the Architect, "drafter" for its system helpers, null for every other agent. */
+  builtin_role?: "architect" | "drafter" | null;
 }
 
 export interface AgentVersion {
@@ -145,8 +149,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   agents: {
-    /** `init` passes a `signal` (say, a timeout) through to fetch. */
-    list: (init?: RequestInit) => request<Agent[]>("/api/v1/agents", init),
+    /** `init` passes a `signal` (say, a timeout) through to fetch; `includeSystem` also lists the
+     * Architect's drafter helpers (`?include_system=true`). */
+    list: (init?: RequestInit, options: { includeSystem?: boolean } = {}) =>
+      request<Agent[]>(options.includeSystem ? "/api/v1/agents?include_system=true" : "/api/v1/agents", init),
     create: (spec: AgentSpec) => request<Agent>("/api/v1/agents", { method: "POST", body: JSON.stringify({ spec }) }),
     get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
     update: (id: string, spec: AgentSpec) => request<Agent>(`/api/v1/agents/${id}`, { method: "PATCH", body: JSON.stringify({ spec }) }),
