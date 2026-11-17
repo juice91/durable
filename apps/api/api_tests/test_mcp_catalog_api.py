@@ -6,6 +6,8 @@ import json
 
 from sqlalchemy import text
 
+from eap_schemas import CatalogMeta, CatalogNetwork
+
 from .mcp_runtime_helpers import BASE, CATALOG, make_entry, requires_pg, runtime_world, _secrets_key  # noqa: F401
 
 pytestmark = requires_pg
@@ -33,6 +35,37 @@ def test_catalog_search_pages_and_hides_hidden_entries(runtime_world):
     names = [i["name"] for i in client.get(CATALOG, params={"q": token}, headers=h).json()["items"]]
     assert a.name not in names
     assert client.get(f"{CATALOG}/{a.name}", headers=h).status_code == 200  # an installed server keeps resolving
+
+
+def test_catalog_source_fields_filter_and_toolhive_first(runtime_world):
+    client, app, _fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    token = "th" + make_entry().name[-8:]
+    off = make_entry(name=f"io.example/{token}-a", description=token)
+    meta = CatalogMeta(
+        tier="Official", tags=("browser", "web"), tools=("navigate", "click"), tool_count=2,
+        network=CatalogNetwork(allow_host=(), allow_port=(443,), insecure_allow_all=True))
+    th = make_entry(name=f"io.github.stacklok/{token}-z", description=token, source="toolhive", meta=meta)
+    quiet = make_entry(name=f"io.github.stacklok/{token}-y", description=token, source="toolhive", meta=CatalogMeta())
+    app.state.seed(off, th, quiet)
+    items = client.get(CATALOG, params={"q": token}, headers=h).json()["items"]
+    assert [i["name"] for i in items] == [quiet.name, th.name, off.name]  # ToolHive first, then official
+    by = {i["name"]: i for i in items}
+    assert by[th.name]["source"] == "toolhive" and by[th.name]["tier"] == "Official"
+    assert by[th.name]["tags"] == ["browser", "web"] and by[th.name]["tool_count"] == 2
+    assert by[th.name]["network"] == {"allow_host": [], "allow_port": [443], "insecure_allow_all": True}
+    assert by[quiet.name]["network"] is None and by[quiet.name]["tier"] is None and by[quiet.name]["tool_count"] == 0
+    assert by[off.name]["source"] == "official" and by[off.name]["tags"] == [] and by[off.name]["network"] is None
+    only = client.get(CATALOG, params={"q": token, "source": "toolhive"}, headers=h).json()["items"]
+    assert [i["name"] for i in only] == [quiet.name, th.name]
+    only = client.get(CATALOG, params={"q": token, "source": "official"}, headers=h).json()["items"]
+    assert [i["name"] for i in only] == [off.name]
+    page1 = client.get(CATALOG, params={"q": token, "limit": 2}, headers=h).json()
+    page2 = client.get(CATALOG, params={"q": token, "limit": 2, "after": page1["next_after"]}, headers=h).json()
+    assert [i["name"] for i in page1["items"] + page2["items"]] == [quiet.name, th.name, off.name]
+    assert client.get(CATALOG, params={"source": "nope"}, headers=h).status_code == 422
+    got = client.get(f"{CATALOG}/{th.name}", headers=h).json()
+    assert got["source"] == "toolhive" and got["tool_count"] == 2
 
 
 def test_catalog_entry_by_name_with_a_slash_and_unknown_is_404(runtime_world):

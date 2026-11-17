@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CatalogEntrySheet } from "./CatalogEntrySheet";
-import { LOCAL_ENTRY, REMOTE_ENTRY } from "./catalogFixtures";
+import { LOCAL_ENTRY, REMOTE_ENTRY, TOOLHIVE_ENTRY } from "./catalogFixtures";
 import { mcpCatalog } from "@/lib/mcpCatalog";
 import { ApiError } from "@/lib/api";
 import * as secrets from "@/lib/secrets";
@@ -27,6 +27,20 @@ describe("CatalogEntrySheet", () => {
     vi.mocked(mcpCatalog.install).mockReset();
     vi.mocked(secrets.listSecrets).mockReset().mockResolvedValue([{ name: "slack-token", created_at: "a", updated_at: "b", used_by: [] }]);
     vi.mocked(secrets.putSecret).mockReset().mockResolvedValue({ restarted: [] });
+  });
+
+  it("shows the ToolHive badge, tier, tags, tool count and network summary", () => {
+    render(<CatalogEntrySheet entry={TOOLHIVE_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
+    expect(screen.getByText("ToolHive")).toBeInTheDocument();
+    expect(screen.getByText("Official")).toBeInTheDocument();
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getByText("1 tool")).toBeInTheDocument();
+    expect(screen.getByText(/Network: any host on 443/)).toBeInTheDocument();
+  });
+
+  it("shows no network line without a block", () => {
+    render(<CatalogEntrySheet entry={LOCAL_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
+    expect(screen.queryByText(/Network:/)).toBeNull();
   });
 
   it("shows packages, remotes and env vars with required and secret markers", () => {
