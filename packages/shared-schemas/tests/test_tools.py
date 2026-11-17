@@ -8,7 +8,7 @@ from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
 
 def test_builtin_tool_declarations_expose_stable_input_schemas() -> None:
     """The catalog describes the built-in tool inputs without runtime dependencies."""
-    assert list(TOOL_DECLARATIONS) == ["clock.now", "tickets.create"]
+    assert list(TOOL_DECLARATIONS) == ["clock.now", "tickets.create", "secrets.request"]
     assert TOOL_DECLARATIONS["clock.now"].input_json_schema() == {
         "additionalProperties": False,
         "properties": {},

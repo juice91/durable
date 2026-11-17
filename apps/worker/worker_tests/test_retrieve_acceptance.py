@@ -282,7 +282,8 @@ def test_toolset_factory_is_unchanged_without_knowledge_bases(worker, kb_tenant)
         return asyncio.run(_toolset_for_run(ctx))  # type: ignore[arg-type]
 
     plain = build(ticket_spec())
-    assert type(plain) is FunctionToolset  # exactly the toolset a spec always got: no wrapper
+    # Still a FunctionToolset (no wrapper: same steps); a spec with tools resolves secret refs in its call.
+    assert isinstance(plain, FunctionToolset) and not isinstance(plain, RunToolset)
     kb = str(uuid.uuid4())
     with_kb = build(rag_spec({"id": kb}))
     assert isinstance(with_kb, RunToolset)

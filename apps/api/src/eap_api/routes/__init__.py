@@ -36,7 +36,7 @@ from eap_run_store.definitions import (
     set_agent_archived,
 )
 from eap_schemas import AgentSpec
-from eap_schemas.architect import ungated_architect_tools
+from eap_schemas.tools import ungated_always_gated_tools
 
 # Body cap, UTF-8, depth, unstorable strings and compact 422s: eap_api.request_guard.
 log = logging.getLogger("eap_api")
@@ -53,24 +53,30 @@ BUILTIN_AGENT = "builtin_agent"
 APPROVAL_REQUIRED = "approval_required"
 
 
-def _refuse_architect_tools(spec: AgentSpec, builtin: bool) -> JSONResponse | None:
-    """422 `tool_not_allowed` when a non-builtin agent's spec lists an `architect.*` tool."""
-    if builtin:
-        # The gated tools (publish, restore, archive, schedules) only with their approval entries.
-        ungated = ungated_architect_tools(spec.tools, spec.approvals.tools if spec.approvals else None)
-        if ungated:
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                content={
-                    "detail": f"tools {', '.join(ungated)} must be listed in approvals.tools",
-                    "code": APPROVAL_REQUIRED,
-                    "tools": ungated,
-                },
-            )
+def _refuse_ungated(spec: AgentSpec) -> JSONResponse | None:
+    """422 `approval_required` when the spec lists an always-gated tool (the Architect's publish,
+    restore, archive and schedule tools; `secrets.request`) without its `approvals.tools` entry."""
+    ungated = ungated_always_gated_tools(spec.tools, spec.approvals.tools if spec.approvals else None)
+    if not ungated:
         return None
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content={
+            "detail": f"tools {', '.join(ungated)} must be listed in approvals.tools",
+            "code": APPROVAL_REQUIRED,
+            "tools": ungated,
+        },
+    )
+
+
+def _refuse_architect_tools(spec: AgentSpec, builtin: bool) -> JSONResponse | None:
+    """422 `tool_not_allowed` when a non-builtin agent's spec lists an `architect.*` tool; 422
+    `approval_required` for any agent that lists an always-gated tool without its approval entry."""
+    if builtin:
+        return _refuse_ungated(spec)
     denied = [t for t in spec.tools if t.startswith(ARCHITECT_TOOL_PREFIX)]
     if not denied:
-        return None
+        return _refuse_ungated(spec)
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={

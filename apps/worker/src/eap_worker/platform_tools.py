@@ -84,6 +84,7 @@ from eap_schemas.tools import (
     KNOWLEDGE_SEARCH_DECLARATION,
     MAX_SEARCH_QUERY_CHARS,
     RETRIEVE_TOOL_NAME,
+    TOOL_DECLARATIONS,
 )
 from eap_worker.crash import crash_point
 from eap_worker.embeddings import EmbeddingCall, embed_query, is_retryable, record_embedding
@@ -769,9 +770,39 @@ async def knowledge_search(
     }
 
 
+# ------------------------------------------------------------------------------- secrets.request
+
+
+def secrets_request_summary(args: dict[str, Any]) -> str:
+    """The approval card's wording (D3): what the person is asked to store, and why."""
+    return f"Store a secret named '{args.get('name')}' for: {args.get('purpose')}"
+
+
+async def secrets_request(ctx: RunContext[RunDeps], name: str, purpose: str) -> dict[str, Any]:
+    """Ask the person for a credential. The call is always gated: the person types the value into a
+    masked card (Studio stores it, write-only) and approves; the tool then only checks that the secret
+    exists and returns its reference `secret:<name>`. The value never reaches the model."""
+    from eap_schemas.secrets import SECRET_REF_PREFIX, is_secret_name
+    from eap_worker.runtime import get_runtime
+    from eap_worker.secret_refs import secret_store
+    from eap_secrets import SecretsError
+
+    if not is_secret_name(name):
+        return {"error": {"code": "secret_name_invalid", "message": "name must match ^[a-z][a-z0-9_.-]{0,63}$"}}
+    try:
+        store = secret_store(get_runtime().engine)
+        stored = await asyncio.to_thread(store.resolve, ctx.deps.tenant_id, name) is not None
+    except SecretsError:
+        return {"error": {"code": "secret_unreadable", "message": "the secret store is not available"}}
+    if not stored:
+        return {"error": {"code": "secret_missing", "message": f"no secret named '{name}' was stored"}}
+    return {"ref": f"{SECRET_REF_PREFIX}{name}", "stored": True}
+
+
 def register_platform_tools(registry: ToolRegistry) -> None:
     """Register the hidden platform tools (tool runs only) in the worker's registry."""
     registry.register(KNOWLEDGE_SEARCH_DECLARATION, knowledge_search)
+    registry.register(TOOL_DECLARATIONS["secrets.request"], secrets_request, approval_summary=secrets_request_summary)
     from eap_worker.architect_tools import register_architect_tools
 
     register_architect_tools(registry)

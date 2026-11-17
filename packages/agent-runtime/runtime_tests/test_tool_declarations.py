@@ -13,6 +13,8 @@ def test_default_implementations_match_declared_input_schemas() -> None:
     registry = default_registry()
 
     for tool_id, declaration in TOOL_DECLARATIONS.items():
+        if tool_id == "secrets.request":
+            continue  # bound by the worker (eap_worker.platform_tools): it reads the tenant's secret store
         implementation_schema = Tool(
             registry.get(tool_id),
             name=tool_id.replace(".", "__"),
@@ -27,6 +29,8 @@ def test_default_registry_uses_shared_declaration_metadata() -> None:
     registry = default_registry()
 
     for tool_id, declaration in TOOL_DECLARATIONS.items():
+        if tool_id == "secrets.request":
+            continue  # bound by the worker (eap_worker.platform_tools): it reads the tenant's secret store
         assert registry.get_declaration(tool_id) is declaration
         assert registry.get_metadata(tool_id) == {
             "description": declaration.description,

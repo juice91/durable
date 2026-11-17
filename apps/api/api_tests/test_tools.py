@@ -46,6 +46,26 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
             },
             "allowed": True,
         },
+        {
+            "id": "secrets.request",
+            "title": "Request a secret",
+            "description": (
+                "Ask the person for a credential. They type it into a masked card; you receive only a "
+                "reference (secret:<name>) to pass as an argument, never the value"
+            ),
+            "side_effect": True,
+            "external_idempotent": False,
+            "input_schema": {
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "purpose": {"type": "string"},
+                },
+                "required": ["name", "purpose"],
+                "type": "object",
+            },
+            "allowed": True,
+        },
     ]
 
 
