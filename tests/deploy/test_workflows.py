@@ -279,3 +279,14 @@ def test_hosted_jobs_cache_the_uv_and_pnpm_stores_on_their_lockfiles():
         # setup-node's pnpm cache is keyed on pnpm-lock.yaml (cache-dependency-path defaults to it).
         assert node["with"]["cache"] == "pnpm", name
         assert "cache-dependency-path" not in node["with"], name
+
+
+def test_ci_heavy_does_not_wait_for_hosted_ci():
+    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
+    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
+    assert not any(step.get("name") == "Require the hosted CI gate" for step in steps)
+    assert "sleep 15" not in text and "Timed out waiting for CI" not in text
+    report = next(step for step in steps if "hosted CI status" in step.get("name", ""))
+    # Information only: no loop, no exit 1, so it can never block or fail the run.
+    assert "exit 1" not in report["run"] and "sleep" not in report["run"]
+    assert "|| conclusion=unknown" in report["run"]
