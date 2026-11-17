@@ -10,7 +10,7 @@ own virtualenv (`uv sync --all-packages --frozen`, about 2 s from the uv cache).
    `tests/recovery/api_server.py`: see `API_LAUNCHER`) and worker, creates
    and publishes agents and workflows over HTTP, and starts runs and turns with them;
 3. stops (or crash-kills, at the previous build's own `EAP_CRASH_AT` points) the previous build,
-   upgrades the schema with THIS build's migrations to head (0014_approvals to 0017_api_keys: exactly what a
+   upgrades the schema with THIS build's migrations to head (every migration after 0013, up to the current head: exactly what a
    deploy does), and starts this build's API and worker with the same application version and
    executor id, so the new worker recovers the old workflows.
 
@@ -55,6 +55,9 @@ TERMINAL = {"completed", "failed", "needs_attention"}
 # could land in between and glue its timestamp onto the port (`port=511002026`), and connecting to
 # that port fails in getaddrinfo with "[Errno 8] nodename nor servname provided". This tree's
 # launcher writes the line and its newline in one call.
+# Steps this build's workflows record that the previous build's did not: `eap.record_spans` materialises
+# the trace spans when a run finishes (056dca3, after the previous build).
+ADDED_SINCE_PREVIOUS_BUILD = frozenset({"eap.record_spans"})
 API_LAUNCHER = REPO_ROOT / "tests" / "recovery" / "api_server.py"
 
 
@@ -207,6 +210,7 @@ class World:
     def upgrade_to_this_build(self) -> None:
         """Stop the previous build, migrate with THIS build's migrations to head, switch builds."""
         from alembic import command
+        from alembic.script import ScriptDirectory
         from sqlalchemy import create_engine
 
         from eap_db import alembic_config
@@ -219,7 +223,8 @@ class World:
                 command.upgrade(alembic_config(conn), "head")
         finally:
             migrator.dispose()
-        assert self.revision() == "0017_api_keys"
+        # Whatever this tree's head is (the chain keeps growing); the old build's 0013 schema must reach it.
+        assert self.revision() == ScriptDirectory.from_config(alembic_config()).get_current_head()
         self.build = "this"
 
     def close(self) -> None:
@@ -293,8 +298,11 @@ class World:
         return [r[0] for r in self._dbos("SELECT status FROM {s}.workflow_status WHERE workflow_uuid = %s", workflow_id)]
 
     def steps(self, workflow_id: str) -> list[str]:
+        """The workflow's recorded step names, minus steps only a later build records: the golden lists
+        are what the previous build recorded, and this build may add steps after them."""
         return [r[0] for r in self._dbos(
-            "SELECT function_name FROM {s}.operation_outputs WHERE workflow_uuid = %s ORDER BY function_id", workflow_id)]
+            "SELECT function_name FROM {s}.operation_outputs WHERE workflow_uuid = %s ORDER BY function_id", workflow_id)
+            if r[0] not in ADDED_SINCE_PREVIOUS_BUILD]
 
     def wait_workflow(self, workflow_id: str, timeout: float = 90) -> None:
         try:
