@@ -25,7 +25,8 @@ from eap_schemas.knowledge import (
 )
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid
 from eap_schemas.limits import MAX_REQUESTS, RunBudgetExceeded, UsageLimitsSpec
-from eap_schemas.mcp import McpToolRef, mcp_tool_name
+from eap_schemas.mcp import McpRuntimeKind, McpServerSpec, McpToolRef, mcp_tool_name
+from eap_schemas.mcp_catalog import CatalogEntry, CatalogPackage, EnvVarSpec, RuntimeState
 from eap_schemas.memory import (
     HistoryConfig,
     MemoryConfig,
@@ -122,6 +123,12 @@ __all__ = (
     "ToolDeclaration",
     "canonical_spec_hash",
     "mcp_tool_name",
+    "McpRuntimeKind",
+    "McpServerSpec",
+    "CatalogEntry",
+    "CatalogPackage",
+    "EnvVarSpec",
+    "RuntimeState",
     # Workflow loops (eap_schemas.workflow_scope, LP.2)
     "LOOP_ERROR_CODES",
     "LOOP_ERROR_MESSAGES",

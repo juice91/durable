@@ -103,3 +103,24 @@ describe("mcpServers client", () => {
     await expect(mcpServers.remove("1")).resolves.toBeUndefined();
   });
 });
+
+describe("runtime calls", () => {
+  beforeEach(() => vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "dev-token"));
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+  it("hits the runtime, action and logs routes", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { mcpServers: client, runtimeActionsFor } = await import("./mcpServers");
+    await client.runtime("a b");
+    await client.runtimeAction("a b", "restart");
+    await client.runtimeLogs("a b", 50);
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls.map((c) => c[0].replace(/^.*\/api\/v1/, ""))).toEqual([
+      "/mcp-servers/a%20b/runtime",
+      "/mcp-servers/a%20b/runtime/restart",
+      "/mcp-servers/a%20b/runtime/logs?tail=50",
+    ]);
+    expect(calls[1][1].method).toBe("POST");
+    expect(runtimeActionsFor("stopping")).toEqual({ start: false, stop: false, restart: false });
+  });
+});

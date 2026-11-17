@@ -20,6 +20,8 @@ dependencies = [
     "dbos>=3.5.0",
     "uvicorn>=0.34.0",
     "eap-secrets",
+    # Managed MCP servers: the runtime contract the API starts, stops and reads logs through.
+    "eap-mcp-runtime",
     # Processor catalog test console and RE2 validation of blocklist patterns at publish.
     "eap-processors",
     # Knowledge base uploads are extracted once to reject unsupported or unsafe content early.
@@ -51,6 +53,7 @@ eap-run-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
+eap-mcp-runtime = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
 eap-pricing = { workspace = true }

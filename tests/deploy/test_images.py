@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -70,27 +71,70 @@ def _cache_env() -> dict[str, str]:
     return env
 
 
+def _ensure_profile_running() -> bool:
+    """Start the Colima profile if stopped. Returns True only if this call started it."""
+    status = subprocess.run(["colima", "status", PROFILE], capture_output=True, text=True)
+    if status.returncode == 0:
+        return False
+    started = subprocess.run(
+        ["colima", "start", PROFILE, "--activate=false"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=_cache_env(),
+        check=False,
+    )
+    if started.returncode != 0:
+        pytest.skip(
+            "colima start of the pydanticos profile failed; "
+            f"image tests need that VM.\n{started.stdout}\n{started.stderr}"
+        )
+    return True
+
+
+def _restore_profile(started_by_test: bool) -> None:
+    """Stop the profile only when the test started it; a running profile stays running."""
+    if started_by_test:
+        subprocess.run(["colima", "stop", PROFILE], check=False, timeout=180, capture_output=True)
+
+
+def test_running_profile_is_left_running(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd[1])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    started = _ensure_profile_running()
+    _restore_profile(started)
+    assert started is False
+    assert calls == ["status"]
+
+
+def test_profile_started_by_test_is_stopped(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd[1])
+        return subprocess.CompletedProcess(cmd, 1 if cmd[1] == "status" else 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys.modules[__name__], "_cache_env", lambda: {})
+    started = _ensure_profile_running()
+    _restore_profile(started)
+    assert started is True
+    assert calls == ["status", "start", "stop"]
+
+
 @pytest.fixture(scope="module")
 def images():
     sha = _sha()
     python_tag = f"pydanticos-python:{sha}"
     studio_tag = f"pydanticos-studio:{sha}"
+    started_by_test = False
     try:
-        start = subprocess.run(["colima", "status", PROFILE], capture_output=True, text=True)
-        if start.returncode != 0:
-            started = subprocess.run(
-                ["colima", "start", PROFILE, "--activate=false"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=_cache_env(),
-                check=False,
-            )
-            if started.returncode != 0:
-                pytest.skip(
-                    "colima start of the pydanticos profile failed; "
-                    f"image tests need that VM.\n{started.stdout}\n{started.stderr}"
-                )
+        started_by_test = _ensure_profile_running()
         for tag, dockerfile in ((python_tag, PYTHON_DF), (studio_tag, STUDIO_DF)):
             build_args = ["build", "--platform", "linux/arm64", "-f", str(dockerfile), "-t", tag, str(REPO_ROOT)]
             built = docker(*build_args, check=False, timeout=1800)
@@ -103,7 +147,7 @@ def images():
                 )
         yield {"python": python_tag, "studio": studio_tag, "sha": sha}
     finally:
-        subprocess.run(["colima", "stop", PROFILE], check=False, timeout=180, capture_output=True)
+        _restore_profile(started_by_test)
 
 
 def test_python_image_is_non_root_and_entrypoints_help(images):

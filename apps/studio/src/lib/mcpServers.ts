@@ -17,6 +17,31 @@ export interface McpServer {
   last_checked_at: string | null;
   last_status: "ok" | "error" | null;
   last_error_code: string | null;
+  /** Local runtime fields (absent on servers from older APIs: treat as external). */
+  runtime?: "external" | "managed";
+  runtime_state?: McpRuntimeState | null;
+  runtime_error?: string | null;
+  catalog_name?: string | null;
+  env_names?: string[];
+}
+
+export type McpRuntimeState = "pending" | "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
+
+export interface McpRuntime {
+  state: McpRuntimeState;
+  message: string | null;
+  reachable: boolean;
+  last_error: string | null;
+  last_used_at: string | null;
+  updated_at: string | null;
+  image: string | null;
+  catalog_name: string | null;
+  package: { registry_type: string; identifier: string; version: string; transport: string } | null;
+}
+
+export interface McpRuntimeLogs {
+  lines: string[];
+  tail: number;
 }
 
 export interface McpDiscoveredTool {
@@ -63,7 +88,33 @@ export const mcpServers = {
     request<McpServer>(`/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   remove: (id: string) => request<void>(`/${encodeURIComponent(id)}`, { method: "DELETE" }),
   test: (id: string) => request<McpTestResult>(`/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  runtime: (id: string) => request<McpRuntime>(`/${encodeURIComponent(id)}/runtime`),
+  runtimeAction: (id: string, action: McpRuntimeAction) =>
+    request<McpRuntime>(`/${encodeURIComponent(id)}/runtime/${action}`, { method: "POST" }),
+  runtimeLogs: (id: string, tail = 200) => request<McpRuntimeLogs>(`/${encodeURIComponent(id)}/runtime/logs?tail=${tail}`),
 };
+
+export type McpRuntimeAction = "start" | "stop" | "restart";
+
+export const RUNTIME_STATES: readonly McpRuntimeState[] = ["pending", "starting", "running", "idle", "stopping", "stopped", "failed"];
+
+/** Which controls make sense in a state (the API still decides; a disabled server also refuses start and restart). */
+export function runtimeActionsFor(state: McpRuntimeState): Record<McpRuntimeAction, boolean> {
+  switch (state) {
+    case "running":
+    case "idle":
+      return { start: false, stop: true, restart: true };
+    case "stopped":
+      return { start: true, stop: false, restart: false };
+    case "failed":
+      return { start: true, stop: true, restart: true };
+    case "pending":
+    case "starting":
+      return { start: false, stop: true, restart: false };
+    case "stopping":
+      return { start: false, stop: false, restart: false };
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Error codes -> readable messages

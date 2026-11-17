@@ -7,20 +7,24 @@ belong to a server of its own tenant (FK (tenant_id, server_id) -> mcp_servers(t
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     LargeBinary,
     PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
+    Uuid,
+    func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from eap_api.models import Base
@@ -40,12 +44,16 @@ class McpServerModel(Base):
         UniqueConstraint("tenant_id", "name", name="uq_mcp_servers_tenant_name"),
         CheckConstraint("transport = 'streamable_http'", name="ck_mcp_servers_transport"),
         CheckConstraint("last_status IS NULL OR last_status IN ('ok', 'error')", name="ck_mcp_servers_last_status"),
+        CheckConstraint("runtime IN ('external', 'managed')", name="ck_mcp_servers_runtime"),
+        CheckConstraint("(runtime = 'external') = (url IS NOT NULL)", name="ck_mcp_servers_runtime_url"),
     )
 
     id: Mapped[str] = mapped_column(String, default=lambda: str(uuid4()))
     tenant_id: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL for a managed server: its endpoint lives on mcp_runtimes (0024).
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    runtime: Mapped[str] = mapped_column(Text, nullable=False, default="external", server_default=text("'external'"))
     transport: Mapped[str] = mapped_column(
         String, nullable=False, default=TRANSPORT_STREAMABLE_HTTP, server_default=text("'streamable_http'")
     )
@@ -63,7 +71,8 @@ class McpServerSecretModel(Base):
 
     __tablename__ = "mcp_server_secrets"
     __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "server_id", "header_name", name="mcp_server_secrets_pkey"),
+        PrimaryKeyConstraint("tenant_id", "server_id", "kind", "header_name", name="mcp_server_secrets_pkey"),
+        CheckConstraint("kind IN ('header', 'env')", name="ck_mcp_server_secrets_kind"),
         ForeignKeyConstraint(
             ["tenant_id", "server_id"],
             ["mcp_servers.tenant_id", "mcp_servers.id"],
@@ -74,9 +83,68 @@ class McpServerSecretModel(Base):
 
     tenant_id: Mapped[str] = mapped_column(String, nullable=False)
     server_id: Mapped[str] = mapped_column(String, nullable=False)
-    header_name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="header", server_default=text("'header'"))
+    header_name: Mapped[str] = mapped_column(String, nullable=False)  # also an env variable's name when kind = 'env'
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     key_id: Mapped[str] = mapped_column(String, nullable=False)
 
     def __repr__(self) -> str:
         return f"McpServerSecretModel(server_id={self.server_id!r}, header_name={self.header_name!r})"
+
+
+class McpCatalogEntryModel(Base):
+    """Platform-wide, read-only mirror of the official MCP registry (0024); no tenant."""
+
+    __tablename__ = "mcp_catalog_entries"
+    __table_args__ = (
+        PrimaryKeyConstraint("name", name="mcp_catalog_entries_pkey"),
+        Index("ix_mcp_catalog_entries_latest_status", "is_latest", "status"),
+        Index("ix_mcp_catalog_entries_name_lower", func.lower(text("name"))),
+    )
+
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active", server_default=text("'active'"))
+    is_latest: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    packages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    remotes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
+    licence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+
+
+class McpRuntimeModel(Base):
+    """A managed server's runtime (one pod per tenant per server). Deleted with its server."""
+
+    __tablename__ = "mcp_runtimes"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="mcp_runtimes_pkey"),
+        UniqueConstraint("tenant_id", "server_id", name="uq_mcp_runtimes_tenant_server"),
+        ForeignKeyConstraint(
+            ["tenant_id", "server_id"],
+            ["mcp_servers.tenant_id", "mcp_servers.id"],
+            name="fk_mcp_runtimes_tenant_server",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "state IN ('pending', 'starting', 'running', 'idle', 'stopping', 'stopped', 'failed')", name="ck_mcp_runtimes_state"
+        ),
+        Index("ix_mcp_runtimes_state_last_used", "state", "last_used_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, default=uuid4)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    server_id: Mapped[str] = mapped_column(String, nullable=False)
+    catalog_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    package: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    image: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    cr_name: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
+    endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)

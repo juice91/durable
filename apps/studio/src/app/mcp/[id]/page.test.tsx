@@ -69,6 +69,16 @@ describe("MCP server detail page", () => {
     expect(screen.getByRole("link", { name: "MCP Servers" })).toHaveAttribute("href", routes.mcp());
   });
 
+  it("shows a Runtime tab only for managed servers", async () => {
+    const { unmount } = render(<McpServerDetailPage />);
+    await screen.findByTestId("mcp-tab-run");
+    expect(screen.queryByTestId("mcp-tab-runtime")).toBeNull();
+    unmount();
+    vi.mocked(mcpServers.get).mockResolvedValue({ ...server, runtime: "managed", runtime_state: "running" });
+    render(<McpServerDetailPage />);
+    expect(await screen.findByTestId("mcp-tab-runtime")).toBeInTheDocument();
+  });
+
   it("has a Run tab that lists the tested server's tools", async () => {
     vi.mocked(mcpServers.test).mockResolvedValue({
       status: "ok",

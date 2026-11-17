@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "eap-schemas",
+    "eap-mcp-runtime",
 ]
 
 [dependency-groups]
@@ -20,9 +21,10 @@ members = ["packages/*", "apps/api", "apps/worker"]
 
 [tool.uv.sources]
 eap-schemas = { workspace = true }
+eap-mcp-runtime = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -69,6 +71,16 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "The MCP runtime adapter has no platform, web, database or agent imports"
+type = "forbidden"
+source_modules = ["eap_mcp_runtime"]
+forbidden_modules = [
+    "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability",
+    "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing",
+    "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos",
+]
+
+[[tool.importlinter.contracts]]
 name = "Processors import only the standard library, eap_schemas and re2"
 type = "forbidden"
 source_modules = ["eap_processors"]
@@ -100,7 +112,7 @@ type = "forbidden"
 # D19: ag-ui-protocol is used only inside eap_api.ag_ui; data reaching the run row and the worker
 # uses eap_schemas.client_tools. Direct imports only: the rest of eap_api reaches ag_ui through
 # eap_api.ag_ui (the sanctioned path), and the other roots may not import eap_api at all.
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime"]
 forbidden_modules = ["ag_ui"]
 ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
 unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
