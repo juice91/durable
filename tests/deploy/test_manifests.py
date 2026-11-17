@@ -148,6 +148,15 @@ def test_litellm_url_defaults_to_host_lima_internal_4001():
         assert data[key] == "http://host.lima.internal:4001", (key, data[key])
 
 
+def test_r2_endpoint_is_in_the_configmap_not_a_secret():
+    cm = next(d for d in kustomize_docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
+    data = cm["data"]
+    assert data["EAP_BLOB_S3_ENDPOINT"] == "https://9a497744238ab16a1060dc3ae8abd102.r2.cloudflarestorage.com"
+    assert data["EAP_BLOB_S3_BUCKET"] == "pydanticos-attachments"
+    assert data["EAP_BLOB_S3_REGION"] == "auto"
+    assert "PLACEHOLDER" not in data["EAP_BLOB_S3_ENDPOINT"]
+
+
 def test_kustomize_emits_no_secret_objects():
     secrets = [d for d in kustomize_docs() if d.get("kind") == "Secret"]
     assert secrets == []
