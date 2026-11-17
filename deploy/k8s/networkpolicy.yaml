@@ -260,6 +260,27 @@ spec:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}
 ---
+# The API's "Test connection" and the install/start path reach the same proxy Services as the worker
+# (mcp-<cr>-proxy:8080 in the tenant namespaces); without this rule the test reports connect_failed
+# while the worker can already use the server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-egress-mcp-tenants
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: pydanticos.io/mcp-tenant, operator: Exists}
+      ports:
+        - {protocol: TCP, port: 8080}
+---
 # The worker calls managed MCP servers through the proxy Service (mcp-<cr>-proxy:8080) in each
 # tenant's `mcp-tenant-*` namespace. Those namespaces carry the label pydanticos.io/mcp-tenant; the
 # tenant side admits only this namespace's worker pods on that port (NetworkPolicy `<cr>-isolation`).
