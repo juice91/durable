@@ -1,10 +1,11 @@
 """The Architect: seed, options, draft and page save (Task 5 of the Architect milestone).
 
-- POST /architect            seed the tenant's two built-in agents (idempotent): 201 when it made one, else 200.
+- POST /architect            seed the tenant's three built-in agents (idempotent): 201 when it made one, else 200.
 - GET  /architect            seed state plus the agents and workflows the Architect made.
 - GET  /architect/options    the allowlist the page's pickers show (what a created agent may use).
 - POST /architect/draft      the form's "Fill in the form": one drafter run, its structured answer
                              filtered through the allowlist.
+- POST /architect/draft-workflow  the same for the workflow form (the built-in workflow drafter).
 - POST /architect/agents     save (and optionally publish) an agent from the restricted format.
 - POST /architect/workflows  the same for a workflow.
 
@@ -71,11 +72,15 @@ from eap_schemas.architect import (
 from eap_schemas.architect_seed import (
     ARCHITECT_SLUG,
     DRAFTER_SLUG,
+    WORKFLOW_DRAFTER_SLUG,
     architect_agent_spec,
     drafter_agent_spec,
     filter_draft,
+    filter_workflow_draft,
     gated_approvals_missing,
+    normalize_workflow_draft,
     pick_seed_model,
+    workflow_drafter_agent_spec,
 )
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.tools import TOOL_DECLARATIONS
@@ -195,22 +200,26 @@ def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: s
 
 def ensure_seed(engine: Engine, tenant_id: str, user_id: str) -> tuple[dict[str, Any], bool]:
     """The tenant's built-in agents, created when missing. `({architect_agent_id, drafter_agent_id,
-    model}, created)`; raises the 409 `choose_model` refusal when a row is missing and no model exists."""
+    workflow_drafter_agent_id, model}, created)`; raises the 409 `choose_model` refusal when a row is missing and no model exists."""
     chosen: list[str] = []
     with engine.begin() as conn:
         architect, made_a = _seed_one(conn, tenant_id, user_id, ARCHITECT_SLUG, "Architect", architect_agent_spec, chosen)
         drafter, made_d = _seed_one(conn, tenant_id, user_id, DRAFTER_SLUG, "Architect drafter", drafter_agent_spec, chosen)
+        wdrafter, made_w = _seed_one(
+            conn, tenant_id, user_id, WORKFLOW_DRAFTER_SLUG, "Architect workflow drafter", workflow_drafter_agent_spec, chosen
+        )
     return {
         "architect_agent_id": str(architect.id),
         "drafter_agent_id": str(drafter.id),
+        "workflow_drafter_agent_id": str(wdrafter.id),
         "model": _spec_model(architect.draft_spec),
-    }, made_a or made_d
+    }, made_a or made_d or made_w
 
 
 @router.post("", responses={409: {"description": "choose_model"}})
 def seed(request: Request, principal: PrincipalDep) -> JSONResponse:
-    """Seed the tenant's Architect and drafter (idempotent). 201 `{architect_agent_id, drafter_agent_id,
-    model}` when a row was created, 200 with the same shape otherwise (the tenant's edits are kept).
+    """Seed the tenant's Architect and its two drafters (idempotent). 201 `{architect_agent_id,
+    drafter_agent_id, workflow_drafter_agent_id, model}` when a row was created, 200 with the same shape otherwise (the tenant's edits are kept).
     409 `{detail, code: "choose_model", providers}` when no model is available."""
     body, created = ensure_seed(request.app.state.database_engine, principal.tenant_id, principal.user_id)
     return JSONResponse(content=body, status_code=201 if created else 200)
@@ -262,7 +271,8 @@ def _listing(conn: Connection, tenant_id: str, statement: Any, hasher: Any, id_k
 
 @router.get("")
 def state(request: Request, principal: PrincipalDep) -> JSONResponse:
-    """`{seeded, choose_model, architect_agent_id, drafter_agent_id, model, agents, workflows}`.
+    """`{seeded, choose_model, architect_agent_id, drafter_agent_id, workflow_drafter_agent_id, model,
+    agents, workflows}`.
     `seeded` is true when both built-in agents exist; `choose_model` is true when they do not and
     no model is available to seed them with. `agents` and `workflows` are the Architect-made
     definitions by id: `{id (slug), agent_id | workflow_id (the row id), name, versions,
@@ -272,8 +282,8 @@ def state(request: Request, principal: PrincipalDep) -> JSONResponse:
     tenant_id = principal.tenant_id
     with engine.connect() as conn:
         built = {r.slug: r for r in conn.execute(
-            text("SELECT id, slug, draft_spec FROM agents WHERE tenant_id = :t AND builtin AND slug IN (:a, :d)"),
-            {"t": tenant_id, "a": ARCHITECT_SLUG, "d": DRAFTER_SLUG},
+            text("SELECT id, slug, draft_spec FROM agents WHERE tenant_id = :t AND builtin AND slug IN (:a, :d, :w)"),
+            {"t": tenant_id, "a": ARCHITECT_SLUG, "d": DRAFTER_SLUG, "w": WORKFLOW_DRAFTER_SLUG},
         )}
         agents = _listing(conn, tenant_id, _AGENT_LIST, draft_hash, "agent_id")
         workflows = _listing(conn, tenant_id, _WORKFLOW_LIST, _workflow_draft_hash, "workflow_id")
@@ -284,6 +294,7 @@ def state(request: Request, principal: PrincipalDep) -> JSONResponse:
         "choose_model": (not seeded) and seed_model() is None,
         "architect_agent_id": str(architect.id) if architect else None,
         "drafter_agent_id": str(built[DRAFTER_SLUG].id) if DRAFTER_SLUG in built else None,
+        "workflow_drafter_agent_id": str(built[WORKFLOW_DRAFTER_SLUG].id) if WORKFLOW_DRAFTER_SLUG in built else None,
         "model": _spec_model(architect.draft_spec) if architect else None,
         "agents": agents,
         "workflows": workflows,
@@ -410,9 +421,41 @@ def _wait_for_run(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> dict[str
         time.sleep(DRAFT_POLL_S)
 
 
-def _invalid(raw: str, problems: list[str]) -> DefinitionError:
-    return refuse(422, "The drafter's answer is not a valid agent definition.", code="draft_invalid",
+def _invalid(raw: str, problems: list[str], what: str = "agent") -> DefinitionError:
+    return refuse(422, f"The drafter's answer is not a valid {what} definition.", code="draft_invalid",
                   raw=raw[:MAX_RAW_CHARS], problems=problems)
+
+
+def _run_drafter(
+    drafter_agent_id: str, prompt: str, principal: Principal, db: Session, stores: Any, launcher: RunLauncher,
+    what: str,
+) -> tuple[dict[str, Any], list[str], str, str, str | None]:
+    """One run of a built-in drafter and its answer: `(parsed object, assumptions, raw, run_id, model)`.
+    The parsed object has `assumptions` removed; 502, 504 and 422 `draft_invalid` for the failures."""
+    try:
+        run = RunCreate(run_id=uuid.uuid4(), input=prompt)
+    except ValidationError:
+        raise refuse(422, "The description is too long.", code="description_too_long") from None
+    started = start_run(uuid.UUID(drafter_agent_id), run, principal, db, stores, launcher)
+    run_id = json.loads(started.body)["run_id"]
+    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id))
+    if finished["status"] != "completed":
+        raise DraftFailed("The drafter run did not finish.", code="draft_failed", run_id=run_id,
+                          error=str(finished.get("error") or finished["status"])[:300])
+    raw = finished.get("output") or ""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        raise _invalid(raw, ["the answer is not JSON"], what) from None
+    if not isinstance(parsed, dict):
+        raise _invalid(raw, ["the answer is not a JSON object"], what)
+    listed = parsed.pop("assumptions", [])
+    assumptions = [a for a in listed if isinstance(a, str)][:12] if isinstance(listed, list) else []
+    return parsed, assumptions, raw, run_id, finished.get("model_id")
+
+
+def _problems(exc: ValidationError) -> list[str]:
+    return [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
 
 
 @router.post("/draft", responses={409: {"description": "choose_model"}, 422: {"description": "draft_invalid"}})
@@ -433,33 +476,17 @@ def draft(
     engine: Engine = request.app.state.database_engine
     ids, _ = ensure_seed(engine, principal.tenant_id, principal.user_id)
     allowlist = build_allowlist(request, principal)
-    try:
-        run = RunCreate(run_id=uuid.uuid4(), input=drafter_input(body.description, body.current, allowlist))
-    except ValidationError:
-        raise refuse(422, "The description is too long.", code="description_too_long") from None
-    started = start_run(uuid.UUID(ids["drafter_agent_id"]), run, principal, db, stores, launcher)
-    run_id = json.loads(started.body)["run_id"]
-    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id))
-    if finished["status"] != "completed":
-        raise DraftFailed("The drafter run did not finish.", code="draft_failed", run_id=run_id,
-                          error=str(finished.get("error") or finished["status"])[:300])
-    raw = finished.get("output") or ""
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        raise _invalid(raw, ["the answer is not JSON"]) from None
-    if not isinstance(parsed, dict):
-        raise _invalid(raw, ["the answer is not a JSON object"])
-    assumptions = [a for a in parsed.pop("assumptions", []) if isinstance(a, str)][:12] if isinstance(
-        parsed.get("assumptions", []), list
-    ) else []
+    parsed, assumptions, raw, run_id, model = _run_drafter(
+        ids["drafter_agent_id"], drafter_input(body.description, body.current, allowlist),
+        principal, db, stores, launcher, "agent",
+    )
     bad_id = parsed.get("id") if isinstance(parsed.get("id"), str) and not AGENT_ID_PATTERN.fullmatch(parsed["id"]) else None
     if bad_id is not None:
         parsed["id"] = None  # the schema cannot state the id rule: enforced here
     try:
         spec = ArchitectAgentSpec.model_validate(parsed)
     except ValidationError as exc:
-        raise _invalid(raw, [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]) from None
+        raise _invalid(raw, _problems(exc)) from None
     cleaned, dropped = filter_draft(spec, allowlist)
     if bad_id is not None:
         dropped.append({"kind": "id", "id": bad_id})
@@ -468,7 +495,69 @@ def draft(
         "assumptions": assumptions,
         "dropped": dropped,
         "run_id": run_id,
-        "model": finished.get("model_id"),
+        "model": model,
+    })
+
+
+class DraftWorkflowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(min_length=1, max_length=MAX_DESCRIPTION_CHARS)
+    current: ArchitectWorkflowSpec | None = None
+
+
+def workflow_drafter_input(description: str, current: ArchitectWorkflowSpec | None, allowlist: Allowlist) -> str:
+    """The workflow drafter's prompt: the description as written, then the agents and tools the steps
+    may use, then the current definition when the person is editing one."""
+    lines = [description.strip(), "", "--- Available to use in steps (only these) ---"]
+    lines.append("Agents (id): " + ("; ".join(f"{a.id} ({a.name})" for a in allowlist.agents) or "none"))
+    lines.append("Tools (id): " + ("; ".join(f"{t.id} ({t.title})" for t in allowlist.tools) or "none"))
+    if current is not None:
+        lines += ["", "--- Current definition (change only what the description asks for) ---",
+                  current.model_dump_json(exclude_none=True)]
+    return "\n".join(lines)
+
+
+@router.post(
+    "/draft-workflow", responses={409: {"description": "choose_model"}, 422: {"description": "draft_invalid"}}
+)
+def draft_workflow(
+    body: DraftWorkflowRequest,
+    request: Request,
+    principal: PrincipalDep,
+    db: SessionDep,
+    stores: StoresDep,
+    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+) -> JSONResponse:
+    """`/architect/draft` for a workflow (the built-in `architect-workflow-drafter`). 200 `{spec:
+    ArchitectWorkflowSpec, assumptions: [string], dropped: [{kind: agent | tool | id, id}], run_id,
+    model}`: a step that uses an agent or tool the allowlist did not offer is removed and reported (a
+    parallel step keeps its remaining branches), so `spec.steps` may come back empty. 422 `draft_invalid`
+    with `raw` and `problems`; 502 `draft_failed`; 504 `draft_timeout`; 409 `choose_model`. The page
+    saves the result through POST /architect/workflows, which validates it again."""
+    engine: Engine = request.app.state.database_engine
+    ids, _ = ensure_seed(engine, principal.tenant_id, principal.user_id)
+    allowlist = build_allowlist(request, principal, mcp_servers=set())
+    parsed, assumptions, raw, run_id, model = _run_drafter(
+        ids["workflow_drafter_agent_id"], workflow_drafter_input(body.description, body.current, allowlist),
+        principal, db, stores, launcher, "workflow",
+    )
+    bad_id = parsed.get("id") if isinstance(parsed.get("id"), str) and not AGENT_ID_PATTERN.fullmatch(parsed["id"]) else None
+    if bad_id is not None:
+        parsed["id"] = None
+    try:
+        spec = ArchitectWorkflowSpec.model_validate(normalize_workflow_draft(parsed))
+    except ValidationError as exc:
+        raise _invalid(raw, _problems(exc), "workflow") from None
+    cleaned, dropped = filter_workflow_draft(spec, allowlist)
+    if bad_id is not None:
+        dropped.append({"kind": "id", "id": bad_id})
+    return JSONResponse(content={
+        "spec": cleaned.model_dump(mode="json"),
+        "assumptions": assumptions,
+        "dropped": dropped,
+        "run_id": run_id,
+        "model": model,
     })
 
 

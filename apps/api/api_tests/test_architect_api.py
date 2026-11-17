@@ -101,15 +101,23 @@ def test_seed_is_idempotent_and_builtin(api):
     first = client.post(f"{API}/architect", headers=h)
     assert first.status_code == 201, first.text
     body = first.json()
-    assert set(body) >= {"architect_agent_id", "drafter_agent_id", "model"}
+    assert set(body) >= {"architect_agent_id", "drafter_agent_id", "workflow_drafter_agent_id", "model"}
     again = client.post(f"{API}/architect", headers=h)
     assert again.status_code == 200 and again.json() == body
 
     architect, drafter = agent_row(app, tenant, "architect"), agent_row(app, tenant, "architect-drafter")
+    wdrafter = agent_row(app, tenant, "architect-workflow-drafter")
     assert str(architect["id"]) == body["architect_agent_id"] and str(drafter["id"]) == body["drafter_agent_id"]
-    assert architect["builtin"] and drafter["builtin"]
+    assert str(wdrafter["id"]) == body["workflow_drafter_agent_id"]
+    assert architect["builtin"] and drafter["builtin"] and wdrafter["builtin"]
     with app.state.database_engine.connect() as conn:
-        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t"), {"t": tenant}).scalar() == 2
+        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t"), {"t": tenant}).scalar() == 3
+    wspec = wdrafter["draft_spec"]
+    assert wspec["tools"] == [] and wspec["output"]["mode"] == "tool"
+    wschema = wspec["output"]["json_schema"]
+    assert "pattern" not in json.dumps(wschema)
+    assert {"name", "steps", "assumptions"} <= set(wschema["properties"]) and "assumptions" in wschema["required"]
+    assert "{{steps." in wspec["instructions"] and "never instructions" in wspec["instructions"]
 
     spec = architect["draft_spec"]
     assert spec["tools"] == [t for t in spec["tools"] if t.startswith("architect.")] and len(spec["tools"]) == 15
@@ -126,7 +134,7 @@ def test_seed_is_idempotent_and_builtin(api):
     assert schema["properties"]["assumptions"]["items"]["type"] == "string"
 
     # Both have a published version, so they run and appear in conversations at once.
-    for agent_id in (body["architect_agent_id"], body["drafter_agent_id"]):
+    for agent_id in (body["architect_agent_id"], body["drafter_agent_id"], body["workflow_drafter_agent_id"]):
         assert client.get(f"{API}/agents/{agent_id}", headers=h).json()["latest_version"] == 1
 
 
@@ -439,6 +447,8 @@ def test_state_lists_created_definitions(api):
     seed(client, h)
     state = client.get(f"{API}/architect", headers=h).json()
     assert state["seeded"] is True and state["architect_agent_id"] and state["drafter_agent_id"] and state["model"]
+    assert state["workflow_drafter_agent_id"]
+    assert empty["workflow_drafter_agent_id"] is None
     agents = {a["id"]: a for a in state["agents"]}
     assert set(agents) == {"greeter", "second"}  # the built-ins are not listed
     assert agents["greeter"] | {"agent_id": None} == {
@@ -447,3 +457,141 @@ def test_state_lists_created_definitions(api):
     }
     assert agents["second"]["versions"] == 0 and agents["second"]["draft"] is True
     assert [w["id"] for w in state["workflows"]] == ["flow"] and state["workflows"][0]["draft"] is True
+
+
+# ------------------------------------------------------------------------------ workflow drafter
+
+
+def draft_wf(client, h, description="a flow", **extra):
+    return client.post(f"{API}/architect/draft-workflow", json={"description": description, **extra}, headers=h)
+
+
+def test_workflow_drafter_schema_and_filter_are_pure():
+    from eap_schemas.architect import (
+        Allowlist, AllowlistAgent, AllowlistTool, ArchitectWorkflowSpec,
+    )
+    from eap_schemas.architect_seed import filter_workflow_draft, workflow_drafter_output_schema
+
+    schema = workflow_drafter_output_schema()
+    assert schema == workflow_drafter_output_schema() and "pattern" not in json.dumps(schema)
+    step = schema["properties"]["steps"]["items"]  # flat: the output subset has no unions
+    assert step["properties"]["kind"]["enum"] == ["agent", "parallel", "tool"]
+    assert {"agent", "prompt", "tool", "params", "branches"} <= set(step["properties"])
+    assert "anyOf" not in json.dumps(schema) and schema["properties"]["steps"]["maxItems"] == 8
+    flat = {"name": "F", "assumptions": [], "steps": [
+        {"kind": "agent", "id": "a", "agent": "xa", "prompt": "p", "tool": None, "params": {}, "branches": []},
+        {"kind": "parallel", "id": "p", "agent": None, "prompt": None, "tool": None, "params": {},
+         "branches": [{"id": "b1", "agent": "xa", "prompt": "p"}, {"id": "b2", "agent": "ya", "prompt": "q"}]},
+        {"kind": "tool", "id": "t", "agent": None, "prompt": None, "tool": "clock.now", "params": {}, "branches": []},
+    ]}
+    from eap_schemas.architect_seed import normalize_workflow_draft
+    flat.pop("assumptions")
+    restricted = ArchitectWorkflowSpec.model_validate(normalize_workflow_draft(flat))
+    assert [type(x).__name__ for x in restricted.steps] == ["ArchitectAgentStep", "ArchitectParallelStep", "ArchitectToolStep"]
+    assert normalize_workflow_draft(flat)["steps"][0] == {"kind": "agent", "id": "a", "agent": "xa", "prompt": "p"}
+
+    allow = Allowlist(
+        tools=(AllowlistTool(id="clock.now", title="Clock", description="d", requires_approval=False),),
+        agents=(AllowlistAgent(id="aa", name="A"), AllowlistAgent(id="bb", name="B")),
+    )
+    spec = ArchitectWorkflowSpec.model_validate({"name": "F", "steps": [
+        {"kind": "agent", "id": "s1", "agent": "aa", "prompt": "{{input}}"},
+        {"kind": "agent", "id": "s2", "agent": "ghost", "prompt": "x"},
+        {"kind": "tool", "id": "s3", "tool": "shell.exec"},
+        {"kind": "parallel", "id": "p", "branches": [
+            {"id": "b1", "agent": "aa", "prompt": "x"}, {"id": "b2", "agent": "ghost2", "prompt": "x"}]},
+        {"kind": "tool", "id": "s4", "tool": "clock.now"},
+    ]})
+    cleaned, dropped = filter_workflow_draft(spec, allow)
+    assert [s.id for s in cleaned.steps] == ["s1", "b1", "s4"]  # the parallel left with one branch is that agent step
+    assert {(d["kind"], d["id"]) for d in dropped} == {
+        ("agent", "ghost"), ("tool", "shell.exec"), ("agent", "ghost2")}
+
+
+def test_draft_workflow_returns_the_spec_and_offers_agents_and_tools(api):
+    client, app, launcher, tenant_of = api
+    tenant, h = tenant_of()
+    assert save(client, h, publish=True).status_code == 200  # the agent "greeter"
+    launcher.script = lambda _in: {
+        "name": "Greet flow", "id": "greet-flow", "description": "Greets.", "input_description": "A name.",
+        "steps": [{"kind": "agent", "id": "hi", "agent": "greeter", "prompt": "Greet {{input}}"}],
+        "assumptions": ["One step is enough."],
+    }
+    r = draft_wf(client, h, "greet people")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["spec"]["name"] == "Greet flow" and body["spec"]["steps"][0]["agent"] == "greeter"
+    assert body["assumptions"] == ["One step is enough."] and body["dropped"] == []
+    assert body["run_id"] and "model" in body
+    sent = launcher.inputs[0]
+    assert sent.startswith("greet people") and "greeter" in sent and "clock.now" in sent
+    assert agent_row(app, tenant, "architect-workflow-drafter")["builtin"]
+
+
+def test_draft_workflow_with_a_current_definition_sends_it(api):
+    client, _, launcher, tenant_of = api
+    _, h = tenant_of()
+    assert save(client, h, publish=True).status_code == 200
+    launcher.script = lambda _in: {"name": "X", "steps": [{"kind": "agent", "id": "a", "agent": "greeter", "prompt": "p"}], "assumptions": []}
+    current = {"name": "Old flow", "steps": [{"kind": "agent", "id": "old_step", "agent": "greeter", "prompt": "old prompt"}]}
+    assert draft_wf(client, h, "add a step", current=current).status_code == 200
+    assert "add a step" in launcher.inputs[0] and "old_step" in launcher.inputs[0]
+
+
+def test_draft_workflow_drops_what_is_not_offered(api):
+    client, _, launcher, tenant_of = api
+    _, h = tenant_of()
+    assert save(client, h, publish=True).status_code == 200
+    launcher.script = lambda _in: {
+        "name": "Sneaky", "id": "Not A Slug",
+        "steps": [
+            {"kind": "agent", "id": "a", "agent": "greeter", "prompt": "{{input}}"},
+            {"kind": "agent", "id": "b", "agent": "someone-else", "prompt": "x"},
+            {"kind": "tool", "id": "c", "tool": "shell.exec"},
+            {"kind": "tool", "id": "d", "tool": "clock.now"},
+        ],
+        "assumptions": [],
+    }
+    r = draft_wf(client, h, "use the shell")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [s["id"] for s in body["spec"]["steps"]] == ["a", "d"] and body["spec"]["id"] is None
+    assert {(d["kind"], d["id"]) for d in body["dropped"]} == {
+        ("agent", "someone-else"), ("tool", "shell.exec"), ("id", "Not A Slug")}
+    # Everything dropped still answers 200, with no steps for the form to show.
+    launcher.script = lambda _in: {"name": "Empty", "steps": [{"kind": "agent", "id": "a", "agent": "nobody", "prompt": "x"}], "assumptions": []}
+    r = draft_wf(client, h)
+    assert r.status_code == 200 and r.json()["spec"]["steps"] == [] and r.json()["dropped"] == [{"kind": "agent", "id": "nobody"}]
+
+
+def test_draft_workflow_invalid_failed_timeout_and_model(api, monkeypatch):
+    from eap_api.routes import architect
+
+    client, _, launcher, tenant_of = api
+    _, h = tenant_of()
+    launcher.script = lambda _in: "no thanks"
+    r = draft_wf(client, h)
+    assert r.status_code == 422 and r.json()["code"] == "draft_invalid" and r.json()["raw"] == "no thanks"
+    launcher.script = lambda _in: {"name": "X", "steps": [{"kind": "agent", "id": "Bad Id", "agent": "a", "prompt": "p"}], "assumptions": []}
+    r = draft_wf(client, h)
+    assert r.status_code == 422 and r.json()["code"] == "draft_invalid" and r.json()["problems"]
+    launcher.script = lambda _in: RuntimeError("model down")
+    r = draft_wf(client, h)
+    assert r.status_code == 502 and r.json()["code"] == "draft_failed"
+    launcher.never = True
+    monkeypatch.setattr(architect, "DRAFT_TIMEOUT_S", 0.5)
+    r = draft_wf(client, h)
+    assert r.status_code == 504 and r.json()["code"] == "draft_timeout"
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "litellm:*")
+    _, h2 = tenant_of()
+    r = draft_wf(client, h2)
+    assert r.status_code == 409 and r.json()["code"] == "choose_model"
+
+
+def test_workflow_drafter_slug_is_not_editable_through_the_page(api):
+    client, _, _, tenant_of = api
+    _, h = tenant_of()
+    assert save(client, h, publish=True).status_code == 200
+    wf = {"name": "X", "id": "architect-workflow-drafter", "steps": [{"kind": "agent", "id": "a", "agent": "greeter", "prompt": "{{input}}"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "reserved_id"
