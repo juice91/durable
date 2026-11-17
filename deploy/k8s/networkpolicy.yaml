@@ -202,3 +202,53 @@ spec:
               - 192.168.5.2/32
       ports:
         - {protocol: TCP, port: 443}
+---
+# The worker and API create, inspect and delete MCP runtimes through the Kubernetes API server
+# (serviceAccount pydanticos-mcp, rbac-mcp.yaml). Policies see the API server after Service NAT, so
+# both addresses are allowed: the `kubernetes` Service ClusterIP (kubectl get svc kubernetes) and the
+# endpoint (kubectl get endpoints kubernetes -n default). Replace these with the cluster's own values
+# and set the same list as EAP_MCP_API_SERVER_CIDRS (the per-tenant policies need it too).
+# 10.43.0.1 is the k3s default; 192.168.5.3 is the colima-pydanticos node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-egress-kube-api
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [api, worker]
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+        - ipBlock:
+            cidr: 192.168.5.3/32
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+---
+# The worker calls managed MCP servers through the proxy Service (mcp-<cr>-proxy:8080) in each
+# tenant's `mcp-tenant-*` namespace. Those namespaces carry the label pydanticos.io/mcp-tenant; the
+# tenant side admits only this namespace's worker pods on that port (NetworkPolicy `<cr>-isolation`).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-egress-mcp-tenants
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: pydanticos.io/mcp-tenant
+                operator: Exists
+      ports:
+        - {protocol: TCP, port: 8080}

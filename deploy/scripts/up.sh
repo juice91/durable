@@ -153,6 +153,11 @@ fi
 git_sha=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
 python_image="pydanticos-python:${git_sha}"
 studio_image="pydanticos-studio:${git_sha}"
+# Platform runner images for managed MCP servers (npm and pypi packages install at pod start). The
+# worker finds them through EAP_MCP_RUNNER_NODE_IMAGE / EAP_MCP_RUNNER_PYTHON_IMAGE, or by the
+# same SHA tag.
+runner_node_image="pydanticos-mcp-runner-node:${git_sha}"
+runner_python_image="pydanticos-mcp-runner-python:${git_sha}"
 
 # Right after the VM (re)starts its network can lag: a deploy failed with an i/o timeout to
 # registry-1.docker.io that worked seconds later. Wait (bounded) until the VM reaches the
@@ -179,6 +184,19 @@ build_image() { # DOCKERFILE TAG
 }
 build_image python.Dockerfile "$python_image"
 build_image studio.Dockerfile "$studio_image"
+# The runner Dockerfiles need no repo files; a small context keeps the builds fast.
+build_runner_image() { # DOCKERFILE TAG
+  local attempt
+  for attempt in 1 2; do
+    if docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/$1" -t "$2" "$REPO_ROOT/deploy/docker"; then
+      return 0
+    fi
+    (( attempt == 2 )) || { printf 'Image build for %s failed; retrying once in 15 seconds.\n' "$1" >&2; sleep 15; }
+  done
+  return 1
+}
+build_runner_image mcp-runner-node.Dockerfile "$runner_node_image"
+build_runner_image mcp-runner-python.Dockerfile "$runner_python_image"
 
 kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/namespace.yaml"
 

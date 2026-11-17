@@ -25,6 +25,7 @@ from eap_worker import workflow_run as _workflow_run  # noqa: F401  (eap.workflo
 from eap_worker import kb_ingest as _kb_ingest  # noqa: F401  (eap.kb_ingest and its steps, RM.10)
 from eap_worker import observational as _observational  # noqa: F401  (eap-observer, eap.memory_observe*, RM.13)
 from eap_worker import retention as _retention  # noqa: F401  (eap.memory_retention and its steps, RM.15)
+from eap_worker import mcp_catalog_mirror as _mcp_catalog_mirror  # noqa: F401  (eap.mcp_catalog_mirror and its steps)
 from eap_worker import eval_run as _eval_run  # noqa: F401  (eap.eval_run, its steps and eap-judge, AC.11)
 
 APP_NAME = "eap-worker"
@@ -101,13 +102,15 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     )
     # eap.memory_retention (RM.15): scheduled when EAP_MEMORY_RETENTION_* is set, removed on =off.
     _retention.apply_retention_schedule()
+    # eap.mcp_catalog_mirror: hourly by default, removed on EAP_MCP_CATALOG_SCHEDULE=off.
+    _mcp_catalog_mirror.apply_catalog_schedule()
     return settings
 
 
 def validate_startup(settings: WorkerSettings) -> None:
     """Fail at start (before DBOS launches or recovers anything) on settings that would otherwise
     first fail inside a step: the ingest caps, the ingest queue's concurrency, the exact-search
-    fallback cap, the reflector input cap, the retention settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError is one)."""
+    fallback cap, the reflector input cap, the retention and MCP catalog mirror settings and the embedding gateway pairing. Raises ValueError (RetentionConfigError and CatalogMirrorConfigError are)."""
     from eap_run_store.knowledge import check_exact_search_max_chunks
 
     from eap_worker.config import embedding_endpoint_problem
@@ -117,6 +120,7 @@ def validate_startup(settings: WorkerSettings) -> None:
     check_exact_search_max_chunks()
     kb_ingest_concurrency()
     _retention.RetentionConfig.from_env()
+    _mcp_catalog_mirror.CatalogMirrorConfig.from_env()
     queue_polling_interval()
     problem = embedding_endpoint_problem(settings)
     if problem is not None:

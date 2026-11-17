@@ -194,3 +194,75 @@ def test_unknown_phase_falls_back_to_starting() -> None:
 
 def test_env_names_lists_plain_and_secret_names() -> None:
     assert spec().env_names == ("LOG_LEVEL", "API_TOKEN")
+
+
+def _limits(api: FakeKube, h) -> dict:
+    (c,) = api.objects[("MCPServer", h.namespace, h.cr_name)]["spec"]["podTemplateSpec"]["spec"]["containers"]
+    return c["resources"]
+
+
+async def test_pod_limits_default_to_one_cpu_and_one_gi(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EAP_MCP_POD_CPU", raising=False)
+    monkeypatch.delenv("EAP_MCP_POD_MEMORY", raising=False)
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert _limits(api, h)["limits"] == {"cpu": "1", "memory": "1Gi"}
+
+
+async def test_pod_limits_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_POD_CPU", "2")
+    monkeypatch.setenv("EAP_MCP_POD_MEMORY", "512Mi")
+    rt, api = runtime()
+    h = await rt.start(spec())
+    res = _limits(api, h)
+    assert res["limits"] == {"cpu": "2", "memory": "512Mi"}
+    assert res["requests"]["cpu"] == "50m" and res["requests"]["memory"] == "64Mi"
+
+
+async def test_requests_never_exceed_a_small_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_POD_CPU", "20m")
+    monkeypatch.setenv("EAP_MCP_POD_MEMORY", "32Mi")
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert _limits(api, h)["requests"] == {"cpu": "20m", "memory": "32Mi"}
+
+
+@pytest.mark.parametrize(("var", "bad"), [("EAP_MCP_POD_CPU", "lots"), ("EAP_MCP_POD_MEMORY", "1 gigabyte")])
+def test_an_invalid_limit_is_rejected_at_construction(monkeypatch: pytest.MonkeyPatch, var: str, bad: str) -> None:
+    monkeypatch.setenv(var, bad)
+    with pytest.raises(ValueError, match=var):
+        runtime()
+
+
+async def test_api_server_cidrs_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_API_SERVER_CIDRS", "10.43.0.1/32, 192.168.5.3/32")
+    api = FakeKube()
+    rt = OperatorRuntime(api)
+    h = await rt.start(spec())
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    cidrs = [t["ipBlock"]["cidr"] for r in np["egress"] for t in r["to"] if "ipBlock" in t]
+    assert "10.43.0.1/32" in cidrs and "192.168.5.3/32" in cidrs
+
+
+async def test_an_explicit_cidr_argument_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_API_SERVER_CIDRS", "10.43.0.1/32")
+    api = FakeKube()
+    rt = OperatorRuntime(api, api_server_cidrs=("172.20.0.5/32",))
+    h = await rt.start(spec())
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    cidrs = [t["ipBlock"]["cidr"] for r in np["egress"] for t in r["to"] if "ipBlock" in t]
+    assert "172.20.0.5/32" in cidrs and "10.43.0.1/32" not in cidrs
+
+
+def test_an_invalid_cidr_in_the_environment_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EAP_MCP_API_SERVER_CIDRS", "not-a-cidr")
+    with pytest.raises(ValueError, match="EAP_MCP_API_SERVER_CIDRS"):
+        OperatorRuntime(FakeKube())
+
+
+async def test_pod_never_gets_service_account_token_or_host_access() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    pod = api.objects[("MCPServer", h.namespace, h.cr_name)]["spec"]["podTemplateSpec"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert not any(pod.get(k) for k in ("hostNetwork", "hostPID", "hostIPC"))

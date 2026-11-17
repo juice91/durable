@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
+import os
+import re
 import time
 from collections.abc import Sequence
 from typing import Any, Protocol
@@ -14,6 +17,13 @@ from eap_mcp_runtime.models import RuntimeHandle, RuntimeSpec, RuntimeStatus
 
 FIELD_MANAGER = "pydanticos-mcp-runtime"
 PRIVATE_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10")
+POD_CPU_ENV = "EAP_MCP_POD_CPU"
+POD_MEMORY_ENV = "EAP_MCP_POD_MEMORY"
+API_SERVER_CIDRS_ENV = "EAP_MCP_API_SERVER_CIDRS"
+DEFAULT_POD_CPU = "1"
+DEFAULT_POD_MEMORY = "1Gi"
+REQUEST_CPU = "50m"
+REQUEST_MEMORY = "64Mi"
 STATE_BY_PHASE = {
     "Pending": "starting",
     "Ready": "running",
@@ -21,6 +31,49 @@ STATE_BY_PHASE = {
     "Terminating": "stopping",
     "Stopped": "stopped",
 }
+
+
+_CPU = re.compile(r"^(\d+(?:\.\d+)?)(m?)$")
+_MEM = re.compile(r"^(\d+)(Ki|Mi|Gi|Ti|k|K|M|G|T)?$")
+_MEM_UNITS = {None: 1, "k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12,
+              "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+
+
+def _cpu_millis(value: str, var: str) -> float:
+    mt = _CPU.match(value.strip())
+    if not mt or float(mt.group(1)) <= 0:
+        raise ValueError(f"{var}={value!r} is not a CPU quantity such as 1, 0.5 or 500m")
+    return float(mt.group(1)) * (1 if mt.group(2) else 1000)
+
+
+def _memory_bytes(value: str, var: str) -> int:
+    mt = _MEM.match(value.strip())
+    if not mt or int(mt.group(1)) <= 0:
+        raise ValueError(f"{var}={value!r} is not a memory quantity such as 512Mi or 1Gi")
+    return int(mt.group(1)) * _MEM_UNITS[mt.group(2)]
+
+
+def pod_resources(cpu: str, memory: str) -> dict[str, dict[str, str]]:
+    """Container resources for the MCP container. Limits come from the operator's configuration;
+    requests are the usual small request, lowered to the limit when the limit is smaller."""
+    cpu, memory = cpu.strip(), memory.strip()
+    req_cpu = REQUEST_CPU if _cpu_millis(cpu, POD_CPU_ENV) >= _cpu_millis(REQUEST_CPU, "") else cpu
+    req_mem = REQUEST_MEMORY if _memory_bytes(memory, POD_MEMORY_ENV) >= _memory_bytes(REQUEST_MEMORY, "") else memory
+    return {"requests": {"cpu": req_cpu, "memory": req_mem}, "limits": {"cpu": cpu, "memory": memory}}
+
+
+def cidrs_from_env(value: str) -> tuple[str, ...]:
+    out = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            raise ValueError(f"{API_SERVER_CIDRS_ENV} entry {part!r} is not a CIDR") from None
+        out.append(part)
+    return tuple(out)
 
 
 def handle_for(tenant_id: str, server_id: str) -> RuntimeHandle:
@@ -149,6 +202,8 @@ def mcpserver_doc(
     tenant_id: str,
     server_id: str,
     replicas: int = 1,
+    cpu: str = DEFAULT_POD_CPU,
+    memory: str = DEFAULT_POD_MEMORY,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "image": image,
@@ -163,6 +218,14 @@ def mcpserver_doc(
         "podTemplateSpec": {
             "spec": {
                 "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                # No Kubernetes API credentials inside the pod, and no host namespaces.
+                "automountServiceAccountToken": False,
+                "hostNetwork": False,
+                "hostPID": False,
+                "hostIPC": False,
+                # A pids limit (256 was planned) cannot be set per pod: Kubernetes only has the
+                # kubelet-wide `podPidsLimit`, and the PodSpec has no field for it. The node's
+                # setting and the pod count in `mcp-quota` bound it instead.
                 "containers": [
                     {
                         "name": m.MCP_CONTAINER,
@@ -174,10 +237,7 @@ def mcpserver_doc(
                             "readOnlyRootFilesystem": True,
                             "capabilities": {"drop": ["ALL"]},
                         },
-                        "resources": {
-                            "requests": {"cpu": "50m", "memory": "64Mi"},
-                            "limits": {"cpu": "500m", "memory": "256Mi"},
-                        },
+                        "resources": pod_resources(cpu, memory),
                         "volumeMounts": [{"name": "work", "mountPath": "/tmp"}],
                     }
                 ],
@@ -318,12 +378,24 @@ class OperatorRuntime:
         *,
         platform_namespace: str = "pydanticos",
         worker_label: dict[str, str] | None = None,
-        api_server_cidrs: Sequence[str] = (),
+        api_server_cidrs: Sequence[str] | None = None,
+        pod_cpu: str | None = None,
+        pod_memory: str | None = None,
     ) -> None:
         self._api = api or LightkubeApi()
         self._platform_namespace = platform_namespace
         self._worker_label = worker_label or {"app.kubernetes.io/name": "worker"}
-        self._api_server_cidrs = tuple(api_server_cidrs)
+        # The proxy runner reaches the backend through the Kubernetes API server, whose address is
+        # cluster specific: `kubectl get endpoints kubernetes -n default` (and the `kubernetes`
+        # Service ClusterIP), as comma separated CIDRs, e.g. "10.43.0.1/32,192.168.5.3/32".
+        self._api_server_cidrs = (
+            tuple(api_server_cidrs)
+            if api_server_cidrs is not None
+            else cidrs_from_env(os.environ.get(API_SERVER_CIDRS_ENV, ""))
+        )
+        self._cpu = (pod_cpu or os.environ.get(POD_CPU_ENV) or DEFAULT_POD_CPU).strip()
+        self._memory = (pod_memory or os.environ.get(POD_MEMORY_ENV) or DEFAULT_POD_MEMORY).strip()
+        pod_resources(self._cpu, self._memory)  # validate now rather than at the first start
 
     async def start(self, spec: RuntimeSpec) -> RuntimeHandle:
         h = RuntimeHandle(m.namespace_name(spec.tenant_id), m.cr_name(spec.server_id))
@@ -354,6 +426,8 @@ class OperatorRuntime:
                 display_name=spec.name,
                 tenant_id=spec.tenant_id,
                 server_id=spec.server_id,
+                cpu=self._cpu,
+                memory=self._memory,
             )
         )
         return h
