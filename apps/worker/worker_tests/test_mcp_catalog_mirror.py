@@ -319,3 +319,177 @@ def test_config_validates_the_cron_and_min_keep():
     assert CatalogMirrorConfig.from_env({}).min_keep == 20
     with pytest.raises(CatalogMirrorConfigError, match="http"):
         CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_URL": "ftp://x"})
+
+
+# ---------------------------------------------------------------- the ToolHive registry (second source)
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+THV_URL = "https://thv.test/toolhive-registry-upstream.json"
+THV_CDN = "https://thv-cdn.test/blob/toolhive-registry-upstream.json"
+FIXTURE = Path(__file__).with_name("toolhive_registry_fixture.json")  # playwright and fetch, trimmed from the real artifact
+
+
+def thv_servers() -> list[dict]:
+    return json.loads(FIXTURE.read_text())["data"]["servers"]
+
+
+class FakeToolhive:
+    """The artifact URL redirects to a CDN (like a GitHub release download), as the real one does."""
+
+    def __init__(self, registry: FakeRegistry) -> None:
+        self.registry = registry
+        self.servers = thv_servers()
+        self.requests: list[str] = []
+        self.status = 200
+        self.loop = False
+
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
+        url = str(request.url)
+        if request.url.host not in ("thv.test", "thv-cdn.test"):
+            return self.registry.handler(request)
+        self.requests.append(url)
+        if self.loop:
+            return httpx2.Response(302, headers={"location": url})
+        if url == THV_URL:
+            return httpx2.Response(302, headers={"location": THV_CDN})
+        if self.status != 200:
+            return httpx2.Response(self.status, text="down")
+        return httpx2.Response(200, json={"version": "x", "data": {"servers": self.servers, "skills": []}})
+
+
+@pytest.fixture
+def thv(registry, monkeypatch):
+    fake = FakeToolhive(registry)
+    monkeypatch.setattr(mirror, "_client", lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(fake.handler)))
+    return fake
+
+
+def run_both(at: datetime = TICK, **context):
+    context.setdefault("toolhive_url", THV_URL)
+    return run(at, **context)
+
+
+def test_parse_entry_keeps_the_publisher_provided_meta_for_toolhive():
+    by_name = {s["name"]: s for s in thv_servers()}
+    pw = parse_entry(by_name["io.github.stacklok/playwright"], source="toolhive")
+    assert pw is not None and pw.source == "toolhive" and pw.status == "active" and pw.is_latest
+    (pkg,) = pw.packages
+    assert (pkg.registry_type, pkg.identifier, pkg.transport) == ("oci", "mcr.microsoft.com/playwright/mcp:v0.0.83", "stdio")
+    assert pkg.environment_variables[0].name.startswith("PLAYWRIGHT_MCP_")
+    m = pw.meta
+    assert m.tier == "Official" and m.tool_count == len(m.tools) == 25 and "browser_navigate" in m.tools
+    assert m.stars == 28552 and m.tags
+    assert m.network.insecure_allow_all is True and m.network.allow_port == (443,) and m.network.allow_host == ()
+
+    fetch = parse_entry(by_name["io.github.stacklok/fetch"], source="toolhive")
+    assert fetch.meta.tier == "Community" and fetch.meta.tools == ("fetch",) and fetch.meta.tool_count == 1
+    assert fetch.packages[0].transport == "streamable-http"
+
+
+def test_parse_entry_defaults_to_the_official_source_without_meta():
+    e = parse_entry(server("io.acme/files"))
+    assert e.source == "official" and e.meta is None
+
+
+def test_parse_entry_toolhive_without_a_publisher_block_or_a_network_block():
+    item = thv_servers()[0]
+    item = {**item, "_meta": {}}
+    e = parse_entry(item, source="toolhive")
+    assert e is not None and e.meta is None and e.status == "active"
+    block = thv_servers()[0]["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["io.github.stacklok"]
+    (inner,) = block.values()
+    no_net = json.loads(json.dumps(thv_servers()[0]))
+    no_net["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["io.github.stacklok"][
+        next(iter(block))
+    ].pop("permissions", None)
+    assert parse_entry(no_net, source="toolhive").meta.network is None
+    assert "tools" in inner
+
+
+def test_a_non_active_toolhive_entry_is_not_kept():
+    item = json.loads(json.dumps(thv_servers()[0]))
+    for v in item["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["io.github.stacklok"].values():
+        v["status"] = "Deprecated"
+    assert parse_entry(item, source="toolhive").status == "deprecated"
+
+
+def test_config_reads_the_toolhive_url_and_off(monkeypatch):
+    cfg = CatalogMirrorConfig.from_env({})
+    assert cfg.toolhive_url == mirror.DEFAULT_TOOLHIVE_URL
+    assert cfg.toolhive_url.endswith("/releases/latest/download/toolhive-registry-upstream.json")
+    assert CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_TOOLHIVE_URL": " OFF "}).toolhive_url is None
+    assert CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_TOOLHIVE_URL": THV_URL}).toolhive_url == THV_URL
+    with pytest.raises(CatalogMirrorConfigError, match="http"):
+        CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_TOOLHIVE_URL": "ftp://x"})
+    ctx = CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_TOOLHIVE_URL": THV_URL}).to_context()
+    assert CatalogMirrorConfig.from_context(ctx).toolhive_url == THV_URL
+    assert CatalogMirrorConfig.from_context({}).toolhive_url is None
+
+
+def test_the_mirror_upserts_toolhive_entries_after_the_official_ones(worker, thv, store):
+    thv.registry.pages = [[server("io.acme/a")]]
+    out = run_both()
+    assert out["kept"] == 1 and out["toolhive"]["kept"] == 2 and out["toolhive"]["complete"] is True
+    pw = store.get("io.github.stacklok/playwright")
+    assert pw.source == "toolhive" and pw.meta.tier == "Official" and pw.packages[0].registry_type == "oci"
+    assert store.get("io.acme/a").source == "official"
+    assert names(store) == ["io.github.stacklok/fetch", "io.github.stacklok/playwright", "io.acme/a"]  # toolhive first
+    assert thv.requests == [THV_URL, THV_CDN]  # the redirect was followed through the guarded client
+
+
+def test_each_sources_removal_sweep_only_touches_its_own_rows(worker, thv, store):
+    thv.registry.pages = [[server("io.acme/a"), server("io.acme/b")]]
+    run_both()
+    # next hour: the official registry drops b, ToolHive drops fetch
+    thv.registry.pages = [[server("io.acme/a")]]
+    thv.servers = [s for s in thv_servers() if not s["name"].endswith("/fetch")]
+    out = run_both(TICK + timedelta(hours=1), min_keep=1)
+    assert out["removed"] == 1 and out["toolhive"]["removed"] == 1
+    assert store.get("io.acme/b").status == "removed" and store.get("io.github.stacklok/fetch").status == "removed"
+    assert store.get("io.acme/a").status == "active" and store.get("io.github.stacklok/playwright").status == "active"
+    # ToolHive outage: the official sweep must not remove ToolHive rows, and the run reports the failure
+    thv.status = 503
+    with pytest.raises(Exception):
+        run_both(TICK + timedelta(hours=2))
+    assert store.get("io.github.stacklok/playwright").status == "active"
+
+
+def test_an_official_outage_does_not_stop_the_toolhive_source(worker, thv, store):
+    thv.registry.fail = True
+    with pytest.raises(Exception):
+        run_both()
+    assert store.get("io.github.stacklok/playwright") is not None  # ToolHive rows landed anyway
+
+
+def test_toolhive_off_skips_the_second_source(worker, thv, store):
+    thv.registry.pages = [[server("io.acme/a")]]
+    out = run(toolhive_url=None)
+    assert "toolhive" not in out or out["toolhive"] is None
+    assert thv.requests == [] and names(store) == ["io.acme/a"]
+
+
+def test_an_empty_toolhive_answer_never_empties_the_source(worker, thv, store):
+    thv.registry.pages = [[server("io.acme/a")]]
+    run_both()
+    thv.servers = []
+    out = run_both(TICK + timedelta(hours=1))
+    assert out["toolhive"]["removed"] == 0 and out["toolhive"]["complete"] is False
+    assert store.get("io.github.stacklok/playwright").status == "active"
+
+
+def test_an_oversized_toolhive_body_is_refused(worker, thv, store, monkeypatch):
+    monkeypatch.setattr(mirror, "TOOLHIVE_MAX_BODY_BYTES", 100)
+    thv.registry.pages = [[server("io.acme/a")]]
+    with pytest.raises(Exception):
+        run_both()
+    assert store.get("io.github.stacklok/playwright") is None and store.get("io.acme/a") is not None
+
+
+def test_a_redirect_loop_is_refused(worker, thv, store):
+    thv.loop = True
+    thv.registry.pages = [[server("io.acme/a")]]
+    with pytest.raises(Exception):
+        run_both()
+    assert len(thv.requests) <= (mirror.MAX_REDIRECTS + 1) * 3  # bounded, with the step's retries

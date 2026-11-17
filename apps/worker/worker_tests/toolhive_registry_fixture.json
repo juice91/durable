@@ -1,0 +1,241 @@
+{
+ "$schema": "https://raw.githubusercontent.com/stacklok/toolhive-core/main/registry/types/data/upstream-registry.schema.json",
+ "version": "1.0.0",
+ "meta": {
+  "last_updated": "2026-11-03T01:05:14Z"
+ },
+ "data": {
+  "servers": [
+   {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.github.stacklok/fetch",
+    "description": "Allows you to fetch content from the web",
+    "title": "Fetch",
+    "repository": {
+     "url": "https://github.com/stackloklabs/gofetch",
+     "source": "github"
+    },
+    "version": "1.0.0",
+    "icons": [
+     {
+      "src": "https://raw.githubusercontent.com/stacklok/toolhive-registry/main/registries/toolhive/servers/fetch/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+       "any"
+      ]
+     }
+    ],
+    "packages": [
+     {
+      "registryType": "oci",
+      "identifier": "ghcr.io/stackloklabs/gofetch/server:1.0.6",
+      "transport": {
+       "type": "streamable-http",
+       "url": "http://localhost:8080"
+      }
+     }
+    ],
+    "_meta": {
+     "io.modelcontextprotocol.registry/publisher-provided": {
+      "io.github.stacklok": {
+       "ghcr.io/stackloklabs/gofetch/server:1.0.6": {
+        "metadata": {
+         "last_updated": "2026-08-07T03:07:39Z",
+         "stars": 25
+        },
+        "overview": "## Fetch MCP Server\n\nThe fetch-mcp-server is a lightweight Model Context Protocol (MCP) server that gives AI assistants direct access to external HTTP and HTTPS resources. It allows AI-driven workflow",
+        "permissions": {
+         "network": {
+          "outbound": {
+           "allow_port": [
+            443
+           ],
+           "insecure_allow_all": true
+          }
+         }
+        },
+        "status": "Active",
+        "tags": [
+         "content",
+         "html",
+         "markdown",
+         "fetch",
+         "fetching",
+         "get",
+         "wget",
+         "json",
+         "curl",
+         "modelcontextprotocol"
+        ],
+        "tier": "Community",
+        "tool_definitions": [
+         {
+          "annotations": {},
+          "description": "Fetches a URL from the internet and optionally extracts its contents as markdown.",
+          "inputSchema": {
+           "type": "object"
+          },
+          "name": "fetch"
+         }
+        ],
+        "tools": [
+         "fetch"
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.github.stacklok/playwright",
+    "description": "Provides browser automation capabilities using Playwright",
+    "title": "Playwright",
+    "repository": {
+     "url": "https://github.com/microsoft/playwright-mcp",
+     "source": "github"
+    },
+    "version": "1.0.0",
+    "icons": [
+     {
+      "src": "https://raw.githubusercontent.com/stacklok/toolhive-registry/main/registries/toolhive/servers/playwright/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+       "any"
+      ]
+     }
+    ],
+    "packages": [
+     {
+      "registryType": "oci",
+      "identifier": "mcr.microsoft.com/playwright/mcp:v0.0.83",
+      "transport": {
+       "type": "stdio"
+      },
+      "environmentVariables": [
+       {
+        "description": "Comma-separated list of hosts this server is allowed to serve from. Defaults to the host the server is bound to. Pass '*' to disable the host check.",
+        "name": "PLAYWRIGHT_MCP_ALLOWED_HOSTS"
+       },
+       {
+        "description": "Semicolon-separated list of origins the browser may request. Defaults to all origins; this is not a security boundary and does not affect redirects.",
+        "name": "PLAYWRIGHT_MCP_ALLOWED_ORIGINS"
+       },
+       {
+        "description": "Allow access to files outside of the workspace roots, including unrestricted access to file:// URLs.",
+        "name": "PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS"
+       },
+       {
+        "description": "Semicolon-separated list of origins to block before the allowlist. Unmatched requests remain allowed when no allowlist is set; this is not a security boundary and does not affect redirects.",
+        "name": "PLAYWRIGHT_MCP_BLOCKED_ORIGINS"
+       }
+      ]
+     }
+    ],
+    "_meta": {
+     "io.modelcontextprotocol.registry/publisher-provided": {
+      "io.github.stacklok": {
+       "mcr.microsoft.com/playwright/mcp:v0.0.83": {
+        "metadata": {
+         "last_updated": "2026-10-16T03:17:51Z",
+         "stars": 28552
+        },
+        "overview": "## Playwright MCP Server\n\nThe playwright MCP server provides browser automation capabilities using Playwright. The server enables comprehensive browser automation supporting Chromium, Firefox, and Web",
+        "permissions": {
+         "network": {
+          "outbound": {
+           "allow_port": [
+            443
+           ],
+           "insecure_allow_all": true
+          }
+         }
+        },
+        "status": "Active",
+        "tags": [
+         "playwright",
+         "automation",
+         "browser",
+         "navigate",
+         "testing",
+         "web",
+         "accessibility"
+        ],
+        "tier": "Official",
+        "tool_definitions": [
+         {
+          "annotations": {
+           "destructiveHint": true,
+           "openWorldHint": true,
+           "readOnlyHint": false,
+           "title": "Click"
+          },
+          "description": "Perform click on a web page",
+          "inputSchema": {
+           "type": "object"
+          },
+          "name": "browser_click"
+         },
+         {
+          "annotations": {
+           "destructiveHint": true,
+           "openWorldHint": true,
+           "readOnlyHint": false,
+           "title": "Close browser"
+          },
+          "description": "Close the page",
+          "inputSchema": {
+           "type": "object"
+          },
+          "name": "browser_close"
+         },
+         {
+          "annotations": {
+           "destructiveHint": false,
+           "openWorldHint": true,
+           "readOnlyHint": true,
+           "title": "Get console messages"
+          },
+          "description": "Returns all console messages",
+          "inputSchema": {
+           "type": "object"
+          },
+          "name": "browser_console_messages"
+         }
+        ],
+        "tools": [
+         "browser_click",
+         "browser_close",
+         "browser_console_messages",
+         "browser_drag",
+         "browser_drop",
+         "browser_emulate_media",
+         "browser_evaluate",
+         "browser_file_upload",
+         "browser_fill_form",
+         "browser_find",
+         "browser_handle_dialog",
+         "browser_hover",
+         "browser_navigate",
+         "browser_navigate_back",
+         "browser_network_request",
+         "browser_network_requests",
+         "browser_press_key",
+         "browser_resize",
+         "browser_run_code_unsafe",
+         "browser_select_option",
+         "browser_snapshot",
+         "browser_tabs",
+         "browser_take_screenshot",
+         "browser_type",
+         "browser_wait_for"
+        ]
+       }
+      }
+     }
+    }
+   }
+  ],
+  "skills": []
+ }
+}

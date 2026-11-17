@@ -11,6 +11,15 @@ guard every outbound call uses) and keeps the entries that are the latest versio
     EAP_MCP_CATALOG_PAGE_SIZE    100                                        `limit` per page (the registry caps it at 100)
     EAP_MCP_CATALOG_MAX_PAGES    200                                        pages per run
     EAP_MCP_CATALOG_MIN_KEEP     20                                         removal floor (see below)
+    EAP_MCP_CATALOG_TOOLHIVE_URL https://github.com/stacklok/toolhive-catalog/releases/latest/download/
+                                 toolhive-registry-upstream.json            ToolHive's curated registry; `off` disables
+
+The ToolHive registry is a second source (`source = 'toolhive'`) mirrored by the same workflow right
+after the official one: one bounded GET (50 MiB; redirects are followed by hand, each hop through the
+same guarded client, at most 5), `data.servers` parsed with the same parser, the publisher-provided
+block (tier, tags, network permissions, tool names, stars) kept in `meta`. Each source has its own
+removal sweep, floor and failure: one source being down never marks the other's rows removed, and
+the run still mirrors the other source before it reports the failure.
 
 Durability and safety:
 - Each page is one fetch step and one upsert step, so a crash resumes after the last completed step;
@@ -39,12 +48,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 import json
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from dbos import DBOS
 
 from eap_run_store import CatalogStore
-from eap_schemas import CatalogEntry, CatalogPackage, EnvVarSpec
+from eap_schemas import CatalogEntry, CatalogMeta, CatalogNetwork, CatalogPackage, EnvVarSpec
 from eap_secrets.outbound import OutboundPolicy
 
 from eap_worker.cancel_reconcile import valid_cron
@@ -58,6 +67,9 @@ FETCH_STEP = "eap.mcp_catalog_mirror.fetch_page"
 UPSERT_STEP = "eap.mcp_catalog_mirror.upsert"
 COUNT_STEP = "eap.mcp_catalog_mirror.count_active"
 REMOVE_STEP = "eap.mcp_catalog_mirror.mark_removed"
+FETCH_TOOLHIVE_STEP = "eap.mcp_catalog_mirror.fetch_toolhive"
+COUNT_TOOLHIVE_STEP = "eap.mcp_catalog_mirror.count_active_toolhive"
+REMOVE_TOOLHIVE_STEP = "eap.mcp_catalog_mirror.mark_removed_toolhive"
 
 SCHEDULE_ENV = "EAP_MCP_CATALOG_SCHEDULE"
 URL_ENV = "EAP_MCP_CATALOG_URL"
@@ -71,6 +83,14 @@ MAX_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 200
 MAX_MAX_PAGES = 10_000
 DEFAULT_MIN_KEEP = 20
+TOOLHIVE_URL_ENV = "EAP_MCP_CATALOG_TOOLHIVE_URL"
+DEFAULT_TOOLHIVE_URL = (
+    "https://github.com/stacklok/toolhive-catalog/releases/latest/download/toolhive-registry-upstream.json"
+)
+TOOLHIVE_MAX_BODY_BYTES = 50 * 1024 * 1024
+MAX_REDIRECTS = 5
+TOOLHIVE_PUBLISHER_KEY = "io.modelcontextprotocol.registry/publisher-provided"
+TOOLHIVE_PUBLISHER = "io.github.stacklok"
 MAX_MIN_KEEP = 1_000_000
 MAX_BODY_BYTES = 8 * 1024 * 1024
 OFF = "off"
@@ -111,6 +131,7 @@ class CatalogMirrorConfig:
     max_pages: int = DEFAULT_MAX_PAGES
     min_keep: int = DEFAULT_MIN_KEEP
     off: bool = False
+    toolhive_url: str | None = None  # None: the ToolHive source is off (from_env defaults it on)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "CatalogMirrorConfig":
@@ -120,6 +141,14 @@ class CatalogMirrorConfig:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise CatalogMirrorConfigError(URL_ENV, "must be an http(s) URL")
+        raw_toolhive = (env.get(TOOLHIVE_URL_ENV) or "").strip()
+        toolhive_url: str | None = raw_toolhive or DEFAULT_TOOLHIVE_URL
+        if toolhive_url.lower() == OFF:
+            toolhive_url = None
+        else:
+            thv_parts = urlsplit(toolhive_url)
+            if thv_parts.scheme not in ("http", "https") or not thv_parts.hostname:
+                raise CatalogMirrorConfigError(TOOLHIVE_URL_ENV, "must be an http(s) URL or 'off'")
         off = raw_schedule.lower() == OFF
         if not off and raw_schedule and not valid_cron(raw_schedule):
             # Before launch: DBOS.apply_schedules would only reject it after recovery has started.
@@ -131,17 +160,26 @@ class CatalogMirrorConfig:
             max_pages=_bounded_int(MAX_PAGES_ENV, env.get(MAX_PAGES_ENV), DEFAULT_MAX_PAGES, MAX_MAX_PAGES),
             min_keep=_bounded_int(MIN_KEEP_ENV, env.get(MIN_KEEP_ENV), DEFAULT_MIN_KEEP, MAX_MIN_KEEP),
             off=off,
+            toolhive_url=toolhive_url,
         )
         return config
 
     def to_context(self) -> dict[str, Any]:
-        return {"url": self.url, "page_size": self.page_size, "max_pages": self.max_pages, "min_keep": self.min_keep}
+        return {
+            "url": self.url,
+            "page_size": self.page_size,
+            "max_pages": self.max_pages,
+            "min_keep": self.min_keep,
+            "toolhive_url": self.toolhive_url,
+        }
 
     @classmethod
     def from_context(cls, context: Any) -> "CatalogMirrorConfig":
         ctx = context if isinstance(context, Mapping) else {}
         url = ctx.get("url")
+        thv = ctx.get("toolhive_url")
         return cls(
+            toolhive_url=thv if isinstance(thv, str) and thv else None,
             url=url if isinstance(url, str) and url else DEFAULT_URL,
             page_size=_bounded_int(PAGE_SIZE_ENV, ctx.get("page_size"), DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
             max_pages=_bounded_int(MAX_PAGES_ENV, ctx.get("max_pages"), DEFAULT_MAX_PAGES, MAX_MAX_PAGES),
@@ -188,9 +226,59 @@ def _package(raw: Any) -> CatalogPackage | None:
     )
 
 
-def parse_entry(item: Any) -> CatalogEntry | None:
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:
+    return tuple(x for x in value if isinstance(x, str)) if isinstance(value, list) else ()
+
+
+def _toolhive_block(server: Mapping, meta: Any, packages: Any) -> Mapping | None:
+    """The publisher-provided block for the entry's package image (else the first one), or None."""
+    holder = meta.get(TOOLHIVE_PUBLISHER_KEY) if isinstance(meta, Mapping) else None
+    blocks = holder.get(TOOLHIVE_PUBLISHER) if isinstance(holder, Mapping) else None
+    if not isinstance(blocks, Mapping):
+        return None
+    for package in packages if isinstance(packages, list) else ():
+        block = blocks.get(package.get("identifier")) if isinstance(package, Mapping) else None
+        if isinstance(block, Mapping):
+            return block
+    return next((b for b in blocks.values() if isinstance(b, Mapping)), None)
+
+
+def _toolhive_meta(block: Mapping) -> CatalogMeta:
+    outbound = None
+    permissions = block.get("permissions")
+    network = permissions.get("network") if isinstance(permissions, Mapping) else None
+    raw = network.get("outbound") if isinstance(network, Mapping) else None
+    if isinstance(raw, Mapping):
+        outbound = CatalogNetwork(
+            allow_host=_str_tuple(raw.get("allow_host")),
+            allow_port=tuple(p for p in (raw.get("allow_port") or ()) if isinstance(p, int) and not isinstance(p, bool))
+            if isinstance(raw.get("allow_port"), list)
+            else (),
+            insecure_allow_all=bool(raw.get("insecure_allow_all", False)),
+        )
+    tools = _str_tuple(block.get("tools"))
+    definitions = block.get("tool_definitions")
+    stats = block.get("metadata")
+    tier = block.get("tier")
+    return CatalogMeta(
+        tier=tier if isinstance(tier, str) else None,
+        tags=_str_tuple(block.get("tags")),
+        network=outbound,
+        tools=tools,
+        tool_count=len(tools) or (len(definitions) if isinstance(definitions, list) else 0),
+        stars=_int_or_none(stats.get("stars")) if isinstance(stats, Mapping) else None,
+    )
+
+
+def parse_entry(item: Any, source: str = "official") -> CatalogEntry | None:
     """One registry list item (`{server, _meta}`, or the bare server object) as a CatalogEntry, with
-    the registry's status and isLatest. None when it is not an entry (no name or version)."""
+    the registry's status and isLatest. With `source="toolhive"` the status comes from the publisher
+    block (lower-cased: `Active` -> `active`) and the block's tier, tags, network permissions and
+    tools are kept as `meta`. None when it is not an entry (no name or version)."""
     if not isinstance(item, Mapping):
         return None
     server = item.get("server") if isinstance(item.get("server"), Mapping) else item
@@ -203,12 +291,20 @@ def parse_entry(item: Any) -> CatalogEntry | None:
     title, description = server.get("title"), server.get("description")
     packages = server.get("packages")
     remotes = server.get("remotes")
+    status, catalog_meta = str(official.get("status") or "active"), None
+    if source == "toolhive":
+        block = _toolhive_block(server, meta, packages)
+        if block is not None:
+            catalog_meta = _toolhive_meta(block)
+            status = str(block.get("status") or "active").lower()
     return CatalogEntry(
+        source=source,
+        meta=catalog_meta,
         name=name,
         title=title if isinstance(title, str) else None,
         description=description if isinstance(description, str) else None,
         version=version,
-        status=str(official.get("status") or "active"),
+        status=status,
         is_latest=bool(official.get("isLatest", True)),
         packages=tuple(p for p in (_package(x) for x in (packages if isinstance(packages, list) else ())) if p),
         remotes=tuple(r for r in (remotes if isinstance(remotes, list) else ()) if isinstance(r, dict)),
@@ -259,6 +355,56 @@ async def fetch_page_step(url: str, page_size: int, cursor: str | None) -> dict[
     }
 
 
+async def _get_following_redirects(client: Any, url: str, max_bytes: int) -> bytes:
+    """GET with a size cap; redirects are followed here (the guarded client never follows them), each
+    hop through the same client, at most MAX_REDIRECTS, http(s) only."""
+    for _ in range(MAX_REDIRECTS + 1):
+        async with client.stream("GET", url, headers={"accept": "application/json"}) as response:
+            if response.status_code in (301, 302, 303, 307, 308):
+                target = urljoin(url, response.headers.get("location") or "")
+                if urlsplit(target).scheme not in ("http", "https"):
+                    raise ValueError("the ToolHive registry redirected to a non-http(s) address")
+                url = target
+                continue
+            response.raise_for_status()
+            buffer = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > max_bytes:
+                    raise ValueError(f"toolhive registry answer is larger than {max_bytes} bytes")
+            return bytes(buffer)
+    raise ValueError(f"toolhive registry redirected more than {MAX_REDIRECTS} times")
+
+
+@DBOS.step(name=FETCH_TOOLHIVE_STEP, retries_allowed=True, max_attempts=3)
+async def fetch_toolhive_step(url: str) -> dict[str, Any]:
+    """The ToolHive artifact in one bounded GET: the kept entries (active ones, as JSON) and how many
+    servers it listed. A bad status, an oversized body or malformed JSON raises (the step retries)."""
+    async with _client() as client:
+        raw = await _get_following_redirects(client, url, TOOLHIVE_MAX_BODY_BYTES)
+    body = json.loads(raw)
+    data = body.get("data") if isinstance(body, Mapping) else None
+    servers = data.get("servers") if isinstance(data, Mapping) else None
+    if not isinstance(servers, list):
+        raise ValueError("toolhive registry answer has no data.servers list")
+    kept = []
+    for item in servers:
+        entry = parse_entry(item, source="toolhive")
+        if entry is not None and entry.is_latest and entry.status == "active":
+            kept.append(entry.model_dump(mode="json"))
+    return {"entries": kept, "fetched": len(servers)}
+
+
+@DBOS.step(name=COUNT_TOOLHIVE_STEP, retries_allowed=True, max_attempts=3)
+async def count_active_toolhive_step() -> int:
+    return await asyncio.to_thread(_store().count_active, "toolhive")
+
+
+@DBOS.step(name=REMOVE_TOOLHIVE_STEP, retries_allowed=True, max_attempts=3)
+async def mark_removed_toolhive_step(fetched_at_iso: str) -> int:
+    return await asyncio.to_thread(_store().mark_removed_before, datetime.fromisoformat(fetched_at_iso), "toolhive")
+
+
 @DBOS.step(name=UPSERT_STEP, retries_allowed=True, max_attempts=3)
 async def upsert_entries_step(entries: list[dict[str, Any]], fetched_at_iso: str) -> int:
     parsed = [CatalogEntry.model_validate(e) for e in entries]
@@ -267,7 +413,7 @@ async def upsert_entries_step(entries: list[dict[str, Any]], fetched_at_iso: str
 
 @DBOS.step(name=COUNT_STEP, retries_allowed=True, max_attempts=3)
 async def count_active_step() -> int:
-    return await asyncio.to_thread(_store().count_active)
+    return await asyncio.to_thread(_store().count_active, "official")
 
 
 @DBOS.step(name=REMOVE_STEP, retries_allowed=True, max_attempts=3)
@@ -279,11 +425,7 @@ def as_utc(when: datetime) -> datetime:
     return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
 
 
-@DBOS.workflow(name=WORKFLOW_NAME)
-async def mcp_catalog_mirror(scheduled_at: datetime, context: Any) -> dict[str, Any]:
-    """The scheduled mirror run (DBOS passes the tick time and the schedule context)."""
-    config = CatalogMirrorConfig.from_context(context)
-    at = as_utc(scheduled_at).isoformat()
+async def _mirror_official(config: CatalogMirrorConfig, at: str) -> dict[str, Any]:
     cursors: set[str] = set()
     cursor: str | None = None
     pages = fetched = kept = 0
@@ -319,6 +461,56 @@ async def mcp_catalog_mirror(scheduled_at: datetime, context: Any) -> dict[str, 
             removed = await mark_removed_step(at)
     log.info("mcp catalog mirrored pages=%d fetched=%d kept=%d removed=%d", pages, fetched, kept, removed)
     return {"scheduled_at": at, "pages": pages, "fetched": fetched, "kept": kept, "removed": removed, "complete": complete}
+
+
+async def _mirror_toolhive(config: CatalogMirrorConfig, at: str) -> dict[str, Any]:
+    """One GET, one upsert, then the ToolHive-only removal sweep (same floors as the official one)."""
+    assert config.toolhive_url is not None
+    page = await fetch_toolhive_step(config.toolhive_url)
+    kept = 0
+    if page["entries"]:
+        kept = await upsert_entries_step(page["entries"], at)
+    removed, complete = 0, True
+    if kept == 0:
+        complete = False
+        log.warning("mcp catalog mirror: ToolHive returned no active entry; its rows are left as they are")
+    else:
+        active = await count_active_toolhive_step()
+        if kept < config.min_keep or kept * 2 < active:
+            log.warning(
+                "mcp catalog mirror: ToolHive kept %d of %d active entries (floor: half of them and at least %d); "
+                "nothing marked removed", kept, active, config.min_keep,
+            )
+            complete = False
+        else:
+            removed = await mark_removed_toolhive_step(at)
+    log.info("mcp catalog mirrored toolhive fetched=%d kept=%d removed=%d", page["fetched"], kept, removed)
+    return {"fetched": page["fetched"], "kept": kept, "removed": removed, "complete": complete}
+
+
+@DBOS.workflow(name=WORKFLOW_NAME)
+async def mcp_catalog_mirror(scheduled_at: datetime, context: Any) -> dict[str, Any]:
+    """The scheduled mirror run (DBOS passes the tick time and the schedule context): the official
+    registry, then ToolHive's. A failing source does not stop the other; the first failure is raised
+    at the end so the run shows as failed."""
+    config = CatalogMirrorConfig.from_context(context)
+    at = as_utc(scheduled_at).isoformat()
+    failure: Exception | None = None
+    result: dict[str, Any] = {}
+    try:
+        result = await _mirror_official(config, at)
+    except Exception as exc:  # noqa: BLE001 - re-raised below, after the other source ran
+        log.warning("mcp catalog mirror: the official source failed: %s", type(exc).__name__)
+        failure = exc
+    if config.toolhive_url is not None:
+        try:
+            result["toolhive"] = await _mirror_toolhive(config, at)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mcp catalog mirror: the ToolHive source failed: %s", type(exc).__name__)
+            failure = failure or exc
+    if failure is not None:
+        raise failure
+    return result
 
 
 def apply_catalog_schedule(config: CatalogMirrorConfig | None = None) -> str:

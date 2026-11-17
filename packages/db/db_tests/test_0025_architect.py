@@ -28,8 +28,8 @@ def _columns(conn, table: str) -> set[str]:
     ), {"t": table}).scalars())
 
 
-def test_head_is_the_tenant_secrets_revision_after_0025():
-    assert head_revisions() == {"0027_tenant_secrets"}
+def test_head_is_the_catalog_source_revision_after_0025():
+    assert head_revisions() == {"0028_mcp_catalog_source"}
 
 
 def test_upgrade_adds_the_columns_and_downgrade_removes_them():

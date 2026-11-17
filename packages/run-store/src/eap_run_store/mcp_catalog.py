@@ -14,19 +14,27 @@ from sqlalchemy.engine import Engine
 from eap_schemas import CatalogEntry
 
 MAX_SEARCH_LIMIT = 100
-_COLUMNS = "name, title, description, version, status, is_latest, packages, remotes, licence, fetched_at, hidden"
+_COLUMNS = (
+    "name, title, description, version, status, is_latest, packages, remotes, licence, fetched_at, hidden,"
+    " source, meta"
+)
+_SOURCES = ("official", "toolhive")
+_RANK = "CASE WHEN source = 'toolhive' THEN 0 ELSE 1 END"
 
 _UPSERT = text(
     """
     INSERT INTO mcp_catalog_entries
-        (name, title, description, version, status, is_latest, packages, remotes, licence, fetched_at)
+        (name, title, description, version, status, is_latest, packages, remotes, licence, fetched_at,
+         source, meta)
     VALUES
         (:name, :title, :description, :version, :status, :is_latest,
-         CAST(:packages AS jsonb), CAST(:remotes AS jsonb), :licence, :fetched_at)
+         CAST(:packages AS jsonb), CAST(:remotes AS jsonb), :licence, :fetched_at,
+         :source, CAST(:meta AS jsonb))
     ON CONFLICT (name) DO UPDATE SET
         title = EXCLUDED.title, description = EXCLUDED.description, version = EXCLUDED.version,
         status = EXCLUDED.status, is_latest = EXCLUDED.is_latest, packages = EXCLUDED.packages,
-        remotes = EXCLUDED.remotes, licence = EXCLUDED.licence, fetched_at = EXCLUDED.fetched_at
+        remotes = EXCLUDED.remotes, licence = EXCLUDED.licence, fetched_at = EXCLUDED.fetched_at,
+        source = EXCLUDED.source, meta = EXCLUDED.meta
     WHERE mcp_catalog_entries.fetched_at <= EXCLUDED.fetched_at
     """
 )
@@ -50,8 +58,15 @@ def _entry(row: Any) -> CatalogEntry:
             "licence": row.licence,
             "fetched_at": row.fetched_at,
             "hidden": row.hidden,
+            "source": row.source,
+            "meta": row.meta,
         }
     )
+
+
+def _check_source(source: str) -> None:
+    if source not in _SOURCES:
+        raise ValueError(f"unknown catalog source {source!r}")
 
 
 class CatalogStore:
@@ -76,6 +91,8 @@ class CatalogStore:
                 "remotes": json.dumps(list(e.remotes)),
                 "licence": e.licence,
                 "fetched_at": stamp,
+                "source": e.source,
+                "meta": json.dumps(e.meta.model_dump(mode="json")) if e.meta is not None else None,
             }
             for e in entries
         ]
@@ -83,30 +100,41 @@ class CatalogStore:
             conn.execute(_UPSERT, rows)
         return len(rows)
 
-    def mark_removed_before(self, fetched_before: datetime) -> int:
-        """Mark the active entries last fetched before the instant as `removed` (never deleted).
-        Returns how many changed."""
+    def mark_removed_before(self, fetched_before: datetime, source: str = "official") -> int:
+        """Mark the active entries of one source last fetched before the instant as `removed` (never
+        deleted); the other source's rows are not touched. Returns how many changed."""
+        _check_source(source)
         with self._engine.begin() as conn:
             result = conn.execute(
                 text(
                     "UPDATE mcp_catalog_entries SET status = 'removed'"
-                    " WHERE status = 'active' AND fetched_at < :t"
+                    " WHERE status = 'active' AND source = :source AND fetched_at < :t"
                 ),
-                {"t": fetched_before},
+                {"t": fetched_before, "source": source},
             )
         return result.rowcount
 
-    def count_active(self) -> int:
-        """How many entries are `active` (hidden ones included)."""
+    def count_active(self, source: str | None = None) -> int:
+        """How many entries are `active` (hidden ones included), of one source or of all."""
+        sql, params = "SELECT count(*) FROM mcp_catalog_entries WHERE status = 'active'", {}
+        if source is not None:
+            _check_source(source)
+            sql, params = sql + " AND source = :source", {"source": source}
         with self._engine.connect() as conn:
-            return int(conn.execute(text("SELECT count(*) FROM mcp_catalog_entries WHERE status = 'active'")).scalar_one())
+            return int(conn.execute(text(sql), params).scalar_one())
 
-    def search(
-        self, q: str | None = None, limit: int = 30, after: str | None = None, *, include_hidden: bool = False
+    def list(
+        self,
+        q: str | None = None,
+        limit: int = 30,
+        after: str | None = None,
+        *,
+        include_hidden: bool = False,
+        source: str | None = None,
     ) -> list[CatalogEntry]:
         """Latest, active entries whose name, title or description contain `q` (case-insensitive,
-        literal), by name; `after` is the last name of the previous page. Hidden entries only with
-        `include_hidden`."""
+        literal), ToolHive entries first and then official ones, each by name; `after` is the last name
+        of the previous page. `source` keeps one source. Hidden entries only with `include_hidden`."""
         clauses = ["is_latest", "status = 'active'"]
         params: dict[str, Any] = {"limit": max(1, min(int(limit), MAX_SEARCH_LIMIT))}
         if not include_hidden:
@@ -116,14 +144,25 @@ class CatalogStore:
                 "(name ILIKE :q ESCAPE '\\' OR title ILIKE :q ESCAPE '\\' OR description ILIKE :q ESCAPE '\\')"
             )
             params["q"] = f"%{_escape_like(q.strip())}%"
+        if source is not None:
+            _check_source(source)
+            clauses.append("source = :source")
+            params["source"] = source
         if after is not None:
-            clauses.append("name > :after")
+            # Keyset on (source rank, name): the cursor entry's own source decides which rank it had.
+            clauses.append(
+                f"({_RANK}, name) > (CASE WHEN (SELECT source FROM mcp_catalog_entries WHERE name = :after)"
+                " = 'toolhive' THEN 0 ELSE 1 END, :after)"
+            )
             params["after"] = after
         sql = text(
-            f"SELECT {_COLUMNS} FROM mcp_catalog_entries WHERE {' AND '.join(clauses)} ORDER BY name LIMIT :limit"
+            f"SELECT {_COLUMNS} FROM mcp_catalog_entries WHERE {' AND '.join(clauses)}"
+            f" ORDER BY {_RANK}, name LIMIT :limit"
         )
         with self._engine.connect() as conn:
             return [_entry(r) for r in conn.execute(sql, params)]
+
+    search = list  # the earlier name; the same call
 
     def get(self, name: str) -> CatalogEntry | None:
         """One entry by exact name, whatever its status or visibility (an installed server keeps resolving)."""
