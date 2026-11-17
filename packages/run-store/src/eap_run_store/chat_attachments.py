@@ -220,6 +220,40 @@ class ChatAttachmentStore:
             raise
         return None if row is None else _meta(row)
 
+    def get_for_key(
+        self, tenant_id: str, attachment_id: str, key_created_by: str, agent_ids: Iterable[str] | None
+    ) -> AttachmentMeta | None:
+        """`get` for an API key: only an attachment the key created (`created_by` is `key:{key_id}`), or
+        one linked to a message of a run of an agent the key may use (`agent_ids`; None means every
+        agent of the tenant, empty means none)."""
+        from eap_run_store.ag_ui import AgUiRunModel
+
+        if not _is_uuid(attachment_id):
+            return None
+        allowed = None if agent_ids is None else [str(a) for a in agent_ids]
+        with self.Session() as session:
+            row = session.execute(
+                select(ChatAttachmentModel).where(
+                    ChatAttachmentModel.tenant_id == tenant_id, ChatAttachmentModel.id == attachment_id
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.created_by == key_created_by:
+                return _meta(row)
+            if row.message_id is None or allowed == []:
+                return None
+            linked = select(AgUiRunModel.run_id).where(
+                AgUiRunModel.tenant_id == tenant_id,
+                AgUiRunModel.scope_kind == "agent",
+                AgUiRunModel.input_message_ids.contains([row.message_id]),
+            )
+            if allowed is not None:
+                linked = linked.where(AgUiRunModel.scope_id.in_(allowed))
+            if session.execute(linked.limit(1)).first() is None:
+                return None
+        return _meta(row)
+
     def metas(self, tenant_id: str, ids: Iterable[str]) -> dict[str, AttachmentMeta]:
         wanted = [i for i in dict.fromkeys(ids) if _is_uuid(i)]
         if not wanted:

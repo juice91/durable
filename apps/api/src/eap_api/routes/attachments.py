@@ -22,34 +22,29 @@ user) tied to the run that produced the message; AG-UI thread snapshots return i
 
 from __future__ import annotations
 
-import codecs
-import hashlib
-import logging
 import re
-import uuid
-from typing import Annotated, Any, AsyncIterator, Literal
-from urllib.parse import quote
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from eap_blob_store import BlobNotFound, BlobStore, attachment_key
+from eap_api.attachments_shared import (
+    attachment_response,
+    attachment_store,
+    created_by_for,
+    read_upload,
+    store_upload,
+)
 from eap_api.auth import Principal, current_principal, feedback_viewer
 from eap_api.schemas import ErrorDetail
 from eap_run_store import AgUiRunModel
 from eap_run_store.chat_attachments import (
-    ALLOWED_MEDIA_TYPES,
-    ATTACHMENT_NAME_MAX_CHARS,
     FEEDBACK_COMMENT_MAX_CHARS,
-    IMAGE_TYPES,
-    ChatAttachmentStore,
     MessageFeedbackStore,
-    PDF_TYPE,
-    is_text_type,
     max_attachment_bytes,
 )
 
@@ -59,20 +54,7 @@ router = APIRouter(
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
-logger = logging.getLogger(__name__)
-_CHUNK = 64 * 1024
 _MESSAGE_ID = re.compile(r"^(?P<prefix>.+)-m(?P<n>\d+)$")
-
-
-def attachment_store(request: Request) -> ChatAttachmentStore:
-    store = getattr(request.app.state, "chat_attachment_store", None)
-    if store is None:
-        store = request.app.state.chat_attachment_store = ChatAttachmentStore(request.app.state.database_engine)
-    return store
-
-
-def blob_store(request: Request) -> BlobStore:
-    return request.app.state.blob_store
 
 
 def feedback_store(request: Request) -> MessageFeedbackStore:
@@ -82,143 +64,14 @@ def feedback_store(request: Request) -> MessageFeedbackStore:
     return store
 
 
-def sniff_ok(media_type: str, data: bytes) -> bool:
-    """Whether the bytes are what the declared type says (signatures at offset 0; text must be UTF-8)."""
-    if media_type == "image/png":
-        return data.startswith(b"\x89PNG\r\n\x1a\n")
-    if media_type == "image/jpeg":
-        return data.startswith(b"\xff\xd8\xff")
-    if media_type == "image/gif":
-        return data[:6] in (b"GIF87a", b"GIF89a")
-    if media_type == "image/webp":
-        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
-    if media_type == PDF_TYPE:
-        return data.lstrip()[:5] == b"%PDF-"
-    if is_text_type(media_type):
-        try:
-            data.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
-        return b"\x00" not in data
-    return False
-
-
-class _Sniffer:
-    """`sniff_ok` over a stream: signatures are checked on the first bytes, text must decode as UTF-8
-    without NUL across the whole file (checked chunk by chunk)."""
-
-    _HEAD = 1024
-
-    def __init__(self, media_type: str) -> None:
-        self.media_type = media_type
-        self.head = b""
-        self.text = is_text_type(media_type)
-        self.decoder = codecs.getincrementaldecoder("utf-8")() if self.text else None
-
-    def feed(self, chunk: bytes) -> bool:
-        if self.decoder is not None:
-            if b"\x00" in chunk:
-                return False
-            try:
-                self.decoder.decode(chunk)
-            except UnicodeDecodeError:
-                return False
-        elif len(self.head) < self._HEAD:
-            self.head += chunk[: self._HEAD - len(self.head)]
-        return True
-
-    def finish(self) -> bool:
-        if self.decoder is not None:
-            try:
-                self.decoder.decode(b"", final=True)
-            except UnicodeDecodeError:
-                return False
-            return True
-        return sniff_ok(self.media_type, self.head)
-
-
-def _safe_name(name: str | None) -> str:
-    cleaned = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
-    cleaned = "".join(ch for ch in cleaned if ch.isprintable()).strip()
-    return (cleaned or "attachment")[:ATTACHMENT_NAME_MAX_CHARS]
-
-
 @router.post(
     "/attachments",
     status_code=status.HTTP_201_CREATED,
     responses={413: {"model": ErrorDetail}, 415: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
 async def upload_attachment(request: Request, principal: PrincipalDep, file: UploadFile) -> JSONResponse:
-    limit = max_attachment_bytes()
-    declared = request.headers.get("content-length")
-    # The multipart envelope adds a little; refuse a body that is clearly over before reading it.
-    if declared is not None and declared.isdigit() and int(declared) > limit + 64 * 1024:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=f"the attachment is over {limit} bytes")
-    media_type = (file.content_type or "").split(";", 1)[0].strip().lower()
-    if media_type not in ALLOWED_MEDIA_TYPES:
-        raise HTTPException(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"media type {media_type or 'unknown'!r} is not allowed; allowed: {', '.join(sorted(ALLOWED_MEDIA_TYPES))}",
-        )
-    # Pass 1 over the spooled upload: size, sniff and hash before anything reaches the store, so a
-    # refused upload leaves no blob and no row.
-    sniffer = _Sniffer(media_type)
-    digest = hashlib.sha256()
-    total = 0
-    while True:
-        chunk = await file.read(_CHUNK)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > limit:
-            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=f"the attachment is over {limit} bytes")
-        if not sniffer.feed(chunk):
-            raise HTTPException(
-                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"the bytes are not a valid {media_type} file"
-            )
-        digest.update(chunk)
-    if total == 0:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the attachment is empty")
-    if not sniffer.finish():
-        raise HTTPException(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"the bytes are not a valid {media_type} file"
-        )
-    attachment_id = str(uuid.uuid4())
-    key = attachment_key(principal.tenant_id, attachment_id)
-    await file.seek(0)
-    store = blob_store(request)
-
-    async def chunks() -> AsyncIterator[bytes]:
-        while piece := await file.read(_CHUNK):
-            yield piece
-
-    try:
-        await store.put(key, chunks(), total, media_type)
-    except Exception as exc:  # noqa: BLE001 - the object store is unreachable or refused the write
-        logger.exception("attachment blob put failed")
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="attachment storage is unavailable") from exc
-    try:
-        meta = await run_in_threadpool(
-            attachment_store(request).create,
-            principal.tenant_id, attachment_id=attachment_id, name=_safe_name(file.filename), media_type=media_type,
-            size=total, sha256=digest.hexdigest(), storage_key=key, created_by=principal.user_id,
-        )
-    except BaseException:
-        try:  # the row failed: do not leave an orphan blob
-            await store.delete(key)
-        except Exception:  # noqa: BLE001
-            logger.exception("could not remove the blob of a failed attachment upload")
-        raise
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=meta.as_json())
-
-
-async def _with_first(first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    try:
-        yield first
-        async for chunk in rest:
-            yield chunk
-    finally:
-        await rest.aclose()  # type: ignore[attr-defined]
+    uploaded = await read_upload(request, file, max_attachment_bytes())
+    return await store_upload(request, principal.tenant_id, file, uploaded, created_by_for(principal))
 
 
 @router.get("/attachments/{attachment_id}", responses={410: {"description": "the blob is gone"}})
@@ -226,30 +79,7 @@ async def get_attachment(attachment_id: str, request: Request, principal: Princi
     meta = await run_in_threadpool(attachment_store(request).get, principal.tenant_id, attachment_id)
     if meta is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
-    stream = blob_store(request).open(meta.storage_key)
-    try:
-        first = await anext(stream)  # a missing blob raises here, before any byte is sent
-    except BlobNotFound:
-        raise HTTPException(
-            status.HTTP_410_GONE,
-            detail={"code": "attachment_gone", "message": "The attachment's file is no longer available"},
-        ) from None
-    except StopAsyncIteration:
-        first = b""
-    # Only images and PDFs may render inline; everything else downloads. nosniff always.
-    disposition = "inline" if meta.media_type in IMAGE_TYPES or meta.media_type == PDF_TYPE else "attachment"
-    ascii_name = re.sub(r'[^A-Za-z0-9._ -]', "_", meta.name) or "attachment"
-    return StreamingResponse(
-        _with_first(first, stream),
-        media_type=meta.media_type,
-        headers={
-            "Content-Length": str(meta.size),
-            "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(meta.name)}",
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=300",
-            "Content-Security-Policy": "sandbox; default-src 'none'",
-        },
-    )
+    return await attachment_response(request, meta)
 
 
 # --------------------------------------------------------------------------- message feedback

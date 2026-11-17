@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -120,9 +120,17 @@ from eap_api.ag_ui.resume_entries import (
     waiting_seq,
 )
 from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
+from eap_run_store.chat_attachments import max_attachment_bytes
 from eap_run_store.chat_attachments import ChatAttachmentStore, MessageFeedbackStore, model_accepts
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
 from eap_api.agent_archive import AGENT_ARCHIVED
+from eap_api.attachments_shared import (
+    attachment_response,
+    attachment_store,
+    created_by_for,
+    read_upload,
+    store_upload,
+)
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, get_api_key_store, require_agui_agent
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
@@ -788,6 +796,8 @@ def _with_attachment_parts(c: _Ctx, messages: list[dict[str, Any]]) -> list[dict
     by_message = ChatAttachmentStore(c.engine).for_messages(c.tenant_id, ids)
     if not by_message:
         return messages
+    # An API key fetches through the AG-UI twin; the dev bearer through the dev route.
+    base = "/api/v1/ag-ui/attachments" if c.principal.is_api_key else "/api/v1/attachments"
     out: list[dict[str, Any]] = []
     for m in messages:
         files = by_message.get(m.get("id")) if m.get("role") == "user" else None
@@ -799,7 +809,7 @@ def _with_attachment_parts(c: _Ctx, messages: list[dict[str, Any]]) -> list[dict
             kind = "image" if f.media_type.startswith("image/") else "document"
             parts.append({
                 "type": kind,
-                "source": {"type": "url", "value": f"/api/v1/attachments/{f.id}", "mimeType": f.media_type},
+                "source": {"type": "url", "value": f"{base}/{f.id}", "mimeType": f.media_type},
                 "metadata": {"attachmentId": f.id, "filename": f.name, "size": f.size},
             })
         out.append({**m, "content": parts})
@@ -1241,6 +1251,47 @@ async def attach_run(
         raise
     d = _StreamDeps(c=c, thread_id=thread_id, settings=settings, delta_source=delta_source, agui=agui)
     return _response(d, _frames(d, prepared), lease)
+
+
+# --------------------------------------------------------------------------- attachments (API keys)
+
+# Their own router: the AG-UI route class above reads every write body as capped UTF-8 JSON, which a
+# multipart upload (up to EAP_CHAT_ATTACHMENT_MAX_BYTES) is not. include_router keeps each route's class.
+_attachment_routes = APIRouter(
+    tags=["ag-ui"], responses={401: {"model": ErrorDetail}, 404: {"model": ErrorDetail}}
+)
+
+
+@_attachment_routes.post(
+    "/attachments",
+    status_code=status.HTTP_201_CREATED,
+    responses={413: {"model": ErrorDetail}, 415: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
+)
+async def upload_attachment(request: Request, principal: AgUiPrincipalDep, file: UploadFile) -> JSONResponse:
+    """Upload a file (multipart field `file`) to reference from a run's message as an `image` or
+    `document` part. Same limits and codes as `POST /attachments`; 201 {id, name, media_type, size}."""
+    uploaded = await read_upload(request, file, max_attachment_bytes())
+    return await store_upload(request, principal.tenant_id, file, uploaded, created_by_for(principal))
+
+
+@_attachment_routes.get("/attachments/{attachment_id}", responses={410: {"description": "the blob is gone"}})
+async def get_attachment(attachment_id: str, request: Request, principal: AgUiPrincipalDep) -> Response:
+    """The bytes. A key sees what it uploaded and what is linked to a message of a conversation of an
+    agent it may use; anything else (and another tenant's) is 404. The dev bearer sees the tenant's."""
+    store = attachment_store(request)
+    if principal.is_api_key:
+        agents = None if principal.is_unrestricted else tuple(principal.agent_ids or ())
+        meta = await run_in_threadpool(
+            store.get_for_key, principal.tenant_id, attachment_id, created_by_for(principal), agents
+        )
+    else:
+        meta = await run_in_threadpool(store.get, principal.tenant_id, attachment_id)
+    if meta is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    return await attachment_response(request, meta)
+
+
+router.include_router(_attachment_routes)
 
 
 __all__ = ["AgUiRouteSettings", "get_agui_settings", "router"]

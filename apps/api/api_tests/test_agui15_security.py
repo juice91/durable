@@ -140,7 +140,11 @@ def test_the_sweep_lists_every_ag_ui_route(api):
     lists every route (FastAPI keeps included routers nested, so app.routes alone is not flat)."""
     _, app = api
     found = {(m.upper(), p) for p, item in app.openapi()["paths"].items() if "/ag-ui/" in p for m in item}
-    assert found == ROUTES
+    # The attachment twins have no agent or workflow in their path; test_agui_attachments_api and
+    # test_ac18_cross_tenant cover them (keys, scope, tenant, linking).
+    attachments = {r for r in found if "/ag-ui/attachments" in r[1]}
+    assert attachments == {("POST", "/api/v1/ag-ui/attachments"), ("GET", "/api/v1/ag-ui/attachments/{attachment_id}")}
+    assert found - attachments == ROUTES
 
 
 def test_every_foreign_credential_gets_the_same_answer_on_every_route_and_records_nothing(api, tenant):

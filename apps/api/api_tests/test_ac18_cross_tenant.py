@@ -338,3 +338,30 @@ def test_every_decision_route_caps_the_comment(api, fake, kind, verb, cap):
     assert r.status_code == 200, r.text
     assert r.json()["comment"] == "y" * cap
     assert event_log.get_event(tenant, run_id, key).data["comment"] == "y" * cap
+
+
+# Attachments round 2: the AG-UI twins of the attachment routes (a key's upload and fetch).
+ATTACHMENT_ROUTES = {
+    ("POST", "/api/v1/ag-ui/attachments"),
+    ("GET", "/api/v1/ag-ui/attachments/{attachment_id}"),
+}
+
+
+def test_agui_attachment_routes_are_in_the_inventory_and_closed_to_another_tenant(api):
+    client, app, tenant_of = api
+    assert ATTACHMENT_ROUTES <= app_routes(app)
+    assert {(m, p) for m, p in app_routes(app) if "/ag-ui/attachments" in p} == ATTACHMENT_ROUTES
+    tenant, h = tenant_of()
+    _other, other = tenant_of("mallory")
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    mine = client.post(f"{API}/ag-ui/attachments", files={"file": ("a.png", png, "image/png")}, headers=h)
+    assert mine.status_code == 201, mine.text
+    path = f"{API}/ag-ui/attachments/{mine.json()['id']}"
+    assert client.get(path, headers=h).content == png
+    assert client.get(path, headers=other).status_code == 404  # another tenant's dev bearer
+    keyed = client.post(f"{API}/api-keys", json={"name": "k"}, headers=other)
+    assert keyed.status_code == 201, keyed.text
+    assert client.get(path, headers={"Authorization": f"Bearer {keyed.json()['key']}"}).status_code == 404
+    assert client.get(path, headers=h).content == png  # untouched
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("DELETE FROM chat_attachments WHERE tenant_id = :t"), {"t": tenant})
