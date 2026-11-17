@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -41,6 +42,9 @@ class AgentModel(Base):
     """Model for agents table."""
 
     __tablename__ = "agents"
+    __table_args__ = (
+        Index("uq_agents_tenant_slug", "tenant_id", "slug", unique=True, postgresql_where=text("slug IS NOT NULL")),
+    )
 
     id: Mapped[UUIDAnnotated] = mapped_column(
         "id",
@@ -57,6 +61,8 @@ class AgentModel(Base):
     builtin: Mapped[bool] = mapped_column(
         "builtin", Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # 0026: the Architect's short id for a definition it made (NULL for hand-made agents).
+    slug: Mapped[str | None] = mapped_column("slug", String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

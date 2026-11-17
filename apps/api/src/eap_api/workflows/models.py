@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     String,
@@ -35,6 +36,7 @@ class WorkflowModel(Base):
     __table_args__ = (
         PrimaryKeyConstraint("id", name="workflows_pkey"),
         UniqueConstraint("tenant_id", "id", name="uq_workflows_tenant_id_id"),
+        Index("uq_workflows_tenant_slug", "tenant_id", "slug", unique=True, postgresql_where=text("slug IS NOT NULL")),
     )
 
     id: Mapped[str] = mapped_column(String, default=lambda: str(uuid4()))
@@ -42,6 +44,8 @@ class WorkflowModel(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     draft_spec: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # 0026: the Architect's short id for a definition it made (NULL for hand-made workflows).
+    slug: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
 

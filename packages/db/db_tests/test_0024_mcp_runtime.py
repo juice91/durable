@@ -82,6 +82,7 @@ def test_upgrade_constraints_downgrade_and_reupgrade():
             assert [
                 d for d in schema_diff(conn)
                 if "chat_attachments" not in repr(d) and "'builtin'" not in repr(d) and "'created_via'" not in repr(d)
+                and "'slug'" not in repr(d) and "_tenant_slug" not in repr(d)
             ] == []
 
         # external keeps a URL; managed must not have one.

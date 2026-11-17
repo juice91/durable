@@ -10,7 +10,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from eap_db import head_revisions
-from eap_db.metadata import schema_diff
 from eap_db.testing import SCHEMA_ENV, drop_schema, schema_url
 
 pytestmark = pytest.mark.skipif(
@@ -29,8 +28,8 @@ def _columns(conn, table: str) -> set[str]:
     ), {"t": table}).scalars())
 
 
-def test_head_is_0025_architect():
-    assert head_revisions() == {"0025_architect"}
+def test_head_is_the_slug_revision_after_0025():
+    assert head_revisions() == {"0026_architect_slugs"}
 
 
 def test_upgrade_adds_the_columns_and_downgrade_removes_them():
@@ -58,7 +57,7 @@ def test_upgrade_adds_the_columns_and_downgrade_removes_them():
             assert "created_via" in _columns(conn, "workflow_versions")
             # Existing rows are not builtin; the models match the migrated schema.
             assert conn.execute(text("SELECT builtin FROM agents WHERE id = 'a1'")).scalar_one() is False
-            assert schema_diff(conn) == []
+            # (the models also carry the 0026 slugs now; head-vs-models is checked in test_migrations.py)
         with engine.begin() as conn:
             command.downgrade(alembic_config(conn), "0023_attachments_r2")
         with engine.connect() as conn:
