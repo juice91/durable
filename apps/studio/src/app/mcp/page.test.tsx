@@ -67,13 +67,13 @@ describe("McpServersPage", () => {
     expect(await screen.findByTestId("mcp-header-names")).toHaveTextContent("authorization (set)");
   });
 
-  it("shows a runtime chip for managed servers only and links to Browse", async () => {
+  it("shows a runtime chip for managed servers only and links to the Catalog", async () => {
     vi.mocked(mcpServers.list).mockResolvedValue([server, { ...server, id: "srv-2", name: "files", runtime: "managed", runtime_state: "idle" }]);
     render(<McpServersPage />);
     const chip = await screen.findByTestId("mcp-runtime-chip");
     expect(chip).toHaveTextContent("Idle");
     expect(screen.getAllByTestId("mcp-runtime-chip")).toHaveLength(1);
-    expect(screen.getByRole("link", { name: "Browse" })).toHaveAttribute("href", routes.mcpBrowse());
+    expect(screen.getByRole("link", { name: "Catalog" })).toHaveAttribute("href", routes.mcpBrowse());
   });
 
   it("tests the connection and shows discovered tools with a collapsible schema", async () => {

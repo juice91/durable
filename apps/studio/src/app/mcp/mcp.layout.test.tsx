@@ -48,6 +48,12 @@ const agents: Agent[] = [
   { id: "a1", name: "Writer", latest_version: null, draft_spec: { spec_version: 1, name: "w", instructions: "", model: { provider: "p", name: "m" }, tools: [], mcp_tools: [{ server: "docs", tool: "search" }] } },
 ];
 
+// "Add server" is a menu now: open it, then pick an item.
+async function pickAddItem(name: string) {
+  fireEvent.keyDown(screen.getByTestId("mcp-add-server"), { key: "Enter" });
+  fireEvent.click(await screen.findByRole("menuitem", { name }));
+}
+
 describe("MCP servers list (layout)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -71,10 +77,12 @@ describe("MCP servers list (layout)", () => {
     fireEvent.keyDown(screen.getByRole("searchbox"), { key: "c" });
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.keyDown(document.body, { key: "c" });
+    expect(await screen.findByRole("menuitem", { name: "From the catalog" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remote server by URL" }));
     expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    fireEvent.click(screen.getByTestId("mcp-add-server"));
+    await pickAddItem("Remote server by URL");
     expect(await screen.findByRole("form", { name: "Register MCP server" })).toBeInTheDocument();
   });
 

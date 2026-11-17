@@ -57,6 +57,12 @@ function server(overrides: Partial<McpServer> = {}): McpServer {
   };
 }
 
+// "Add server" is a menu now: open it, then pick an item.
+async function pickAddItem(name: string) {
+  fireEvent.keyDown(screen.getByTestId("mcp-add-server"), { key: "Enter" });
+  fireEvent.click(await screen.findByRole("menuitem", { name }));
+}
+
 describe("MCP servers acceptance", () => {
   beforeEach(() => {
     toolRunLedger.reset();
@@ -109,7 +115,8 @@ describe("MCP servers acceptance", () => {
       last_checked_at: null,
     }));
     render(<McpServersPage />);
-    fireEvent.click(await screen.findByTestId("mcp-add-server"));
+    await screen.findByTestId("mcp-add-server");
+    await pickAddItem("Remote server by URL");
     expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
     expect(screen.getByRole("form", { name: "Register MCP server" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "west" } });

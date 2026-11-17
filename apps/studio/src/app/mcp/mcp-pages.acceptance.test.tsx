@@ -129,6 +129,12 @@ afterEach(() => {
 const row = () => screen.getByTestId("mcp-server-row");
 const connection = () => screen.getByTestId("mcp-connection");
 
+// "Add server" is a menu now: open it, then pick an item.
+async function pickAddItem(name: string) {
+  fireEvent.keyDown(screen.getByTestId("mcp-add-server"), { key: "Enter" });
+  fireEvent.click(await screen.findByRole("menuitem", { name }));
+}
+
 describe("MCP list: rows and row actions", () => {
   it("a plain row click opens the detail; row actions and clicks inside their dialogs never do", async () => {
     vi.mocked(mcpServers.test).mockResolvedValue(TOOLS);
@@ -224,6 +230,7 @@ describe("MCP list: rows and row actions", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
 
     fireEvent.keyDown(document.body, { key: "c" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remote server by URL" }));
     const dialog = await screen.findByRole("dialog", { name: "Add MCP server" });
     // Typing "c" in the dialog's fields types; it never reopens or stacks a dialog.
     const name = within(dialog).getByLabelText("Name");
@@ -240,9 +247,21 @@ describe("MCP list: rows and row actions", () => {
     render(<McpServersPage />);
     const list = screen.getByTestId("mcp-server-list");
     await waitFor(() => expect(list).toHaveAttribute("data-state", "empty"));
-    expect(within(list).getByText("No MCP servers yet")).toBeInTheDocument();
+    expect(within(list).getByText("No servers yet. Install one from the Catalog or register a remote server.")).toBeInTheDocument();
     expect(screen.queryByTestId("mcp-server-row")).toBeNull();
-    fireEvent.click(within(list).getByRole("button", { name: "Add server" }));
+    fireEvent.click(within(list).getByRole("link", { name: "Install from the Catalog" }));
+    expect(navigations).toContain(routes.mcpBrowse());
+    fireEvent.click(within(list).getByRole("button", { name: "Register a remote server" }));
+    expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
+  });
+
+  it("Add server is a menu: From the catalog goes to the Catalog tab, Remote server by URL opens the dialog", async () => {
+    render(<McpServersPage />);
+    await screen.findByTestId("mcp-server-row");
+    await pickAddItem("From the catalog");
+    expect(push).toHaveBeenCalledWith(routes.mcpBrowse());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await pickAddItem("Remote server by URL");
     expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
   });
 
@@ -266,7 +285,7 @@ describe("MCP list: rows and row actions", () => {
     const list = render(<McpServersPage />);
     await screen.findByTestId("mcp-used-by-count");
     await expectNoAxeViolations(list.container);
-    fireEvent.click(screen.getByTestId("mcp-add-server"));
+    await pickAddItem("Remote server by URL");
     await expectNoAxeViolations(await screen.findByRole("dialog", { name: "Add MCP server" }));
     list.unmount();
     cleanup();
