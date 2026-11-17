@@ -116,7 +116,29 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -C apps/studio lint
       - run: pnpm -C apps/studio exec tsc --noEmit
-      - run: pnpm -C apps/studio test
+
+  studio-test:
+    needs: changes
+    if: needs.changes.outputs.studio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1', '2', '3']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/3
 
   deploy-checks:
     needs: changes
