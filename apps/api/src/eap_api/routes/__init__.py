@@ -175,6 +175,7 @@ def create_agent(
             "latest_version": None,
             "archived": False,
             "builtin": False,
+            "builtin_role": None,
         },
         status_code=201,
     )
