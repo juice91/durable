@@ -166,7 +166,7 @@ def test_retention_skips_rows_linked_during_the_batch(worker, attach_tenant, blo
 
         def unsent_before(self, cutoff, limit):
             ids = real.unsent_before(cutoff, limit)
-            real.link(t, [racing], message_id="m-race")
+            real.link(t, [racing], message_id="m-race", run_id="r-race", created_by="alice")
             return ids
 
         def delete_unsent_ids(self, ids):
