@@ -221,6 +221,76 @@ describe("Architect page", () => {
     expect(screen.getByLabelText("Describe it")).toHaveValue("something");
   });
 
+  test("the header shows the model and the picker sets it through PUT /architect/model and refreshes", async () => {
+    let model = "litellm:qwen3.8";
+    const api = mount({
+      "GET /architect": () => ({ body: { ...SEEDED_STATE, model } }),
+      "PUT /architect/model": (body: unknown) => {
+        model = (body as { model: string }).model;
+        return { body: { model, agent_ids: ["a", "b", "c"] } };
+      },
+    });
+    expect(await screen.findByTestId("architect-model")).toHaveTextContent("Model: litellm:qwen3.8");
+    const picker = screen.getByLabelText("Change model");
+    expect(within(picker).getAllByRole("option").map((o) => (o as HTMLOptionElement).value)).toEqual(["litellm:qwen3.8", "litellm:other"]);
+    await user.type(picker, "litellm:other");
+    await waitFor(() => expect(screen.getByTestId("architect-model")).toHaveTextContent("Model: litellm:other"));
+    expect(api.calls.find((c) => c.key === "PUT /architect/model")?.body).toEqual({ model: "litellm:other" });
+  });
+
+  test("a refused model change is shown and the model stays", async () => {
+    mount({
+      "GET /architect": SEEDED_STATE,
+      "PUT /architect/model": () => ({ status: 422, body: { detail: "The model 'litellm:other' is not available.", code: "model_not_allowed" } }),
+    });
+    await screen.findByTestId("architect-model");
+    await user.type(screen.getByLabelText("Change model"), "litellm:other");
+    expect(await screen.findByRole("alert")).toHaveTextContent("not available");
+    expect(screen.getByTestId("architect-model")).toHaveTextContent("Model: litellm:qwen3.8");
+  });
+
+  test("an invalid drafter answer is a readable alert: raw answer collapsed, the sentence, the picker inline", async () => {
+    const api = mount({
+      "GET /architect": SEEDED_STATE,
+      "POST /architect/draft": () => ({
+        status: 422,
+        body: { detail: "The drafter's answer is not a valid agent definition.", code: "draft_invalid", raw: "Sure! Here is a poem.", problems: ["the answer is not JSON"] },
+      }),
+      "PUT /architect/model": { model: "litellm:other", agent_ids: [] },
+    });
+    await user.type(await screen.findByLabelText("Describe it"), "something");
+    await user.click(screen.getByRole("button", { name: "Fill in the form" }));
+    const alert = await screen.findByTestId("architect-drafter-failure");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveTextContent("The drafter's model did not produce the form. Choose another model.");
+    const details = alert.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details).toHaveTextContent("Sure! Here is a poem.");
+    expect(alert).not.toHaveTextContent(/retr(y|ies)/i);
+    await user.type(within(alert).getByLabelText("Drafter model"), "litellm:other");
+    await waitFor(() => expect(api.calls.some((c) => c.key === "PUT /architect/model")).toBe(true));
+    expect(screen.getByLabelText("Describe it")).toHaveValue("something");
+  });
+
+  test("a failed drafter run never shows the chat-style retry text outside the collapsed details", async () => {
+    mount({
+      "GET /architect": SEEDED_STATE,
+      "POST /architect/draft": () => ({
+        status: 502,
+        body: { detail: "The drafter run did not finish.", code: "draft_failed", run_id: "r1", error: "Invalid structured output within the allowed retries" },
+      }),
+    });
+    await user.type(await screen.findByLabelText("Describe it"), "something");
+    await user.click(screen.getByRole("button", { name: "Fill in the form" }));
+    const alert = await screen.findByTestId("architect-drafter-failure");
+    expect(alert).toHaveTextContent("Choose another model.");
+    const details = alert.querySelector("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    const visible = alert.cloneNode(true) as HTMLElement;
+    visible.querySelector("details")?.remove();
+    expect(visible).not.toHaveTextContent(/retr(y|ies)|structured output|did not finish/i);
+  });
+
   test("the Chat and Workflow tabs are present", async () => {
     mount({ "GET /architect": SEEDED_STATE });
     await screen.findByRole("tab", { name: "Form" });

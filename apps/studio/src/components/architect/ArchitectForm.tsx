@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Switch } from "@/components/ui/Switch";
 import {
   draftAgent,
+  drafterFailure,
   EMPTY_FORM,
   formToSpec,
   saveAgent,
@@ -19,6 +20,7 @@ import {
   type SaveResult,
 } from "@/lib/architect";
 import { routes } from "@/lib/routes";
+import { DrafterFailure } from "./ArchitectModel";
 
 const labelClass = "mb-1 block text-label font-medium text-foreground";
 const fieldClass =
@@ -74,6 +76,7 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
   const [description, setDescription] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ answer: string | null; problems: string[] } | null>(null);
   const [assumptions, setAssumptions] = useState<string[]>([]);
   const [dropped, setDropped] = useState<DraftResult["dropped"]>([]);
   const [reviewed, setReviewed] = useState(false);
@@ -90,6 +93,7 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
   async function fillIn() {
     setDrafting(true);
     setDraftError(null);
+    setFailure(null);
     try {
       const result = await draftAgent(description, form.name.trim() && form.instructions.trim() ? formToSpec(form) : undefined);
       setForm(limitToOptions(result.spec, options));
@@ -99,7 +103,9 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
       setStatus(null);
       setSaveError(null);
     } catch (reason: unknown) {
-      setDraftError(reason instanceof Error ? reason.message : "The draft failed");
+      const unusable = drafterFailure(reason);
+      if (unusable) setFailure(unusable);
+      else setDraftError(reason instanceof Error ? reason.message : "The draft failed");
     } finally {
       setDrafting(false);
     }
@@ -148,6 +154,7 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
           </Button>
           <span className="text-caption text-muted-foreground">The draft only fills the fields below; nothing is saved until you save.</span>
         </div>
+        {failure ? <DrafterFailure answer={failure.answer} problems={failure.problems} /> : null}
         {draftError ? (
           <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-label text-destructive-text">{draftError}</div>
         ) : null}
