@@ -11,6 +11,8 @@ import time
 from collections.abc import Sequence
 from typing import Any, Protocol
 
+import httpx2
+
 from eap_mcp_runtime import k8s_models as m
 from eap_mcp_runtime.k8s_models import MANAGED_BY
 from eap_mcp_runtime.models import RuntimeHandle, RuntimeSpec, RuntimeStatus
@@ -40,6 +42,19 @@ DEFAULT_POD_CPU = "1"
 DEFAULT_POD_MEMORY = "1Gi"
 REQUEST_CPU = "50m"
 REQUEST_MEMORY = "64Mi"
+# Container waiting/terminated reasons that will not clear by waiting: the operator keeps the phase
+# at Pending while the pod crash-loops or cannot pull its image.
+FAILED_REASONS = frozenset(
+    {"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError", "OOMKilled"}
+)
+CALL_TIMEOUT = 45.0  # bound for one Kubernetes API call (the HTTP timeouts bound its parts)
+# Explicit client timeouts; lightkube's default is a flat 10 s. NOTE (finding 6): lightkube 1.0.2 builds
+# in-cluster config with `User(token_file=...)`, which selects `BearerTokenFileAuth`: it reads the
+# service-account token file on first use and re-reads it after a 401, so the kubelet's token rotation
+# is picked up without re-creating the client. Verified in lightkube/config/client_adapter.py.
+HTTP_TIMEOUT = httpx2.Timeout(connect=5, read=30, write=30, pool=5)
+_REDACT_ASSIGNMENT = re.compile(r"(?i)((?:token|key|secret|password)=)\S+")
+REDACTED = "***"
 STATE_BY_PHASE = {
     "Pending": "starting",
     "Ready": "running",
@@ -381,15 +396,21 @@ class KubeApi(Protocol):
 
     async def pod_log(self, namespace: str, pod: str, tail: int) -> str: ...
 
+    async def pod_list(self, namespace: str, label_selector: str) -> list[dict[str, Any]]:
+        """The pods (as dicts, with `status`) matching the selector."""
+
 
 class LightkubeApi:
     """`KubeApi` on lightkube's async client."""
 
-    def __init__(self, client: Any | None = None, *, config: Any | None = None) -> None:
+    def __init__(
+        self, client: Any | None = None, *, config: Any | None = None, call_timeout: float = CALL_TIMEOUT
+    ) -> None:
         from lightkube import AsyncClient
 
-        self._client = client or AsyncClient(config=config, field_manager=FIELD_MANAGER)
+        self._client = client or AsyncClient(config=config, field_manager=FIELD_MANAGER, timeout=HTTP_TIMEOUT)
         self._mcpserver = m.lightkube_mcpserver()
+        self._call_timeout = call_timeout
 
     def _cls(self, kind: str) -> Any:
         from lightkube.resources.core_v1 import LimitRange, Namespace, Pod, ResourceQuota, Secret
@@ -407,16 +428,19 @@ class LightkubeApi:
             m.KIND: self._mcpserver,
         }[kind]
 
+    async def _bounded(self, coro: Any) -> Any:
+        return await asyncio.wait_for(coro, self._call_timeout)
+
     async def apply(self, doc: dict[str, Any]) -> None:
         cls = self._cls(doc["kind"])
         obj = cls.from_dict(doc) if hasattr(cls, "from_dict") else cls(**doc)
-        await self._client.apply(obj, field_manager=FIELD_MANAGER, force=True)
+        await self._bounded(self._client.apply(obj, field_manager=FIELD_MANAGER, force=True))
 
     async def get(self, kind: str, namespace: str | None, name: str) -> dict[str, Any] | None:
         from lightkube import ApiError
 
         try:
-            obj = await self._client.get(self._cls(kind), name, namespace=namespace)
+            obj = await self._bounded(self._client.get(self._cls(kind), name, namespace=namespace))
         except ApiError as e:
             if e.status.code == 404:
                 return None
@@ -427,7 +451,7 @@ class LightkubeApi:
         from lightkube import ApiError
 
         try:
-            await self._client.delete(self._cls(kind), name, namespace=namespace)
+            await self._bounded(self._client.delete(self._cls(kind), name, namespace=namespace))
         except ApiError as e:
             if e.status.code != 404:
                 raise
@@ -435,21 +459,32 @@ class LightkubeApi:
     async def merge_patch(self, kind: str, namespace: str, name: str, body: dict[str, Any]) -> None:
         from lightkube import types
 
-        await self._client.patch(self._cls(kind), name, body, namespace=namespace, patch_type=types.PatchType.MERGE)
+        await self._bounded(
+            self._client.patch(self._cls(kind), name, body, namespace=namespace, patch_type=types.PatchType.MERGE)
+        )
+
+    async def _pods(self, namespace: str, label_selector: str) -> list[Any]:
+        labels = dict(p.split("=", 1) for p in label_selector.split(","))
+        return [pod async for pod in self._client.list(self._cls("Pod"), namespace=namespace, labels=labels)]
 
     async def pod_names(self, namespace: str, label_selector: str) -> list[str]:
-        labels = dict(p.split("=", 1) for p in label_selector.split(","))
-        return [
-            pod.metadata.name
-            async for pod in self._client.list(self._cls("Pod"), namespace=namespace, labels=labels)
-        ]
+        return [p.metadata.name for p in await self._bounded(self._pods(namespace, label_selector))]
+
+    async def pod_list(self, namespace: str, label_selector: str) -> list[dict[str, Any]]:
+        return [_to_dict(p) for p in await self._bounded(self._pods(namespace, label_selector))]
 
     async def pod_log(self, namespace: str, pod: str, tail: int) -> str:
-        lines = [
-            line
-            async for line in self._client.log(pod, namespace=namespace, container=m.MCP_CONTAINER, tail_lines=tail)
-        ]
-        return "\n".join(lines)
+        async def read() -> str:
+            return "\n".join(
+                [
+                    line
+                    async for line in self._client.log(
+                        pod, namespace=namespace, container=m.MCP_CONTAINER, tail_lines=tail
+                    )
+                ]
+            )
+
+        return await self._bounded(read())
 
 
 def _to_dict(obj: Any) -> dict[str, Any]:
@@ -486,6 +521,7 @@ class OperatorRuntime:
         self._ingress_labels = tuple(ingress_labels) if ingress_labels else DEFAULT_CALLER_LABELS
         self._worker_sa = worker_service_account or os.environ.get(WORKER_SA_ENV) or "pydanticos-mcp-worker"
         self._api_sa = api_service_account or os.environ.get(API_SA_ENV) or "pydanticos-mcp-api"
+        self._secret_values: dict[RuntimeHandle, tuple[str, ...]] = {}  # for redacting logs; never logged
         self._poll_interval = 1.0
         self._delete_timeout = 120.0
         # The proxy runner reaches the backend through the Kubernetes API server, whose address is
@@ -509,19 +545,24 @@ class OperatorRuntime:
     async def start(self, spec: RuntimeSpec) -> RuntimeHandle:
         h = RuntimeHandle(m.namespace_name(spec.tenant_id), m.cr_name(spec.server_id))
         await self._api.apply(namespace_doc(h.namespace, spec.tenant_id))
-        # The per-tenant grants first: the worker's cluster-wide role cannot touch anything inside the
-        # namespace, these bindings are what let it (and the API, read-only) work in this one.
+        # The per-tenant grants first: the platform accounts' cluster-wide role cannot touch anything inside the
+        # namespace, these bindings are what let them work in this one.
         await self._api.apply(
             role_binding_doc(h.namespace, f"{TENANT_ROLE}-worker", TENANT_ROLE, self._worker_sa, self._platform_namespace)
         )
+        # The API drives start/stop/restart/delete itself, so it gets the same write role. A new binding
+        # name: a RoleBinding's roleRef is immutable, so the earlier read-only `-api` one cannot be edited.
         await self._api.apply(
-            role_binding_doc(h.namespace, f"{TENANT_ROLE}-api", TENANT_READ_ROLE, self._api_sa, self._platform_namespace)
+            role_binding_doc(h.namespace, f"{TENANT_ROLE}-api-write", TENANT_ROLE, self._api_sa, self._platform_namespace)
         )
         await self._api.apply(default_deny_doc(h.namespace))
         await self._api.apply(limit_range_doc(h.namespace))
         await self._api.apply(quota_doc(h.namespace))
         if spec.secret_refs:
             await self._api.apply(secret_doc(h.namespace, h.cr_name, dict(spec.secret_refs)))
+        else:  # a previous run's values must not outlive a spec that no longer has secrets
+            await self._api.delete("Secret", h.namespace, m.secret_name(h.cr_name))
+        self._secret_values[h] = tuple(v for v in spec.secret_refs.values() if v)
         await self._api.apply(
             network_policy_doc(
                 h.namespace,
@@ -588,25 +629,68 @@ class OperatorRuntime:
         if cr is None:
             return RuntimeStatus("absent", endpoint, "not found")
         st = cr.get("status") or {}
-        state = STATE_BY_PHASE.get(st.get("phase", ""), "starting")
-        return RuntimeStatus(state, endpoint, st.get("message", ""))  # type: ignore[arg-type]
+        message = st.get("message", "")
+        generation = (cr.get("metadata") or {}).get("generation")
+        if generation is not None and st.get("observedGeneration") != generation:
+            # The operator has not seen the latest spec yet: its phase describes the previous one.
+            return RuntimeStatus("starting", endpoint, message or "waiting for the operator")
+        phase = st.get("phase", "")
+        state = STATE_BY_PHASE.get(phase, "starting")
+        if state == "starting":
+            reason = await self._pod_failure(handle)
+            if reason:
+                return RuntimeStatus("failed", endpoint, reason)
+        return RuntimeStatus(state, endpoint, message)  # type: ignore[arg-type]
 
-    async def logs(self, handle: RuntimeHandle, tail: int = 200) -> list[str]:
+    async def _pod_failure(self, handle: RuntimeHandle) -> str | None:
+        """While the operator still says Pending, a crash-looping or unpullable pod is a failure."""
+        try:
+            pods = await self._api.pod_list(handle.namespace, f"{m.POD_LABEL}={handle.cr_name}")
+        except Exception:  # noqa: BLE001 - the extra detail is best effort; the phase stays authoritative
+            return None
+        for pod in pods:
+            pst = pod.get("status") or {}
+            for cs in (*(pst.get("initContainerStatuses") or []), *(pst.get("containerStatuses") or [])):
+                waiting = (cs.get("state") or {}).get("waiting") or {}
+                terminated = (cs.get("lastState") or {}).get("terminated") or {}
+                for reason, detail in ((waiting.get("reason"), waiting.get("message")),
+                                       (terminated.get("reason"), terminated.get("message"))):
+                    if reason in FAILED_REASONS:
+                        name = (pod.get("metadata") or {}).get("name", "pod")
+                        return f"{reason} ({name}/{cs.get('name', '?')})" + (f": {detail}" if detail else "")
+        return None
+
+    async def logs(self, handle: RuntimeHandle, tail: int = 200, secret_values: Sequence[str] = ()) -> list[str]:
+        """Backend pod log lines with secret values and `token|key|secret|password=...` redacted.
+        The values come from this process's own `start()` and from `secret_values` (a different process,
+        such as the API, passes the spec's values); the pattern covers the rest."""
         pods = await self._api.pod_names(handle.namespace, f"{m.POD_LABEL}={handle.cr_name}")
         backend = f"{handle.cr_name}-0"
         if backend not in pods:
             return []
         text = await self._api.pod_log(handle.namespace, backend, tail)
+        values = sorted({*self._secret_values.get(handle, ()), *(v for v in secret_values if v)}, key=len, reverse=True)
+        for v in values:
+            text = text.replace(v, REDACTED)
+        text = _REDACT_ASSIGNMENT.sub(lambda mt: mt.group(1) + REDACTED, text)
         return text.splitlines()
 
     def endpoint(self, handle: RuntimeHandle) -> str:
         return m.endpoint_url(handle.namespace, handle.cr_name)
 
     async def wait_for(self, handle: RuntimeHandle, state: str, timeout: float = 180.0) -> RuntimeStatus:
+        """Poll until `state`, or a failed state (its message holds the reason), or `timeout` seconds in
+        total: `timeout` is an overall deadline that also bounds a status call that hangs."""
         deadline = time.monotonic() + timeout
+        last = RuntimeStatus("starting", self.endpoint(handle), "no status yet")
         while True:
-            s = await self.status(handle)
-            if s.state == state or time.monotonic() >= deadline:
-                return s
-            await asyncio.sleep(2)
-
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return last
+            try:
+                last = await asyncio.wait_for(self.status(handle), remaining)
+            except TimeoutError:
+                return RuntimeStatus(last.state, last.endpoint, "status check timed out")
+            if last.state == state or (last.state == "failed" and state != "failed"):
+                return last
+            await asyncio.sleep(min(2, max(deadline - time.monotonic(), 0)))

@@ -9,9 +9,9 @@ catalog entry cannot become an option (`--index-url=...`) or a second argument.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +21,9 @@ TAG_ENV = "EAP_MCP_RUNNER_TAG"
 PACKAGE_ENV = "MCP_PACKAGE"
 NODE_IMAGE_NAME = "pydanticos-mcp-runner-node"
 PYTHON_IMAGE_NAME = "pydanticos-mcp-runner-python"
+# What each image is built from, relative to deploy/docker; the default tag hashes these in order.
+NODE_FILES = ("mcp-runner-node.Dockerfile",)
+PYTHON_FILES = ("mcp-runner-python.Dockerfile", "mcp-run-python.sh")
 
 # npm: optional @scope/, lowercase name. PyPI: PEP 508 name (no extras). Neither may start with "-".
 _NPM_NAME = re.compile(r"^(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$")
@@ -41,26 +44,28 @@ class PackageSpec:
     image: str | None = None  # oci: the entry's image, ideally already pinned by digest
 
 
-def _tag() -> str:
+def _runner_files_dir() -> Path | None:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "deploy" / "docker").is_dir():
+            return parent / "deploy" / "docker"
+    return None
+
+
+def _tag(files: tuple[str, ...]) -> str:
+    """Tag of a default runner image: `EAP_MCP_RUNNER_TAG`, else a hash of the files the image is built
+    from (`deploy/scripts/up.sh` computes the same), so it changes only when the image does and a code
+    commit does not force a rebuild. `local` when the files are not there (an installed package)."""
     explicit = os.environ.get(TAG_ENV)
     if explicit:
         return explicit
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short=12", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return "local"
+    base = _runner_files_dir()
+    if base is None or not all((base / f).is_file() for f in files):
+        return "local"
+    return hashlib.sha256(b"".join((base / f).read_bytes() for f in files)).hexdigest()[:12]
 
 
-def _runner(env_name: str, image_name: str) -> str:
-    return os.environ.get(env_name) or f"{image_name}:{_tag()}"
+def _runner(env_name: str, image_name: str, files: tuple[str, ...]) -> str:
+    return os.environ.get(env_name) or f"{image_name}:{_tag(files)}"
 
 
 def _check(pattern: re.Pattern[str], value: str, what: str) -> str:
@@ -75,11 +80,11 @@ def image_for(package: PackageSpec) -> tuple[str, tuple[str, ...], dict[str, str
     if kind == "npm":
         ident = _check(_NPM_NAME, package.identifier, "npm package name")
         version = _check(_VERSION, package.version, "npm package version")
-        return _runner(NODE_IMAGE_ENV, NODE_IMAGE_NAME), (), {PACKAGE_ENV: f"{ident}@{version}"}
+        return _runner(NODE_IMAGE_ENV, NODE_IMAGE_NAME, NODE_FILES), (), {PACKAGE_ENV: f"{ident}@{version}"}
     if kind == "pypi":
         ident = _check(_PYPI_NAME, package.identifier, "pypi package name")
         version = _check(_VERSION, package.version, "pypi package version")
-        return _runner(PYTHON_IMAGE_ENV, PYTHON_IMAGE_NAME), (), {PACKAGE_ENV: f"{ident}=={version}"}
+        return _runner(PYTHON_IMAGE_ENV, PYTHON_IMAGE_NAME, PYTHON_FILES), (), {PACKAGE_ENV: f"{ident}=={version}"}
     if kind == "oci":
         ref = package.image or f"{package.identifier}:{package.version}"
         return _check(_OCI_REF, ref, "image reference"), (), {}

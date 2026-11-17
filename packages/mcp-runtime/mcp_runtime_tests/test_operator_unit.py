@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 
 import pytest
@@ -281,10 +283,10 @@ async def test_each_tenant_namespace_gets_rolebindings_for_the_platform_service_
     rt, api = runtime()
     h = await rt.start(spec())
     worker = _doc(api, "RoleBinding", h.namespace, "pydanticos-mcp-tenant-worker")
-    reader = _doc(api, "RoleBinding", h.namespace, "pydanticos-mcp-tenant-api")
+    reader = _doc(api, "RoleBinding", h.namespace, "pydanticos-mcp-tenant-api-write")
     assert worker["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "pydanticos-mcp-tenant"}
     assert worker["subjects"] == [{"kind": "ServiceAccount", "name": "pydanticos-mcp-worker", "namespace": "pydanticos"}]
-    assert reader["roleRef"]["name"] == "pydanticos-mcp-tenant-read"
+    assert reader["roleRef"]["name"] == "pydanticos-mcp-tenant"  # the API starts and stops runtimes too
     assert reader["subjects"] == [{"kind": "ServiceAccount", "name": "pydanticos-mcp-api", "namespace": "pydanticos"}]
 
 
@@ -456,3 +458,120 @@ def test_an_invalid_api_server_port_is_rejected(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("EAP_MCP_API_SERVER_PORTS", "443,https")
     with pytest.raises(ValueError, match="EAP_MCP_API_SERVER_PORTS"):
         OperatorRuntime(FakeKube())
+
+
+# --- review findings on 19f0703: failed states, generation, timeouts, secret cleanup, redaction ------
+
+
+def _pod(name: str, waiting: str | None = None, message: str = "", terminated: str | None = None) -> dict:
+    cs: dict = {"name": "mcp", "state": {}, "lastState": {}}
+    if waiting:
+        cs["state"] = {"waiting": {"reason": waiting, "message": message}}
+    if terminated:
+        cs["lastState"] = {"terminated": {"reason": terminated, "exitCode": 137}}
+    return {"metadata": {"name": name}, "status": {"phase": "Pending", "containerStatuses": [cs]}}
+
+
+@pytest.mark.parametrize(
+    "waiting,terminated",
+    [("CrashLoopBackOff", None), ("ImagePullBackOff", None), ("ErrImagePull", None),
+     ("CreateContainerConfigError", None), (None, "OOMKilled")],
+)
+async def test_a_pending_server_with_a_broken_pod_is_failed_with_the_reason(waiting, terminated) -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    api.objects[("MCPServer", h.namespace, h.cr_name)]["status"] = {"phase": "Pending", "message": "waiting"}
+    api.pod_status[h.namespace] = [_pod(f"{h.cr_name}-0", waiting, "back-off 5m0s restarting", terminated)]
+    s = await rt.status(h)
+    assert s.state == "failed"
+    assert (waiting or terminated) in s.message
+
+
+async def test_a_pending_server_with_healthy_or_unknown_pods_stays_starting() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    api.objects[("MCPServer", h.namespace, h.cr_name)]["status"] = {"phase": "Pending"}
+    api.pod_status[h.namespace] = [_pod(f"{h.cr_name}-0", "ContainerCreating")]
+    assert (await rt.status(h)).state == "starting"
+    api.pod_status[h.namespace] = []
+    assert (await rt.status(h)).state == "starting"
+
+
+async def test_wait_for_stops_early_on_a_failed_state_and_reports_the_reason() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    api.objects[("MCPServer", h.namespace, h.cr_name)]["status"] = {"phase": "Pending"}
+    api.pod_status[h.namespace] = [_pod(f"{h.cr_name}-0", "ImagePullBackOff", "pull access denied")]
+    s = await rt.wait_for(h, "running", timeout=30)
+    assert s.state == "failed" and "ImagePullBackOff" in s.message
+
+
+async def test_status_is_starting_until_the_operator_observed_the_latest_generation() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    cr = api.objects[("MCPServer", h.namespace, h.cr_name)]
+    cr["metadata"]["generation"] = 3
+    cr["status"] = {"phase": "Ready", "observedGeneration": 2}
+    assert (await rt.status(h)).state == "starting"
+    cr["status"]["observedGeneration"] = 3
+    assert (await rt.status(h)).state == "running"
+
+
+async def test_wait_for_is_bounded_even_when_a_status_call_hangs() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+
+    async def hang(*a, **k):
+        await asyncio.sleep(60)
+
+    api.get = hang  # type: ignore[method-assign]
+    started = time.monotonic()
+    s = await rt.wait_for(h, "running", timeout=0.3)
+    assert time.monotonic() - started < 5
+    assert s.state == "starting" and "timed out" in s.message
+
+
+async def test_lightkube_calls_are_bounded_and_the_client_has_explicit_timeouts() -> None:
+    import httpx2
+    from eap_mcp_runtime import operator as op
+
+    class Hanging:
+        async def get(self, *a, **k):
+            await asyncio.sleep(60)
+
+    api = op.LightkubeApi(Hanging(), call_timeout=0.2)
+    with pytest.raises(TimeoutError):
+        await api.get("Secret", "ns", "x")
+    t = op.HTTP_TIMEOUT
+    assert isinstance(t, httpx2.Timeout)
+    assert (t.connect, t.read, t.write, t.pool) == (5, 30, 30, 5)
+
+
+async def test_start_without_secret_refs_removes_a_secret_left_by_an_earlier_run() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec())
+    assert ("Secret", h.namespace, f"{h.cr_name}-env") in api.objects
+    await rt.start(spec(secret_refs={}))
+    assert ("Secret", h.namespace, f"{h.cr_name}-env") not in api.objects
+    assert "secrets" not in api.objects[("MCPServer", h.namespace, h.cr_name)]["spec"]
+
+
+async def test_logs_redact_the_secret_values_and_token_like_assignments() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec(secret_refs={"API_TOKEN": CANARY}))
+    api.pods[h.namespace] = [f"{h.cr_name}-0"]
+    api.logs[f"{h.cr_name}-0"] = (
+        f"using {CANARY} now\nAPI_TOKEN=abc123 ok\nlogin password=hunter2 done\nSecret=x Key=y plain line"
+    )
+    out = "\n".join(await rt.logs(h))
+    assert CANARY not in out and "abc123" not in out and "hunter2" not in out
+    assert "Secret=x" not in out and "Key=y" not in out
+    assert "plain line" in out and "using" in out
+
+
+async def test_logs_redact_values_a_caller_passes_in() -> None:
+    rt, api = runtime()
+    h = handle_for(TENANT, SERVER)
+    api.pods[h.namespace] = [f"{h.cr_name}-0"]
+    api.logs[f"{h.cr_name}-0"] = "value is zzz-not-registered here"
+    assert "zzz-not-registered" not in "\n".join(await rt.logs(h, secret_values=["zzz-not-registered"]))

@@ -34,7 +34,7 @@ def test_there_is_no_cluster_wide_binding_of_secret_or_pod_access() -> None:
 def test_cluster_wide_grant_is_only_namespaces_and_rolebindings() -> None:
     items = docs("rbac-mcp.yaml")
     (binding,) = by_kind(items, "ClusterRoleBinding").values()
-    assert [s["name"] for s in binding["subjects"]] == ["pydanticos-mcp-worker"]
+    assert [s["name"] for s in binding["subjects"]] == ["pydanticos-mcp-worker", "pydanticos-mcp-api"]
     g = grants(by_kind(items, "ClusterRole")[binding["roleRef"]["name"]])
     assert {r for _, r, _ in g} == {"namespaces", "rolebindings", "clusterroles"}
     assert {v for _, r, v in g if r == "namespaces"} == {"create", "get", "patch"}
@@ -55,17 +55,20 @@ def test_per_tenant_role_is_static_and_by_name_for_secrets() -> None:
     assert not any(r in {"namespaces", "rolebindings", "roles"} for _, r, _ in g)
 
 
-def test_api_service_account_is_read_only_and_has_no_secret_access() -> None:
+def test_both_service_accounts_exist_and_the_read_role_stays_read_only() -> None:
     items = docs("rbac-mcp.yaml")
-    sas = by_kind(items, "ServiceAccount")
-    assert {"pydanticos-mcp-worker", "pydanticos-mcp-api"} <= set(sas)
+    assert {"pydanticos-mcp-worker", "pydanticos-mcp-api"} <= set(by_kind(items, "ServiceAccount"))
     g = grants(by_kind(items, "ClusterRole")["pydanticos-mcp-tenant-read"])
     assert {v for _, _, v in g} <= {"get", "list"}
     assert "secrets" not in {r for _, r, _ in g}
     assert ("", "pods/log", "get") in g
-    # nothing binds the api account cluster wide
+
+
+def test_no_cluster_wide_binding_gives_either_account_secret_or_pod_access() -> None:
+    items = docs("rbac-mcp.yaml")
     for b in by_kind(items, "ClusterRoleBinding").values():
-        assert "pydanticos-mcp-api" not in [s["name"] for s in b["subjects"]]
+        role = by_kind(items, "ClusterRole")[b["roleRef"]["name"]]
+        assert not {r for rule in role["rules"] for r in rule["resources"]} & {"secrets", "pods", "pods/log", "mcpservers"}
 
 
 def test_admission_policy_confines_the_worker_to_mcp_tenant_namespaces() -> None:
@@ -75,7 +78,10 @@ def test_admission_policy_confines_the_worker_to_mcp_tenant_namespaces() -> None
     assert binding["spec"]["policyName"] == policy["metadata"]["name"]
     assert binding["spec"]["validationActions"] == ["Deny"]
     text = yaml.safe_dump(policy)
-    assert "mcp-tenant-" in text and "system:serviceaccount:pydanticos:pydanticos-mcp-worker" in text
+    assert "mcp-tenant-" in text
+    # both write accounts are confined, not just the worker
+    assert "system:serviceaccount:pydanticos:pydanticos-mcp-worker" in text
+    assert "system:serviceaccount:pydanticos:pydanticos-mcp-api" in text
     resources = {r for rule in policy["spec"]["matchConstraints"]["resourceRules"] for r in rule["resources"]}
     assert resources == {"namespaces", "rolebindings"}
 

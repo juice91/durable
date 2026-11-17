@@ -154,10 +154,17 @@ git_sha=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
 python_image="pydanticos-python:${git_sha}"
 studio_image="pydanticos-studio:${git_sha}"
 # Platform runner images for managed MCP servers (npm and pypi packages install at pod start). The
-# worker finds them through EAP_MCP_RUNNER_NODE_IMAGE / EAP_MCP_RUNNER_PYTHON_IMAGE, or by the
-# same SHA tag.
-runner_node_image="pydanticos-mcp-runner-node:${git_sha}"
-runner_python_image="pydanticos-mcp-runner-python:${git_sha}"
+# worker finds them through EAP_MCP_RUNNER_NODE_IMAGE / EAP_MCP_RUNNER_PYTHON_IMAGE.
+# Their tag is a hash of the files each image is built from (the same one
+# eap_mcp_runtime.images computes), not the commit: a code commit does not rebuild or retag them.
+runner_hash() { # FILE... (relative to deploy/docker)
+  local f
+  for f in "$@"; do cat "$REPO_ROOT/deploy/docker/$f"; done | shasum -a 256 | cut -c1-12
+}
+runner_node_tag=$(runner_hash mcp-runner-node.Dockerfile)
+runner_python_tag=$(runner_hash mcp-runner-python.Dockerfile mcp-run-python.sh)
+runner_node_image="pydanticos-mcp-runner-node:${runner_node_tag}"
+runner_python_image="pydanticos-mcp-runner-python:${runner_python_tag}"
 
 # Right after the VM (re)starts its network can lag: a deploy failed with an i/o timeout to
 # registry-1.docker.io that worked seconds later. Wait (bounded) until the VM reaches the

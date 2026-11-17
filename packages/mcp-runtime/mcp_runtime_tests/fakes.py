@@ -12,6 +12,7 @@ class FakeKube:
         self.calls: list[tuple[str, str, str | None, str]] = []
         self.pods: dict[str, list[str]] = {}
         self.logs: dict[str, str] = {}
+        self.pod_status: dict[str, list[dict[str, Any]]] = {}  # namespace -> pod dicts
 
     def _key(self, doc: dict[str, Any]) -> tuple[str, str | None, str]:
         md = doc["metadata"]
@@ -40,3 +41,6 @@ class FakeKube:
 
     async def pod_log(self, namespace: str, pod: str, tail: int) -> str:
         return "\n".join(self.logs.get(pod, "").splitlines()[-tail:])
+
+    async def pod_list(self, namespace: str, label_selector: str) -> list[dict[str, Any]]:
+        return copy.deepcopy(self.pod_status.get(namespace, []))

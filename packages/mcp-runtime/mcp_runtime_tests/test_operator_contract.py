@@ -446,25 +446,28 @@ def can_i(sa: str, verb: str, resource: str, namespace: str) -> bool:
 
 
 def test_the_api_service_account_cannot_read_platform_secrets(platform_rbac: None) -> None:
-    """Item 1: a Secret in `pydanticos` or `kube-system`, pod logs and writes are all refused for the API."""
+    """A Secret in `pydanticos`, `kube-system` or `default`, pod logs and writes are all refused for the
+    API outside the tenant namespaces, although it now has the write role inside them."""
     api = "pydanticos-mcp-api"
     for ns in ("pydanticos", "kube-system", "default"):
-        for verb, res in (("get", "secrets"), ("list", "secrets"), ("get", "pods/log"), ("create", "secrets"), ("create", "networkpolicies")):
+        for verb, res in (("get", "secrets"), ("list", "secrets"), ("get", "pods/log"), ("create", "secrets"), ("create", "networkpolicies"),
+                          ("create", "mcpservers.toolhive.stacklok.dev")):
             assert not can_i(api, verb, res, ns), (api, verb, res, ns)
     out = kubectl_as(sa_token(api), "-n", "pydanticos", "get", "secret", "pydanticos-secrets")
     assert out.returncode != 0 and "forbidden" in out.stderr.lower(), out.stderr
 
 
-def test_the_worker_service_account_has_no_cluster_wide_secret_or_pod_access(platform_rbac: None) -> None:
-    worker = "pydanticos-mcp-worker"
+@pytest.mark.parametrize("worker", ["pydanticos-mcp-worker", "pydanticos-mcp-api"])
+def test_the_service_accounts_have_no_cluster_wide_secret_or_pod_access(worker: str, platform_rbac: None) -> None:
     for ns in ("pydanticos", "kube-system"):
         for verb, res in (("get", "secrets"), ("create", "secrets"), ("delete", "secrets"), ("get", "pods/log"),
                           ("create", "networkpolicies"), ("delete", "networkpolicies"), ("create", "mcpservers.toolhive.stacklok.dev")):
             assert not can_i(worker, verb, res, ns), (worker, verb, res, ns)
 
 
-def test_the_worker_cannot_touch_namespaces_or_bind_outside_mcp_tenant(platform_rbac: None) -> None:
-    token = sa_token("pydanticos-mcp-worker")
+@pytest.mark.parametrize("sa", ["pydanticos-mcp-worker", "pydanticos-mcp-api"])
+def test_the_service_accounts_cannot_touch_namespaces_or_bind_outside_mcp_tenant(sa: str, platform_rbac: None) -> None:
+    token = sa_token(sa)
 
     def as_worker(*args: str) -> subprocess.CompletedProcess[str]:
         return kubectl_as(token, *args)
@@ -473,15 +476,15 @@ def test_the_worker_cannot_touch_namespaces_or_bind_outside_mcp_tenant(platform_
     assert relabel.returncode != 0 and "mcp-tenant-" in relabel.stderr, relabel.stderr
     create = as_worker("create", "namespace", "not-a-tenant-" + uuid.uuid4().hex[:6])
     assert create.returncode != 0 and "mcp-tenant-" in create.stderr, create.stderr
-    bind = as_worker("create", "rolebinding", "evil", "--clusterrole=pydanticos-mcp-tenant", "--serviceaccount=pydanticos:pydanticos-mcp-worker", "-n", "pydanticos")
+    bind = as_worker("create", "rolebinding", "evil", "--clusterrole=pydanticos-mcp-tenant", f"--serviceaccount=pydanticos:{sa}", "-n", "pydanticos")
     assert bind.returncode != 0, bind.stdout
-    admin = as_worker("create", "rolebinding", "evil", "--clusterrole=cluster-admin", "--serviceaccount=pydanticos:pydanticos-mcp-worker", "-n", "mcp-tenant-000000000000")
+    admin = as_worker("create", "rolebinding", "evil", "--clusterrole=cluster-admin", f"--serviceaccount=pydanticos:{sa}", "-n", "mcp-tenant-000000000000")
     assert admin.returncode != 0, admin.stdout
 
 
 async def test_the_lifecycle_runs_with_only_the_per_tenant_grants(tenant: str, platform_rbac: None) -> None:
     """The adapter, authenticated as the worker ServiceAccount, starts a server, the API account reads
-    its status and logs but not its Secret, and delete leaves the namespace baseline."""
+    its status and logs, and delete leaves the namespace baseline."""
     worker = make_runtime(sa_token("pydanticos-mcp-worker"))
     reader = make_runtime(sa_token("pydanticos-mcp-api"))
     h = await worker.start(
@@ -492,10 +495,11 @@ async def test_the_lifecycle_runs_with_only_the_per_tenant_grants(tenant: str, p
         assert st.state == "running", st
         assert (await reader.status(h)).state == "running"
         assert isinstance(await reader.logs(h, tail=5), list)
-        assert not can_i("pydanticos-mcp-api", "get", "secrets", h.namespace)
         assert can_i("pydanticos-mcp-api", "get", "pods/log", h.namespace)
-        assert not can_i("pydanticos-mcp-api", "delete", "mcpservers.toolhive.stacklok.dev", h.namespace)
-        assert not can_i("pydanticos-mcp-worker", "list", "secrets", h.namespace)
+        assert can_i("pydanticos-mcp-api", "delete", "mcpservers.toolhive.stacklok.dev", h.namespace)
+        for sa in ("pydanticos-mcp-api", "pydanticos-mcp-worker"):
+            assert not can_i(sa, "list", "secrets", h.namespace)  # by name only, never enumerated
+            assert not can_i(sa, "delete", "namespaces", h.namespace)
         assert (
             kubectl("-n", h.namespace, "get", "namespace", h.namespace, "-o", "jsonpath={.metadata.labels.pod-security\\.kubernetes\\.io/enforce}").strip()
             == "restricted"
@@ -507,3 +511,22 @@ async def test_the_lifecycle_runs_with_only_the_per_tenant_grants(tenant: str, p
         await worker.delete(h)
     left = kubectl("-n", h.namespace, "get", "mcpserver,networkpolicy,secret,pods", "-o", "name").split()
     assert set(left) == {"networkpolicy.networking.k8s.io/default-deny"}, left
+
+
+async def test_the_api_service_account_can_start_and_stop_a_runtime(tenant: str, platform_rbac: None) -> None:
+    """The API drives OperatorRuntime itself: as its ServiceAccount, in a namespace no one created yet, it
+    starts a server, stops it, restarts it and deletes it."""
+    api = make_runtime(sa_token("pydanticos-mcp-api"))
+    spec = RuntimeSpec(tenant_id=tenant, server_id=str(uuid.uuid4()), name="ApiRw", image=ECHO_IMAGE, secret_refs={"T": CANARY})
+    h = await api.start(spec)
+    try:
+        st = await api.wait_for(h, "running", timeout=240)
+        assert st.state == "running", st
+        await api.stop(h)
+        st = await api.wait_for(h, "stopped", timeout=120)
+        assert st.state == "stopped", st
+        await api.start(spec)  # restart
+        assert (await api.wait_for(h, "running", timeout=240)).state == "running"
+    finally:
+        await api.delete(h)
+    assert (await api.status(h)).state == "absent"
