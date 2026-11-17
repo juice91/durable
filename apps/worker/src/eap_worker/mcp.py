@@ -326,6 +326,7 @@ def _build_spec(engine: Engine, tenant_id: str, conn: McpServerConn, row: Any) -
         secret_refs=secret_refs,
         transport=package.get("transport") or "stdio",
         port=package.get("port"),
+        network=package.get("network"),
     )
 
 

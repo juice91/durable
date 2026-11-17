@@ -26,7 +26,15 @@ from eap_schemas.knowledge import (
 from eap_schemas.json_schema_subset import SchemaSubsetInvalid
 from eap_schemas.limits import MAX_REQUESTS, RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.mcp import McpRuntimeKind, McpServerSpec, McpToolRef, mcp_tool_name
-from eap_schemas.mcp_catalog import CatalogEntry, CatalogPackage, EnvVarSpec, RuntimeState
+from eap_schemas.mcp_catalog import (
+    CatalogEntry,
+    CatalogMeta,
+    CatalogNetwork,
+    CatalogPackage,
+    CatalogSource,
+    EnvVarSpec,
+    RuntimeState,
+)
 from eap_schemas.memory import (
     HistoryConfig,
     MemoryConfig,
@@ -126,6 +134,9 @@ __all__ = (
     "McpRuntimeKind",
     "McpServerSpec",
     "CatalogEntry",
+    "CatalogMeta",
+    "CatalogNetwork",
+    "CatalogSource",
     "CatalogPackage",
     "EnvVarSpec",
     "RuntimeState",

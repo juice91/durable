@@ -18,3 +18,25 @@ describe("mcpCatalog client", () => {
     expect(JSON.parse(String(calls[3][1].body))).toEqual({ catalog_name: "io.example/files", package_index: 0 });
   });
 });
+
+describe("networkSummary", () => {
+  it("words the network block", async () => {
+    const { networkSummary } = await import("./mcpCatalog");
+    expect(networkSummary(null)).toBeNull();
+    expect(networkSummary({ allow_host: [], allow_port: [443], insecure_allow_all: true })).toBe("any host on 443");
+    expect(networkSummary({ allow_host: [], allow_port: [], insecure_allow_all: true })).toBe("any host");
+    expect(networkSummary({ allow_host: ["a.com", "b.com", ".c.com"], allow_port: [443], insecure_allow_all: false })).toBe("3 listed hosts");
+    expect(networkSummary({ allow_host: [], allow_port: [], insecure_allow_all: false })).toBe("no network");
+  });
+});
+
+describe("mcpCatalog.list source", () => {
+  it("sends the source filter", async () => {
+    vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "dev-token");
+    const fetchMock = vi.fn(async (_url: string) => new Response(JSON.stringify({ items: [], next_after: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mcpCatalog.list({ source: "toolhive" });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/mcp-catalog?source=toolhive");
+    vi.unstubAllGlobals();
+  });
+});

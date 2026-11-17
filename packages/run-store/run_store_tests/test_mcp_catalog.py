@@ -109,3 +109,73 @@ def test_an_older_run_never_lowers_the_stamp(engine, prefix):
     store.upsert([entry(prefix, "a", version="3.0.0")], fetched_at=T0 + timedelta(hours=1))  # same stamp: ok
     assert store.get(f"{prefix}/a").version == "3.0.0"
     assert store.count_active() == 1
+
+
+# ------------------------------------------------------------------------------ sources (0028)
+
+from eap_schemas import CatalogMeta, CatalogNetwork  # noqa: E402
+
+
+def toolhive(prefix: str, short: str, **kw) -> CatalogEntry:
+    kw.setdefault("source", "toolhive")
+    kw.setdefault(
+        "meta",
+        CatalogMeta(
+            tier="Official",
+            tags=("browser", "web"),
+            network=CatalogNetwork(allow_host=("a.example",), allow_port=(443,), insecure_allow_all=False),
+            tools=("navigate", "click"),
+            tool_count=2,
+            stars=7,
+        ),
+    )
+    return entry(prefix, short, **kw)
+
+
+def test_source_and_meta_round_trip(engine, prefix):
+    store = CatalogStore(engine)
+    th, off = toolhive(prefix, "pw"), entry(prefix, "official-one")
+    store.upsert([th, off], fetched_at=T0)
+    got = store.get(th.name)
+    assert got.source == "toolhive" and got.meta == th.meta
+    assert got.meta.network.allow_host == ("a.example",) and got.meta.network.insecure_allow_all is False
+    plain = store.get(off.name)
+    assert plain.source == "official" and plain.meta is None
+    store.upsert([toolhive(prefix, "pw", meta=None)], fetched_at=T0 + timedelta(hours=1))
+    assert store.get(th.name).meta is None  # meta follows the publisher, like everything but `hidden`
+
+
+def test_list_puts_toolhive_first_then_name_and_filters_by_source(engine, prefix):
+    store = CatalogStore(engine)
+    store.upsert(
+        [entry(prefix, "a"), entry(prefix, "b"), toolhive(prefix, "y"), toolhive(prefix, "z")], fetched_at=T0
+    )
+    short = lambda es: [e.name.split("/")[1] for e in es]  # noqa: E731
+    assert short(store.list(prefix, limit=10)) == ["y", "z", "a", "b"]
+    assert short(store.list(prefix, limit=10, source="toolhive")) == ["y", "z"]
+    assert short(store.list(prefix, limit=10, source="official")) == ["a", "b"]
+    assert short(store.search(prefix, limit=10)) == ["y", "z", "a", "b"]  # search is the same call
+
+
+def test_list_pages_across_the_source_boundary(engine, prefix):
+    store = CatalogStore(engine)
+    store.upsert([entry(prefix, "a"), entry(prefix, "b"), toolhive(prefix, "y"), toolhive(prefix, "z")], fetched_at=T0)
+    seen, after = [], None
+    while True:
+        page = store.list(prefix, limit=3, after=after)
+        if not page:
+            break
+        seen += [e.name.split("/")[1] for e in page]
+        after = page[-1].name
+    assert seen == ["y", "z", "a", "b"]
+
+
+def test_removal_and_count_are_per_source(engine, prefix):
+    store = CatalogStore(engine)
+    store.upsert([entry(prefix, "old"), toolhive(prefix, "old-th")], fetched_at=T0)
+    later = T0 + timedelta(hours=1)
+    assert store.count_active("toolhive") == 1 and store.count_active("official") == 1 and store.count_active() == 2
+    assert store.mark_removed_before(later, source="toolhive") == 1
+    assert store.get(f"{prefix}/old-th").status == "removed" and store.get(f"{prefix}/old").status == "active"
+    assert store.mark_removed_before(later) == 1  # default source is official
+    assert store.get(f"{prefix}/old").status == "removed"

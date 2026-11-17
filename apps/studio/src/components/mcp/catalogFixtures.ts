@@ -25,6 +25,11 @@ export const LOCAL_ENTRY: CatalogEntry = {
   local: true,
   remote: true,
   fetched_at: "2026-11-17T10:00:00Z",
+  source: "official",
+  tier: null,
+  tags: [],
+  network: null,
+  tool_count: 0,
 };
 
 export const REMOTE_ENTRY: CatalogEntry = {
@@ -39,4 +44,30 @@ export const REMOTE_ENTRY: CatalogEntry = {
   local: false,
   remote: true,
   fetched_at: "2026-11-17T10:00:00Z",
+  source: "official",
+  tier: null,
+  tags: [],
+  network: null,
+  tool_count: 0,
+};
+
+export const TOOLHIVE_ENTRY: CatalogEntry = {
+  name: "io.github.stacklok/fetch",
+  title: "Fetch",
+  description: "Allows you to fetch content from the web",
+  version: "1.0.0",
+  status: "active",
+  licence: null,
+  packages: [
+    { registry_type: "oci", identifier: "ghcr.io/stackloklabs/gofetch/server:1.0.6", version: null, transport: "streamable-http", environment_variables: [] },
+  ],
+  remotes: [],
+  local: true,
+  remote: false,
+  fetched_at: "2026-11-18T10:00:00Z",
+  source: "toolhive",
+  tier: "Official",
+  tags: ["web", "fetch"],
+  network: { allow_host: [], allow_port: [443], insecure_allow_all: true },
+  tool_count: 1,
 };

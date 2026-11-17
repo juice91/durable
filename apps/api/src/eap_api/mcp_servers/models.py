@@ -100,6 +100,8 @@ class McpCatalogEntryModel(Base):
         PrimaryKeyConstraint("name", name="mcp_catalog_entries_pkey"),
         Index("ix_mcp_catalog_entries_latest_status", "is_latest", "status"),
         Index("ix_mcp_catalog_entries_name_lower", func.lower(text("name"))),
+        Index("ix_mcp_catalog_entries_source", "source", "status"),
+        CheckConstraint("source IN ('official', 'toolhive')", name="ck_mcp_catalog_entries_source"),
     )
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -113,6 +115,8 @@ class McpCatalogEntryModel(Base):
     licence: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="official", server_default=text("'official'"))
+    meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class McpRuntimeModel(Base):

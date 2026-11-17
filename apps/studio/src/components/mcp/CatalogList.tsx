@@ -4,9 +4,15 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ApiError } from "@/lib/api";
-import { mcpCatalog, type CatalogEntry } from "@/lib/mcpCatalog";
+import { mcpCatalog, networkSummary, type CatalogEntry, type CatalogSource } from "@/lib/mcpCatalog";
 
 const PAGE_SIZE = 30;
+
+type SourceFilter = CatalogSource | "all";
+
+export function toolCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "tool" : "tools"}`;
+}
 
 function describe(reason: unknown): string {
   if (reason instanceof ApiError) return reason.message;
@@ -28,6 +34,7 @@ interface CatalogListProps {
 /** The searchable catalog: one row per entry, Load more by cursor. */
 export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
   const [query, setQuery] = useState("");
+  const [source, setSource] = useState<SourceFilter>("toolhive");
   const [items, setItems] = useState<CatalogEntry[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -43,7 +50,7 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
       setLoading(true);
       setError(null);
       try {
-        const page = await mcpCatalog.list({ q: query, limit: PAGE_SIZE });
+        const page = await mcpCatalog.list({ q: query, limit: PAGE_SIZE, source: source === "all" ? undefined : source });
         if (id !== requestId.current) return;
         setItems(page.items);
         setNext(page.next_after);
@@ -65,7 +72,7 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
       clearTimeout(timer);
       requestId.current += 1;
     };
-  }, [query, debounceMs, reloadTick]);
+  }, [query, source, debounceMs, reloadTick]);
 
   const loadMore = useCallback(async () => {
     if (!next) return;
@@ -73,7 +80,7 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
     setLoadingMore(true);
     setError(null);
     try {
-      const page = await mcpCatalog.list({ q: query, limit: PAGE_SIZE, after: next });
+      const page = await mcpCatalog.list({ q: query, limit: PAGE_SIZE, after: next, source: source === "all" ? undefined : source });
       if (id !== requestId.current) return;
       setItems((current) => [...current, ...page.items]);
       setNext(page.next_after);
@@ -82,18 +89,30 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
     } finally {
       setLoadingMore(false);
     }
-  }, [next, query]);
+  }, [next, query, source]);
 
   return (
     <div className="flex min-w-0 flex-col gap-4" data-testid="mcp-catalog">
+      <div className="flex min-w-0 flex-wrap gap-2">
+      <select
+        aria-label="Source"
+        value={source}
+        onChange={(event) => setSource(event.target.value as SourceFilter)}
+        className="rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <option value="toolhive">ToolHive</option>
+        <option value="official">Official registry</option>
+        <option value="all">All sources</option>
+      </select>
       <input
         type="search"
         aria-label="Search the catalog"
         placeholder="Search servers by name or description"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        className="w-full rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
+      </div>
 
       {error ? (
         <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">
@@ -119,12 +138,20 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
               >
                 <span className="flex min-w-0 flex-wrap items-center gap-2">
                   <span className="truncate font-medium text-foreground">{entry.title || entry.name}</span>
+                  {entry.source === "toolhive" ? <Badge variant="info">ToolHive</Badge> : null}
+                  {entry.source === "toolhive" && entry.tier ? <Badge variant="outline">{entry.tier}</Badge> : null}
                   {entry.local ? <Badge variant="info">Local</Badge> : null}
                   {entry.remote ? <Badge variant="outline">Remote</Badge> : null}
                   {entry.status ? <Badge variant={registryStatusVariant(entry.status)}>{entry.status}</Badge> : null}
                   {entry.licence ? <span className="text-caption text-muted-foreground">{entry.licence}</span> : null}
                 </span>
                 <span className="font-mono text-caption text-muted-foreground">{entry.name}</span>
+                {entry.source === "toolhive" ? (
+                  <span className="flex flex-wrap items-center gap-x-3 text-caption text-muted-foreground">
+                    <span>{toolCountLabel(entry.tool_count)}</span>
+                    {networkSummary(entry.network) ? <span>{networkSummary(entry.network)}</span> : null}
+                  </span>
+                ) : null}
                 {entry.description ? <span className="line-clamp-2 text-body text-muted-foreground">{entry.description}</span> : null}
               </button>
             </li>

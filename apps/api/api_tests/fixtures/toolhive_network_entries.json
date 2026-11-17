@@ -1,0 +1,227 @@
+[
+ {
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stacklok/fetch",
+  "description": "Allows you to fetch content from the web",
+  "title": "Fetch",
+  "repository": {
+   "url": "https://github.com/stackloklabs/gofetch",
+   "source": "github"
+  },
+  "version": "1.0.0",
+  "_meta": {
+   "io.modelcontextprotocol.registry/publisher-provided": {
+    "io.github.stacklok": {
+     "ghcr.io/stackloklabs/gofetch/server:1.0.6": {
+      "metadata": {
+       "last_updated": "2026-08-07T03:07:39Z",
+       "stars": 25
+      },
+      "permissions": {
+       "network": {
+        "outbound": {
+         "allow_port": [
+          443
+         ],
+         "insecure_allow_all": true
+        }
+       }
+      },
+      "status": "Active",
+      "tags": [
+       "content",
+       "html",
+       "markdown",
+       "fetch",
+       "fetching",
+       "get",
+       "wget",
+       "json",
+       "curl",
+       "modelcontextprotocol"
+      ],
+      "tier": "Community",
+      "tools": [
+       "fetch"
+      ]
+     }
+    }
+   }
+  }
+ },
+ {
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stacklok/memory",
+  "description": "Persistent memory for LLM applications using local knowledge graph to store user information",
+  "title": "Memory",
+  "repository": {
+   "url": "https://github.com/modelcontextprotocol/servers",
+   "source": "github"
+  },
+  "version": "1.0.0",
+  "_meta": {
+   "io.modelcontextprotocol.registry/publisher-provided": {
+    "io.github.stacklok": {
+     "ghcr.io/stacklok/dockyard/npx/server-memory:2026.8.31": {
+      "metadata": {
+       "last_updated": "2026-10-28T21:46:12Z",
+       "stars": 85231
+      },
+      "permissions": {
+       "network": {
+        "outbound": {}
+       }
+      },
+      "status": "Active",
+      "tags": [
+       "entities",
+       "graph",
+       "knowledge",
+       "memory",
+       "observations",
+       "persistent",
+       "relations"
+      ],
+      "tier": "Community",
+      "tools": [
+       "add_observations",
+       "create_entities",
+       "create_relations",
+       "delete_entities",
+       "delete_observations",
+       "delete_relations",
+       "open_nodes",
+       "read_graph",
+       "search_nodes"
+      ]
+     }
+    }
+   }
+  }
+ },
+ {
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stacklok/osv",
+  "description": "OSV (Open Source Vulnerabilities) database access for querying package and commit vulnerabilities",
+  "title": "OSV",
+  "repository": {
+   "url": "https://github.com/StacklokLabs/osv-mcp",
+   "source": "github"
+  },
+  "version": "1.0.0",
+  "_meta": {
+   "io.modelcontextprotocol.registry/publisher-provided": {
+    "io.github.stacklok": {
+     "ghcr.io/stackloklabs/osv-mcp/server:0.1.4": {
+      "metadata": {
+       "last_updated": "2026-10-16T03:17:20Z",
+       "stars": 33
+      },
+      "permissions": {
+       "network": {
+        "outbound": {
+         "allow_host": [
+          "api.osv.dev"
+         ],
+         "allow_port": [
+          443
+         ]
+        }
+       }
+      },
+      "status": "Active",
+      "tags": [
+       "vulnerability",
+       "security",
+       "osv",
+       "open-source",
+       "cve",
+       "packages",
+       "dependencies",
+       "scanning",
+       "security-scanning",
+       "vulnerability-detection"
+      ],
+      "tier": "Community",
+      "tools": [
+       "get_vulnerability",
+       "query_vulnerabilities_batch",
+       "query_vulnerability"
+      ]
+     }
+    }
+   }
+  }
+ },
+ {
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stacklok/playwright",
+  "description": "Provides browser automation capabilities using Playwright",
+  "title": "Playwright",
+  "repository": {
+   "url": "https://github.com/microsoft/playwright-mcp",
+   "source": "github"
+  },
+  "version": "1.0.0",
+  "_meta": {
+   "io.modelcontextprotocol.registry/publisher-provided": {
+    "io.github.stacklok": {
+     "mcr.microsoft.com/playwright/mcp:v0.0.83": {
+      "metadata": {
+       "last_updated": "2026-10-16T03:17:51Z",
+       "stars": 28552
+      },
+      "permissions": {
+       "network": {
+        "outbound": {
+         "allow_port": [
+          443
+         ],
+         "insecure_allow_all": true
+        }
+       }
+      },
+      "status": "Active",
+      "tags": [
+       "playwright",
+       "automation",
+       "browser",
+       "navigate",
+       "testing",
+       "web",
+       "accessibility"
+      ],
+      "tier": "Official",
+      "tools": [
+       "browser_click",
+       "browser_close",
+       "browser_console_messages",
+       "browser_drag",
+       "browser_drop",
+       "browser_emulate_media",
+       "browser_evaluate",
+       "browser_file_upload",
+       "browser_fill_form",
+       "browser_find",
+       "browser_handle_dialog",
+       "browser_hover",
+       "browser_navigate",
+       "browser_navigate_back",
+       "browser_network_request",
+       "browser_network_requests",
+       "browser_press_key",
+       "browser_resize",
+       "browser_run_code_unsafe",
+       "browser_select_option",
+       "browser_snapshot",
+       "browser_tabs",
+       "browser_take_screenshot",
+       "browser_type",
+       "browser_wait_for"
+      ]
+     }
+    }
+   }
+  }
+ }
+]

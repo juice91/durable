@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 RuntimeState = Literal["absent", "starting", "running", "stopping", "stopped", "failed"]
 
@@ -24,6 +24,9 @@ class RuntimeSpec:
     secret_refs: Mapping[str, str] = field(default_factory=dict, repr=False)
     transport: Literal["stdio", "streamable-http", "sse"] = "stdio"
     port: int | None = None  # the port the server listens on (non-stdio transports)
+    # The catalog entry's outbound permissions: {allow_host: [str], allow_port: [int], insecure_allow_all: bool}.
+    # None (no block) keeps the default egress rule; see operator.network_policy_doc.
+    network: Mapping[str, Any] | None = None
 
     @property
     def env_names(self) -> tuple[str, ...]:

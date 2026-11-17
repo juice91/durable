@@ -36,6 +36,32 @@ class CatalogPackage(BaseModel):
     environment_variables: tuple[EnvVarSpec, ...] = ()
 
 
+CatalogSource = Literal["official", "toolhive"]
+
+
+class CatalogNetwork(BaseModel):
+    """A publisher's declared outbound network permissions (ToolHive `permissions.network.outbound`)."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    allow_host: tuple[str, ...] = ()
+    allow_port: tuple[int, ...] = ()
+    insecure_allow_all: bool = False
+
+
+class CatalogMeta(BaseModel):
+    """The publisher-provided block we keep for a ToolHive entry."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    tier: str | None = None
+    tags: tuple[str, ...] = ()
+    network: CatalogNetwork | None = None
+    tools: tuple[str, ...] = ()
+    tool_count: int = 0
+    stars: int | None = None
+
+
 class CatalogEntry(BaseModel):
     """A mirrored registry entry (platform-wide, read-only for tenants)."""
 
@@ -52,6 +78,8 @@ class CatalogEntry(BaseModel):
     licence: str | None = None
     fetched_at: datetime | None = None
     hidden: bool = False
+    source: CatalogSource = "official"
+    meta: CatalogMeta | None = None
 
 
-__all__ = ["CatalogEntry", "CatalogPackage", "EnvVarSpec", "PackageTransport", "RegistryType", "RUNTIME_STATES", "RuntimeState"]
+__all__ = ["CatalogEntry", "CatalogMeta", "CatalogNetwork", "CatalogSource", "CatalogPackage", "EnvVarSpec", "PackageTransport", "RegistryType", "RUNTIME_STATES", "RuntimeState"]

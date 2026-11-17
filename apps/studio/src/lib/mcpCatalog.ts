@@ -34,6 +34,30 @@ export interface CatalogEntry {
   local: boolean;
   remote: boolean;
   fetched_at: string | null;
+  source: CatalogSource;
+  tier: string | null;
+  tags: string[];
+  network: CatalogNetwork | null;
+  tool_count: number;
+}
+
+export type CatalogSource = "official" | "toolhive";
+
+export interface CatalogNetwork {
+  allow_host: string[];
+  allow_port: number[];
+  insecure_allow_all: boolean;
+}
+
+/** What a ToolHive entry may reach, in words; null when the entry declares no network block. */
+export function networkSummary(network: CatalogNetwork | null | undefined): string | null {
+  if (!network) return null;
+  if (network.insecure_allow_all) {
+    return network.allow_port.length > 0 ? `any host on ${network.allow_port.join(", ")}` : "any host";
+  }
+  const hosts = network.allow_host.length;
+  if (hosts === 0) return "no network";
+  return hosts === 1 ? "1 listed host" : `${hosts} listed hosts`;
 }
 
 export interface CatalogPage {
@@ -57,11 +81,12 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const mcpCatalog = {
-  list: (params: { q?: string; limit?: number; after?: string | null } = {}) => {
+  list: (params: { q?: string; limit?: number; after?: string | null; source?: CatalogSource } = {}) => {
     const query = new URLSearchParams();
     if (params.q?.trim()) query.set("q", params.q.trim());
     if (params.limit) query.set("limit", String(params.limit));
     if (params.after) query.set("after", params.after);
+    if (params.source) query.set("source", params.source);
     const text = query.toString();
     return call<CatalogPage>(`/mcp-catalog${text ? `?${text}` : ""}`);
   },

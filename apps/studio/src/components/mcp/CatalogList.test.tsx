@@ -1,9 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import "@testing-library/jest-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CatalogList } from "./CatalogList";
-import { LOCAL_ENTRY, REMOTE_ENTRY } from "./catalogFixtures";
+import { LOCAL_ENTRY, REMOTE_ENTRY, TOOLHIVE_ENTRY } from "./catalogFixtures";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -35,6 +35,35 @@ describe("CatalogList", () => {
     expect(screen.getAllByText("Local").length).toBe(1);
     expect(screen.getAllByText("Remote").length).toBe(2);
     expect(urls()[0]).toContain("/api/v1/mcp-catalog");
+  });
+
+  it("defaults to ToolHive and shows its badge, tier, tool count and network summary", async () => {
+    fetchMock.mockImplementation(async () => json({ items: [TOOLHIVE_ENTRY], next_after: null }));
+    render(<CatalogList onOpen={vi.fn()} />);
+    expect(await screen.findByText("Fetch")).toBeInTheDocument();
+    expect(new URL(urls()[0]).searchParams.get("source")).toBe("toolhive");
+    const row = within(screen.getByTestId("mcp-catalog-entry"));
+    expect(row.getByText("ToolHive")).toBeInTheDocument();
+    expect(screen.getByText("Official")).toBeInTheDocument();
+    expect(screen.getByText("1 tool")).toBeInTheDocument();
+    expect(screen.getByText("any host on 443")).toBeInTheDocument();
+  });
+
+  it("switches the source filter, and All sends no source", async () => {
+    render(<CatalogList onOpen={vi.fn()} />);
+    await screen.findByText("Files");
+    fireEvent.change(screen.getByRole("combobox", { name: /source/i }), { target: { value: "official" } });
+    await waitFor(() => expect(urls().some((url) => url.includes("source=official"))).toBe(true));
+    fireEvent.change(screen.getByRole("combobox", { name: /source/i }), { target: { value: "all" } });
+    await waitFor(() => expect(urls().length).toBeGreaterThanOrEqual(3));
+    expect(new URL(urls().at(-1)!).searchParams.has("source")).toBe(false);
+  });
+
+  it("shows nothing for an entry without a network block", async () => {
+    render(<CatalogList onOpen={vi.fn()} />);
+    await screen.findByText("Files");
+    expect(screen.queryByText(/any host|listed host|no network/)).toBeNull();
+    expect(within(screen.getAllByTestId("mcp-catalog-entry")[0]).queryByText("ToolHive")).toBeNull();
   });
 
   it("debounces the search and sends q", async () => {

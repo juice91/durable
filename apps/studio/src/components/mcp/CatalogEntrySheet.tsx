@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader } from "@/components/ui/Sheet";
 import { ApiError } from "@/lib/api";
-import { mcpCatalog, packageLabel, type CatalogEntry, type CatalogInstall } from "@/lib/mcpCatalog";
+import { mcpCatalog, networkSummary, packageLabel, type CatalogEntry, type CatalogInstall } from "@/lib/mcpCatalog";
 import type { McpServer } from "@/lib/mcpServers";
 import { listSecrets, putSecret, secretRef } from "@/lib/secrets";
 
@@ -137,6 +137,8 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
       <SheetHeader title={entry.title || entry.name} description={entry.name} />
       <SheetBody className="flex flex-col gap-5">
         <div className="flex flex-wrap items-center gap-2">
+          {entry.source === "toolhive" ? <Badge variant="info">ToolHive</Badge> : null}
+          {entry.source === "toolhive" && entry.tier ? <Badge variant="outline">{entry.tier}</Badge> : null}
           {entry.local ? <Badge variant="info">Local</Badge> : null}
           {entry.remote ? <Badge variant="outline">Remote</Badge> : null}
           {entry.status ? <Badge variant={entry.status === "active" ? "success" : "warning"}>{entry.status}</Badge> : null}
@@ -144,6 +146,15 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
           {entry.licence ? <span className="text-caption text-muted-foreground">{entry.licence}</span> : null}
         </div>
         {entry.description ? <p className="text-body text-foreground">{entry.description}</p> : null}
+        {entry.source === "toolhive" ? (
+          <div className="flex min-w-0 flex-col gap-1 text-caption text-muted-foreground">
+            <span>{entry.tool_count} {entry.tool_count === 1 ? "tool" : "tools"}</span>
+            {networkSummary(entry.network) ? <span>Network: {networkSummary(entry.network)}</span> : null}
+            {entry.tags.length > 0 ? (
+              <span className="flex flex-wrap gap-1">{entry.tags.map((tag) => <Badge key={tag} variant="neutral">{tag}</Badge>)}</span>
+            ) : null}
+          </div>
+        ) : null}
 
         {firstChoice === null ? (
           <p className="text-body text-muted-foreground">This entry lists no package or remote endpoint to run.</p>
