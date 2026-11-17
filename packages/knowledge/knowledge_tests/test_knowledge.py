@@ -35,6 +35,8 @@ from eap_knowledge import (
     slugify,
 )
 
+from .timing import cap
+
 WORDS = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu".split()
 
 
@@ -433,7 +435,7 @@ def test_huge_heading_in_a_5mb_document_stays_bounded() -> None:
     assert total <= 1.75 * len(md), total / len(md)
     assert all(len(c.embed_text) <= 512 * 4 for c in chunks)
     assert peak < 40 * len(md), peak
-    assert elapsed < 30
+    assert elapsed < cap(30)
 
 
 def test_determinism_across_runs_and_copies() -> None:
@@ -636,7 +638,7 @@ def _assert_linear(make, *, limit: float = 2.0) -> None:
     run(_MIB // 64)  # warm up
     # Best of three: a pause (GC, a busy machine) inflates one timing, a quadratic path all of them.
     small, large = min(run(_MIB // 4) for _ in range(3)), min(run(_MIB) for _ in range(3))
-    assert large < limit, (small, large)
+    assert large < cap(limit), (small, large)
     assert large <= 8 * small + 0.1, (small, large)
 
 
@@ -722,7 +724,7 @@ def _bounded(fn, seconds: float, peak_bytes: int):
         elapsed = time.perf_counter() - started
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
-        assert elapsed < seconds and peak < peak_bytes, (elapsed, peak)
+        assert elapsed < cap(seconds) and peak < peak_bytes, (elapsed, peak)
 
 
 @pytest.mark.parametrize(

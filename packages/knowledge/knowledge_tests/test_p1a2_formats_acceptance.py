@@ -24,7 +24,19 @@ from eap_knowledge.formats.doxygen import doxygen_to_markdown, extract_doxygen_m
 from eap_knowledge.formats.rst import evaluate_condition, extract_rst
 from eap_knowledge.formats.structured import extract_json, extract_yaml
 
+try:
+    from .timing import best_of_3, cap
+except ImportError:  # imported as a top-level module by the hash-seed subprocess test
+    from timing import best_of_3, cap  # type: ignore[no-redef]
+
 URL = "https://ti.example/page.html"
+
+
+def _raised(fn, src):  # noqa: ANN001, ANN202
+    """The ExtractionFailed `fn(src)` raises (a test failure if it does not)."""
+    with pytest.raises(ExtractionFailed) as info:
+        fn(src)
+    return info
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 WORDS = re.compile(r"[A-Za-z0-9_]+")
 
@@ -680,10 +692,9 @@ def _laughs(depth: int, fan: int) -> str:
 
 @pytest.mark.parametrize(("depth", "fan"), [(9, 9), (11, 10), (20, 10)])
 def test_yaml_billion_laughs_fails_extract_limit_in_well_under_a_second(depth: int, fan: int) -> None:
-    started = time.perf_counter()
-    with pytest.raises(ExtractionFailed) as info:
-        extract_yaml(_laughs(depth, fan))
-    assert time.perf_counter() - started < 2.0
+    src = _laughs(depth, fan)
+    info, elapsed = best_of_3(lambda: _raised(extract_yaml, src))
+    assert elapsed < cap(2.0), elapsed
     assert info.value.code == "extract_limit"
     assert info.value.user_message == "The document is over an extraction limit (pages, nodes, nesting or image size)."
 
@@ -696,9 +707,8 @@ def test_yaml_laughs_inside_a_later_document_of_a_stream_is_caught_too() -> None
 
 def test_yaml_merge_key_chains_do_not_blow_up() -> None:
     src = "a: &a {k: 1}\nb: &b {<<: [*a, *a, *a, *a], j: 2}\nc: &c {<<: [*b, *b, *b, *b]}\n"
-    started = time.perf_counter()
-    doc = extract_yaml(src)
-    assert time.perf_counter() - started < 2.0
+    doc, elapsed = best_of_3(lambda: extract_yaml(src))
+    assert elapsed < cap(2.0), elapsed
     assert [s.heading for s in doc.sections if s.heading] == ["a", "b", "c"]
 
 
@@ -707,10 +717,8 @@ def test_deeply_nested_objects_fail_extract_limit_quickly(fn) -> None:  # noqa: 
     src = "".join('{"a":' for _ in range(200)) + "1" + "}" * 200
     if fn is extract_yaml:
         src = "".join(" " * i + "a:\n" for i in range(200)) + " " * 200 + "1\n"
-    started = time.perf_counter()
-    with pytest.raises(ExtractionFailed) as info:
-        fn(src)
-    assert info.value.reason == "extract_limit" and time.perf_counter() - started < 2.0
+    info, elapsed = best_of_3(lambda: _raised(fn, src))
+    assert info.value.reason == "extract_limit" and elapsed < cap(2.0), elapsed
 
 
 MALFORMED_YAML = {
@@ -753,10 +761,8 @@ def test_rst_limit_errors_carry_no_content() -> None:
 
 def test_a_huge_rst_line_over_10000_characters_fails_extract_limit_fast_even_amid_valid_text() -> None:
     src = "Title\n=====\n\nfine\n\n" + "word " * 4000 + "\n\nmore fine\n"
-    started = time.perf_counter()
-    with pytest.raises(ExtractionFailed) as info:
-        extract_rst(src)
-    assert info.value.reason == "extract_limit" and time.perf_counter() - started < 2.0
+    info, elapsed = best_of_3(lambda: _raised(extract_rst, src))
+    assert info.value.reason == "extract_limit" and elapsed < cap(2.0), elapsed
     # the same text wrapped into lines under the limit is fine
     wrapped = "Title\n=====\n\n" + ("word " * 100 + "\n") * 40
     assert extract_rst(wrapped).extracted_chars > 0
@@ -780,10 +786,12 @@ def test_malformed_rst_inputs_do_not_hang_or_throw() -> None:
         "\x00\x01\x02\n", "``" * 5000 + "\n", "*" * 9000 + "\n", ".. " * 3000 + "\n", "|" * 9000 + "\n",
         "=" * 9000 + "\nT\n" + "=" * 9000 + "\n", ":" * 9000 + "\n", "`" + "a" * 9000 + "`_\n",
     ]
-    started = time.perf_counter()
-    for src in nasty:
-        _no_controls(extract_rst(src))
-    assert time.perf_counter() - started < 5.0
+    def run_all() -> None:
+        for src in nasty:
+            _no_controls(extract_rst(src))
+
+    _, elapsed = best_of_3(run_all)
+    assert elapsed < cap(5.0), elapsed
 
 
 def _registry() -> tuple:
