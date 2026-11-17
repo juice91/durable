@@ -14,6 +14,8 @@ No I/O.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import re
 from typing import Annotated, Any, Literal, Union
 from uuid import UUID
@@ -54,6 +56,26 @@ ARCHITECT_DENIED_TOOL_PREFIXES: tuple[str, ...] = (
 # Registry tools offered to created agents but always behind a person's approval, besides every tool
 # the registry marks as having a side effect and every MCP tool.
 GATED_TOOL_IDS: frozenset[str] = frozenset({"tickets.create"})
+
+# The Architect's tools that change what is live or what runs by itself (Task 4). A built-in agent that
+# lists one must list it in `approvals.tools` too: the API refuses the spec (422 approval_required) and
+# the worker refuses the run, so no path reaches them without a person's recorded approval.
+ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
+    "architect.publish_agent",
+    "architect.restore_agent_version",
+    "architect.archive_agent",
+    "architect.publish_workflow",
+    "architect.restore_workflow_version",
+    "architect.archive_workflow",
+    "architect.set_workflow_schedule",
+)
+
+
+def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] | None) -> list[str]:
+    """The gated Architect tools in `tools` that `approval_tools` (spec.approvals.tools) does not list."""
+    gated = set(approval_tools or ())
+    return [t for t in tools if t in ARCHITECT_GATED_TOOL_IDS and t not in gated]
+
 
 MAX_AGENT_TOOLS = 32
 MAX_STEPS = 8
@@ -448,9 +470,11 @@ __all__ = [
     "ArchitectParallelStep",
     "ArchitectToolStep",
     "ArchitectWorkflowSpec",
+    "ARCHITECT_GATED_TOOL_IDS",
     "GATED_TOOL_IDS",
     "RESERVED_AGENT_IDS",
     "compile_agent",
     "compile_workflow",
     "is_denied_tool",
+    "ungated_architect_tools",
 ]

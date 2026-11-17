@@ -23,13 +23,14 @@ tenant's agent is 404 like an unknown one).
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from eap_run_store.definitions import referencing_workflows as _referencing_workflows
 
 AGENT_ARCHIVED = "Agent is archived; unarchive it to start runs, conversations or publish versions"
 
@@ -42,27 +43,9 @@ def refuse_if_archived(agent: object) -> None:
 
 def referencing_workflows(db: Session, tenant_id: str, agent_id: uuid.UUID | str) -> list[dict[str, Any]]:
     """The tenant's non-archived workflows with a published version that runs `agent_id` as an
-    agent step, one entry per workflow: `{workflow_id, workflow_name, versions (ascending),
-    latest_version}` (`latest_version` is the workflow's newest version, which a run without
-    `version` uses). Steps are a flat list (parallel branches name step ids), so a JSONB
-    containment test on `spec->'steps'` finds every agent step. One query."""
-    needle = json.dumps([{"type": "agent", "agent_id": str(agent_id)}])
-    rows = db.execute(
-        text(
-            "SELECT w.id, w.name, array_agg(v.version ORDER BY v.version) AS versions,"
-            " (SELECT max(lv.version) FROM workflow_versions lv"
-            "   WHERE lv.workflow_id = w.id AND lv.tenant_id = w.tenant_id) AS latest"
-            " FROM workflows w JOIN workflow_versions v ON v.workflow_id = w.id AND v.tenant_id = w.tenant_id"
-            " WHERE w.tenant_id = :t AND w.archived IS NOT TRUE"
-            "   AND v.spec -> 'steps' @> CAST(:needle AS jsonb)"
-            " GROUP BY w.id, w.name, w.tenant_id ORDER BY w.name, w.id"
-        ),
-        {"t": tenant_id, "needle": needle},
-    ).fetchall()
-    return [
-        {"workflow_id": str(r.id), "workflow_name": r.name, "versions": list(r.versions), "latest_version": r.latest}
-        for r in rows
-    ]
+    agent step (see eap_run_store.definitions.referencing_workflows, which the archive and the
+    Architect's archive tool share)."""
+    return _referencing_workflows(db.connection(), tenant_id, agent_id)
 
 
 def archived_step_problems(db: Session, tenant_id: str, steps: Any) -> list[str]:

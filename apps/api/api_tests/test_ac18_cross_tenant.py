@@ -78,6 +78,10 @@ NEW_ROUTES = {
     ("POST", "/api/v1/workflows/{workflow_id}/schedules"),
     ("PATCH", "/api/v1/workflows/schedules/{schedule_id}"),
     ("DELETE", "/api/v1/workflows/schedules/{schedule_id}"),
+    # Architect milestone: workflow archive, unarchive and restore (shared with the Architect's tools).
+    ("POST", "/api/v1/workflows/{workflow_id}/archive"),
+    ("POST", "/api/v1/workflows/{workflow_id}/unarchive"),
+    ("POST", "/api/v1/workflows/{workflow_id}/versions/{version_num}/restore"),
     # Parity round 2, D7: spans list, runs histogram, score on demand.
     ("GET", "/api/v1/spans"),
     ("GET", "/api/v1/runs/histogram"),
@@ -247,6 +251,10 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
          {"active": False}, 404),
         (("DELETE", "/api/v1/workflows/schedules/{schedule_id}"), "DELETE", f"/workflows/schedules/{w['schedule']}",
          None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/archive"), "POST", f"/workflows/{w['workflow']}/archive", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/unarchive"), "POST", f"/workflows/{w['workflow']}/unarchive", None, 404),
+        (("POST", "/api/v1/workflows/{workflow_id}/versions/{version_num}/restore"), "POST",
+         f"/workflows/{w['workflow']}/versions/1/restore", {"discard_draft": True}, 404),
         (("GET", "/api/v1/spans"), "GET", "/spans", None, 200),
         (("GET", "/api/v1/spans"), "GET", f"/spans?agent_id={a}", None, 200),
         (("GET", "/api/v1/runs/histogram"), "GET", "/runs/histogram", None, 200),
@@ -290,6 +298,8 @@ def test_another_tenant_reaches_nothing_on_any_new_route(api, fake):
     assert sorted((i["kind"], i["approval_key"], i["decision"]) for i in pending) == [
         ("step", "approve", None), ("tool", "call_1", None)]
     assert fake.sent == sent_before  # no wake-up for a refused decision
+    # The refused archive changed nothing: A's workflow is still listed and its schedule still active.
+    assert w["workflow"] in [i["id"] for i in client.get(f"{API}/workflows", headers=h).json()]
     mine = client.get(f"{API}/workflows/schedules", headers=h).json()["items"]
     assert [(i["id"], i["active"], i["name"]) for i in mine] == [(w["schedule"], True, "nightly")]
     assert client.get(f"{API}/workflows/schedules", headers=other).json()["items"] == []

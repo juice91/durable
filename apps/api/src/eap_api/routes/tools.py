@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+
 import uuid
 from typing import Annotated, Any
 
@@ -26,6 +26,7 @@ from eap_api.routes.runs import StoresDep
 from eap_api.schemas import ErrorDetail
 from eap_observability import current_trace_context, log_failure
 from eap_run_store import ENQUEUE_FAILED_ERROR, RunIdConflict
+from eap_run_store.workflow_checks import allowed_tool_ids as _allowed_tool_ids
 from eap_schemas.tools import TOOL_DECLARATIONS, ToolDeclaration
 
 log = logging.getLogger("eap_api")
@@ -34,14 +35,6 @@ log = logging.getLogger("eap_api")
 MAX_TOOL_INPUT_BYTES = 32 * 1024
 
 router = APIRouter(prefix="/tools", tags=["tools"], route_class=GuardedJsonRoute)
-
-
-def _allowed_tool_ids() -> frozenset[str] | None:
-    """Parse the same optional platform allowlist used by the worker."""
-    configured = os.environ.get("EAP_ALLOWED_TOOLS")
-    if configured is None:
-        return None
-    return frozenset(tool_id.strip() for tool_id in configured.split(",") if tool_id.strip())
 
 
 def _tool_response(declaration: ToolDeclaration, allowed_tools: frozenset[str] | None) -> dict:

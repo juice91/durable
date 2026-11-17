@@ -948,6 +948,8 @@ name = "eap-run-store"
 version = "0.1.0"
 source = { editable = "packages/run-store" }
 dependencies = [
+    { name = "eap-pricing" },
+    { name = "eap-processors" },
     { name = "eap-schemas" },
     { name = "pgvector" },
     { name = "psycopg", extra = ["binary"] },
@@ -956,6 +958,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "eap-pricing", editable = "packages/pricing" },
+    { name = "eap-processors", editable = "packages/processors" },
     { name = "eap-schemas", editable = "packages/shared-schemas" },
     { name = "pgvector", specifier = ">=0.4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },

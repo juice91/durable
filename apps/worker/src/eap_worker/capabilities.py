@@ -403,6 +403,27 @@ def _approval_summary(call: ToolCallPart) -> str | None:
         return None
 
 
+def _enriched_summary(tenant_id: str, data: dict[str, Any]) -> str | None:
+    """The Architect's gated tools word their approval card with facts read from the database (publish
+    warnings, versions, referencing workflows, schedules). The registry summariser is pure and has no
+    tenant, so those facts are read here, inside the begin step: its recorded result keeps the wording
+    stable across a replay. None for any other tool, or when the facts cannot be read (the registry's
+    summary then stands)."""
+    from eap_worker.runtime import get_runtime
+
+    rt = get_runtime()
+    tool_id = rt.registry.tool_id_for_name(str(data.get("tool_name", "")))
+    if tool_id is None or not tool_id.startswith("architect."):
+        return None
+    try:
+        from eap_worker.architect_tools import approval_summary_text
+
+        args = data.get("args")
+        return approval_summary_text(rt.engine, tenant_id, tool_id, args if isinstance(args, dict) else {})
+    except Exception:  # noqa: BLE001 - a summary is a courtesy, never a reason to fail the run
+        return None
+
+
 @DBOS.step(name="eap.tool_approval_begin")
 async def tool_approval_begin_step(
     run_id: str,
@@ -436,6 +457,8 @@ async def tool_approval_begin_step(
                 return {"deadline": None, "duplicate": True}
         deadline = batch_deadline if batch_deadline is not None else time.time() + timeout_seconds
         payload = {**data, "deadline": datetime.fromtimestamp(deadline, tz=timezone.utc).isoformat()}
+        if (facts := _enriched_summary(tenant_id, data)) is not None:
+            payload["summary"] = facts
         event, _created = rt.event_log.append_approval_waiting(tenant_id, run_id, "tool", tool_call_id, payload)
         crash_point("after_event_write", event_key=key)
         stored = event.data.get("deadline") if isinstance(event.data, dict) else None

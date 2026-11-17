@@ -68,6 +68,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # /api/v1/ag-ui/* only, also the EAP_AGUI_CORS_ORIGINS allowlist (eap_api.cors, AGUI.9).
     app.add_middleware(PathScopedCORSMiddleware, agui_origins=agui_cors_origins)
     
+    # Refusals of the shared definition operations (eap_run_store.definitions: publish, restore and
+    # archive, also used by the Architect's tools) answer with the status and body the routes always had.
+    from eap_run_store.definition_errors import DefinitionError
+
+    @app.exception_handler(DefinitionError)
+    async def _definition_error(_request, exc: DefinitionError):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=exc.status_code, content=exc.body)
+
     # Import and register routes
     from eap_api.routes import router as agents_router
     

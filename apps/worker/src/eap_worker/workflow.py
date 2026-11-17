@@ -339,10 +339,11 @@ from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolse
 from pydantic_core import to_jsonable_python
 
 from eap_observability import log_context, log_failure, run_span, set_run_outcome
-from eap_runtime import RunDeps, SideEffectOutcomeUnknown, check_spec_tools, toolset_for_spec
+from eap_runtime import RunDeps, SideEffectOutcomeUnknown, ToolNotAllowedError, check_spec_tools, toolset_for_spec
 from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore, ScorerStore
 from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas import ModelSettings as ModelSettingsSpec
+from eap_schemas.architect import ungated_architect_tools
 from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
@@ -2061,6 +2062,10 @@ async def _run_body(
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
         builtin = await agent_is_builtin_step(tenant_id, agent_id)
         check_spec_tools(spec, rt.registry, rt.allowed_tools_for(builtin=builtin))
+        # The Architect's gated tools run only behind a recorded approval: a spec that lists one
+        # without its approvals entry never starts (the seed and the API keep them in step).
+        for ungated in ungated_architect_tools(spec.tools, spec.approvals.tools if spec.approvals else None):
+            raise ToolNotAllowedError(ungated)
         request_context = link.get("request_context") or None
         _check_request_context(spec, request_context)
         deps = rt.deps_for(run_id, tenant_id, spec, request_context, builtin=builtin)

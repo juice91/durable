@@ -121,7 +121,7 @@ class TestAgents:
         data = response.json()
         assert data["name"] == "Test Agent"
         # Response follows contract: {id, name, draft_spec, latest_version}
-        assert set(data.keys()) == {"id", "name", "draft_spec", "latest_version", "archived"}
+        assert set(data.keys()) == {"id", "name", "draft_spec", "latest_version", "archived", "builtin"}
         assert data["draft_spec"] is not None
         assert data["latest_version"] is None
         assert UUID4(data["id"])
@@ -177,4 +177,4 @@ class TestAgents:
         agent = response.json()[0]
         assert agent["name"] == "Agent 1"
         # Response follows contract: {id, name, draft_spec, latest_version}
-        assert set(agent.keys()) == {"id", "name", "draft_spec", "latest_version", "archived"}
+        assert set(agent.keys()) == {"id", "name", "draft_spec", "latest_version", "archived", "builtin"}

@@ -6,7 +6,15 @@ They run inside the Architect agent's run, in the worker, over the app database 
 Read tools (no approval): `architect.list_approved_tools`, `list_created_agents`,
 `list_agent_versions`, `list_created_workflows`, `list_workflow_versions`,
 `list_workflow_step_kinds`. Draft tools (no approval, a draft is inert): `architect.save_agent`,
-`architect.save_workflow`. Gated tools (publish, restore, archive, schedules) arrive in Task 4.
+`architect.save_workflow`. Gated tools (listed in the Architect's `approvals.tools`, so every call
+waits for a person): `architect.publish_agent`, `restore_agent_version`, `archive_agent`,
+`publish_workflow`, `restore_workflow_version`, `archive_workflow`, `set_workflow_schedule`.
+
+The gated tools hold no logic of their own: publish, restore and archive are the functions of
+`eap_run_store.definitions`, the same ones the API routes call, run in one transaction with the
+tenant of the run. Schedules go through `eap_run_store.ScheduleStore`. The approval summary of a gated
+call (`approval_summary_text`) comes from a rolled-back dry run of that same function, so the card
+shows exactly the warnings, versions, referencing workflows and schedules the real call would meet.
 
 Rules every tool follows:
 
@@ -34,17 +42,21 @@ import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic_ai import RunContext
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from eap_runtime import RunDeps, ToolRegistry
+from eap_run_store import ScheduleNameConflict, ScheduleStore, definitions
+from eap_run_store.definition_errors import DefinitionError
+from eap_runtime import RunDeps, ToolRegistry, run_side_effect
 from eap_schemas import reserved_tool_name_conflicts
 from eap_schemas.architect import (
     AGENT_ID_PATTERN,
+    ARCHITECT_GATED_TOOL_IDS,
     RESERVED_AGENT_IDS,
     Allowlist,
     ArchitectAgentSpec,
@@ -67,7 +79,20 @@ TOOL_IDS = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.publish_agent",
+    "architect.restore_agent_version",
+    "architect.archive_agent",
+    "architect.publish_workflow",
+    "architect.restore_workflow_version",
+    "architect.archive_workflow",
+    "architect.set_workflow_schedule",
 )
+# The tools that go live: the seed lists them in the Architect's approvals.tools.
+GATED_TOOL_IDS = ARCHITECT_GATED_TOOL_IDS
+assert TOOL_IDS[8:] == GATED_TOOL_IDS
+# `created_by` of a version made through a tool (the person who approved is in the approval record).
+ARCHITECT_ACTOR = "architect"
+SCHEDULE_ACTIONS = ("create", "pause", "resume", "delete")
 
 STEP_KINDS: list[dict[str, Any]] = [
     {
@@ -313,6 +338,414 @@ async def save_workflow(
     return {**result, "warnings": []}
 
 
+# ----------------------------------------------------------------------------------- gated tools
+
+T = TypeVar("T")
+_REFUSAL_CODES = {400: "no_draft", 404: "not_found", 409: "conflict", 422: "publish_refused", 503: "unavailable"}
+
+
+def _via(run_id: str | None) -> str:
+    return f"{ARCHITECT_MARKER_PREFIX}:{run_id}" if run_id else ARCHITECT_MARKER_PREFIX
+
+
+def _refusal(exc: DefinitionError) -> dict[str, Any]:
+    """A refusal of a shared definition operation as the model reads it: `{error: {code, message, ...}}`."""
+    return error(exc.code or _REFUSAL_CODES.get(exc.status_code, "refused"), exc.detail, **exc.extra)
+
+
+def _resolve(conn: Connection, kind: _Kind, tenant_id: str, slug: str) -> tuple[Any, dict[str, Any] | None]:
+    """The Architect's definition by slug, or an error: a built-in agent, a definition without a slug
+    (someone else's: not reachable by slug) and another tenant's all refuse."""
+    row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
+    label = "agent" if kind is AGENTS else "workflow"
+    if row is None:
+        return None, error("not_found", f"No {label} made by the Architect has the id {slug!r}.")
+    if row["builtin"]:
+        return None, error("builtin_agent", f"{slug!r} is a built-in agent; the Architect does not change it.")
+    return row, None
+
+
+def _apply(
+    engine: Engine, kind: _Kind, tenant_id: str, slug: str, op: Callable[[Connection, Any], dict[str, Any]]
+) -> dict[str, Any]:
+    """Run `op(conn, row)` on the Architect's definition `slug` in ONE transaction: committed when it
+    returns, rolled back (the definition untouched) when it raises a DefinitionError, which becomes an
+    error result."""
+    try:
+        with engine.begin() as conn:
+            row, err = _resolve(conn, kind, tenant_id, slug)
+            if err is not None:
+                return err
+            return op(conn, row)
+    except DefinitionError as exc:
+        return _refusal(exc)
+
+
+def _published(slug: str, result: definitions.Published) -> dict[str, Any]:
+    return {
+        "id": slug,
+        "version": result.version["version"],
+        "status": "published",
+        "warnings": [w["message"] for w in result.warnings],
+    }
+
+
+def publish_agent_sync(engine: Engine, tenant_id: str, id: str, run_id: str | None = None) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.publish_agent(
+            conn, tenant_id, str(row["id"]), created_by=ARCHITECT_ACTOR, created_via=_via(run_id)
+        )
+        return _published(id, result)
+
+    return _apply(engine, AGENTS, tenant_id, id, op)
+
+
+def restore_agent_version_sync(
+    engine: Engine, tenant_id: str, id: str, version: int, discard_draft: bool = False, run_id: str | None = None
+) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.restore_agent_version(
+            conn, tenant_id, str(row["id"]), version, created_by=ARCHITECT_ACTOR, created_via=_via(run_id),
+            discard_draft=discard_draft,
+        )
+        return {**_published(id, result), "status": "restored", "restored_from": version}
+
+    return _apply(engine, AGENTS, tenant_id, id, op)
+
+
+def archive_agent_sync(engine: Engine, tenant_id: str, id: str, run_id: str | None = None) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.set_agent_archived(conn, tenant_id, str(row["id"]), True)
+        return {"id": id, "status": "archived", "archived": result.archived}
+
+    return _apply(engine, AGENTS, tenant_id, id, op)
+
+
+def publish_workflow_sync(engine: Engine, tenant_id: str, id: str, run_id: str | None = None) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.publish_workflow(
+            conn, tenant_id, str(row["id"]), created_by=ARCHITECT_ACTOR, created_via=_via(run_id)
+        )
+        return _published(id, result)
+
+    return _apply(engine, WORKFLOWS, tenant_id, id, op)
+
+
+def restore_workflow_version_sync(
+    engine: Engine, tenant_id: str, id: str, version: int, discard_draft: bool = False, run_id: str | None = None
+) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.restore_workflow_version(
+            conn, tenant_id, str(row["id"]), version, created_by=ARCHITECT_ACTOR, created_via=_via(run_id),
+            discard_draft=discard_draft,
+        )
+        return {**_published(id, result), "status": "restored", "restored_from": version}
+
+    return _apply(engine, WORKFLOWS, tenant_id, id, op)
+
+
+def archive_workflow_sync(engine: Engine, tenant_id: str, id: str, run_id: str | None = None) -> dict[str, Any]:
+    def op(conn: Connection, row: Any) -> dict[str, Any]:
+        result = definitions.set_workflow_archived(conn, tenant_id, str(row["id"]), True)
+        return {
+            "id": id,
+            "status": "archived",
+            "archived": result.archived,
+            "paused_schedules": len(result.paused_schedules),
+        }
+
+    return _apply(engine, WORKFLOWS, tenant_id, id, op)
+
+
+# ---- schedules (eap_run_store.ScheduleStore; the checks are the API's, restated for the worker)
+
+
+def describe_cron(cron: str) -> str:
+    """The cron in words, by the rules of the Studio's schedule preview (cronPreview.ts): every minute,
+    every N minutes, every hour at :MM, every day at HH:MM; any other pattern is returned as written."""
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        return cron
+    minute, hour, day, month, weekday = parts
+    if day != "*" or month != "*" or weekday != "*":
+        return cron
+    if minute == "*" and hour == "*":
+        return "Every minute"
+    step = re.fullmatch(r"\*/(\d+)", minute)
+    if step and hour == "*":
+        n = int(step.group(1))
+        return "Every minute" if n == 1 else f"Every {n} minutes"
+    if re.fullmatch(r"\d+", minute) and int(minute) < 60:
+        if hour == "*":
+            return f"Every hour at :{int(minute):02d}"
+        if re.fullmatch(r"\d+", hour) and int(hour) < 24:
+            return f"Every day at {int(hour):02d}:{int(minute):02d}"
+    return cron
+
+
+def _cron_problem(cron: str, tz: str) -> dict[str, Any] | None:
+    from croniter import croniter
+
+    if not (isinstance(cron, str) and len(cron.split()) == 5 and croniter.is_valid(cron)):
+        return error("invalid_cron", "cron must be 5 fields: minute hour day month weekday")
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return error("invalid_timezone", "timezone must be an IANA name such as UTC or Asia/Taipei")
+    return None
+
+
+def _schedule_json(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schedule_id": row["id"],
+        "name": row["name"],
+        "cron": row["cron"],
+        "cron_in_words": describe_cron(row["cron"]),
+        "timezone": row["timezone"],
+        "active": row["active"],
+        "next_fire_at": row["next_fire_at"].isoformat(),
+    }
+
+
+def set_workflow_schedule_sync(
+    engine: Engine, tenant_id: str, workflow_id: str, action: str, *, name: str | None = None,
+    cron: str | None = None, timezone: str = "UTC", input: Any = None, schedule_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """create | pause | resume | delete one schedule of a workflow the Architect made. A schedule fires
+    the workflow's latest published version, so `create` and `resume` need one; pause and delete always
+    work. `schedule_id` (or, for pause, resume and delete, the schedule's `name`) names the schedule."""
+    from eap_worker.schedule_tick import input_problems, next_fire
+
+    if action not in SCHEDULE_ACTIONS:
+        return error("invalid_action", f"action must be one of: {', '.join(SCHEDULE_ACTIONS)}.")
+    with engine.connect() as conn:
+        row, err = _resolve(conn, WORKFLOWS, tenant_id, workflow_id)
+        if err is not None:
+            return err
+        latest = conn.execute(
+            text(
+                "SELECT spec FROM workflow_versions WHERE workflow_id = :w AND tenant_id = :t"
+                " ORDER BY version DESC LIMIT 1"
+            ),
+            {"w": row["id"], "t": tenant_id},
+        ).first()
+    if row["archived"]:
+        return error("archived", f"The workflow {workflow_id!r} is archived; it takes no schedules.")
+    store = ScheduleStore(engine)
+    wf_row_id = str(row["id"])
+
+    def find() -> dict[str, Any] | None:
+        if schedule_id is not None:
+            found = store.get(tenant_id, schedule_id)
+            return found if found is not None and found["workflow_id"] == wf_row_id else None
+        if name is not None:
+            items, _ = store.list(tenant_id, wf_row_id, limit=200)
+            return next((i for i in items if i["name"] == name), None)
+        return None
+
+    if action == "create":
+        if not name or not cron:
+            return error("missing_field", "create needs a name and a cron.")
+        if (problem := _cron_problem(cron, timezone)) is not None:
+            return problem
+        if latest is None:
+            return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
+        value = {} if input is None else input
+        if problems := input_problems(latest.spec.get("input_schema"), value):
+            return error("input_schema_errors", "The input does not fit the workflow's input schema.", errors=problems)
+        try:
+            created = store.create(
+                tenant_id, wf_row_id, name=name, cron=cron, timezone=timezone, input=value,
+                next_fire_at=next_fire(cron, timezone, _now()),
+            )
+        except ScheduleNameConflict:
+            return error("schedule_name_taken", f"The workflow already has a schedule named {name!r}.")
+        log.info("architect.set_workflow_schedule tenant=%s run=%s create=%s", tenant_id, run_id, created["id"])
+        return {"id": workflow_id, "status": "created", **_schedule_json(created)}
+
+    current = find()
+    if current is None:
+        return error("not_found", "No schedule of this workflow has that schedule_id or name.")
+    if action == "delete":
+        store.delete(tenant_id, current["id"])
+        return {"id": workflow_id, "status": "deleted", "schedule_id": current["id"], "name": current["name"]}
+    if action == "pause":
+        updated = store.update(tenant_id, current["id"], active=False, last_error=None)
+        return {"id": workflow_id, "status": "paused", **_schedule_json(updated)}
+    # resume: re-checked like the API's PATCH (the stored cron and input may no longer fit)
+    if (problem := _cron_problem(current["cron"], current["timezone"])) is not None:
+        return problem
+    if latest is None:
+        return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
+    if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
+        return error("input_schema_errors", "The stored input no longer fits the workflow's input schema.", errors=problems)
+    updated = store.update(
+        tenant_id, current["id"], active=True, last_error=None,
+        next_fire_at=next_fire(current["cron"], current["timezone"], _now()),
+    )
+    return {"id": workflow_id, "status": "resumed", **_schedule_json(updated)}
+
+
+# ---- async entry points (what the tests and the registered tools call)
+
+
+async def publish_agent(engine: Engine, tenant_id: str, id: str, *, run_id: str | None = None) -> dict[str, Any]:
+    return await asyncio.to_thread(publish_agent_sync, engine, tenant_id, id, run_id)
+
+
+async def restore_agent_version(
+    engine: Engine, tenant_id: str, id: str, version: int, *, discard_draft: bool = False, run_id: str | None = None
+) -> dict[str, Any]:
+    return await asyncio.to_thread(restore_agent_version_sync, engine, tenant_id, id, version, discard_draft, run_id)
+
+
+async def archive_agent(engine: Engine, tenant_id: str, id: str, *, run_id: str | None = None) -> dict[str, Any]:
+    return await asyncio.to_thread(archive_agent_sync, engine, tenant_id, id, run_id)
+
+
+async def publish_workflow(engine: Engine, tenant_id: str, id: str, *, run_id: str | None = None) -> dict[str, Any]:
+    return await asyncio.to_thread(publish_workflow_sync, engine, tenant_id, id, run_id)
+
+
+async def restore_workflow_version(
+    engine: Engine, tenant_id: str, id: str, version: int, *, discard_draft: bool = False, run_id: str | None = None
+) -> dict[str, Any]:
+    return await asyncio.to_thread(restore_workflow_version_sync, engine, tenant_id, id, version, discard_draft, run_id)
+
+
+async def archive_workflow(engine: Engine, tenant_id: str, id: str, *, run_id: str | None = None) -> dict[str, Any]:
+    return await asyncio.to_thread(archive_workflow_sync, engine, tenant_id, id, run_id)
+
+
+async def set_workflow_schedule(engine: Engine, tenant_id: str, workflow_id: str, action: str, **fields: Any) -> dict[str, Any]:
+    return await asyncio.to_thread(set_workflow_schedule_sync, engine, tenant_id, workflow_id, action, **fields)
+
+
+# ---- approval summaries
+
+
+def _pure_summary(tool_id: str, args: dict[str, Any]) -> str:
+    """The summary from the arguments alone (the registry summariser: pure and deterministic; the
+    fallback when the facts below cannot be read)."""
+    ident = args.get("id")
+    version = args.get("version")
+    if tool_id == "architect.publish_agent":
+        return f"Publish the draft of agent {ident!r} as its next version, live for every run."
+    if tool_id == "architect.restore_agent_version":
+        return f"Restore agent {ident!r} to version {version}: published again as a new version."
+    if tool_id == "architect.archive_agent":
+        return f"Archive agent {ident!r}: new runs, conversations and publishes are refused."
+    if tool_id == "architect.publish_workflow":
+        return f"Publish the draft of workflow {ident!r} as its next version, live for every run."
+    if tool_id == "architect.restore_workflow_version":
+        return f"Restore workflow {ident!r} to version {version}: published again as a new version."
+    if tool_id == "architect.archive_workflow":
+        return f"Archive workflow {ident!r}: it takes no new runs and its schedules are paused."
+    if tool_id == "architect.set_workflow_schedule":
+        action = args.get("action")
+        target = f"workflow {args.get('workflow_id')!r}"
+        label = args.get("name") or args.get("schedule_id") or "a schedule"
+        if action == "create":
+            cron = str(args.get("cron") or "")
+            return (
+                f"Create schedule {label!r} on {target}: {describe_cron(cron)} ({args.get('timezone') or 'UTC'})"
+                + (f", cron `{cron}`" if describe_cron(cron) != cron else "")
+                + ". It then starts runs by itself."
+            )
+        verb = {"pause": "Pause", "resume": "Resume", "delete": "Delete"}.get(str(action), str(action))
+        return f"{verb} schedule {label!r} on {target}."
+    return tool_id
+
+
+def _dry_run(engine: Engine, fn: Callable[[Connection], T]) -> T:
+    """Run `fn` in a transaction that is always rolled back: the real shared function, nothing kept."""
+    with engine.connect() as conn:
+        trans = conn.begin()
+        try:
+            return fn(conn)
+        finally:
+            trans.rollback()
+
+
+def _warnings_text(warnings: list[dict[str, str]]) -> str:
+    return "Warnings: " + " ".join(f"{w['message']}" for w in warnings) if warnings else "No publish warnings."
+
+
+def approval_summary_text(engine: Engine, tenant_id: str, tool_id: str, args: dict[str, Any]) -> str | None:
+    """The approval card's summary of one gated call, with facts read now (blocking): the publish
+    warnings, the version a restore leaves and reaches, the workflows that run an agent, the schedules
+    an archive pauses, the cron in words. The publish, restore and archive facts come from a dry run
+    of the shared function (rolled back), so they are what the call itself would meet. None for a tool
+    that is not gated here."""
+    if tool_id not in GATED_TOOL_IDS:
+        return None
+    base = _pure_summary(tool_id, args)
+    slug = args.get("id")
+    version = args.get("version")
+    if tool_id == "architect.set_workflow_schedule":
+        return base
+    if not isinstance(slug, str):
+        return base
+    kind = AGENTS if "agent" in tool_id else WORKFLOWS
+    label = "agent" if kind is AGENTS else "workflow"
+    facts: list[str] = []
+
+    def dry(conn: Connection) -> None:
+        row, err = _resolve(conn, kind, tenant_id, slug)
+        if err is not None:
+            facts.append(f"It would be refused: {err['error']['message']}")
+            return
+        row_id = str(row["id"])
+        name = row["name"]
+        try:
+            if tool_id.endswith("publish_agent") or tool_id.endswith("publish_workflow"):
+                fn = definitions.publish_agent if kind is AGENTS else definitions.publish_workflow
+                result = fn(conn, tenant_id, row_id, created_by=ARCHITECT_ACTOR, created_via=ARCHITECT_MARKER_PREFIX)
+                new = result.version["version"]
+                facts.append(f"Publishes {label} {name!r} as version {new}.")
+                facts.append(_warnings_text(result.warnings))
+            elif "restore" in tool_id:
+                fn = definitions.restore_agent_version if kind is AGENTS else definitions.restore_workflow_version
+                if not isinstance(version, int):
+                    return
+                result = fn(
+                    conn, tenant_id, row_id, version, created_by=ARCHITECT_ACTOR, created_via=ARCHITECT_MARKER_PREFIX,
+                    discard_draft=bool(args.get("discard_draft")),
+                )
+                new = result.version["version"]
+                facts.append(
+                    f"Restores {label} {name!r} from version {new - 1} (live now) to version {version}, "
+                    f"published as version {new}; the draft becomes version {version}."
+                )
+                facts.append(_warnings_text(result.warnings))
+            elif tool_id == "architect.archive_agent":
+                definitions.set_agent_archived(conn, tenant_id, row_id, True)
+                facts.append(f"Archives agent {name!r}. No published workflow runs it.")
+            elif tool_id == "architect.archive_workflow":
+                active = [s for s in ScheduleStore(engine).list(tenant_id, row_id, limit=200)[0] if s["active"]]
+                facts.append(f"Archives workflow {name!r}.")
+                facts.append(
+                    "It pauses "
+                    + ", ".join(f"{s['name']!r} ({describe_cron(s['cron'])}, {s['timezone']})" for s in active)
+                    + "." if active else "It has no active schedules."
+                )
+        except DefinitionError as exc:
+            detail = exc.detail
+            workflows = exc.extra.get("workflows")
+            if workflows:
+                names = ", ".join(w["workflow_name"] for w in workflows)
+                detail = f"published workflows run it: {names}; archiving is refused while they do"
+            facts.append(f"It would be refused now: {detail}.")
+
+    try:
+        _dry_run(engine, dry)
+    except Exception:  # noqa: BLE001 - a summary is a courtesy; the pure one stands
+        log.warning("architect approval summary failed tool=%s", tool_id, exc_info=True)
+        return base
+    return " ".join([base, *facts])
+
+
 # ------------------------------------------------------------------------------------- registry
 
 
@@ -367,6 +800,72 @@ async def _save_workflow(
     return await save_workflow(_engine(), ctx.deps.tenant_id, spec, confirm, run_id=str(ctx.deps.run_id))
 
 
+async def _gated(ctx: RunContext[RunDeps], fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run one gated operation once for this tool call: the side-effect store keeps the result under
+    the run and tool call id, so a crashed and replayed call returns it instead of repeating the change
+    (and an unknown outcome is raised, never guessed)."""
+    if ctx.tool_call_id is None:
+        raise ValueError("tool_call_id is required for the Architect's gated tools")
+    key = f"architect:{ctx.deps.run_id}:{ctx.tool_call_id}"
+    tenant_id, run_id = ctx.deps.tenant_id, str(ctx.deps.run_id)
+
+    def call() -> dict[str, Any]:
+        return fn(_engine(), tenant_id, *args, run_id=run_id, **kwargs)
+
+    result, _performed = await asyncio.to_thread(run_side_effect, ctx.deps.side_effects, key, call)
+    return result
+
+
+async def _publish_agent(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
+    """Publish the draft of an agent you made as its next version (live). A person approves each call."""
+    return await _gated(ctx, publish_agent_sync, id)
+
+
+async def _restore_agent_version(
+    ctx: RunContext[RunDeps], id: str, version: int, discard_draft: bool = False
+) -> dict[str, Any]:
+    """Restore an agent you made to an earlier version (published as a new version; the draft becomes it).
+    Set discard_draft only after the person agreed to lose unpublished draft changes. A person approves each call."""
+    return await _gated(ctx, restore_agent_version_sync, id, version, discard_draft)
+
+
+async def _archive_agent(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
+    """Archive an agent you made. Refused while a published workflow runs it. A person approves each call."""
+    return await _gated(ctx, archive_agent_sync, id)
+
+
+async def _publish_workflow(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
+    """Publish the draft of a workflow you made as its next version (live). A person approves each call."""
+    return await _gated(ctx, publish_workflow_sync, id)
+
+
+async def _restore_workflow_version(
+    ctx: RunContext[RunDeps], id: str, version: int, discard_draft: bool = False
+) -> dict[str, Any]:
+    """Restore a workflow you made to an earlier version (published as a new version; the draft becomes it).
+    Set discard_draft only after the person agreed to lose unpublished draft changes. A person approves each call."""
+    return await _gated(ctx, restore_workflow_version_sync, id, version, discard_draft)
+
+
+async def _archive_workflow(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
+    """Archive a workflow you made; its active schedules are paused. A person approves each call."""
+    return await _gated(ctx, archive_workflow_sync, id)
+
+
+async def _set_workflow_schedule(
+    ctx: RunContext[RunDeps], workflow_id: str, action: str, name: str | None = None, cron: str | None = None,
+    timezone: str = "UTC", input: Any = None, schedule_id: str | None = None,
+) -> dict[str, Any]:
+    """Create, pause, resume or delete a schedule of a workflow you made (action: create | pause | resume |
+    delete). create needs name and cron (5 fields, minute hour day month weekday), optional timezone (IANA) and
+    input (an object; for a workflow you made: {"input": "<the text it starts with>"}); the others name the schedule by schedule_id or name. The workflow must have a published version. A
+    person approves each call."""
+    return await _gated(
+        ctx, set_workflow_schedule_sync, workflow_id, action, name=name, cron=cron, timezone=timezone, input=input,
+        schedule_id=schedule_id,
+    )
+
+
 _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_approved_tools", _list_approved_tools),
     ("architect.list_created_agents", _list_created_agents),
@@ -377,12 +876,47 @@ _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.save_agent", _save_agent),
     ("architect.save_workflow", _save_workflow),
 )
+_GATED: tuple[tuple[str, Callable[..., Any]], ...] = (
+    ("architect.publish_agent", _publish_agent),
+    ("architect.restore_agent_version", _restore_agent_version),
+    ("architect.archive_agent", _archive_agent),
+    ("architect.publish_workflow", _publish_workflow),
+    ("architect.restore_workflow_version", _restore_workflow_version),
+    ("architect.archive_workflow", _archive_workflow),
+    ("architect.set_workflow_schedule", _set_workflow_schedule),
+)
 
 
 def register_architect_tools(registry: ToolRegistry) -> None:
-    """Register the Architect's read and draft tools. No approval entries: none of them goes live."""
+    """Register the Architect's tools. The read and draft tools carry no approval; the gated ones are
+    listed in the Architect's `approvals.tools` by the seed and carry a pure approval summary (the card
+    shows `approval_summary_text` when the worker can read the facts)."""
     for tool_id, func in _TOOLS:
         registry.register(tool_id, func, description=(func.__doc__ or tool_id).strip(), side_effect=False)
+    for tool_id, func in _GATED:
+        registry.register(
+            tool_id,
+            func,
+            description=(func.__doc__ or tool_id).strip(),
+            side_effect=True,
+            approval_summary=lambda args, _id=tool_id: _pure_summary(_id, args),
+        )
 
 
-__all__ = ["TOOL_IDS", "register_architect_tools", "save_agent", "save_workflow", "slugify"]
+__all__ = [
+    "GATED_TOOL_IDS",
+    "TOOL_IDS",
+    "approval_summary_text",
+    "archive_agent",
+    "archive_workflow",
+    "describe_cron",
+    "publish_agent",
+    "publish_workflow",
+    "register_architect_tools",
+    "restore_agent_version",
+    "restore_workflow_version",
+    "save_agent",
+    "save_workflow",
+    "set_workflow_schedule",
+    "slugify",
+]

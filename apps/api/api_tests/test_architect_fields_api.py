@@ -53,10 +53,31 @@ def test_architect_tools_are_refused_on_non_builtin_agents(client, tenant, tools
     r = client.patch(f"/api/v1/agents/{agent_id}", json={"spec": {**SPEC, "tools": tools}}, headers=h)
     assert r.status_code == 422, r.text
     assert r.json()["code"] == "tool_not_allowed"
-    # The same tools are accepted on a builtin row.
+    # The same tools are accepted on a builtin row (a gated one with its approvals entry).
     _sql(client, "UPDATE agents SET builtin = true WHERE id = :i", i=agent_id)
-    r = client.patch(f"/api/v1/agents/{agent_id}", json={"spec": {**SPEC, "tools": tools}}, headers=h)
+    gated = [t for t in tools if t == "architect.publish_agent"]
+    spec = {**SPEC, "tools": tools, **({"approvals": {"tools": gated}} if gated else {})}
+    r = client.patch(f"/api/v1/agents/{agent_id}", json={"spec": spec}, headers=h)
     assert r.status_code == 200, r.text
+
+
+def test_gated_architect_tools_need_their_approval_entry_even_on_builtin_agents(client, tenant):
+    """Nothing publishes, restores, archives or schedules without a recorded approval: a builtin spec that
+    lists a gated tool without `approvals.tools` is refused (the worker refuses such a run too)."""
+    from eap_schemas.architect import ARCHITECT_GATED_TOOL_IDS
+
+    h = get_auth_header(tenant, "alice")
+    agent_id = create_agent(client, tenant, "alice")
+    _sql(client, "UPDATE agents SET builtin = true WHERE id = :i", i=agent_id)
+    tools = ["architect.save_agent", *ARCHITECT_GATED_TOOL_IDS]
+    r = client.patch(f"/api/v1/agents/{agent_id}", json={"spec": {**SPEC, "tools": tools}}, headers=h)
+    assert r.status_code == 422, r.text
+    assert r.json()["code"] == "approval_required" and r.json()["tools"] == list(ARCHITECT_GATED_TOOL_IDS)
+    partial = {**SPEC, "tools": tools, "approvals": {"tools": list(ARCHITECT_GATED_TOOL_IDS[:-1])}}
+    r = client.patch(f"/api/v1/agents/{agent_id}", json={"spec": partial}, headers=h)
+    assert r.status_code == 422 and r.json()["tools"] == [ARCHITECT_GATED_TOOL_IDS[-1]]
+    full = {**SPEC, "tools": tools, "approvals": {"tools": list(ARCHITECT_GATED_TOOL_IDS)}}
+    assert client.patch(f"/api/v1/agents/{agent_id}", json={"spec": full}, headers=h).status_code == 200
 
 
 def test_version_json_carries_created_via(client, tenant):
