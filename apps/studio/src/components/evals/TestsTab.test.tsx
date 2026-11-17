@@ -172,7 +172,7 @@ describe("Tests tab: a suite", () => {
   it("shows evaluators and cases; a case row opens the case Sheet, which saves a JSON expected output", async () => {
     vi.mocked(updateCase).mockImplementation(async (_s, _c, body) => ({ ...suite.cases[0], ...body }) as never);
     renderAt(routes.agentTests(AGENT, { suite: SUITE }));
-    expect(await screen.findByTestId("eval-suite-title")).toHaveTextContent("Refunds");
+    await waitFor(() => expect(screen.getByTestId("eval-suite-title")).toHaveTextContent("Refunds"));
     expect(screen.getAllByTestId("eval-evaluator")).toHaveLength(2);
     fireEvent.click(within(await screen.findByTestId("eval-case-row")).getByRole("button", { name: "Case first" }));
     await waitFor(() => expect(nextRouter.url).toContain("edit=c1"));
