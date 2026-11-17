@@ -90,6 +90,7 @@ def store(worker):
 def run(at: datetime = TICK, **context):
     from dbos import DBOS, SetWorkflowID
 
+    context.setdefault("min_keep", 1)
     ctx = CatalogMirrorConfig(**context).to_context()
     with SetWorkflowID(f"test-mirror-{uuid.uuid4().hex[:8]}"):
         return DBOS.start_workflow(mcp_catalog_mirror, at, ctx).get_result()
@@ -185,16 +186,16 @@ def test_entries_that_vanish_are_marked_removed_not_deleted(worker, registry, st
     registry.pages = [[server("io.acme/a"), server("io.acme/b"), server("io.acme/c")]]
     run()
     store.set_hidden("io.acme/a", True)
-    registry.pages = [[server("io.acme/a", version="2.0.0"), server("io.acme/c", status="deprecated")]]
+    registry.pages = [[server("io.acme/a", version="2.0.0"), server("io.acme/d"), server("io.acme/c", status="deprecated")]]
     out = run(TICK + timedelta(hours=1))
     assert out["removed"] == 2
     assert store.get("io.acme/b").status == "removed"  # vanished
     assert store.get("io.acme/c").status == "removed"  # no longer active
     a = store.get("io.acme/a")
     assert a.status == "active" and a.version == "2.0.0" and a.hidden is True
-    assert names(store) == []  # a is hidden, b and c are removed: nothing offered to tenants
+    assert names(store) == ["io.acme/d"]  # a is hidden, b and c are removed: only d is offered to tenants
     # an entry that returns is active again
-    registry.pages = [[server("io.acme/b")]]
+    registry.pages = [[server("io.acme/b"), server("io.acme/d")]]
     run(TICK + timedelta(hours=2))
     assert store.get("io.acme/b").status == "active" and store.get("io.acme/a").status == "removed"
 
@@ -281,3 +282,40 @@ def test_worker_start_validates_the_mirror_settings(worker_settings, monkeypatch
     monkeypatch.setenv("EAP_MCP_CATALOG_MAX_PAGES", "-3")
     with pytest.raises(CatalogMirrorConfigError):
         validate_startup(worker_settings)
+
+
+# ------------------------------------------------------------------------------ bounds and floors
+
+
+def test_an_oversized_body_is_refused(worker, registry, store):
+    big = b'{"servers": [], "pad": "' + b"x" * (mirror.MAX_BODY_BYTES + 10) + b'"}'
+    registry.handler = lambda request: httpx2.Response(200, content=big)  # type: ignore[method-assign]
+    with pytest.raises(Exception) as info:
+        run()
+    assert "fetch_page" in str(info.value)  # the step gave up after its retries
+    assert names(store) == []
+
+
+def test_removal_is_skipped_below_the_floor(worker, registry, store):
+    registry.pages = [[server(f"io.acme/s{i}") for i in range(10)]]
+    run()
+    registry.pages = [[server("io.acme/s0"), server("io.acme/s1")]]  # 2 of 10: under half
+    out = run(TICK + timedelta(hours=1))
+    assert out["removed"] == 0 and out["complete"] is False
+    assert store.get("io.acme/s9").status == "active"
+    # at or above half it removes
+    registry.pages = [[server(f"io.acme/s{i}") for i in range(5)]]
+    assert run(TICK + timedelta(hours=2))["removed"] == 5
+    # the absolute minimum applies too
+    registry.pages = [[server(f"io.acme/s{i}") for i in range(4)]]
+    out = run(TICK + timedelta(hours=3), min_keep=20)
+    assert out["removed"] == 0 and store.get("io.acme/s4").status == "active"
+
+
+def test_config_validates_the_cron_and_min_keep():
+    with pytest.raises(CatalogMirrorConfigError):
+        CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_SCHEDULE": "not a cron"})
+    assert CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_SCHEDULE": "0 */5 * * * *"}).schedule == "0 */5 * * * *"
+    assert CatalogMirrorConfig.from_env({}).min_keep == 20
+    with pytest.raises(CatalogMirrorConfigError, match="http"):
+        CatalogMirrorConfig.from_env({"EAP_MCP_CATALOG_URL": "ftp://x"})

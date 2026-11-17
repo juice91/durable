@@ -10,6 +10,7 @@ guard every outbound call uses) and keeps the entries that are the latest versio
     EAP_MCP_CATALOG_URL          https://registry.modelcontextprotocol.io/v0/servers
     EAP_MCP_CATALOG_PAGE_SIZE    100                                        `limit` per page (the registry caps it at 100)
     EAP_MCP_CATALOG_MAX_PAGES    200                                        pages per run
+    EAP_MCP_CATALOG_MIN_KEEP     20                                         removal floor (see below)
 
 Durability and safety:
 - Each page is one fetch step and one upsert step, so a crash resumes after the last completed step;
@@ -18,7 +19,11 @@ Durability and safety:
 - Entries that vanish (or are no longer latest and active) are marked `status = 'removed'`, not
   deleted, and only after a run that read the whole registry and kept at least one entry: an
   empty answer or a run stopped by the page limit leaves the mirror as it is. A removed entry that
-  returns becomes `active` again; `hidden` is an operator's choice and is never overwritten.
+  returns becomes `active` again; removal is skipped (and logged) when the run kept fewer than half of
+  the active entries or fewer than EAP_MCP_CATALOG_MIN_KEEP (a registry that shrank that far is a bad
+  answer). `hidden` is an operator's choice and is never overwritten.
+- A response body is capped at 8 MB. An older, slower run never lowers `fetched_at` of a row a newer
+  run wrote (the upsert only updates rows with an older or equal stamp).
 - Several workers apply the same schedule (an upsert by name); DBOS runs one workflow per tick.
 
 Logs and the result carry counts only.
@@ -33,6 +38,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+import json
 from urllib.parse import urlsplit
 
 from dbos import DBOS
@@ -41,6 +47,7 @@ from eap_run_store import CatalogStore
 from eap_schemas import CatalogEntry, CatalogPackage, EnvVarSpec
 from eap_secrets.outbound import OutboundPolicy
 
+from eap_worker.cancel_reconcile import valid_cron
 from eap_worker.runtime import get_runtime
 
 log = logging.getLogger("eap_worker.mcp_catalog_mirror")
@@ -49,18 +56,23 @@ WORKFLOW_NAME = "eap.mcp_catalog_mirror"
 SCHEDULE_NAME = "eap.mcp_catalog_mirror"
 FETCH_STEP = "eap.mcp_catalog_mirror.fetch_page"
 UPSERT_STEP = "eap.mcp_catalog_mirror.upsert"
+COUNT_STEP = "eap.mcp_catalog_mirror.count_active"
 REMOVE_STEP = "eap.mcp_catalog_mirror.mark_removed"
 
 SCHEDULE_ENV = "EAP_MCP_CATALOG_SCHEDULE"
 URL_ENV = "EAP_MCP_CATALOG_URL"
 PAGE_SIZE_ENV = "EAP_MCP_CATALOG_PAGE_SIZE"
 MAX_PAGES_ENV = "EAP_MCP_CATALOG_MAX_PAGES"
+MIN_KEEP_ENV = "EAP_MCP_CATALOG_MIN_KEEP"
 DEFAULT_SCHEDULE = "0 15 * * * *"
 DEFAULT_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 200
 MAX_MAX_PAGES = 10_000
+DEFAULT_MIN_KEEP = 20
+MAX_MIN_KEEP = 1_000_000
+MAX_BODY_BYTES = 8 * 1024 * 1024
 OFF = "off"
 REGISTRY_META_KEY = "io.modelcontextprotocol.registry/official"
 SUPPORTED_REGISTRY_TYPES = ("npm", "pypi", "oci")
@@ -97,6 +109,7 @@ class CatalogMirrorConfig:
     url: str = DEFAULT_URL
     page_size: int = DEFAULT_PAGE_SIZE
     max_pages: int = DEFAULT_MAX_PAGES
+    min_keep: int = DEFAULT_MIN_KEEP
     off: bool = False
 
     @classmethod
@@ -106,19 +119,23 @@ class CatalogMirrorConfig:
         url = (env.get(URL_ENV) or "").strip() or DEFAULT_URL
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise CatalogMirrorConfigError(URL_ENV, "must be an https URL")
+            raise CatalogMirrorConfigError(URL_ENV, "must be an http(s) URL")
+        off = raw_schedule.lower() == OFF
+        if not off and raw_schedule and not valid_cron(raw_schedule):
+            # Before launch: DBOS.apply_schedules would only reject it after recovery has started.
+            raise CatalogMirrorConfigError(SCHEDULE_ENV, "must be a valid cron expression (seconds first) or 'off'")
         config = cls(
-            # DBOS.apply_schedules validates the cron expression at worker start (DBOSException).
             schedule=raw_schedule or DEFAULT_SCHEDULE,
             url=url,
             page_size=_bounded_int(PAGE_SIZE_ENV, env.get(PAGE_SIZE_ENV), DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
             max_pages=_bounded_int(MAX_PAGES_ENV, env.get(MAX_PAGES_ENV), DEFAULT_MAX_PAGES, MAX_MAX_PAGES),
-            off=raw_schedule.lower() == OFF,
+            min_keep=_bounded_int(MIN_KEEP_ENV, env.get(MIN_KEEP_ENV), DEFAULT_MIN_KEEP, MAX_MIN_KEEP),
+            off=off,
         )
         return config
 
     def to_context(self) -> dict[str, Any]:
-        return {"url": self.url, "page_size": self.page_size, "max_pages": self.max_pages}
+        return {"url": self.url, "page_size": self.page_size, "max_pages": self.max_pages, "min_keep": self.min_keep}
 
     @classmethod
     def from_context(cls, context: Any) -> "CatalogMirrorConfig":
@@ -128,6 +145,7 @@ class CatalogMirrorConfig:
             url=url if isinstance(url, str) and url else DEFAULT_URL,
             page_size=_bounded_int(PAGE_SIZE_ENV, ctx.get("page_size"), DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
             max_pages=_bounded_int(MAX_PAGES_ENV, ctx.get("max_pages"), DEFAULT_MAX_PAGES, MAX_MAX_PAGES),
+            min_keep=_bounded_int(MIN_KEEP_ENV, ctx.get("min_keep"), DEFAULT_MIN_KEEP, MAX_MIN_KEEP),
         )
 
 
@@ -216,9 +234,14 @@ async def fetch_page_step(url: str, page_size: int, cursor: str | None) -> dict[
     if cursor:
         params["cursor"] = cursor
     async with _client() as client:
-        response = await client.get(url, params=params, headers={"accept": "application/json"})
-    response.raise_for_status()
-    body = response.json()
+        async with client.stream("GET", url, params=params, headers={"accept": "application/json"}) as response:
+            response.raise_for_status()
+            buffer = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > MAX_BODY_BYTES:
+                    raise ValueError(f"registry answer is larger than {MAX_BODY_BYTES} bytes")
+    body = json.loads(bytes(buffer))
     items = body.get("servers") if isinstance(body, Mapping) else None
     if not isinstance(items, list):
         raise ValueError("registry answer has no servers list")
@@ -240,6 +263,11 @@ async def fetch_page_step(url: str, page_size: int, cursor: str | None) -> dict[
 async def upsert_entries_step(entries: list[dict[str, Any]], fetched_at_iso: str) -> int:
     parsed = [CatalogEntry.model_validate(e) for e in entries]
     return await asyncio.to_thread(_store().upsert, parsed, fetched_at=datetime.fromisoformat(fetched_at_iso))
+
+
+@DBOS.step(name=COUNT_STEP, retries_allowed=True, max_attempts=3)
+async def count_active_step() -> int:
+    return await asyncio.to_thread(_store().count_active)
 
 
 @DBOS.step(name=REMOVE_STEP, retries_allowed=True, max_attempts=3)
@@ -280,7 +308,15 @@ async def mcp_catalog_mirror(scheduled_at: datetime, context: Any) -> dict[str, 
         complete = False
         log.warning("mcp catalog mirror: the registry returned no latest active entry; mirror left as it is")
     else:
-        removed = await mark_removed_step(at)
+        active = await count_active_step()
+        if kept < config.min_keep or kept * 2 < active:
+            log.warning(
+                "mcp catalog mirror: kept %d of %d active entries (floor: half of them and at least %d); "
+                "nothing marked removed", kept, active, config.min_keep,
+            )
+            complete = False
+        else:
+            removed = await mark_removed_step(at)
     log.info("mcp catalog mirrored pages=%d fetched=%d kept=%d removed=%d", pages, fetched, kept, removed)
     return {"scheduled_at": at, "pages": pages, "fetched": fetched, "kept": kept, "removed": removed, "complete": complete}
 

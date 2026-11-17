@@ -27,6 +27,7 @@ _UPSERT = text(
         title = EXCLUDED.title, description = EXCLUDED.description, version = EXCLUDED.version,
         status = EXCLUDED.status, is_latest = EXCLUDED.is_latest, packages = EXCLUDED.packages,
         remotes = EXCLUDED.remotes, licence = EXCLUDED.licence, fetched_at = EXCLUDED.fetched_at
+    WHERE mcp_catalog_entries.fetched_at <= EXCLUDED.fetched_at
     """
 )
 
@@ -94,6 +95,11 @@ class CatalogStore:
                 {"t": fetched_before},
             )
         return result.rowcount
+
+    def count_active(self) -> int:
+        """How many entries are `active` (hidden ones included)."""
+        with self._engine.connect() as conn:
+            return int(conn.execute(text("SELECT count(*) FROM mcp_catalog_entries WHERE status = 'active'")).scalar_one())
 
     def search(
         self, q: str | None = None, limit: int = 30, after: str | None = None, *, include_hidden: bool = False

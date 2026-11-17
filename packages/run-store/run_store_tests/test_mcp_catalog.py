@@ -98,3 +98,14 @@ def test_mark_removed_before_only_touches_older_active_rows(engine, prefix):
     assert store.get(f"{prefix}/old").status == "removed"
     assert store.get(f"{prefix}/new").status == "active"
     assert store.get(f"{prefix}/gone").fetched_at == T0
+
+
+def test_an_older_run_never_lowers_the_stamp(engine, prefix):
+    store = CatalogStore(engine)
+    store.upsert([entry(prefix, "a", version="2.0.0")], fetched_at=T0 + timedelta(hours=1))
+    store.upsert([entry(prefix, "a", version="1.0.0")], fetched_at=T0)  # a slow, older run
+    got = store.get(f"{prefix}/a")
+    assert got.fetched_at == T0 + timedelta(hours=1) and got.version == "2.0.0"
+    store.upsert([entry(prefix, "a", version="3.0.0")], fetched_at=T0 + timedelta(hours=1))  # same stamp: ok
+    assert store.get(f"{prefix}/a").version == "3.0.0"
+    assert store.count_active() == 1
