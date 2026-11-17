@@ -150,6 +150,7 @@ def _version_response(version: WorkflowVersionModel) -> dict:
         "spec_hash": version.spec_hash,
         "created_at": version.created_at.isoformat(),
         "created_by": version.created_by,
+        "created_via": version.created_via,
     }
 
 

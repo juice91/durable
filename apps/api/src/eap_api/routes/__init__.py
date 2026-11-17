@@ -46,6 +46,29 @@ router = APIRouter(route_class=GuardedJsonRoute)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
+# Tool ids of the Architect's management tools: valid registry ids, but only an agent whose row is
+# `builtin` may list them (the check lives here, on create and patch; the worker re-checks per run).
+ARCHITECT_TOOL_PREFIX = "architect."
+TOOL_NOT_ALLOWED = "tool_not_allowed"
+BUILTIN_AGENT = "builtin_agent"
+
+
+def _refuse_architect_tools(spec: AgentSpec, builtin: bool) -> JSONResponse | None:
+    """422 `tool_not_allowed` when a non-builtin agent's spec lists an `architect.*` tool."""
+    if builtin:
+        return None
+    denied = [t for t in spec.tools if t.startswith(ARCHITECT_TOOL_PREFIX)]
+    if not denied:
+        return None
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        content={
+            "detail": f"tools {', '.join(denied)} are reserved for built-in agents",
+            "code": TOOL_NOT_ALLOWED,
+            "tools": denied,
+        },
+    )
+
 
 def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
     """Convert AgentModel to response dict."""
@@ -55,6 +78,7 @@ def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
         "draft_spec": agent.draft_spec,
         "latest_version": latest_version,
         "archived": bool(agent.archived),
+        "builtin": bool(agent.builtin),
     }
 
 
@@ -68,6 +92,7 @@ def _version_to_response(version: AgentVersionModel) -> dict:
         "created_at": version.created_at.isoformat(),
         "created_by": version.created_by,
         "restored_from": version.restored_from,
+        "created_via": version.created_via,
     }
 
 
@@ -84,6 +109,9 @@ def create_agent(
     db: SessionDep,
 ) -> dict:
     """Create a new agent."""
+    refused = _refuse_architect_tools(request.spec, builtin=False)
+    if refused is not None:
+        return refused
     spec_dict = request.spec.model_dump(mode="json")
 
     agent = AgentModel(
@@ -102,6 +130,7 @@ def create_agent(
             "draft_spec": agent.draft_spec,
             "latest_version": None,
             "archived": False,
+            "builtin": False,
         },
         status_code=201,
     )
@@ -199,6 +228,9 @@ def patch_agent(
             detail="Agent not found",
         )
 
+    refused = _refuse_architect_tools(request.spec, builtin=bool(agent.builtin))
+    if refused is not None:
+        return refused
     spec_dict = request.spec.model_dump(mode="json")
 
     agent.name = request.spec.name
@@ -221,6 +253,12 @@ def _set_archived(
     # Locked like publish and restore: a publish that already holds the row finishes first, and one
     # that starts after this commit sees the new flag.
     agent = _tenant_agent(db, principal.tenant_id, agent_id, lock=True)
+    if archived and agent.builtin:
+        db.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "a built-in agent cannot be archived", "code": BUILTIN_AGENT},
+        )
     if archived and not agent.archived and not force:
         workflows = referencing_workflows(db, principal.tenant_id, agent.id)
         if workflows:

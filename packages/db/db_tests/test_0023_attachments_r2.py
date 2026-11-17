@@ -80,6 +80,10 @@ def _seed(engine):
                                     "h": hashlib.sha256(b"notes").hexdigest(), "d": b"notes", "msg": None})
 
 
+def _is_0025(diff) -> bool:
+    return any(name in repr(diff) for name in ("'builtin'", "'created_via'"))
+
+
 def test_backfill_moves_bytes_into_the_store_and_drops_the_column(schema_engine, monkeypatch, tmp_path):
     _seed(schema_engine)
     monkeypatch.setenv("EAP_BLOB_BACKEND", "fs")
@@ -96,7 +100,8 @@ def test_backfill_moves_bytes_into_the_store_and_drops_the_column(schema_engine,
             " AND schemaname = current_schema()"
         )).all())["ix_chat_attachments_unsent_created_at"]
         assert "(created_at)" in indexdef and "message_id IS NULL" in indexdef
-        assert schema_diff(conn) == []
+        # At 0023 the models already carry 0025's builtin and created_via columns; nothing else differs.
+        assert [d for d in schema_diff(conn) if not _is_0025(d)] == []
     store = FsBlobStore(tmp_path)
 
     async def read(key):

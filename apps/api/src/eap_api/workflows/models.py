@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     PrimaryKeyConstraint,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -67,3 +68,5 @@ class WorkflowVersionModel(Base):
     spec_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
+    # 0025: `architect:<run_id>` or `architect-page` for a version the Architect made; NULL otherwise.
+    created_via: Mapped[str | None] = mapped_column(Text, nullable=True)
