@@ -193,10 +193,12 @@ def test_hosted_path_filters_skip_unaffected_jobs():
     assert "if" not in ci["jobs"]["changes"]
     assert ci["jobs"]["python"]["if"] == "needs.changes.outputs.python == 'true'"
     assert ci["jobs"]["studio"]["if"] == "needs.changes.outputs.studio == 'true'"
+    assert ci["jobs"]["studio-test"]["if"] == "needs.changes.outputs.studio == 'true'"
     assert ci["jobs"]["deploy-checks"]["if"] == "needs.changes.outputs.deploy == 'true'"
     filters = ci["jobs"]["changes"]["steps"][1]["with"]["filters"]
     assert "packages/**" in filters
     assert "apps/studio/**" in filters
+    assert ".github/workflows/ci.yml" in filters  # a change to the studio gate runs the studio gate
     assert "deploy/**" in filters
     assert "tests/deploy/**" in filters
 
@@ -216,3 +218,64 @@ def test_pnpm_action_setup_is_pinned_to_the_v6_1_1_commit():
             "pnpm/action-setup must be pinned to commit "
             f"{PNPM_ACTION_COMMIT} (v6.1.1); the annotated tag object is not a commit"
         )
+
+
+def test_ci_heavy_skips_docs_only_pushes():
+    push = _load("ci-heavy.yml")["on"]["push"]
+    assert push["branches"] == ["main"]
+    assert push["paths-ignore"] == ["docs/**", "**/*.md", ".planning/**"]
+    # Only the push trigger is path-filtered: the nightly and manual runs always run.
+    assert "schedule" in _load("ci-heavy.yml")["on"]
+    assert "workflow_dispatch" in _load("ci-heavy.yml")["on"]
+
+
+def test_ci_heavy_cancels_superseded_runs_of_the_same_ref_only():
+    concurrency = _load("ci-heavy.yml")["concurrency"]
+    # One group per ref: a newer run cancels an older run of the same branch, and a run of another
+    # branch (or main) is never in that group, so it is never cancelled by it.
+    assert concurrency["group"] == "ci-heavy-${{ github.ref }}"
+    assert concurrency["cancel-in-progress"] == "true"
+
+
+def test_ci_heavy_runs_the_api_suite_under_xdist_on_six_workers():
+    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
+    api = next(step for step in steps if step.get("name") == "API suite")
+    assert api["run"] == "uv run pytest apps/api/api_tests -q -n 6"
+    # The worker suite stays serial: every worker test shares the one DBOS database.
+    worker = next(step for step in steps if step.get("name") == "Nightly worker suite")
+    assert "-n" not in worker["run"].split()
+
+
+def test_pytest_xdist_is_a_dev_dependency():
+    text = (ROOT / "pyproject.toml").read_text()
+    assert re.search(r'"pytest-xdist[^"]*"', text)
+    assert 'name = "pytest-xdist"' in (ROOT / "uv.lock").read_text()
+
+
+def test_studio_vitest_is_sharded_in_three_jobs_and_static_checks_run_once():
+    jobs = _load("ci.yml")["jobs"]
+    static, tests = jobs["studio"], jobs["studio-test"]
+    static_runs = [step.get("run", "") for step in static["steps"]]
+    assert "pnpm -C apps/studio lint" in static_runs
+    assert "pnpm -C apps/studio exec tsc --noEmit" in static_runs
+    assert not any("vitest" in run or run.endswith(" test") for run in static_runs)
+    assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3"]
+    assert tests["strategy"]["fail-fast"] == "false"
+    test_runs = [step.get("run", "") for step in tests["steps"]]
+    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/3" in test_runs
+    assert not any("lint" in run or "tsc" in run for run in test_runs)
+    assert static["timeout-minutes"] == "30"
+    assert tests["timeout-minutes"] == "30"
+
+
+def test_hosted_jobs_cache_the_uv_and_pnpm_stores_on_their_lockfiles():
+    jobs = _load("ci.yml")["jobs"]
+    for name in ("python", "deploy-checks"):
+        uv_step = next(s for s in jobs[name]["steps"] if str(s.get("uses", "")).startswith("astral-sh/setup-uv@"))
+        assert uv_step["with"]["enable-cache"] == "true", name
+        assert uv_step["with"]["cache-dependency-glob"] == "uv.lock", name
+    for name in ("studio", "studio-test"):
+        node = next(s for s in jobs[name]["steps"] if str(s.get("uses", "")).startswith("actions/setup-node@"))
+        # setup-node's pnpm cache is keyed on pnpm-lock.yaml (cache-dependency-path defaults to it).
+        assert node["with"]["cache"] == "pnpm", name
+        assert "cache-dependency-path" not in node["with"], name

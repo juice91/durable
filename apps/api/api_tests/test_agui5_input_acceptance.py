@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any
@@ -391,7 +392,7 @@ def leak_cases() -> list[dict[str, Any]]:
     ]
 
 
-@pytest.mark.parametrize("payload", leak_cases(), ids=lambda p: str(abs(hash(json.dumps(p, default=str))))[:6])
+@pytest.mark.parametrize("payload", leak_cases(), ids=lambda p: hashlib.sha1(json.dumps(p, default=str).encode()).hexdigest()[:6])
 def test_no_input_value_leaks_into_errors(payload: dict[str, Any]) -> None:
     err = refused(payload)
     assert err.status_code == 422
