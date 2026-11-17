@@ -938,6 +938,32 @@ class RecordStore:
             )
         return result.rowcount
 
+    def mark_removed_unobserved_since(self, tenant_id: str, source_id: str, since: datetime) -> int:
+        """Mark `removed` every active record of the source whose `external_id` has NO record (of any type)
+        observed at or after `since`: the key set of a walk that started at `since`, without listing it (so it
+        stays small however large the catalogue is). Only for a COMPLETE full walk. ValueError when nothing
+        was observed since (an empty or failed walk must not remove every record)."""
+        with self._engine.begin() as conn:
+            seen = conn.execute(
+                text(
+                    "SELECT 1 FROM kb_source_records WHERE tenant_id = :t AND source_id = :s AND observed_at >= :since"
+                    " LIMIT 1"
+                ),
+                {"t": tenant_id, "s": source_id, "since": since},
+            ).first()
+            if seen is None:
+                raise ValueError("refusing to remove every record of a source: the walk observed nothing")
+            result = conn.execute(
+                text(
+                    "UPDATE kb_source_records r SET status = 'removed' WHERE r.tenant_id = :t AND r.source_id = :s"
+                    " AND r.status = 'active' AND NOT EXISTS (SELECT 1 FROM kb_source_records o WHERE"
+                    " o.tenant_id = r.tenant_id AND o.source_id = r.source_id AND o.external_id = r.external_id"
+                    " AND o.observed_at >= :since)"
+                ),
+                {"t": tenant_id, "s": source_id, "since": since},
+            )
+        return result.rowcount
+
 
 # --------------------------------------------------------------------------------------- entities
 

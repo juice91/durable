@@ -27,7 +27,7 @@ from worker_tests.kb_ingest_helpers import cleanup_knowledge, create_kb
 REPORT_KEYS = {
     "source_id", "mode", "status", "discovered", "inserted", "updated", "unchanged", "documents_discovered",
     "documents_queued", "failed", "checkpoint", "errors", "complete", "stop_reason", "calls_used", "started_at",
-    "completed_at",
+    "completed_at", "removed", "budget", "source_revision",
 }
 
 

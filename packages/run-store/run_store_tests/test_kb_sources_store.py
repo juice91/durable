@@ -221,6 +221,30 @@ def test_mark_removed_except_only_touches_unseen_active_rows(engine, tenants, kb
         records.mark_removed_except(a, s.id, [])
 
 
+def test_mark_removed_unobserved_since_removes_what_the_walk_did_not_observe(engine, tenants, kb):
+    a, b = tenants
+    s = _source(engine, a, kb[a], _conn(engine, a).id)
+    sb = _source(engine, b, kb[b], _conn(engine, b).id)
+    records = RecordStore(engine)
+    walk = NOW + timedelta(hours=1)
+    old = NOW
+    for key in ("A", "B", "C"):
+        records.upsert(a, s.id, key, "detail", {"k": key}, observed_at=old)
+        records.upsert(a, s.id, key, "listing", {"k": key}, observed_at=old)
+    records.upsert(b, sb.id, "B", "detail", {"k": "B"}, observed_at=old)
+    # the walk observes A (re-upsert, same hash: only observed_at moves) and C's listing only
+    assert records.upsert(a, s.id, "A", "detail", {"k": "A"}, observed_at=walk) == "unchanged"
+    records.upsert(a, s.id, "C", "listing", {"k": "C"}, observed_at=walk)
+    assert records.mark_removed_unobserved_since(a, s.id, walk) == 2  # only B (both its rows): A and C were observed by any record type
+    assert records.get(a, s.id, "B", "detail").status == "removed" and records.get(a, s.id, "B", "listing").status == "removed"
+    assert records.get(a, s.id, "A", "detail").status == "active" and records.get(a, s.id, "C", "detail").status == "active"
+    assert records.get(b, sb.id, "B", "detail").status == "active"  # another tenant and source untouched
+    assert records.mark_removed_unobserved_since(a, s.id, walk) == 0
+    # nothing observed since: refuses rather than removing every record
+    with pytest.raises(ValueError):
+        records.mark_removed_unobserved_since(a, s.id, walk + timedelta(days=1))
+
+
 # ---------------------------------------------------------------------------------------- entities
 
 

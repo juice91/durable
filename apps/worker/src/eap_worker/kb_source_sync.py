@@ -4,7 +4,8 @@ workflow sequence).
     eap.kb_source_sync(run_id, tenant_id, source_id, request_json)   -> {status, error_code, error, report}
 
 `request_json`: `{"mode": targeted|incremental|full, "part_numbers": [<= 100] (targeted only),
-"max_segments"?, "max_seconds"?, "page_budget"? (1..25), "call_budget"? (provider calls per segment)}`.
+"max_segments"?, "max_seconds"?, "page_budget"? (1..25), "call_budget"? (provider calls per segment),
+"restart"? (full / incremental: start a new walk instead of resuming the stored cursor)}`.
 
 Root workflow (control flow only; clock, network and database live in steps):
 
@@ -141,6 +142,7 @@ class SyncRequest:
     max_seconds: int
     page_budget: int
     call_budget: int
+    restart: bool = False  # full / incremental: drop the stored walk position and start a new walk
 
 
 def _limit(data: dict[str, Any], name: str) -> int:
@@ -179,7 +181,12 @@ def parse_request(request_json: str) -> SyncRequest:
             if item not in parts:
                 parts.append(item)
     limits = {name: _limit(data, name) for name in DEFAULT_LIMITS}
-    return SyncRequest(mode=mode, part_numbers=tuple(parts), **limits)
+    restart = data.get("restart", False)
+    if not isinstance(restart, bool):
+        raise InvalidRequest("restart must be true or false")
+    if restart and mode == "targeted":
+        raise InvalidRequest("restart is only for a full or incremental sync")
+    return SyncRequest(mode=mode, part_numbers=tuple(parts), restart=restart, **limits)
 
 
 # --------------------------------------------------------------------------------------- resources
@@ -537,7 +544,9 @@ async def segment_step(
     errors = secrets.scrub([{k: str(v)[:200] for k, v in e.items()} for e in result.errors[:MAX_SEGMENT_ERRORS]])
     return {
         "next_cursor": next_cursor, "complete": bool(result.complete), "counters": result.counters.as_dict(),
-        "errors": errors, "calls_used": int(result.calls_used),
+        "errors": errors, "calls_used": int(result.calls_used), "sweep_ok": bool(result.sweep_ok),
+        "source_revision": (str(result.source_revision)[:200] if result.source_revision else None),
+        "budget": result.budget if _small(result.budget) else None,
     }
 
 
@@ -588,6 +597,10 @@ async def checkpoint_step(
     return await asyncio.to_thread(work)
 
 
+def _small(value: Any) -> bool:
+    return value is None or len(json.dumps(value, separators=(",", ":")).encode("utf-8")) <= 1024
+
+
 def _report(state: dict[str, Any], status: str, now: datetime) -> dict[str, Any]:
     c = state["counters"]
     return {
@@ -597,6 +610,8 @@ def _report(state: dict[str, Any], status: str, now: datetime) -> dict[str, Any]
         "checkpoint": {"cursor": state["cursor"], "segments": state["segments"]} if state["cursor"] is not None else {},
         "errors": state["errors"][:MAX_SEGMENT_ERRORS], "complete": state["complete"], "stop_reason": state["stop_reason"],
         "calls_used": state["calls_used"], "started_at": state["started_at"], "completed_at": now.isoformat(),
+        "removed": state.get("removed", 0), "budget": state.get("budget") or {},
+        "source_revision": state.get("source_revision"),
     }
 
 
@@ -609,16 +624,27 @@ async def finalize_step(run_id: str, tenant_id: str, source_id: str, state: dict
 
     def work() -> dict[str, Any]:
         rt = get_runtime()
-        report = _report(state, "completed", _now())
+        st = dict(state)
+        counters = st["counters"]
+        if st["complete"] and st["mode"] == "full" and st.get("sweep_ok", True) and st.get("walk_started_at"):
+            # A COMPLETE full walk: what it did not observe is gone from the catalogue. The key set is
+            # `observed_at >= walk start` (no list anywhere); an empty walk removes nothing.
+            try:
+                st["removed"] = RecordStore(rt.engine).mark_removed_unobserved_since(
+                    tenant_id, source_id, datetime.fromisoformat(st["walk_started_at"])
+                )
+            except ValueError:
+                st["removed"] = 0
+        report = _report(st, "completed", _now())
         output = json.dumps(report, sort_keys=True, separators=(",", ":"))
-        counters = state["counters"]
-        if state["cursor"] is not None or state["complete"]:
+        if st["cursor"] is not None or st["complete"]:
             SourceStore(rt.engine).set_checkpoint(
-                tenant_id, source_id, {"cursor": state["cursor"], "segments": state["segments"]},
-                completed=bool(state["complete"]),
+                tenant_id, source_id, {"cursor": st["cursor"], "segments": st["segments"]},
+                last_source_revision=st.get("source_revision") if st["complete"] else None,
+                completed=bool(st["complete"]),
             )
         _sync_store().finish(
-            tenant_id, run_id, "completed", counters=counters, bounded_errors=state["errors"][:MAX_SEGMENT_ERRORS],
+            tenant_id, run_id, "completed", counters=counters, bounded_errors=st["errors"][:MAX_SEGMENT_ERRORS],
             completed_at=_now(),
         )
         try:
@@ -669,6 +695,7 @@ def _empty_state(source_id: str, mode: str | None, started_at: str) -> dict[str,
     return {
         "source_id": source_id, "mode": mode, "counters": SegmentCounters().as_dict(), "errors": [], "cursor": None,
         "segments": 0, "complete": False, "stop_reason": None, "calls_used": 0, "started_at": started_at,
+        "walk_started_at": None, "sweep_ok": True, "removed": 0, "budget": None, "source_revision": None,
     }
 
 
@@ -722,6 +749,19 @@ async def _drive(
     # A targeted sync never moves the walk's cursor; only the daily quota counts (inside it) are carried.
     cursor: dict[str, Any] = {k: v for k, v in stored.items() if k == "daily_budget"} if targeted else dict(stored)
     state["cursor"] = stored or None
+    walk_started = None
+    if not targeted:
+        # The walk position lives in the adapter's cursor; the worker adds two reserved keys while a walk is
+        # unfinished: `walk_started_at` (the removal sweep's boundary) and `walk_mode`. Resume the stored
+        # walk of THIS mode; `restart` or a walk of the other mode starts a new one (the quota counts stay).
+        budget_only = {k: v for k, v in stored.items() if k == "daily_budget"}
+        if request.restart or (stored.get("walk_mode") not in (None, request.mode)):
+            cursor, walk_started = budget_only, begin.get("started_at")
+        elif stored.get("walk_mode") == request.mode and stored.get("walk_started_at"):
+            walk_started = stored["walk_started_at"]
+        else:
+            walk_started = begin.get("started_at")
+        state["walk_started_at"] = walk_started
     parts = list(request.part_numbers)
     n = 0
     stop: str | None = "cancelled" if begin.get("cancel") else None
@@ -743,6 +783,7 @@ async def _drive(
         if out.get("fatal"):
             return await _fail(run_id, tenant_id, source_id, out["fatal"], out.get("message", ""), state)
         state["calls_used"] += out["calls_used"]
+        complete = (n * TARGETED_SEGMENT_PARTS >= len(parts)) if targeted else bool(out["complete"])
         if out["next_cursor"] is not None:
             if targeted:
                 if "daily_budget" in out["next_cursor"]:
@@ -750,11 +791,15 @@ async def _drive(
                     cursor = {"daily_budget": out["next_cursor"]["daily_budget"]}
             else:
                 cursor = out["next_cursor"]
+                if not complete:
+                    cursor = {**cursor, "walk_started_at": walk_started, "walk_mode": request.mode}
                 stored = cursor
             state["cursor"] = stored
-        targeted_done = request.mode == "targeted" and n * TARGETED_SEGMENT_PARTS >= len(parts)
-        complete = targeted_done if targeted else bool(out["complete"])
         state["complete"] = complete
+        state["sweep_ok"] = bool(out.get("sweep_ok", True))
+        state["budget"] = out.get("budget") or state["budget"]
+        if complete and not targeted:
+            state["source_revision"] = out.get("source_revision")
         decision = await checkpoint_step(
             run_id, tenant_id, source_id, n, state["cursor"], state["counters"], state["errors"],
             state["started_at"], request.max_segments, request.max_seconds, complete,

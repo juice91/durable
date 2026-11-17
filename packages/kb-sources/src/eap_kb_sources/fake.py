@@ -51,6 +51,7 @@ class FakeCatalogAdapter:
         fail: Mapping[str, str] | None = None,
         unauthorized: bool = False,
         daily_limit: int = 1000,
+        sweep_ok: bool = True,
     ) -> None:
         self.size = size
         self.page_size = page_size
@@ -59,6 +60,7 @@ class FakeCatalogAdapter:
         self.fail = dict(fail or {})
         self.unauthorized = unauthorized
         self.daily_limit = daily_limit
+        self.sweep_ok = sweep_ok  # what a complete walk tells the worker about removing unobserved records
         self.today: date | None = None  # tests pin the quota day
         self.revision: dict[str, int] = {self._key(n): 1 for n in range(1, size + 1)}
         self._clock = 1
@@ -72,6 +74,14 @@ class FakeCatalogAdapter:
         return f"FAKE{n:04d}"
 
     def bump(self, key: str) -> None:
+        self._clock += 1
+        self.revision[key] = self._clock
+
+    def remove(self, key: str) -> None:
+        """The product vanishes from the catalogue (it is no longer listed)."""
+        self.revision.pop(key, None)
+
+    def restore(self, key: str) -> None:
         self._clock += 1
         self.revision[key] = self._clock
 
@@ -114,7 +124,7 @@ class FakeCatalogAdapter:
         cursor = request.cursor
         if request.mode == "targeted":
             return list(request.part_numbers), dict(cursor), True
-        all_keys = [self._key(n) for n in range(1, self.size + 1)]
+        all_keys = sorted(self.revision)
         since = int(cursor.get("changed_since", 0)) if request.mode == "incremental" else 0
         target = int(cursor.get("target_rev", self._clock))
         index = int(cursor.get("cursor", 0))
@@ -151,6 +161,8 @@ class FakeCatalogAdapter:
             self._call("fetch_record", key)
             code = self.fail.get(key)
             if code:
+                if request.mode == "full":
+                    store.upsert_record(key, "listing", {"key": key, "detail_pending": True})  # observed, not swept
                 counters.failed += 1
                 errors.append(error_entry(key, SourceError(code, f"{key} failed")))
                 consumed += 1
@@ -167,7 +179,13 @@ class FakeCatalogAdapter:
         # (upserts are hash-guarded): the cursor does not advance, the daily counts do.
         cursor_out = {**request.cursor, "daily_budget": daily.as_state()} if stopped_early else {**after, "daily_budget": daily.as_state()}
         complete = done and not stopped_early
-        return SyncSegmentResult(cursor_out, complete, counters, errors[:50], calls)
+        revision = None
+        if complete and request.mode != "targeted":
+            revision = f"{len(self.revision)}:rev{max(self.revision.values(), default=0)}"
+        return SyncSegmentResult(
+            cursor_out, complete, counters, errors[:50], calls, sweep_ok=self.sweep_ok, source_revision=revision,
+            budget=daily.snapshot(),
+        )
 
     def _store(
         self, key: str, request: SyncSegmentRequest, store: SourceStoreFacade, counters: SegmentCounters,

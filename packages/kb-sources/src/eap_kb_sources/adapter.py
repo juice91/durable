@@ -122,6 +122,13 @@ class SyncSegmentResult:
     counters: SegmentCounters = field(default_factory=SegmentCounters)
     errors: list[dict[str, str]] = field(default_factory=list)  # <= 50 x {external_id?, code, message <= 200}
     calls_used: int = 0
+    # A complete FULL walk makes the worker mark every record the walk did not observe `removed` (a record
+    # is observed when any upsert of its external id ran during the walk, so an adapter must observe every
+    # key its listing names, even when the detail fetch failed). `sweep_ok=False` vetoes that sweep, e.g.
+    # when the listing looked truncated.
+    sweep_ok: bool = True
+    source_revision: str | None = None  # what the walk saw of the provider (stored on a complete walk)
+    budget: dict[str, Any] | None = None  # {"used": {bucket: n}, "remaining": {bucket: n}} after the segment
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,11 @@ class SourceStoreFacade(Protocol):
     ) -> EntityRef:
         """The normalised entity (`canonical_name` = `external_id`), its `(scheme, value, is_primary)`
         identifiers and its parameter rows (`kb_entity_parameters` fields), replaced as given."""
+        ...
+
+    def record_unchanged(self, external_id: str, record_type: str, payload: dict[str, Any]) -> bool:
+        """Read-only: an ACTIVE record with exactly this payload (by hash) is already stored. Lets an
+        incremental walk skip the detail calls of an item whose listing entry did not change."""
         ...
 
     def document_state(self, entity: EntityRef, relationship: str, url: str) -> DocumentState | None: ...
