@@ -1,0 +1,290 @@
+{
+  "description": "Synchronise a knowledge-base source: read the source, check its connection, start the sync, wait for it with a bounded loop and return its bounded report. Run it with {source_id, mode, part_numbers}; schedule it with {source_id, mode: \"incremental\"} for a recurring incremental sync. Every tool answers a stable error code instead of an exception text, so a refused step ends the run with a stable code: a failed, cancelled or attention-needing sync makes workflow.run.result (require_success) return an error object, which fails the run output_schema (output_invalid); a sync that outlasts the wait loop fails with loop_max_iterations (100 waits of up to 300 s). The example needs no agent: it uses the platform tools only.",
+  "agents": {},
+  "input": {
+    "source_id": "00000000-0000-0000-0000-000000000000",
+    "mode": "targeted",
+    "part_numbers": [
+      "EXAMPLE-PART-001"
+    ]
+  },
+  "spec": {
+    "name": "KB Source Synchronization",
+    "description": "Check a knowledge-base source's connection, start a sync (targeted, incremental or full), wait for it and report. Documents reach the knowledge base through its ingestion; agents read them through retrieve.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "targeted",
+            "incremental",
+            "full"
+          ]
+        },
+        "part_numbers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "maxItems": 100,
+          "default": []
+        }
+      },
+      "required": [
+        "source_id",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "status": {
+          "const": "completed"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "discovered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inserted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unchanged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "documents_queued": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checkpoint": {
+          "type": "object"
+        },
+        "errors": {
+          "type": "array",
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "run_id",
+        "status",
+        "source_id",
+        "mode",
+        "discovered",
+        "inserted",
+        "updated",
+        "unchanged",
+        "documents_queued",
+        "failed",
+        "checkpoint",
+        "errors"
+      ]
+    },
+    "start": "source",
+    "steps": [
+      {
+        "id": "source",
+        "type": "tool",
+        "tool_id": "kb.source.get",
+        "input": {
+          "source_id": {
+            "$ref": "input.source_id"
+          }
+        },
+        "next": "check"
+      },
+      {
+        "id": "check",
+        "type": "tool",
+        "tool_id": "settings.connection.check",
+        "input": {
+          "connection_id": {
+            "$ref": "steps.source.output.connection_id"
+          }
+        },
+        "next": "gate"
+      },
+      {
+        "id": "gate",
+        "type": "branch",
+        "cases": [
+          {
+            "when": {
+              "op": "eq",
+              "left": {
+                "$ref": "steps.check.output.ok"
+              },
+              "right": true
+            },
+            "next": "route"
+          }
+        ],
+        "default": "connection_failed"
+      },
+      {
+        "id": "connection_failed",
+        "type": "tool",
+        "tool_id": "settings.connection.check",
+        "input": {
+          "connection_id": {
+            "$ref": "steps.source.output.connection_id"
+          }
+        }
+      },
+      {
+        "id": "route",
+        "type": "branch",
+        "cases": [
+          {
+            "when": {
+              "op": "exists",
+              "left": {
+                "$ref": "input.part_numbers"
+              }
+            },
+            "next": "sync_targeted"
+          }
+        ],
+        "default": "sync_all"
+      },
+      {
+        "id": "sync_targeted",
+        "type": "tool",
+        "tool_id": "kb.source.sync",
+        "input": {
+          "source_id": {
+            "$ref": "input.source_id"
+          },
+          "mode": {
+            "$ref": "input.mode"
+          },
+          "part_numbers": {
+            "$ref": "input.part_numbers"
+          }
+        },
+        "next": "wait_targeted"
+      },
+      {
+        "id": "wait_targeted",
+        "type": "loop",
+        "max_iterations": 100,
+        "on_max_iterations": "fail",
+        "until": {
+          "op": "eq",
+          "left": {
+            "$ref": "steps.await_targeted.output.terminal"
+          },
+          "right": true
+        },
+        "body": {
+          "start": "await_targeted",
+          "steps": [
+            {
+              "id": "await_targeted",
+              "type": "tool",
+              "tool_id": "workflow.run.wait",
+              "input": {
+                "run_id": {
+                  "$ref": "steps.sync_targeted.output.run_id"
+                },
+                "wait_seconds": 300
+              }
+            }
+          ]
+        },
+        "next": "report_targeted"
+      },
+      {
+        "id": "report_targeted",
+        "type": "tool",
+        "tool_id": "workflow.run.result",
+        "input": {
+          "run_id": {
+            "$ref": "steps.sync_targeted.output.run_id"
+          },
+          "require_success": true
+        }
+      },
+      {
+        "id": "sync_all",
+        "type": "tool",
+        "tool_id": "kb.source.sync",
+        "input": {
+          "source_id": {
+            "$ref": "input.source_id"
+          },
+          "mode": {
+            "$ref": "input.mode"
+          }
+        },
+        "next": "wait_all"
+      },
+      {
+        "id": "wait_all",
+        "type": "loop",
+        "max_iterations": 100,
+        "on_max_iterations": "fail",
+        "until": {
+          "op": "eq",
+          "left": {
+            "$ref": "steps.await_all.output.terminal"
+          },
+          "right": true
+        },
+        "body": {
+          "start": "await_all",
+          "steps": [
+            {
+              "id": "await_all",
+              "type": "tool",
+              "tool_id": "workflow.run.wait",
+              "input": {
+                "run_id": {
+                  "$ref": "steps.sync_all.output.run_id"
+                },
+                "wait_seconds": 300
+              }
+            }
+          ]
+        },
+        "next": "report_all"
+      },
+      {
+        "id": "report_all",
+        "type": "tool",
+        "tool_id": "workflow.run.result",
+        "input": {
+          "run_id": {
+            "$ref": "steps.sync_all.output.run_id"
+          },
+          "require_success": true
+        }
+      }
+    ]
+  }
+}
