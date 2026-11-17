@@ -171,3 +171,37 @@ def _is_enqueue_failed(error: str) -> bool:
     from eap_run_store.store import ENQUEUE_FAILED_ERROR
 
     return error == ENQUEUE_FAILED_ERROR
+
+
+# ------------------------------------------------------------------------------------------ views
+
+
+def checkpoint_summary(checkpoint: dict[str, Any] | None) -> dict[str, Any]:
+    """What a caller may see of a source's checkpoint: how many segments it has walked and whether a cursor is
+    stored. Never the cursor itself."""
+    checkpoint = checkpoint or {}
+    segments = checkpoint.get("segments")
+    return {
+        "segments": segments if isinstance(segments, int) and not isinstance(segments, bool) else 0,
+        "has_cursor": isinstance(checkpoint.get("cursor"), dict) and bool(checkpoint.get("cursor")),
+    }
+
+
+def source_view(source: Any) -> dict[str, Any]:
+    """A `kb_sources` row as the API and `kb.source.get` return it (non-secret config only)."""
+    synced = source.last_successful_sync_at
+    return {
+        "id": source.id,
+        "knowledge_base_id": source.knowledge_base_id,
+        "connection_id": source.connection_id,
+        "kind": source.kind,
+        "provider": source.provider,
+        "name": source.name,
+        "enabled": source.enabled,
+        "config": dict(source.config),
+        "last_successful_sync_at": synced.isoformat() if synced is not None else None,
+        "last_checkpoint_summary": checkpoint_summary(source.last_checkpoint),
+        "last_source_revision": source.last_source_revision,
+        "created_at": source.created_at.isoformat(),
+        "updated_at": source.updated_at.isoformat(),
+    }

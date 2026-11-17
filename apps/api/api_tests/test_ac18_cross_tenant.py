@@ -538,3 +538,92 @@ def test_a_managed_server_ref_cannot_name_another_tenants_secret(api, monkeypatc
         with app.state.database_engine.begin() as conn:
             conn.execute(text("DELETE FROM tenant_secrets WHERE tenant_id IN (:a, :b)"), {"a": tenant, "b": other_tenant})
             conn.execute(text("DELETE FROM mcp_catalog_entries WHERE name = :n"), {"n": entry.name})
+
+
+# kb source sync (Task 4): connections, sources and syncs.
+KB_SOURCE_ROUTES = {
+    ("POST", "/api/v1/settings/connections"),
+    ("GET", "/api/v1/settings/connections"),
+    ("GET", "/api/v1/settings/connections/{connection_id}"),
+    ("PATCH", "/api/v1/settings/connections/{connection_id}"),
+    ("DELETE", "/api/v1/settings/connections/{connection_id}"),
+    ("POST", "/api/v1/settings/connections/{connection_id}/check"),
+    ("POST", "/api/v1/knowledge-bases/{kb_id}/sources"),
+    ("GET", "/api/v1/knowledge-bases/{kb_id}/sources"),
+    ("GET", "/api/v1/knowledge-bases/{kb_id}/sources/{source_id}"),
+    ("PATCH", "/api/v1/knowledge-bases/{kb_id}/sources/{source_id}"),
+    ("POST", "/api/v1/knowledge-bases/{kb_id}/sources/{source_id}/sync"),
+    ("GET", "/api/v1/knowledge-bases/{kb_id}/sources/{source_id}/syncs"),
+    ("GET", "/api/v1/knowledge-bases/{kb_id}/sources/{source_id}/syncs/{run_id}"),
+}
+
+
+def test_kb_source_routes_are_in_the_inventory_and_closed_to_another_tenant(api, fake, monkeypatch):
+    """Tenant B reaches nothing of A's connection, source or sync through any route: 404 for everything
+    addressed by id, empty lists, no secret of A resolved, no enqueue, and A's rows are untouched."""
+    from eap_kb_sources.fake import FakeCatalogAdapter
+    from eap_kb_sources.registry import register_adapter
+    from eap_secrets import KEY_ENV, generate_key
+
+    monkeypatch.setenv(KEY_ENV, generate_key())
+    monkeypatch.setenv("EAP_ALLOWED_EMBEDDING_MODELS", "test:*")
+    adapter = FakeCatalogAdapter()
+    register_adapter("product_catalog", "fake", lambda: adapter)
+    client, app, tenant_of = api
+    assert {(m, p) for m, p in app_routes(app) if "/settings/connections" in p or p.endswith(("/sources", "/syncs"))
+            or "/sources/" in p} == KB_SOURCE_ROUTES
+    tenant, h = tenant_of()
+    other_tenant, other = tenant_of("mallory")
+    engine = app.state.database_engine
+    try:
+        for name in ("ti-id", "ti-secret"):
+            assert client.put(f"{API}/secrets/{name}", json={"value": "fake-not-real"}, headers=h).status_code == 200
+        conn = client.post(f"{API}/settings/connections", headers=h, json={
+            "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://x.example.com",
+            "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}},
+        ).json()
+        kb = client.post(f"{API}/knowledge-bases", json={"name": "d", "embedding_model": "test:hash"}, headers=h).json()["id"]
+        src = client.post(f"{API}/knowledge-bases/{kb}/sources", headers=h, json={
+            "connection_id": conn["id"], "name": "p", "kind": "product_catalog", "provider": "fake"}).json()
+        run = client.post(f"{API}/knowledge-bases/{kb}/sources/{src['id']}/sync", json={"mode": "full"}, headers=h).json()["run_id"]
+        enqueued = len(fake.enqueued) if hasattr(fake, "enqueued") else None
+
+        c, s = f"{API}/settings/connections/{conn['id']}", f"{API}/knowledge-bases/{kb}/sources/{src['id']}"
+        assert client.get(f"{API}/settings/connections", headers=other).json() == {"items": []}
+        assert client.get(c, headers=other).status_code == 404
+        assert client.patch(c, json={"enabled": False}, headers=other).status_code == 404
+        assert client.post(f"{c}/check", headers=other).status_code == 404
+        assert client.delete(c, headers=other).status_code == 404
+        # B's kb does not exist for A's ids; B's own kb cannot see A's source or connection either
+        assert client.get(f"{API}/knowledge-bases/{kb}/sources", headers=other).status_code == 404
+        assert client.post(f"{API}/knowledge-bases/{kb}/sources", headers=other, json={
+            "connection_id": conn["id"], "name": "p", "kind": "product_catalog", "provider": "fake"}).status_code == 404
+        b_kb = client.post(f"{API}/knowledge-bases", json={"name": "d", "embedding_model": "test:hash"}, headers=other).json()["id"]
+        assert client.post(f"{API}/knowledge-bases/{b_kb}/sources", headers=other, json={
+            "connection_id": conn["id"], "name": "p", "kind": "product_catalog", "provider": "fake"}).status_code == 404
+        assert client.get(f"{API}/knowledge-bases/{b_kb}/sources", headers=other).json() == {"items": []}
+        for kb_path in (kb, b_kb):
+            base = f"{API}/knowledge-bases/{kb_path}/sources/{src['id']}"
+            assert client.get(base, headers=other).status_code == 404
+            assert client.patch(base, json={"enabled": False}, headers=other).status_code == 404
+            assert client.post(f"{base}/sync", json={"mode": "full"}, headers=other).status_code == 404
+            assert client.get(f"{base}/syncs", headers=other).status_code == 404
+            assert client.get(f"{base}/syncs/{run}", headers=other).status_code == 404
+        assert client.get(f"{API}/runs/{run}", headers=other).status_code == 404
+
+        assert adapter.secret_values == []  # B's check never resolved A's secrets
+        assert client.get(c, headers=h).json()["enabled"] is True
+        assert client.get(s, headers=h).json()["enabled"] is True
+        assert len(client.get(f"{s}/syncs", headers=h).json()["items"]) == 1
+        if enqueued is not None:
+            assert len(fake.enqueued) == enqueued  # B enqueued nothing
+        with engine.connect() as conn_:
+            assert conn_.execute(text("SELECT count(*) FROM runs WHERE tenant_id = :t"), {"t": other_tenant}).scalar() == 0
+    finally:
+        with engine.begin() as conn_:
+            for t in (tenant, other_tenant):
+                conn_.execute(text("DELETE FROM execution_events WHERE tenant_id = :t"), {"t": t})
+                conn_.execute(text("DELETE FROM runs WHERE tenant_id = :t"), {"t": t})
+                conn_.execute(text("DELETE FROM knowledge_bases WHERE tenant_id = :t"), {"t": t})
+                conn_.execute(text("DELETE FROM settings_connections WHERE tenant_id = :t"), {"t": t})
+                conn_.execute(text("DELETE FROM tenant_secrets WHERE tenant_id = :t"), {"t": t})

@@ -98,6 +98,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.secrets import router as secrets_router
 
     app.include_router(secrets_router, prefix="/api/v1")
+    from eap_api.routes.connections import router as connections_router
+    from eap_api.routes.kb_sources import router as kb_sources_router
+
+    app.include_router(connections_router, prefix="/api/v1")
+    app.include_router(kb_sources_router, prefix="/api/v1")
     from eap_api.routes.mcp_catalog import router as mcp_catalog_router
 
     app.include_router(mcp_catalog_router, prefix="/api/v1")
