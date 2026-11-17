@@ -51,7 +51,7 @@ make_tmp() {
 }
 
 # Keys the Secret must carry. The two URLs are derived from the passwords unless supplied.
-base_keys=(POSTGRES_PASSWORD EAP_APP_DATABASE_PASSWORD EAP_DBOS_DATABASE_PASSWORD EAP_SECRETS_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY EAP_AUDIT_HASH_SALT)
+base_keys=(POSTGRES_PASSWORD EAP_APP_DATABASE_PASSWORD EAP_DBOS_DATABASE_PASSWORD EAP_SECRETS_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY EAP_AUDIT_HASH_SALT EAP_BLOB_S3_ACCESS_KEY EAP_BLOB_S3_SECRET_KEY EAP_BLOB_R2_ACCOUNT_ID)
 postgres_host=postgres.pydanticos.svc.cluster.local
 
 # Value of KEY in a dotenv file (first match, everything after the first "="). Used only to fill
@@ -197,10 +197,23 @@ fi
 
 for key in "${base_keys[@]}"; do
   value=$(dotenv_get "$secret_file" "$key")
-  [[ -n "$value" ]] || { printf 'Required secret is missing or empty: %s\n' "$key" >&2; exit 1; }
+  if [[ -z "$value" ]]; then
+    case "$key" in
+      EAP_BLOB_*) printf 'Required secret is missing or empty: %s. Attachment bytes live in Cloudflare R2: create the bucket and an S3 API token and fill the three EAP_BLOB_* fields (deploy/README.md, "Object storage").\n' "$key" >&2 ;;
+      *) printf 'Required secret is missing or empty: %s\n' "$key" >&2 ;;
+    esac
+    exit 1
+  fi
   # An unreplaced op-bootstrap placeholder must never reach the cluster.
   [[ "$value" != CHANGE_ME* ]] || { printf 'Secret %s is still a placeholder; run litellm-deploy-key.sh.\n' "$key" >&2; exit 1; }
 done
+
+# The R2 account id becomes part of the endpoint host in the ConfigMap, so only a bare id is accepted.
+r2_account_id=$(dotenv_get "$secret_file" EAP_BLOB_R2_ACCOUNT_ID)
+[[ "$r2_account_id" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || {
+  printf 'EAP_BLOB_R2_ACCOUNT_ID must be the bare Cloudflare account id (letters, digits, - and _ only).\n' >&2
+  exit 1
+}
 
 # EAP_DATABASE_URL / EAP_DBOS_URL follow from the roles in deploy/k8s/configmap.yaml (eap_app,
 # eap_dbos), their databases, and the in-cluster Postgres service. They are derived unless a
@@ -307,6 +320,7 @@ kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
     -e "s|pydanticos-studio:dev|${studio_image}|g" \
     -e "s|/var/lib/pydanticos-backups|${PYDANTICOS_BACKUP_DIR}|g" \
     -e "s|192.168.5.2|${host_gateway}|g" \
+    -e "s|R2_ACCOUNT_ID_PLACEHOLDER|${r2_account_id}|g" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"

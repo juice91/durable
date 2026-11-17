@@ -1,4 +1,5 @@
-"""W2.4: a turn's attachments become the user prompt's parts, seen by the scripted model."""
+"""W2.4: a turn's attachments become the user prompt's parts, seen by the scripted model.
+Attachment bytes are read through the BlobStore (never a database row)."""
 
 from __future__ import annotations
 
@@ -7,30 +8,62 @@ import asyncio
 import pytest
 from pydantic_ai import Agent, BinaryContent, TextContent
 
-from eap_run_store.chat_attachments import AttachmentBlob, AttachmentMeta
+from eap_blob_store import FsBlobStore
+from eap_run_store.chat_attachments import AttachmentMeta
 from eap_worker.attachments import AttachmentUnsupported, build_prompt
 from eap_worker.models import scripted_echo_model
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
 
 
-def blob(name: str, media_type: str, data: bytes) -> AttachmentBlob:
-    return AttachmentBlob(AttachmentMeta(id=f"id-{name}", name=name, media_type=media_type, size=len(data)), data)
+class Files:
+    """A BlobStore on a temp dir plus the metas of what was put in it."""
+
+    def __init__(self, root) -> None:
+        self.store = FsBlobStore(root)
+
+    def meta(self, name: str, media_type: str, data: bytes, *, put: bool = True) -> AttachmentMeta:
+        key = f"attachments/t1/id-{name}"
+        if put:
+            async def chunks():
+                yield data
+
+            asyncio.run(self.store.put(key, chunks(), len(data), media_type))
+        return AttachmentMeta(id=f"id-{name}", name=name, media_type=media_type, size=len(data), storage_key=key)
+
+    def prompt(self, text, metas, model_id):
+        return asyncio.run(build_prompt(text, metas, model_id, self.store))
 
 
-def test_no_files_is_the_plain_text():
-    assert build_prompt("hi", [], "test:echo") == "hi"
+@pytest.fixture
+def files(tmp_path) -> Files:
+    return Files(tmp_path)
 
 
-def test_image_and_text_file_become_prompt_parts():
-    prompt = build_prompt("look", [blob("a.png", "image/png", PNG), blob("n.txt", "text/plain", b"notes")], "test:echo")
+def test_no_files_is_the_plain_text(files):
+    assert files.prompt("hi", [], "test:echo") == "hi"
+
+
+def test_image_and_text_file_become_prompt_parts_read_through_the_store(files):
+    prompt = files.prompt(
+        "look", [files.meta("a.png", "image/png", PNG), files.meta("n.txt", "text/plain", b"notes")], "test:echo"
+    )
     assert prompt[0] == "look"
     assert isinstance(prompt[1], BinaryContent) and prompt[1].media_type == "image/png" and prompt[1].data == PNG
     assert isinstance(prompt[2], TextContent) and "Attached file n.txt:\nnotes" == prompt[2].content
 
 
-def test_the_scripted_model_receives_the_parts():
-    prompt = build_prompt("look", [blob("a.png", "image/png", PNG), blob("n.txt", "text/plain", b"notes")], "test:echo")
+def test_a_blob_missing_from_the_store_fails_the_prompt_with_its_id(files):
+    from eap_blob_store import BlobNotFound
+
+    with pytest.raises(BlobNotFound):
+        files.prompt("x", [files.meta("gone.png", "image/png", PNG, put=False)], "test:echo")
+
+
+def test_the_scripted_model_receives_the_parts(files):
+    prompt = files.prompt(
+        "look", [files.meta("a.png", "image/png", PNG), files.meta("n.txt", "text/plain", b"notes")], "test:echo"
+    )
     result = asyncio.run(Agent(scripted_echo_model()).run(prompt))
     assert result.output.startswith("Echo: look [file image/png 16 bytes] [text file Attached file n.txt:")
     # The stored user prompt keeps the bytes for the next turn's history.
@@ -38,9 +71,9 @@ def test_the_scripted_model_receives_the_parts():
     assert any(isinstance(item, BinaryContent) for item in stored)
 
 
-def test_a_model_that_cannot_take_images_or_pdfs_is_refused_but_text_is_inlined():
+def test_a_model_that_cannot_take_images_or_pdfs_is_refused_but_text_is_inlined(files):
     with pytest.raises(AttachmentUnsupported):
-        build_prompt("x", [blob("a.png", "image/png", PNG)], "test:ticket")
+        files.prompt("x", [files.meta("a.png", "image/png", PNG)], "test:ticket")
     with pytest.raises(AttachmentUnsupported):
-        build_prompt("x", [blob("a.pdf", "application/pdf", b"%PDF-1")], "mistral:small")
-    assert isinstance(build_prompt("x", [blob("n.md", "text/markdown", b"# t")], "test:ticket")[1], TextContent)
+        files.prompt("x", [files.meta("a.pdf", "application/pdf", b"%PDF-1")], "mistral:small")
+    assert isinstance(files.prompt("x", [files.meta("n.md", "text/markdown", b"# t")], "test:ticket")[1], TextContent)

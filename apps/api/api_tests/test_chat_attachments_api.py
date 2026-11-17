@@ -67,6 +67,54 @@ def test_upload_and_fetch(ag, tenant):
     assert got.headers["content-disposition"].startswith("inline; filename=\"a.png\"")
 
 
+def test_bytes_live_in_the_blob_store_not_in_postgres(ag, tenant):
+    import asyncio
+
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    key = f"attachments/{tenant}/{meta['id']}"
+    with app.state.database_engine.connect() as conn:
+        row = conn.execute(text("SELECT storage_key, size FROM chat_attachments WHERE id = :i"), {"i": meta["id"]}).one()
+        columns = set(conn.execute(text(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'chat_attachments'"
+            " AND table_schema = current_schema()"
+        )).scalars())
+    assert tuple(row) == (key, len(PNG)) and "data" not in columns
+    assert asyncio.run(app.state.blob_store.exists(key)) is True
+
+
+def test_download_of_a_missing_blob_is_410(ag, tenant):
+    import asyncio
+
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    asyncio.run(app.state.blob_store.delete(f"attachments/{tenant}/{meta['id']}"))
+    got = client.get(f"/api/v1/attachments/{meta['id']}", headers=h)
+    assert got.status_code == 410 and got.json()["detail"]["code"] == "attachment_gone"
+    # An unknown id is still 404: only a known row without its blob is "gone".
+    assert client.get(f"/api/v1/attachments/{uuid.uuid4()}", headers=h).status_code == 404
+
+
+def test_a_rejected_upload_leaves_no_blob_and_no_row(ag, tenant):
+    import asyncio
+
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    assert upload(client, h, "fake.png", b"not a png", "image/png").status_code == 415
+    assert upload(client, h, "bad.txt", b"ok\xff\xfe", "text/plain").status_code == 415
+    with app.state.database_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM chat_attachments WHERE tenant_id = :t"), {"t": tenant}).scalar_one() == 0
+    assert asyncio.run(_count_blobs(app.state.blob_store, tenant)) == 0
+
+
+async def _count_blobs(store, tenant):
+    root = getattr(store, "root", None)
+    d = root / "attachments" / tenant if root is not None else None
+    return len(list(d.iterdir())) if d is not None and d.exists() else 0
+
+
 def test_text_attachment_downloads_not_inline(ag, tenant):
     client, _ = ag
     h = get_auth_header(tenant, "alice")
@@ -233,8 +281,8 @@ def test_the_worker_finds_a_turns_attachments_through_its_message_ids(ag, tenant
     assert post(client, agent_id, body("t", "r1", msg), h)[0] == 200
     native = derive_agent_run_id(tenant, agent_id, "t", "r1")
     store = ChatAttachmentStore(app.state.database_engine)
-    blobs = store.for_run(tenant, native)
-    assert [b.meta.id for b in blobs] == [meta["id"]] and blobs[0].data == PNG
+    metas = store.for_run(tenant, native)
+    assert [m.id for m in metas] == [meta["id"]] and metas[0].storage_key == f"attachments/{tenant}/{meta['id']}"
     assert store.for_run(f"t{uuid.uuid4().hex[:8]}", native) == []
 
 

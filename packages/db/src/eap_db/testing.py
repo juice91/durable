@@ -23,7 +23,10 @@ would without a database. Disable with `-p no:eap_db`.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 import uuid
 import warnings
 
@@ -36,6 +39,16 @@ DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://eap_app:eap_app_password@local
 SCHEMA_ENV = "EAP_TEST_SCHEMA"
 
 _state: dict[str, str] = {}
+
+
+def _use_temp_blob_dir() -> None:
+    """Attachment bytes (eap_blob_store's `fs` backend) go to a temp dir for the session unless the
+    environment names one, so a test never writes ./.blobs. Inherited by worker subprocesses."""
+    if os.environ.get("EAP_BLOB_DIR") or os.environ.get("EAP_BLOB_BACKEND"):
+        return
+    path = tempfile.mkdtemp(prefix="eap_test_blobs_")
+    os.environ["EAP_BLOB_DIR"] = path
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
 
 
 def schema_url(base_url: str, schema: str, *, public: bool = False) -> str:
@@ -104,6 +117,7 @@ def pytest_configure(config: pytest.Config) -> None:
 def _setup(config: pytest.Config) -> None:
     if "schema" in _state:
         return
+    _use_temp_blob_dir()
     if hasattr(config, "workerinput"):  # pragma: no cover - xdist workers inherit the controller's env
         return
     base_url = os.environ.get("EAP_TEST_DATABASE_URL") or DEFAULT_TEST_DATABASE_URL

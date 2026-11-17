@@ -13,6 +13,13 @@ data:
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
   EAP_ALLOWED_TOOLS: "ticket.create"
   EAP_LOKI_URL: http://lgtm:3100
+  # Chat attachment bytes live in Cloudflare R2 (S3 API), reached over HTTPS 443. R2_ACCOUNT_ID_PLACEHOLDER is
+  # replaced by up.sh with the account id (secret key EAP_BLOB_R2_ACCOUNT_ID); the access key and secret
+  # come from the Secret (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY). The bucket is created by the operator.
+  EAP_BLOB_BACKEND: s3
+  EAP_BLOB_S3_ENDPOINT: https://R2_ACCOUNT_ID_PLACEHOLDER.r2.cloudflarestorage.com
+  EAP_BLOB_S3_BUCKET: pydanticos-attachments
+  EAP_BLOB_S3_REGION: auto
   OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
 ---
 apiVersion: v1

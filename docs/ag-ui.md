@@ -120,7 +120,9 @@ stream) is not run twice. Re-sending the latest recorded user message alone unde
 
 - **Attachments.** Upload a file (image PNG/JPEG/GIF/WebP, PDF, plain text, Markdown, CSV, JSON) as
   multipart field `file` to `POST /api/v1/attachments` (dev bearer): `{id, name, media_type, size}`.
-  413 over `EAP_CHAT_ATTACHMENT_MAX_BYTES` (default 10 MiB), 415 for another type. Send it in a user
+  413 over `EAP_CHAT_ATTACHMENT_MAX_BYTES` (default 10 MiB), 415 for another type. The bytes are kept in
+  object storage (`EAP_BLOB_BACKEND`: `fs` for dev, `s3` for Cloudflare R2), not in Postgres; a fetch
+  answers 410 `attachment_gone` when a row's blob is missing. Send it in a user
   message as `{"type": "image" | "document", "source": {"type": "url", "value": "/api/v1/attachments/{id}",
   "mimeType": ...}, "metadata": {"filename": ...}}`. Up to 5 per message; one attachment belongs to one
   message. 422 `attachment_not_found`, `attachment_in_use`, `attachment_unsupported_by_model` (images and

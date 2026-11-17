@@ -14,6 +14,7 @@ from eap_worker.config import (
     WorkerSettings,
     kb_ingest_concurrency,
 )
+from eap_worker.attachments import configure_blob_store
 from eap_worker.runtime import configure_runtime
 
 # Importing registers the generic agent, its DBOS steps, the queue and the workflow. This must
@@ -62,6 +63,7 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     and launch it (recovery runs here)."""
     settings = settings or WorkerSettings.from_env()
     validate_startup(settings)
+    configure_blob_store()  # EAP_BLOB_*: a bad setting fails the start, before DBOS launches
     configure_runtime(settings)
     setup_worker_telemetry()
     DBOS(config=dbos_config(settings))

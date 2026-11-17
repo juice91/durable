@@ -202,3 +202,31 @@ spec:
               - 192.168.5.2/32
       ports:
         - {protocol: TCP, port: 443}
+---
+# Attachment bytes live in Cloudflare R2: the API and the migrate Job (attachment backfill) reach it over
+# HTTPS 443 to public ranges only, the same shape as the worker's rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-egress-object-storage
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [api, migrate]
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 192.168.5.2/32
+      ports:
+        - {protocol: TCP, port: 443}

@@ -1,9 +1,10 @@
 """Chat attachments and message feedback (0021_chat_attachments).
 
-Attachments: files the user attaches in the chat composer, stored as bytes in `chat_attachments`
-(the same "bytes live in the tenant's Postgres rows" approach as knowledge documents). An upload is
-free-standing; `link` ties it to the turn (`run_id`) and the user message (`message_id`) that
-references it. Every read and write is tenant-scoped: another tenant's id is "not found".
+Attachments: files the user attaches in the chat composer. The row holds the metadata and
+`storage_key`; the bytes live in the BlobStore (eap_blob_store; 0023_attachments_r2), never in
+Postgres. An upload is free-standing; `link` ties it to the turn (`run_id`) and the user message
+(`message_id`) that references it. Every read and write is tenant-scoped: another tenant's id is
+"not found".
 
 Feedback: one thumbs rating and optional comment per (tenant, message, user) on an assistant
 message, tied to the run that produced it. Setting again replaces the rating.
@@ -11,7 +12,6 @@ message, tied to the run that produced it. Setting again replaces the rating.
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,7 +24,6 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
-    LargeBinary,
     PrimaryKeyConstraint,
     String,
     Text,
@@ -98,7 +97,7 @@ class ChatAttachmentModel(Base):
     media_type: Mapped[str] = mapped_column("media_type", String, nullable=False)
     size: Mapped[int] = mapped_column("size", Integer, nullable=False)
     sha256: Mapped[str] = mapped_column("sha256", String, nullable=False)
-    data: Mapped[bytes] = mapped_column("data", LargeBinary, nullable=False)
+    storage_key: Mapped[str] = mapped_column("storage_key", Text, nullable=False)
     message_id: Mapped[str | None] = mapped_column("message_id", String, nullable=True)
     created_by: Mapped[str] = mapped_column("created_by", String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -109,6 +108,10 @@ class ChatAttachmentModel(Base):
         PrimaryKeyConstraint("id", name="chat_attachments_pkey"),
         CheckConstraint(ATTACHMENT_SIZE_CHECK, name="ck_chat_attachments_size"),
         Index("ix_chat_attachments_tenant_message", "tenant_id", "message_id"),
+        # Unsent uploads (the retention pass scans them oldest first).
+        Index(
+            "ix_chat_attachments_unsent_created_at", "created_at", postgresql_where=text("message_id IS NULL")
+        ),
     )
 
 
@@ -151,15 +154,10 @@ class AttachmentMeta:
     media_type: str
     size: int
     message_id: str | None = None
+    storage_key: str = ""  # where the BlobStore holds the bytes; never part of as_json
 
     def as_json(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "media_type": self.media_type, "size": self.size}
-
-
-@dataclass(frozen=True)
-class AttachmentBlob:
-    meta: AttachmentMeta
-    data: bytes
 
 
 @dataclass(frozen=True)
@@ -187,6 +185,7 @@ class FeedbackRecord:
 def _meta(row: ChatAttachmentModel) -> AttachmentMeta:
     return AttachmentMeta(
         id=str(row.id), name=row.name, media_type=row.media_type, size=row.size, message_id=row.message_id,
+        storage_key=row.storage_key,
     )
 
 
@@ -194,16 +193,20 @@ class ChatAttachmentStore:
     def __init__(self, engine: Engine) -> None:
         self.Session = sessionmaker(bind=engine, expire_on_commit=False)
 
-    def create(self, tenant_id: str, *, name: str, media_type: str, data: bytes, created_by: str) -> AttachmentMeta:
+    def create(
+        self, tenant_id: str, *, attachment_id: str, name: str, media_type: str, size: int, sha256: str,
+        storage_key: str, created_by: str,
+    ) -> AttachmentMeta:
+        """Record an upload whose bytes are already in the BlobStore under `storage_key`."""
         row = ChatAttachmentModel(
-            id=str(uuid4()), tenant_id=tenant_id, name=name, media_type=media_type, size=len(data),
-            sha256=hashlib.sha256(data).hexdigest(), data=data, created_by=created_by,
+            id=attachment_id, tenant_id=tenant_id, name=name, media_type=media_type, size=size, sha256=sha256,
+            storage_key=storage_key, created_by=created_by,
         )
         with self.Session() as session, session.begin():
             session.add(row)
         return _meta(row)
 
-    def get(self, tenant_id: str, attachment_id: str) -> AttachmentBlob | None:
+    def get(self, tenant_id: str, attachment_id: str) -> AttachmentMeta | None:
         try:
             with self.Session() as session:
                 row = session.execute(
@@ -215,7 +218,7 @@ class ChatAttachmentStore:
             if "invalid input syntax" in str(exc).lower():
                 return None
             raise
-        return None if row is None else AttachmentBlob(_meta(row), row.data)
+        return None if row is None else _meta(row)
 
     def metas(self, tenant_id: str, ids: Iterable[str]) -> dict[str, AttachmentMeta]:
         wanted = [i for i in dict.fromkeys(ids) if _is_uuid(i)]
@@ -245,8 +248,9 @@ class ChatAttachmentStore:
                 .values(message_id=message_id)
             )
 
-    def for_run(self, tenant_id: str, run_id: str) -> list[AttachmentBlob]:
-        """The bytes of the attachments of a turn's user messages (its `ag_ui_runs.input_message_ids`)."""
+    def for_run(self, tenant_id: str, run_id: str) -> list[AttachmentMeta]:
+        """The attachments of a turn's user messages (its `ag_ui_runs.input_message_ids`); the bytes
+        are read through the BlobStore by `storage_key`."""
         from eap_run_store.ag_ui import AgUiRunModel
 
         with self.Session() as session:
@@ -263,7 +267,7 @@ class ChatAttachmentStore:
                 .where(ChatAttachmentModel.tenant_id == tenant_id, ChatAttachmentModel.message_id.in_(message_ids))
                 .order_by(ChatAttachmentModel.created_at, ChatAttachmentModel.id)
             ).scalars().all()
-        return [AttachmentBlob(_meta(r), r.data) for r in rows]
+        return [_meta(r) for r in rows]
 
     def for_messages(self, tenant_id: str, message_ids: Iterable[str]) -> dict[str, list[AttachmentMeta]]:
         wanted = list(dict.fromkeys(message_ids))

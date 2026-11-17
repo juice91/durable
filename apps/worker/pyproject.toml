@@ -12,6 +12,7 @@ dependencies = [
     "eap-schemas",
     "eap-agent-runtime",
     "eap-run-store",
+    "eap-blob-store",
     "eap-db",
     "eap-observability",
     "eap-secrets",
@@ -56,6 +57,7 @@ dev = [
 eap-schemas = { workspace = true }
 eap-agent-runtime = { workspace = true }
 eap-run-store = { workspace = true }
+eap-blob-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }

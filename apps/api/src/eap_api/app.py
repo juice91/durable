@@ -186,6 +186,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.database_engine = engine
     app.state.database_url = database_url
 
+    # Attachment bytes live in object storage (eap_blob_store; EAP_BLOB_*), never in Postgres. A bad
+    # EAP_BLOB_* setting fails startup here.
+    from eap_blob_store import blob_store_from_env
+
+    try:
+        app.state.blob_store = blob_store_from_env()
+    except Exception:
+        engine.dispose()
+        raise
+
     # Runs and events (eap_run_store). The DBOS client and LISTEN connections open lazily.
     from eap_api.launcher import DBOSRunLauncher, LauncherSettings
     from eap_api.sse import PostgresDeltaSource

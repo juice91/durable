@@ -107,7 +107,8 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
             assert "ix_workflow_schedules_active_next_fire" in _indexes(conn, "workflow_schedules")
             assert "(tenant_id, start DESC)" in _indexes(conn, "spans")["ix_spans_tenant_start"]
             assert _constraints(conn, "spans", "p") == {"spans_pkey"}
-            assert schema_diff(conn) == []
+            # At 0022 the models already carry 0023's chat_attachments (storage_key, no data); nothing else differs.
+            assert [d for d in schema_diff(conn) if "chat_attachments" not in repr(d)] == []
 
         # An eval run may target a workflow; every other shape stays rejected.
         with engine.begin() as conn:

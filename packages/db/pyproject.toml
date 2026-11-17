@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3",
     "eap-run-store",
+    "eap-blob-store",
 ]
 
 [project.entry-points.pytest11]
@@ -25,6 +26,7 @@ eap_db = "eap_db.testing"
 
 [tool.uv.sources]
 eap-run-store = { workspace = true }
+eap-blob-store = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/eap_db"]
