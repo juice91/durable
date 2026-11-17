@@ -118,9 +118,9 @@ def _providers() -> list[dict[str, Any]]:
 
 
 def seed_model() -> str | None:
-    """The model of the built-in agents (see eap_schemas.architect_seed.pick_seed_model): the first
-    non-thinking model of the first provider with status ok and models the platform allowlist permits,
-    else that provider's first model, else the first concrete model the allowlist names. The platform
+    """The model of the built-in agents: the best-ranked model of the providers with status ok that the
+    platform allowlist permits (ranking: eap_schemas.architect_seed.pick_seed_model), else the first
+    concrete model the allowlist names. The platform
     has no per-tenant default model, so there is no tenant setting to consult first."""
     policy = ModelPolicy.from_env()
     provider_models = []

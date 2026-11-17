@@ -206,8 +206,8 @@ def test_seed_model_choice():
     assert pick_seed_model([("litellm", ["a-reasoner", "b-thinking"])], ["test:echo"]) == "litellm:a-reasoner"
     assert pick_seed_model([], ["test:echo", "test:history"]) == "test:echo"
     assert pick_seed_model([], []) is None
-    # only the first provider with models counts
-    assert pick_seed_model([("litellm", ["m-thinking"]), ("openai", ["gpt-5"])], []) == "litellm:m-thinking"
+    # a direct provider outranks the gateway even when the gateway is listed first
+    assert pick_seed_model([("litellm", ["m-thinking"]), ("openai", ["gpt-5"])], []) == "openai:gpt-5"
 
 
 # ---------------------------------------------------------------------------------------- options
