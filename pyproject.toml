@@ -12,6 +12,7 @@ dependencies = [
 dev = [
     "pytest>=7",
     "import-linter>=2.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.uv.workspace]
