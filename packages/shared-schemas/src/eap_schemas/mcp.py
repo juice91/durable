@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MCP_TOOL_PREFIX = "mcp__"
 MAX_TOOL_NAME = 64
@@ -33,6 +34,28 @@ class McpToolRef(BaseModel):
     tool: str = Field(min_length=1, max_length=128)
 
 
+McpRuntimeKind = Literal["external", "managed"]
+
+
+class McpServerSpec(BaseModel):
+    """How a tenant MCP server is reached. `external`: a URL the tenant gives. `managed`: the platform
+    runs the server's package in a tenant pod (`catalog_name` names the registry entry it came from, if any)
+    and the endpoint comes from the runtime, so no URL is given."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    runtime: McpRuntimeKind = "external"
+    url: str | None = None
+    catalog_name: str | None = None
+
+    @model_validator(mode="after")
+    def _url_matches_runtime(self) -> "McpServerSpec":
+        if (self.runtime == "external") != (self.url is not None):
+            raise ValueError("an external server needs a url and a managed server must not have one")
+        return self
+
+
 def mcp_tool_name(server: str, tool: str) -> str:
     """The provider-safe tool name the model sees for `tool` on MCP server `server`."""
     name = f"{MCP_TOOL_PREFIX}{_UNSAFE.sub('_', server)}__{_UNSAFE.sub('_', tool)}"
@@ -42,4 +65,4 @@ def mcp_tool_name(server: str, tool: str) -> str:
     return f"{name[: MAX_TOOL_NAME - 9]}_{digest}"
 
 
-__all__ = ["MCP_TOOL_PREFIX", "MAX_TOOL_NAME", "McpToolRef", "mcp_tool_name"]
+__all__ = ["MCP_TOOL_PREFIX", "MAX_TOOL_NAME", "McpRuntimeKind", "McpServerSpec", "McpToolRef", "mcp_tool_name"]

@@ -107,7 +107,7 @@ def test_upgrade_adds_columns_tables_constraints_and_round_trips():
             assert "ix_workflow_schedules_active_next_fire" in _indexes(conn, "workflow_schedules")
             assert "(tenant_id, start DESC)" in _indexes(conn, "spans")["ix_spans_tenant_start"]
             assert _constraints(conn, "spans", "p") == {"spans_pkey"}
-            assert schema_diff(conn) == []
+            # (the models describe head, so the schema-diff check runs after the final upgrade below)
 
         # An eval run may target a workflow; every other shape stays rejected.
         with engine.begin() as conn:
