@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-mcp-runtime"
+version = "0.1.0"
+description = "Operator adapter that runs managed MCP servers as isolated pods per tenant"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "lightkube==1.0.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_mcp_runtime"]

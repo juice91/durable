@@ -20,6 +20,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: api}
     spec:
+      serviceAccountName: pydanticos-mcp
       hostAliases:
         - ip: 192.168.5.2
           hostnames: [host.lima.internal]

@@ -1,0 +1,45 @@
+# The API and the worker run managed MCP servers through the ToolHive operator: they write MCPServer
+# custom resources and their Secret, NetworkPolicy, ResourceQuota and LimitRange in per-tenant
+# namespaces named mcp-tenant-<hash>. RBAC cannot match namespaces by prefix, so the ClusterRole is
+# limited by resource type and verbs instead; namespaces may be created and read, never deleted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pydanticos-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pydanticos-mcp
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, patch]
+  - apiGroups: [toolhive.stacklok.dev]
+    resources: [mcpservers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets, resourcequotas, limitranges]
+    verbs: [get, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pydanticos-mcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pydanticos-mcp
+subjects:
+  - kind: ServiceAccount
+    name: pydanticos-mcp
+    namespace: pydanticos
