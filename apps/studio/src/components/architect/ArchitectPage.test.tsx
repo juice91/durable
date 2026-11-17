@@ -9,6 +9,8 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+vi.mock("@/components/agentPage/ChatTab", () => ({ ChatTab: ({ agentId }: { agentId: string }) => <div data-testid="chat-tab" data-agent={agentId} /> }));
+
 import { FrameHarness } from "@/components/frame/frameTesting";
 import ArchitectPageRoute from "@/app/architect/page";
 import { DRAFT_RESPONSE, OPTIONS, SEEDED_STATE, stubArchitectApi } from "./architectFixtures";
@@ -203,8 +205,8 @@ describe("Architect page", () => {
     mount({ "GET /architect": SEEDED_STATE });
     await screen.findByRole("tab", { name: "Form" });
     await user.click(screen.getByRole("tab", { name: "Chat" }));
-    expect(await screen.findByTestId("architect-chat-stub")).toBeInTheDocument();
+    expect(await screen.findByTestId("chat-tab")).toHaveAttribute("data-agent", "row-arch");
     await user.click(screen.getByRole("tab", { name: "Workflow" }));
-    expect(await screen.findByTestId("architect-workflow-stub")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Describe the workflow")).toBeInTheDocument();
   });
 });

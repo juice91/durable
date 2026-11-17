@@ -275,6 +275,9 @@ export interface ChatTabProps {
   agentId: string;
   /** The conversation named by the route (`/agents/:id/chat/:conversationId`); none starts a new one. */
   conversationId?: string | null;
+  /** Write the conversation, version and model to the address bar (default). The Architect page
+   * embeds the chat under `/architect` and turns this off so the page keeps its own address. */
+  syncUrl?: boolean;
 }
 
 /**
@@ -285,7 +288,7 @@ export interface ChatTabProps {
  * `?version=&model=` in the query, written back as they change so a reload restores them; the one-shot
  * `context=preset` applies the newest preset and `context=open` opens the popover.
  */
-export function ChatTab({ agentId, conversationId: routeConversationId = null }: ChatTabProps) {
+export function ChatTab({ agentId, conversationId: routeConversationId = null, syncUrl = true }: ChatTabProps) {
   const selectedAgentId = agentId;
   const page = useAgentPage();
   const reportChatHref = page && page.agentId === agentId ? page.setChatHref : undefined;
@@ -422,12 +425,13 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
     (patch: Partial<ChatUrlState>) => {
       if (typeof window === "undefined") return;
       urlStateRef.current = { ...urlStateRef.current, ...patch };
+      if (!syncUrl) return;
       const next = chatUrlFor(window.location.href, agentId, urlStateRef.current);
       if (next !== `${window.location.pathname}${window.location.search}${window.location.hash}`) window.history.replaceState({}, "", next);
       // The Chat tab links back here (conversation and options) from the other tabs.
       reportChatHref?.(next.split("#")[0]);
     },
-    [agentId, reportChatHref],
+    [agentId, reportChatHref, syncUrl],
   );
   const setConversationParam = useCallback((id: string | null) => writeUrl({ conversation: id }), [writeUrl]);
 

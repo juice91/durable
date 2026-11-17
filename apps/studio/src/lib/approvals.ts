@@ -33,6 +33,8 @@ export interface Approval {
   agent_id: string | null;
   workflow_id: string | null;
   tool_name: string | null;
+  /** What the call would do, in words (a tool with a summariser, such as architect.*); else null. */
+  summary?: string | null;
   /** The tool call's arguments (≤ 8 KiB, else `{truncated: true}`); null for a step. */
   args: unknown;
   prompt: string | null;
@@ -215,6 +217,23 @@ export async function decideToolApproval(
   );
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();
+}
+
+// --- Decisions made on a card ----------------------------------------------------------------
+
+const decisionListeners = new Set<(decision: "approved" | "denied") => void>();
+
+/** Calls `listener` after any tool approval card records a decision (the Architect page refreshes
+ * what it created). Returns the unsubscribe. */
+export function onToolDecided(listener: (decision: "approved" | "denied") => void): () => void {
+  decisionListeners.add(listener);
+  return () => {
+    decisionListeners.delete(listener);
+  };
+}
+
+export function announceToolDecided(decision: "approved" | "denied"): void {
+  decisionListeners.forEach((listener) => listener(decision));
 }
 
 // --- The pending count (sidebar badge) -------------------------------------------------------

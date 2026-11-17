@@ -92,6 +92,7 @@ for the second key.
 | `/` | Focus the list search |
 | `c` | Create (the page's primary action) |
 | `↑` `↓` (also `Home` `End`), then `Enter` | Move through list rows, then open one |
+| `g` then `r` | Go to Architect |
 | `g` then `i` | Go to Approvals |
 | `g` then `a` | Go to Agents |
 | `g` then `w` | Go to Workflows |

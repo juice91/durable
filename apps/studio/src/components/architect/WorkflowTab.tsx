@@ -1,15 +1,20 @@
 "use client";
 
 import React from "react";
-import type { ArchitectOptions } from "@/lib/architect";
+import type { ArchitectOptions, CreatedItem } from "@/lib/architect";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { WorkflowForm } from "./WorkflowForm";
 
 export interface WorkflowTabProps {
   options: ArchitectOptions | null;
+  /** GET /architect `agents`: the Architect-made agents a step may use. */
+  agents: readonly CreatedItem[];
   /** Call after a workflow was saved, so the created list refreshes. */
   onSaved: () => void;
 }
 
-/** Placeholder for the Workflow tab; Task 8 mounts the workflow form here. */
-export function WorkflowTab(_props: WorkflowTabProps) {
-  return <p data-testid="architect-workflow-stub" className="text-body text-muted-foreground">The workflow form is coming here.</p>;
+/** The Workflow tab: the workflow form of the Architect page. */
+export function WorkflowTab({ options, agents, onSaved }: WorkflowTabProps) {
+  if (!options) return <div className="space-y-3" aria-busy="true"><Skeleton className="h-8 w-64" /><Skeleton className="h-48 w-full" /></div>;
+  return <WorkflowForm options={options} agents={agents} onSaved={() => onSaved()} />;
 }

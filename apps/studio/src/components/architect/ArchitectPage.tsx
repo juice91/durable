@@ -143,7 +143,7 @@ export function ArchitectPage() {
                   <ArchitectChat architectAgentId={state.architect_agent_id} onChanged={() => void refresh()} />
                 </TabsContent>
                 <TabsContent value="workflow" className="pt-4">
-                  <WorkflowTab options={options} onSaved={() => void refresh()} />
+                  <WorkflowTab options={options} agents={state.agents} onSaved={() => void refresh()} />
                 </TabsContent>
               </Tabs>
             </div>
