@@ -53,6 +53,7 @@ import contextlib
 import functools
 import json
 import logging
+import math
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -171,6 +172,8 @@ def _env_float(name: str, default: float, low: float, high: float) -> float:
         value = float(os.environ.get(name, default))
     except ValueError:
         value = default
+    if not math.isfinite(value):
+        value = default
     return min(max(value, low), high)
 
 
@@ -225,6 +228,8 @@ def load_servers(
     urls: dict[str, tuple[str, str | None]] = {}
     for r in rows.values():
         if r.runtime != "managed":
+            if not r.url:
+                raise McpToolUnavailable(r.name, first_tool[r.name], "server_url_missing")
             urls[r.id] = (r.url, None)
             continue
         if r.id not in runtimes:
@@ -255,7 +260,7 @@ _RUNTIME_ROW = text(
     "SELECT id, state, image, package, namespace, cr_name FROM mcp_runtimes WHERE id = :r AND tenant_id = :t AND server_id = :s"
 )
 _CLAIM_START = text(
-    "UPDATE mcp_runtimes SET state = 'starting', last_error = NULL, updated_at = :now "
+    "UPDATE mcp_runtimes SET state = 'starting', last_error = NULL, last_used_at = :now, updated_at = :now "
     "WHERE id = :r AND tenant_id = :t AND state IN ('pending', 'stopped', 'idle', 'failed') RETURNING id"
 )
 _SET_STATE = text(
@@ -263,10 +268,13 @@ _SET_STATE = text(
     "WHERE id = :r AND tenant_id = :t AND state = :was"
 )
 _SET_RUNNING = text(
-    "UPDATE mcp_runtimes SET state = 'running', endpoint = :ep, last_error = NULL, updated_at = :now "
+    "UPDATE mcp_runtimes SET state = 'running', endpoint = :ep, last_error = NULL, last_used_at = :now, updated_at = :now "
     "WHERE id = :r AND tenant_id = :t AND state = 'starting'"
 )
-_TOUCH = text("UPDATE mcp_runtimes SET last_used_at = :now WHERE id = :r AND tenant_id = :t")
+_TOUCH = text(
+    "UPDATE mcp_runtimes SET last_used_at = :now "
+    "WHERE id = :r AND tenant_id = :t AND state IN ('running', 'idle') RETURNING id"
+)
 _ENV_SECRETS = text(
     "SELECT header_name, ciphertext, key_id FROM mcp_server_secrets WHERE tenant_id = :t AND server_id = :s AND kind = 'env'"
 )
@@ -331,17 +339,30 @@ async def ensure_managed_running(
         with engine.connect() as db:
             return db.execute(_RUNTIME_ROW, {"r": rid, "t": tenant_id, "s": conn.server_id}).first()
 
-    row = await asyncio.to_thread(read)
-    if row is None:
-        raise McpToolUnavailable(server, tool, "runtime_missing")
-    handle = RuntimeHandle(row.namespace, row.cr_name)
-    state = row.state
-    if state in _STARTABLE:
-        claimed = await asyncio.to_thread(_exec_returning, engine, _CLAIM_START, now=_now(), r=rid, t=tenant_id)
-        if claimed:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + start_timeout_s()
+    poll = start_poll_s()
+
+    def remaining() -> float:
+        return max(deadline - loop.time(), 0.001)
+
+    first = True
+    while True:
+        if not first and loop.time() >= deadline:
+            raise McpToolUnavailable(server, tool, "runtime_start_timeout")
+        first = False
+        row = await asyncio.to_thread(read)
+        if row is None:
+            raise McpToolUnavailable(server, tool, "runtime_missing")
+        handle = RuntimeHandle(row.namespace, row.cr_name)
+        state = row.state
+        if state in _STARTABLE:
+            claimed = await asyncio.to_thread(_exec_returning, engine, _CLAIM_START, now=_now(), r=rid, t=tenant_id)
+            if not claimed:
+                continue  # somebody else moved it; look again
             try:
                 spec = await asyncio.to_thread(_build_spec, engine, tenant_id, conn, row)
-                await rt.start(spec)
+                await asyncio.wait_for(rt.start(spec), remaining())
             except SecretsError as exc:
                 await asyncio.to_thread(_fail, engine, tenant_id, rid, "secret_unreadable")
                 log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",
@@ -352,27 +373,34 @@ async def ensure_managed_running(
                 log_failure(log, "mcp runtime start failed", exc, code="runtime_start_failed", tenant_id=tenant_id,
                             server=server)
                 raise McpToolUnavailable(server, tool, "runtime_start_failed") from None
-        state = "starting"
-    if state == "starting":
-        deadline = asyncio.get_running_loop().time() + start_timeout_s()
-        poll = start_poll_s()
-        while True:
+            state = "starting"
+        if state == "stopping":  # the idle sweep is scaling it down; wait for `stopped`, then start it
+            await asyncio.sleep(min(poll, remaining()))
+            continue
+        if state == "starting":
             try:
-                status = await rt.status(handle)
+                status = await asyncio.wait_for(rt.status(handle), remaining())
             except Exception as exc:  # noqa: BLE001 - a status hiccup is retried until the deadline
                 log_failure(log, "mcp runtime status failed", exc, code="runtime_status_failed",
                             level=logging.INFO, tenant_id=tenant_id, server=server)
                 status = None
             if status is not None and status.state == "running":
                 await asyncio.to_thread(_exec, engine, _SET_RUNNING, ep=status.endpoint or None, now=_now(), r=rid, t=tenant_id)
-                break
+                continue
             if status is not None and status.state == "failed":
                 await asyncio.to_thread(_fail, engine, tenant_id, rid, "runtime_failed", was="starting")
                 raise McpToolUnavailable(server, tool, "runtime_failed")
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= deadline:
                 raise McpToolUnavailable(server, tool, "runtime_start_timeout")
-            await asyncio.sleep(poll)
-    await asyncio.to_thread(_exec, engine, _TOUCH, now=_now(), r=rid, t=tenant_id)
+            await asyncio.sleep(min(poll, remaining()))
+            current = await asyncio.to_thread(read)  # the starter may have failed the row meanwhile
+            if current is not None and current.state == "failed":
+                raise McpToolUnavailable(server, tool, "runtime_failed")
+            continue
+        touched = await asyncio.to_thread(_exec_returning, engine, _TOUCH, now=_now(), r=rid, t=tenant_id)
+        if touched:
+            return
+        # the row left running/idle (the sweep claimed it): start/wait again
 
 
 def _exec_returning(engine: Engine, stmt: Any, **params: Any) -> bool:

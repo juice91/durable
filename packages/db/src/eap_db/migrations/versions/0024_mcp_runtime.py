@@ -100,7 +100,7 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.CheckConstraint(
-            "state IN ('pending', 'starting', 'running', 'idle', 'stopped', 'failed')",
+            "state IN ('pending', 'starting', 'running', 'idle', 'stopping', 'stopped', 'failed')",
             name="ck_mcp_runtimes_state",
         ),
     )

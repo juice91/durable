@@ -4,14 +4,17 @@ State transitions it makes on `mcp_runtimes` (all conditional on the state it re
 changed the row meanwhile wins):
 
 - `running` / `idle`, last used (`last_used_at`, else `updated_at`) longer ago than EAP_MCP_IDLE_MINUTES
-  (default 30)  ->  `stopped`; then `McpRuntime.stop`, which scales the server down and keeps its
-  objects. The next tool call starts it again (eap_worker.mcp.ensure_managed_running). When `stop`
-  raises, the row becomes `failed` with `last_error = stop_failed: <exception class>`.
+  (default 30)  ->  `stopping`; then `McpRuntime.stop`, which scales the server down and keeps its
+  objects; then `stopped`. A caller that arrives while the row is `stopping` waits for `stopped` and
+  then starts it (eap_worker.mcp.ensure_managed_running). When `stop` raises, the row becomes `failed`
+  with `last_error = stop_failed: <exception class>`; `stopping` for longer than 10 minutes becomes
+  `failed` with `last_error = stop_timed_out`.
 - `starting` for longer than 10 minutes (`updated_at`)  ->  `failed` with `last_error = start_timed_out`
   (a worker that died while starting, or a pod that never became ready).
 
 The state is claimed first (one UPDATE ... RETURNING), the adapter is called second, so two workers
-never stop the same runtime twice and a call that arrives in between sees `stopped` and starts it.
+never stop the same runtime twice; the row only becomes `stopped` once `stop` has returned, so a late
+stop can never scale down a runtime a caller has just started.
 
 Settings: EAP_MCP_RUNTIME_SWEEP_SCHEDULE (a DBOS cron, seconds first; default `0 * * * * *`; `off`
 removes the schedule), EAP_MCP_IDLE_MINUTES.
@@ -89,14 +92,19 @@ _FAIL_STARTING = text(
     "UPDATE mcp_runtimes SET state = 'failed', last_error = 'start_timed_out', updated_at = :now "
     "WHERE state = 'starting' AND updated_at < :cutoff RETURNING id"
 )
+_FAIL_STOPPING = text(
+    "UPDATE mcp_runtimes SET state = 'failed', last_error = 'stop_timed_out', updated_at = :now "
+    "WHERE state = 'stopping' AND updated_at < :cutoff RETURNING id"
+)
 _CLAIM_IDLE = text(
-    "UPDATE mcp_runtimes SET state = 'stopped', last_error = NULL, updated_at = :now "
+    "UPDATE mcp_runtimes SET state = 'stopping', last_error = NULL, updated_at = :now "
     "WHERE state IN ('running', 'idle') AND COALESCE(last_used_at, updated_at) < :cutoff "
     "RETURNING id, namespace, cr_name"
 )
 _STOP_FAILED = text(
-    "UPDATE mcp_runtimes SET state = 'failed', last_error = :err, updated_at = :now WHERE id = :i AND state = 'stopped'"
+    "UPDATE mcp_runtimes SET state = 'failed', last_error = :err, updated_at = :now WHERE id = :i AND state = 'stopping'"
 )
+_STOPPED = text("UPDATE mcp_runtimes SET state = 'stopped', updated_at = :now WHERE id = :i AND state = 'stopping'")
 
 
 async def sweep_runtimes(
@@ -108,6 +116,7 @@ async def sweep_runtimes(
     def claim() -> tuple[int, list[Any]]:
         with engine.begin() as conn:
             failed = conn.execute(_FAIL_STARTING, {"now": now, "cutoff": now - STARTING_TIMEOUT}).all()
+            conn.execute(_FAIL_STOPPING, {"now": now, "cutoff": now - STARTING_TIMEOUT})
             idle = conn.execute(_CLAIM_IDLE, {"now": now, "cutoff": now - timedelta(minutes=idle_minutes)}).all()
         return len(failed), idle
 
@@ -116,6 +125,8 @@ async def sweep_runtimes(
     for row in idle:
         try:
             await runtime.stop(RuntimeHandle(row.namespace, row.cr_name))
+            with engine.begin() as conn:
+                conn.execute(_STOPPED, {"now": datetime.now(timezone.utc), "i": row.id})
             stopped += 1
         except Exception as exc:  # noqa: BLE001 - one runtime's failure never stops the sweep
             stop_failed += 1
@@ -132,10 +143,9 @@ async def sweep_runtimes(
 
 
 @DBOS.step(name=STEP_NAME)
-async def sweep_step(now_iso: str) -> dict[str, int]:
-    return await sweep_runtimes(
-        get_runtime().engine, get_mcp_runtime(), now=datetime.fromisoformat(now_iso), idle_minutes=idle_minutes()
-    )
+async def sweep_step() -> dict[str, int]:
+    """The real clock is read here, inside the step: a replayed workflow must not stop runtimes by a stale time."""
+    return await sweep_runtimes(get_runtime().engine, get_mcp_runtime(), now=datetime.now(timezone.utc), idle_minutes=idle_minutes())
 
 
 @DBOS.workflow(name=WORKFLOW_NAME)
@@ -143,7 +153,7 @@ async def mcp_runtime_sweep(scheduled_at: datetime, context: Any) -> dict[str, i
     """The scheduled sweep (DBOS passes the tick time and the schedule context). The real clock decides
     what is idle: a recovered tick must not stop runtimes by a stale time."""
     del scheduled_at, context
-    return await sweep_step(datetime.now(timezone.utc).isoformat())
+    return await sweep_step()
 
 
 def apply_runtime_sweep_schedule(config: RuntimeSweepConfig | None = None) -> str:

@@ -129,7 +129,7 @@ class McpRuntimeModel(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint(
-            "state IN ('pending', 'starting', 'running', 'idle', 'stopped', 'failed')", name="ck_mcp_runtimes_state"
+            "state IN ('pending', 'starting', 'running', 'idle', 'stopping', 'stopped', 'failed')", name="ck_mcp_runtimes_state"
         ),
         Index("ix_mcp_runtimes_state_last_used", "state", "last_used_at"),
     )

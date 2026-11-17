@@ -101,6 +101,9 @@ def test_upgrade_constraints_downgrade_and_reupgrade():
         with pytest.raises(IntegrityError, match="ck_mcp_runtimes_state"):
             with engine.begin() as conn:
                 conn.execute(text("UPDATE mcp_runtimes SET state = 'bogus'"))
+        with engine.begin() as conn:  # the sweep's transient state is allowed
+            conn.execute(text("UPDATE mcp_runtimes SET state = 'stopping'"))
+            conn.execute(text("UPDATE mcp_runtimes SET state = 'pending'"))
 
         # secrets: header and env rows may share a name; env rows are removed by the downgrade.
         with engine.begin() as conn:

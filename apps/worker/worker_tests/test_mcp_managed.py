@@ -253,7 +253,12 @@ def test_a_running_runtime_is_only_touched(engine):
     assert str(used) != str(NOW - timedelta(minutes=3))
 
 
-def test_concurrent_callers_start_the_runtime_once(engine):
+def test_concurrent_callers_start_the_runtime_once(tmp_path):
+    # a file database: the shared in-memory connection is not safe for callers running in threads
+    engine = create_engine(f"sqlite:///{tmp_path / 'c.db'}", connect_args={"timeout": 30})
+    with engine.begin() as conn:
+        for ddl in DDL:
+            conn.execute(text(ddl))
     fake = FakeRuntime(statuses=["starting", "running"])
     add_managed(engine, "t1", state="stopped")
 
@@ -339,3 +344,157 @@ def test_discovery_and_call_start_a_stopped_server_on_demand(engine):
                                              {"order_id": "7"}, "k", ctx))
         assert result["is_error"] is False
         assert fake.kinds().count("start") == 2 and server.call_count("lookup_order") == 1
+
+
+# --------------------------------------------------------------------------- races (Task 6b)
+
+
+def _last_used(engine, rid):
+    with engine.connect() as c:
+        return c.execute(text("SELECT last_used_at FROM mcp_runtimes WHERE id = :i"), {"i": rid}).scalar()
+
+
+def test_claiming_a_start_refreshes_last_used_so_the_sweep_cannot_take_it_back(engine):
+    fake = FakeRuntime(statuses=["running"])
+    _, rid = add_managed(engine, "t1", state="stopped", used_ago=timedelta(hours=5))
+    asyncio.run(ensure_managed_running(engine, "t1", conn_for(engine, fake), "read_graph", runtime=fake))
+    assert state_of(engine, rid).state == "running"
+    assert asyncio.run(sweep.sweep_runtimes(engine, FakeRuntime(), idle_minutes=30))["stopped"] == 0
+    assert state_of(engine, rid).state == "running"
+
+
+def test_a_runtime_stopped_between_read_and_touch_is_started_again(engine):
+    fake = FakeRuntime(statuses=["running"])
+    _, rid = add_managed(engine, "t1", state="running", used_ago=timedelta(hours=5))
+    conn = conn_for(engine, fake)
+    real = worker_mcp._TOUCH
+    flipped = []
+
+    orig_exec = worker_mcp._exec_returning
+
+    def flip_then_touch(eng, stmt, **params):
+        if stmt is real and not flipped:  # the sweep wins just before the touch
+            flipped.append(1)
+            with eng.begin() as c:
+                c.execute(text("UPDATE mcp_runtimes SET state = 'stopped' WHERE id = :i"), {"i": rid})
+        return orig_exec(eng, stmt, **params)
+
+    worker_mcp._exec_returning, restore = flip_then_touch, orig_exec
+    try:
+        asyncio.run(ensure_managed_running(engine, "t1", conn, "read_graph", runtime=fake))
+    finally:
+        worker_mcp._exec_returning = restore
+    assert fake.kinds().count("start") == 1 and state_of(engine, rid).state == "running"
+
+
+def test_the_sweep_marks_stopping_until_stop_returns(engine):
+    seen = []
+
+    class Slow(FakeRuntime):
+        async def stop(self, handle):
+            seen.append(state_of(engine, rid).state)
+
+    _, rid = add_managed(engine, "t1", state="running", used_ago=timedelta(minutes=99))
+    asyncio.run(sweep.sweep_runtimes(engine, Slow(), now=NOW, idle_minutes=30))
+    assert seen == ["stopping"] and state_of(engine, rid).state == "stopped"
+
+
+def test_a_caller_waits_for_stopping_and_starts_only_after_the_stop(engine):
+    order = []
+
+    class Ordered(FakeRuntime):
+        async def stop(self, handle):
+            order.append("stop")
+            await asyncio.sleep(0.15)
+            order.append("stop-done")
+
+        async def start(self, spec):
+            order.append("start")
+            return await super().start(spec)
+
+    fake = Ordered()
+    _, rid = add_managed(engine, "t1", state="running", used_ago=timedelta(minutes=99))
+
+    async def go():
+        conn = conn_for(engine, fake)
+        sweeping = asyncio.create_task(sweep.sweep_runtimes(engine, fake, now=NOW, idle_minutes=30))
+        await asyncio.sleep(0.05)
+        await ensure_managed_running(engine, "t1", conn, "read_graph", runtime=fake)
+        await sweeping
+
+    asyncio.run(go())
+    assert order == ["stop", "stop-done", "start"] and state_of(engine, rid).state == "running"
+
+
+def test_a_stuck_stopping_row_fails_after_ten_minutes(engine):
+    _, rid = add_managed(engine, "t1", state="stopping", updated_ago=timedelta(minutes=11))
+    asyncio.run(sweep.sweep_runtimes(engine, FakeRuntime(), now=NOW, idle_minutes=30))
+    row = state_of(engine, rid)
+    assert row.state == "failed" and row.last_error == "stop_timed_out"
+
+
+def test_a_stop_failure_leaves_failed_not_stopping(engine):
+    class Broken(FakeRuntime):
+        async def stop(self, handle):
+            raise RuntimeError("x")
+
+    _, rid = add_managed(engine, "t1", state="running", used_ago=timedelta(minutes=99))
+    asyncio.run(sweep.sweep_runtimes(engine, Broken(), now=NOW, idle_minutes=30))
+    assert state_of(engine, rid).state == "failed"
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+def test_non_finite_timeouts_fall_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv("EAP_MCP_START_TIMEOUT_SECONDS", raw)
+    assert worker_mcp.start_timeout_s() == worker_mcp.DEFAULT_START_TIMEOUT_S
+
+
+def test_a_hanging_start_is_bounded_by_the_deadline(engine, monkeypatch):
+    monkeypatch.setenv("EAP_MCP_START_TIMEOUT_SECONDS", "1")
+
+    class Hang(FakeRuntime):
+        async def start(self, spec):
+            await asyncio.sleep(60)
+
+    _, rid = add_managed(engine, "t1", state="stopped")
+    with pytest.raises(McpToolUnavailable) as exc:
+        asyncio.run(asyncio.wait_for(ensure_managed_running(engine, "t1", conn_for(engine, Hang()), "t", runtime=Hang()), 10))
+    assert exc.value.code == "runtime_start_failed" and state_of(engine, rid).state == "failed"
+
+
+def test_a_hanging_status_is_bounded_by_the_deadline(engine, monkeypatch):
+    monkeypatch.setenv("EAP_MCP_START_TIMEOUT_SECONDS", "1")
+
+    class Hang(FakeRuntime):
+        async def status(self, handle):
+            await asyncio.sleep(60)
+
+    _, rid = add_managed(engine, "t1", state="starting")
+    with pytest.raises(McpToolUnavailable) as exc:
+        asyncio.run(asyncio.wait_for(ensure_managed_running(engine, "t1", conn_for(engine, Hang()), "t", runtime=Hang()), 10))
+    assert exc.value.code == "runtime_start_timeout"
+
+
+def test_waiters_exit_when_the_starter_marks_the_row_failed(engine):
+    class Lagging(FakeRuntime):
+        async def status(self, handle):
+            if not self.calls:
+                with engine.begin() as c:
+                    c.execute(text("UPDATE mcp_runtimes SET state = 'failed', last_error = 'start_failed: X'"))
+            self.calls.append(("status", handle))
+            return RuntimeStatus("starting", None)  # type: ignore[arg-type]
+
+    _, rid = add_managed(engine, "t1", state="starting")
+    fake = Lagging()
+    with pytest.raises(McpToolUnavailable) as exc:
+        asyncio.run(ensure_managed_running(engine, "t1", conn_for(engine, fake), "t", runtime=fake))
+    assert exc.value.code == "runtime_failed"
+    assert fake.kinds().count("status") <= 2
+
+
+def test_a_non_managed_row_without_a_url_is_unavailable(engine):
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO mcp_servers (id, tenant_id, name, url, runtime) VALUES ('s1', 't1', 'memory', NULL, 'external')"))
+    with pytest.raises(McpToolUnavailable) as exc:
+        load_servers(engine, "t1", refs())
+    assert exc.value.code == "server_url_missing"
