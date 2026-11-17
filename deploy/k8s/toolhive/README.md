@@ -15,7 +15,7 @@ The managed MCP runtime uses the ToolHive Kubernetes operator only. Nothing in t
 ```bash
 deploy/scripts/toolhive.sh install   --context colima-pydanticos   # idempotent (helm upgrade --install)
 deploy/scripts/toolhive.sh status    --context colima-pydanticos
-deploy/scripts/toolhive.sh uninstall --context colima-pydanticos   # releases, CRDs and the namespace
+deploy/scripts/toolhive.sh uninstall --yes --context colima-pydanticos   # releases, CRDs and the namespace
 ```
 
 `--context` defaults to `colima-pydanticos`. On macOS the script installs helm with Homebrew when it is missing;

@@ -13,12 +13,14 @@ PROBE_CRD=mcpservers.toolhive.stacklok.dev
 DEFAULT_CONTEXT=colima-pydanticos
 
 usage() {
-  printf 'Usage: %s {install|status|uninstall} [--context KUBE_CONTEXT]\n' "$0" >&2
+  printf 'Usage: %s {install|status|uninstall} [--context KUBE_CONTEXT] [--yes]\n' "$0" >&2
+  printf 'uninstall deletes every MCPServer resource and needs --yes.\n' >&2
   printf 'Default context: %s. ToolHive chart version: %s.\n' "$DEFAULT_CONTEXT" "$TOOLHIVE_VERSION" >&2
 }
 
 command_name=""
 context=$DEFAULT_CONTEXT
+assume_yes=0
 while (($#)); do
   case "$1" in
     install | status | uninstall)
@@ -30,6 +32,10 @@ while (($#)); do
       [[ $# -ge 2 && -n "$2" ]] || { usage; exit 64; }
       context=$2
       shift 2
+      ;;
+    --yes)
+      assume_yes=1
+      shift
       ;;
     -h | --help)
       usage
@@ -58,13 +64,21 @@ require_kubectl() {
   command -v kubectl >/dev/null 2>&1 || { printf 'Required command not found: kubectl\n' >&2; exit 127; }
 }
 
+require_helm() {
+  command -v helm >/dev/null 2>&1 || { printf 'Required command not found: helm (install it, or run "install" which can add it with Homebrew).\n' >&2; exit 127; }
+}
+
+require_reachable() {
+  kc cluster-info >/dev/null 2>&1 || { printf 'Cluster %s is not reachable. Start it first (colima start pydanticos).\n' "$context" >&2; exit 1; }
+}
+
 kc() { kubectl --context "$context" "$@"; }
 hm() { helm --kube-context "$context" "$@"; }
 
 do_install() {
   require_kubectl
   ensure_helm
-  kc cluster-info >/dev/null 2>&1 || { printf 'Cluster %s is not reachable. Start it first (colima start pydanticos).\n' "$context" >&2; exit 1; }
+  require_reachable
   hm upgrade --install "$CRDS_RELEASE" "$CRDS_CHART" --version "$TOOLHIVE_VERSION" \
     --namespace "$TOOLHIVE_NAMESPACE" --create-namespace --wait --timeout 5m
   hm upgrade --install "$OPERATOR_RELEASE" "$OPERATOR_CHART" --version "$TOOLHIVE_VERSION" \
@@ -77,21 +91,29 @@ do_install() {
 
 do_status() {
   require_kubectl
-  ensure_helm
-  hm list --namespace "$TOOLHIVE_NAMESPACE" || true
+  require_helm
+  require_reachable
+  hm list --namespace "$TOOLHIVE_NAMESPACE"
   kc get crd "$PROBE_CRD" || { printf 'CRD %s is missing.\n' "$PROBE_CRD" >&2; exit 1; }
   kc -n "$TOOLHIVE_NAMESPACE" get pods
 }
 
 do_uninstall() {
   require_kubectl
-  ensure_helm
-  hm uninstall "$OPERATOR_RELEASE" --namespace "$TOOLHIVE_NAMESPACE" --ignore-not-found --wait || true
-  hm uninstall "$CRDS_RELEASE" --namespace "$TOOLHIVE_NAMESPACE" --ignore-not-found --wait || true
+  require_helm
+  require_reachable
+  if ((!assume_yes)); then
+    printf 'uninstall removes the operator, its CRDs and every MCPServer resource on %s. Rerun with --yes to proceed.\n' "$context" >&2
+    exit 64
+  fi
+  hm uninstall "$OPERATOR_RELEASE" --namespace "$TOOLHIVE_NAMESPACE" --ignore-not-found --wait
+  hm uninstall "$CRDS_RELEASE" --namespace "$TOOLHIVE_NAMESPACE" --ignore-not-found --wait
   # helm keeps CRDs it did not template; remove the ToolHive ones explicitly.
   local crd
   while IFS= read -r crd; do
-    [[ "$crd" == *.toolhive.stacklok.dev ]] && kc delete "$crd" --ignore-not-found
+    if [[ "$crd" == *.toolhive.stacklok.dev ]]; then
+      kc delete "$crd" --ignore-not-found
+    fi
   done < <(kc get crd -o name 2>/dev/null || true)
   kc delete namespace "$TOOLHIVE_NAMESPACE" --ignore-not-found
 }
