@@ -374,7 +374,7 @@ kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
     -e "s|192.168.5.2|${host_gateway}|g" \
     -e "s|@@API_SERVICE_CIDR@@|${api_service_ip}/32|g" \
     -e "s|@@API_ENDPOINT_CIDR@@|${api_endpoint_ip}/32|g" \
-    -e "s|{protocol: TCP, port: 6443}|{protocol: TCP, port: ${api_endpoint_port}}|g" \
+    -e "s|port: 6443$|port: ${api_endpoint_port}|g" \
     -e "s|EAP_MCP_API_SERVER_PORTS: 443,6443|EAP_MCP_API_SERVER_PORTS: 443,${api_endpoint_port}|g" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
