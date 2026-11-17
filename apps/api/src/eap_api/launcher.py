@@ -57,6 +57,10 @@ LEGACY_KB_INGEST_QUEUE_NAME = "eap-kb-ingest"
 # DBOS stores workflow inputs again in its system database. AC.11 may read `runs.input` by run id
 # instead and ignore `input_json`; the argument stays so the hand-off shape matches the plan.
 EVAL_WORKFLOW_NAME = "eap.eval_run"
+# Knowledge-base source syncs (kb source sync, Task 4): `eap.kb_source_sync(run_id, tenant_id, source_id,
+# request_json)` on the agent-run queue, workflow_id = run_id; `request_json` is the canonical JSON of
+# `{mode, part_numbers}` (eap_run_store.kb_source_launch.launch_sync is the one caller).
+KB_SOURCE_SYNC_WORKFLOW_NAME = "eap.kb_source_sync"
 # Score on demand (parity round 2): `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)` on the agent-run queue;
 # its workflow id is `score:{run_id}:{random}` (a run can be scored any number of times, and its own
 # workflow id is the run id).
@@ -138,6 +142,16 @@ class RunLauncher(Protocol):
         run_id: UUID,
         tenant_id: str,
         input_json: str,
+        traceparent: str | None = None,
+    ) -> None: ...
+
+    def launch_kb_source_sync(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        source_id: str,
+        request_json: str,
         traceparent: str | None = None,
     ) -> None: ...
 
@@ -244,6 +258,19 @@ class DBOSRunLauncher:
         EVAL_WORKFLOW_NAME)."""
         options = self._options(EVAL_WORKFLOW_NAME, run_id, traceparent)
         self._get_client().enqueue(options, str(run_id), tenant_id, input_json)
+
+    def launch_kb_source_sync(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        source_id: str,
+        request_json: str,
+        traceparent: str | None = None,
+    ) -> None:
+        """Enqueue `eap.kb_source_sync(run_id, tenant_id, source_id, request_json)`, workflow_id = run_id."""
+        options = self._options(KB_SOURCE_SYNC_WORKFLOW_NAME, run_id, traceparent)
+        self._get_client().enqueue(options, str(run_id), tenant_id, str(source_id), request_json)
 
     def launch_score(self, *, run_id: UUID, tenant_id: str, scorer_ids: list[str]) -> None:
         """Enqueue `eap.score_run_on_demand(run_id, tenant_id, scorer_ids)`: the worker scores the finished run with
