@@ -116,9 +116,13 @@ class WorkerRuntime:
     def allowed_tools_for(self, *, builtin: bool) -> frozenset[str]:
         """The tools one run may use. The Architect's `architect.*` tools belong to built-in agent
         rows only: for any other agent they are removed here, so a spec that lists one fails the
-        run's tool check (ToolNotAllowedError) before the model is called."""
+        run's tool check (ToolNotAllowedError) before the model is called. For a built-in agent they
+        are always allowed: they are platform management tools the seed grants, not tenant-chosen
+        tools, so the deployment's EAP_ALLOWED_TOOLS allowlist (which names tenant-grantable tools)
+        does not have to list them."""
         if builtin:
-            return self.allowed_tools
+            architect = frozenset(t for t in self.registry.tool_ids() if t.startswith(ARCHITECT_TOOL_PREFIX))
+            return self.allowed_tools | architect
         return frozenset(t for t in self.allowed_tools if not t.startswith(ARCHITECT_TOOL_PREFIX))
 
     def agent_is_builtin(self, tenant_id: str, agent_id: str) -> bool:

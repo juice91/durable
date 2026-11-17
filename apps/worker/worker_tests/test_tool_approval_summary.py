@@ -49,8 +49,20 @@ def test_waiting_payload_has_no_summary_without_a_summariser(worker, client, ten
 
 def test_allowed_tools_for_hides_architect_tools_from_non_builtin_agents(worker, monkeypatch):
     monkeypatch.setitem(worker.__dict__, "allowed_tools", frozenset({"clock.now", "architect.save_agent"}))
+    architect = {t for t in worker.registry.tool_ids() if t.startswith("architect.")}
     assert worker.allowed_tools_for(builtin=False) == frozenset({"clock.now"})
-    assert worker.allowed_tools_for(builtin=True) == frozenset({"clock.now", "architect.save_agent"})
+    assert worker.allowed_tools_for(builtin=True) == frozenset({"clock.now", "architect.save_agent"}) | architect
+
+
+def test_builtin_agents_keep_architect_tools_under_a_deployment_allowlist(worker, monkeypatch):
+    """EAP_ALLOWED_TOOLS names tenant-grantable tools (a deployment may allow only ticket.create); the
+    seed's platform tools for the built-in Architect must not be cut by it, or every Architect run fails
+    with tool_not_allowed before the model is called (deploy-host, 2026-11-17)."""
+    monkeypatch.setitem(worker.__dict__, "allowed_tools", frozenset({"ticket.create"}))
+    architect = {t for t in worker.registry.tool_ids() if t.startswith("architect.")}
+    assert architect, "the registry registers the Architect's tools"
+    assert worker.allowed_tools_for(builtin=True) == frozenset({"ticket.create"}) | architect
+    assert worker.allowed_tools_for(builtin=False) == frozenset({"ticket.create"})
 
 
 @pytest.mark.parametrize("builtin", [False, True])
