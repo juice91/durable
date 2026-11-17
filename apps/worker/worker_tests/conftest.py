@@ -29,6 +29,8 @@ MODEL_PRICES_TEST_FILE = os.path.join(
 os.environ.setdefault("EAP_MODEL_PRICES_FILE", os.path.abspath(MODEL_PRICES_TEST_FILE))
 # The in-process worker must never schedule the hourly registry mirror (it would reach the real registry).
 os.environ.setdefault("EAP_MCP_CATALOG_SCHEDULE", "off")
+# ... nor sweep managed MCP runtimes (it would build the operator adapter and look for a cluster).
+os.environ.setdefault("EAP_MCP_RUNTIME_SWEEP_SCHEDULE", "off")
 
 
 def new_schema(prefix: str) -> str:
