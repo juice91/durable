@@ -545,6 +545,9 @@ def reject_step(
 # --------------------------------------------------------------------------- cancel (loops D12)
 
 CANCEL_NOT_SUPPORTED = "cancel_not_supported"
+# Run kinds the cancel route accepts: a workflow run, and a knowledge-base source sync run (a DBOS workflow
+# that watches the same `cancel_requested` event between its steps).
+CANCELLABLE_KINDS = ("workflow", "kb_source_sync")
 CANCEL_NOT_SUPPORTED_DETAIL = "only workflow runs can be cancelled"
 ALREADY_ENDED_DETAIL = "the run has already ended"
 CANCEL_PENDING_DETAIL = (
@@ -598,7 +601,8 @@ def cancel_run(
     run = run_store.get_run(tenant_id, run_id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    if run.get("kind") != "workflow":
+    kind = run.get("kind")
+    if kind not in CANCELLABLE_KINDS:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={"detail": CANCEL_NOT_SUPPORTED_DETAIL, "code": CANCEL_NOT_SUPPORTED},
@@ -627,7 +631,7 @@ def cancel_run(
         status_code=status.HTTP_202_ACCEPTED,
         content=RunCancelResponse(
             run_id=str(run_id),
-            kind="workflow",
+            kind=kind,
             status=result.status or current["status"],
             display_status=current["display_status"],
             error_code=error_code,

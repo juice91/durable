@@ -836,7 +836,7 @@ class RunCancelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
-    kind: Literal["workflow"]
+    kind: Literal["workflow", "kb_source_sync"]
     status: str
     display_status: str
     error_code: str | None

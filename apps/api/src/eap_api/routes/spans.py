@@ -50,7 +50,7 @@ def list_spans(
     span_kind: Annotated[Literal[*SPAN_KINDS] | None, Query()] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
-    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     created_from: Annotated[datetime | None, Query(alias="from")] = None,

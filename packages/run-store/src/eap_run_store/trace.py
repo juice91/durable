@@ -1626,6 +1626,8 @@ def answering_model_id(requests: dict[str, dict[str, Any]]) -> str | None:
 def _run_name(run: dict[str, Any]) -> str:
     if run["kind"] == "kb_ingest":
         return f"knowledge base {run.get('knowledge_base_id')} ingest"
+    if run["kind"] == "kb_source_sync":
+        return f"knowledge base {run.get('knowledge_base_id')} source sync"
     if run["kind"] == "tool":
         return f"tool {run.get('tool_id')}"
     if run["kind"] == "workflow":

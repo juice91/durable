@@ -102,7 +102,7 @@ def metrics_query(
     agent_id: uuid.UUID | None = None,
     model: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     provider: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    kind: Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None = None,
+    kind: Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None = None,
     operation: Literal["chat", "moderation", "observer", "reflector", "embedding", "judge", "memory"] | None = None,
 ) -> MetricsQuery:
     try:
