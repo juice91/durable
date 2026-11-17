@@ -4,6 +4,7 @@ import React from "react";
 import { Plus } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/DropdownMenu";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { CreatedItem } from "@/lib/architect";
@@ -13,7 +14,8 @@ export interface CreatedListProps {
   workflows: readonly CreatedItem[];
   /** The agent slug open in the form, if any. */
   selectedAgentId: string | null;
-  onNewAgent: () => void;
+  /** "New" was chosen: start a fresh agent form or a fresh workflow form. */
+  onNew: (kind: "agent" | "workflow") => void;
   onSelectAgent: (item: CreatedItem) => void;
 }
 
@@ -39,14 +41,22 @@ function Row({ item, selected, onSelect }: { item: CreatedItem; selected: boolea
   );
 }
 
-/** The left column: "+ New agent", then what the Architect page created, each as `id · vN`. */
-export function CreatedList({ agents, workflows, selectedAgentId, onNewAgent, onSelectAgent }: CreatedListProps) {
+/** The left column: "+ New" (an agent or a workflow), then what the Architect page created, each as `id · vN`. */
+export function CreatedList({ agents, workflows, selectedAgentId, onNew, onSelectAgent }: CreatedListProps) {
   return (
     <div data-testid="architect-created" className="flex min-w-0 flex-col gap-4">
-      <Button variant="primary" onClick={onNewAgent} data-testid="architect-new-agent">
-        <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-        New agent
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="primary" data-testid="architect-new">
+            <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+            New
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem data-testid="architect-new-agent" onSelect={() => onNew("agent")}>Agent</DropdownMenuItem>
+          <DropdownMenuItem data-testid="architect-new-workflow" onSelect={() => onNew("workflow")}>Workflow</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <section aria-labelledby="architect-created-agents" className="min-w-0">
         <h2 id="architect-created-agents" className="mb-1 px-2 text-caption font-medium uppercase tracking-wide text-muted-foreground">Agents</h2>
         {agents.length === 0 ? (

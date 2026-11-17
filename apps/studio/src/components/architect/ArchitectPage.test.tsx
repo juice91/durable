@@ -167,6 +167,26 @@ describe("Architect page", () => {
     expect(screen.getByRole("button", { name: "Save and go live" })).toBeEnabled();
   });
 
+  test("New offers an agent or a workflow; Workflow opens a fresh Workflow tab, Agent returns to the form", async () => {
+    mount({ "GET /architect": SEEDED_STATE });
+    const pick = async (item: string) => {
+      await act(async () => {
+        fireEvent.keyDown(screen.getByTestId("architect-new"), { key: "Enter" });
+      });
+      const menu = await screen.findByRole("menu");
+      await act(async () => {
+        fireEvent.click(within(menu).getByRole("menuitem", { name: item }));
+      });
+    };
+    await screen.findByTestId("architect-new");
+    await pick("Workflow");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Workflow" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByRole("tab", { name: "Form" })).toHaveAttribute("aria-selected", "false");
+    await pick("Agent");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Form" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByLabelText("Name")).toHaveValue("");
+  });
+
   test("a stale version (409) is readable and offers to reload", async () => {
     mount({
       "GET /architect": SEEDED_STATE,
