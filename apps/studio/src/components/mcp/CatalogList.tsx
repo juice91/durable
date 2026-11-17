@@ -29,10 +29,12 @@ interface CatalogListProps {
   onOpen: (entry: CatalogEntry) => void;
   /** Search debounce; tests shorten it. */
   debounceMs?: number;
+  /** Focus the search box on mount (the Catalog tab, reached from "Add server"). */
+  autoFocusSearch?: boolean;
 }
 
 /** The searchable catalog: one row per entry, Load more by cursor. */
-export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
+export function CatalogList({ onOpen, debounceMs = 300, autoFocusSearch = false }: CatalogListProps) {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<SourceFilter>("toolhive");
   const [items, setItems] = useState<CatalogEntry[]>([]);
@@ -106,6 +108,7 @@ export function CatalogList({ onOpen, debounceMs = 300 }: CatalogListProps) {
       </select>
       <input
         type="search"
+        autoFocus={autoFocusSearch}
         aria-label="Search the catalog"
         placeholder="Search servers by name or description"
         value={query}

@@ -1,7 +1,9 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { ChevronDown, Plus } from "lucide-react";
 import { McpDeleteConfirm } from "@/components/mcp/McpDeleteConfirm";
 import { McpLastTest } from "@/components/mcp/McpLastTest";
 import { McpSectionTabs } from "@/components/mcp/McpSectionTabs";
@@ -11,6 +13,7 @@ import { describeUsage, usageCountLabel, useMcpUsage } from "@/components/mcp/mc
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/DropdownMenu";
 import { Kbd } from "@/components/ui/Kbd";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
@@ -48,6 +51,8 @@ export default function McpServersPage() {
   const [confirmDelete, setConfirmDelete] = useState<McpServer | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const router = useRouter();
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const usage = useMcpUsage();
   // The server whose delete dialog is open right now (state is stale inside async callbacks).
   const openDeleteId = useRef<string | null>(null);
@@ -72,7 +77,9 @@ export default function McpServersPage() {
 
   const openCreate = useCallback(() => setForm({ mode: "create" }), []);
   // `c` goes through the global shortcut provider (one listener, one guard), only while no dialog is open.
-  useCreateAction(form === null && confirmDelete === null ? openCreate : null);
+  const openAddMenu = useCallback(() => setAddMenuOpen(true), []);
+  useCreateAction(form === null && confirmDelete === null ? openAddMenu : null);
+  const openCatalog = useCallback(() => router.push(routes.mcpBrowse()), [router]);
 
   const replaceServer = (server: McpServer) =>
     setServers((current) => {
@@ -271,11 +278,20 @@ export default function McpServersPage() {
         titleRef={headingRef}
         titleProps={{ tabIndex: -1, className: "focus:outline-none" }}
         actions={
-          <Button variant="primary" onClick={openCreate} aria-keyshortcuts="c" data-testid="mcp-add-server">
-            <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-            Add server
-            <Kbd className="hidden md:inline-flex">C</Kbd>
-          </Button>
+          <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="primary" aria-keyshortcuts="c" data-testid="mcp-add-server">
+                <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                Add server
+                <ChevronDown strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                <Kbd className="hidden md:inline-flex">C</Kbd>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={openCatalog}>From the catalog</DropdownMenuItem>
+              <DropdownMenuItem onSelect={openCreate}>Remote server by URL</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         }
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
@@ -303,9 +319,13 @@ export default function McpServersPage() {
           error={error}
           onRetry={() => void load()}
           empty={{
-            title: "No MCP servers yet",
-            description: "Register a remote server over Streamable HTTP to make its tools available to agents.",
-            action: <Button variant="primary" onClick={openCreate}>Add server</Button>,
+            title: "No servers yet. Install one from the Catalog or register a remote server.",
+            action: (
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button variant="primary" asChild><Link href={routes.mcpBrowse()}>Install from the Catalog</Link></Button>
+                <Button onClick={openCreate}>Register a remote server</Button>
+              </div>
+            ),
           }}
         />
       </div>
