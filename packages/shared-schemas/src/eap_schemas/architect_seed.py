@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -304,15 +305,58 @@ def is_thinking_model(name: str) -> bool:
     return "thinking" in lowered or "reason" in lowered
 
 
+_PROVIDER_RANK = {"anthropic": 0, "openai": 1}
+_STRUCTURED_FAMILIES = re.compile(
+    r"^(claude|gpt-4|gpt-5|o3|o4|qwen3|deepseek-v3|gemini-2|mistral-large|llama-3\.3|llama-4)"
+)
+# Models that are not text chat models (or are tuned away from tool schemas): embeddings, rerankers,
+# speech, coder and medical tunes, vision-only ("-vl-") models.
+_UNSUITABLE = re.compile(r"embed|rerank|whisper|tts|coder|(?<![a-z])med(?![a-z])|medgemma|(?<![a-z0-9])vl(?![a-z0-9])")
+_QUANTISED = re.compile(r"(?<![a-z0-9])(?:[248]bit|q[2-8](?:_[a-z0-9_]+)?|gguf|mlx)(?![a-z0-9])")
+
+
+def _tokens_lower(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _seed_rank(name: str, index: int) -> tuple[int, ...]:
+    lowered = name.lower()
+    spaced = _tokens_lower(name)
+    return (
+        1 if _UNSUITABLE.search(spaced) else 0,
+        1 if _QUANTISED.search(spaced) else 0,
+        0 if _STRUCTURED_FAMILIES.match(lowered) else 1,
+        1 if is_thinking_model(name) else 0,
+        index,
+    )
+
+
 def pick_seed_model(provider_models: Sequence[tuple[str, Sequence[str]]], fallback: Sequence[str]) -> str | None:
-    """The model of a tenant's built-in agents: the first non-thinking model of the first provider that
-    lists models (provider order, `provider_models` holds only providers with status ok), else that
-    provider's first model; with no such provider the first of `fallback` (the ids the allowlist names);
-    None when there is no model at all."""
+    """The model of a tenant's built-in agents, chosen by ranking every candidate
+    (`provider_models` holds only providers with status ok; names the allowlist already filtered).
+
+    A candidate's sort key, most significant first (ties keep listing order):
+    1. unsuitable names last: embedding, embed, rerank, whisper, tts, coder, med/medgemma and "-vl-"
+       (vision-language) markers; this comes before the provider so a direct provider's embedding model
+       never beats the gateway's chat model;
+    2. quantised names (4bit, 8bit, 2bit, q4, q8 and kin, gguf, mlx) below unquantised siblings;
+    3. provider: anthropic, then openai, then litellm and the rest (a direct provider's models are known
+       to follow tool schemas);
+    4. families known to do structured output well (claude*, gpt-4*, gpt-5*, o3*, o4*, qwen3*,
+       deepseek-v3*, gemini-2*, mistral-large*, llama-3.3*, llama-4*) before other names;
+    5. thinking/reasoning models last (see `is_thinking_model`), so a known-family thinking model still
+       beats an unknown name but loses to a non-thinking sibling of a known family.
+    When no provider lists a model the first of `fallback` (the ids the allowlist names) is used; None
+    when there is no model at all."""
+    ranked: list[tuple[tuple[int, ...], str]] = []
+    index = 0
     for provider, names in provider_models:
-        if names:
-            chosen = next((n for n in names if not is_thinking_model(n)), names[0])
-            return f"{provider}:{chosen}"
+        for name in names:
+            rank = _seed_rank(name, index)
+            ranked.append(((rank[0], rank[1], _PROVIDER_RANK.get(provider, 2), *rank[2:]), f"{provider}:{name}"))
+            index += 1
+    if ranked:
+        return min(ranked, key=lambda item: item[0])[1]
     return fallback[0] if fallback else None
 
 

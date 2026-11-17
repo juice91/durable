@@ -1,5 +1,6 @@
 """The Architect: seed, options, draft and page save (Task 5 of the Architect milestone).
 
+- PUT  /architect/model      set the model of the three built-in agents and publish them.
 - POST /architect            seed the tenant's three built-in agents (idempotent): 201 when it made one, else 200.
 - GET  /architect            seed state plus the agents and workflows the Architect made.
 - GET  /architect/options    the allowlist the page's pickers show (what a created agent may use).
@@ -98,6 +99,7 @@ DRAFT_TIMEOUT_S = 60.0
 DRAFT_POLL_S = 0.2
 MCP_DISCOVERY_TIMEOUT_S = 12.0
 PAGE_MARKER = "architect-page"
+BUILTIN_SLUGS = (ARCHITECT_SLUG, DRAFTER_SLUG, WORKFLOW_DRAFTER_SLUG)
 MAX_DESCRIPTION_CHARS = 8000
 MAX_RAW_CHARS = 8000
 
@@ -118,9 +120,9 @@ def _providers() -> list[dict[str, Any]]:
 
 
 def seed_model() -> str | None:
-    """The model of the built-in agents (see eap_schemas.architect_seed.pick_seed_model): the first
-    non-thinking model of the first provider with status ok and models the platform allowlist permits,
-    else that provider's first model, else the first concrete model the allowlist names. The platform
+    """The model of the built-in agents: the best-ranked model of the providers with status ok that the
+    platform allowlist permits (ranking: eap_schemas.architect_seed.pick_seed_model), else the first
+    concrete model the allowlist names. The platform
     has no per-tenant default model, so there is no tenant setting to consult first."""
     policy = ModelPolicy.from_env()
     provider_models = []
@@ -223,6 +225,49 @@ def seed(request: Request, principal: PrincipalDep) -> JSONResponse:
     409 `{detail, code: "choose_model", providers}` when no model is available."""
     body, created = ensure_seed(request.app.state.database_engine, principal.tenant_id, principal.user_id)
     return JSONResponse(content=body, status_code=201 if created else 200)
+
+
+class ModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=3, max_length=200, pattern=r"^[^:\s]+:\S+$")  # "provider:name"
+
+
+@router.put(
+    "/model",
+    responses={404: {"description": "not_seeded"}, 422: {"description": "model_not_allowed"}},
+)
+def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> JSONResponse:
+    """Set the model of the tenant's three built-in agents (architect, architect-drafter,
+    architect-workflow-drafter): each row's draft gets the new model (nothing else in the draft changes,
+    hand-edited instructions stay) and is published as the signed-in user (`created_via`
+    "architect-page"), in one transaction. A row whose draft already equals its latest version after the
+    change publishes nothing. 200 `{model, agent_ids: [..]}`; 404 `not_seeded`; 422 `model_not_allowed`
+    when the platform allowlist or provider discovery does not list the model."""
+    model_id = body.model
+    if model_id not in {i["id"] for i in model_items(ModelPolicy.from_env()) if not i["wildcard"]}:
+        raise refuse(422, f"The model {model_id!r} is not available.", code="model_not_allowed")
+    provider, _, name = model_id.partition(":")
+    tenant_id = principal.tenant_id
+    engine: Engine = request.app.state.database_engine
+    ids: list[str] = []
+    with engine.begin() as conn:
+        rows = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in BUILTIN_SLUGS]
+        if any(r is None for r in rows):
+            raise refuse(404, "The Architect is not set up yet.", code="not_seeded")
+        for row in rows:
+            locked = definitions.lock_agent(conn, tenant_id, str(row.id))
+            spec = dict(locked.draft_spec or {})
+            spec["model"] = {**(spec.get("model") or {}), "provider": provider, "name": name}
+            conn.execute(
+                text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
+                {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
+            )
+            latest = definitions.latest_agent_version(conn, str(row.id))
+            if latest is None or draft_hash(spec) != latest.spec_hash:
+                definitions.publish_agent(conn, tenant_id, str(row.id), created_by=principal.user_id, created_via=PAGE_MARKER)
+            ids.append(str(row.id))
+    return JSONResponse(content={"model": model_id, "agent_ids": ids})
 
 
 # ---------------------------------------------------------------------------------- state lists

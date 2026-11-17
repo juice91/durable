@@ -261,6 +261,20 @@ describe("WorkflowForm", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("Weekly report");
   });
 
+  it("an invalid or failed workflow drafter answer is the readable drafter alert with the raw answer collapsed", async () => {
+    responder = () => json(422, { detail: "The drafter's answer is not a valid workflow definition.", code: "draft_invalid", raw: "not json at all", problems: ["steps: too short"] });
+    form({ initial: { spec, version: 1 } });
+    fireEvent.change(screen.getByLabelText("Describe the workflow"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "Fill in the form" }));
+    const alert = await screen.findByTestId("architect-drafter-failure");
+    expect(alert).toHaveTextContent("The drafter's model did not produce the form. Choose another model.");
+    expect((alert.querySelector("details") as HTMLDetailsElement).open).toBe(false);
+    expect(alert.querySelector("details")).toHaveTextContent("not json at all");
+    responder = () => json(502, { detail: "The drafter run did not finish.", code: "draft_failed", run_id: "r", error: "boom" });
+    fireEvent.click(screen.getByRole("button", { name: "Fill in the form" }));
+    await waitFor(() => expect(screen.getByTestId("architect-drafter-failure").querySelector("details")).toHaveTextContent("boom"));
+  });
+
   it("will not save without a name or a step", async () => {
     form();
     fireEvent.click(screen.getByRole("button", { name: "Save draft" }));

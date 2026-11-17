@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -10,6 +10,7 @@ import {
   ArchitectError,
   getArchitect,
   getArchitectOptions,
+  setArchitectModel,
   seedArchitect,
   storedSpecToArchitect,
   type ArchitectOptions,
@@ -19,6 +20,7 @@ import {
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { ArchitectChat } from "./ArchitectChat";
+import { ArchitectModelProvider, ModelPicker } from "./ArchitectModel";
 import { ArchitectForm, type ArchitectFormSource } from "./ArchitectForm";
 import { CreatedList } from "./CreatedList";
 import { WorkflowTab } from "./WorkflowTab";
@@ -104,6 +106,11 @@ export function ArchitectPage() {
   }, []);
 
   const state = load.kind === "ready" ? load.state : null;
+  const changeModel = useCallback(async (model: string) => {
+    await setArchitectModel(model);
+    await refresh();
+  }, [refresh]);
+  const modelValue = useMemo(() => ({ model: state?.model ?? null, options, change: changeModel }), [state?.model, options, changeModel]);
 
   return (
     <>
@@ -124,6 +131,11 @@ export function ArchitectPage() {
             <button type="button" className="underline underline-offset-4" onClick={() => void refresh()}>Try again</button>
           </div>
         ) : state ? (
+          <ArchitectModelProvider value={modelValue}>
+          <div data-testid="architect-model" className="flex flex-wrap items-center gap-2 text-label text-muted-foreground">
+            <span>Model: <span className="font-mono text-foreground">{state.model ?? "none"}</span></span>
+            <ModelPicker label="Change model" />
+          </div>
           <div className="grid min-w-0 gap-6 md:grid-cols-[16rem_minmax(0,1fr)]">
             <aside aria-label="Created by the Architect">
               <CreatedList agents={state.agents} workflows={state.workflows} selectedAgentId={selected?.id ?? null} onNew={startNew} onSelectAgent={(item) => void openAgent(item)} />
@@ -154,6 +166,7 @@ export function ArchitectPage() {
               </Tabs>
             </div>
           </div>
+          </ArchitectModelProvider>
         ) : null}
       </div>
     </>

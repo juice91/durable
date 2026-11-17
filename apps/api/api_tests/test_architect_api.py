@@ -206,8 +206,8 @@ def test_seed_model_choice():
     assert pick_seed_model([("litellm", ["a-reasoner", "b-thinking"])], ["test:echo"]) == "litellm:a-reasoner"
     assert pick_seed_model([], ["test:echo", "test:history"]) == "test:echo"
     assert pick_seed_model([], []) is None
-    # only the first provider with models counts
-    assert pick_seed_model([("litellm", ["m-thinking"]), ("openai", ["gpt-5"])], []) == "litellm:m-thinking"
+    # a direct provider outranks the gateway even when the gateway is listed first
+    assert pick_seed_model([("litellm", ["m-thinking"]), ("openai", ["gpt-5"])], []) == "openai:gpt-5"
 
 
 # ---------------------------------------------------------------------------------------- options
@@ -595,3 +595,61 @@ def test_workflow_drafter_slug_is_not_editable_through_the_page(api):
     wf = {"name": "X", "id": "architect-workflow-drafter", "steps": [{"kind": "agent", "id": "a", "agent": "greeter", "prompt": "{{input}}"}]}
     r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
     assert r.status_code == 422 and r.json()["code"] == "reserved_id"
+
+
+# ----------------------------------------------------------------------------------------- model
+
+
+def _versions(app, tenant: str, slug: str) -> list[tuple[int, str | None, str | None, str]]:
+    with app.state.database_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT v.version, v.created_by, v.created_via, v.spec->'model'->>'name' FROM agent_versions v"
+                 " JOIN agents a ON a.id = v.agent_id WHERE a.tenant_id = :t AND a.slug = :s ORDER BY v.version"),
+            {"t": tenant, "s": slug},
+        ).all()
+    return [tuple(r) for r in rows]
+
+
+BUILTIN_SLUGS = ("architect", "architect-drafter", "architect-workflow-drafter")
+
+
+def test_put_model_sets_and_publishes_the_three_builtin_rows(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of("alice")
+    body = seed(client, h)
+    spec = agent_row(app, tenant, "architect")["draft_spec"]
+    spec = {**spec, "instructions": "My own rules."}
+    assert client.patch(f"{API}/agents/{body['architect_agent_id']}", json={"spec": spec}, headers=h).status_code == 200
+    r = client.put(f"{API}/architect/model", json={"model": "test:history"}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "test:history"
+    for slug in BUILTIN_SLUGS:
+        row = agent_row(app, tenant, slug)
+        assert row["draft_spec"]["model"]["provider"] == "test" and row["draft_spec"]["model"]["name"] == "history"
+        last = _versions(app, tenant, slug)[-1]
+        assert last[1:] == ("alice", "architect-page", "history")
+    assert agent_row(app, tenant, "architect")["draft_spec"]["instructions"] == "My own rules."  # only the model changed
+    assert client.get(f"{API}/architect", headers=h).json()["model"] == "test:history"
+    # the same model again changes nothing and publishes nothing
+    before = [len(_versions(app, tenant, s)) for s in BUILTIN_SLUGS]
+    assert client.put(f"{API}/architect/model", json={"model": "test:history"}, headers=h).status_code == 200
+    assert [len(_versions(app, tenant, s)) for s in BUILTIN_SLUGS] == before
+
+
+def test_put_model_refuses_a_model_the_policy_does_not_list(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    before = agent_row(app, tenant, "architect")["draft_spec"]["model"]
+    r = client.put(f"{API}/architect/model", json={"model": "litellm:no-such-model"}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "model_not_allowed"
+    r = client.put(f"{API}/architect/model", json={"model": "nocolon"}, headers=h)
+    assert r.status_code == 422
+    assert agent_row(app, tenant, "architect")["draft_spec"]["model"] == before
+
+
+def test_put_model_before_the_seed_is_404(api):
+    client, _app, _, tenant_of = api
+    _t, h = tenant_of()
+    r = client.put(f"{API}/architect/model", json={"model": "test:echo"}, headers=h)
+    assert r.status_code == 404 and r.json()["code"] == "not_seeded"

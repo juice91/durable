@@ -84,7 +84,7 @@ export class ArchitectError extends ApiError {
   }
 }
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function call<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
   const response = await fetch(`${BASE_URL}/api/v1/architect${path ? `/${path}` : ""}`, {
     method,
     headers: { "Content-Type": "application/json", ...apiHeaders() },
@@ -111,6 +111,8 @@ export const getArchitect = () => call<ArchitectState>("GET", "");
 export const getArchitectOptions = () => call<ArchitectOptions>("GET", "options");
 /** Idempotent. Rejects with code `choose_model` when no model is available. */
 export const seedArchitect = () => call<{ architect_agent_id: string; drafter_agent_id: string; model: string }>("POST", "");
+/** Sets the model of the three built-in agents (published as a new version). 422 `model_not_allowed`. */
+export const setArchitectModel = (model: string) => call<{ model: string; agent_ids: string[] }>("PUT", "model", { model });
 export const draftAgent = (description: string, current?: ArchitectAgentSpec) =>
   call<DraftResult>("POST", "draft", current ? { description, current } : { description });
 export const saveAgent = (spec: ArchitectAgentSpec, options: { publish: boolean; expectedVersion?: number | null }) =>
@@ -203,5 +205,15 @@ export function storedSpecToArchitect(stored: Record<string, unknown>, slug: str
     ...(settings && (settings.temperature != null || settings.max_tokens != null)
       ? { model_settings: { ...(settings.temperature != null ? { temperature: settings.temperature } : {}), ...(settings.max_tokens != null ? { max_tokens: settings.max_tokens } : {}) } }
       : {}),
+  };
+}
+
+/** The drafter answered with something that is not a form (422 draft_invalid) or its run failed (502 draft_failed). */
+export function drafterFailure(reason: unknown): { answer: string | null; problems: string[] } | null {
+  if (!(reason instanceof ArchitectError) || (reason.code !== "draft_invalid" && reason.code !== "draft_failed")) return null;
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : null);
+  return {
+    answer: text(reason.extra.raw) ?? text(reason.extra.error),
+    problems: Array.isArray(reason.extra.problems) ? reason.extra.problems.map(String) : [],
   };
 }

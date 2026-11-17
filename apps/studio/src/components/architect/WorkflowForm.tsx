@@ -14,6 +14,7 @@ import { PublishWarnings } from "@/components/agents/PublishWarnings";
 import { WorkflowCanvas } from "@/components/workflows/WorkflowGraph";
 import { cronPreview } from "@/components/workflows/cronPreview";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { DrafterFailure } from "./ArchitectModel";
 import { createSchedule, type WorkflowSchedule } from "@/lib/schedules";
 import {
   ArchitectApiError,
@@ -138,6 +139,7 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
   const [assumptions, setAssumptions] = useState<string[]>([]);
   const [dropped, setDropped] = useState<{ kind: string; id: string }[]>([]);
   const [fillError, setFillError] = useState<string[] | null>(null);
+  const [unusable, setUnusable] = useState<{ answer: string | null; problems: string[] } | null>(null);
 
   const [saving, setSaving] = useState<"draft" | "publish" | null>(null);
   const [saved, setSaved] = useState<WfSaved | null>(null);
@@ -180,6 +182,7 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
     if (!describe.trim() || filling) return;
     setFilling(true);
     setFillError(null);
+    setUnusable(null);
     try {
       const result = await draftWorkflow(describe.trim(), current.steps.length > 0 ? current : null);
       setName(result.spec.name ?? "");
@@ -193,8 +196,9 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
       setFormErrors([]);
       setSaved(null);
     } catch (reason: unknown) {
-      if (reason instanceof ArchitectApiError && reason.code === "draft_invalid") {
-        setFillError([reason.message, ...reason.problems]);
+      if (reason instanceof ArchitectApiError && (reason.code === "draft_invalid" || reason.code === "draft_failed")) {
+        const answer = reason.raw ?? (typeof reason.body.error === "string" ? reason.body.error : null);
+        setUnusable({ answer, problems: reason.problems });
       } else {
         setFillError([reason instanceof Error ? reason.message : "The drafter could not answer."]);
       }
@@ -250,6 +254,7 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
           <Button variant="secondary" onClick={fillIn} disabled={filling || !describe.trim()}>{filling ? "Drafting…" : "Fill in the form"}</Button>
           <p className="text-caption text-muted-foreground">The drafter fills the form below; nothing is saved until you save.</p>
         </div>
+        {unusable ? <DrafterFailure answer={unusable.answer} problems={unusable.problems} /> : null}
         {fillError ? (
           <div role="alert" className={`${alertClass} space-y-1`}>
             {fillError.map((m) => <p key={m}>{m}</p>)}
