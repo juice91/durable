@@ -59,7 +59,7 @@ describe("Navigation", () => {
       expect(navSections.map((section) => section.group.title)).toEqual([null, "Primitives", "Evaluation", "Observability", null]);
       const permanent = (groupId: string) =>
         navSections.find((section) => section.group.id === groupId)!.items.filter((item) => !item.transitional).map((item) => item.label);
-      expect(permanent("primitives")).toEqual(["Agents", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge"]);
+      expect(permanent("primitives")).toEqual(["Agents", "Architect", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge"]);
       expect(permanent("evaluation")).toEqual(["Datasets", "Scorers", "Experiments"]);
       expect(permanent("observability")).toEqual(["Metrics", "Threads", "Traces", "Logs"]);
       expect(permanent("settings")).toEqual(["Settings"]);
@@ -74,7 +74,7 @@ describe("Navigation", () => {
 
     test("g-keys follow the plan", () => {
       const keys = Object.fromEntries(navItems.filter((item) => item.gKey).map((item) => [item.gKey, item.id]));
-      expect(keys).toEqual({ i: "approvals", a: "agents", w: "workflows", o: "tools", m: "mcp", p: "processors", k: "knowledge", d: "datasets", s: "scorers", e: "experiments", n: "metrics", h: "threads", t: "traces", l: "logs", ",": "settings" });
+      expect(keys).toEqual({ i: "approvals", a: "agents", r: "architect", w: "workflows", o: "tools", m: "mcp", p: "processors", k: "knowledge", d: "datasets", s: "scorers", e: "experiments", n: "metrics", h: "threads", t: "traces", l: "logs", ",": "settings" });
       expect(navItemForGKey("t")?.href).toBe(routes.traces());
       expect(navItemForGKey("z")).toBeNull();
     });

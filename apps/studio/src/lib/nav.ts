@@ -1,5 +1,6 @@
 import {
   AgentsIcon,
+  ArchitectIcon,
   ApprovalsIcon,
   DatasetsIcon,
   ExperimentsIcon,
@@ -81,6 +82,7 @@ export const navItems: readonly NavItem[] = [
   { id: "approvals", label: "Approvals", href: routes.approvals(), icon: ApprovalsIcon, group: "approvals", gKey: "i", badge: "approvals_pending", keywords: ["inbox", "pending", "human in the loop", "approve", "deny"] },
   // Primitives
   { id: "agents", label: "Agents", href: routes.agents(), icon: AgentsIcon, group: "primitives", gKey: "a", keywords: ["assistants"] },
+  { id: "architect", label: "Architect", href: routes.architect(), icon: ArchitectIcon, group: "primitives", gKey: "r", keywords: ["create agent", "describe", "build", "generate", "draft"] },
   { id: "workflows", label: "Workflows", href: routes.workflows(), icon: WorkflowsIcon, group: "primitives", gKey: "w" },
   { id: "tools", label: "Tools", href: routes.tools(), icon: ToolsIcon, group: "primitives", gKey: "o" },
   { id: "mcp", label: "MCP Servers", href: routes.mcp(), icon: McpIcon, group: "primitives", gKey: "m", keywords: ["mcp"] },

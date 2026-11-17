@@ -4,6 +4,7 @@
  * builder and the assertions that name it. One file per area; legacy redirects live in `legacy.ts`.
  */
 import { agentRoutes } from "./agents";
+import { architectRoutes } from "./architect";
 import { approvalRoutes } from "./approvals";
 import { evaluationRoutes } from "./evaluation";
 import { knowledgeRoutes } from "./knowledge";
@@ -19,6 +20,7 @@ import { workflowRoutes } from "./workflows";
 export const ROUTE_AREAS = {
   approvals: approvalRoutes,
   agents: agentRoutes,
+  architect: architectRoutes,
   workflows: workflowRoutes,
   tools: toolRoutes,
   mcp: mcpRoutes,
@@ -32,6 +34,7 @@ export const ROUTE_AREAS = {
 export const routes = {
   ...approvalRoutes,
   ...agentRoutes,
+  ...architectRoutes,
   ...workflowRoutes,
   ...toolRoutes,
   ...mcpRoutes,

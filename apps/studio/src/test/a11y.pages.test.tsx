@@ -28,6 +28,7 @@ import { expectAccessiblePage } from "./a11yPages";
 import { FrameHarness, mockMatchMedia } from "@/components/frame/frameTesting";
 import { AGENT as WORKFLOW_AGENT, demoSpec } from "./workflowFixtures";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
+import { OPTIONS as ARCHITECT_OPTIONS, SEEDED_STATE as ARCHITECT_STATE } from "@/components/architect/architectFixtures";
 import { modelsFixture, processorCatalogFixture } from "@/components/agents/specSections.fixtures";
 
 const T0 = "2026-11-14T10:00:00Z";
@@ -171,6 +172,8 @@ function kbDocument(key: string, extra: Record<string, unknown> = {}) {
 /** The API with rows: one agent, two versions, runs, tools, an MCP server, a workflow, logs, metrics. */
 function respond(url: URL): unknown {
   const p = url.pathname.replace(/^\/api\/v1/, "");
+  if (p === "/architect") return ARCHITECT_STATE;
+  if (p === "/architect/options") return ARCHITECT_OPTIONS;
   if (p === "/agents") return [AGENT, MEMORY_AGENT];
   if (p === "/agents/a2") return MEMORY_AGENT;
   if (p === "/agents/a2/versions") return MEMORY_VERSIONS;
@@ -293,6 +296,7 @@ const PAGES: PageCase[] = [
   { name: "workflow traces", path: "/workflows/w1/traces", params: { id: "w1" }, load: () => import("@/app/workflows/[id]/traces/page"), h1: "Triage", shows: "#workflow-trace-row" },
   { name: "workflow run", path: "/workflows/w1/runs/wr1", params: { id: "w1", runId: "wr1" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr1", shows: "classify" },
   { name: "workflow run paused", path: "/workflows/w1/runs/wr2", params: { id: "w1", runId: "wr2" }, load: () => import("@/app/workflows/[id]/runs/[runId]/page"), h1: "wr2", shows: "#workflow-paused-banner" },
+  { name: "architect", path: "/architect", load: () => import("@/app/architect/page"), h1: "Architect", shows: "faq-bot · v2" },
   { name: "tools", path: "/tools", load: () => import("@/app/tools/page"), h1: "Tools", shows: "Current time" },
   { name: "mcp", path: "/mcp", load: () => import("@/app/mcp/page"), h1: "MCP Servers", shows: "Docs" },
   { name: "mcp browse", path: "/mcp/browse", load: () => import("@/app/mcp/browse/page"), h1: "Browse", shows: "Files" },

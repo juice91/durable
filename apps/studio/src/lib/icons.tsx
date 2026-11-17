@@ -13,6 +13,7 @@ import {
   Plug,
   ScrollText,
   Settings,
+  Sparkles,
   ShieldCheck,
   Workflow,
   Wrench,
@@ -40,6 +41,7 @@ export function studioIcon(Icon: LucideIcon, displayName: string): IconComponent
 
 // Section icons, by the plan's names.
 export const AgentsIcon = studioIcon(Bot, "AgentsIcon");
+export const ArchitectIcon = studioIcon(Sparkles, "ArchitectIcon");
 export const WorkflowsIcon = studioIcon(Workflow, "WorkflowsIcon");
 export const ToolsIcon = studioIcon(Wrench, "ToolsIcon");
 export const McpIcon = studioIcon(Plug, "McpIcon");
