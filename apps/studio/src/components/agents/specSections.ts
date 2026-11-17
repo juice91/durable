@@ -6,6 +6,7 @@
  * keep their exact JSON and `spec_hash`.
  */
 import { apiErrorFromResponse, apiHeaders, BASE_URL, type AgentSpec } from "@/lib/api";
+import type { ModelCapabilities } from "@/lib/attachments";
 import type { JsonSchema } from "@/lib/tools";
 import {
   approvalProblems,
@@ -107,14 +108,6 @@ export interface ProcessorCatalog {
     max_test_sample_bytes?: number;
   };
   moderation_categories: string[];
-}
-
-/** What a model takes as input (GET /models `capabilities`); `source` says how sure that is. */
-export interface ModelCapabilities {
-  image: boolean;
-  pdf: boolean;
-  /** "assumed": a guess from the provider, not a fact. */
-  source: "gateway" | "static" | "assumed";
 }
 
 export interface ModelOption {

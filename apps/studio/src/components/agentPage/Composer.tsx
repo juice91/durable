@@ -7,6 +7,7 @@ import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { focusRing } from "@/components/ui/Button";
 import { AttachButton, ComposerAttachmentList } from "@/components/chat/Attachments";
+import type { ModelCapabilities } from "@/lib/attachments";
 
 export interface ComposerProps {
   /** The run option chips (version, model) and the request context button, in that order. */
@@ -18,6 +19,8 @@ export interface ComposerProps {
   placeholder?: string;
   /** The runtime has an attachment adapter (the AG-UI chat): shows the paperclip and the file chips. */
   attachments?: boolean;
+  /** What the selected model takes (GET /models); the picker and the refusals follow it. Unknown: everything. */
+  attachmentCapabilities?: ModelCapabilities | null;
 }
 
 /**
@@ -25,7 +28,7 @@ export interface ComposerProps {
  * option chips on the left and the output-check hint and Send on the right. Enter sends, Shift+Enter
  * adds a line. The row wraps, so the chips fit a 375 px screen.
  */
-export function Composer({ chips, outputChecked, notices, placeholder = "Message the agent…", attachments = false }: ComposerProps) {
+export function Composer({ chips, outputChecked, notices, placeholder = "Message the agent…", attachments = false, attachmentCapabilities = null }: ComposerProps) {
   return (
     <ComposerPrimitive.Root
       data-testid="chat-composer"
@@ -39,7 +42,7 @@ export function Composer({ chips, outputChecked, notices, placeholder = "Message
         className="max-h-60 min-h-12 w-full min-w-0 resize-none bg-transparent px-2 py-1.5 text-body text-foreground placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
       />
       <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="run-options">
-        {attachments ? <AttachButton /> : null}
+        {attachments ? <AttachButton capabilities={attachmentCapabilities} /> : null}
         {chips}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {outputChecked ? (

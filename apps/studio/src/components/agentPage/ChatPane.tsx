@@ -24,6 +24,7 @@ import { MarkdownText, MessageRunsContext, ToolCallCard, ToolCallInfoContext, To
 import { StructuredOutputView } from "@/components/chat/StructuredOutput";
 import { MessageAttachmentList } from "@/components/chat/Attachments";
 import { createAttachmentAdapter } from "@/components/chat/attachmentAdapter";
+import type { ModelCapabilities } from "@/lib/attachments";
 import { FeedbackScopeContext, MessageFeedback, isRatableMessage, type FeedbackScope } from "@/components/chat/MessageFeedback";
 import { AgUiApprovals, type AgUiApprovalLookups } from "@/components/chat/AgUiApprovals";
 import { messageRunMap, type RunMaps, type StudioChatAgent } from "@/components/chat/agUiChat";
@@ -330,6 +331,8 @@ export interface AgUiChatPaneProps extends ChatPaneCommonProps {
   retries?: ReadonlyMap<string, readonly Record<string, unknown>[]>;
   /** The conversation and the caller's thumbs on it (W2.4); without a conversation no thumbs show. */
   feedback?: FeedbackScope;
+  /** What the selected model takes (GET /models), for the attach picker and its refusals. */
+  attachmentCapabilities?: ModelCapabilities | null;
 }
 
 const NO_DECISIONS: ReadonlyMap<string, ToolDecisionEntry> = new Map();
@@ -377,10 +380,14 @@ export function AgUiChatPane({
   decisions = NO_DECISIONS,
   retries = NO_RETRIES,
   feedback = NO_FEEDBACK,
+  attachmentCapabilities = null,
 }: AgUiChatPaneProps) {
   const actions = useRunActions(onRefreshRun);
   // W2.4: files attached in the composer are uploaded first and sent as AG-UI media parts.
-  const attachments = React.useMemo(() => createAttachmentAdapter(), []);
+  // The adapter is made once; it reads the selected model's capabilities as they are at each attach.
+  const capabilitiesRef = React.useRef(attachmentCapabilities);
+  capabilitiesRef.current = attachmentCapabilities;
+  const attachments = React.useMemo(() => createAttachmentAdapter(undefined, () => capabilitiesRef.current), []);
   const adapters = React.useMemo(() => ({ history, attachments }), [history, attachments]);
   const errorRef = React.useRef(onError);
   errorRef.current = onError;

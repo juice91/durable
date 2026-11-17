@@ -3,7 +3,7 @@ import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantRuntimeProvider, ComposerPrimitive, MessagePrimitive, ThreadPrimitive, useExternalStoreRuntime, useLocalRuntime, type ChatModelAdapter, type ThreadMessageLike } from "@assistant-ui/react";
-import { ATTACHMENT_MAX_BYTES, attachmentIdFromUrl, attachmentRefusal, type Attachment } from "@/lib/attachments";
+import { ATTACHMENT_MAX_BYTES, attachmentIdFromUrl, attachmentRefusal, type Attachment, type ModelCapabilities } from "@/lib/attachments";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 import { setWindowWidth } from "@/components/frame/frameTesting";
 import { createAttachmentAdapter } from "./attachmentAdapter";
@@ -18,7 +18,7 @@ function png(name = "pic.png", size = 8): File {
 let upload: ReturnType<typeof vi.fn<(file: File) => Promise<Attachment>>>;
 let received: unknown[];
 
-function Harness() {
+function Harness({ capabilities = null }: { capabilities?: ModelCapabilities | null }) {
   const model = React.useMemo<ChatModelAdapter>(
     () => ({
       async *run({ messages }) {
@@ -28,14 +28,16 @@ function Harness() {
     }),
     [],
   );
-  const attachments = React.useMemo(() => createAttachmentAdapter((file) => upload(file)), []);
+  const capabilitiesRef = React.useRef(capabilities);
+  capabilitiesRef.current = capabilities;
+  const attachments = React.useMemo(() => createAttachmentAdapter((file) => upload(file), () => capabilitiesRef.current), []);
   const runtime = useLocalRuntime(model, { adapters: { attachments } });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ComposerPrimitive.Root>
         <ComposerAttachmentList />
         <ComposerPrimitive.Input aria-label="Message" />
-        <AttachButton />
+        <AttachButton capabilities={capabilities} />
         <ComposerPrimitive.Send aria-label="Send message" />
       </ComposerPrimitive.Root>
     </AssistantRuntimeProvider>
@@ -65,6 +67,45 @@ describe("attachment rules", () => {
     expect(attachmentIdFromUrl(`/api/v1/attachments/${ID}`)).toBe(ID);
     expect(attachmentIdFromUrl(`http://x/api/v1/attachments/${ID}?a=1`)).toBe(ID);
     expect(attachmentIdFromUrl("/elsewhere")).toBeNull();
+  });
+});
+
+const PDF = () => new File(["%PDF-1.4"], "doc.pdf", { type: "application/pdf" });
+
+describe("the attach button follows the model's capabilities", () => {
+  it("offers no PDF in the picker for a model without PDF input, and no images for a text-only model", () => {
+    const { rerender } = render(<Harness capabilities={{ image: true, pdf: false, source: "gateway" }} />);
+    const input = screen.getByTestId("composer-attach-input");
+    expect(input.getAttribute("accept")).not.toContain("application/pdf");
+    expect(input.getAttribute("accept")).toContain("image/png");
+    rerender(<Harness capabilities={{ image: false, pdf: false, source: "static" }} />);
+    expect(screen.getByTestId("composer-attach-input").getAttribute("accept")).not.toContain("image/");
+    rerender(<Harness capabilities={null} />);
+    expect(screen.getByTestId("composer-attach-input").getAttribute("accept")).toContain("application/pdf");
+  });
+
+  it("a dropped PDF for a gateway model that does not take it is refused before the upload", async () => {
+    render(<Harness capabilities={{ image: true, pdf: false, source: "gateway" }} />);
+    attach(PDF());
+    expect(await screen.findByRole("alert")).toHaveTextContent("This model does not accept PDF files");
+    expect(upload).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("composer-attachment")).toBeNull();
+  });
+
+  it("an assumed 'no' warns ('may not accept') but still uploads and attaches", async () => {
+    render(<Harness capabilities={{ image: true, pdf: false, source: "assumed" }} />);
+    attach(PDF());
+    expect(await screen.findByTestId("composer-attachment")).toHaveTextContent("doc.pdf");
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent("This model may not accept PDF files");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("the adapter reads the capabilities as they are at the time of the drop, not as created", async () => {
+    const { rerender } = render(<Harness capabilities={null} />);
+    rerender(<Harness capabilities={{ image: false, pdf: true, source: "static" }} />);
+    attach(png());
+    expect(await screen.findByRole("alert")).toHaveTextContent("This model does not accept image files");
   });
 });
 

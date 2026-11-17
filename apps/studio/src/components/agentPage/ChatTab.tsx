@@ -403,6 +403,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
   const resolvedModel = resolveModelChoice(modelChoice);
   const chosenModelId = "modelId" in resolvedModel ? resolvedModel.modelId : null;
   const modelChoiceError = "error" in resolvedModel ? resolvedModel.error : null;
+  // What the model of the next turn takes (the chosen one, else the version's), for the attach button.
+  const attachmentCapabilities = useMemo(() => {
+    const id = chosenModelId ?? defaultModelId;
+    return (id ? models.find((m) => m.id === id && !m.wildcard)?.capabilities : null) ?? null;
+  }, [chosenModelId, defaultModelId, models]);
 
   const refreshRail = useCallback(() => setRailRefresh((n) => n + 1), []);
   useEffect(() => {
@@ -1731,9 +1736,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null }:
                 decisions={toolDecisionEntries}
                 retries={outputRetries}
                 feedback={feedbackScope}
+                attachmentCapabilities={attachmentCapabilities}
                 composer={
                   <Composer
                     attachments
+                    attachmentCapabilities={attachmentCapabilities}
                     chips={chips}
                     outputChecked={hasOutputProcessors(spec)}
                     notices={hasNotices ? notices : null}

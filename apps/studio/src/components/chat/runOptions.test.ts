@@ -284,6 +284,15 @@ describe("turn badge data", () => {
       version: "draft", model: { provider: "test", name: "echo" }, request_context: { a: 1 },
     });
   });
+
+  it("does not re-post the server's attachment decision as a model setting", () => {
+    const decided = { image: true, pdf: false, source: "gateway" };
+    const run = { version: 2, model_id: "test:echo", model_overridden: false, request_context: {} };
+    expect(optionsFromRun({ ...run, model_settings: { attachment_capabilities: decided } as never })).toEqual(NO_OPTIONS_WITH(2));
+    expect(optionsFromRun({ ...run, model_settings: { temperature: 0.3, attachment_capabilities: decided } as never })).toEqual({
+      ...NO_OPTIONS_WITH(2), model_settings: { temperature: 0.3 },
+    });
+  });
 });
 
 function NO_OPTIONS_WITH(version: number) {

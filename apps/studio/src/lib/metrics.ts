@@ -4,6 +4,7 @@
 // the Traces list.
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
 import { formatCost } from "./format";
+import type { ModelCapabilities } from "@/lib/attachments";
 import { routes } from "@/lib/routes";
 import type { TraceFilters } from "./traces";
 
@@ -564,6 +565,8 @@ export interface ModelOption {
   wildcard: boolean;
   source: "allowlist" | "scripted" | "discovered";
   description: string | null;
+  /** Image and PDF input (absent on a wildcard entry: its name is not known yet). */
+  capabilities?: ModelCapabilities;
   /** On a wildcard entry whose provider's model list could not be loaded: why. */
   discovery_error?: string | null;
 }

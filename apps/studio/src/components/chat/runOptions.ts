@@ -511,12 +511,15 @@ export function turnBlock(events: readonly RunEvent[]): { code: BlockCode; messa
 
 /** The options a recorded turn was started with, for an idempotent re-post of that same turn. */
 export function optionsFromRun(run: RunUsageRow): TurnOptions {
+  // `attachment_capabilities` rides in the stored settings but is the server's decision, not an option.
+  const { attachment_capabilities: _decided, ...settings } = (run.model_settings ?? {}) as Record<string, unknown>;
+  void _decided;
   const context = run.request_context && Object.keys(run.request_context).length > 0 ? run.request_context : null;
   return {
     version: run.draft ? "draft" : (run.version ?? null),
     model: run.model_overridden && run.model_id && run.model_id.includes(":") ? modelRef(run.model_id) : null,
     request_context: context,
-    ...(hasSettings(run.model_settings) ? { model_settings: run.model_settings } : {}),
+    ...(hasSettings(settings as ModelSettingsBody) ? { model_settings: settings as ModelSettingsBody } : {}),
   };
 }
 

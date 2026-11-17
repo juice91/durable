@@ -1,11 +1,12 @@
 import type { AttachmentAdapter, CompleteAttachment, PendingAttachment } from "@assistant-ui/react";
 import {
-  ATTACHMENT_ACCEPT,
+  acceptFor,
   attachmentPath,
   attachmentRefusal,
   fileMediaType,
   uploadAttachment,
   type Attachment,
+  type ModelCapabilities,
 } from "@/lib/attachments";
 
 /**
@@ -13,13 +14,20 @@ import {
  * (POST /attachments), so a refusal shows when the file is attached, not when the message is sent;
  * `send` turns the uploaded file into the message part the AG-UI runtime sends: a `file` part whose
  * data is the attachment's URL (it becomes an AG-UI `image` or `document` part with a url source).
+ * `capabilities` is read at each attach, so the picker's file types and the refusals follow the
+ * model chosen now (the adapter is made once per chat).
  */
-export function createAttachmentAdapter(upload: (file: File) => Promise<Attachment> = uploadAttachment): AttachmentAdapter {
+export function createAttachmentAdapter(
+  upload: (file: File) => Promise<Attachment> = uploadAttachment,
+  capabilities: () => ModelCapabilities | null | undefined = () => null,
+): AttachmentAdapter {
   const uploaded = new Map<string, Attachment>();
   return {
-    accept: ATTACHMENT_ACCEPT,
+    get accept() {
+      return acceptFor(capabilities());
+    },
     async *add({ file }) {
-      const refusal = attachmentRefusal(file);
+      const refusal = attachmentRefusal(file, capabilities());
       if (refusal) throw new Error(refusal);
       const mediaType = fileMediaType(file);
       const base = {
