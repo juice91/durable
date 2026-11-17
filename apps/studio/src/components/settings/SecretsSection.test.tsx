@@ -6,12 +6,13 @@ const mocks = vi.hoisted(() => ({ listSecrets: vi.fn(), putSecret: vi.fn(), dele
 vi.mock("@/lib/secrets", async (importOriginal) => ({ ...(await importOriginal<object>()), ...mocks }));
 
 import { SecretsSection } from "./SecretsSection";
+import { ApiError } from "@/lib/api";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 
 const FAKE = "fake-secret-value-000";
 beforeEach(() => {
   mocks.listSecrets.mockReset().mockResolvedValue([{ name: "slack-token", created_at: "2026-11-17T00:00:00Z", updated_at: "2026-11-17T00:00:00Z" }]);
-  mocks.putSecret.mockReset().mockResolvedValue(undefined);
+  mocks.putSecret.mockReset().mockResolvedValue({ restarted: [] });
   mocks.deleteSecret.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => cleanup());
@@ -69,6 +70,39 @@ describe("SecretsSection", () => {
     expect(mocks.deleteSecret).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(mocks.deleteSecret).toHaveBeenCalledWith("slack-token"));
+  });
+
+  it("shows Used by with links to the servers and disables Delete while in use", async () => {
+    mocks.listSecrets.mockResolvedValue([
+      { name: "slack-token", created_at: "a", updated_at: "b", used_by: [{ server_id: "srv-1", name: "files" }] },
+      { name: "free-token", created_at: "a", updated_at: "b", used_by: [] },
+    ]);
+    render(<SecretsSection />);
+    const link = await screen.findByRole("link", { name: "files" });
+    expect(link).toHaveAttribute("href", "/mcp/srv-1");
+    expect(screen.getByRole("button", { name: "Delete slack-token" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete free-token" })).toBeEnabled();
+  });
+
+  it("handles a 409 secret_in_use on delete: closes the dialog, names the servers, reloads", async () => {
+    mocks.deleteSecret.mockRejectedValue(new ApiError(409, "In use by files."));
+    render(<SecretsSection />);
+    await screen.findByText("slack-token");
+    fireEvent.click(screen.getByRole("button", { name: "Delete slack-token" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByTestId("secrets-status")).toHaveTextContent("In use by files.");
+    expect(mocks.listSecrets).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports the servers restarted by an update", async () => {
+    mocks.putSecret.mockResolvedValue({ restarted: ["srv-1", "srv-2"] });
+    render(<SecretsSection />);
+    await screen.findByText("slack-token");
+    fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "slack-token" } });
+    fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: FAKE } });
+    fireEvent.click(screen.getByRole("button", { name: "Add secret" }));
+    await waitFor(() => expect(screen.getByTestId("secrets-status")).toHaveTextContent(/Restarted 2 servers/));
   });
 
   it("has no axe violations, with the delete dialog open too", async () => {

@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toaster";
 import { ApiError } from "@/lib/api";
+import { routes } from "@/lib/routes";
 import { deleteSecret, listSecrets, putSecret, secretRef, type SecretInfo } from "@/lib/secrets";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -54,10 +56,11 @@ export function SecretsSection() {
     setSaving(true);
     setFormError(null);
     try {
-      await putSecret(trimmed, value);
+      const { restarted } = await putSecret(trimmed, value);
       setName("");
       setValue("");
-      setStatus(`Secret ${trimmed} saved. Use it as ${secretRef(trimmed)}.`);
+      const restart = restarted.length > 0 ? ` Restarted ${restarted.length} ${restarted.length === 1 ? "server" : "servers"} to pick it up.` : "";
+      setStatus(`Secret ${trimmed} saved. Use it as ${secretRef(trimmed)}.${restart}`);
       toast.success("Secret saved");
       void load();
     } catch (reason: unknown) {
@@ -82,6 +85,10 @@ export function SecretsSection() {
       if (reason instanceof ApiError && reason.status === 404) {
         setDeleting(null);
         setStatus(`Secret ${secretName} no longer exists.`);
+        void load();
+      } else if (reason instanceof ApiError && reason.status === 409) {
+        setDeleting(null);
+        setStatus(`Secret ${secretName} was not deleted. ${reason.message}`);
         void load();
       } else {
         setDeleteError(errorText(reason, "The secret could not be deleted"));
@@ -120,10 +127,27 @@ export function SecretsSection() {
         <ul aria-label="Secrets" data-testid="secrets-list" className="min-w-0">
           {secrets.map((secret) => (
             <li key={secret.name} data-secret={secret.name} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
-              <span className="min-w-0 break-all font-mono text-label text-foreground">{secret.name}</span>
+              <span className="min-w-0 flex-1">
+                <span className="break-all font-mono text-label text-foreground">{secret.name}</span>
+                {(secret.used_by ?? []).length > 0 ? (
+                  <span data-testid={`secret-used-by-${secret.name}`} className="block text-caption text-muted-foreground">
+                    Used by{" "}
+                    {(secret.used_by ?? []).map((user, index) => (
+                      <React.Fragment key={user.server_id}>
+                        {index > 0 ? ", " : null}
+                        <Link href={routes.mcpServer(user.server_id)} className="text-foreground underline underline-offset-4 hover:no-underline">
+                          {user.name}
+                        </Link>
+                      </React.Fragment>
+                    ))}
+                  </span>
+                ) : null}
+              </span>
               <Button
                 variant="secondary"
                 size="sm"
+                disabled={(secret.used_by ?? []).length > 0}
+                title={(secret.used_by ?? []).length > 0 ? "Change the servers using this secret first" : undefined}
                 aria-label={`Delete ${secret.name}`}
                 onClick={() => {
                   setDeleteError(null);

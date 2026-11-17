@@ -27,6 +27,23 @@ describe("secrets client", () => {
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body)).toEqual({ value: "fake-value-123" });
   });
+  it("returns the restarted server ids from a 200 put, [] from a 204", async () => {
+    fetchMock.mockResolvedValueOnce(json({ restarted: ["srv-1"] }));
+    expect(await putSecret("slack-token", "fake-value-123")).toEqual({ restarted: ["srv-1"] });
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    expect(await putSecret("slack-token", "fake-value-123")).toEqual({ restarted: [] });
+  });
+  it("lists used_by on a secret", async () => {
+    const used_by = [{ server_id: "srv-1", name: "files" }];
+    fetchMock.mockResolvedValue(json([{ name: "slack-token", created_at: "a", updated_at: "b", used_by }]));
+    expect((await listSecrets())[0].used_by).toEqual(used_by);
+  });
+  it("turns a 409 secret_in_use into an error naming the servers", async () => {
+    fetchMock.mockResolvedValue(json({ detail: { code: "secret_in_use", servers: [{ server_id: "srv-1", name: "files" }, { server_id: "srv-2", name: "git" }] } }, 409));
+    const error = await deleteSecret("slack-token").catch((e) => e);
+    expect(error.status).toBe(409);
+    expect(error.message).toMatch(/files, git/);
+  });
   it("throws a readable error without the value on 422 secret_name_invalid", async () => {
     fetchMock.mockResolvedValue(json({ detail: { code: "secret_name_invalid" } }, 422));
     const error = await putSecret("Bad Name", "fake-value-123").catch((e) => e);

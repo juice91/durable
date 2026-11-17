@@ -5,11 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimePanel } from "./RuntimePanel";
 import { mcpServers, type McpRuntime, type McpRuntimeState } from "@/lib/mcpServers";
 import { ApiError } from "@/lib/api";
+import * as secrets from "@/lib/secrets";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
-  return { ...actual, mcpServers: { ...actual.mcpServers, runtime: vi.fn(), runtimeAction: vi.fn(), runtimeLogs: vi.fn() } };
+  return { ...actual, mcpServers: { ...actual.mcpServers, runtime: vi.fn(), runtimeAction: vi.fn(), runtimeLogs: vi.fn(), update: vi.fn() } };
+});
+
+vi.mock("@/lib/secrets", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/secrets")>();
+  return { ...actual, listSecrets: vi.fn() };
 });
 
 const runtime = (state: McpRuntimeState, extra: Partial<McpRuntime> = {}): McpRuntime => ({
@@ -23,6 +29,11 @@ describe("RuntimePanel", () => {
   beforeEach(() => {
     vi.mocked(mcpServers.runtime).mockReset().mockResolvedValue(runtime("running", { message: "Pod ready" }));
     vi.mocked(mcpServers.runtimeAction).mockReset();
+    vi.mocked(mcpServers.update).mockReset().mockResolvedValue({} as never);
+    vi.mocked(secrets.listSecrets).mockReset().mockResolvedValue([
+      { name: "slack-token", created_at: "a", updated_at: "b", used_by: [] },
+      { name: "other-token", created_at: "a", updated_at: "b", used_by: [] },
+    ]);
     vi.mocked(mcpServers.runtimeLogs).mockReset().mockResolvedValue({ lines: ["line one", "line two"], tail: 200 });
   });
 
@@ -32,6 +43,39 @@ describe("RuntimePanel", () => {
     expect(screen.getByText("Pod ready")).toBeInTheDocument();
     expect(await screen.findByText(/line one/)).toBeInTheDocument();
     expect(mcpServers.runtimeLogs).toHaveBeenCalledWith("s1", 200);
+  });
+
+  it("lists env names, showing refs as secret:<name> and never a value", async () => {
+    vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("running", { env: [{ name: "API_TOKEN", ref: "secret:slack-token" }, { name: "ROOT_DIR", ref: null }] }));
+    render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+    const list = await screen.findByRole("list", { name: "Environment" });
+    expect(list).toHaveTextContent("API_TOKEN");
+    expect(list).toHaveTextContent("secret:slack-token");
+    expect(list).toHaveTextContent("ROOT_DIR");
+    expect(list).toHaveTextContent("Stored with the server");
+  });
+
+  it("changes a variable to another stored secret through the server update, then resyncs", async () => {
+    vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("running", { env: [{ name: "API_TOKEN", ref: "secret:slack-token" }] }));
+    const onChanged = vi.fn();
+    render(<RuntimePanel serverId="s1" enabled onChanged={onChanged} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Change API_TOKEN" }));
+    fireEvent.change(await screen.findByLabelText("Secret for API_TOKEN"), { target: { value: "other-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save API_TOKEN" }));
+    await waitFor(() => expect(mcpServers.update).toHaveBeenCalledWith("s1", { env: { API_TOKEN: "secret:other-token" } }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(vi.mocked(mcpServers.runtime).mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("shows the update error and keeps the picker open", async () => {
+    vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("running", { env: [{ name: "API_TOKEN", ref: null }] }));
+    vi.mocked(mcpServers.update).mockRejectedValue(new ApiError(422, "unknown secret"));
+    render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Change API_TOKEN" }));
+    fireEvent.change(await screen.findByLabelText("Secret for API_TOKEN"), { target: { value: "other-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save API_TOKEN" }));
+    expect(await screen.findByText(/unknown secret/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Secret for API_TOKEN")).toBeInTheDocument();
   });
 
   it.each([

@@ -53,7 +53,7 @@ function respond(url: URL): unknown {
   if (p === "/api/v1/knowledge-bases/kb1") return { id: "kb1", tenant_id: "t1", name: "Product docs", description: null, embedding_model: "test:hash", dimensions: 1536, chunking: {}, active_generation: 1, last_generation: 1, pending_generation: null, pending_embedding_model: null, pending_dimensions: null, status: "ready", error: null, created_at: "2026-11-14T10:00:00Z", updated_at: "2026-11-14T10:00:00Z", document_count: 0, chunk_count: 0, ingest_tokens: 0, ingest_cost_usd: "0.0000000000", ingest_requests: 0 };
   if (p === "/api/v1/knowledge-bases/kb1/documents") return { items: [], next_after: null };
   if (p === "/api/v1/workflows" || p === "/api/v1/tools") return p.endsWith("tools") ? { items: [] } : [];
-  if (/\/(versions|tools|processors|servers)$/.test(p)) return [];
+  if (/\/(versions|tools|processors|servers|secrets)$/.test(p)) return [];
   return { items: [], next_before: null, total: 0 };
 }
 
