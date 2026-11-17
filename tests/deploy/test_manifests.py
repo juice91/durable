@@ -314,3 +314,11 @@ def test_secret_templates_have_no_real_values():
             continue
         _, _, raw = line.partition("=")
         assert raw.strip() == "", line
+
+
+def test_allowed_tools_name_the_kb_source_tools_and_spell_tickets_correctly():
+    config = next(d for d in kustomize_docs() if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
+    allowed = set(config["data"]["EAP_ALLOWED_TOOLS"].split(","))
+    assert "ticket.create" not in allowed and "tickets.create" in allowed
+    assert {"kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
+            "workflow.run.result"} <= allowed

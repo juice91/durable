@@ -430,7 +430,7 @@ def test_worker_import_paths_do_not_load_client_tools_in_schemas_package():
 # --- import-linter contract ----------------------------------------------------------------------
 
 ROOTS = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db",
-         "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime"]  # eap_pricing: the AC merge
+         "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]  # eap_pricing: the AC merge
 
 
 def _agui_contract() -> dict:
@@ -485,7 +485,7 @@ def test_contract_allows_ag_ui_only_inside_eap_api_ag_ui(tmp_path):
     ["eap_schemas/probe.py", "eap_worker/probe.py", "eap_api/probe.py", "eap_api/routes/probe.py",
      "eap_api/ag_ui_extra.py", "eap_runtime/probe.py", "eap_run_store/probe.py", "eap_db/probe.py",
      "eap_observability/probe.py", "eap_secrets/probe.py", "eap_processors/probe.py", "eap_knowledge/probe.py",
-     "eap_pricing/probe.py", "eap_mcp_runtime/probe.py"],
+     "eap_pricing/probe.py", "eap_mcp_runtime/probe.py", "eap_kb_sources/probe.py"],
 )
 @pytest.mark.parametrize("statement", ["import ag_ui\n", "from ag_ui.core import X\n", "import ag_ui.core\n"])
 def test_contract_breaks_for_every_module_outside_eap_api_ag_ui(tmp_path, module, statement):
