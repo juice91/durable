@@ -13,6 +13,10 @@ Create Date: 2026-11-17 12:00:00
 - The backfill REFUSES to run when rows exist and `EAP_BLOB_BACKEND` is unset (an unset backend
   would silently mean "a local directory", which a deployment never wants): the error names the
   variables to set. With no rows the migration needs no backend.
+- `chat_attachments.run_id TEXT NULL`: the native run whose message linked the upload, so an API key
+  reads a linked upload only through a run of an agent it may use (not by a message id that two
+  agents' runs can share). Rows linked before it existed have no run and stay unreadable to a key
+  that did not upload them (a key's own uploads and the dev bearer are unaffected).
 - `ix_chat_attachments_unsent_created_at` ON (created_at) WHERE message_id IS NULL: the scan of
   unsent uploads (the retention pass).
 
@@ -21,7 +25,7 @@ NULL (a scan of the table) and a DROP COLUMN (catalog only); the table holds onl
 
 Downgrade: re-adds a nullable `data` column WITHOUT restoring the bytes (they stay in the
 BlobStore; rows are kept with `data` NULL, so their downloads fail after a downgrade) and drops
-`storage_key` and the partial index.
+`storage_key`, `run_id` and the partial index.
 """
 import asyncio
 import concurrent.futures
@@ -84,6 +88,7 @@ def _backfill(conn: sa.Connection) -> None:
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column("chat_attachments", sa.Column("storage_key", sa.Text(), nullable=True))
+    op.add_column("chat_attachments", sa.Column("run_id", sa.Text(), nullable=True))
     _backfill(op.get_bind())
     op.alter_column("chat_attachments", "storage_key", existing_type=sa.Text(), nullable=False)
     op.drop_column("chat_attachments", "data")
@@ -97,3 +102,4 @@ def downgrade() -> None:
     op.drop_index(_INDEX, table_name="chat_attachments")
     op.add_column("chat_attachments", sa.Column("data", sa.LargeBinary(), nullable=True))
     op.drop_column("chat_attachments", "storage_key")
+    op.drop_column("chat_attachments", "run_id")

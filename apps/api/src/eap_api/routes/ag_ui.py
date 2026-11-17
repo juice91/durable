@@ -777,10 +777,11 @@ def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> dict[str, A
     provider, _, name = model_id.partition(":")
     capabilities = model_discovery.capabilities_for(provider, name).public()
     metas = ChatAttachmentStore(c.engine).metas(c.tenant_id, [i for _, ids in mapped.attachments for i in ids])
+    caller = created_by_for(c.principal)  # another principal's unsent upload is "not found"
     for message_id, ids in mapped.attachments:
         for attachment_id in ids:
             meta = metas.get(attachment_id)
-            if meta is None:
+            if meta is None or (meta.message_id is None and meta.created_by != caller):
                 raise AgUiInputError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_not_found", ["messages"],
                     f"attachment {attachment_id} was not found; upload it with POST /attachments",
@@ -817,10 +818,20 @@ def _unsupported_message(model_id: str, media_type: str, source: str) -> str:
     return f"model {model_id} does not accept {media_type} ({source} capabilities); text files are always accepted"
 
 
-def _link_attachments(c: _Ctx, mapped: AgUiInput) -> None:
+def _link_attachments(c: _Ctx, mapped: AgUiInput, run_id: str) -> None:
+    """Link each message's uploads to run `run_id`. Only the caller's own uploads link (the same check
+    as `_check_attachments`, repeated here under the update so a race cannot slip a foreign one in):
+    another principal's upload is reported as not found, like an unknown id."""
     store = ChatAttachmentStore(c.engine)
+    caller = created_by_for(c.principal)
     for message_id, ids in mapped.attachments:
-        store.link(c.tenant_id, ids, message_id=message_id)
+        linked = store.link(c.tenant_id, ids, message_id=message_id, run_id=run_id, created_by=caller)
+        for attachment_id in ids:
+            if attachment_id not in linked:
+                raise AgUiInputError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_not_found", ["messages"],
+                    f"attachment {attachment_id} was not found; upload it with POST /attachments",
+                )
 
 
 def _with_attachment_parts(c: _Ctx, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -873,7 +884,7 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
         return record.fingerprint == new.fingerprint
 
     tools, results = _tool_dicts(effective)
-    _link_attachments(c, effective)  # before the launch: the worker reads them through the turn's message ids
+    _link_attachments(c, effective, new.native_run_id)  # before the launch: the worker reads them through the turn's message ids
     with Session(c.engine) as db:
         agent = lock_agent(db, c.tenant_id, c.agent_id)
         try:

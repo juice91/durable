@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -100,11 +101,16 @@ def test_key_cannot_fetch_an_attachment_it_did_not_create_unless_linked_to_its_a
     assert client.get(f"{UP}/{mine['id']}", headers=kh(key_b)).status_code == 404
     dev = upload(client, h).json()
     assert client.get(f"{UP}/{dev['id']}", headers=kh(key_a)).status_code == 404
-    # Linked to a message of a conversation of key_a's agent: visible to key_a, still not to key_b.
+    # A key cannot link the dev user's upload into its own message (and so cannot read it that way).
     msg = {"id": "u1", "role": "user", "content": [{"type": "text", "text": "x"}, ref(dev)]}
+    status, detail, _ = post(client, agent_a, body("t1", "r1", msg), kh(key_a))
+    assert status == 422 and "attachment_not_found" in json.dumps(detail)
+    assert client.get(f"{UP}/{dev['id']}", headers=kh(key_a)).status_code == 404
+    # Linked to a message of a run of key_a's agent, its own upload stays visible to key_a only.
+    msg = {"id": "u1", "role": "user", "content": [{"type": "text", "text": "x"}, ref(mine)]}
     assert post(client, agent_a, body("t1", "r1", msg), kh(key_a))[0] == 200
-    assert client.get(f"{UP}/{dev['id']}", headers=kh(key_a)).status_code == 200
-    assert client.get(f"{UP}/{dev['id']}", headers=kh(key_b)).status_code == 404
+    assert client.get(f"{UP}/{mine['id']}", headers=kh(key_a)).status_code == 200
+    assert client.get(f"{UP}/{mine['id']}", headers=kh(key_b)).status_code == 404
     # Another tenant's key never sees it.
     other = f"t{uuid.uuid4().hex[:10]}"
     ag[1].state.test_tenants.append(other)
@@ -214,3 +220,106 @@ def test_delete_needs_the_scope_and_credentials(ag, tenant):
     with app.state.database_engine.begin() as conn:
         conn.execute(text("UPDATE api_keys SET scopes = '[]'::jsonb WHERE id = :i"), {"i": key_id})
     assert client.delete(f"{UP}/{uuid.uuid4()}", headers=kh(key)).status_code == 403
+
+
+def test_a_reused_message_id_does_not_open_another_agents_attachment(ag, tenant, worker):
+    """Message ids are client-chosen: agent B's run may carry the same id as agent A's message. B's key
+    must still not read what A's run linked under it."""
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_a, agent_b = make_agent(client, h), make_agent(client, h)
+    _, key_a = _key(client, tenant, agent_ids=[agent_a])
+    _, key_b = _key(client, tenant, agent_ids=[agent_b])
+    secret = key_upload(client, key_a).json()
+    msg_a = {"id": "same-id", "role": "user", "content": [{"type": "text", "text": "x"}, ref(secret)]}
+    assert post(client, agent_a, body("ta", "ra", msg_a), kh(key_a))[0] == 200
+    # Agent B has a run whose input message id is the same bare id.
+    assert post(client, agent_b, body("tb", "rb", user("same-id", "hello")), kh(key_b))[0] == 200
+    assert client.get(f"{UP}/{secret['id']}", headers=kh(key_a)).status_code == 200
+    assert client.get(f"{UP}/{secret['id']}", headers=kh(key_b)).status_code == 404
+
+
+def test_a_key_cannot_link_another_principals_attachment(ag, tenant, worker):
+    client, _ = ag
+    h = get_auth_header(tenant, "alice")
+    agent_a, agent_b = make_agent(client, h), make_agent(client, h)
+    _, key_a = _key(client, tenant, agent_ids=[agent_a])
+    _, key_b = _key(client, tenant, agent_ids=[agent_b])
+    theirs = key_upload(client, key_a).json()  # unsent, another key's
+    msg = {"id": "u1", "role": "user", "content": [{"type": "text", "text": "x"}, ref(theirs)]}
+    status, detail, _ = post(client, agent_b, body("tb", "rb", msg), kh(key_b))
+    assert status == 422 and "attachment_not_found" in json.dumps(detail)
+    assert client.get(f"{UP}/{theirs['id']}", headers=kh(key_b)).status_code == 404
+    # Still unsent and still its owner's: key_a can use it.
+    msg_a = {"id": "ua", "role": "user", "content": [{"type": "text", "text": "x"}, ref(theirs)]}
+    assert post(client, agent_a, body("ta", "ra", msg_a), kh(key_a))[0] == 200
+
+
+# --------------------------------------------------------------------------- security of the two routes
+# (the per-route sweep in test_agui15_security.py lists the agent and workflow routes only)
+
+
+def _last_used(app, key_id):
+    with app.state.database_engine.connect() as conn:
+        return conn.execute(text("SELECT last_used_at FROM api_keys WHERE id = :i"), {"i": key_id}).scalar()
+
+
+def _rows(app, tenant):
+    with app.state.database_engine.connect() as conn:
+        return conn.execute(text("SELECT count(*) FROM chat_attachments WHERE tenant_id = :t"), {"t": tenant}).scalar_one()
+
+
+def test_a_disallowed_origin_is_403_on_both_routes_and_touches_nothing(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    key_id, key = _key(client, tenant, allowed_origins=["https://ok.test"])
+    own = client.post(UP, files={"file": ("a.png", PNG, "image/png")}, headers=h).json()  # a dev upload
+    evil = kh(key) | {"Origin": "https://evil.test"}
+    before = _rows(app, tenant)
+    up = client.post(UP, files={"file": ("a.png", PNG, "image/png")}, headers=evil)
+    got = client.get(f"{UP}/{own['id']}", headers=evil)
+    assert (up.status_code, got.status_code) == (403, 403)
+    assert _rows(app, tenant) == before and _last_used(app, key_id) is None
+    for refusal in (up, got):  # no key, no storage key, no attachment detail in a refusal
+        assert key not in refusal.text and "attachments/" not in refusal.text and own["id"] not in refusal.text
+    ok = kh(key) | {"Origin": "https://ok.test"}
+    assert client.post(UP, files={"file": ("a.png", PNG, "image/png")}, headers=ok).status_code == 201
+    assert _last_used(app, key_id) is not None
+
+
+def test_a_revoked_key_cannot_upload_or_fetch(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    key_id, key = _key(client, tenant)
+    meta = key_upload(client, key).json()
+    assert client.delete(f"/api/v1/api-keys/{key_id}", headers=h).status_code == 204
+    before = _rows(app, tenant)
+    up = key_upload(client, key)
+    got = client.get(f"{UP}/{meta['id']}", headers=kh(key))
+    gone = client.delete(f"{UP}/{meta['id']}", headers=kh(key))
+    assert (up.status_code, got.status_code, gone.status_code) == (401, 401, 401)
+    assert up.json() == got.json() == {"detail": "Invalid API key"}
+    assert _rows(app, tenant) == before
+    for refusal in (up, got, gone):
+        assert key not in refusal.text and meta["id"] not in refusal.text
+
+
+def test_a_foreign_credential_gets_the_same_404_as_an_unknown_id(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    agent_a, agent_b = make_agent(client, h), make_agent(client, h)
+    _, key_a = _key(client, tenant, agent_ids=[agent_a])
+    _, key_b = _key(client, tenant, agent_ids=[agent_b])
+    other = f"t{uuid.uuid4().hex[:10]}"
+    app.state.test_tenants.append(other)
+    _, key_o = _key(client, other)
+    meta = key_upload(client, key_a).json()
+    unknown = client.get(f"{UP}/{uuid.uuid4()}", headers=kh(key_a))
+    assert unknown.status_code == 404
+    for foreign in (key_b, key_o, None):  # another key, another tenant's key, the dev bearer of another tenant
+        headers = kh(foreign) if foreign else get_auth_header(other, "bob")
+        got = client.get(f"{UP}/{meta['id']}", headers=headers)
+        assert (got.status_code, got.json()) == (404, unknown.json()), foreign
+        gone = client.delete(f"{UP}/{meta['id']}", headers=headers)
+        assert gone.status_code == 404 and gone.json() == unknown.json()
+    assert client.get(f"{UP}/{meta['id']}", headers=kh(key_a)).status_code == 200

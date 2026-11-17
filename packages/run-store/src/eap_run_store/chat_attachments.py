@@ -117,6 +117,10 @@ class ChatAttachmentModel(Base):
     sha256: Mapped[str] = mapped_column("sha256", String, nullable=False)
     storage_key: Mapped[str] = mapped_column("storage_key", Text, nullable=False)
     message_id: Mapped[str | None] = mapped_column("message_id", String, nullable=True)
+    # The native run whose user message linked this upload (set with message_id by `link`). A key may
+    # read a linked upload only through a run of an agent it may use, never by the bare client-chosen
+    # message id, which two agents' runs can share.
+    run_id: Mapped[str | None] = mapped_column("run_id", String, nullable=True)
     created_by: Mapped[str] = mapped_column("created_by", String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
@@ -173,6 +177,8 @@ class AttachmentMeta:
     size: int
     message_id: str | None = None
     storage_key: str = ""  # where the BlobStore holds the bytes; never part of as_json
+    created_by: str = ""  # the uploader (user id or `key:{key_id}`); never part of as_json
+    run_id: str | None = None  # the native run whose message first linked it; never part of as_json
 
     def as_json(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "media_type": self.media_type, "size": self.size}
@@ -204,6 +210,7 @@ def _meta(row: ChatAttachmentModel) -> AttachmentMeta:
     return AttachmentMeta(
         id=str(row.id), name=row.name, media_type=row.media_type, size=row.size, message_id=row.message_id,
         storage_key=row.storage_key,
+        created_by=row.created_by, run_id=row.run_id,
     )
 
 
@@ -261,8 +268,11 @@ class ChatAttachmentStore:
                 return _meta(row)
             if row.message_id is None or allowed == []:
                 return None
+            if row.run_id is None:  # linked by no run we know: not reachable through an agent
+                return None
             linked = select(AgUiRunModel.run_id).where(
                 AgUiRunModel.tenant_id == tenant_id,
+                AgUiRunModel.run_id == row.run_id,  # the run that linked it, not any run reusing the message id
                 AgUiRunModel.scope_kind == "agent",
                 AgUiRunModel.input_message_ids.contains([row.message_id]),
             )
@@ -284,21 +294,35 @@ class ChatAttachmentStore:
             ).scalars().all()
         return {str(r.id): _meta(r) for r in rows}
 
-    def link(self, tenant_id: str, ids: Iterable[str], *, message_id: str) -> None:
-        """Tie uploads to the user message that sends them (idempotent for the same message)."""
+    def link(self, tenant_id: str, ids: Iterable[str], *, message_id: str, run_id: str, created_by: str) -> set[str]:
+        """Tie uploads to the user message of run `run_id` that sends them. Only the caller's own
+        uploads (`created_by`) link: another principal's upload is left alone, so a key cannot pull
+        someone else's file into its own message and then read it. An upload is unlinked or already
+        linked to this same message (a retry, a resent history), and keeps the run that linked it
+        first. Returns the ids that are linked to `message_id` afterwards."""
         wanted = [i for i in ids if _is_uuid(i)]
         if not wanted:
-            return
+            return set()
         with self.Session() as session, session.begin():
             session.execute(
                 update(ChatAttachmentModel)
                 .where(
                     ChatAttachmentModel.tenant_id == tenant_id,
                     ChatAttachmentModel.id.in_(wanted),
+                    ChatAttachmentModel.created_by == created_by,
                     (ChatAttachmentModel.message_id.is_(None)) | (ChatAttachmentModel.message_id == message_id),
                 )
-                .values(message_id=message_id)
+                .values(message_id=message_id, run_id=func.coalesce(ChatAttachmentModel.run_id, run_id))
             )
+            done = session.execute(
+                select(ChatAttachmentModel.id).where(
+                    ChatAttachmentModel.tenant_id == tenant_id,
+                    ChatAttachmentModel.id.in_(wanted),
+                    ChatAttachmentModel.created_by == created_by,
+                    ChatAttachmentModel.message_id == message_id,
+                )
+            ).scalars().all()
+        return {str(i) for i in done}
 
     def delete_unsent(
         self, tenant_id: str, attachment_id: str, created_by: str, *, remove_blob: Callable[[str], None]
