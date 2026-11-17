@@ -129,6 +129,20 @@ stream) is not run twice. Re-sending the latest recorded user message alone unde
   PDFs need a model that takes them; text files are inlined for any model). Thread GET and snapshots
   return the same parts on the user message. `GET /api/v1/attachments/{id}` returns the bytes
   (tenant-scoped, `nosniff`).
+- **Attachments with an API key.** The dev routes refuse a key, so a key uses their AG-UI twins, with the
+  same limits and codes: `POST /api/v1/ag-ui/attachments` (multipart field `file`, scope `agui:run`)
+  and `GET /api/v1/ag-ui/attachments/{id}`; after migration 0023 the key can also discard an unsent
+  upload with `DELETE /api/v1/ag-ui/attachments/{id}` (409 once a message references it). Reference it
+  as `/api/v1/ag-ui/attachments/{id}` (or `attachment:{id}`) in an `image` / `document` part. A key's
+  uploads are recorded as created by `key:{key_id}`. A key fetches only an attachment it uploaded, or one
+  linked to a message of a conversation of an agent the key may use; any other id, and every id of
+  another tenant, is 404. Thread GET and snapshots give a key the AG-UI URL in `source.value` (the dev
+  bearer keeps `/api/v1/attachments/{id}`).
+- **Expiry.** An upload that no message has referenced is removed, with its file, 24 hours after it was
+  made; send it in a message before then. A sent attachment stays with its conversation.
+- **Deployment.** With `EAP_BLOB_BACKEND=s3` the deployment reads the object-storage credentials from
+  `op://<vault>/<item>/EAP_BLOB_S3_ACCESS_KEY`, `.../EAP_BLOB_S3_SECRET_KEY` and
+  `.../EAP_BLOB_R2_ACCOUNT_ID`.
 - **Feedback.** `PUT|DELETE /api/v1/conversations/{id}/messages/{messageId}/feedback`
   (`{rating: "up"|"down", comment?}`) rates an assistant message (`{runId}-m{n}`), one row per user.
   The thread GET adds `feedback: {messageId: {rating, comment, updated_at}}` for the caller. Feedback is
