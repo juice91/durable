@@ -144,7 +144,7 @@ fi
 
 guard_contexts
 
-# The ToolHive operator runs managed MCP servers; idempotent, installs helm on macOS if missing.
+# The ToolHive operator runs managed MCP servers; idempotent, downloads the pinned helm release into ~/.local/bin if missing.
 # PYDANTICOS_SKIP_TOOLHIVE=1 skips it (the stub-based script tests, which have no helm).
 if [[ "${PYDANTICOS_SKIP_TOOLHIVE:-}" != 1 ]]; then
   "${SCRIPT_DIR}/toolhive.sh" install --context "$EXPECTED_CONTEXT"

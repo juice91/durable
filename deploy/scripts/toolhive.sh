@@ -49,15 +49,57 @@ while (($#)); do
 done
 [[ -n "$command_name" ]] || { usage; exit 64; }
 
+HELM_VERSION=${HELM_VERSION:-v3.19.0}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# Download the official release tarball, verify it against the published checksum, install the binary.
+install_helm_release() {
+  local os arch machine dir name tmp want got
+  case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) printf 'helm is required and this OS has no release download here. Install it (https://helm.sh/docs/intro/install/).\n' >&2; exit 127 ;;
+  esac
+  machine=$(uname -m)
+  case "$machine" in
+    arm64 | aarch64) arch=arm64 ;;
+    x86_64 | amd64) arch=amd64 ;;
+    *) printf 'helm is required and architecture %s is unsupported here. Install it manually.\n' "$machine" >&2; exit 127 ;;
+  esac
+  dir=${HELM_INSTALL_DIR:-$HOME/.local/bin}
+  name=helm-${HELM_VERSION}-${os}-${arch}.tar.gz
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/$name" "https://get.helm.sh/$name" || { rm -rf "$tmp"; printf 'Failed to download %s\n' "$name" >&2; exit 1; }
+  curl -fsSL -o "$tmp/$name.sha256sum" "https://get.helm.sh/$name.sha256sum" || { rm -rf "$tmp"; printf 'Failed to download %s.sha256sum\n' "$name" >&2; exit 1; }
+  want=$(awk '{print $1; exit}' "$tmp/$name.sha256sum")
+  got=$(sha256_of "$tmp/$name")
+  if [[ -z "$want" || "$want" != "$got" ]]; then
+    rm -rf "$tmp"
+    printf 'Checksum mismatch for %s (expected %s, got %s); refusing to install.\n' "$name" "$want" "$got" >&2
+    exit 1
+  fi
+  tar -xzf "$tmp/$name" -C "$tmp" "${os}-${arch}/helm"
+  mkdir -p "$dir"
+  install -m 0755 "$tmp/${os}-${arch}/helm" "$dir/helm"
+  rm -rf "$tmp"
+  export PATH="$dir:$PATH"
+  printf 'Installed helm %s to %s\n' "$HELM_VERSION" "$dir/helm" >&2
+}
+
 ensure_helm() {
   command -v helm >/dev/null 2>&1 && return 0
-  if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
-    printf 'helm not found; installing it with Homebrew.\n' >&2
-    brew install helm
-  else
-    printf 'helm is required. Install it (https://helm.sh/docs/intro/install/) and rerun.\n' >&2
-    exit 127
+  # Homebrew only as an optional first attempt, and only when its prefix is writable.
+  if command -v brew >/dev/null 2>&1 && [[ -w "$(brew --prefix 2>/dev/null)" ]]; then
+    printf 'helm not found; trying Homebrew.\n' >&2
+    brew install helm >&2 || printf 'brew install helm failed; falling back to the release tarball.\n' >&2
+    command -v helm >/dev/null 2>&1 && return 0
   fi
+  install_helm_release
 }
 
 require_kubectl() {
@@ -65,7 +107,7 @@ require_kubectl() {
 }
 
 require_helm() {
-  command -v helm >/dev/null 2>&1 || { printf 'Required command not found: helm (install it, or run "install" which can add it with Homebrew).\n' >&2; exit 127; }
+  command -v helm >/dev/null 2>&1 || { printf 'Required command not found: helm (run "install", which downloads it when missing).\n' >&2; exit 127; }
 }
 
 require_reachable() {
