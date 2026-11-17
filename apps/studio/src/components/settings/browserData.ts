@@ -6,6 +6,7 @@ import { safeLocalStorage } from "@/lib/safeStorage";
 import {
   AGENT_CONFIG_KEY_PREFIX,
   AGENT_LAYOUT_KEY_PREFIX,
+  AGENTS_SHOW_SYSTEM_KEY,
   AGENTS_VIEW_KEY,
   LAST_AGENT_KEY,
 } from "@/components/agentPage/agentPageModel";
@@ -74,8 +75,8 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
   {
     id: "agents-view",
     label: "Agents list view",
-    description: "List or Compact.",
-    keys: [AGENTS_VIEW_KEY],
+    description: "List or Compact, and whether system agents are shown.",
+    keys: [AGENTS_VIEW_KEY, AGENTS_SHOW_SYSTEM_KEY],
     prefixes: [],
     clearGroup: "layout",
   },

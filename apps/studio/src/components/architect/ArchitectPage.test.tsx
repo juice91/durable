@@ -221,6 +221,13 @@ describe("Architect page", () => {
     expect(screen.getByLabelText("Describe it")).toHaveValue("something");
   });
 
+  test("the header says the two system helpers share the model", async () => {
+    mount({ "GET /architect": SEEDED_STATE });
+    expect(await screen.findByTestId("architect-model")).toHaveTextContent(
+      "The Architect uses two system helpers for the form; they share this model.",
+    );
+  });
+
   test("the header shows the model and the picker sets it through PUT /architect/model and refreshes", async () => {
     let model = "litellm:qwen3.8";
     const api = mount({
