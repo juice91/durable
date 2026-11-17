@@ -427,6 +427,7 @@ ARCHITECT_ROUTES = {
     ("POST", "/api/v1/architect"),
     ("GET", "/api/v1/architect/options"),
     ("POST", "/api/v1/architect/draft"),
+    ("POST", "/api/v1/architect/draft-workflow"),  # tenant scoping of what it offers: test_architect_api drop tests
     ("POST", "/api/v1/architect/agents"),
     ("POST", "/api/v1/architect/workflows"),
 }
