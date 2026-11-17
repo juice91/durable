@@ -52,6 +52,7 @@ from eap_secrets import (
 from eap_mcp_runtime import McpRuntime, RuntimeHandle, handle_for
 from eap_mcp_runtime.images import UnsupportedPackage
 from eap_run_store.mcp_catalog import CatalogStore
+from eap_run_store.secrets import SecretStore
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
@@ -114,6 +115,7 @@ class McpServerUpdate(BaseModel):
     url: str | None = None
     enabled: bool | None = None
     headers: Any = None
+    env: Any = None  # managed servers: {VARIABLE: value | "secret:<name>"}, validated by managed.check_env
 
 
 def check_secrets_configuration() -> None:
@@ -350,20 +352,29 @@ def get_mcp_server(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep
 
 @router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}})
 def update_mcp_server(
+    request: Request,
     server_id: uuid.UUID,
     principal: PrincipalDep,
     db: SessionDep,
     policy: PolicyDep,
+    runtime: RuntimeDep,
     payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
     """Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing
-    the url or headers clears the last test result, which no longer describes the server."""
+    the url or headers clears the last test result, which no longer describes the server. A managed
+    server takes `env` (`{VARIABLE: value | "secret:<name>"}`, only the variables it changes): the
+    server's pod is restarted so the new values are projected (the response carries the resulting
+    `runtime_state`). 422 for `env` on an external server, an undeclared variable or a reference to a
+    secret the tenant does not have."""
     body = _parse(McpServerUpdate, payload)
     assert isinstance(body, McpServerUpdate)
     tenant_id = principal.tenant_id
     server = _get_or_404(db, tenant_id, server_id)
     if server.runtime == "managed" and (body.url is not None or body.headers is not None):
         raise _unprocessable("a managed server has no url or headers; its endpoint is the platform's")
+    if body.env is not None and server.runtime != "managed":
+        raise _unprocessable("env: only a managed server takes environment variables")
+    env_change = _plan_env_change(request, db, tenant_id, server, body.env) if body.env is not None else None
     headers = _validate_headers(body.headers) if body.headers is not None else None
     if body.url is not None:
         _check_url_sync(policy, body.url)
@@ -384,9 +395,15 @@ def update_mcp_server(
         if ring is not None:
             db.add_all(_seal(ring, tenant_id, server.id, headers))
         server.last_status = server.last_error_code = server.last_checked_at = None
+    if env_change is not None:
+        _apply_env_change(db, tenant_id, server, env_change)
     server.updated_at = datetime.now(timezone.utc)
     _commit_or_409(db)
     db.refresh(server)
+    if env_change is not None and server.enabled:
+        row = _runtime_of(db, tenant_id, server.id)
+        if row is not None and row.state in managed.RESTARTABLE:
+            restart_runtime(db, server, row, runtime)
     return JSONResponse(content=_json_of(db, tenant_id, server))
 
 
@@ -459,6 +476,65 @@ def _managed_row(db: Session, tenant_id: str, server_id: uuid.UUID) -> tuple[Mcp
     return server, row
 
 
+class _EnvChange(BaseModel):
+    """A validated env update: what to put where. Plain values go to the package document, secrets and
+    references to sealed rows (a reference also to the document's `secret_refs`)."""
+
+    plain: dict[str, str]
+    secret: dict[str, str]
+    refs: dict[str, str]
+
+    @property
+    def names(self) -> set[str]:
+        return set(self.plain) | set(self.secret) | set(self.refs)
+
+
+def _plan_env_change(request: Request, db: Session, tenant_id: str, server: McpServerModel, env: Any) -> _EnvChange:
+    if not isinstance(env, dict):
+        raise _unprocessable("env must be an object of variable name to string value")
+    row = _runtime_of(db, tenant_id, server.id)
+    entry = CatalogStore(request.app.state.database_engine).get(row.catalog_name) if row is not None else None
+    package = None
+    if row is not None and entry is not None:
+        doc = row.package if isinstance(row.package, dict) else {}
+        package = next((p for p in entry.packages if p.identifier == doc.get("identifier")), None)
+    if package is None:
+        raise _unprocessable("env: this server's catalog entry is no longer available, so its variables cannot be checked")
+    try:
+        plain, secret, refs = managed.check_env(package, env, partial=True)
+        managed.require_refs(SecretStore(request.app.state.database_engine, None), tenant_id, refs)
+    except ValueError as exc:  # messages name a variable or a secret, never a value
+        raise _unprocessable(str(exc)) from None
+    return _EnvChange(plain=plain, secret=secret, refs=refs)
+
+
+def _apply_env_change(db: Session, tenant_id: str, server: McpServerModel, change: _EnvChange) -> None:
+    row = _runtime_of(db, tenant_id, server.id)
+    assert row is not None
+    names = change.names
+    sealed = {**change.secret, **managed.ref_secrets(change.refs)}
+    ring = _keyring() if sealed else None
+    db.execute(delete(McpServerSecretModel).where(
+        McpServerSecretModel.tenant_id == tenant_id, McpServerSecretModel.server_id == server.id,
+        McpServerSecretModel.kind == "env", McpServerSecretModel.header_name.in_(names),
+    ))
+    if ring is not None:
+        db.add_all(managed.seal_env(ring, tenant_id, server.id, sealed))
+    doc = dict(row.package) if isinstance(row.package, dict) else {}
+    doc["env"] = {**{k: v for k, v in (doc.get("env") or {}).items() if k not in names}, **change.plain}
+    doc["secret_refs"] = {**{k: v for k, v in managed.refs_of(row).items() if k not in names}, **change.refs}
+    row.package = doc  # a new dict, so the JSON column registers the change
+    server.last_status = server.last_error_code = server.last_checked_at = None
+
+
+def restart_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, runtime: McpRuntime) -> bool:
+    """Stop the pod and start it again so a changed env (or a changed tenant secret) is projected. False
+    when either step failed (the row is then `failed` with a code) or another caller owned the row."""
+    if _stop_runtime(db, row, runtime, managed.RESTARTABLE) != "stopped":
+        return False
+    return _start_runtime(db, server, row, runtime)
+
+
 def _start_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, runtime: McpRuntime) -> bool:
     """Start a pending, stopped, idle or failed runtime: claim `starting` (one conditional UPDATE, so the
     worker's on-demand start and this one never both run), decrypt the env secrets and call the adapter.
@@ -468,7 +544,13 @@ def _start_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, ru
     if not managed.claim(db, row, "starting", managed.STARTABLE):
         return True
     try:
-        secrets = managed.open_env(db, load_keyring(), server.tenant_id, server.id)
+        ring = load_keyring()
+        secrets = managed.resolve_env(db, ring, server.tenant_id, managed.open_env(db, ring, server.tenant_id, server.id))
+    except managed.SecretRefMissing as exc:
+        log.warning("mcp runtime env refers to a missing secret tenant=%s server=%s secret=%s",
+                    server.tenant_id, server.id, exc.name)
+        managed.set_failed(db, row, "secret_not_found")
+        return False
     except SecretsError as exc:
         log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",
                     tenant_id=server.tenant_id, server_id=server.id)
@@ -524,9 +606,21 @@ def _reconcile(db: Session, row: McpRuntimeModel, runtime: McpRuntime) -> tuple[
     return True, managed.redact_lines([live.message], {})[0] if live.message else ""
 
 
-def _runtime_body(row: McpRuntimeModel, reachable: bool = True, message: str = "") -> dict[str, Any]:
+def _runtime_env(db: Session, row: McpRuntimeModel) -> list[dict[str, Any]]:
+    """`[{name, ref}]`: every variable of the server, `ref` = `secret:<name>` for a stored-secret
+    reference and null otherwise. Never a value."""
+    refs = {v: managed.SECRET_REF_PREFIX + n for v, n in managed.refs_of(row).items()}
+    names = set(refs) | {n for n in ((row.package or {}).get("env") or {}) if n != managed.PACKAGE_ENV}
+    names |= set(db.scalars(select(McpServerSecretModel.header_name).where(
+        McpServerSecretModel.tenant_id == row.tenant_id, McpServerSecretModel.server_id == row.server_id,
+        McpServerSecretModel.kind == "env")))
+    return [{"name": n, "ref": refs.get(n)} for n in sorted(names)]
+
+
+def _runtime_body(row: McpRuntimeModel, reachable: bool = True, message: str = "", env: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     package = row.package or {}
     return {
+        "env": env or [],
         "state": row.state,
         "message": message,
         "reachable": reachable,
@@ -661,18 +755,22 @@ def install_from_catalog(
     if not isinstance(env, dict):
         raise _unprocessable("env must be an object of variable name to string value")
     try:
-        plain, secret = managed.check_env(package, env)
+        plain, secret, refs = managed.check_env(package, env)
+        managed.require_refs(SecretStore(request.app.state.database_engine, None), tenant_id, refs)
         image, document = managed.package_document(package)
     except ValueError as exc:  # check_env messages and UnsupportedPackage (a ValueError) carry no values
         raise _unprocessable(str(exc)) from None
     document["env"] = {**document["env"], **plain}
-    ring = _keyring() if secret else None
+    if refs:
+        document["secret_refs"] = dict(refs)  # {VARIABLE: secret name}
+    sealed = {**secret, **managed.ref_secrets(refs)}
+    ring = _keyring() if sealed else None
     handle = handle_for(tenant_id, server_id)
     db.add(McpServerModel(id=server_id, tenant_id=tenant_id, name=name, url=None, runtime="managed",
                           transport=TRANSPORT_STREAMABLE_HTTP, enabled=True))
     _flush_or_409(db)
     if ring is not None:
-        db.add_all(managed.seal_env(ring, tenant_id, server_id, secret))
+        db.add_all(managed.seal_env(ring, tenant_id, server_id, sealed))
     row = McpRuntimeModel(
         id=uuid.uuid4(), tenant_id=tenant_id, server_id=server_id, catalog_name=entry.name, package=document,
         image=image, namespace=handle.namespace, cr_name=handle.cr_name, state="pending",
@@ -694,7 +792,7 @@ def get_runtime(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, r
     first. `reachable` false means the cluster could not be asked (the stored state is shown)."""
     _server, row = _managed_row(db, principal.tenant_id, server_id)
     reachable, message = _reconcile(db, row, runtime) if row.state in ("starting", "running", "idle") else (True, "")
-    return JSONResponse(content=_runtime_body(row, reachable, message))
+    return JSONResponse(content=_runtime_body(row, reachable, message, _runtime_env(db, row)))
 
 
 @router.post("/mcp-servers/{server_id}/runtime/{action}",
@@ -727,7 +825,7 @@ def control_runtime(
     if not ok:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"the runtime could not be {action}ed"
                             if action != "stop" else "the runtime could not be stopped")
-    return JSONResponse(content=_runtime_body(row))
+    return JSONResponse(content=_runtime_body(row, env=_runtime_env(db, row)))
 
 
 @router.get("/mcp-servers/{server_id}/runtime/logs", responses={409: {"model": ErrorDetail}, 502: {"model": ErrorDetail}})
@@ -748,7 +846,9 @@ def get_runtime_logs(
                     tenant_id=principal.tenant_id, server_id=str(server_id))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="the logs could not be read") from None
     try:
-        secrets = managed.open_env(db, load_keyring(), principal.tenant_id, server.id)
+        ring = load_keyring()
+        secrets = managed.resolve_env(
+            db, ring, principal.tenant_id, managed.open_env(db, ring, principal.tenant_id, server.id), strict=False)
     except SecretsError:
         secrets = {}  # unreadable secrets cannot be matched by value; the pattern mask still applies
     return JSONResponse(content={"lines": managed.redact_lines(list(lines), secrets), "tail": tail})

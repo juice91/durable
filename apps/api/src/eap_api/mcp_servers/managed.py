@@ -11,6 +11,11 @@ starts a pod.
 A runtime row's `package` document is `{registry_type, identifier, version, transport, port, args, env}`:
 `env` holds the non-secret variables (plus the runner's package reference), secret variables are only
 ever sealed rows of `mcp_server_secrets` (kind `env`) and Kubernetes Secrets written by the adapter.
+A variable may instead be a reference `secret:<name>` to a tenant secret (secret input): the sealed row
+then holds the reference text (the worker resolves it when it starts the pod on demand), the package
+document's `secret_refs` maps `{VARIABLE: <name>}` (so usage can be listed without decrypting),
+and the API resolves it into the projected Kubernetes Secret at start. A tenant reference can only name
+that tenant's own secret (SecretStore is keyed by tenant).
 """
 
 from __future__ import annotations
@@ -26,7 +31,9 @@ from sqlalchemy.orm import Session
 
 from eap_mcp_runtime import McpRuntime, RuntimeHandle, RuntimeSpec
 from eap_mcp_runtime.images import PACKAGE_ENV, PackageSpec, UnsupportedPackage, image_for
+from eap_run_store.secrets import SecretStore
 from eap_schemas import CatalogPackage
+from eap_schemas.secrets import SECRET_REF_PREFIX, is_secret_ref
 from eap_secrets import Keyring, mcp_env_context
 from eap_secrets.redaction import redact, secret_variants
 
@@ -37,6 +44,7 @@ log = logging.getLogger("eap_api.mcp_servers.managed")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 MAX_ENV_VALUE = 8192
 STARTABLE = ("pending", "stopped", "idle", "failed")
+RESTARTABLE = ("starting", "running", "idle", "failed")  # a pod that exists or just failed: re-project on change
 STOPPABLE = ("pending", "starting", "running", "idle", "failed")
 MAX_LOG_TAIL = 1000
 DEFAULT_LOG_TAIL = 200
@@ -113,15 +121,28 @@ def package_document(package: CatalogPackage) -> tuple[str, dict[str, Any]]:
     }
 
 
-def check_env(package: CatalogPackage, env: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
-    """Split the submitted env into `(plain, secret)` by the package's declaration. Raises ValueError
-    with a message naming the variable, never its value."""
+class SecretRefMissing(ValueError):
+    """An env variable refers to a tenant secret that does not exist (the message names the secret)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"env: secret {name} does not exist")
+        self.name = name
+
+
+def check_env(
+    package: CatalogPackage, env: Mapping[str, Any], *, partial: bool = False
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Split the submitted env into `(plain, secret, refs)` by the package's declaration; `refs` maps a
+    variable to the tenant secret name it refers to (`secret:<name>`, any declared variable). `partial`
+    skips the required check (an update names only the variables it changes). Raises ValueError with a
+    message naming the variable, never its value."""
     declared = {v.name: v for v in package.environment_variables}
     for name in declared:
         if name.upper() in DENIED_ENV or name.upper().startswith(DENIED_ENV_PREFIXES):
             raise ValueError(f"env_name_denied: {name} cannot be set on a managed server")
     plain: dict[str, str] = {}
     secret: dict[str, str] = {}
+    refs: dict[str, str] = {}
     for name, value in env.items():
         if not isinstance(name, str) or not ENV_NAME.match(name) or name == PACKAGE_ENV:
             raise ValueError("env: an entry has an invalid variable name")
@@ -131,11 +152,53 @@ def check_env(package: CatalogPackage, env: Mapping[str, Any]) -> tuple[dict[str
             raise ValueError(f"env: {name} must be a string of at most {MAX_ENV_VALUE} characters")
         if value == "":
             continue
+        if value.startswith(SECRET_REF_PREFIX):
+            ref = is_secret_ref(value)
+            if ref is None:
+                raise ValueError(f"env: {name} is not a valid secret reference")
+            refs[name] = ref
+            continue
         (secret if declared[name].secret else plain)[name] = value
-    for name, spec in declared.items():
-        if spec.required and name not in plain and name not in secret:
-            raise ValueError(f"env: {name} is required")
-    return plain, secret
+    if not partial:
+        for name, spec in declared.items():
+            if spec.required and name not in plain and name not in secret and name not in refs:
+                raise ValueError(f"env: {name} is required")
+    return plain, secret, refs
+
+
+def require_refs(store: SecretStore, tenant_id: str, refs: Mapping[str, str]) -> None:
+    """Every referenced secret must exist for this tenant (SecretMissing otherwise)."""
+    if not refs:
+        return
+    have = {r["name"] for r in store.names(tenant_id)}
+    for name in sorted(set(refs.values())):
+        if name not in have:
+            raise SecretRefMissing(name)
+
+
+def ref_secrets(refs: Mapping[str, str]) -> dict[str, str]:
+    """`{VARIABLE: "secret:<name>"}`: the sealed text of a reference-valued variable."""
+    return {var: SECRET_REF_PREFIX + name for var, name in refs.items()}
+
+
+def refs_of(row: McpRuntimeModel) -> dict[str, str]:
+    package = row.package if isinstance(row.package, dict) else {}
+    return {v: n for v, n in (package.get("secret_refs") or {}).items() if isinstance(n, str)}
+
+
+def servers_using(db: Session, tenant_id: str) -> dict[str, list[dict[str, str]]]:
+    """`{secret name: [{server_id, name}]}` for the tenant's managed servers, from the package documents
+    (no decryption)."""
+    rows = db.execute(
+        select(McpRuntimeModel, McpServerModel.name)
+        .join(McpServerModel, McpServerModel.id == McpRuntimeModel.server_id)
+        .where(McpRuntimeModel.tenant_id == tenant_id, McpServerModel.tenant_id == tenant_id)
+    ).all()
+    used: dict[str, list[dict[str, str]]] = {}
+    for runtime_row, server_name in rows:
+        for name in sorted(set(refs_of(runtime_row).values())):
+            used.setdefault(name, []).append({"server_id": runtime_row.server_id, "name": server_name})
+    return used
 
 
 def seal_env(ring: Keyring, tenant_id: str, server_id: str, secret: Mapping[str, str]) -> list[McpServerSecretModel]:
@@ -157,6 +220,25 @@ def open_env(db: Session, ring: Keyring, tenant_id: str, server_id: str) -> dict
                McpServerSecretModel.kind == "env")
     ).all()
     return {n: ring.decrypt(bytes(c), k, context=mcp_env_context(tenant_id, server_id, n)) for n, c, k in rows}
+
+
+def resolve_env(db: Session, ring: Keyring, tenant_id: str, values: Mapping[str, str], *, strict: bool = True) -> dict[str, str]:
+    """Replace reference values (`secret:<name>`) by the tenant's stored secret. A missing secret raises
+    SecretRefMissing (`strict`), or keeps the reference text out of the result (not strict: log redaction)."""
+    store = SecretStore(db.get_bind(), ring)  # type: ignore[arg-type]
+    out: dict[str, str] = {}
+    for var, value in values.items():
+        ref = is_secret_ref(value)
+        if ref is None:
+            out[var] = value
+            continue
+        resolved = store.resolve(tenant_id, ref)
+        if resolved is None:
+            if strict:
+                raise SecretRefMissing(ref)
+            continue
+        out[var] = resolved
+    return out
 
 
 def build_spec(row: McpRuntimeModel, server: McpServerModel, secrets: Mapping[str, str]) -> RuntimeSpec:
@@ -234,6 +316,6 @@ def redact_lines(lines: list[str], secrets: Mapping[str, str]) -> list[str]:
 
 
 __all__ = [
-    "DEFAULT_LOG_TAIL", "MAX_LOG_TAIL", "STARTABLE", "STOPPABLE", "DENIED_ENV", "finish_stop", "touch", "build_spec", "check_env", "claim",
-    "get_mcp_runtime", "handle_of", "open_env", "package_document", "redact_lines", "seal_env", "set_failed",
+    "DEFAULT_LOG_TAIL", "RESTARTABLE", "SECRET_REF_PREFIX", "PACKAGE_ENV", "MAX_LOG_TAIL", "STARTABLE", "STOPPABLE", "DENIED_ENV", "finish_stop", "touch", "build_spec", "check_env", "claim",
+    "get_mcp_runtime", "handle_of", "open_env", "resolve_env", "SecretRefMissing", "require_refs", "ref_secrets", "refs_of", "servers_using", "package_document", "redact_lines", "seal_env", "set_failed",
 ]

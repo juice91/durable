@@ -40,15 +40,15 @@ def test_put_list_delete_never_returns_the_value(client, keyed, tenant_secrets_c
     caplog.set_level(logging.DEBUG)
     _, h = _tenant(tenant_secrets_cleanup)
     r = client.put(f"{API}/secrets/slack-token", json={"value": FAKE_VALUE}, headers=h)
-    assert r.status_code == 204 and r.content == b""
+    assert r.status_code == 200 and r.json() == {"restarted": []}
     listed = client.get(f"{API}/secrets", headers=h)
     assert listed.status_code == 200
     body = listed.json()
     assert [s["name"] for s in body] == ["slack-token"]
-    assert set(body[0]) == {"name", "created_at", "updated_at"}
+    assert set(body[0]) == {"name", "created_at", "updated_at", "used_by"}
     assert FAKE_VALUE not in listed.text
     # An upsert keeps one row and moves updated_at.
-    assert client.put(f"{API}/secrets/slack-token", json={"value": FAKE_VALUE + "-2"}, headers=h).status_code == 204
+    assert client.put(f"{API}/secrets/slack-token", json={"value": FAKE_VALUE + "-2"}, headers=h).status_code == 200
     again = client.get(f"{API}/secrets", headers=h).json()
     assert len(again) == 1 and again[0]["created_at"] == body[0]["created_at"]
     assert client.delete(f"{API}/secrets/slack-token", headers=h).status_code == 204
@@ -61,7 +61,7 @@ def test_value_is_stored_encrypted_and_resolves(client, keyed, tenant_secrets_cl
     from eap_secrets import load_keyring
 
     t, h = _tenant(tenant_secrets_cleanup)
-    assert client.put(f"{API}/secrets/api.key", json={"value": FAKE_VALUE}, headers=h).status_code == 204
+    assert client.put(f"{API}/secrets/api.key", json={"value": FAKE_VALUE}, headers=h).status_code == 200
     engine = client.app.state.database_engine
     with engine.connect() as conn:
         raw = conn.execute(text("SELECT ciphertext, created_by FROM tenant_secrets WHERE tenant_id = :t"), {"t": t}).one()
@@ -98,7 +98,7 @@ def test_invalid_value_is_422_and_not_echoed(client, keyed, tenant_secrets_clean
 
 def test_max_length_value_is_accepted(client, keyed, tenant_secrets_cleanup):
     _, h = _tenant(tenant_secrets_cleanup)
-    assert client.put(f"{API}/secrets/tok", json={"value": "v" * 8192}, headers=h).status_code == 204
+    assert client.put(f"{API}/secrets/tok", json={"value": "v" * 8192}, headers=h).status_code == 200
 
 
 def test_without_the_platform_key_the_write_is_503(client, monkeypatch, tenant_secrets_cleanup):

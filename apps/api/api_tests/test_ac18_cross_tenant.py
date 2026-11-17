@@ -491,7 +491,7 @@ def test_secret_routes_are_in_the_inventory_and_closed_to_another_tenant(api, mo
     tenant, h = tenant_of()
     other_tenant, other = tenant_of("mallory")
     try:
-        assert client.put(f"{API}/secrets/slack-token", json={"value": "fake-not-real"}, headers=h).status_code == 204
+        assert client.put(f"{API}/secrets/slack-token", json={"value": "fake-not-real"}, headers=h).status_code == 200
         assert client.get(f"{API}/secrets", headers=other).json() == []
         assert client.delete(f"{API}/secrets/slack-token", headers=other).status_code == 404
         assert [s["name"] for s in client.get(f"{API}/secrets", headers=h).json()] == ["slack-token"]
@@ -503,3 +503,33 @@ def test_secret_routes_are_in_the_inventory_and_closed_to_another_tenant(api, mo
     finally:
         with app.state.database_engine.begin() as conn:
             conn.execute(text("DELETE FROM tenant_secrets WHERE tenant_id IN (:a, :b)"), {"a": tenant, "b": other_tenant})
+
+
+def test_a_managed_server_ref_cannot_name_another_tenants_secret(api, monkeypatch):
+    """Secret input: tenant B installing or patching a managed server with `secret:<A's name>` is a 422
+    (the name does not exist for B) and nothing is started; A's secret is not reported as used."""
+    from eap_api.mcp_servers.managed import get_mcp_runtime
+    from eap_run_store.mcp_catalog import CatalogStore
+    from eap_secrets import KEY_ENV, generate_key
+
+    from .mcp_runtime_helpers import FakeRuntime, make_entry
+
+    monkeypatch.setenv(KEY_ENV, generate_key())
+    client, app, tenant_of = api
+    fake = FakeRuntime()
+    app.dependency_overrides[get_mcp_runtime] = lambda: fake
+    tenant, h = tenant_of()
+    other_tenant, other = tenant_of("mallory")
+    entry = make_entry()
+    CatalogStore(app.state.database_engine).upsert([entry])
+    try:
+        assert client.put(f"{API}/secrets/slack-token", json={"value": "fake-not-real"}, headers=h).status_code == 200
+        r = client.post(f"{API}/mcp-servers/from-catalog", headers=other, json={
+            "catalog_name": entry.name, "env": {"API_TOKEN": "secret:slack-token"}})
+        assert r.status_code == 422 and "fake-not-real" not in r.text
+        assert fake.specs == []
+        assert client.get(f"{API}/secrets", headers=h).json()[0]["used_by"] == []
+    finally:
+        with app.state.database_engine.begin() as conn:
+            conn.execute(text("DELETE FROM tenant_secrets WHERE tenant_id IN (:a, :b)"), {"a": tenant, "b": other_tenant})
+            conn.execute(text("DELETE FROM mcp_catalog_entries WHERE name = :n"), {"n": entry.name})
