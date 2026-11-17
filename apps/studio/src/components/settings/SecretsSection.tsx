@@ -1,0 +1,182 @@
+"use client";
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
+import { Button } from "@/components/ui/Button";
+import { toast } from "@/components/ui/Toaster";
+import { ApiError } from "@/lib/api";
+import { deleteSecret, listSecrets, putSecret, secretRef, type SecretInfo } from "@/lib/secrets";
+
+const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+function errorText(reason: unknown, fallback: string): string {
+  return reason instanceof Error && reason.message ? reason.message : fallback;
+}
+
+/**
+ * Settings → Secrets: the tenant's secret names (values are write-only and never shown), Add
+ * secret with a masked value, and Delete after a confirm. Agents and MCP headers refer to a
+ * secret as `secret:<name>`.
+ */
+export function SecretsSection() {
+  const [secrets, setSecrets] = useState<SecretInfo[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const loadSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    try {
+      const listed = await listSecrets();
+      if (seq !== loadSeq.current) return;
+      setSecrets(listed);
+      setLoadError(null);
+    } catch (reason: unknown) {
+      if (seq === loadSeq.current) setLoadError(errorText(reason, "Could not load secrets"));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const add = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (saving || !trimmed || !value) return;
+    setSaving(true);
+    setFormError(null);
+    try {
+      await putSecret(trimmed, value);
+      setName("");
+      setValue("");
+      setStatus(`Secret ${trimmed} saved. Use it as ${secretRef(trimmed)}.`);
+      toast.success("Secret saved");
+      void load();
+    } catch (reason: unknown) {
+      // The message is built from the response, never from what was typed.
+      setFormError(errorText(reason, "The secret could not be saved"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (secretName: string) => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteSecret(secretName);
+      setDeleting(null);
+      setStatus(`Secret ${secretName} deleted.`);
+      toast.success("Secret deleted");
+      void load();
+    } catch (reason: unknown) {
+      if (reason instanceof ApiError && reason.status === 404) {
+        setDeleting(null);
+        setStatus(`Secret ${secretName} no longer exists.`);
+        void load();
+      } else {
+        setDeleteError(errorText(reason, "The secret could not be deleted"));
+      }
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  return (
+    <section id="secrets" aria-labelledby="settings-secrets" data-testid="settings-secrets" className="flex min-w-0 scroll-mt-4 flex-col gap-3 rounded-lg border border-border p-4">
+      <div className="flex min-w-0 flex-col gap-1">
+        <h2 id="settings-secrets" className="text-title font-semibold text-foreground">
+          Secrets
+        </h2>
+        <p className="text-label text-muted-foreground">
+          Credentials agents and MCP servers can use without ever seeing them. Values are stored encrypted and never shown again; refer to one as <code>secret:&lt;name&gt;</code>.
+        </p>
+      </div>
+      {loadError ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <p role="alert" data-testid="secrets-error" className="text-label text-destructive-text">
+            {loadError}
+          </p>
+          <Button variant="secondary" size="sm" onClick={() => void load()}>
+            Retry
+          </Button>
+        </div>
+      ) : secrets === null ? (
+        <p className="text-label text-muted-foreground">Loading secrets…</p>
+      ) : secrets.length === 0 ? (
+        <p data-testid="secrets-empty" className="text-label text-muted-foreground">
+          No secrets yet.
+        </p>
+      ) : (
+        <ul aria-label="Secrets" data-testid="secrets-list" className="min-w-0">
+          {secrets.map((secret) => (
+            <li key={secret.name} data-secret={secret.name} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
+              <span className="min-w-0 break-all font-mono text-label text-foreground">{secret.name}</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                aria-label={`Delete ${secret.name}`}
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleting(secret.name);
+                }}
+              >
+                Delete
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form onSubmit={add} aria-label="Add secret" data-testid="secrets-form" className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
+        <div className="grid min-w-0 gap-3 md:grid-cols-2">
+          <div className="space-y-1">
+            <label htmlFor="secret-name" className="block text-sm font-medium text-foreground">
+              Secret name
+            </label>
+            <input id="secret-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" spellCheck={false} placeholder="slack-token" className={`${inputClass} font-mono`} />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="secret-value" className="block text-sm font-medium text-foreground">
+              Secret value
+            </label>
+            <input id="secret-value" type="password" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+          </div>
+        </div>
+        {formError ? (
+          <p role="alert" data-testid="secrets-form-error" className="text-label text-destructive-text">
+            {formError}
+          </p>
+        ) : null}
+        <div>
+          <Button type="submit" variant="primary" size="sm" disabled={saving || !name.trim() || !value}>
+            Add secret
+          </Button>
+        </div>
+      </form>
+      <p role="status" data-testid="secrets-status" className="min-h-5 text-label text-muted-foreground">
+        {status}
+      </p>
+      {deleting ? (
+        <ConfirmDialog
+          title={`Delete ${deleting}?`}
+          description="Anything that refers to this secret stops working until it is added again. This cannot be undone."
+          confirmLabel="Delete"
+          destructive
+          busy={deleteBusy}
+          error={deleteError}
+          onConfirm={() => void remove(deleting)}
+          onCancel={() => setDeleting(null)}
+        />
+      ) : null}
+    </section>
+  );
+}

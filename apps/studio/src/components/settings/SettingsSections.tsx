@@ -11,6 +11,7 @@ import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
 import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
 import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
+import { SecretsSection } from "./SecretsSection";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useChatProtocol, type ChatProtocol } from "@/components/chat/chatProtocol";
@@ -228,6 +229,7 @@ export function SettingsSections() {
         <ShortcutTable headingLevel={3} />
       </Section>
       <ProvidersSection />
+      <SecretsSection />
       <ApiKeysSection />
       <BrowserDataSection />
       <AboutSection />
