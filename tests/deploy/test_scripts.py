@@ -57,6 +57,8 @@ def _env(tmp: Path, bindir: Path, extra: dict[str, str] | None = None) -> dict[s
     # Stopped profile: do not read the real ~/.colima mount list.
     env["STUB_COLIMA_STOPPED"] = "1"
     env["PYDANTICOS_DATA_DIR"] = str(tmp / "pydanticos-data")
+    # The stubs have no helm; the operator install is covered by test_toolhive_script.py.
+    env["PYDANTICOS_SKIP_TOOLHIVE"] = "1"
     if extra:
         env.update(extra)
     return env

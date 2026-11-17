@@ -144,6 +144,12 @@ fi
 
 guard_contexts
 
+# The ToolHive operator runs managed MCP servers; idempotent, installs helm on macOS if missing.
+# PYDANTICOS_SKIP_TOOLHIVE=1 skips it (the stub-based script tests, which have no helm).
+if [[ "${PYDANTICOS_SKIP_TOOLHIVE:-}" != 1 ]]; then
+  "${SCRIPT_DIR}/toolhive.sh" install --context "$EXPECTED_CONTEXT"
+fi
+
 git_sha=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
 python_image="pydanticos-python:${git_sha}"
 studio_image="pydanticos-studio:${git_sha}"
