@@ -575,3 +575,98 @@ async def test_logs_redact_values_a_caller_passes_in() -> None:
     api.pods[h.namespace] = [f"{h.cr_name}-0"]
     api.logs[f"{h.cr_name}-0"] = "value is zzz-not-registered here"
     assert "zzz-not-registered" not in "\n".join(await rt.logs(h, secret_values=["zzz-not-registered"]))
+
+
+# --- per-server network permissions (ToolHive catalog) ----------------------------------------------
+
+
+def _egress_internet(api: FakeKube, h) -> list[dict]:
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    return [r for r in np["egress"] if any("ipBlock" in t for t in r["to"])]
+
+
+def _resolver(table: dict[str, list[str]]):
+    calls: list[str] = []
+
+    def resolve(host: str) -> list[str]:
+        calls.append(host)
+        if host not in table:
+            raise OSError(f"no such host {host}")
+        return table[host]
+
+    resolve.calls = calls  # type: ignore[attr-defined]
+    return resolve
+
+
+async def test_insecure_allow_all_keeps_the_public_rule_limited_to_the_listed_ports() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec(network={"allow_host": [], "allow_port": [443], "insecure_allow_all": True}))
+    (rule,) = _egress_internet(api, h)
+    assert rule["to"] == [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]
+    assert rule["ports"] == [{"protocol": "TCP", "port": 443}]
+
+
+async def test_insecure_allow_all_without_ports_is_not_limited_by_port() -> None:
+    rt, api = runtime()
+    h = await rt.start(spec(network={"insecure_allow_all": True}))
+    (rule,) = _egress_internet(api, h)
+    assert "ports" not in rule
+
+
+async def test_listed_hosts_become_resolved_cidrs_on_443_by_default() -> None:
+    resolve = _resolver({"api.osv.dev": ["34.1.2.3", "2606:4700::1111"], "github.com": ["140.82.1.1"]})
+    rt, api = runtime(resolve_host=resolve)
+    h = await rt.start(spec(network={"allow_host": ["api.osv.dev", "github.com"], "allow_port": []}))
+    (rule,) = _egress_internet(api, h)
+    assert [t["ipBlock"]["cidr"] for t in rule["to"]] == ["34.1.2.3/32", "2606:4700::1111/128", "140.82.1.1/32"]
+    assert all("except" not in t["ipBlock"] for t in rule["to"])
+    assert rule["ports"] == [{"protocol": "TCP", "port": 443}]
+
+
+async def test_listed_hosts_use_the_listed_ports_and_a_leading_dot_resolves_the_apex() -> None:
+    resolve = _resolver({"github.com": ["140.82.1.1"]})
+    rt, api = runtime(resolve_host=resolve)
+    h = await rt.start(spec(network={"allow_host": [".github.com"], "allow_port": [443, 80]}))
+    (rule,) = _egress_internet(api, h)
+    assert resolve.calls == ["github.com"]
+    assert rule["ports"] == [{"protocol": "TCP", "port": 443}, {"protocol": "TCP", "port": 80}]
+
+
+async def test_resolved_private_addresses_and_unresolvable_hosts_are_dropped() -> None:
+    resolve = _resolver({"evil.example": ["10.0.0.7", "169.254.169.254", "127.0.0.1"], "ok.example": ["8.8.4.4"]})
+    rt, api = runtime(resolve_host=resolve)
+    h = await rt.start(spec(network={"allow_host": ["evil.example", "gone.example", "ok.example"], "allow_port": [443]}))
+    (rule,) = _egress_internet(api, h)
+    assert [t["ipBlock"]["cidr"] for t in rule["to"]] == ["8.8.4.4/32"]
+
+
+async def test_listed_hosts_that_resolve_to_nothing_leave_no_internet_rule() -> None:
+    rt, api = runtime(resolve_host=_resolver({}))
+    h = await rt.start(spec(network={"allow_host": ["gone.example"], "allow_port": [443]}))
+    assert _egress_internet(api, h) == []
+
+
+async def test_an_empty_network_block_means_no_network() -> None:
+    resolve = _resolver({})
+    rt, api = runtime(resolve_host=resolve)
+    h = await rt.start(spec(network={"allow_host": [], "allow_port": [], "insecure_allow_all": False}))
+    assert _egress_internet(api, h) == [] and resolve.calls == []
+    np = api.objects[("NetworkPolicy", h.namespace, f"{h.cr_name}-isolation")]["spec"]
+    assert len(np["egress"]) == 2  # its own pods and cluster DNS only
+
+
+async def test_no_network_block_keeps_todays_public_rule_and_resolves_nothing() -> None:
+    resolve = _resolver({})
+    rt, api = runtime(resolve_host=resolve)
+    h = await rt.start(spec())
+    (rule,) = _egress_internet(api, h)
+    assert rule == {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]}
+    assert resolve.calls == []
+
+
+async def test_a_restart_with_a_new_network_block_replaces_the_policy() -> None:
+    rt, api = runtime(resolve_host=_resolver({"a.example": ["8.8.8.8"]}))
+    h = await rt.start(spec(network={"allow_host": ["a.example"]}))
+    await rt.start(spec(network=None))
+    (rule,) = _egress_internet(api, h)
+    assert rule["to"][0]["ipBlock"]["cidr"] == "0.0.0.0/0"

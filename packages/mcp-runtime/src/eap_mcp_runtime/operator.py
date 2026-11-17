@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import logging
 import os
 import re
+import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx2
@@ -17,6 +19,7 @@ from eap_mcp_runtime import k8s_models as m
 from eap_mcp_runtime.k8s_models import MANAGED_BY
 from eap_mcp_runtime.models import RuntimeHandle, RuntimeSpec, RuntimeStatus
 
+log = logging.getLogger("eap_mcp_runtime.operator")
 FIELD_MANAGER = "pydanticos-mcp-runtime"
 # Excluded from the pod's public egress: private, link-local, CGNAT, loopback, "this network",
 # IETF protocol assignments, benchmarking, multicast and reserved space.
@@ -224,13 +227,78 @@ def secret_doc(namespace: str, cr: str, values: dict[str, str]) -> dict[str, Any
     }
 
 
+HostResolver = Callable[[str], Sequence[str]]
+DEFAULT_NETWORK_PORTS = (443,)
+
+
+def resolve_host_ips(host: str) -> list[str]:
+    """The addresses a host name resolves to now (the default resolver; blocking)."""
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    return sorted({str(info[4][0]) for info in infos})
+
+
+def _public_cidrs(addresses: Sequence[str]) -> list[str]:
+    """/32 and /128 CIDRs for the public addresses only: a name that resolves into private, loopback,
+    link-local or reserved space (DNS rebinding, a poisoned or internal record) never opens egress."""
+    private = [ipaddress.ip_network(r) for r in PRIVATE_RANGES]
+    out: list[str] = []
+    for raw in addresses:
+        try:
+            ip = ipaddress.ip_address(raw.split("%")[0])
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            continue
+        if ip.version == 4 and any(ip in net for net in private):
+            continue
+        cidr = f"{ip}/{32 if ip.version == 4 else 128}"
+        if cidr not in out:
+            out.append(cidr)
+    return out
+
+
+def resolve_network(
+    network: Mapping[str, Any] | None, resolve: HostResolver = resolve_host_ips
+) -> dict[str, Any] | None:
+    """Turn a catalog `{allow_host, allow_port, insecure_allow_all}` block into the egress it allows:
+    `{"all": bool, "cidrs": [..], "ports": [..]}`; None when there is no block (today's default).
+
+    The DNS answers are a SNAPSHOT taken here, at install/start: a host whose addresses change later is
+    unreachable until the server is started again, and a CDN-backed host may hand out different
+    addresses to the pod than to the platform. A leading dot (`.github.com`, a ToolHive subdomain
+    wildcard) resolves the bare domain only; NetworkPolicy cannot match names, so subdomains with other
+    addresses are not covered. A host that does not resolve is skipped (fail closed). With
+    `insecure_allow_all` the hosts are not resolved at all. No hosts and no `insecure_allow_all` means
+    no outbound network."""
+    if network is None:
+        return None
+    ports = [int(p) for p in network.get("allow_port") or ()]
+    if network.get("insecure_allow_all"):
+        return {"all": True, "cidrs": [], "ports": ports}
+    cidrs: list[str] = []
+    for host in network.get("allow_host") or ():
+        name = str(host).lstrip(".").strip()
+        if not name:
+            continue
+        try:
+            found = resolve(name)
+        except Exception as exc:  # noqa: BLE001 - any resolver failure skips the host
+            log.warning("network permission host %s did not resolve: %s", name, exc)
+            continue
+        cidrs.extend(c for c in _public_cidrs(found) if c not in cidrs)
+    return {"all": False, "cidrs": cidrs, "ports": ports or list(DEFAULT_NETWORK_PORTS)}
+
+
 def network_policy_doc(
     namespace: str,
     cr: str,
     *,
     platform_namespace: str,
     caller_labels: Sequence[dict[str, str]],
+    egress_network: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """`egress_network` is `resolve_network`'s result: None keeps the public-internet rule (private ranges
+    excluded, any port); otherwise exactly the allowed CIDRs/ports, or nothing beyond DNS."""
     own = {"podSelector": {"matchLabels": {m.POD_LABEL: cr}}}
     egress: list[dict[str, Any]] = [
         {"to": [own]},
@@ -243,8 +311,18 @@ def network_policy_doc(
             ],
             "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
         },
-        {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]},
     ]
+    if egress_network is None:
+        egress.append({"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]})
+    else:
+        ports = [{"protocol": "TCP", "port": p} for p in egress_network["ports"]]
+        if egress_network["all"]:
+            rule: dict[str, Any] = {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE_RANGES)}}]}
+            if ports:
+                rule["ports"] = ports
+            egress.append(rule)
+        elif egress_network["cidrs"]:
+            egress.append({"to": [{"ipBlock": {"cidr": c}} for c in egress_network["cidrs"]], "ports": ports})
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -514,8 +592,10 @@ class OperatorRuntime:
         api_server_ports: Sequence[int] | None = None,
         pod_cpu: str | None = None,
         pod_memory: str | None = None,
+        resolve_host: HostResolver | None = None,
     ) -> None:
         self._api = api or LightkubeApi()
+        self._resolve_host = resolve_host or resolve_host_ips  # injectable for tests
         self._platform_namespace = platform_namespace
         # Platform pods that may call the proxy port: the worker and the API, by label.
         self._ingress_labels = tuple(ingress_labels) if ingress_labels else DEFAULT_CALLER_LABELS
@@ -563,12 +643,15 @@ class OperatorRuntime:
         else:  # a previous run's values must not outlive a spec that no longer has secrets
             await self._api.delete("Secret", h.namespace, m.secret_name(h.cr_name))
         self._secret_values[h] = tuple(v for v in spec.secret_refs.values() if v)
+        # Resolved off the event loop: getaddrinfo blocks. Re-resolved at every start (a snapshot per start).
+        egress_network = await asyncio.to_thread(resolve_network, spec.network, self._resolve_host)
         await self._api.apply(
             network_policy_doc(
                 h.namespace,
                 h.cr_name,
                 platform_namespace=self._platform_namespace,
                 caller_labels=self._ingress_labels,
+                egress_network=egress_network,
             )
         )
         if self._api_server_cidrs:

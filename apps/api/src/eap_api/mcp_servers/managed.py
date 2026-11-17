@@ -105,12 +105,28 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def package_document(package: CatalogPackage) -> tuple[str, dict[str, Any]]:
-    """`(image, package document)` for a catalog package; raises UnsupportedPackage."""
+def network_of(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The entry meta's `network` block `{allow_host, allow_port, insecure_allow_all}` normalised, or None
+    when the entry has none (then the default egress applies). An empty block means no network."""
+    raw = meta.get("network") if isinstance(meta, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return None
+    hosts = raw.get("allow_host") or []
+    ports = raw.get("allow_port") or []
+    return {
+        "allow_host": [h for h in hosts if isinstance(h, str) and h.strip()],
+        "allow_port": [p for p in ports if isinstance(p, int) and not isinstance(p, bool) and 0 < p < 65536],
+        "insecure_allow_all": raw.get("insecure_allow_all") is True,
+    }
+
+
+def package_document(package: CatalogPackage, meta: Mapping[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    """`(image, package document)` for a catalog package; raises UnsupportedPackage. The entry's network
+    block (from its `meta`) is carried into the document as `network`; no block, no key."""
     if not package.version:
         raise UnsupportedPackage("the package has no version")
     image, args, env = image_for(PackageSpec(package.registry_type, package.identifier, package.version))
-    return image, {
+    document: dict[str, Any] = {
         "registry_type": package.registry_type,
         "identifier": package.identifier,
         "version": package.version,
@@ -119,6 +135,10 @@ def package_document(package: CatalogPackage) -> tuple[str, dict[str, Any]]:
         "args": list(args),
         "env": dict(env),
     }
+    network = network_of(meta)
+    if network is not None:
+        document["network"] = network
+    return image, document
 
 
 class SecretRefMissing(ValueError):
@@ -253,6 +273,7 @@ def build_spec(row: McpRuntimeModel, server: McpServerModel, secrets: Mapping[st
         secret_refs=dict(secrets),
         transport=package.get("transport") or "stdio",
         port=package.get("port"),
+        network=package.get("network"),
     )
 
 
@@ -317,5 +338,5 @@ def redact_lines(lines: list[str], secrets: Mapping[str, str]) -> list[str]:
 
 __all__ = [
     "DEFAULT_LOG_TAIL", "RESTARTABLE", "SECRET_REF_PREFIX", "PACKAGE_ENV", "MAX_LOG_TAIL", "STARTABLE", "STOPPABLE", "DENIED_ENV", "finish_stop", "touch", "build_spec", "check_env", "claim",
-    "get_mcp_runtime", "handle_of", "open_env", "resolve_env", "SecretRefMissing", "require_refs", "ref_secrets", "refs_of", "servers_using", "package_document", "redact_lines", "seal_env", "set_failed",
+    "get_mcp_runtime", "handle_of", "open_env", "resolve_env", "SecretRefMissing", "require_refs", "ref_secrets", "refs_of", "servers_using", "package_document", "network_of", "redact_lines", "seal_env", "set_failed",
 ]

@@ -757,7 +757,7 @@ def install_from_catalog(
     try:
         plain, secret, refs = managed.check_env(package, env)
         managed.require_refs(SecretStore(request.app.state.database_engine, None), tenant_id, refs)
-        image, document = managed.package_document(package)
+        image, document = managed.package_document(package, getattr(entry, "meta", None))
     except ValueError as exc:  # check_env messages and UnsupportedPackage (a ValueError) carry no values
         raise _unprocessable(str(exc)) from None
     document["env"] = {**document["env"], **plain}
