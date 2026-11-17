@@ -26,7 +26,7 @@ import { WorkflowTab } from "./WorkflowTab";
 type Load = { kind: "loading" } | { kind: "choose_model" } | { kind: "error"; message: string } | { kind: "ready"; state: ArchitectState };
 
 /**
- * The Architect page: left, "New agent" and what was created (`id · vN`); right, tabs Form | Chat |
+ * The Architect page: left, "New" (agent or workflow) and what was created (`id · vN`); right, tabs Form | Chat |
  * Workflow. The Chat tab (`ArchitectChat`) and the Workflow tab (`WorkflowTab`) are mounted here;
  * both call `refresh` when they create or change something.
  */
@@ -74,9 +74,15 @@ export function ArchitectPage() {
     };
   }, [refresh]);
 
-  const newAgent = useCallback(() => {
+  const [workflowKey, setWorkflowKey] = useState(0);
+  const startNew = useCallback((kind: "agent" | "workflow") => {
     setSelected(null);
     setOpenError(null);
+    if (kind === "workflow") {
+      setWorkflowKey((current) => current + 1);  // a fresh workflow form
+      setTab("workflow");
+      return;
+    }
     setSource((current) => ({ key: current.key + 1, value: { spec: null, version: null, agentRowId: null } }));
     setTab("form");
   }, []);
@@ -120,7 +126,7 @@ export function ArchitectPage() {
         ) : state ? (
           <div className="grid min-w-0 gap-6 md:grid-cols-[16rem_minmax(0,1fr)]">
             <aside aria-label="Created by the Architect">
-              <CreatedList agents={state.agents} workflows={state.workflows} selectedAgentId={selected?.id ?? null} onNewAgent={newAgent} onSelectAgent={(item) => void openAgent(item)} />
+              <CreatedList agents={state.agents} workflows={state.workflows} selectedAgentId={selected?.id ?? null} onNew={startNew} onSelectAgent={(item) => void openAgent(item)} />
             </aside>
             <div className="min-w-0">
               <Tabs value={tab} onValueChange={setTab}>
@@ -143,7 +149,7 @@ export function ArchitectPage() {
                   <ArchitectChat architectAgentId={state.architect_agent_id} onChanged={() => void refresh()} />
                 </TabsContent>
                 <TabsContent value="workflow" className="pt-4">
-                  <WorkflowTab options={options} agents={state.agents} onSaved={() => void refresh()} />
+                  <WorkflowTab key={workflowKey} options={options} agents={state.agents} onSaved={() => void refresh()} />
                 </TabsContent>
               </Tabs>
             </div>
