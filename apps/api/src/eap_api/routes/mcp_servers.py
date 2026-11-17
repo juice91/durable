@@ -459,39 +459,45 @@ def _managed_row(db: Session, tenant_id: str, server_id: uuid.UUID) -> tuple[Mcp
     return server, row
 
 
-def _start_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, runtime: McpRuntime) -> None:
+def _start_runtime(db: Session, server: McpServerModel, row: McpRuntimeModel, runtime: McpRuntime) -> bool:
     """Start a pending, stopped, idle or failed runtime: claim `starting` (one conditional UPDATE, so the
     worker's on-demand start and this one never both run), decrypt the env secrets and call the adapter.
     A failure is recorded as `failed` with a code (`secret_unreadable`, `start_failed: <class>`), never
-    the exception text. The worker moves `starting` to `running` once the pod is ready (or GET runtime does)."""
+    the exception text, and returns False. The worker moves `starting` to `running` once the pod is ready
+    (or GET runtime does)."""
     if not managed.claim(db, row, "starting", managed.STARTABLE):
-        return
+        return True
     try:
         secrets = managed.open_env(db, load_keyring(), server.tenant_id, server.id)
     except SecretsError as exc:
         log_failure(log, "mcp runtime env secret could not be decrypted", exc, code="secret_unreadable",
                     tenant_id=server.tenant_id, server_id=server.id)
         managed.set_failed(db, row, "secret_unreadable")
-        return
+        return False
     try:
         anyio.from_thread.run(runtime.start, managed.build_spec(row, server, secrets))
     except Exception as exc:  # noqa: BLE001 - reduced to a code
         log_failure(log, "mcp runtime start failed", exc, code="runtime_start_failed",
                     tenant_id=server.tenant_id, server_id=server.id)
         managed.set_failed(db, row, f"start_failed: {type(exc).__name__}")
-
-
-def _stop_runtime(db: Session, row: McpRuntimeModel, runtime: McpRuntime, allowed: tuple[str, ...]) -> bool:
-    """Claim `stopped` and scale the pod down (its objects stay). True when this call stopped it."""
-    if not managed.claim(db, row, "stopped", allowed):
         return False
+    return True
+
+
+def _stop_runtime(db: Session, row: McpRuntimeModel, runtime: McpRuntime, allowed: tuple[str, ...]) -> str:
+    """Stop the pod (its objects stay), the way the idle sweep does: claim `stopping` (so no start can
+    claim the row meanwhile), call the adapter, then `stopped` only if the row is still `stopping`.
+    Returns `stopped`, `skipped` (another caller owned the row, or it moved on during the stop) or
+    `failed` (the adapter raised: the row is `failed` with `stop_failed: <class>`)."""
+    if not managed.claim(db, row, "stopping", allowed):
+        return "skipped"
     try:
         anyio.from_thread.run(runtime.stop, managed.handle_of(row))
     except Exception as exc:  # noqa: BLE001
         log_failure(log, "mcp runtime stop failed", exc, code="runtime_stop_failed", tenant_id=row.tenant_id)
         managed.set_failed(db, row, f"stop_failed: {type(exc).__name__}")
-        return False
-    return True
+        return "failed"
+    return "stopped" if managed.finish_stop(db, row) else "skipped"
 
 
 def _reconcile(db: Session, row: McpRuntimeModel, runtime: McpRuntime) -> tuple[bool, str]:
@@ -505,7 +511,8 @@ def _reconcile(db: Session, row: McpRuntimeModel, runtime: McpRuntime) -> tuple[
         return False, ""
     values: dict[str, Any] | None = None
     if row.state == "starting" and live.state == "running":
-        values = {"state": "running", "endpoint": live.endpoint or None, "last_error": None}
+        values = {"state": "running", "endpoint": live.endpoint or None, "last_error": None,
+                  "last_used_at": datetime.now(timezone.utc)}
     elif row.state in ("starting", "running", "idle") and live.state == "failed":
         values = {"state": "failed", "last_error": "runtime_failed"}
     if values is not None:
@@ -537,7 +544,8 @@ async def _resolve_target(
 ) -> tuple[str | None, OutboundPolicy, str | None]:
     """`(url, policy, error_code)` to connect to a server. A managed server is reached at its runtime's
     endpoint under a policy that allows exactly that endpoint; it must be running (a startable one is
-    started for the next try, and `runtime_not_running` is the code meanwhile)."""
+    started for the next try, and `runtime_not_running` is the code meanwhile). `running` and `idle` are
+    both ready; using one records `last_used_at`."""
     if not target.managed:
         return target.url, policy, None
     if not target.runtime_id:
@@ -546,14 +554,18 @@ async def _resolve_target(
     def check() -> str | None:
         with Session(request.app.state.database_engine) as db:
             row = _runtime_of(db, tenant_id, server_id)
-            server = db.scalar(select(McpServerModel).where(McpServerModel.id == server_id))
+            server = db.scalar(select(McpServerModel).where(
+                McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id))
             if row is None or server is None:
                 return "runtime_missing"
             if row.state in ("starting", "running", "idle"):
                 _reconcile(db, row, runtime)
             elif row.state in managed.STARTABLE and server.enabled:
                 _start_runtime(db, server, row, runtime)
-            return None if row.state == "running" else "runtime_not_running"
+            if row.state in ("running", "idle"):
+                managed.touch(db, row)
+                return None
+            return "runtime_not_running"
 
     code = await run_in_threadpool(check)
     if code is not None:
@@ -685,7 +697,8 @@ def get_runtime(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, r
     return JSONResponse(content=_runtime_body(row, reachable, message))
 
 
-@router.post("/mcp-servers/{server_id}/runtime/{action}", responses={409: {"model": ErrorDetail}})
+@router.post("/mcp-servers/{server_id}/runtime/{action}",
+             responses={409: {"model": ErrorDetail}, 502: {"model": ErrorDetail}})
 def control_runtime(
     server_id: uuid.UUID,
     action: Literal["start", "stop", "restart"],
@@ -695,17 +708,25 @@ def control_runtime(
 ) -> JSONResponse:
     """Start (a pending, stopped, idle or failed pod; otherwise a no-op), stop (scale to zero, objects
     stay; the next tool call starts it again) or restart (stop, then start). Answers the runtime body
-    of GET .../runtime. 409 for an external server or a disabled one (start, restart)."""
+    of GET .../runtime. 409 for an external server or a disabled one (start, restart). 502 when the
+    adapter (or the sealed env) fails: the row is then `failed` with `last_error` set, read it with
+    GET .../runtime; the error text is never returned."""
     server, row = _managed_row(db, principal.tenant_id, server_id)
     if action != "stop" and not server.enabled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="the server is disabled")
+    ok = True
     if action == "start":
-        _start_runtime(db, server, row, runtime)
+        ok = _start_runtime(db, server, row, runtime)
     elif action == "stop":
-        _stop_runtime(db, row, runtime, managed.STOPPABLE)
+        ok = _stop_runtime(db, row, runtime, managed.STOPPABLE) != "failed"
     else:
-        if _stop_runtime(db, row, runtime, ("pending", "starting", "running", "idle", "stopped", "failed")):
-            _start_runtime(db, server, row, runtime)
+        outcome = _stop_runtime(db, row, runtime, ("pending", "starting", "running", "idle", "stopped", "failed"))
+        ok = outcome != "failed"
+        if outcome == "stopped":
+            ok = _start_runtime(db, server, row, runtime)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"the runtime could not be {action}ed"
+                            if action != "stop" else "the runtime could not be stopped")
     return JSONResponse(content=_runtime_body(row))
 
 

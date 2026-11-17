@@ -167,3 +167,156 @@ def test_test_route_uses_the_managed_endpoint_and_needs_a_running_pod(runtime_wo
     r = client.post(f"{BASE}/{sid}/test", headers=h)
     assert r.json()["status"] == "ok", r.text
     assert seen["url"].startswith("http://") and ".svc.cluster.local" in seen["url"] and seen["headers"] == {}
+
+
+# --- review follow-ups (task 7b) -------------------------------------------------------------------
+
+
+def make_running(client, app, fake, h, sid):
+    fake.make_ready()
+    assert client.get(f"{BASE}/{sid}/runtime", headers=h).json()["state"] == "running"
+
+
+def test_stop_claims_stopping_then_stopped_and_restart_starts_only_after_stopped(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    make_running(client, app, fake, h, sid)
+    seen: list[str] = []
+    fake.on_stop = lambda: seen.append(state(app, sid).state)
+    r = client.post(f"{BASE}/{sid}/runtime/stop", headers=h)
+    assert r.status_code == 200 and r.json()["state"] == "stopped"
+    assert seen == ["stopping"]  # the adapter ran while the row was `stopping`, so a start could not slip in
+    seen.clear()
+    r = client.post(f"{BASE}/{sid}/runtime/restart", headers=h)
+    assert r.json()["state"] == "starting" and seen == ["stopping"]
+    assert [c[0] for c in fake.calls[-2:]] == ["stop", "start"]
+
+
+def test_a_late_stop_does_not_clobber_a_row_that_moved_on(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    make_running(client, app, fake, h, sid)
+
+    def interfere():  # something moves the row out of `stopping` while the adapter is stopping the pod
+        with app.state.database_engine.begin() as conn:
+            conn.execute(text("UPDATE mcp_runtimes SET state = 'failed', last_error = 'x' WHERE server_id = :s"), {"s": sid})
+
+    fake.on_stop = interfere
+    client.post(f"{BASE}/{sid}/runtime/stop", headers=h)
+    assert state(app, sid).state == "failed"  # the final UPDATE is conditional on `stopping`
+    starts = len(fake.specs)
+    fake.on_stop = interfere
+    r = client.post(f"{BASE}/{sid}/runtime/restart", headers=h)
+    assert len(fake.specs) == starts  # the stop did not end in `stopped`: no start
+
+
+def test_adapter_errors_on_start_stop_restart_answer_502_with_a_failed_row(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    make_running(client, app, fake, h, sid)
+    fake.fail_stop = True
+    for action in ("stop", "restart"):
+        make_running_row(app, sid)
+        r = client.post(f"{BASE}/{sid}/runtime/{action}", headers=h)
+        assert r.status_code == 502, (action, r.text)
+        assert "boom" not in r.text
+        assert tuple(state(app, sid)) == ("failed", "stop_failed: RuntimeError")
+    fake.fail_stop = False
+    fake.fail_start = True
+    for action in ("start", "restart"):
+        r = client.post(f"{BASE}/{sid}/runtime/{action}", headers=h)
+        assert r.status_code == 502, (action, r.text)
+        assert "abc123" not in r.text
+        assert tuple(state(app, sid)) == ("failed", "start_failed: RuntimeError")
+
+
+def make_running_row(app, sid):
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET state = 'running', last_error = NULL WHERE server_id = :s"), {"s": sid})
+
+
+def last_used(app, sid):
+    with app.state.database_engine.connect() as conn:
+        return conn.execute(text("SELECT last_used_at FROM mcp_runtimes WHERE server_id = :s"), {"s": sid}).scalar()
+
+
+def test_api_starts_and_reconcile_set_last_used_at(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    assert last_used(app, sid) is not None  # claimed `starting` by the install
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET last_used_at = NULL WHERE server_id = :s"), {"s": sid})
+    fake.make_ready()
+    client.get(f"{BASE}/{sid}/runtime", headers=h)  # reconcile starting -> running
+    assert state(app, sid).state == "running" and last_used(app, sid) is not None
+    client.post(f"{BASE}/{sid}/runtime/stop", headers=h)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET last_used_at = NULL WHERE server_id = :s"), {"s": sid})
+    client.post(f"{BASE}/{sid}/runtime/start", headers=h)
+    assert last_used(app, sid) is not None
+
+
+def _resolve(app, sid, tenant, fake):
+    import anyio
+    from starlette.requests import Request
+
+    from eap_api.routes import mcp_servers as routes
+    from sqlalchemy.orm import Session
+    from eap_secrets.outbound import OutboundPolicy
+
+    with Session(app.state.database_engine) as db:
+        server = db.get(routes.McpServerModel, sid)
+        target = routes._target(db, server)
+    request = Request({"type": "http", "app": app, "headers": []})
+
+    async def public(host, port):
+        return ["93.184.215.14"]
+
+    return anyio.run(routes._resolve_target, request, tenant, sid, target, fake, OutboundPolicy(resolver=public))
+
+
+def test_idle_is_resolved_like_running_and_touches_last_used_at(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    tenant, h = tenant_of()
+    sid = install(client, app, h)
+    make_running(client, app, fake, h, sid)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET state = 'idle', last_used_at = NULL WHERE server_id = :s"), {"s": sid})
+    url, _policy, code = _resolve(app, sid, tenant, fake)
+    assert code is None and url and ".svc.cluster.local" in url
+    assert last_used(app, sid) is not None
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET state = 'running', last_used_at = NULL WHERE server_id = :s"), {"s": sid})
+    assert _resolve(app, sid, tenant, fake)[2] is None and last_used(app, sid) is not None
+
+
+def test_resolve_target_is_scoped_to_the_tenant(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    tenant, h = tenant_of()
+    sid = install(client, app, h)
+    make_running(client, app, fake, h, sid)
+    assert _resolve(app, sid, "someone-else", fake)[2] == "runtime_missing"
+
+
+def test_runtime_logs_mask_the_other_assignment_shapes(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    fake.log_lines = [
+        "auth token: abc111xyz",
+        'json {"password":"p4ss w0rd","user":"u"}',
+        "run --api-key cli222key --verbose",
+        "Authorization: Bearer eyJhbGciOi.payload.sig",
+        "secret = 'two words 333' done",
+        "plain line",
+    ]
+    r = client.get(f"{BASE}/{sid}/runtime/logs", headers=h)
+    out = "\n".join(r.json()["lines"])
+    for leaked in ("abc111xyz", "p4ss", "w0rd", "cli222key", "eyJhbGciOi", "two words", "333"):
+        assert leaked not in out, (leaked, out)
+    assert "token: [redacted]" in out and "--verbose" in out and '"user":"u"' in out and "plain line" in out
+    assert "Authorization: Bearer [redacted]" in out and "--api-key [redacted]" in out

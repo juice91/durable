@@ -40,7 +40,16 @@ STARTABLE = ("pending", "stopped", "idle", "failed")
 STOPPABLE = ("pending", "starting", "running", "idle", "failed")
 MAX_LOG_TAIL = 1000
 DEFAULT_LOG_TAIL = 200
-_KEYLIKE = re.compile(r"(?i)\b([A-Za-z0-9_.-]*(?:token|key|secret|password))=\S+")
+_KEYLIKE = re.compile(
+    r"""(?i)\b([A-Za-z0-9_.-]*(?:token|key|secret|password)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"""
+)  # token=x, token: x, "password":"x y", API_KEY = 'x y'
+_KEYLIKE_FLAG = re.compile(r"(?i)(--[A-Za-z0-9_.-]*(?:token|key|secret|password)\s+)(\S+)")  # --api-key x
+_BEARER = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+")  # Authorization: Bearer x
+# Variables that change how the process or its loader runs; a catalog entry declaring one is refused.
+DENIED_ENV = frozenset({
+    "NODE_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "PYTHONPATH", "PYTHONSTARTUP", "HOME",
+})
+DENIED_ENV_PREFIXES = ("DYLD_",)
 
 
 class _LazyRuntime:
@@ -108,6 +117,9 @@ def check_env(package: CatalogPackage, env: Mapping[str, Any]) -> tuple[dict[str
     """Split the submitted env into `(plain, secret)` by the package's declaration. Raises ValueError
     with a message naming the variable, never its value."""
     declared = {v.name: v for v in package.environment_variables}
+    for name in declared:
+        if name.upper() in DENIED_ENV or name.upper().startswith(DENIED_ENV_PREFIXES):
+            raise ValueError(f"env_name_denied: {name} cannot be set on a managed server")
     plain: dict[str, str] = {}
     secret: dict[str, str] = {}
     for name, value in env.items():
@@ -164,12 +176,17 @@ def build_spec(row: McpRuntimeModel, server: McpServerModel, secrets: Mapping[st
 
 def claim(db: Session, row: McpRuntimeModel, new: str, allowed: tuple[str, ...], error: str | None = None) -> bool:
     """Move the row to `new` when it is in one of `allowed` (one conditional UPDATE). False when another
-    caller changed it first."""
+    caller changed it first. Claiming `starting` also records `last_used_at`, so the idle sweep does not
+    stop a pod that was just started."""
+    now = _now()
+    values: dict[str, Any] = {"state": new, "last_error": error, "updated_at": now}
+    if new == "starting":
+        values["last_used_at"] = now
     result = db.execute(
         update(McpRuntimeModel)
         .where(McpRuntimeModel.id == row.id, McpRuntimeModel.tenant_id == row.tenant_id,
                McpRuntimeModel.state.in_(allowed))
-        .values(state=new, last_error=error, updated_at=_now())
+        .values(**values)
     )
     db.commit()
     db.refresh(row)
@@ -180,6 +197,21 @@ def set_failed(db: Session, row: McpRuntimeModel, error: str) -> None:
     db.execute(
         update(McpRuntimeModel).where(McpRuntimeModel.id == row.id).values(state="failed", last_error=error, updated_at=_now())
     )
+    db.commit()
+    db.refresh(row)
+
+
+def finish_stop(db: Session, row: McpRuntimeModel) -> bool:
+    """`stopping` to `stopped` after the adapter scaled the pod down (conditional on `stopping`, so a row
+    that moved on is left alone). False when it had moved on."""
+    return claim(db, row, "stopped", ("stopping",))
+
+
+def touch(db: Session, row: McpRuntimeModel) -> None:
+    """Record a use of a running or idle runtime (what the idle sweep reads)."""
+    db.execute(update(McpRuntimeModel).where(
+        McpRuntimeModel.id == row.id, McpRuntimeModel.state.in_(("running", "idle"))
+    ).values(last_used_at=_now()))
     db.commit()
     db.refresh(row)
 
@@ -195,11 +227,13 @@ def redact_lines(lines: list[str], secrets: Mapping[str, str]) -> list[str]:
     out = []
     for line in lines:
         masked = redact(line, variants) if variants else line
-        out.append(_KEYLIKE.sub(lambda m: f"{m.group(1)}=[redacted]", masked))
+        masked = _KEYLIKE.sub(lambda m: f"{m.group(1)}[redacted]", masked)
+        masked = _KEYLIKE_FLAG.sub(lambda m: f"{m.group(1)}[redacted]", masked)
+        out.append(_BEARER.sub(lambda m: f"{m.group(1)}[redacted]", masked))
     return out
 
 
 __all__ = [
-    "DEFAULT_LOG_TAIL", "MAX_LOG_TAIL", "STARTABLE", "STOPPABLE", "build_spec", "check_env", "claim",
+    "DEFAULT_LOG_TAIL", "MAX_LOG_TAIL", "STARTABLE", "STOPPABLE", "DENIED_ENV", "finish_stop", "touch", "build_spec", "check_env", "claim",
     "get_mcp_runtime", "handle_of", "open_env", "package_document", "redact_lines", "seal_env", "set_failed",
 ]

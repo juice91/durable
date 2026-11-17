@@ -128,3 +128,17 @@ def test_remote_entries_register_without_a_runtime(runtime_world):
     sse = make_entry(packages=[], remotes=[{"type": "sse", "url": "https://mcp.example.com/sse"}])
     app.state.seed(sse)
     assert client.post(f"{BASE}/from-catalog", headers=h, json={"catalog_name": sse.name}).status_code == 422
+
+
+def test_dangerous_env_names_are_denied(runtime_world):
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    for name in ("NODE_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "PYTHONPATH", "PYTHONSTARTUP", "HOME", "DYLD_INSERT_LIBRARIES"):
+        entry = make_entry(packages=[{
+            "registry_type": "npm", "identifier": "@example/mcp-server", "version": "1.2.3", "transport": "stdio",
+            "environment_variables": [{"name": name, "required": False, "secret": False}],
+        }])
+        app.state.seed(entry)
+        r = client.post(f"{BASE}/from-catalog", headers=h, json={"catalog_name": entry.name, "env": {name: "x"}})
+        assert r.status_code == 422 and "env_name_denied" in r.json()["detail"], (name, r.text)
+        assert not fake.specs

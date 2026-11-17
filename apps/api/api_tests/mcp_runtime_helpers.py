@@ -39,6 +39,8 @@ class FakeRuntime:
         self.log_lines: list[str] = []
         self.crash_after_delete = False
         self.fail_start = False
+        self.fail_stop = False
+        self.on_stop = None  # called inside stop(), to observe what the database says at that moment
 
     async def start(self, spec: RuntimeSpec) -> RuntimeHandle:
         from eap_mcp_runtime import handle_for
@@ -54,6 +56,10 @@ class FakeRuntime:
 
     async def stop(self, handle: RuntimeHandle) -> None:
         self.calls.append(("stop", handle.cr_name))
+        if self.on_stop is not None:
+            self.on_stop()
+        if self.fail_stop:
+            raise RuntimeError("stop boom")
         if (handle.namespace, handle.cr_name) in self.objects:
             self.phase[(handle.namespace, handle.cr_name)] = "stopped"
 
