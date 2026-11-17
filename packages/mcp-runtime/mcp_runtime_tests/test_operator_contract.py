@@ -316,3 +316,70 @@ async def test_secret_values_appear_only_in_the_kubernetes_secret(tenant: str, c
     assert value not in "\n".join(await rt.logs(h, tail=500))
     assert value not in caplog.text
     assert value not in repr(h) and value not in repr(st)
+
+
+# --- platform runner images (Task 4): npm and pypi servers installed at pod start ---------------
+
+
+async def _run_package_and_list_tools(tenant: str, package: Any, expect_tool: str) -> float:
+    """Start `package` on its runner image, wait for it to serve MCP, list tools; return cold-start seconds."""
+    from eap_mcp_runtime.images import image_for
+
+    rt = make_runtime()
+    image, args, env = image_for(package)
+    spec = RuntimeSpec(
+        tenant_id=tenant, server_id=str(uuid.uuid4()), name="Runner", image=image, args=args, env=env
+    )
+    started = time.monotonic()
+    h = await rt.start(spec)
+    st = await rt.wait_for(h, "running", timeout=300)
+    assert st.state == "running", st
+    pf = PortForward(h.namespace, f"mcp-{h.cr_name}-proxy")
+    try:
+        local = f"http://127.0.0.1:{pf.port}/mcp"
+        init, sid = None, None
+        deadline = time.monotonic() + 120  # the runner installs the package before it answers
+        while time.monotonic() < deadline:
+            try:
+                init, sid = rpc(
+                    local,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "contract", "version": "0"},
+                        },
+                    },
+                )
+                if init and "result" in init:
+                    break
+            except OSError:
+                pass
+            time.sleep(2)
+        assert init and "protocolVersion" in init["result"], init
+        cold_start = time.monotonic() - started
+        rpc(local, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+        listed, _ = rpc(local, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}, sid)
+        assert expect_tool in [t["name"] for t in listed["result"]["tools"]]
+    finally:
+        pf.close()
+        await rt.delete(h)
+    print(f"COLD_START {package.registry_type} {package.identifier}: {cold_start:.1f}s")
+    return cold_start
+
+
+async def test_npm_server_runs_on_the_node_runner(tenant: str) -> None:
+    from eap_mcp_runtime.images import PackageSpec
+
+    pkg = PackageSpec("npm", "@modelcontextprotocol/server-memory", "2.1.1")
+    await _run_package_and_list_tools(tenant, pkg, "create_entities")
+
+
+async def test_pypi_server_runs_on_the_python_runner(tenant: str) -> None:
+    from eap_mcp_runtime.images import PackageSpec
+
+    pkg = PackageSpec("pypi", "mcp-server-time", "2026.11.11")
+    await _run_package_and_list_tools(tenant, pkg, "get_current_time")
