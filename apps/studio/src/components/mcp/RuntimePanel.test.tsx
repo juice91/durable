@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act as rtlAct, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import "@testing-library/jest-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimePanel } from "./RuntimePanel";
 import { mcpServers, type McpRuntime, type McpRuntimeState } from "@/lib/mcpServers";
 import { ApiError } from "@/lib/api";
@@ -107,6 +107,92 @@ describe("RuntimePanel", () => {
     vi.mocked(mcpServers.runtimeLogs).mockRejectedValue(new ApiError(502, "bad gateway"));
     render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
     expect(await screen.findByText("Cluster unreachable")).toBeInTheDocument();
+  });
+
+  describe("polling and recovery", () => {
+    afterEach(() => { vi.useRealTimers(); });
+    const tick = async (ms: number) => { await rtlAct(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+
+    it("polls a stopping state every 3 s and stops once running", async () => {
+      vi.useFakeTimers();
+      vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("stopping"));
+      render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+      await tick(0);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(1);
+      await tick(3000);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(2);
+      vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("running"));
+      await tick(3000);
+      expect(screen.getByTestId("runtime-state")).toHaveTextContent("Running");
+      const calls = vi.mocked(mcpServers.runtime).mock.calls.length;
+      await tick(9000);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(calls);
+    });
+
+    it("does not poll a settled state and skips ticks while hidden", async () => {
+      vi.useFakeTimers();
+      render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+      await tick(9000);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(1);
+      vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("starting"));
+      fireEvent.click(screen.getByRole("button", { name: "Refresh state" }));
+      await tick(0);
+      const calls = vi.mocked(mcpServers.runtime).mock.calls.length;
+      const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+      await tick(6000);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(calls);
+      hidden.mockRestore();
+    });
+
+    it("clears the interval on unmount", async () => {
+      vi.useFakeTimers();
+      vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("pending"));
+      const { unmount } = render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+      await tick(0);
+      unmount();
+      const calls = vi.mocked(mcpServers.runtime).mock.calls.length;
+      await tick(9000);
+      expect(mcpServers.runtime).toHaveBeenCalledTimes(calls);
+    });
+  });
+
+  it("the refresh button reloads the runtime state", async () => {
+    render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+    await screen.findByTestId("runtime-state");
+    vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("stopped"));
+    fireEvent.click(btn("Refresh state"));
+    await waitFor(() => expect(screen.getByTestId("runtime-state")).toHaveTextContent("Stopped"));
+  });
+
+  it("after a 502 action it reloads the runtime, calls onChanged and shows the cluster message", async () => {
+    vi.mocked(mcpServers.runtimeAction).mockRejectedValue(new ApiError(502, "kube said no"));
+    const onChanged = vi.fn();
+    render(<RuntimePanel serverId="s1" enabled onChanged={onChanged} />);
+    await screen.findByTestId("runtime-state");
+    vi.mocked(mcpServers.runtime).mockResolvedValue(runtime("failed", { last_error: "boom" }));
+    fireEvent.click(btn("Restart"));
+    expect(await screen.findByText("The cluster could not be reached. Try again.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("runtime-state")).toHaveTextContent("Failed"));
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("maps a non-JSON failure to the cluster message", async () => {
+    vi.mocked(mcpServers.runtimeAction).mockRejectedValue(new SyntaxError("Unexpected token < in JSON"));
+    render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+    await screen.findByTestId("runtime-state");
+    fireEvent.click(btn("Restart"));
+    expect(await screen.findByText("The cluster could not be reached. Try again.")).toBeInTheDocument();
+  });
+
+  it("ignores a slow runtime response after the server changed", async () => {
+    let resolveSlow: (value: McpRuntime) => void = () => {};
+    vi.mocked(mcpServers.runtime).mockImplementation((id: string) =>
+      id === "s1" ? new Promise<McpRuntime>((resolve) => { resolveSlow = resolve; }) : Promise.resolve(runtime("stopped")));
+    const { rerender } = render(<RuntimePanel serverId="s1" enabled onChanged={vi.fn()} />);
+    rerender(<RuntimePanel serverId="s2" enabled onChanged={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("runtime-state")).toHaveTextContent("Stopped"));
+    await rtlAct(async () => { resolveSlow(runtime("running")); });
+    expect(screen.getByTestId("runtime-state")).toHaveTextContent("Stopped");
   });
 
   it("has no axe violations", async () => {

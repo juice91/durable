@@ -33,6 +33,8 @@ export function RuntimeStateChip({ state, testId }: { state: McpRuntimeState; te
   return <Badge variant={runtimeStateVariant(state)} data-testid={testId}>{RUNTIME_STATE_LABEL[state]}</Badge>;
 }
 
+const POLL_MS = 3000;
+const CLUSTER_UNREACHABLE = "The cluster could not be reached. Try again.";
 const TAILS = [100, 200, 500, 1000] as const;
 
 function message(reason: unknown, fallback: string): string {
@@ -58,12 +60,17 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
   const [logsError, setLogsError] = useState<string | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
   const logsRequest = useRef(0);
+  const runtimeRequest = useRef(0);
 
   const loadRuntime = useCallback(async () => {
+    const id = ++runtimeRequest.current;
     try {
-      setRuntime(await mcpServers.runtime(serverId));
+      const result = await mcpServers.runtime(serverId);
+      if (id !== runtimeRequest.current) return;
+      setRuntime(result);
       setLoadError(null);
     } catch (reason: unknown) {
+      if (id !== runtimeRequest.current) return;
       setLoadError(message(reason, "The runtime state could not be loaded"));
     }
   }, [serverId]);
@@ -92,6 +99,16 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
     void loadLogs();
   }, [loadLogs]);
 
+  const transitional = runtime?.state === "pending" || runtime?.state === "starting" || runtime?.state === "stopping";
+  useEffect(() => {
+    if (!transitional) return;
+    const timer = setInterval(() => {
+      if (document.hidden) return;
+      void loadRuntime();
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [transitional, loadRuntime]);
+
   const act = async (action: McpRuntimeAction) => {
     setActing(action);
     setActionError(null);
@@ -100,7 +117,11 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
       onChanged();
       void loadLogs();
     } catch (reason: unknown) {
-      setActionError(message(reason, "The action failed"));
+      const unreachable = !(reason instanceof ApiError) || reason.status === 502;
+      setActionError(unreachable ? CLUSTER_UNREACHABLE : message(reason, "The action failed"));
+      // The API may already have moved the row (e.g. to failed): resync.
+      void loadRuntime();
+      onChanged();
     } finally {
       setActing(null);
     }
@@ -122,6 +143,9 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
           </div>
         </div>
         <div className={card}>
+          <div className="mb-3 flex justify-end">
+            <Button size="sm" onClick={() => void loadRuntime()}>Refresh state</Button>
+          </div>
           {loadError ? (
             <div role="alert" className="flex flex-wrap items-center justify-between gap-3 text-body text-destructive-text">
               <span className="min-w-0">{loadError}</span>
