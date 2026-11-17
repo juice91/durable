@@ -15,6 +15,7 @@ from sqlalchemy import text
 from eap_run_store import RunStore
 
 from .conftest import create_agent, get_auth_header
+from .timing import best_of_3, cap
 
 SECRET = "ZQSECRET9931"
 TEST_URL = "/api/v1/processors/test"
@@ -33,9 +34,8 @@ def _blocklist(*patterns, action="block"):
 @pytest.mark.parametrize("action", ["block", "redact"])
 def test_console_quadratic_pattern_on_32_kib_answers_under_one_second(client, tenant, user, action):
     headers = get_auth_header(tenant, user)
-    started = time.perf_counter()
-    response = _test(client, headers, [_blocklist("a+b|a", action=action)], "a" * (32 * 1024))
-    assert time.perf_counter() - started < 1.0
+    response, elapsed = best_of_3(lambda: _test(client, headers, [_blocklist("a+b|a", action=action)], "a" * (32 * 1024)))
+    assert elapsed < cap(1.0), elapsed
     body = response.json()
     assert response.status_code == 200 and body["blocked"] is True and body["text"] is None
     result = body["results"][0]

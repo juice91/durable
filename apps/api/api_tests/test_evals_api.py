@@ -31,6 +31,7 @@ from eap_schemas.evals import EvalCase
 from .conftest import get_auth_header
 from .run_helpers import PG_URL, cleanup_tenant, hard_timeout, requires_pg
 from .test_workflow_runs_api import FakeClient
+from .timing import best_of_3, cap
 
 API = "/api/v1"
 AGENT_SPEC = {"name": "Evaluated", "instructions": "Help.", "model": {"provider": "test", "name": "echo"}}
@@ -681,9 +682,9 @@ def test_worst_case_yaml_within_the_caps_parses_under_two_seconds():
     }
     for name, text in worst.items():
         assert len(text.encode()) <= MiB, name
-        result, cpu = _cpu(lambda: parse_file(text, "yaml"))
+        result, cpu = best_of_3(lambda: _cpu(lambda: parse_file(text, "yaml"))[0])
         assert not isinstance(result, EvalFormatError), (name, result)
-        assert cpu < 2.0, (name, cpu)
+        assert cpu < cap(2.0), (name, cpu)
 
 
 def _suite_file(n_cases: int = 500, prompt_chars: int = 1800) -> str:

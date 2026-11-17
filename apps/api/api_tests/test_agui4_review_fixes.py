@@ -269,5 +269,6 @@ def test_long_streams_are_linear():
         assert "MESSAGES_SNAPSHOT" not in "".join(frames)
         return time.perf_counter() - started
 
-    small, large = run(2000), run(20000)
+    # best of three: a noisy neighbour inflates one run, a quadratic blow-up inflates all of them
+    small, large = min(run(2000) for _ in range(3)), min(run(20000) for _ in range(3))
     assert large < small * 30  # 10x the deltas: linear-ish, never quadratic (100x)

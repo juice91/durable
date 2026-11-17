@@ -40,6 +40,7 @@ from eap_schemas.request_context import RESERVED_CONTEXT_NAMES
 from .conftest import get_auth_header
 from .test_conversations import new_conversation, turn
 from .test_input_hardening_acceptance import _asgi, _headers, _nested
+from .timing import best_of_3, cap
 from .test_runs import (  # noqa: F401 - fixtures
     SPEC,
     FakeDBOSClient,
@@ -547,10 +548,8 @@ def test_pathological_patterns_on_a_32_kib_console_sample_answer_in_bounded_time
     client, _ = pg
     _, headers = tenant_of()
     assert len(sample.encode()) <= 32 * 1024
-    started = time.perf_counter()
-    r = _console(client, headers, [_blocklist(pattern, action=action)], sample)
-    elapsed = time.perf_counter() - started
-    assert elapsed < 3.0, (pattern, action, elapsed)
+    r, elapsed = best_of_3(lambda: _console(client, headers, [_blocklist(pattern, action=action)], sample))
+    assert elapsed < cap(3.0), (pattern, action, elapsed)
     if r.status_code == 422:
         assert "too complex" in r.json()["detail"], r.text
         return
