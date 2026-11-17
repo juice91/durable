@@ -44,15 +44,29 @@ def test_workflows_default_to_read_only_contents():
         assert _load(name).get("permissions") == {"contents": "read"}, name
 
 
-def test_self_hosted_workflows_never_run_for_pull_requests():
+SAME_REPO_ONLY = (
+    "github.event_name != 'pull_request' || "
+    "github.event.pull_request.head.repo.full_name == github.repository"
+)
+
+
+def test_self_hosted_workflows_never_run_fork_code():
     for name in WORKFLOW_NAMES:
         workflow = _load(name)
-        if not any("self-hosted" in job.get("runs-on", []) for job in workflow["jobs"].values()):
+        self_hosted = [
+            job for job in workflow["jobs"].values() if "self-hosted" in job.get("runs-on", [])
+        ]
+        if not self_hosted:
             continue
         events = workflow.get("on", {})
-        # A fork has no separate event: pull_request / pull_request_target is how its code arrives.
-        for forbidden in ("pull_request", "pull_request_target", "issue_comment"):
+        # pull_request_target and issue_comment run with secrets or on comment text: never.
+        for forbidden in ("pull_request_target", "issue_comment"):
             assert forbidden not in events, name
+        if "pull_request" in events:
+            # Only CI Heavy runs for pull requests, and only for branches of this repository.
+            assert name == "ci-heavy.yml", name
+            for job in self_hosted:
+                assert " ".join(job["if"].split()) == SAME_REPO_ONLY, name
         push = events.get("push")
         if isinstance(push, dict):
             assert push.get("branches") == ["main"], name
@@ -162,8 +176,7 @@ def test_deploy_secrets_come_from_1password_in_the_deploy_step_only():
 def test_ci_heavy_postgres_is_loopback_and_always_removed():
     text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
     assert 'docker --context colima-pydanticos rm -f "$CI_PG_NAME"' in text
-    assert '-p "127.0.0.1:${CI_PG_PORT}:5432"' in text
-    assert "CI_PG_PORT: '54359'" in text
+    assert "-p '127.0.0.1::5432'" in text  # loopback only, free port chosen by Docker
     assert "kubectl" not in text
     assert "-n pydanticos" not in text
     steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
@@ -224,6 +237,7 @@ def test_ci_heavy_skips_docs_only_pushes():
     push = _load("ci-heavy.yml")["on"]["push"]
     assert push["branches"] == ["main"]
     assert push["paths-ignore"] == ["docs/**", "**/*.md", ".planning/**"]
+    assert _load("ci-heavy.yml")["on"]["pull_request"]["paths-ignore"] == push["paths-ignore"]
     # Only the push trigger is path-filtered: the nightly and manual runs always run.
     assert "schedule" in _load("ci-heavy.yml")["on"]
     assert "workflow_dispatch" in _load("ci-heavy.yml")["on"]
@@ -234,7 +248,30 @@ def test_ci_heavy_cancels_superseded_runs_of_the_same_ref_only():
     # One group per ref: a newer run cancels an older run of the same branch, and a run of another
     # branch (or main) is never in that group, so it is never cancelled by it.
     assert concurrency["group"] == "ci-heavy-${{ github.ref }}"
-    assert concurrency["cancel-in-progress"] == "true"
+    # Only pull request runs are superseded; main, nightly and manual runs always finish.
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_ci_heavy_runs_for_pull_requests_with_a_read_only_token():
+    heavy = _load("ci-heavy.yml")
+    assert "pull_request" in heavy["on"] and "workflow_dispatch" in heavy["on"] and "schedule" in heavy["on"]
+    assert heavy["permissions"] == {"contents": "read"}
+    # Checkout, the main-ref fetch and the status report need nothing beyond these.
+    assert heavy["jobs"]["heavy"]["permissions"] == {"actions": "read", "contents": "read"}
+    assert "pull_request_target" not in heavy["on"]
+
+
+def test_ci_heavy_postgres_is_unique_per_run_so_two_runners_do_not_collide():
+    heavy = _load("ci-heavy.yml")["jobs"]["heavy"]
+    assert heavy["env"]["CI_PG_NAME"] == "pydanticos-ci-pg-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert "CI_PG_PORT" not in heavy["env"]  # Docker picks a free host port
+    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
+    assert "54359" not in text
+    assert "CI_PG_PORT=${port}" in text and 'GITHUB_ENV' in text
+    for step in heavy["steps"]:
+        for value in (step.get("env") or {}).values():
+            if "127.0.0.1" in value:
+                assert "${{ env.CI_PG_PORT }}" in value
 
 
 def test_ci_heavy_runs_the_api_suite_under_xdist_on_six_workers():
@@ -252,17 +289,17 @@ def test_pytest_xdist_is_a_dev_dependency():
     assert 'name = "pytest-xdist"' in (ROOT / "uv.lock").read_text()
 
 
-def test_studio_vitest_is_sharded_in_three_jobs_and_static_checks_run_once():
+def test_studio_vitest_is_sharded_in_five_jobs_and_static_checks_run_once():
     jobs = _load("ci.yml")["jobs"]
     static, tests = jobs["studio"], jobs["studio-test"]
     static_runs = [step.get("run", "") for step in static["steps"]]
     assert "pnpm -C apps/studio lint" in static_runs
     assert "pnpm -C apps/studio exec tsc --noEmit" in static_runs
     assert not any("vitest" in run or run.endswith(" test") for run in static_runs)
-    assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3"]
+    assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4", "5"]
     assert tests["strategy"]["fail-fast"] == "false"
     test_runs = [step.get("run", "") for step in tests["steps"]]
-    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/3" in test_runs
+    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/5" in test_runs
     assert not any("lint" in run or "tsc" in run for run in test_runs)
     assert static["timeout-minutes"] == "30"
     assert tests["timeout-minutes"] == "30"
@@ -279,3 +316,26 @@ def test_hosted_jobs_cache_the_uv_and_pnpm_stores_on_their_lockfiles():
         # setup-node's pnpm cache is keyed on pnpm-lock.yaml (cache-dependency-path defaults to it).
         assert node["with"]["cache"] == "pnpm", name
         assert "cache-dependency-path" not in node["with"], name
+
+
+def test_ci_heavy_does_not_wait_for_hosted_ci():
+    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
+    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
+    assert not any(step.get("name") == "Require the hosted CI gate" for step in steps)
+    assert "sleep 15" not in text and "Timed out waiting for CI" not in text
+    report = next(step for step in steps if "hosted CI status" in step.get("name", ""))
+    # Information only: no loop, no exit 1, so it can never block or fail the run.
+    assert "exit 1" not in report["run"] and "sleep" not in report["run"]
+    assert "|| conclusion=unknown" in report["run"]
+
+
+def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_config():
+    steps = _load("ci.yml")["jobs"]["studio-test"]["steps"]
+    cache = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache@"))
+    assert cache["with"]["path"] == "apps/studio/node_modules/.vite"
+    assert "hashFiles('pnpm-lock.yaml', 'apps/studio/vite.config.ts')" in cache["with"]["key"]
+    assert "matrix.shard" in cache["with"]["key"]
+    # Restored after install (install would not touch .vite) and before vitest runs.
+    names = [s.get("run") or s.get("uses") for s in steps]
+    assert steps.index(cache) > names.index("pnpm install --frozen-lockfile")
+    assert steps.index(cache) < next(i for i, s in enumerate(steps) if "vitest run" in s.get("run", ""))
