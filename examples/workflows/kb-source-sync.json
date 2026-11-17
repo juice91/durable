@@ -35,6 +35,10 @@
           },
           "maxItems": 100,
           "default": []
+        },
+        "restart": {
+          "type": "boolean",
+          "description": "Full or incremental only: start the catalogue walk from the beginning instead of the stored cursor."
         }
       },
       "required": [
@@ -191,6 +195,15 @@
               }
             },
             "next": "sync_targeted"
+          },
+          {
+            "when": {
+              "op": "exists",
+              "left": {
+                "$ref": "input.restart"
+              }
+            },
+            "next": "sync_all_restart"
           }
         ],
         "default": "sync_all"
@@ -304,6 +317,64 @@
         "input": {
           "run_id": {
             "$ref": "steps.sync_all.output.run_id"
+          },
+          "require_success": true
+        }
+      },
+      {
+        "id": "sync_all_restart",
+        "type": "tool",
+        "tool_id": "kb.source.sync",
+        "input": {
+          "source_id": {
+            "$ref": "input.source_id"
+          },
+          "mode": {
+            "$ref": "input.mode"
+          },
+          "restart": {
+            "$ref": "input.restart"
+          }
+        },
+        "next": "wait_all_restart"
+      },
+      {
+        "id": "wait_all_restart",
+        "type": "loop",
+        "max_iterations": 100,
+        "on_max_iterations": "fail",
+        "until": {
+          "op": "eq",
+          "left": {
+            "$ref": "steps.await_all_restart.output.terminal"
+          },
+          "right": true
+        },
+        "body": {
+          "start": "await_all_restart",
+          "steps": [
+            {
+              "id": "await_all_restart",
+              "type": "tool",
+              "tool_id": "workflow.run.wait",
+              "input": {
+                "run_id": {
+                  "$ref": "steps.sync_all_restart.output.run_id"
+                },
+                "wait_seconds": 300
+              }
+            }
+          ]
+        },
+        "next": "report_all_restart"
+      },
+      {
+        "id": "report_all_restart",
+        "type": "tool",
+        "tool_id": "workflow.run.result",
+        "input": {
+          "run_id": {
+            "$ref": "steps.sync_all_restart.output.run_id"
           },
           "require_success": true
         }

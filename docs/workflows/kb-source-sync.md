@@ -47,7 +47,7 @@ Create the connection and the source first (`POST /api/v1/settings/connections`,
 `source` reads the source; `check` checks its connection and `gate` stops at `connection_failed` (the check
 again, whose output carries the stable `error_code`) when it is not `ok`. Nothing is started then. `route` sends a
 run that has `part_numbers` down the `*_targeted` steps and any other run down `*_all`, the same three steps
-without `part_numbers` (`sync_all`, `wait_all`, `report_all`); the walk below shows the targeted one.
+without `part_numbers` (`sync_all`, `wait_all`, `report_all`), and a third with `restart: true` for a full or incremental walk that starts from the beginning instead of the stored cursor (`sync_all_restart`, `wait_all_restart`, `report_all_restart`; the engine applies no input defaults and a `$ref` to a missing input fails, so each optional input gets its own chain); the walk below shows the targeted one.
 
 <!-- example: kb-source-sync.json /spec/steps/5 -->
 ```json

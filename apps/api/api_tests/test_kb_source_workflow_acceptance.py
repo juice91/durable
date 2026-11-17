@@ -103,10 +103,11 @@ def test_the_example_is_a_valid_spec_without_agents():
     assert spec.name == "KB Source Synchronization"
     tools = [s.tool_id for s in spec.steps if s.type == "tool"]
     assert tools == ["kb.source.get", "settings.connection.check", "settings.connection.check",
-                     "kb.source.sync", "workflow.run.result", "kb.source.sync", "workflow.run.result"]
+                     "kb.source.sync", "workflow.run.result", "kb.source.sync", "workflow.run.result",
+                     "kb.source.sync", "workflow.run.result"]  # targeted, all, all with restart
     loops = [s for s in spec.steps if s.type == "loop"]
     assert [(s.id, s.max_iterations, s.on_max_iterations) for s in loops] == [
-        ("wait_targeted", 100, "fail"), ("wait_all", 100, "fail")]
+        ("wait_targeted", 100, "fail"), ("wait_all", 100, "fail"), ("wait_all_restart", 100, "fail")]
     assert example["spec"]["input_schema"]["properties"]["part_numbers"]["default"] == []
     assert "ti." not in json.dumps(example["spec"]).replace("mi.", "")  # no provider identifier
 
@@ -310,6 +311,22 @@ def test_an_incremental_run_without_part_numbers_takes_the_sync_all_path(stack, 
     assert (output["mode"], output["discovered"]) == ("incremental", 12)
     assert "step:sync_all:completed" in stack.events(run_id) and "step:sync_targeted:started" not in stack.events(run_id)
     jsonschema.validate(output, load_example()["spec"]["output_schema"])
+
+
+@requires_pg
+def test_a_full_run_with_restart_takes_the_restart_path_and_passes_it_to_the_sync(stack, workflow):
+    """`restart: true` (full or incremental) is its own chain: the engine applies no input defaults and a
+    `$ref` to a missing input fails, so the route branches on `exists(input.restart)`."""
+    source = stack.source()
+    run_id, run = stack.run(workflow, {"source_id": source, "mode": "full", "restart": True})
+    assert run["status"] == "completed", run
+    output = json.loads(run["output"])
+    jsonschema.validate(output, load_example()["spec"]["output_schema"])
+    events = stack.events(run_id)
+    assert "step:sync_all_restart:completed" in events
+    assert "step:sync_all:started" not in events and "step:sync_targeted:started" not in events
+    assert events["step:sync_all_restart:completed"][1]["output"]["status"] == "queued"
+    assert output["mode"] == "full"
 
 
 @requires_pg
