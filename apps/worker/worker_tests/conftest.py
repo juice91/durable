@@ -33,6 +33,12 @@ os.environ.setdefault("EAP_MCP_CATALOG_SCHEDULE", "off")
 os.environ.setdefault("EAP_MCP_RUNTIME_SWEEP_SCHEDULE", "off")
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "requires_k3s: needs the local colima-pydanticos k3s with the ToolHive operator"
+    )
+
+
 def new_schema(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
