@@ -44,15 +44,29 @@ def test_workflows_default_to_read_only_contents():
         assert _load(name).get("permissions") == {"contents": "read"}, name
 
 
-def test_self_hosted_workflows_never_run_for_pull_requests():
+SAME_REPO_ONLY = (
+    "github.event_name != 'pull_request' || "
+    "github.event.pull_request.head.repo.full_name == github.repository"
+)
+
+
+def test_self_hosted_workflows_never_run_fork_code():
     for name in WORKFLOW_NAMES:
         workflow = _load(name)
-        if not any("self-hosted" in job.get("runs-on", []) for job in workflow["jobs"].values()):
+        self_hosted = [
+            job for job in workflow["jobs"].values() if "self-hosted" in job.get("runs-on", [])
+        ]
+        if not self_hosted:
             continue
         events = workflow.get("on", {})
-        # A fork has no separate event: pull_request / pull_request_target is how its code arrives.
-        for forbidden in ("pull_request", "pull_request_target", "issue_comment"):
+        # pull_request_target and issue_comment run with secrets or on comment text: never.
+        for forbidden in ("pull_request_target", "issue_comment"):
             assert forbidden not in events, name
+        if "pull_request" in events:
+            # Only CI Heavy runs for pull requests, and only for branches of this repository.
+            assert name == "ci-heavy.yml", name
+            for job in self_hosted:
+                assert " ".join(job["if"].split()) == SAME_REPO_ONLY, name
         push = events.get("push")
         if isinstance(push, dict):
             assert push.get("branches") == ["main"], name
@@ -162,8 +176,7 @@ def test_deploy_secrets_come_from_1password_in_the_deploy_step_only():
 def test_ci_heavy_postgres_is_loopback_and_always_removed():
     text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
     assert 'docker --context colima-pydanticos rm -f "$CI_PG_NAME"' in text
-    assert '-p "127.0.0.1:${CI_PG_PORT}:5432"' in text
-    assert "CI_PG_PORT: '54359'" in text
+    assert "-p '127.0.0.1::5432'" in text  # loopback only, free port chosen by Docker
     assert "kubectl" not in text
     assert "-n pydanticos" not in text
     steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
@@ -224,6 +237,7 @@ def test_ci_heavy_skips_docs_only_pushes():
     push = _load("ci-heavy.yml")["on"]["push"]
     assert push["branches"] == ["main"]
     assert push["paths-ignore"] == ["docs/**", "**/*.md", ".planning/**"]
+    assert _load("ci-heavy.yml")["on"]["pull_request"]["paths-ignore"] == push["paths-ignore"]
     # Only the push trigger is path-filtered: the nightly and manual runs always run.
     assert "schedule" in _load("ci-heavy.yml")["on"]
     assert "workflow_dispatch" in _load("ci-heavy.yml")["on"]
@@ -234,7 +248,30 @@ def test_ci_heavy_cancels_superseded_runs_of_the_same_ref_only():
     # One group per ref: a newer run cancels an older run of the same branch, and a run of another
     # branch (or main) is never in that group, so it is never cancelled by it.
     assert concurrency["group"] == "ci-heavy-${{ github.ref }}"
-    assert concurrency["cancel-in-progress"] == "true"
+    # Only pull request runs are superseded; main, nightly and manual runs always finish.
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_ci_heavy_runs_for_pull_requests_with_a_read_only_token():
+    heavy = _load("ci-heavy.yml")
+    assert "pull_request" in heavy["on"] and "workflow_dispatch" in heavy["on"] and "schedule" in heavy["on"]
+    assert heavy["permissions"] == {"contents": "read"}
+    # Checkout, the main-ref fetch and the status report need nothing beyond these.
+    assert heavy["jobs"]["heavy"]["permissions"] == {"actions": "read", "contents": "read"}
+    assert "pull_request_target" not in heavy["on"]
+
+
+def test_ci_heavy_postgres_is_unique_per_run_so_two_runners_do_not_collide():
+    heavy = _load("ci-heavy.yml")["jobs"]["heavy"]
+    assert heavy["env"]["CI_PG_NAME"] == "pydanticos-ci-pg-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert "CI_PG_PORT" not in heavy["env"]  # Docker picks a free host port
+    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
+    assert "54359" not in text
+    assert "CI_PG_PORT=${port}" in text and 'GITHUB_ENV' in text
+    for step in heavy["steps"]:
+        for value in (step.get("env") or {}).values():
+            if "127.0.0.1" in value:
+                assert "${{ env.CI_PG_PORT }}" in value
 
 
 def test_ci_heavy_runs_the_api_suite_under_xdist_on_six_workers():
