@@ -92,6 +92,7 @@ jobs:
           uv run pytest -p no:eap_db -q
           packages/shared-schemas/tests
           packages/agent-runtime/runtime_tests
+          packages/kb-sources/kb_sources_tests
           packages/knowledge/knowledge_tests
           packages/observability/tests
           packages/pricing/pricing_tests

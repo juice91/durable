@@ -30,6 +30,7 @@ from eap_worker import attachment_retention as _attachment_retention  # noqa: F4
 from eap_worker import mcp_catalog_mirror as _mcp_catalog_mirror  # noqa: F401  (eap.mcp_catalog_mirror and its steps)
 from eap_worker import mcp_runtime_sweep as _mcp_runtime_sweep  # noqa: F401  (eap.mcp_runtime_sweep and its step)
 from eap_worker import eval_run as _eval_run  # noqa: F401  (eap.eval_run, its steps and eap-judge, AC.11)
+from eap_worker import kb_source_sync as _kb_source_sync  # noqa: F401  (eap.kb_source_sync, its segment child and steps)
 
 APP_NAME = "eap-worker"
 

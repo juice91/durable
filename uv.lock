@@ -13,6 +13,7 @@ members = [
     "eap-api",
     "eap-blob-store",
     "eap-db",
+    "eap-kb-sources",
     "eap-knowledge",
     "eap-mcp-runtime",
     "eap-observability",
@@ -855,6 +856,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "eap-kb-sources"
+version = "0.1.0"
+source = { editable = "packages/kb-sources" }
+dependencies = [
+    { name = "eap-run-store" },
+    { name = "eap-schemas" },
+    { name = "eap-secrets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-run-store", editable = "packages/run-store" },
+    { name = "eap-schemas", editable = "packages/shared-schemas" },
+    { name = "eap-secrets", editable = "packages/secrets" },
+]
+
+[[package]]
 name = "eap-knowledge"
 version = "0.1.0"
 source = { editable = "packages/knowledge" }
@@ -1011,6 +1029,7 @@ dependencies = [
     { name = "eap-agent-runtime" },
     { name = "eap-blob-store" },
     { name = "eap-db" },
+    { name = "eap-kb-sources" },
     { name = "eap-knowledge" },
     { name = "eap-mcp-runtime" },
     { name = "eap-observability" },
@@ -1043,6 +1062,7 @@ requires-dist = [
     { name = "eap-agent-runtime", editable = "packages/agent-runtime" },
     { name = "eap-blob-store", editable = "packages/blob-store" },
     { name = "eap-db", editable = "packages/db" },
+    { name = "eap-kb-sources", editable = "packages/kb-sources" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-mcp-runtime", editable = "packages/mcp-runtime" },
     { name = "eap-observability", editable = "packages/observability" },

@@ -24,7 +24,7 @@ eap-schemas = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -54,7 +54,7 @@ forbidden_modules = ["eap_worker", "eap_runtime", "pydantic_ai"]
 [[tool.importlinter.contracts]]
 name = "Only eap_observability may import OpenTelemetry"
 type = "forbidden"
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_kb_sources"]
 forbidden_modules = ["opentelemetry"]
 # Direct imports only: the sanctioned path is eap_api/eap_worker -> eap_observability -> opentelemetry.
 # Every other root package is a source here, so any indirect chain must still end in a direct
@@ -79,6 +79,14 @@ forbidden_modules = [
     "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing",
     "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Knowledge-base source adapters have no web, worker or DBOS imports"
+type = "forbidden"
+# eap_kb_sources may import eap_schemas, eap_run_store and eap_secrets; the worker owns the DBOS
+# workflow that drives an adapter and the API owns the routes.
+source_modules = ["eap_kb_sources"]
+forbidden_modules = ["eap_api", "eap_worker", "eap_runtime", "fastapi", "starlette", "dbos", "pydantic_ai"]
 
 [[tool.importlinter.contracts]]
 name = "Processors import only the standard library, eap_schemas and re2"
@@ -112,7 +120,7 @@ type = "forbidden"
 # D19: ag-ui-protocol is used only inside eap_api.ag_ui; data reaching the run row and the worker
 # uses eap_schemas.client_tools. Direct imports only: the rest of eap_api reaches ag_ui through
 # eap_api.ag_ui (the sanctioned path), and the other roots may not import eap_api at all.
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]
 forbidden_modules = ["ag_ui"]
 ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
 unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
