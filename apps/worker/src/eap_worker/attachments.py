@@ -21,13 +21,14 @@ from typing import Any
 
 from pydantic_ai import BinaryContent, TextContent
 
-from eap_blob_store import BlobStore, blob_store_from_env
+from eap_blob_store import BlobNotFound, BlobStore, blob_store_from_env
 from eap_run_store.chat_attachments import (
     ATTACHMENT_CAPABILITIES_KEY,
     AttachmentMeta,
     ChatAttachmentStore,
     accepts_by_capabilities,
     is_text_type,
+    max_attachment_bytes,
     model_accepts,
 )
 
@@ -46,12 +47,50 @@ def blob_store() -> BlobStore:
     return _store if _store is not None else configure_blob_store()
 
 
-async def _read(store: BlobStore, key: str) -> bytes:
-    return b"".join([chunk async for chunk in store.open(key)])  # BlobNotFound when the blob is gone
-
-
 class AttachmentUnsupported(ValueError):
     """The run's model does not accept an attached file's media type."""
+
+
+class AttachmentGone(ValueError):
+    """An attachment's blob is no longer in the store (expired, deleted or lost). Carries the id only."""
+
+    def __init__(self, attachment_id: str) -> None:
+        self.attachment_id = attachment_id
+        super().__init__(attachment_id)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"attachment {self.attachment_id} is no longer available"
+
+
+class AttachmentTooLarge(ValueError):
+    """An attachment's recorded size, or its stored bytes, exceed the size cap."""
+
+    def __init__(self, attachment_id: str) -> None:
+        self.attachment_id = attachment_id
+        super().__init__(attachment_id)  # pickle-safe
+
+    def __str__(self) -> str:
+        return f"attachment {self.attachment_id} is larger than allowed"
+
+
+async def _read(store: BlobStore, meta: AttachmentMeta) -> bytes:
+    """The blob's bytes, bounded by the recorded size and the attachment cap (10 MiB by default):
+    reading stops with AttachmentTooLarge as soon as either is exceeded, never buffering more.
+    A missing blob is AttachmentGone."""
+    limit = min(meta.size, max_attachment_bytes())
+    if meta.size > limit:
+        raise AttachmentTooLarge(meta.id)
+    parts: list[bytes] = []
+    total = 0
+    try:
+        async for chunk in store.open(meta.storage_key):
+            total += len(chunk)
+            if total > limit:
+                raise AttachmentTooLarge(meta.id)
+            parts.append(chunk)
+    except BlobNotFound:
+        raise AttachmentGone(meta.id) from None
+    return b"".join(parts)
 
 
 def recorded_capabilities(model_settings: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -69,15 +108,15 @@ async def build_prompt(
 ) -> str | list[Any]:
     """`text` alone when there are no files, else [text, one part per file], the bytes read through
     `store`. `capabilities` is the run's recorded decision (recorded_capabilities); without one the
-    assumed rules apply. Raises AttachmentUnsupported for a model that cannot take a file, BlobNotFound for a file
-    whose blob is gone."""
+    assumed rules apply. Raises AttachmentUnsupported for a model that cannot take a file, AttachmentGone for a file
+    whose blob is gone, AttachmentTooLarge for one over its recorded size or the cap."""
     if not metas:
         return text
     provider, _, name = model_id.partition(":")
     parts: list[Any] = [text]
     for meta in metas:
         if is_text_type(meta.media_type):
-            body = (await _read(store, meta.storage_key)).decode("utf-8", errors="replace")
+            body = (await _read(store, meta)).decode("utf-8", errors="replace")
             parts.append(TextContent(content=f"Attached file {meta.name}:\n{body}", metadata={"attachment_id": meta.id}))
             continue
         accepted = (
@@ -87,7 +126,7 @@ async def build_prompt(
         )
         if not accepted:
             raise AttachmentUnsupported(f"model {model_id} does not accept {meta.media_type} attachments")
-        data = await _read(store, meta.storage_key)
+        data = await _read(store, meta)
         parts.append(BinaryContent(data=data, media_type=meta.media_type, identifier=meta.id))
     return parts
 

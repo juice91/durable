@@ -34,6 +34,7 @@ from eap_schemas.limits import USAGE_LIMIT_KWARGS, RunBudgetExceeded
 from eap_schemas.models_policy import ModelNotAllowed
 from eap_schemas.output import OutputInvalid
 from eap_schemas.workflow_scope import LOOP_WORKFLOW_FAILURES
+from eap_worker.attachments import AttachmentGone, AttachmentTooLarge, AttachmentUnsupported
 from eap_worker.client_tools import ClientToolArgsInvalid
 from eap_worker.mcp import McpToolUnavailable
 
@@ -363,6 +364,15 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
         "failed",
         "model_not_allowed",
         lambda e: f"model '{_field(e, 'provider')}:{_field(e, 'name')}' is not allowed on this platform",
+    ),
+    # W2.4: an attached file's blob is gone, over the size cap, or of a type the model cannot take.
+    (AttachmentGone, "failed", "attachment_gone", lambda e: "an attached file is no longer available; attach it again"),
+    (AttachmentTooLarge, "failed", "attachment_too_large", lambda e: "an attached file is larger than allowed"),
+    (
+        AttachmentUnsupported,
+        "failed",
+        "attachment_unsupported",
+        lambda e: "the model does not accept an attached file's type",
     ),
     (RequestContextInvalid, "failed", "request_context_invalid", lambda e: REQUEST_CONTEXT_INVALID_MESSAGE),
     (InputBlocked, "failed", "input_blocked", lambda e: INPUT_BLOCKED_MESSAGE),

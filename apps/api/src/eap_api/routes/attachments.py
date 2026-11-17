@@ -6,10 +6,16 @@
                                      CSV, JSON) or bytes that are not what the type says.
 - GET  /attachments/{id}             the bytes, tenant-scoped (another tenant's id is 404), with the stored
                                      content type, `Content-Disposition` and `X-Content-Type-Options: nosniff`.
-                                     410 `attachment_gone` when the row exists but its blob does not.
+                                     410 `attachment_gone` when the row exists but its blob does not;
+                                     503 when the object store itself is unreachable.
 - DELETE /attachments/{id}           discard the caller's own unsent upload: 204; 409 `attachment_in_use`
                                      once a message references it; 404 unknown, another tenant's or another
                                      user's. Unsent uploads also expire (EAP_ATTACHMENT_ORPHAN_HOURS, 24 h).
+
+Delete order: DELETE reads the row `FOR UPDATE` and checks it is not in use first, then deletes the
+blob, then the row; the retention pass deletes the row first (conditional on `message_id IS NULL`),
+then the blob. A crash can leave a row without a blob (410) or a blob without a row, never a message
+pointing at nothing.
 
 The bytes live in the BlobStore (`app.state.blob_store`, built from EAP_BLOB_* at startup), never in
 Postgres: an upload is validated (size, type, sniff) and then streamed into the store, the row records

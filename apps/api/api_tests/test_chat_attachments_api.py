@@ -97,6 +97,25 @@ def test_download_of_a_missing_blob_is_410(ag, tenant):
     assert client.get(f"/api/v1/attachments/{uuid.uuid4()}", headers=h).status_code == 404
 
 
+def test_download_with_an_unreachable_store_is_503_not_500(ag, tenant):
+    client, app = ag
+    h = get_auth_header(tenant, "alice")
+    meta = upload(client, h).json()
+    real = app.state.blob_store
+
+    class Down:
+        async def open(self, key):
+            raise ConnectionError("store down")
+            yield b""  # pragma: no cover
+
+    app.state.blob_store = Down()
+    try:
+        got = client.get(f"/api/v1/attachments/{meta['id']}", headers=h)
+    finally:
+        app.state.blob_store = real
+    assert got.status_code == 503 and "store down" not in got.text
+
+
 def test_a_rejected_upload_leaves_no_blob_and_no_row(ag, tenant):
     import asyncio
 

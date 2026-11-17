@@ -1,8 +1,12 @@
 """S3-compatible backend on aiobotocore (Cloudflare R2 in the deployment, MinIO in tests).
 
 Path-style addressing. Request checksums are only sent when the API requires them: R2 and MinIO
-reject the default CRC checksum headers newer botocore adds. A client is opened per call, so a store
-is safe to share across event loops (the API's threadpool and asyncio.run both use it).
+reject the default CRC checksum headers newer botocore adds. A client is opened per call, deliberately:
+an aiobotocore client's connection pool is bound to the event loop it was created on, and one store
+is used from several loops (the API's request loop, anyio threads via `from_thread`, the worker's
+`asyncio.run`), so a cached client would break across loops. The cost is a new connection per call,
+small next to a file transfer; a per-loop cache can replace it if call volume ever makes it matter.
+Connect and read timeouts are set so an unreachable store fails fast instead of hanging a request.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ from botocore.exceptions import ClientError
 from eap_blob_store import BlobNotFound
 
 _READ_CHUNK = 64 * 1024
+_CONNECT_TIMEOUT = 5  # seconds
+_READ_TIMEOUT = 30  # seconds between bytes, not for the whole transfer
 _MISSING = {"404", "NoSuchKey", "NotFound"}
 
 
@@ -43,6 +49,8 @@ class S3BlobStore:
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
             retries={"max_attempts": 3, "mode": "standard"},
+            connect_timeout=_CONNECT_TIMEOUT,
+            read_timeout=_READ_TIMEOUT,
         )
 
     @asynccontextmanager
@@ -77,9 +85,9 @@ class S3BlobStore:
             if total != size:
                 raise ValueError(f"blob {key}: expected {size} bytes, got {total}")
             spool.seek(0)
-            body = spool.read()
-        async with self._client() as client:
-            await client.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType=media_type)
+            # The spool file itself is the Body: the upload streams from memory/disk, never a full copy.
+            async with self._client() as client:
+                await client.put_object(Bucket=self.bucket, Key=key, Body=spool, ContentType=media_type)
 
     async def open(self, key: str) -> AsyncIterator[bytes]:
         async with self._client() as client:

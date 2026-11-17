@@ -216,6 +216,9 @@ async def attachment_response(request: Request, meta: AttachmentMeta) -> Respons
         ) from None
     except StopAsyncIteration:
         first = b""
+    except Exception as exc:  # noqa: BLE001 - the object store is unreachable (not a missing blob)
+        logger.exception("attachment blob read failed")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="attachment storage is unavailable") from exc
     # Only images and PDFs may render inline; everything else downloads. nosniff always.
     disposition = "inline" if meta.media_type in IMAGE_TYPES or meta.media_type == PDF_TYPE else "attachment"
     ascii_name = re.sub(r'[^A-Za-z0-9._ -]', "_", meta.name) or "attachment"

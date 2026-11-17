@@ -10,7 +10,7 @@ from pydantic_ai import Agent, BinaryContent, TextContent
 
 from eap_blob_store import FsBlobStore
 from eap_run_store.chat_attachments import AttachmentMeta
-from eap_worker.attachments import AttachmentUnsupported, build_prompt
+from eap_worker.attachments import AttachmentGone, AttachmentTooLarge, AttachmentUnsupported, build_prompt
 from eap_worker.models import scripted_echo_model
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
@@ -56,8 +56,33 @@ def test_image_and_text_file_become_prompt_parts_read_through_the_store(files):
 def test_a_blob_missing_from_the_store_fails_the_prompt_with_its_id(files):
     from eap_blob_store import BlobNotFound
 
-    with pytest.raises(BlobNotFound):
+    with pytest.raises(AttachmentGone, match="id-gone.png"):
         files.prompt("x", [files.meta("gone.png", "image/png", PNG, put=False)], "test:echo")
+
+
+def test_attachment_gone_is_classified_with_a_clear_code(files):
+    from eap_worker.errors import classify
+
+    try:
+        files.prompt("x", [files.meta("gone.png", "image/png", PNG, put=False)], "test:echo")
+    except AttachmentGone as exc:
+        failure = classify(exc)
+    assert failure.code == "attachment_gone" and "no longer available" in failure.message
+
+
+def test_a_blob_larger_than_its_recorded_size_is_refused(files):
+    meta = files.meta("big.txt", "text/plain", b"x" * 100)
+    small = AttachmentMeta(id=meta.id, name=meta.name, media_type=meta.media_type, size=10, storage_key=meta.storage_key)
+    with pytest.raises(AttachmentTooLarge):
+        files.prompt("x", [small], "test:echo")
+
+
+def test_a_recorded_size_over_the_cap_is_refused_without_reading(files):
+    meta = files.meta("huge.txt", "text/plain", b"x")
+    huge = AttachmentMeta(id=meta.id, name=meta.name, media_type=meta.media_type, size=10 * 1024 * 1024 + 1,
+                          storage_key=meta.storage_key)
+    with pytest.raises(AttachmentTooLarge):
+        files.prompt("x", [huge], "test:echo")
 
 
 def test_the_scripted_model_receives_the_parts(files):
