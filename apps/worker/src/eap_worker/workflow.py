@@ -905,6 +905,10 @@ async def start_run_step(
             "client_tool_pending": client_pending,
             "client_turn_chain": client_chain,
             **({"scorers": scorers} if scorers else {}),
+            # Architect: whether the agent row is built in (only those may use `architect.*` tools).
+            # Recorded here, not a step of its own (a new step would renumber every later step);
+            # a checkpoint without the key (recorded before the Architect) reads as not built in.
+            "builtin": rt.agent_is_builtin(tenant_id, agent_id),
         }
 
     return await asyncio.to_thread(work)
@@ -993,13 +997,6 @@ def _turn_messages(turn: dict[str, Any]) -> list[dict[str, Any]]:
         ModelResponse(parts=[TextPart(turn["output"] or "")], timestamp=ts),
     ]
     return ModelMessagesTypeAdapter.dump_python(fallback, mode="json")
-
-
-@DBOS.step(name="eap.agent_is_builtin")
-async def agent_is_builtin_step(tenant_id: str, agent_id: str) -> bool:
-    """Whether the run's agent row is built in (recorded, so a replay decides the same way):
-    only built-in agents may use `architect.*` tools (WorkerRuntime.allowed_tools_for)."""
-    return await asyncio.to_thread(get_runtime().agent_is_builtin, tenant_id, agent_id)
 
 
 @DBOS.step(name="eap.load_history")
@@ -2060,7 +2057,7 @@ async def _run_body(
             fallback_provider, _, fallback_name = member.partition(":")
             rt.settings.allowed_models.check(fallback_provider, fallback_name)
         check_no_hidden_tools(spec)  # knowledge.search is for tool runs only
-        builtin = await agent_is_builtin_step(tenant_id, agent_id)
+        builtin = bool(link.get("builtin"))
         check_spec_tools(spec, rt.registry, rt.allowed_tools_for(builtin=builtin))
         # The Architect's gated tools run only behind a recorded approval: a spec that lists one
         # without its approvals entry never starts (the seed and the API keep them in step).
