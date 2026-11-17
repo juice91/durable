@@ -48,6 +48,7 @@ jobs:
               - 'pnpm-workspace.yaml'
               - '.npmrc'
               - 'apps/studio/**'
+              - '.github/workflows/ci.yml'
             deploy:
               - '.github/**'
               - 'deploy/**'

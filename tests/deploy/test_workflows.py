@@ -198,6 +198,7 @@ def test_hosted_path_filters_skip_unaffected_jobs():
     filters = ci["jobs"]["changes"]["steps"][1]["with"]["filters"]
     assert "packages/**" in filters
     assert "apps/studio/**" in filters
+    assert ".github/workflows/ci.yml" in filters  # a change to the studio gate runs the studio gate
     assert "deploy/**" in filters
     assert "tests/deploy/**" in filters
 
