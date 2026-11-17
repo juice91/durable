@@ -252,17 +252,17 @@ def test_pytest_xdist_is_a_dev_dependency():
     assert 'name = "pytest-xdist"' in (ROOT / "uv.lock").read_text()
 
 
-def test_studio_vitest_is_sharded_in_three_jobs_and_static_checks_run_once():
+def test_studio_vitest_is_sharded_in_five_jobs_and_static_checks_run_once():
     jobs = _load("ci.yml")["jobs"]
     static, tests = jobs["studio"], jobs["studio-test"]
     static_runs = [step.get("run", "") for step in static["steps"]]
     assert "pnpm -C apps/studio lint" in static_runs
     assert "pnpm -C apps/studio exec tsc --noEmit" in static_runs
     assert not any("vitest" in run or run.endswith(" test") for run in static_runs)
-    assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3"]
+    assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4", "5"]
     assert tests["strategy"]["fail-fast"] == "false"
     test_runs = [step.get("run", "") for step in tests["steps"]]
-    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/3" in test_runs
+    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/5" in test_runs
     assert not any("lint" in run or "tsc" in run for run in test_runs)
     assert static["timeout-minutes"] == "30"
     assert tests["timeout-minutes"] == "30"
@@ -290,3 +290,15 @@ def test_ci_heavy_does_not_wait_for_hosted_ci():
     # Information only: no loop, no exit 1, so it can never block or fail the run.
     assert "exit 1" not in report["run"] and "sleep" not in report["run"]
     assert "|| conclusion=unknown" in report["run"]
+
+
+def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_config():
+    steps = _load("ci.yml")["jobs"]["studio-test"]["steps"]
+    cache = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache@"))
+    assert cache["with"]["path"] == "apps/studio/node_modules/.vite"
+    assert "hashFiles('pnpm-lock.yaml', 'apps/studio/vite.config.ts')" in cache["with"]["key"]
+    assert "matrix.shard" in cache["with"]["key"]
+    # Restored after install (install would not touch .vite) and before vitest runs.
+    names = [s.get("run") or s.get("uses") for s in steps]
+    assert steps.index(cache) > names.index("pnpm install --frozen-lockfile")
+    assert steps.index(cache) < next(i for i, s in enumerate(steps) if "vitest run" in s.get("run", ""))
