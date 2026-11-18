@@ -86,7 +86,7 @@ describe("Architect page", () => {
     });
     const state = await screen.findByTestId("architect-choose-model");
     expect(state).toHaveTextContent("Choose a model");
-    expect(within(state).getByRole("link", { name: "Open providers" })).toHaveAttribute("href", "/settings/providers");
+    expect(within(state).getByRole("link", { name: "Open providers" })).toHaveAttribute("href", "/settings?tab=providers");
     expect(screen.queryByRole("button", { name: "Fill in the form" })).toBeNull();
   });
 
