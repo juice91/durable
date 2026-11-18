@@ -95,7 +95,7 @@ from eap_secrets.outbound_errors import (  # shared with the API's connection te
 )
 from eap_run_store.secrets import SecretStore
 from eap_worker.crash import crash_point
-from eap_worker.secret_refs import SecretRefNotFound, resolve_string
+from eap_worker.secret_refs import SECRET_NOT_FOUND, SecretRefNotFound, resolve_args, resolve_string
 
 log = logging.getLogger("eap_worker.mcp")
 
@@ -684,9 +684,15 @@ class McpToolset(AbstractToolset[Any]):
     neither the database nor the platform key. One short MCP session per listing or call."""
 
     def __init__(
-        self, refs: Sequence[McpToolRef], load: Loader, timeout: float, ensure: Ensure | None = None
+        self,
+        refs: Sequence[McpToolRef],
+        load: Loader,
+        timeout: float,
+        ensure: Ensure | None = None,
+        resolve: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str]]] | None = None,
     ) -> None:
         self._ensure = ensure
+        self._resolve = resolve  # secret references in a call's arguments -> (arguments, values used)
         self.refs = {mcp_tool_name(r.server, r.tool): r for r in refs}
         self._load = load
         self._timeout = timeout
@@ -768,7 +774,22 @@ class McpToolset(AbstractToolset[Any]):
             # completed), so the server row and secrets are read only when a call will really be
             # made. It runs in a thread (the store is synchronous) and drives the MCP call on the loop.
             conn = self._load([ref])[ref.server]
-            result = asyncio.run_coroutine_threadsafe(self._invoke(conn, ref, tool_args, key, ctx), loop).result()
+            args, values = tool_args, []
+            if self._resolve is not None:
+                # `secret:<name>` strings in the arguments become the tenant's values only here, after
+                # the arguments were recorded and approved; the values join the redaction variants.
+                try:
+                    args, values = self._resolve(tool_args)
+                except SecretRefNotFound as exc:
+                    return {"is_error": True, "content": None,
+                            "error": f"{SECRET_NOT_FOUND}: {exc.ref} is not a stored secret"}
+                except SecretsError:
+                    log.warning("mcp argument secret could not be decrypted tenant=%s", ctx.deps.tenant_id)
+                    return {"is_error": True, "content": None,
+                            "error": "secret_unreadable: a referenced secret could not be read"}
+            result = asyncio.run_coroutine_threadsafe(
+                self._invoke(conn, ref, args, key, ctx, values), loop
+            ).result()
             crash_point("after_tool_call")  # the server answered; side_effects.complete has not run
             return result
 
@@ -778,13 +799,21 @@ class McpToolset(AbstractToolset[Any]):
             )
         except (ModelRetry, ValidationError):  # never a retry once a call may have been attempted
             raise SideEffectOutcomeUnknown(key) from None
+        if stored.get("is_error") and stored.get("error"):
+            raise ToolFailed(str(stored["error"]))  # a refused secret reference: names the reference only
         if stored.get("is_error"):
             # A final result, not a retry: the model sees a fixed message, never the server's text.
             raise ToolFailed(TOOL_ERROR_MESSAGE)
         return stored.get("content")
 
     async def _invoke(
-        self, conn: McpServerConn, ref: McpToolRef, args: dict[str, Any], key: str, ctx: RunContext[Any]
+        self,
+        conn: McpServerConn,
+        ref: McpToolRef,
+        args: dict[str, Any],
+        key: str,
+        ctx: RunContext[Any],
+        secret_values: Sequence[str] = (),
     ) -> dict[str, Any]:
         """One tools/call. Before the request can have been sent, a failure is McpToolUnavailable
         (nothing happened, the run fails); after, it is SideEffectOutcomeUnknown (needs_attention)."""
@@ -794,7 +823,7 @@ class McpToolset(AbstractToolset[Any]):
         statuses: list[int] = []
         if self._ensure is not None:  # nothing is sent yet: a failure here is McpToolUnavailable
             await self._ensure(ctx.deps.tenant_id, conn, ref.tool)
-        variants = secret_variants(conn.headers.values())
+        variants = secret_variants([*conn.headers.values(), *secret_values])
         try:
             with anyio.fail_after(self._timeout):
                 async with _session(conn, OutboundPolicy.from_env(), self._timeout, statuses) as client:
@@ -833,6 +862,7 @@ def mcp_toolset_for_run(engine: Engine, tenant_id: str, refs: Sequence[McpToolRe
         functools.partial(load_servers, engine, tenant_id),
         timeout_s(),
         functools.partial(_ensure_for, engine),
+        functools.partial(resolve_args, engine, tenant_id),
     )
 
 

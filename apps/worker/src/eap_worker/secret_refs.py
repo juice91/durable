@@ -8,6 +8,9 @@ what the run records:
   the tool's own call step (`SecretResolvingToolset`), after the arguments were recorded, so the
   durable event, the approval card and the DBOS checkpoint hold the reference only. The tool's
   result and any failure it raises are redacted with `secret_variants` of the values it received.
+- An MCP tool call's string arguments are resolved the same way inside its call step
+  (`McpToolset.call_tool`, via `resolve_args`): the recorded arguments keep the reference, the result
+  is redacted with the values, and an unknown reference is a `secret_not_found` tool failure.
 - An MCP server's decrypted header value or env value equal to a reference is resolved the same way
   (eap_worker.mcp); `McpServerConn.headers` then feeds the existing header redaction.
 
@@ -93,6 +96,17 @@ def resolve_string(value: str, engine: Any, tenant_id: str, store: Any | None = 
     used: list[str] = []
     store = store or secret_store(engine)
     return resolve_value(value, lambda name: store.resolve(tenant_id, name), used)
+
+
+def resolve_args(engine: Any, tenant_id: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """`args` with every reference string resolved, and the values used (blocking; run in a thread).
+    No reference: `args` itself and no values. Raises SecretRefNotFound (names the reference) or
+    SecretsError (the platform key is unset or the stored value is unreadable)."""
+    if not has_ref(args):
+        return args, []
+    store = secret_store(engine)
+    used: list[str] = []
+    return resolve_value(args, lambda name: store.resolve(tenant_id, name), used), used
 
 
 async def call_with_secrets(
