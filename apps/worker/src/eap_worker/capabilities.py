@@ -79,7 +79,8 @@ from uuid import UUID
 from dbos import DBOS
 from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ToolCallPart
+from pydantic import ValidationError
+from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.output import NativeOutput, PromptedOutput, StructuredDict, ToolOutput
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved, ToolDefinition, ToolDenied
 from pydantic_core import to_jsonable_python
@@ -684,9 +685,70 @@ class SpecCapability(AbstractCapability[Any]):
             raise ModelRetry(retry_message(errors))
         return output
 
+    async def on_tool_validate_error(
+        self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any,
+        error: ValidationError | ModelRetry,
+    ) -> Any:
+        """A model that sends the same refused arguments again will keep doing so until its retries run
+        out and the run dies as `unexpected_model_behavior`. Stop at the first identical repeat instead,
+        with the tool and the validation message. Derived from the message history (which a replayed run
+        rebuilds identically), so it keeps no state and adds no step."""
+        if _repeats_refused_call(ctx.messages, call):
+            from eap_worker.errors import ToolCallRepeated
+
+            raise ToolCallRepeated(call.tool_name, _validation_detail(error)) from None
+        raise error
+
     @classmethod
     def get_serialization_name(cls) -> str | None:
         return None
+
+
+MAX_REPEAT_DETAIL = 200
+
+
+def _validation_detail(error: ValidationError | ModelRetry) -> str:
+    """The first validation problem as `path: message`, at most MAX_REPEAT_DETAIL characters."""
+    if isinstance(error, ValidationError):
+        problems = error.errors(include_url=False, include_context=False, include_input=False)
+        detail = f"{'.'.join(str(p) for p in problem['loc']) or 'arguments'}: {problem['msg']}" if (problem := problems[0] if problems else None) else str(error)
+    else:
+        detail = str(error.message)
+    return detail[:MAX_REPEAT_DETAIL]
+
+
+def _repeats_refused_call(messages: list[Any], call: ToolCallPart) -> bool:
+    """True when an earlier call of this tool, with the same arguments, was already answered with a
+    retry prompt (a refused call)."""
+    refused = {
+        part.tool_call_id
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if (
+            isinstance(part, RetryPromptPart)  # the older form of a refused call
+            or (isinstance(part, ToolReturnPart) and part.outcome == "retried")
+        )
+        and part.tool_name == call.tool_name
+    }
+    wanted = _canonical_args(call)
+    return any(
+        isinstance(part, ToolCallPart)
+        and part.tool_name == call.tool_name
+        and part.tool_call_id != call.tool_call_id
+        and part.tool_call_id in refused
+        and _canonical_args(part) == wanted
+        for message in messages
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )
+
+
+def _canonical_args(call: ToolCallPart) -> str:
+    try:
+        return json.dumps(call.args_as_dict(), sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - unparseable arguments compare as the raw text
+        return str(call.args)
 
 
 def check_approved_tool_calls(ctx: RunContext[Any], results: DeferredToolResults) -> None:
