@@ -264,7 +264,7 @@ kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
 #  - A run parked on a human approval (a pending_approvals row without decided_at) is not executing and
 #    may wait for days; its step layout is unchanged while it waits. Counting it blocked every deploy on
 #    2026-11-19 while the API was already scaled to 0, so nobody could decide the approval either.
-#  - Runs whose kind is in PYDANTICOS_DRAIN_EXCLUDE_KINDS (comma list, default "kb_ingest"). Knowledge-base
+#  - Runs whose kind is in PYDANTICOS_DRAIN_EXCLUDE_KINDS (comma list; kb_ingest when unset). Knowledge-base
 #    ingestion is idempotent per document and recovers across a worker restart, and a catalogue sync
 #    queues hundreds of them (868 on 2026-11-19, two at a time), so waiting for them failed the deploy.
 #    A release that changes the eap.kb_ingest* step names must set the variable to "" for that deploy.
