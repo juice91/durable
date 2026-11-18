@@ -47,3 +47,80 @@ the post must not use.
 The same options are in the Studio evaluator editor (**Must not match** and **Field path**) and in
 the reusable scorer form. In an exported `pydantic_evals` file they are the `negate` and `field`
 arguments of `Regex`.
+
+# Suggested rules
+
+After an agent or a workflow exists, Studio can propose rules for it: **Suggest rules** on the
+agent's Tests tab and in its Scorers section (Config), and on the workflow's Tests tab. Nothing is
+added until someone clicks.
+
+## What a suggestion is
+
+`POST /api/v1/agents/{id}/scorer-suggestions` and `POST /api/v1/workflows/{id}/scorer-suggestions`
+(body optional: `{"max": 1..12, "include_runs": true}`, defaults 8 and true) run the built-in
+**Scorer suggester** agent once and answer:
+
+```json
+{
+  "suggestions": [
+    {
+      "title": "No refund promises",
+      "rationale": "The instructions forbid promising refunds.",
+      "scope": "both",
+      "spec": {"kind": "regex", "pattern": "(?i)refund", "negate": true},
+      "evidence": "instructions, line 2"
+    }
+  ],
+  "model": "anthropic:claude-sonnet-5-5",
+  "dropped": 1
+}
+```
+
+- `spec` is a valid suite evaluator (`eap_schemas.evals`). For `scope` `scorer` or `both` it is also a
+  valid reusable scorer (`contains`, `regex`, `schema_valid`, `field_equals`, `max_cost`), so it can be
+  sent to `POST /scorers` as it is. `evaluator` scope means suite only (`max_duration`, `llm_judge`).
+- The suggester prefers deterministic kinds and proposes at most 2 `llm_judge` rules. A judge rule gets
+  the platform's default model; the suggester never picks one.
+- A workflow has no scorers, so every suggestion for a workflow is `evaluator` scope.
+- `dropped` counts the answer's entries that were discarded: not a valid evaluator, a regex RE2 does not
+  compile, a repeated spec, or a third judge. Entries cut by `max` are not counted.
+- The answer is cached for 10 minutes per tenant, target, definition (the draft, as edited) and
+  `max`/`include_runs`, so a repeat click starts no run. Editing the definition asks again.
+- Errors: 404 (not found), 409 `no_model` (no model is allowed for the tenant's built-in agents),
+  422 (a bad body, or `suggest_invalid` when the model's answer is not the expected shape), 502
+  `suggest_failed`, 504 `suggest_timeout` (the run is awaited for at most 60 seconds).
+
+The suggester is a normal built-in agent, seeded for a tenant on first use with the Architect's ranked
+default model (the same rule as the drafters) and hidden from the agent list unless `include_system` is
+set. `PUT /architect/model` changes its model with the others once it exists.
+
+## What it reads, and what it never sees
+
+It reads, as one prompt of at most 20,000 characters:
+
+- the target's definition: the agent's name, instructions, output schema and tool ids, or the
+  workflow's name, description, input and output schemas and steps (the draft, as shown in Studio);
+- with `include_runs` (the default), the inputs and outputs of up to 5 of the target's most recent
+  completed runs, each cut to 600 and 800 characters.
+
+Everything it reads passes through the platform's log redaction first (`eap_observability.redact`):
+bearer and basic tokens, `sk-` keys, platform API keys, `user:password@` in URLs, and values of
+`api_key`, `token`, `secret`, `password` and similar keys are replaced by `[REDACTED]`. That catches
+credentials of those shapes; it cannot recognise personal data or other sensitive text a run's output
+happens to hold. Turn `include_runs` off when run outputs are sensitive.
+
+It never sees: secrets and connection credentials (it has no tools and no access to `/secrets`), memory,
+knowledge-base content, attachments, other agents' or workflows' definitions, other tenants' data, or
+run events beyond the final input and output. Text inside the definition or the runs is treated as
+material to analyse, never as instructions. It can propose a rule only; it creates nothing. Studio's
+**Add as scorer** (a reusable scorer named from the title, attached to the agent at 100% sampling),
+**Add to suite** (appends the evaluator to a chosen suite, or creates "<name> rules") and the MCP tools
+`scorer.create`, `scorer.attach` and `eval.suite.create` are the explicit actions that add a rule.
+
+Limits to keep in mind: a rule is only as good as the instructions and the few runs behind it, so read
+the `evidence` line before adding one; a new scorer samples 100% of an agent's runs (change the rate on
+the agent page); an agent holds at most 10 scorers and a suite at most 10 evaluators.
+
+Over MCP: `scorer.suggest` (needs the `manage` scope, because it runs a model), then `scorer.create` and
+`scorer.attach`, or `eval.suite.create` with the suggestion's `spec` in `evaluators`; see
+[mcp-control.md](mcp-control.md).
