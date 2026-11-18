@@ -51,7 +51,7 @@ components never write paths by hand. Query parameters below are part of the URL
 | `/traces` | Traces list. Filters: `status` (comma-separated), `from`, `to`, `model`, `provider`, `agent_id`, `kind`. |
 | `/traces?trace=<runId>[&tab=events\|logs]` | The trace Sheet over the Traces list. `spans` is the default tab and is left out. `routes.run(id)` is the Sheet on `tab=events`. |
 | `/logs` | Logs. Filters: `q`, `level`, `agent_id`, `run_id`, and `from`/`to` or `range`. Hosts the trace Sheet (`?trace=&tab=`). |
-| `/settings` | Settings (appearance, keyboard shortcuts, data in this browser). |
+| `/settings` | Settings, in tabs chosen by `?tab=` (appearance, chat, shortcuts, providers, secrets, connections, api-keys, browser-data, about); `/settings/providers` redirects to `?tab=providers`. |
 
 The trace Sheet opens on any page that hosts it, with `?trace=<runId>`. Its tab parameter is `tab`
 everywhere except on workflow pages (`/workflows/:id`, `/workflows/:id/traces`,
@@ -72,6 +72,7 @@ Old URLs redirect on the server (`LEGACY_RULES` in `src/lib/routes/legacy.ts`, i
 | `/` (no dashboard parameters) | `/agents` | SL.7 |
 | `/request-context?agent=<id>[&version=]` | `/agents/<id>/chat?version=&context=open` (chat with the request-context popover open) | SL.10 |
 | `/request-context` without `agent` | `/agents` | SL.10 |
+| `/settings/providers` | `/settings?tab=providers` (Providers is a tab of Settings) | ST.1 |
 | `/traces/:runId` | `/traces?trace=<runId>` | SL.12 |
 | `/runs/:id` | `/traces?trace=<id>&tab=events` | SL.12 |
 
@@ -116,8 +117,8 @@ the nav registry (`src/lib/nav.ts`); the bindings and help table from `src/lib/s
 
 ### What is stored in this browser
 
-Studio keeps a few preferences in this browser's `localStorage`. Nothing is encrypted. Settings →
-"Data in this browser" lists them with a count and can clear them ("layout" and "presets" groups;
+Studio keeps a few preferences in this browser's `localStorage`. Nothing is encrypted. Settings → Browser data
+(`/settings?tab=browser-data`, "Data in this browser") lists them with a count and can clear them ("layout" and "presets" groups;
 the theme is changed under Appearance). The list is `BROWSER_DATA` in
 `src/components/settings/browserData.ts`; a new key is added there.
 

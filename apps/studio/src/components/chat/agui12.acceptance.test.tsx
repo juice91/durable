@@ -667,7 +667,10 @@ describe("parity with native", () => {
 });
 
 describe("the Settings 'Chat protocol' switch", () => {
-  afterEach(() => setChatProtocolDefaultForTests("native"));
+  afterEach(() => {
+    setChatProtocolDefaultForTests("native");
+    window.history.pushState({}, "", "/");
+  });
   const both = () => (
     <ThemeProvider>
       <SettingsSections />
@@ -679,7 +682,7 @@ describe("the Settings 'Chat protocol' switch", () => {
     setChatProtocolDefaultForTests("agui");
     window.localStorage.removeItem(CHAT_PROTOCOL_STORAGE_KEY);
     expect(readChatProtocol()).toBe("agui");
-    window.history.replaceState({}, "", "/agents/a1/chat/c1");
+    window.history.replaceState({}, "", "/agents/a1/chat/c1?tab=chat");
     nav.path = "/agents/a1/chat/c1";
     threadBody = aguiToolChainThread();
     render(both());
@@ -690,7 +693,7 @@ describe("the Settings 'Chat protocol' switch", () => {
   });
 
   it("switching to Native reopens the same conversation on the native path (no AG-UI traffic afterwards), and AG-UI comes back the same way", async () => {
-    window.history.replaceState({}, "", "/agents/a1/chat/c1");
+    window.history.replaceState({}, "", "/agents/a1/chat/c1?tab=chat");
     nav.path = "/agents/a1/chat/c1";
     threadBody = aguiToolChainThread();
     vi.mocked(listEvents).mockResolvedValue(nativeOf("tool_chain").map((e) => (e.type === "run_started" ? { ...e, data: { ...e.data, input: "check things" } } : e)));
@@ -715,6 +718,7 @@ describe("the Settings 'Chat protocol' switch", () => {
   it("the key is registered under Browser data (Chat protocol row), and 'Clear layout preferences' returns to the AG-UI default", async () => {
     setChatProtocolDefaultForTests("agui");
     window.localStorage.setItem(CHAT_PROTOCOL_STORAGE_KEY, "native");
+    window.history.pushState({}, "", "/settings?tab=browser-data");
     render(<ThemeProvider><SettingsSections /></ThemeProvider>);
     const table = await screen.findByTestId("browser-data-table");
     expect(within(table).getByText("Chat protocol")).toBeInTheDocument();
@@ -729,12 +733,18 @@ describe("the Settings 'Chat protocol' switch", () => {
   it("after 'Clear layout preferences' the open Settings radio follows the stored default (AG-UI), not the stale Native", async () => {
     setChatProtocolDefaultForTests("agui");
     window.localStorage.setItem(CHAT_PROTOCOL_STORAGE_KEY, "native");
-    render(<ThemeProvider><SettingsSections /></ThemeProvider>);
+    window.history.pushState({}, "", "/settings?tab=chat");
+    const { rerender } = render(<ThemeProvider><SettingsSections /></ThemeProvider>);
     expect(await screen.findByRole("radio", { name: "Native" })).toBeChecked();
-    fireEvent.click(screen.getByTestId("settings-clear-layout"));
+    // The clear button lives on the Browser data tab; the Chat tab's radio then follows the stored default.
+    window.history.pushState({}, "", "/settings?tab=browser-data");
+    rerender(<ThemeProvider><SettingsSections /></ThemeProvider>);
+    fireEvent.click(await screen.findByTestId("settings-clear-layout"));
     const dialog = await screen.findByRole("dialog");
     await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: /^Clear/ })); });
     await waitFor(() => expect(window.localStorage.getItem(CHAT_PROTOCOL_STORAGE_KEY)).toBeNull());
+    window.history.pushState({}, "", "/settings?tab=chat");
+    rerender(<ThemeProvider><SettingsSections /></ThemeProvider>);
     await waitFor(() => expect(screen.getByRole("radio", { name: "AG-UI" })).toBeChecked());
   });
 });

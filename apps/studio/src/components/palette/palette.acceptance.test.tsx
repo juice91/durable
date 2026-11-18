@@ -2,12 +2,12 @@ import React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const nav = vi.hoisted(() => ({ push: vi.fn() }));
+const nav = vi.hoisted(() => ({ push: vi.fn(), search: "" }));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/agents",
   useParams: () => ({}),
   useRouter: () => ({ push: nav.push, replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(nav.search),
 }));
 const data = vi.hoisted(() => ({ agents: vi.fn(), workflows: vi.fn(), tools: vi.fn(), mcp: vi.fn(), knowledge: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -767,7 +767,10 @@ describe("Settings: clearing and browser data", () => {
   const store = window.localStorage;
   const stored = () => Object.keys({ ...store }).sort();
   const seed = (keys: string[], value = "{}") => keys.forEach((k) => store.setItem(k, value));
-  const renderPage = () => render(<FrameHarness><SettingsPage /></FrameHarness>);
+  const renderPage = (tab = "browser-data") => {
+    nav.search = `tab=${tab}`;
+    return render(<FrameHarness><SettingsPage /></FrameHarness>);
+  };
   const status = () => screen.getByTestId("settings-clear-status");
   async function confirm(testId: string, button: "Clear" | "Cancel") {
     fireEvent.click(screen.getByTestId(testId));
@@ -844,7 +847,10 @@ describe("Settings: clearing and browser data", () => {
 
 describe("Settings: storage failures and the data table", () => {
   const store = window.localStorage;
-  const renderPage = () => render(<FrameHarness><SettingsPage /></FrameHarness>);
+  const renderPage = (tab = "browser-data") => {
+    nav.search = `tab=${tab}`;
+    return render(<FrameHarness><SettingsPage /></FrameHarness>);
+  };
   const row = (id: string) => screen.getByTestId("browser-data-table").querySelector(`[data-browser-data="${id}"]`) as HTMLElement;
 
   test("the table lists every registry entry, in order, with no key names or values", async () => {
@@ -916,14 +922,14 @@ describe("Settings: storage failures and the data table", () => {
 
   test("the theme control never touches the other keys", async () => {
     store.setItem(LAST_AGENT_KEY, "a1");
-    renderPage();
+    renderPage("appearance");
     fireEvent.click(within(screen.getByTestId("settings-theme")).getByRole("radio", { name: "Dark" }));
     await waitFor(() => expect(store.getItem(THEME_STORAGE_KEY)).toBe("dark"));
     expect(Object.keys({ ...store }).sort()).toEqual([LAST_AGENT_KEY, THEME_STORAGE_KEY].sort());
   });
 
   test("the Settings shortcut table matches the help dialog's rows", () => {
-    renderPage();
+    renderPage("shortcuts");
     const shown = Array.from(screen.getByTestId("settings-shortcuts").querySelectorAll("[data-shortcut-row]")).map((r) => r.getAttribute("data-shortcut-row"));
     expect(shown).toEqual(shortcutSections().flatMap((section) => section.rows.map((r) => r.id)));
   });

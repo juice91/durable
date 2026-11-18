@@ -4,11 +4,12 @@ import { renderToString } from "react-dom/server";
 import { hydrateRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+const nav = vi.hoisted(() => ({ search: "" }));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/settings",
   useParams: () => ({}),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(nav.search),
 }));
 
 import SettingsPage from "@/app/settings/page";
@@ -34,6 +35,7 @@ function seed() {
 
 let media: MatchMediaControl;
 beforeEach(() => {
+  nav.search = "";
   media = mockMatchMedia(true);
   // The root layout sets lang="en" on <html>; jsdom's document has none.
   document.documentElement.lang = "en";
@@ -89,14 +91,19 @@ describe("browserData", () => {
 });
 
 describe("Settings page", () => {
-  test("the four sections render under the Settings h1", () => {
+  test.each([
+    ["appearance", "Appearance"],
+    ["shortcuts", "Keyboard shortcuts"],
+    ["browser-data", "Data in this browser"],
+    ["about", "About"],
+  ])("the %s tab renders its section under the Settings h1", (tab, name) => {
+    nav.search = `tab=${tab}`;
     render(<FrameHarness><SettingsPage /></FrameHarness>);
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
-    for (const name of ["Appearance", "Keyboard shortcuts", "Data in this browser", "About"]) {
-      expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
-    }
-    expect(screen.getByTestId("settings-api-base")).toHaveTextContent(BASE_URL);
-    expect(within(screen.getByTestId("settings-shortcuts")).getByTestId("shortcut-table")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
+    if (tab === "about") expect(screen.getByTestId("settings-api-base")).toHaveTextContent(BASE_URL);
+    if (tab === "shortcuts") expect(within(screen.getByTestId("settings-shortcuts")).getByTestId("shortcut-table")).toBeInTheDocument();
   });
 
   test("the theme control changes the class and storage", async () => {
@@ -112,6 +119,7 @@ describe("Settings page", () => {
 
   test("Clear layout preferences: confirm, then exactly its keys go, with a toast and an inline status", async () => {
     seed();
+    nav.search = "tab=browser-data";
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     await waitFor(() => expect(screen.getByTestId("sidebar")).toHaveAttribute("data-collapsed", "true"));
     expect(screen.getByTestId("browser-data-table").querySelector('[data-browser-data="agent-layout"]')).toHaveTextContent("2 saved");
@@ -136,6 +144,7 @@ describe("Settings page", () => {
 
   test("Clear request-context presets removes only the presets", async () => {
     seed();
+    nav.search = "tab=browser-data";
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     fireEvent.click(screen.getByTestId("settings-clear-presets"));
     fireEvent.click(within(await screen.findByRole("dialog", { name: "Clear request-context presets?" })).getByRole("button", { name: "Clear" }));
@@ -153,6 +162,7 @@ describe("Settings page", () => {
       if (calls === 2) throw new Error("SecurityError");
       real.call(this, key);
     });
+    nav.search = "tab=browser-data";
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     fireEvent.click(screen.getByTestId("settings-clear-presets"));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Clear" }));
@@ -161,6 +171,7 @@ describe("Settings page", () => {
   });
 
   test("clearing when nothing is stored says so", async () => {
+    nav.search = "tab=browser-data";
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     fireEvent.click(screen.getByTestId("settings-clear-presets"));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Clear" }));
@@ -168,6 +179,7 @@ describe("Settings page", () => {
   });
 
   test("axe: the page and the confirm dialog", async () => {
+    nav.search = "tab=browser-data";
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     await expectNoAxeViolations(document, { rules: PAGE_RULES });
     fireEvent.click(screen.getByTestId("settings-clear-layout"));
@@ -177,6 +189,7 @@ describe("Settings page", () => {
 
   test("hydrates without mismatches (storage is read after mount)", async () => {
     seed();
+    nav.search = "tab=browser-data";
     const ui = <FrameHarness><SettingsPage /></FrameHarness>;
     const container = document.createElement("div");
     container.innerHTML = renderToString(ui);
