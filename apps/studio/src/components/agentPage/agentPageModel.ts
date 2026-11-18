@@ -15,6 +15,7 @@ export const LAST_AGENT_KEY = "studio.lastAgent";
 export const AGENT_LAYOUT_KEY_PREFIX = "studio.agent-layout.v1.";
 /** The agents list view, "list" or "compact". */
 export const AGENTS_VIEW_KEY = "studio.agents.view";
+export const AGENTS_SHOW_SYSTEM_KEY = "studio.agents.show-system";
 
 /** Whether the user left one agent's Config panel open or closed on the Chat tab ("open" | "closed"). */
 export const AGENT_CONFIG_KEY_PREFIX = "studio.agent-config.v1.";
@@ -69,6 +70,15 @@ export type AgentsView = "list" | "compact";
 
 export function readAgentsView(): AgentsView {
   return read(AGENTS_VIEW_KEY) === "compact" ? "compact" : "list";
+}
+
+/** Whether the agents list also shows the system agents (the Architect's drafters); off by default. */
+export function readShowSystemAgents(): boolean {
+  return read(AGENTS_SHOW_SYSTEM_KEY) === "true";
+}
+
+export function writeShowSystemAgents(show: boolean): void {
+  write(AGENTS_SHOW_SYSTEM_KEY, String(show));
 }
 
 export function writeAgentsView(view: AgentsView): void {

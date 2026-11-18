@@ -135,6 +135,7 @@ export function ArchitectPage() {
           <div data-testid="architect-model" className="flex flex-wrap items-center gap-2 text-label text-muted-foreground">
             <span>Model: <span className="font-mono text-foreground">{state.model ?? "none"}</span></span>
             <ModelPicker label="Change model" />
+            <p className="w-full text-caption">The Architect uses two system helpers for the form; they share this model.</p>
           </div>
           <div className="grid min-w-0 gap-6 md:grid-cols-[16rem_minmax(0,1fr)]">
             <aside aria-label="Created by the Architect">

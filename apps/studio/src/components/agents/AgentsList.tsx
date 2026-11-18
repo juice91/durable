@@ -20,6 +20,8 @@ export interface AgentListItem {
   name: string;
   latest_version: number | null;
   draft_spec?: AgentSpec;
+  builtin?: boolean;
+  builtin_role?: "architect" | "drafter" | null;
 }
 
 /** Which agents the list shows: the active ones, or the archived ones (`/agents?view=archived`). */
@@ -38,6 +40,9 @@ export interface AgentsListUIProps {
   /** Default "active". With `onScopeChange`, the toolbar shows an Active / Archived switch. */
   scope?: AgentsScope;
   onScopeChange?: (scope: AgentsScope) => void;
+  /** With `onShowSystemChange`, the toolbar shows a "Show system agents" toggle (the Architect's drafters). */
+  showSystem?: boolean;
+  onShowSystemChange?: (show: boolean) => void;
   /** The archived scope's per-agent Unarchive action. */
   onUnarchive?: (agent: AgentListItem) => void;
   /** The agent whose Unarchive is running (its button is disabled). */
@@ -86,8 +91,29 @@ function ToolCount({ agent }: { agent: AgentListItem }) {
   );
 }
 
+/** "Built in" for built-in agents, plus "System helper" for the Architect's drafters. */
+function BuiltInChips({ agent }: { agent: AgentListItem }) {
+  if (!agent.builtin && !agent.builtin_role) return null;
+  const chip = "rounded-sm border border-border px-1.5 py-0.5 text-caption font-normal text-muted-foreground";
+  return (
+    <>
+      <span className={chip}>Built in</span>
+      {agent.builtin_role === "drafter" ? <span className={chip}>System helper</span> : null}
+    </>
+  );
+}
+
+function NameWithChips({ agent }: { agent: AgentListItem }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      {agent.name}
+      <BuiltInChips agent={agent} />
+    </span>
+  );
+}
+
 const columns: DataListColumn<AgentListItem>[] = [
-  { id: "name", header: "Name", cell: (agent) => agent.name, sortable: true },
+  { id: "name", header: "Name", cell: (agent) => <NameWithChips agent={agent} />, sortValue: (agent) => agent.name, sortable: true },
   {
     id: "purpose",
     header: "Purpose",
@@ -129,7 +155,15 @@ export function AgentsListUI({
   onScopeChange,
   onUnarchive,
   unarchivingId = null,
+  showSystem = false,
+  onShowSystemChange,
 }: AgentsListUIProps) {
+  const systemToggle = onShowSystemChange ? (
+    <label className="inline-flex items-center gap-1.5 text-caption text-muted-foreground">
+      <input type="checkbox" checked={showSystem} onChange={(event) => onShowSystemChange(event.target.checked)} />
+      Show system agents
+    </label>
+  ) : null;
   const archivedScope = scope === "archived";
   const empty = archivedScope ? EMPTY_ARCHIVED : EMPTY;
   const unarchiveButton = (agent: AgentListItem) =>
@@ -211,6 +245,7 @@ export function AgentsListUI({
             <>
               {count}
               {scopeSwitch}
+              {systemToggle}
               {viewToggle}
             </>
           }
@@ -243,6 +278,7 @@ export function AgentsListUI({
         />
         {count}
         {scopeSwitch}
+        {systemToggle}
         {viewToggle}
       </div>
       {loading && agents.length === 0 ? (
@@ -266,7 +302,10 @@ export function AgentsListUI({
                 data-testid="agent-card"
                 className={cn("flex min-w-0 flex-1 flex-col gap-1 rounded-lg border border-border bg-surface p-3 hover:bg-fill-hover", focusRing)}
               >
-                <span className="truncate font-medium text-foreground">{agent.name}</span>
+                <span className="flex min-w-0 flex-wrap items-center gap-2 font-medium text-foreground">
+                  <span className="truncate">{agent.name}</span>
+                  <BuiltInChips agent={agent} />
+                </span>
                 <span className="line-clamp-2 text-label text-muted-foreground">{agentPurpose(agent.draft_spec)}</span>
                 <span className="mt-auto flex flex-wrap gap-x-3 text-caption text-muted-foreground">
                   <span className="font-mono">{modelOf(agent) ?? "-"}</span>

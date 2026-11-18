@@ -322,3 +322,31 @@ def test_allowed_tools_name_the_kb_source_tools_and_spell_tickets_correctly():
     assert "ticket.create" not in allowed and "tickets.create" in allowed
     assert {"kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
             "workflow.run.result"} <= allowed
+
+def test_api_can_reach_managed_mcp_servers_like_the_worker() -> None:
+    """The API's connection test and start path talk to the per-tenant proxy Services on 8080, so the API
+    needs the same egress rule as the worker (deploy-host 2026-11-18: tests reported connect_failed)."""
+    import yaml
+    from pathlib import Path
+
+    docs = [d for d in yaml.safe_load_all((Path(__file__).resolve().parents[2] / "deploy/k8s/networkpolicy.yaml").read_text()) if d]
+    by_name = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "NetworkPolicy"}
+    api = by_name["api-egress-mcp-tenants"]
+    worker = by_name["worker-egress-mcp-tenants"]
+    assert api["spec"]["podSelector"] == {"matchLabels": {"app.kubernetes.io/name": "api"}}
+    assert api["spec"]["egress"] == worker["spec"]["egress"]
+
+
+def test_up_sh_replaces_the_kube_api_port_in_block_style_yaml(tmp_path) -> None:
+    """kustomize re-emits `{protocol: TCP, port: 6443}` as block-style YAML, so the substitution must match
+    `port: 6443` at the end of a line (BSD sed on the runner has no \\b). deploy-host's endpoint port is 55436."""
+    import re
+    from pathlib import Path
+
+    up = (Path(__file__).resolve().parents[2] / "deploy/scripts/up.sh").read_text()
+    m = re.search(r'-e "s\|port: 6443\$\|port: \$\{api_endpoint_port\}\|g"', up)
+    assert m, "up.sh must substitute the block-style port line"
+    sample = "      ports:\n        - port: 443\n          protocol: TCP\n        - port: 6443\n          protocol: TCP\n"
+    import subprocess
+    out = subprocess.run(["sed", "-e", "s|port: 6443$|port: 55436|g"], input=sample, capture_output=True, text=True, check=True).stdout
+    assert "port: 55436" in out and "6443" not in out

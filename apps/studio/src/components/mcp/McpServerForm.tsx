@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import { ApiError } from "@/lib/api";
-import { readText as readClipboardText } from "@/lib/clipboard";
 import {
   buildHeadersPayload,
   describeMcpApiMessage,
@@ -14,7 +14,7 @@ import {
   type McpServerUpdate,
 } from "@/lib/mcpServers";
 import { listSecrets, secretRef } from "@/lib/secrets";
-import { MCP_REGISTRY_URL, parseRegistryUrl, type RegistryMatch } from "@/lib/mcpRegistry";
+import { routes } from "@/lib/routes";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -38,11 +38,6 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
   const [rows, setRows] = useState<HeaderRow[]>(() => rowsFromServer(server?.header_names ?? []));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Registry paste-in (create mode only). `resolution` is null until a github.com/mcp/<slug>
-  // URL parses; the paste box itself always holds the raw text the user typed or pasted.
-  const [pasteValue, setPasteValue] = useState("");
-  const [resolution, setResolution] = useState<RegistryMatch | null>(null);
-  const [clipboardNote, setClipboardNote] = useState<string | null>(null);
   // Stored secret names for the "use secret" pickers; a failed list just leaves no picker.
   const [secretNames, setSecretNames] = useState<string[]>([]);
   useEffect(() => {
@@ -54,26 +49,6 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
       live = false;
     };
   }, []);
-
-  const applyPaste = (value: string) => {
-    setPasteValue(value);
-    setClipboardNote(null);
-    const match = parseRegistryUrl(value);
-    setResolution(match);
-    if (match) {
-      setName(match.name);
-      if (match.url) setUrl(match.url);
-    }
-  };
-
-  const pasteFromClipboard = async () => {
-    const text = await readClipboardText();
-    if (text === null) {
-      setClipboardNote("Could not read the clipboard. Paste the URL into the field above instead.");
-      return;
-    }
-    applyPaste(text);
-  };
 
   const updateRow = (key: string, patch: Partial<HeaderRow>) =>
     setRows((current) => current.map((row) => (row.key === key ? ({ ...row, ...patch } as HeaderRow) : row)));
@@ -122,45 +97,9 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
       {embedded ? null : <h2 className="text-lg font-semibold text-card-foreground">{isCreate ? "Register MCP server" : `Edit ${server.name}`}</h2>}
       {error ? <p role="alert" data-testid="mcp-form-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {isCreate ? (
-        <section data-testid="mcp-registry-paste" aria-labelledby="mcp-registry-paste-title" className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 id="mcp-registry-paste-title" className="text-sm font-medium text-foreground">From the GitHub MCP registry</h3>
-            <a
-              href={MCP_REGISTRY_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              data-testid="mcp-registry-link"
-              className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Browse the GitHub MCP registry
-            </a>
-          </div>
-          <label htmlFor="mcp-registry-paste-input" className="block text-sm font-medium text-foreground">Paste from the GitHub MCP registry</label>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              id="mcp-registry-paste-input"
-              type="url"
-              inputMode="url"
-              autoComplete="off"
-              placeholder="https://github.com/mcp/<slug>"
-              value={pasteValue}
-              onChange={(e) => applyPaste(e.target.value)}
-              data-testid="mcp-registry-paste-input"
-              className={`${inputClass} max-w-md`}
-            />
-            <button type="button" className={secondaryButton} data-testid="mcp-registry-paste-button" onClick={() => void pasteFromClipboard()}>
-              Paste from clipboard
-            </button>
-          </div>
-          {resolution ? (
-            <p data-testid="mcp-registry-resolution" className="text-xs text-muted-foreground">
-              {resolution.url
-                ? <>Prefilled from <code>{resolution.slug}</code>. Enter your own auth token below.</>
-                : <>Prefilled the name <code>{resolution.name}</code>. The slug is not in the built-in list, so enter the server URL yourself.</>}
-            </p>
-          ) : null}
-          {clipboardNote ? <p role="status" data-testid="mcp-registry-clipboard-note" className="text-xs text-muted-foreground">{clipboardNote}</p> : null}
-        </section>
+        <p data-testid="mcp-catalog-pointer" className="text-sm text-muted-foreground">
+          Looking for a published server? Use the <Link href={routes.mcpBrowse()} className="font-medium text-primary underline-offset-4 hover:underline">Catalog tab</Link>.
+        </p>
       ) : null}
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-1">

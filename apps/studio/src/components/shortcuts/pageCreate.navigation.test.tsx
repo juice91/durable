@@ -57,21 +57,21 @@ function navigateTo(page: React.ReactElement, path: string) {
 }
 
 describe("c after a client-side navigation", () => {
-  test("/mcp: c opens Add server", async () => {
+  test("/mcp: c opens the Add server menu", async () => {
     navigateTo(<McpServersPage />, routes.mcp());
     await waitFor(() => expect(mcpServers.list).toHaveBeenCalled());
     pressKey("c");
-    expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Remote server by URL" })).toBeInTheDocument();
   });
 
-  test("/mcp: g then c follows the sequence rules (drops c), and a later c still opens Add", async () => {
+  test("/mcp: g then c follows the sequence rules (drops c), and a later c still opens the Add menu", async () => {
     navigateTo(<McpServersPage />, routes.mcp());
     await waitFor(() => expect(mcpServers.list).toHaveBeenCalled());
     pressKeys("g", "c");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(nav.push).not.toHaveBeenCalled();
     pressKey("c");
-    expect(await screen.findByRole("dialog", { name: "Add MCP server" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Remote server by URL" })).toBeInTheDocument();
   });
 
   test("/agents: c opens New agent", async () => {

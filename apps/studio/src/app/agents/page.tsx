@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import type { Agent } from "@/lib/api";
 import { AgentsListUI, scopeFromParams, type AgentListItem, type AgentsScope } from "@/components/agents/AgentsList";
+import { readShowSystemAgents, writeShowSystemAgents } from "@/components/agentPage/agentPageModel";
 import { unarchiveAgent } from "@/components/agentPage/AgentArchiveMenu";
 import { routes } from "@/lib/routes";
 import { PageHeader } from "@/components/frame/PageHeader";
@@ -21,12 +22,19 @@ function AgentsPageBody() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Read after mount: the server render cannot know the stored choice.
+  const [showSystem, setShowSystem] = useState(false);
+  const [showSystemRead, setShowSystemRead] = useState(false);
+  useEffect(() => {
+    setShowSystem(readShowSystemAgents());
+    setShowSystemRead(true);
+  }, []);
   const [unarchivingId, setUnarchivingId] = useState<string | null>(null);
 
-  const loadAgents = useCallback(async (which: AgentsScope, isCurrent: () => boolean = () => true) => {
+  const loadAgents = useCallback(async (which: AgentsScope, system: boolean, isCurrent: () => boolean = () => true) => {
     try {
       setLoading(true);
-      const data = which === "archived" ? await api.agents.listArchived() : await api.agents.list();
+      const data = which === "archived" ? await api.agents.listArchived() : await api.agents.list(undefined, system ? { includeSystem: true } : undefined);
       if (!isCurrent()) return;
       setAgents(data);
       setError(null);
@@ -38,13 +46,13 @@ function AgentsPageBody() {
   }, []);
 
   useEffect(() => {
+    if (!showSystemRead) return;
     let current = true;
-    setAgents([]);
-    void loadAgents(scope, () => current);
+    void loadAgents(scope, showSystem, () => current);
     return () => {
       current = false;
     };
-  }, [scope, loadAgents]);
+  }, [scope, showSystem, showSystemRead, loadAgents]);
 
   const onUnarchive = async (agent: AgentListItem) => {
     setUnarchivingId(agent.id);
@@ -68,9 +76,14 @@ function AgentsPageBody() {
           agents={agents}
           loading={loading}
           error={error}
-          onRetry={() => void loadAgents(scope)}
+          onRetry={() => void loadAgents(scope, showSystem)}
           scope={scope}
           onScopeChange={(next) => router.replace(routes.agents({ archived: next === "archived" }))}
+          showSystem={showSystem}
+          onShowSystemChange={(next) => {
+            setShowSystem(next);
+            writeShowSystemAgents(next);
+          }}
           onUnarchive={(agent) => void onUnarchive(agent)}
           unarchivingId={unarchivingId}
         />

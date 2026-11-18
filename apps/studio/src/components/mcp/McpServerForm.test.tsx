@@ -1,10 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import "@testing-library/jest-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServerForm } from "./McpServerForm";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { ApiError } from "@/lib/api";
+import { routes } from "@/lib/routes";
 
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
@@ -111,67 +112,20 @@ describe("McpServerForm", () => {
   });
 });
 
-describe("McpServerForm — GitHub MCP registry paste-in", () => {
-  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
-  const setClipboard = (value: unknown) =>
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value });
-
-  afterEach(() => {
-    if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
-    else delete (navigator as { clipboard?: unknown }).clipboard;
-  });
-
-  it("Browse link opens the registry in a new tab with safe rel", () => {
+describe("McpServerForm — catalog pointer", () => {
+  it("create mode drops the GitHub registry paste box and points at the Catalog tab", () => {
     render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
-    const link = screen.getByTestId("mcp-registry-link");
-    expect(link).toHaveAttribute("href", "https://github.com/mcp");
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByText("From the GitHub MCP registry")).toBeNull();
+    expect(screen.queryByLabelText("Paste from the GitHub MCP registry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Paste from clipboard" })).toBeNull();
+    const hint = screen.getByTestId("mcp-catalog-pointer");
+    expect(hint).toHaveTextContent("Looking for a published server? Use the Catalog tab.");
+    expect(within(hint).getByRole("link", { name: "Catalog tab" })).toHaveAttribute("href", routes.mcpBrowse());
   });
 
-  it("paste happy path: an allowlisted slug prefills both name and URL", async () => {
-    render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
-    const paste = screen.getByLabelText("Paste from the GitHub MCP registry");
-    fireEvent.change(paste, { target: { value: "https://github.com/mcp/notion" } });
-    expect(screen.getByLabelText("Name")).toHaveValue("notion");
-    expect(screen.getByLabelText("URL")).toHaveValue("https://mcp.notion.com/mcp");
-    expect(screen.getByTestId("mcp-registry-resolution"))
-      .toHaveTextContent("Prefilled from notion. Enter your own auth token below.");
-  });
-
-  it("a github.com/mcp URL whose slug is not allowlisted prefills the name and leaves the URL for the user", () => {
-    render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
-    const paste = screen.getByLabelText("Paste from the GitHub MCP registry");
-    fireEvent.change(paste, { target: { value: "https://github.com/mcp/pagerduty" } });
-    expect(screen.getByLabelText("Name")).toHaveValue("pagerduty");
-    expect(screen.getByLabelText("URL")).toHaveValue("");
-    expect(screen.getByTestId("mcp-registry-resolution"))
-      .toHaveTextContent("Prefilled the name pagerduty");
-  });
-
-  it("the Paste-from-clipboard button shows a hint and does not throw when the clipboard refuses", async () => {
-    setClipboard({ readText: vi.fn(async () => { throw new Error("NotAllowedError"); }) });
-    render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Paste from clipboard" }));
-    const note = await screen.findByTestId("mcp-registry-clipboard-note");
-    expect(note).toHaveTextContent("Could not read the clipboard");
-    // The input is still usable after a denied read — the user can paste manually.
-    expect(screen.getByLabelText("Paste from the GitHub MCP registry")).toHaveValue("");
-    expect(screen.queryByTestId("mcp-registry-resolution")).toBeNull();
-  });
-
-  it("the Paste-from-clipboard button applies the clipboard URL when permitted", async () => {
-    setClipboard({ readText: vi.fn(async () => "https://github.com/mcp/github") });
-    render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Paste from clipboard" }));
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("github"));
-    expect(screen.getByLabelText("URL")).toHaveValue("https://api.githubcopilot.com/mcp/");
-    expect(screen.getByTestId("mcp-registry-resolution")).toBeInTheDocument();
-  });
-
-  it("the paste-in section and the auth-header hint only appear in create mode", () => {
+  it("the pointer and the auth-header hint only appear in create mode", () => {
     render(<McpServerForm server={server} onSaved={vi.fn()} onCancel={vi.fn()} />);
-    expect(screen.queryByTestId("mcp-registry-paste")).toBeNull();
+    expect(screen.queryByTestId("mcp-catalog-pointer")).toBeNull();
     expect(screen.queryByTestId("mcp-auth-header-hint")).toBeNull();
   });
 });

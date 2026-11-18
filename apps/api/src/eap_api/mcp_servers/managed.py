@@ -120,16 +120,33 @@ def network_of(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _split_oci_reference(identifier: str) -> tuple[str | None, str | None]:
+    """`(image reference, version)` for an OCI identifier that embeds its tag or digest; `(None, None)`
+    when it has neither (the registry path may contain a port, so only the last path segment counts)."""
+    last = identifier.rsplit("/", 1)[-1]
+    if "@" in last:
+        return identifier, last.split("@", 1)[1]
+    if ":" in last:
+        return identifier, last.split(":", 1)[1]
+    return None, None
+
+
 def package_document(package: CatalogPackage, meta: Mapping[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
     """`(image, package document)` for a catalog package; raises UnsupportedPackage. The entry's network
     block (from its `meta`) is carried into the document as `network`; no block, no key."""
-    if not package.version:
+    identifier, version = package.identifier, package.version
+    image_ref: str | None = None
+    if package.registry_type == "oci" and not version:
+        # ToolHive entries pin the image in the identifier itself (`registry/name:tag` or `name@sha256:...`)
+        # and carry no separate version: the tag or digest is the version.
+        image_ref, version = _split_oci_reference(identifier)
+    if not version:
         raise UnsupportedPackage("the package has no version")
-    image, args, env = image_for(PackageSpec(package.registry_type, package.identifier, package.version))
+    image, args, env = image_for(PackageSpec(package.registry_type, identifier, version, image=image_ref))
     document: dict[str, Any] = {
         "registry_type": package.registry_type,
-        "identifier": package.identifier,
-        "version": package.version,
+        "identifier": identifier,
+        "version": version,
         "transport": package.transport,
         "port": None,
         "args": list(args),

@@ -127,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['1', '2', '3']
+        shard: ['1', '2', '3', '4', '5']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,7 +140,16 @@ jobs:
           node-version: '22'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/3
+      - name: Restore the Vite and Vitest transform cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: apps/studio/node_modules/.vite
+          # Transforms depend on the dependency set and the Vite/Vitest config. A shard keeps its own
+          # entry (same files every run), and a stale entry from an older lockfile is still a head start.
+          key: vite-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/studio/vite.config.ts') }}-${{ matrix.shard }}
+          restore-keys: |
+            vite-${{ runner.os }}-
+      - run: pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/5
 
   deploy-checks:
     needs: changes

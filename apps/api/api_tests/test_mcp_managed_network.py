@@ -56,3 +56,38 @@ def test_build_spec_reads_the_network_from_the_package_document() -> None:
     _, plain = managed.package_document(PKG)
     row.package = plain
     assert managed.build_spec(row, SimpleNamespace(name="srv"), {}).network is None
+
+
+# ---- OCI identifiers that carry their own tag or digest (ToolHive entries have no separate version) ----
+
+
+def test_oci_identifier_with_a_tag_installs_without_a_separate_version() -> None:
+    from eap_api.mcp_servers.managed import package_document
+    from eap_schemas.mcp_catalog import CatalogPackage
+
+    package = CatalogPackage(registry_type="oci", identifier="mcr.microsoft.com/playwright/mcp:v0.0.83", transport="stdio")
+    image, document = package_document(package)
+    assert image == "mcr.microsoft.com/playwright/mcp:v0.0.83"
+    assert document["version"] == "v0.0.83" and document["identifier"] == "mcr.microsoft.com/playwright/mcp:v0.0.83"
+
+
+def test_oci_identifier_with_a_digest_installs_without_a_separate_version() -> None:
+    from eap_api.mcp_servers.managed import package_document
+    from eap_schemas.mcp_catalog import CatalogPackage
+
+    digest = "sha256:" + "a" * 64
+    package = CatalogPackage(registry_type="oci", identifier=f"ghcr.io/stacklok/fetch@{digest}", transport="streamable-http")
+    image, document = package_document(package)
+    assert image == f"ghcr.io/stacklok/fetch@{digest}" and document["version"] == digest
+
+
+def test_oci_identifier_without_tag_or_version_is_refused() -> None:
+    import pytest
+    from eap_api.mcp_servers.managed import package_document
+    from eap_mcp_runtime.images import UnsupportedPackage
+    from eap_schemas.mcp_catalog import CatalogPackage
+
+    with pytest.raises(UnsupportedPackage, match="no version"):
+        package_document(CatalogPackage(registry_type="oci", identifier="localhost:5000/tool", transport="stdio"))
+    with pytest.raises(UnsupportedPackage, match="no version"):
+        package_document(CatalogPackage(registry_type="npm", identifier="@scope/tool", transport="stdio"))

@@ -106,3 +106,44 @@ def test_workflow_version_json_carries_created_via(api, fake):
     versions = client.get(f"/api/v1/workflows/{workflow_id}/versions", headers=h).json()
     items = versions["items"] if isinstance(versions, dict) else versions
     assert items[0]["created_via"] == "architect:run-1"
+
+
+def _make_builtin(agent_id: str, slug: str | None) -> None:
+    from .run_helpers import PG_URL
+    from sqlalchemy import create_engine
+
+    engine = create_engine(PG_URL)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE agents SET builtin = true, slug = :s WHERE id = :i"), {"s": slug, "i": agent_id})
+    finally:
+        engine.dispose()
+
+
+def test_builtin_role_is_derived_from_the_slug_and_drafters_are_hidden_by_default(client, tenant):
+    h = get_auth_header(tenant, "alice")
+    plain = create_agent(client, tenant, "alice")
+    architect = create_agent(client, tenant, "alice")
+    drafter = create_agent(client, tenant, "alice")
+    wf_drafter = create_agent(client, tenant, "alice")
+    _make_builtin(architect, "architect")
+    _make_builtin(drafter, "architect-drafter")
+    _make_builtin(wf_drafter, "architect-workflow-drafter")
+
+    roles = {a["id"]: a["builtin_role"] for a in client.get("/api/v1/agents", params={"include_system": "true"}, headers=h).json()}
+    assert roles == {plain: None, architect: "architect", drafter: "drafter", wf_drafter: "drafter"}
+
+    default_ids = {a["id"] for a in client.get("/api/v1/agents", headers=h).json()}
+    assert default_ids == {plain, architect}
+    assert client.get("/api/v1/agents", params={"include_system": "false"}, headers=h).json() == client.get("/api/v1/agents", headers=h).json()
+
+    one = client.get(f"/api/v1/agents/{drafter}", headers=h).json()  # still reachable by id
+    assert one["builtin_role"] == "drafter"
+    assert client.get(f"/api/v1/agents/{plain}", headers=h).json()["builtin_role"] is None
+
+
+def test_include_system_keeps_the_archived_filter(client, tenant):
+    h = get_auth_header(tenant, "alice")
+    drafter = create_agent(client, tenant, "alice")
+    _make_builtin(drafter, "architect-drafter")
+    assert client.get("/api/v1/agents", params={"archived": "true", "include_system": "true"}, headers=h).json() == []
