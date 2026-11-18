@@ -25,6 +25,7 @@ Added by the milestone. Versions are the installed ones (`node_modules/<package>
 | class-variance-authority | 0.7.1 | Apache-2.0 |
 | clsx | 2.1.1 | MIT |
 | cmdk | 1.1.1 | MIT |
+| js-yaml | 4.3.2 | MIT |
 | lucide-react | 1.65.0 | ISC (some icons MIT, see below) |
 | react-resizable-panels | 4.15.3 | MIT |
 | sonner | 2.0.8 | MIT |
