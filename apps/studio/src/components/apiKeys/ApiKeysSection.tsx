@@ -3,13 +3,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { ApiError } from "@/lib/api";
-import { API_KEY_STATUS_LABELS, apiKeys, describeAccess, type ApiKey, type ApiKeyStatus } from "@/lib/apiKeys";
+import { API_KEY_STATUS_LABELS, apiKeys, describeAccess, hasManageScope, type ApiKey, type ApiKeyStatus } from "@/lib/apiKeys";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Badge, type BadgeProps } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toaster";
 import { ApiKeyCreateDialog } from "./ApiKeyCreateDialog";
+import { McpConnectPanel } from "./McpConnectPanel";
 
 /** The section's element id: Connect (AG-UI) links to `/settings#api-keys`. */
 export const API_KEYS_SECTION_ID = "api-keys";
@@ -39,6 +40,11 @@ function KeyRow({ apiKey, onRevoke }: { apiKey: ApiKey; onRevoke: (key: ApiKey) 
           <Badge variant={STATUS_VARIANT[apiKey.status]} data-testid="api-key-status">
             {API_KEY_STATUS_LABELS[apiKey.status]}
           </Badge>
+          {hasManageScope(apiKey) ? (
+            <Badge variant="info" data-testid="api-key-manage">
+              Manage
+            </Badge>
+          ) : null}
         </div>
         <span className="min-w-0 break-all font-mono text-caption text-muted-foreground" data-testid="api-key-prefix">
           {apiKey.prefix}…
@@ -168,7 +174,7 @@ export function ApiKeysSection() {
             API keys
           </h2>
           <p className="text-label text-muted-foreground">
-            Keys let third-party frontends (CopilotKit, any AG-UI client) run your published agents and workflows. Use them from a server, not a browser.
+            Keys let third-party frontends (CopilotKit, any AG-UI client) run your published agents and workflows, and let MCP clients manage this workspace. Use them from a server, not a browser.
           </p>
         </div>
         {devOnly ? null : (
@@ -213,6 +219,7 @@ export function ApiKeysSection() {
       <p role="status" className="min-h-5 text-label text-muted-foreground" data-testid="api-keys-status">
         {status}
       </p>
+      {devOnly ? null : <McpConnectPanel />}
       {creating ? <ApiKeyCreateDialog onCreated={onCreated} onClose={() => setCreating(false)} /> : null}
       {revoking ? (
         <ConfirmDialog

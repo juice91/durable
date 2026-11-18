@@ -6,10 +6,14 @@ import {
   API_KEY_ENV_VAR,
   apiKeys,
   buildApiKeyCreate,
+  claudeCodeMcpSnippet,
+  codexMcpSnippet,
   COPILOTKIT_INSTALL,
   copilotKitSnippet,
   curlSnippet,
   describeAccess,
+  hasManageScope,
+  mcpEndpoint,
   parseOrigins,
   withoutSecret,
   type ApiKeyCreated,
@@ -146,5 +150,32 @@ describe("connect snippets", () => {
     expect(COPILOTKIT_INSTALL).toContain("@ag-ui/client@1.0.2");
     expect(copilotKitSnippet(agent, BASE)).toContain("useSingleEndpoint");
     expect(curlSnippet(workflow, BASE)).toContain('"pydanticos":{"input":{}}');
+  });
+});
+
+describe("MCP control endpoint", () => {
+  it("builds the endpoint from the base URL", () => {
+    expect(mcpEndpoint(BASE)).toBe("https://api.example.com/api/v1/mcp");
+  });
+
+  it("writes connect snippets that name the key by environment variable only", () => {
+    const claude = claudeCodeMcpSnippet(BASE);
+    expect(claude).toContain("claude mcp add pydanticos --transport http https://api.example.com/api/v1/mcp");
+    expect(claude).toContain(`--header "Authorization: Bearer $${API_KEY_ENV_VAR}"`);
+    const codex = codexMcpSnippet(BASE);
+    expect(codex).toContain('url = "https://api.example.com/api/v1/mcp"');
+    expect(codex).toContain(`bearer_token_env_var = "${API_KEY_ENV_VAR}"`);
+    expect(`${claude}${codex}`).not.toMatch(/pos_[0-9a-f]/);
+  });
+
+  it("adds the manage scope only when asked", () => {
+    const base = { name: "k", access: "all" as const, agentIds: [], workflowIds: [], origins: "", expiresAt: null };
+    expect(buildApiKeyCreate(base)).toEqual({ ok: true, body: { name: "k" } });
+    expect(buildApiKeyCreate({ ...base, manage: true })).toEqual({ ok: true, body: { name: "k", scopes: ["agui:run", "manage"] } });
+  });
+
+  it("tells a manage key from a read key", () => {
+    expect(hasManageScope({ scopes: ["agui:run"] })).toBe(false);
+    expect(hasManageScope({ scopes: ["agui:run", "manage"] })).toBe(true);
   });
 });
