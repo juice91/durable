@@ -9,7 +9,13 @@ from fastapi import FastAPI
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager - the database schema was already checked in create_app."""
-    yield
+    # The MCP control endpoint's streamable-HTTP session manager runs for the life of the app.
+    mcp_app = getattr(app.state, "mcp_control_app", None)
+    if mcp_app is None:
+        yield
+    else:
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
     app.state.run_launcher.close()
 
 
@@ -188,6 +194,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.architect import router as architect_router  # Architect: seed, options, draft, page save
 
     app.include_router(architect_router, prefix="/api/v1")
+
+    # PydanticOS controlled through MCP: POST /api/v1/mcp (Streamable HTTP; tenant API keys, scope `manage`
+    # for mutations). See eap_api.mcp_control and docs/mcp-control.md.
+    from eap_api.mcp_control.server import mount_mcp_control
+
+    mount_mcp_control(app)
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

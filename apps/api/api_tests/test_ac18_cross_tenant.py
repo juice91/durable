@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -627,3 +628,60 @@ def test_kb_source_routes_are_in_the_inventory_and_closed_to_another_tenant(api,
                 conn_.execute(text("DELETE FROM knowledge_bases WHERE tenant_id = :t"), {"t": t})
                 conn_.execute(text("DELETE FROM settings_connections WHERE tenant_id = :t"), {"t": t})
                 conn_.execute(text("DELETE FROM tenant_secrets WHERE tenant_id = :t"), {"t": t})
+
+
+# --- the MCP control endpoint (mcp-control milestone) ---------------------------------------------
+
+MCP_PATH = "/api/v1/mcp"
+MCP_READ_BY_ID = (
+    ("agent.get", lambda ids: {"agent_id": ids["agent"]}),
+    ("agent.versions", lambda ids: {"agent_id": ids["agent"]}),
+    ("workflow.get", lambda ids: {"workflow_id": ids["workflow"]}),
+    ("workflow.versions", lambda ids: {"workflow_id": ids["workflow"]}),
+    ("workflow.run.get", lambda ids: {"run_id": ids["run"]}),
+    ("workflow.run.wait", lambda ids: {"run_id": ids["run"], "timeout_seconds": 0}),
+    ("workflow.run.result", lambda ids: {"run_id": ids["run"]}),
+    ("workflow.schedule.list", lambda ids: {"workflow_id": ids["workflow"]}),
+)
+
+
+def _mcp_call(client, key: str, tool: str, arguments: dict) -> dict:
+    r = client.post(
+        MCP_PATH,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json, text/event-stream"},
+    )
+    assert r.status_code == 200, r.text
+    text_body = r.text
+    if text_body.startswith("event:") or "\ndata:" in text_body:
+        text_body = next(line[5:] for line in text_body.splitlines() if line.startswith("data:"))
+    return json.loads(text_body)["result"]
+
+
+def test_the_mcp_endpoint_is_in_the_inventory_and_closed_to_another_tenant(api, fake):
+    client, app, tenant_of = api
+    # Mounted as an ASGI route, so it is not in the OpenAPI inventory: exactly one route serves /api/v1/mcp.
+    assert [r.path for r in app.router.routes if getattr(r, "path", "").startswith(MCP_PATH)] == [MCP_PATH]
+    assert client.post(MCP_PATH, json={}).status_code == 401
+    assert client.post(MCP_PATH, json={}, headers={"Authorization": "Bearer dev:x:y:z"}).status_code == 401
+
+    _tenant, a = tenant_of()
+    _other, b = tenant_of("mallory")
+    agent_id = client.post(
+        f"{API}/agents", json={"spec": {"name": "A", "instructions": "x", "model": {"provider": "test", "name": "echo"}}},
+        headers=a,
+    ).json()["id"]
+    assert client.post(f"{API}/agents/{agent_id}/versions", headers=a).status_code == 201
+    workflow_id = publish_demo(client, a)
+    run_id = str(uuid.uuid4())
+    assert client.post(f"{API}/workflows/{workflow_id}/runs", json={"input": {"q": "hi"}, "run_id": run_id}, headers=a).status_code == 202
+    key_b = client.post(f"{API}/api-keys", json={"name": "k", "scopes": ["agui:run", "manage"]}, headers=b).json()["key"]
+    ids = {"agent": agent_id, "workflow": workflow_id, "run": run_id}
+    for tool, args in MCP_READ_BY_ID:
+        result = _mcp_call(client, key_b, tool, args(ids))
+        assert result["isError"] is True, tool
+        assert result["structuredContent"]["error"]["code"] == "not_found", tool
+    # B's own lists are empty, and A's world is untouched (the run is still queued, one enqueue only).
+    assert _mcp_call(client, key_b, "agent.list", {})["structuredContent"]["items"] == []
+    assert _mcp_call(client, key_b, "workflow.list", {})["structuredContent"]["items"] == []
+    assert len(fake.calls) == 1

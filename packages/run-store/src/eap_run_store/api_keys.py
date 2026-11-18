@@ -37,7 +37,9 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 from eap_run_store.store import Base
 
 API_KEY_PREFIX = "pos_"
-API_KEY_SCOPES = ("agui:run",)
+# `agui:run` runs agents and workflows over AG-UI; `manage` also changes the tenant's platform through the MCP
+# control endpoint (/api/v1/mcp). Any key of the tenant may read there.
+API_KEY_SCOPES = ("agui:run", "manage")
 DEFAULT_API_KEY_SCOPES = ("agui:run",)
 API_KEY_NAME_MAX_CHARS = 100
 API_KEY_ALLOWLIST_MAX_ITEMS = 100
