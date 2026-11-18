@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
+from eap_schemas.tools import ToolDeclaration
+from pydantic import BaseModel, ConfigDict
 
 from worker_tests.conftest import APP_VERSION, event_rows, wait_for, wait_terminal
 from worker_tests.workflow_run_helpers import (
@@ -344,3 +347,65 @@ def test_parent_settles_every_branch_before_finishing(worker, client, tenant, de
     keys = [k for _, k, _, _ in event_rows(worker.engine, run_id)]
     assert keys.index("step:b:completed") < keys.index("step:fan:failed") < keys.index("end")
     assert "step:done:started" not in keys
+
+
+def _fake_tool_spec(tool_id: str) -> dict:
+    return {
+        "name": "Error object",
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object", "required": ["ok"]},
+        "start": "t",
+        "steps": [{"id": "t", "type": "tool", "tool_id": tool_id, "input": {"value": {"$ref": "input.value"}}}],
+    }
+
+
+class _EchoValueInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: Any
+
+
+def _register_fake(worker, monkeypatch, tool_id: str) -> None:
+    def fake(value: Any) -> Any:
+        return value
+
+    if tool_id not in worker.registry.tool_ids():
+        declaration = ToolDeclaration(
+            id=tool_id, title="Echo value", description="Returns its value", side_effect=False,
+            external_idempotent=False, input_model=_EchoValueInput,
+        )
+        worker.registry.register(declaration, fake)
+    monkeypatch.setitem(worker.__dict__, "allowed_tools", frozenset(worker.registry.tool_ids()))
+
+
+@pytest.mark.parametrize(
+    ("returned", "code", "message"),
+    [
+        ({"error": {"code": "sync_failed", "message": "the sync failed"}}, "sync_failed", "the sync failed"),
+        ({"error": {"code": "Not A Code!", "message": "odd"}}, "tool_error", "odd"),
+        ({"error": {"code": "secret_missing"}}, "secret_missing", None),
+    ],
+)
+def test_tool_step_error_object_fails_the_run_with_its_code(worker, client, tenant, defs, monkeypatch, returned, code, message):
+    _register_fake(worker, monkeypatch, "test.error_object")
+    _, run_id = _start(worker, client, tenant, _fake_tool_spec("test.error_object"), {"value": returned})
+    run = wait_terminal(worker.run_store, tenant, run_id)
+    assert run["status"] == "failed"
+    events = event_rows(worker.engine, run_id)
+    assert (events[-2][1], events[-2][2]) == ("step:t:failed", "step_failed")
+    assert events[-2][3]["error_code"] == code
+    assert events[-1][2] == "run_failed" and events[-1][3]["error_code"] == code
+    assert run["error"].startswith("ToolError: ")
+    if message:
+        assert message in run["error"]
+
+
+def test_tool_step_non_error_results_are_unchanged(worker, client, tenant, defs, monkeypatch):
+    _register_fake(worker, monkeypatch, "test.error_object")
+    for value in ({"ok": True}, {"error": "just text"}, {"error": {"code": "x"}, "ok": True}):
+        _, run_id = _start(worker, client, tenant, _fake_tool_spec("test.error_object"), {"value": value})
+        run = wait_terminal(worker.run_store, tenant, run_id)
+        if "ok" in value:
+            assert run["status"] == "completed", run["error"]
+        else:
+            assert event_rows(worker.engine, run_id)[-1][3]["error_code"] == "output_invalid"

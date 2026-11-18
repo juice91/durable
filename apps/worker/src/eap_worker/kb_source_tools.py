@@ -119,8 +119,11 @@ async def kb_source_get(ctx: RunContext[RunDeps], source_id: str) -> dict[str, A
     return source_view(source)
 
 
-async def settings_connection_check(ctx: RunContext[RunDeps], connection_id: str) -> dict[str, Any]:
-    """Check a connection; `{ok, checked_at, error_code}` (a stable code, never a credential)."""
+async def settings_connection_check(
+    ctx: RunContext[RunDeps], connection_id: str, require_ok: bool = False
+) -> dict[str, Any]:
+    """Check a connection; `{ok, checked_at, error_code}` (a stable code, never a credential). With
+    `require_ok` a check that is not ok is `{error: {code: <error_code or connection_failed>, message}}`."""
     from eap_worker.secret_refs import secret_store
 
     cid = _uuid(connection_id)
@@ -132,11 +135,15 @@ async def settings_connection_check(ctx: RunContext[RunDeps], connection_id: str
     except SecretsError:
         return _error("secret_unreadable", "the secret store is not available")
     try:
-        return await check_connection(engine, ctx.deps.tenant_id, cid, secrets)
+        checked = await check_connection(engine, ctx.deps.tenant_id, cid, secrets)
     except SourceError as exc:
         if exc.code == CONNECTION_NOT_FOUND:
             return _error(CONNECTION_NOT_FOUND, "connection not found")
         raise
+    if require_ok and not checked.get("ok"):
+        failed_code = str(checked.get("error_code") or "connection_failed")
+        return _error(failed_code, f"the connection check failed ({failed_code})")
+    return checked
 
 
 def sync_summary(args: dict[str, Any]) -> str:
