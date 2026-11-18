@@ -94,6 +94,7 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `agent.chat` | `agent_id`, `message`, `conversation_id?`, `wait_seconds?` (≤ 300) | one turn: `{text, run_id, conversation_id, status, done, pending_approvals}` |
 | `workflow.save_draft` | `spec`, `workflow_id?` | create a workflow, or replace its draft |
 | `workflow.publish` | `workflow_id` | publish the draft as the next version |
+| `workflow.archive` | `workflow_id`, `archived?`, `force?` | archive or unarchive any workflow; pauses its schedules, refused (`runs_active`) while runs are queued or running unless `force` |
 | `workflow.run.start` | `workflow_id`, `input`, `version?`, `run_id?` | start a run (`run_id` makes a retry idempotent) |
 | `workflow.run.cancel` | `run_id` | cancel the run and its tree |
 | `workflow.schedule.set` | `workflow_id`, `name?`, `cron?`, `timezone?`, `input?`, `schedule_id?`, `active?` | create a schedule, or change / pause one |

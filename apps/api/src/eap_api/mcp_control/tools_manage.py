@@ -151,6 +151,19 @@ def register_tools(tool: Any) -> None:
         return await call(ctx, publish_workflow_version, workflow_id=uid(workflow_id, "workflow_id"),
                           principal=ctx.actor, db=DB)
 
+    @tool("workflow.archive", manage=True)
+    async def workflow_archive(workflow_id: str, archived: bool = True, force: bool = False) -> dict[str, Any]:
+        """Archive (or, with archived=false, unarchive) a workflow, any workflow of the tenant. Archiving
+        pauses its schedules and is refused (409 runs_active) while runs are queued or running, unless
+        force=true; an archived workflow refuses new runs and schedules (workflow_archived). Unarchiving
+        does not resume schedules. Returns the workflow with `archived`, `archived_at`, `paused_schedules`."""
+        from eap_api.routes.workflows import WorkflowArchive, archive_workflow
+
+        ctx = current_ctx()
+        require_workflow(ctx, workflow_id)
+        return await call(ctx, archive_workflow, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor,
+                          db=DB, body=WorkflowArchive(archived=archived, force=force))
+
     @tool("workflow.run.start", manage=True)
     async def workflow_run_start(workflow_id: str, input: dict[str, Any], version: int | None = None,
                                  run_id: str | None = None) -> dict[str, Any]:
