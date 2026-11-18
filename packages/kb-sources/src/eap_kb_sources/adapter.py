@@ -129,6 +129,9 @@ class SyncSegmentResult:
     sweep_ok: bool = True
     source_revision: str | None = None  # what the walk saw of the provider (stored on a complete walk)
     budget: dict[str, Any] | None = None  # {"used": {bucket: n}, "remaining": {bucket: n}} after the segment
+    # Bounded, value-free facts about something that looked wrong (for example the shape of a catalogue page that
+    # parsed to no products): names, types and counts only, never provider data. None when nothing looked wrong.
+    diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
