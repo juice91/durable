@@ -126,7 +126,9 @@ _AGENTS = text(
 
 async def discover_mcp_tools(engine: Engine, tenant_id: str, names: Sequence[str]) -> dict[str, tuple[str, ...]]:
     """Tool names per server from a live `tools/list`, one short session each; a server that cannot be
-    reached (or is a managed server that is not running) maps to no tools."""
+    reached maps to no tools. A managed server is started first, as a tool call would."""
+    import anyio
+
     from eap_schemas import McpToolRef
     from eap_secrets.outbound import OutboundPolicy
 
@@ -138,9 +140,10 @@ async def discover_mcp_tools(engine: Engine, tenant_id: str, names: Sequence[str
         try:
             conns = await asyncio.to_thread(mcp.load_servers, engine, tenant_id, [McpToolRef(server=name, tool="-")])
             conn = conns[name]
-            import anyio
-
+            # The same path as a tool call: a managed server is started when idle (its endpoint is a
+            # private in-cluster Service, allowed by identity in `_client`), the whole thing bounded.
             with anyio.fail_after(MCP_DISCOVERY_TIMEOUT_S):
+                await mcp.ensure_managed_running(engine, tenant_id, conn, "-")
                 async with mcp._session(conn, OutboundPolicy.from_env(), MCP_DISCOVERY_TIMEOUT_S) as client:
                     out[name] = tuple(sorted(t.name for t in await client.list_tools()))
         except Exception as exc:  # noqa: BLE001 - best effort; the server just offers no tools
