@@ -22,37 +22,30 @@ provider. Design: `docs/superpowers/specs/2026-11-18-kb-source-sync-design.md`. 
 
 Safety properties to know: the secret values are resolved only inside the step that calls the provider and never appear
 in events, run rows, DBOS outputs, API responses, spans or logs; the connection's `allowed_hosts` (default
-`api.vendor.example`, `www.ti.com`) is enforced on every request and every redirect hop; documents must be PDFs; a replayed step
+the connection's `allowed_hosts`) is enforced on every request and every redirect hop; documents must be PDFs; a replayed step
 changes nothing; every table and route is tenant-scoped, and another tenant gets `404`.
 
-## 1. Bootstrap the tenant secrets
+## 1. Credentials enter through the platform, never through an API call
 
-The values go from 1Password into `PUT /api/v1/secrets/{name}` without touching argv, a log or a temp file. Open the
-tunnel first (`deploy/scripts/tunnel.sh`, API on `127.0.0.1:18000`), then:
+A data source is not a feature: its credentials are entered where every other tenant secret is entered, and the
+framework names no provider secret. Three surfaces, all backed by the same encrypted tenant secret store:
 
-```sh
-API=http://127.0.0.1:18000/api/v1
-AUTH="Authorization: Bearer dev:studio:operator"   # the dev principal of the studio tenant
+- **Studio → Settings → Connections**: the connection sheet's Client ID / Client secret pickers choose a stored secret by
+  name or create one inline through a masked input (the value is sent once, stored encrypted, never shown again).
+- **Studio → Settings → Secrets**: the same masked input, for secrets created ahead of time.
+- **An agent with `secrets.request`**: the tool pauses on an approval card with a masked input; the person types the value,
+  the agent only ever sees the reference `secret:<name>` (this is how an onboarding agent or the Architect connects a source).
 
-put_secret() {  # put_secret <secret name> <op:// reference>: the value is piped, never printed
-  op read "$2" | python3 -c 'import json, sys; print(json.dumps({"value": sys.stdin.read().rstrip("\n")}))' \
-    | curl -sf -X PUT "$API/secrets/$1" -H "$AUTH" -H 'Content-Type: application/json' --data-binary @-
-}
-put_secret ti-client-id     op://<vault>/<item>/TI_KEY
-put_secret ti-client-secret op://<vault>/<item>/TI_SECRET
-curl -sf "$API/secrets" -H "$AUTH" | jq '.[].name'   # names only
-```
-
-The secret names are free (a name matches `^[a-z][a-z0-9_.-]{0,63}$`); the connection refers to them. In Studio the same is
-Settings → Secrets, then pick them in Settings → Connections.
+`PUT /api/v1/secrets/{name}` is the storage behind these surfaces, not an operator entry point: do not script provider
+credentials into it from a password manager or a shell.
 
 ## 2. Create the connection and check it
 
 ```sh
 CONN=$(curl -sf -X POST "$API/settings/connections" -H "$AUTH" -H 'Content-Type: application/json' -d '{
-  "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://api.vendor.example",
-  "config": {"provider": "acme_catalog", "allowed_hosts": ["api.vendor.example", "www.ti.com"]},
-  "credential_refs": {"client_id": "secret:ti-client-id", "client_secret": "secret:ti-client-secret"}}' | jq -r .id)
+  "name": "<connection name>", "kind": "oauth2_client_credentials", "base_url": "https://<provider api host>",
+  "config": {"provider": "<provider id>", "allowed_hosts": ["<provider api host>", "<document host>"]},
+  "credential_refs": {"client_id": "secret:<client-id-secret-name>", "client_secret": "secret:<client-secret-secret-name>"}}' | jq -r .id)
 curl -sf -X POST "$API/settings/connections/$CONN/check" -H "$AUTH"
 # {"ok": true, "checked_at": "...", "error_code": null}
 ```
@@ -65,9 +58,9 @@ The check fetches a token and one product and persists `last_checked_at` / `last
 
 ```sh
 KB=$(curl -sf -X POST "$API/knowledge-bases" -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"name": "TI catalogue", "embedding_model": "litellm:Qwen3-VL-Embedding-8B-mlx-8bit"}' | jq -r .id)
+  -d '{"name": "<knowledge base name>", "embedding_model": "<allowed embedding model>"}' | jq -r .id)
 SRC=$(curl -sf -X POST "$API/knowledge-bases/$KB/sources" -H "$AUTH" -H 'Content-Type: application/json' -d "{
-  \"connection_id\": \"$CONN\", \"name\": \"ti-catalogue\", \"kind\": \"product_catalog\", \"provider\": \"acme_catalog\",
+  \"connection_id\": \"$CONN\", \"name\": \"<source name>\", \"kind\": \"product_catalog\", \"provider\": \"<provider id>\",
   \"config\": {\"document_policy\": {\"types\": [\"datasheet\"]}, \"page_size\": 100}}" | jq -r .id)
 ```
 
@@ -85,7 +78,7 @@ WF=$(jq '{spec: .spec}' examples/workflows/kb-source-sync.json \
 curl -sf -X POST "$API/workflows/$WF/versions" -H "$AUTH" | jq .warnings   # []
 ```
 
-Run it: `POST /workflows/$WF/runs` with `{"input": {"source_id": "...", "mode": "targeted", "part_numbers": ["..."]}}`; poll
+Run it: `POST /workflows/$WF/runs` with `{"input": {"source_id": "...", "mode": "targeted", "part_numbers": ["<orderable part>"]}}`; poll
 `GET /runs/{run_id}`; the run's `output` is the bounded report (`discovered`, `inserted`, `updated`, `unchanged`,
 `documents_queued`, `failed`, `errors` up to 50, `checkpoint`, `complete`, `stop_reason`, `budget`, `source_revision`).
 Cancel with `POST /runs/{run_id}/cancel`: the child sync is cancelled too and keeps its checkpoint. Schedule an incremental
@@ -93,26 +86,15 @@ sync with a workflow schedule of this workflow and the input `{"source_id": "...
 
 `GET /knowledge-bases/{kb}/sources/{src}/syncs` lists the sync runs and `.../syncs/{run_id}` returns the report.
 
-## 5. Staged live tests (against the real TI API, after approval of the account)
+Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page, e.g. `docs/providers/texas-instruments.md`.
 
-Run them in this order; stop at the first stage that does not match, and read `errors` of the report.
+## 5. Staged live tests
 
-1. **Check** the connection (stage 2). `ok: true` proves the token endpoint, the credentials and `allowed_hosts`.
-2. **One part:** targeted sync of the hero part `EXAMPLE-PART-001`. Expect `discovered 1`, `failed 0`, one datasheet queued, and
-   the document `ready` in `GET /knowledge-bases/$KB/documents` after the ingest. Run it again: `unchanged`, no new version.
-3. **Ten to a hundred parts:** a targeted sync of a hand-picked list. Check `API calls per product` stays at about 3
-   (product, parametrics, quality) and that 404 parts are counted `not_found`, not failed runs.
-4. **One page:** a `full` sync with `product_daily_limit` set so the run stops after the first listing page (about `3 x
-   page_size + 1` calls). Expect `complete: false`, `stop_reason: "budget"` and a `checkpoint.cursor.page`.
-5. **Resume:** raise the limit and run `full` again; the walk continues at the stored page (watch the listing calls in
-   Grafana) and the final report has `complete: true` and a `source_revision`.
-6. **Incremental:** run `incremental` twice; the second run costs one call per listing page and reports every item `unchanged`.
-7. **Full catalogue last.** About 1,486 pages plus about three detail calls per product against 3,000 calls a day is a
-   multi-day walk: let the daily budget stop it and schedule the next run. Ask TI for a non-standard limit first if the
-   timetable matters.
-
-Open items to confirm on the authenticated API (the adapter keeps them configurable): the listing endpoint
-`/v1/products?Page=N&Size=100`, the `/parametrics` and `/quality` paths, and whether TI offers a changed-since filter.
+Never start with a full catalogue. Stage it: (1) check the connection; (2) a targeted sync of one known part and read the
+report (`discovered 1`, `failed 0`, one datasheet queued, `kb_ingest` completes); (3) a targeted sync of 10-100 parts;
+(4) one listing page in `full` mode and confirm the checkpoint and the resume on the next run; (5) only then a full walk,
+which spans days under the provider's daily quota. Provider-specific parts, hosts, quotas and secret field names live on the
+provider page (for Acme Semiconductor: `docs/providers/texas-instruments.md`).
 
 ## Failure codes you will see
 

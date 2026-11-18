@@ -40,13 +40,13 @@ describe("check codes", () => {
 
 describe("connectionPayload", () => {
   it("sends refs, never values, and the token URL in config", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken", clientIdSecret: "ti-id", clientSecretSecret: "ti-secret" });
+    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret" });
     expect(body).toEqual({
       name: "ti",
       kind: "oauth2_client_credentials",
       base_url: "https://api.vendor.example",
       config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
-      credential_refs: { client_id: "secret:ti-id", client_secret: "secret:ti-secret" },
+      credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
       enabled: true,
     });
   });

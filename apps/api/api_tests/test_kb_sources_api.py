@@ -23,7 +23,7 @@ from .run_helpers import PG_URL, requires_pg
 pytestmark = requires_pg
 API = "/api/v1"
 SENTINEL = "sentinel-client-secret-VALUE-0001"
-REFS = {"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}
+REFS = {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}
 CONN = {"name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
         "config": {"provider": "fake"}, "credential_refs": REFS}
 
@@ -157,7 +157,7 @@ def test_check_resolves_inside_the_request_and_persists_without_leaking(env, cap
     client, adapter, _, tenant = env
     caplog.set_level(logging.DEBUG)
     t, h = tenant()
-    for name, value in (("ti-id", "id-value"), ("ti-secret", SENTINEL)):
+    for name, value in (("conn-id", "id-value"), ("conn-secret", SENTINEL)):
         assert client.put(f"{API}/secrets/{name}", json={"value": value}, headers=h).status_code == 200
     conn = mk_conn(client, h)
     r = client.post(f"{API}/settings/connections/{conn['id']}/check", headers=h)
@@ -186,8 +186,8 @@ def test_check_error_codes(env, monkeypatch):
         return r.json()["error_code"]
 
     assert check() == "secret_missing"  # no secret stored yet
-    client.put(f"{API}/secrets/ti-id", json={"value": "a"}, headers=h)
-    client.put(f"{API}/secrets/ti-secret", json={"value": SENTINEL}, headers=h)
+    client.put(f"{API}/secrets/conn-id", json={"value": "a"}, headers=h)
+    client.put(f"{API}/secrets/conn-secret", json={"value": SENTINEL}, headers=h)
     adapter.raises = RuntimeError(f"boom {SENTINEL}")
     assert check() == "connection_response_invalid"
     adapter.raises = SourceError("connection_unreachable", "no route")

@@ -75,7 +75,7 @@ export function SecretPicker({ label, names, value, onChange, onCreated }: { lab
             <label htmlFor={`${id}-name`} className="block text-sm font-medium text-foreground">
               New secret name
             </label>
-            <input id={`${id}-name`} value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" spellCheck={false} placeholder="ti-client-id" className={`${inputClass} font-mono`} />
+            <input id={`${id}-name`} value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" spellCheck={false} placeholder="my-service-client-id" className={`${inputClass} font-mono`} />
           </div>
           <div className="space-y-1">
             <label htmlFor={`${id}-value`} className="block text-sm font-medium text-foreground">
