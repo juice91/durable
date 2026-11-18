@@ -561,3 +561,72 @@ def test_tunnel_sh_reconnects_until_stopped(tmp_path: Path):
     with pytest.raises(subprocess.TimeoutExpired):
         _run("tunnel.sh", env, ["deploy-host"], timeout=8)
     assert _log(env).count("ssh ") >= 2, _log(env)
+
+
+def _drain_sql(log: str) -> str:
+    line = next(line for line in log.splitlines() if "exec postgres-0" in line)
+    return line
+
+
+def test_drain_query_excludes_approvals_and_kb_ingest_by_default(tmp_path: Path):
+    env = _env(tmp_path, _install_stubs(tmp_path), {"STUB_RUNS_COUNTS": "0|868"})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sql = _drain_sql(_log(env))
+    assert "r.status IN ('queued', 'running')" in sql
+    assert "pending_approvals" in sql and "a.decided_at IS NULL" in sql
+    assert "COALESCE(r.kind, '') NOT IN ('kb_ingest')" in sql
+    assert proc.stdout.count("868 kb_ingest runs continue across the deploy") == 1
+
+
+def test_drain_exclude_kinds_is_configurable_and_can_be_empty(tmp_path: Path):
+    env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_DRAIN_EXCLUDE_KINDS": "kb_ingest, other_kind"})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT IN ('kb_ingest', 'other_kind')" in _drain_sql(_log(env))
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    env = _env(empty, _install_stubs(empty), {"PYDANTICOS_DRAIN_EXCLUDE_KINDS": ""})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(empty))], timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    sql = _drain_sql(_log(env))
+    assert "r.kind" not in sql
+    assert "continue across the deploy" not in proc.stdout
+
+
+def test_drain_exclude_kinds_rejects_unsafe_names(tmp_path: Path):
+    env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_DRAIN_EXCLUDE_KINDS": "kb_ingest');DROP TABLE runs;--"})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode != 0
+    assert "PYDANTICOS_DRAIN_EXCLUDE_KINDS" in proc.stderr
+    assert "exec postgres-0" not in _log(env)
+def test_skip_drain_keeps_the_api_up_until_the_migration(tmp_path: Path):
+    env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_SKIP_DRAIN": "1", "STUB_RUNS_COUNTS": "9|0"})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    log = _log(env)
+    assert "exec postgres-0" not in log
+    assert "drain skipped" in proc.stdout.lower()
+    worker0 = _at(log, "scale statefulset/worker --replicas=0")
+    api0 = _at(log, "scale deployment/api --replicas=0")
+    migrate = _at(log, "delete job migrate")
+    api1 = _at(log, "scale deployment/api --replicas=1", migrate)
+    assert worker0 < api0 < migrate < api1
+    assert log.count("scale deployment/api --replicas=0") == 1
+def test_failed_drain_scales_the_api_back_up(tmp_path: Path):
+    env = _env(
+        tmp_path,
+        _install_stubs(tmp_path),
+        {"STUB_RUNS_COUNTS": "3|0", "PYDANTICOS_DRAIN_TIMEOUT": "0", "STUB_API_REPLICAS": "2"},
+    )
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 1
+    assert "Timed out" in proc.stderr
+    log = _log(env)
+    api0 = _at(log, "scale deployment/api --replicas=0")
+    _at(log, "scale deployment/api --replicas=2", api0)
+    assert "scale statefulset/worker --replicas=0" not in log
+    assert "scaled back to 2" in proc.stderr
+
+
