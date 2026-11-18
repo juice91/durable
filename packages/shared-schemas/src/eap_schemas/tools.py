@@ -52,6 +52,11 @@ class ToolDeclaration(BaseModel):
         schema.pop("description", None)
         return schema
 
+    def matches_implementation_schema(self, implementation_schema: dict[str, Any]) -> bool:
+        """True when a function's parameter schema is this declaration's input schema (presentation titles, which
+        Pydantic AI keeps on nested models, do not count)."""
+        return _without_titles(implementation_schema) == self.input_json_schema()
+
 
 class ClockNowInput(BaseModel):
     """Input for ``clock.now``."""
@@ -148,6 +153,38 @@ class JsonQueryInput(BaseModel):
         if len(json.dumps(value, ensure_ascii=False, default=str).encode()) > JSON_QUERY_DATA_MAX_BYTES:
             raise ValueError("data is larger than 1 MiB")
         return value
+
+
+TEXT_CHECK_TOOL_ID = "text.check"
+
+
+class TextCheckRules(BaseModel):
+    """The checks of ``text.check``; every one is off unless set."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_graphemes: Annotated[int, Field(ge=0, le=100000)] | None = None
+    max_graphemes: Annotated[int, Field(ge=1, le=100000)] | None = None
+    forbid_urls: bool = False
+    forbid_hashtags: bool = False
+    forbid_emoji: bool = False
+    forbid_simplified_chinese: bool = False
+    forbid_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    rumour_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    attribution_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    forbid_terms_ci: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    min_han_ratio: Annotated[float, Field(ge=0, le=1)] | None = None
+    max_verbatim_run: Annotated[int, Field(ge=1, le=100000)] | None = None
+
+
+class TextCheckInput(BaseModel):
+    """Input for ``text.check``: a text, optionally the source it must not copy, and the rules. Pure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=20000)]
+    source: Annotated[str, Field(max_length=100000)] | None = None
+    rules: TextCheckRules
 
 
 class KbSourceGetInput(BaseModel):
@@ -332,6 +369,21 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=JsonQueryInput,
+    ),
+    "text.check": ToolDeclaration(
+        id="text.check",
+        title="Check a text",
+        description=(
+            "Clean a text (trim, drop think-tags, a surrounding quote pair and a leading 摘要：) and run mechanical "
+            "checks on it: grapheme length, no URLs, hashtags, emoji or Simplified Chinese, forbidden terms, a "
+            "rumour term needs an attribution term, a minimum share of Han characters, and no long run copied from "
+            "a source. Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
+            "too_short, url, hashtag, emoji, simplified, forbidden_term, unattributed_rumour, not_chinese, "
+            "verbatim) or null. Pure"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=TextCheckInput,
     ),
 }
 

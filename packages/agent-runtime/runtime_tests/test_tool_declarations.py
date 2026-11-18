@@ -11,7 +11,7 @@ from eap_schemas.tools import ClockNowInput, TOOL_DECLARATIONS, ToolDeclaration
 # tenant's secret store, the knowledge-base source tables and the run rows.
 WORKER_BOUND_TOOL_IDS = frozenset({
     "secrets.request", "http.request", "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
-    "workflow.run.result", "feed.parse", "json.query",
+    "workflow.run.result", "feed.parse", "json.query", "text.check",
 })
 
 
