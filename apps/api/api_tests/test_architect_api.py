@@ -231,6 +231,9 @@ def test_options_are_the_allowlist_without_platform_tools(api):
     assert not any(i.startswith(("architect.", "knowledge", "file", "shell")) for i in ids)
     tickets = next((t for t in body["tools"] if t["id"] == "tickets.create"), None)
     assert tickets is None or tickets["requires_approval"] is True
+    assert tickets is None or tickets["approval"] == {"agent_runs": True, "workflow_steps": False}
+    clock = next((t for t in body["tools"] if t["id"] == "clock.now"), None)
+    assert clock is None or (clock["result_example"] == "2026-11-18T09:30:00+00:00" and clock["approval"]["agent_runs"] is False)
     assert {"test:echo", "openai:gpt-4"} <= {m["id"] for m in body["models"]}
     echo = next(m for m in body["models"] if m["id"] == "test:echo")
     assert set(echo["capabilities"]) >= {"image", "pdf", "source"}  # real discovery metadata, not {}
@@ -410,6 +413,66 @@ def test_page_save_derives_an_id_from_the_name(api):
     r = save(client, h, spec)
     assert r.status_code == 200 and r.json()["id"] == "weekly-report-writer"
     assert agent_row(app, tenant, "weekly-report-writer")
+
+
+@pytest.mark.parametrize("placeholder", ["definition", "id", "agent", "workflow", "<id>"])
+def test_page_save_replaces_a_placeholder_id_with_one_from_the_name(api, placeholder):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    spec = {**SPEC, "id": placeholder, "name": "Weekly Report Writer"}
+    r = save(client, h, spec)
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "weekly-report-writer"
+    assert agent_row(app, tenant, "weekly-report-writer")
+    with app.state.database_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t AND slug = :s"),
+                            {"t": tenant, "s": placeholder}).scalar() == 0
+    wf = {"name": "Greet Flow", "id": placeholder, "steps": [{"kind": "tool", "id": "t", "tool": "clock.now"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
+    assert r.status_code == 200 and r.json()["id"] == "greet-flow", r.text
+
+
+def test_page_save_by_uuid_updates_that_agent(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    first = save(client, h, {**SPEC, "id": "kept"})
+    assert first.status_code == 200
+    row_id = first.json()["agent_id"]
+    r = save(client, h, {**SPEC, "id": row_id, "name": "Kept 2"}, expected_version=None)
+    assert r.status_code == 200 and r.json()["id"] == "kept" and r.json()["agent_id"] == row_id, r.text
+    with app.state.database_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t AND slug IS NOT NULL AND NOT builtin"),
+                            {"t": tenant}).scalar() == 1
+    gone = save(client, h, {**SPEC, "id": str(uuid.uuid4())})
+    assert gone.status_code == 404 and gone.json()["code"] == "not_found"
+
+
+def test_a_workflow_draft_may_name_a_draft_agent_but_publishing_needs_a_published_one(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of("alice")
+    assert save(client, h).status_code == 200  # greeter: a draft, no version
+    wf = {"name": "Greet flow", "id": "greet-flow", "steps": [{"kind": "agent", "id": "hi", "agent": "greeter", "prompt": "{{input}}"}]}
+    options = client.get(f"{API}/architect/options", headers=h).json()
+    assert "greeter" in {a["id"] for a in options["agents"]}  # offered while it is a draft
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
+    assert r.status_code == 200, r.text
+    workflow_id = r.json()["workflow_id"]
+    # publishing together with the save, and the plain publish route, both name the agent
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": True, "expected_version": None}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_published", r.text
+    assert [a["id"] for a in r.json()["agents"]] == ["greeter"] and "greeter" in r.json()["detail"]
+    r = client.post(f"{API}/workflows/{workflow_id}/versions", headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_published" and r.json()["agents"][0]["name"] == "Greeter"
+    # once the agent has a published version the same workflow publishes
+    assert save(client, h, publish=True).status_code == 200
+    r = client.post(f"{API}/workflows/{workflow_id}/versions", headers=h)
+    assert r.status_code in (200, 201), r.text
+    # another tenant's agent, or an archived one, is still not allowed
+    other = f"t_{uuid.uuid4().hex[:8]}"
+    del other
+    gone = {**wf, "id": "other-flow", "steps": [{"kind": "agent", "id": "hi", "agent": "nobody", "prompt": "x"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": gone, "publish": False}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"
 
 
 def test_page_save_workflow_publishes_with_marker(api):

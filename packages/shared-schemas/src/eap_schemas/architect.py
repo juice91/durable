@@ -97,7 +97,7 @@ _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63}
 
 
 # Ids a model invents when it has nothing to say; a spec that carries one gets an id from its name.
-GENERIC_IDS = ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+GENERIC_IDS = ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
 
 
 def slugify(name: str) -> str:
@@ -123,9 +123,16 @@ def is_denied_tool(tool_id: str) -> bool:
     return any(tool_id == p or tool_id.startswith(p) for p in ARCHITECT_DENIED_TOOL_PREFIXES)
 
 
+APPROVAL_NOTE = (
+    "Approvals gate agent-initiated calls only: an agent's call to this tool waits for a person; a workflow tool "
+    "step runs as published, with no approval each run."
+)
+
+
 def offer_tool(
     tool_id: str, title: str, description: str, *, side_effect: bool = False, host_only: bool = False,
     input_schema: dict[str, Any] | None = None, example: dict[str, Any] | None = None,
+    result_example: Any = None, result_schema: dict[str, Any] | None = None,
 ) -> "AllowlistTool | None":
     """The allowlist entry for one platform tool, or None when the code denylist or `host_only` keeps it
     from created agents. `requires_approval` is the tool's side effect or its place in GATED_TOOL_IDS.
@@ -136,7 +143,7 @@ def offer_tool(
     return AllowlistTool(
         id=tool_id, title=title, description=description or title,
         requires_approval=bool(side_effect) or tool_id in GATED_TOOL_IDS,
-        input_schema=input_schema, example=example,
+        input_schema=input_schema, example=example, result_example=result_example, result_schema=result_schema,
     )
 
 
@@ -149,10 +156,29 @@ class AllowlistTool(BaseModel):
     id: str
     title: str
     description: str
+    # Kept for the Studio: true when an agent that is granted the tool waits for a person on each call.
     requires_approval: bool = False
+    # Where that applies: `agent_runs` an agent's own call waits for approval; `workflow_steps` is always false,
+    # because a workflow tool step runs as published (the person reviewed the workflow when publishing it).
+    approval: dict[str, bool] = Field(default_factory=dict)
+    approval_note: str = ""
     # The tool's argument schema and one short example call (arguments), so a model can call it without guessing.
     input_schema: dict[str, Any] | None = None
     example: dict[str, Any] | None = None
+    # What the tool returns (a step's output is exactly this value): an example and, where cheap, a JSON Schema.
+    result_example: Any = None
+    result_schema: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _approval(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        agent_runs = bool(data.get("requires_approval", False))
+        out = dict(data)
+        out["approval"] = {"agent_runs": agent_runs, "workflow_steps": False}
+        out["approval_note"] = APPROVAL_NOTE if agent_runs else ""
+        return out
 
 
 class AllowlistMcpServer(BaseModel):
@@ -179,7 +205,7 @@ class AllowlistModel(BaseModel):
 
 
 class AllowlistAgent(BaseModel):
-    """An Architect-made agent a created workflow may run (it has a published version)."""
+    """An Architect-made agent a created workflow may name (draft or published; publishing the workflow needs a published version)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -220,6 +246,24 @@ class ArchitectMcpTool(BaseModel):
     tool: str = Field(min_length=1, max_length=128)
 
 
+def as_uuid(value: str | None) -> str | None:
+    """The canonical (lowercase, hyphenated) form of `value` when it is a UUID, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(UUID(value.strip()))
+    except ValueError:
+        return None
+
+
+def _check_id(value: str | None) -> str | None:
+    """A definition's `id`: a slug, or the UUID of an existing definition (a save then updates that one). A
+    placeholder (`definition`, `id`, `agent`, `workflow`, `<id>`, ...) is no id: the slug comes from the name."""
+    if value is None or is_generic_id(value):
+        return None
+    return as_uuid(value) or _check_slug(value)
+
+
 def _check_slug(value: str | None, what: str = "id") -> str | None:
     if value is not None and not AGENT_ID_PATTERN.fullmatch(value):
         raise ValueError(f"{what} must match ^[a-z][a-z0-9-]{{1,47}}$")
@@ -255,7 +299,7 @@ class ArchitectAgentSpec(BaseModel):
     @field_validator("id")
     @classmethod
     def _id(cls, value: str | None) -> str | None:
-        return _check_slug(value)
+        return _check_id(value)
 
     @field_validator("model")
     @classmethod
@@ -429,7 +473,7 @@ class ArchitectWorkflowSpec(BaseModel):
     @field_validator("id")
     @classmethod
     def _id(cls, value: str | None) -> str | None:
-        return _check_slug(value)
+        return _check_id(value)
 
     @field_validator("name")
     @classmethod
@@ -587,6 +631,7 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
 
 __all__ = [
     "AGENT_ID_PATTERN",
+    "as_uuid",
     "ARCHITECT_DENIED_TOOL_PREFIXES",
     "Allowlist",
     "AllowlistAgent",

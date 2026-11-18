@@ -180,12 +180,14 @@ def test_save_agent_writes_a_draft_and_updates_it(engine, tenant):
     assert other["id"] == "billing-helper-2"
 
     listed = run(list_created_agents(engine, tenant))["agents"]
+    assert all(a["uuid"] for a in listed)
     assert [(a["id"], a["versions"], a["latest_created_via"], a["draft"]) for a in listed] == [
         ("billing-helper", 0, None, True), ("billing-helper-2", 0, None, True), ("helper", 0, None, True),
     ]
-    assert run(list_agent_versions(engine, tenant, "helper")) == {"id": "helper", "name": "Helper", "versions": []}
+    versions = run(list_agent_versions(engine, tenant, "helper"))
+    assert versions == {"id": "helper", "uuid": versions["uuid"], "name": "Helper", "versions": []}
     assert run(list_agent_versions(engine, tenant, "nope"))["error"]["code"] == "not_found"
-    assert str(row["id"]) not in json.dumps(listed)
+    assert {a["uuid"] for a in listed} == {str(r["id"]) for r in agents_rows(engine, tenant)}
 
 
 def test_created_definitions_are_tenant_scoped(engine, tenant):
@@ -261,7 +263,9 @@ def test_save_workflow_creates_a_draft_with_marker(engine, tenant):
     assert wf["slug"] == "daily-note" and wf["archived"] is False  # the slug is the Architect's marker
     assert wf["draft_spec"]["start"] == "draft" and wf["draft_spec"]["steps"][0]["agent_id"] == str(row["id"])
     listed = run(list_created_workflows(engine, tenant))["workflows"]
-    assert listed == [{"id": "daily-note", "name": "Daily note", "versions": 0, "latest_created_via": None, "draft": True}]
+    assert listed == [{"id": "daily-note", "uuid": listed[0]["uuid"], "name": "Daily note", "versions": 0,
+                       "latest_created_via": None, "draft": True}]
+    assert uuid.UUID(listed[0]["uuid"])
     assert run(list_workflow_versions(engine, tenant, "daily-note"))["versions"] == []
 
     # An agent the allowlist does not offer, an unknown placeholder and a denied tool are errors, not rows.
@@ -335,6 +339,21 @@ def test_the_allowlist_lists_models_best_first_and_the_default_is_the_ranked_pic
     models = models_from_settings(settings, gateway=lambda _url, _key: listed)
     assert [m.id for m in models][0] == "litellm:qwen3.8"
     assert [m.id for m in models][-1] == "litellm:bge-reranker"
+
+
+def test_anthropic_wildcard_lists_the_catalogue_when_the_key_is_set_and_the_policy_allows_it():
+    from eap_worker.architect_allowlist import models_from_settings
+
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("litellm:*,anthropic:*"), litellm_base_url="http://gw",
+                               litellm_api_key=None)
+    got = models_from_settings(settings, gateway=lambda _u, _k: ["qwen3.8"], environ={"ANTHROPIC_API_KEY": "k"})
+    ids = [m.id for m in got]
+    assert {"anthropic:claude-fable-5-2", "anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5-5",
+            "anthropic:claude-haiku-5-5", "litellm:qwen3.8"} == set(ids)
+    assert ids[0].startswith("anthropic:claude-")  # the ranked pick is a general chat model
+    assert not [m for m in models_from_settings(settings, gateway=lambda _u, _k: [], environ={}) if m.provider == "anthropic"]
+    exact = SimpleNamespace(allowed_models=ModelPolicy.parse("anthropic:claude-sonnet-5-5"), litellm_base_url=None)
+    assert [m.id for m in models_from_settings(exact, environ={"ANTHROPIC_API_KEY": "k"})] == ["anthropic:claude-sonnet-5-5"]
 
 
 def test_save_agent_without_a_model_uses_the_ranked_model_not_the_first_listed(engine, tenant):
@@ -481,3 +500,126 @@ def test_save_agent_takes_an_output_schema(engine, tenant):
     assert row["draft_spec"]["output"]["json_schema"] == schema
     bad = run(save_agent(engine, tenant, agent_spec(id="picker2", output_schema={"type": "string"}), allowlist=allowlist()))
     assert bad["error"]["code"] == "agent_invalid"
+
+
+def _approved(engine, tenant):
+    registry = default_registry()
+    register_platform_tools(registry)
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("test:*"), litellm_base_url=None)
+
+    async def lister(_engine, tenant_id, names):
+        return {}
+
+    result = run(approved_for_tenant(
+        engine, tenant, registry=registry, settings=settings, allowed_tools=frozenset(registry.tool_ids()), mcp_lister=lister))
+    return {t.id: t for t in result.tools}
+
+
+def test_list_approved_tools_gives_every_tool_its_result_shape(engine, tenant):
+    by_id = _approved(engine, tenant)
+    assert by_id["clock.now"].result_example == "2026-11-18T09:30:00+00:00"  # a bare RFC 3339 string, no field
+    assert by_id["clock.now"].result_schema == {"type": "string", "format": "date-time"}
+    assert {"status", "ok", "headers", "json", "elapsed_ms"} <= set(by_id["http.request"].result_example)
+    assert {"items", "listing", "count", "dropped"} <= set(by_id["feed.parse"].result_example)
+    assert by_id["json.query"].result_example == {"result": {"id": "c2"}}
+    assert {"ok", "text", "reason", "graphemes"} <= set(by_id["text.check"].result_example)
+    assert by_id["secrets.request"].result_example == {"ref": "secret:api-token", "stored": True}
+    assert {"ticket_id", "created"} <= set(by_id["tickets.create"].result_example)
+    assert by_id["workflow.return"].result_example == {"ended": "nothing new"}
+    from eap_schemas.tools import TOOL_DECLARATIONS
+    missing = [t for t, d in TOOL_DECLARATIONS.items() if d.result_example is None]
+    assert missing == []
+
+
+def test_approval_says_where_it_applies_and_requires_approval_stays(engine, tenant):
+    by_id = _approved(engine, tenant)
+    dumped = by_id["http.request"].model_dump(mode="json")
+    assert dumped["approval"] == {"agent_runs": True, "workflow_steps": False}
+    assert dumped["requires_approval"] is True  # the Studio still reads it
+    assert by_id["clock.now"].approval == {"agent_runs": False, "workflow_steps": False}
+    assert "agent-initiated calls only" in by_id["http.request"].approval_note
+
+
+def test_condition_and_check_semantics_are_spelled_out():
+    kinds = run(list_workflow_step_kinds())
+    text = json.dumps(kinds)
+    assert "exists is true when the path exists and is not null" in text
+    assert "ne compares values" in text and "path that does not exist makes the comparison unknown" in text
+    assert "steps.<id>.output" in json.dumps(kinds["step_output"])
+    from eap_schemas.tools import TOOL_DECLARATIONS
+    assert "fails when the longest shared run is >= max_verbatim_run" in TOOL_DECLARATIONS["text.check"].description
+
+
+def test_a_save_by_uuid_updates_the_existing_agent_and_workflow_instead_of_creating_one(engine, tenant):
+    first = run(save_agent(engine, tenant, agent_spec(id="helper"), allowlist=allowlist()))
+    (row,) = agents_rows(engine, tenant)
+    (listed,) = run(list_created_agents(engine, tenant))["agents"]
+    assert (listed["id"], listed["uuid"]) == ("helper", str(row["id"]))
+    for spelled in (str(row["id"]), str(row["id"]).upper()):
+        done = run(save_agent(engine, tenant, agent_spec(name="Helper 2", id=spelled, instructions=f"Changed {spelled[:2]}."),
+                              allowlist=allowlist()))
+        assert done["id"] == "helper" and done["status"] == "draft", done  # the slug comes back
+    (row,) = agents_rows(engine, tenant)  # still one agent
+    assert row["name"] == "Helper 2" and row["draft_spec"]["instructions"].startswith("Changed")
+    missing = run(save_agent(engine, tenant, agent_spec(id=str(uuid.uuid4())), allowlist=allowlist()))
+    assert missing["error"]["code"] == "not_found"
+    other = f"t_{uuid.uuid4().hex[:10]}"
+    assert run(save_agent(engine, other, agent_spec(id=str(row["id"])), allowlist=allowlist()))["error"]["code"] == "not_found"
+    assert len(agents_rows(engine, tenant)) == 1 and first["id"] == "helper"
+
+    wf = ArchitectWorkflowSpec(name="Note", id="note", steps=[{"kind": "tool", "id": "t", "tool": "clock.now"}])
+    run(save_workflow(engine, tenant, wf, allowlist=allowlist()))
+    (w,) = run(list_created_workflows(engine, tenant))["workflows"]
+    again = ArchitectWorkflowSpec(name="Note 2", id=w["uuid"], steps=[{"kind": "tool", "id": "t2", "tool": "clock.now"}])
+    done = run(save_workflow(engine, tenant, again, allowlist=allowlist()))
+    assert done["id"] == "note" and done["status"] == "draft"
+    (w2,) = run(list_created_workflows(engine, tenant))["workflows"]
+    assert w2["uuid"] == w["uuid"] and w2["name"] == "Note 2"
+
+
+def test_publish_and_other_gated_tools_also_take_the_uuid(engine, tenant):
+    run(save_agent(engine, tenant, agent_spec(id="helper"), allowlist=allowlist()))
+    (row,) = agents_rows(engine, tenant)
+    assert run(list_agent_versions(engine, tenant, str(row["id"])))["id"] == "helper"
+
+
+@pytest.mark.parametrize("placeholder", ["definition", "id", "agent", "workflow", "<id>"])
+def test_the_placeholder_ids_of_the_page_are_replaced_by_one_from_the_name(placeholder):
+    spec = ArchitectAgentSpec(name="Weekly Reporter", id=placeholder, instructions="x")
+    from eap_schemas.architect import is_generic_id
+    assert spec.id is None and is_generic_id(placeholder)
+    wf = ArchitectWorkflowSpec(name="W", id=placeholder, steps=[{"kind": "tool", "id": "t", "tool": "clock.now"}])
+    assert wf.id is None
+
+
+def test_a_workflow_draft_names_a_draft_agent_and_publishing_needs_the_agent_published(engine, tenant):
+    from eap_worker.architect_tools import publish_workflow_sync
+
+    registry = default_registry()
+    register_platform_tools(registry)
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("test:*"), litellm_base_url=None)
+
+    async def lister(_engine, tenant_id, names):
+        return {}
+
+    def approved():
+        return run(approved_for_tenant(
+            engine, tenant, registry=registry, settings=settings, allowed_tools=frozenset(registry.tool_ids()),
+            mcp_lister=lister))
+
+    run(save_agent(engine, tenant, agent_spec(id="writer", model="test:echo"), allowlist=approved()))
+    (row,) = agents_rows(engine, tenant)
+    assert [a.id for a in approved().agents] == ["writer"]  # a draft agent is offered
+    spec = ArchitectWorkflowSpec(name="Note", id="note", steps=[{"kind": "agent", "id": "w", "agent": "writer", "prompt": "{{input}}"}])
+    assert run(save_workflow(engine, tenant, spec, allowlist=approved()))["status"] == "draft"
+
+    refused = publish_workflow_sync(engine, tenant, "note")
+    assert refused["error"]["code"] == "agent_not_published", refused
+    assert "writer" in refused["error"]["message"] and refused["error"]["agents"][0]["id"] == "writer"
+    add_agent_version(engine, tenant, row["id"], 1, "architect:run-1")
+    done = publish_workflow_sync(engine, tenant, "note")
+    assert done["status"] == "published" and done["version"] == 1, done
+    # an archived agent leaves the list again
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE agents SET archived = true WHERE tenant_id = :t"), {"t": tenant})
+    assert approved().agents == ()

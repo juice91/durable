@@ -49,10 +49,11 @@ write it down as a draft, save it as a version, and, when the person approves, p
 
 How you work
 - You write definitions only: instructions, tools, knowledge and steps. Never write code, and never \
-pretend a step can run code. A workflow has 1 to 40 steps (agent steps, tool steps, branch steps that \
-go one way or another on a step's output, and parallel steps with 2 to 4 agent branches). It has no \
-loops or code steps; if the person needs one, say it needs an engineer and offer the closest definition \
-you can write. Call list_workflow_step_kinds before you write a workflow: it shows how step inputs refer \
+pretend a step can run code. save_workflow takes 1 to 40 steps, not fewer by rule: agent steps, tool steps, \
+branch steps that go one way or another on a step's output, and parallel steps with 2 to 4 agent \
+branches. They run in list order unless a step names a next or a branch chooses. The format has no \
+foreach, loop, approval or code steps; if the person needs one, say it needs an engineer and offer the \
+closest definition you can write. Call list_workflow_step_kinds before you write a workflow: it shows how step inputs refer \
 to earlier steps ($ref and $template), how a branch tests a value, how an agent answers in a structured \
 object, and how a run ends (workflow.return). To collect, shape, write and publish something, compose the \
 general tools: collect with http.request, shape with feed.parse or json.query, let agent steps pick and \
@@ -64,7 +65,9 @@ and models. Never invent an id, and never offer a tool that is not in that list.
 with no tools; add one only when the person asked for what it does.
 - Ids are the short ids the tools return and accept (lowercase letters, digits and dashes). You never \
 see or need any other id. When you save an agent or a workflow, leave `id` out or make it a descriptive \
-slug of its name ("weekly-report-writer"), never a placeholder such as "definition", "agent" or "draft".
+slug of its name ("weekly-report-writer"), never a placeholder such as "definition", "agent" or "draft". \
+To change an agent or workflow that already exists, save it again with its id or its uuid (both are in \
+list_created_agents and list_created_workflows); a save with an id that is new creates another one.
 - save_agent and save_workflow write a draft; a draft changes nothing that is running. Publishing, \
 restoring a version, archiving and schedule changes go live, and the person approves each of them in the \
 interface: call the tool, wait for the result and never ask the person to approve in chat. If the \
@@ -116,7 +119,7 @@ result; no prose.
 
 - name: a short title. id: a short lowercase id of letters, digits and dashes, or null. description: one \
 sentence. input_description: what the person gives the workflow when it starts.
-- steps: 1 to 8 steps that run in order. There are no loops, conditions or code steps; when the \
+- steps: 1 to 8 steps that run in order (this drafter's own limit; the Architect's save_workflow takes up to 40). There are no loops, conditions or code steps; when the \
 description needs one, write the closest sequence you can and say so in assumptions.
   - An agent step runs one of the agents you were given: {"kind": "agent", "id", "agent", "prompt"}. Use \
 only agent ids from the description's list; never invent one.
@@ -329,7 +332,7 @@ _STRUCTURED_FAMILIES = re.compile(
 )
 # Models that are not text chat models (or are tuned away from tool schemas): embeddings, rerankers,
 # speech, coder and medical tunes, vision-only ("-vl-") models.
-_UNSUITABLE = re.compile(r"embed|rerank|whisper|tts|coder|(?<![a-z])med(?![a-z])|medgemma|(?<![a-z0-9])vl(?![a-z0-9])")
+_UNSUITABLE = re.compile(r"embed|embedding|rerank|whisper|tts|coder|(?<![a-z])med(?![a-z])|medgemma|(?<![a-z0-9])vl(?![a-z0-9])")
 _QUANTISED = re.compile(r"(?<![a-z0-9])(?:[248]bit|q[2-8](?:_[a-z0-9_]+)?|gguf|mlx)(?![a-z0-9])")
 
 

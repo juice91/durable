@@ -52,10 +52,12 @@ from eap_run_store.workflow_checks import (
     loop_agent_approval_warnings,
     output_ref_checks,
     reference_problems,
+    unpublished_agents,
 )
 from eap_schemas import AgentSpec, canonical_spec_hash
 from eap_schemas.workflows import WorkflowSpec, canonical_workflow_hash
 
+AGENT_NOT_PUBLISHED = "agent_not_published"
 WORKFLOW_ARCHIVED = "Workflow is archived; unarchive it to publish or restore versions"
 
 
@@ -357,6 +359,11 @@ def _workflow_problems_and_warnings(
     warnings += judge_cost_cap_warnings(spec)
     warnings += agent_step_cost_cap_warnings(conn, spec, tenant_id)
     if problems:
+        unpublished = unpublished_agents(conn, spec, tenant_id)
+        if unpublished:
+            # A draft may name an agent that is still a draft; a published workflow runs the latest published
+            # version of each agent, so every one needs a version first.
+            raise DefinitionInvalid("; ".join(problems), code=AGENT_NOT_PUBLISHED, agents=unpublished)
         raise DefinitionInvalid("; ".join(problems))
     return warnings
 

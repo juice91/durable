@@ -65,6 +65,7 @@ from eap_schemas.architect import (
     AllowlistModel,
     ArchitectAgentSpec,
     ArchitectWorkflowSpec,
+    as_uuid,
     compile_agent,
     compile_workflow,
     offer_tool,
@@ -127,10 +128,9 @@ def seed_model() -> str | None:
     policy = ModelPolicy.from_env()
     provider_models = []
     for status in model_discovery.all_provider_statuses():
-        if status.status == "ok":
-            names = [m.name for m in status.models if policy.allows(status.id, m.name)]
-            if names:
-                provider_models.append((status.id, names))
+        names = [m.name for m in status.models if policy.allows(status.id, m.name)]  # a catalogue counts too
+        if names:
+            provider_models.append((status.id, names))
     fallback = [item["id"] for item in model_items(policy) if not item["wildcard"]]
     return pick_seed_model(provider_models, fallback)
 
@@ -375,8 +375,7 @@ async def _mcp_tools(request: Request, principal: Principal, servers: dict[str, 
 
 _CREATED_AGENTS = text(
     "SELECT a.slug, a.name, a.id FROM agents a WHERE a.tenant_id = :t AND a.slug IS NOT NULL AND NOT a.archived"
-    " AND NOT a.builtin AND EXISTS (SELECT 1 FROM agent_versions v WHERE v.agent_id = a.id AND v.tenant_id = :t)"
-    " ORDER BY a.slug"
+    " AND NOT a.builtin ORDER BY a.slug"
 )
 
 
@@ -391,7 +390,8 @@ def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[
         if (allowed is None or decl.id in allowed)
         and (offered := offer_tool(
             decl.id, decl.title, decl.description, side_effect=decl.side_effect,
-            input_schema=decl.input_json_schema(), example=decl.example)) is not None
+            input_schema=decl.input_json_schema(), example=decl.example,
+            result_example=decl.result_example, result_schema=decl.result_schema)) is not None
     )
     with engine.connect() as conn:
         servers = {
@@ -422,7 +422,7 @@ def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[
 def options(request: Request, principal: PrincipalDep) -> JSONResponse:
     """The allowlist for the page: `{tools: [{id, title, description, requires_approval}], mcp_servers:
     [{id, name, tools: [name]}], knowledge_bases: [{id, name}], models: [{id, provider, capabilities:
-    {image, pdf, source}}], agents: [{id (slug), name}] (Architect-made, with a published version: what a
+    {image, pdf, source}}], agents: [{id (slug), name}] (Architect-made, draft or published, not archived: what a
     workflow step may run), default_model}`. Tools exclude the platform and host tools; a tool marked
     `requires_approval` is gated when granted (the save writes the approvals entry). MCP tools of a server
     that does not answer are not listed."""
@@ -638,8 +638,13 @@ class _Kind:
     def __init__(self, table: str, versions: str, fk: str, builtin: str) -> None:
         self.table, self.versions, self.fk, self.label = table, versions, fk, "agent" if table == "agents" else "workflow"
         self.by_slug = text(
-            f"SELECT id, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
+            f"SELECT id, slug, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
             " WHERE tenant_id = :t AND slug = :s FOR NO KEY UPDATE"
+        )
+        # `spec.id` may be the UUID of an existing Architect-made definition (it has a slug): that one is updated.
+        self.by_id = text(
+            f"SELECT id, slug, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
+            " WHERE tenant_id = :t AND id = :s AND slug IS NOT NULL FOR NO KEY UPDATE"
         )
         self.latest = text(
             f"SELECT max(version) FROM {versions} WHERE {fk} = :d AND tenant_id = :t"
@@ -682,6 +687,11 @@ def _save(
             row = None
             if expected_version is not None:
                 raise refuse(409, "This definition has no versions yet.", code="version_mismatch", latest_version=None)
+        elif as_uuid(slug) is not None:
+            row = conn.execute(kind.by_id, {"t": tenant_id, "s": as_uuid(slug)}).mappings().first()
+            if row is None:
+                raise refuse(404, f"No {kind.label} made by the Architect has the uuid {slug!r}.", code="not_found")
+            slug = row["slug"]
         else:
             if slug in RESERVED_AGENT_IDS:
                 raise refuse(422, f"{slug!r} is a built-in id; choose another id.", code="reserved_id")
@@ -747,7 +757,8 @@ def save_agent(body: SaveAgentRequest, request: Request, principal: PrincipalDep
 @router.post("/workflows", responses={409: {"description": "version_mismatch"}, 422: {"description": "not allowed"}})
 def save_workflow(body: SaveWorkflowRequest, request: Request, principal: PrincipalDep) -> JSONResponse:
     """The same for a workflow: the restricted format compiles to a full workflow spec (agent steps may
-    run only Architect-made agents with a published version, tool steps only offered tools). 200 `{id,
+    name any Architect-made agent, draft or published; publishing needs each to have a published version, 422
+    `agent_not_published`; tool steps only offered tools). 200 `{id,
     workflow_id, version, published, warnings}`; 422 `agent_not_allowed`, `tool_not_allowed`,
     `unknown_placeholder`, `workflow_invalid`, `reserved_id`; 409 `version_mismatch`."""
     spec = body.spec

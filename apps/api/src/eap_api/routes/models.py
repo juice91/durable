@@ -49,7 +49,7 @@ def model_items(policy: ModelPolicy) -> list[dict[str, Any]]:
         provider, _, name = entry.partition(":")
         if name == "*" and provider in model_discovery.PROVIDER_BY_ID:
             status = model_discovery.provider_status(provider)
-            discovered = [m for m in status.models if policy.allows(provider, m.name)] if status.status == "ok" else []
+            discovered = [m for m in status.models if policy.allows(provider, m.name)]
             if discovered:
                 for entry_found in discovered:
                     found = entry_found.name
@@ -58,7 +58,7 @@ def model_items(policy: ModelPolicy) -> list[dict[str, Any]]:
                     seen.add(f"{provider}:{found}")
                     items.append({
                         "id": f"{provider}:{found}", "provider": provider, "name": found, "wildcard": False,
-                        "source": "discovered", "description": None,
+                        "source": entry_found.source, "description": None,
                         "capabilities": entry_found.capabilities.public(),
                     })
                 continue

@@ -142,7 +142,7 @@ def test_seed_model_demotions_and_unquantised_siblings():
 def test_generic_ids_are_one_list_and_slugify_falls_back_for_names_without_latin_letters():
     from eap_schemas.architect import GENERIC_IDS, is_generic_id
 
-    assert GENERIC_IDS == ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+    assert GENERIC_IDS == ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
     assert all(is_generic_id(g) for g in GENERIC_IDS) and is_generic_id(None) and is_generic_id(" Draft ")
     assert not is_generic_id("weekly-report") and not is_generic_id("agent-7f3a")
     cjk = slugify("球棒（棒球角色帳號）")
@@ -192,3 +192,29 @@ def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_
     assert "collect with http.request" in text and "dry-run" in text
     for provider_specific in ("Bluesky", "LTN", "Yahoo", "MLB"):
         assert provider_specific not in text
+
+
+def test_the_picker_prefers_a_general_chat_model_over_tunes_code_embedding_and_medical_names():
+    from eap_schemas.architect_seed import rank_model_ids
+
+    names = [
+        "Qwen3-VL-Embedding-8B", "medgemma-27b", "Qwen3-Coder-30B", "CausalLM-34b-beta-4bit",
+        "text-embedding-3-small", "Qwen3.6-35B-A3B",
+    ]
+    assert pick_seed_model([("litellm", names)], []) == "litellm:Qwen3.6-35B-A3B"
+    ranked = rank_model_ids([f"litellm:{n}" for n in names])
+    assert ranked[0] == "litellm:Qwen3.6-35B-A3B"
+    for unsuitable in ("Qwen3-VL-Embedding-8B", "medgemma-27b", "Qwen3-Coder-30B", "text-embedding-3-small"):
+        assert ranked.index(f"litellm:{unsuitable}") > ranked.index("litellm:CausalLM-34b-beta-4bit")
+    # a direct Anthropic model still leads, and the newest catalogue names count as a known family
+    both = [("litellm", names), ("anthropic", ["claude-sonnet-5-5", "claude-fable-5-2"])]
+    assert pick_seed_model(both, []).startswith("anthropic:claude-")
+
+
+def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rule_stays_in_the_drafter():
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS, WORKFLOW_DRAFTER_INSTRUCTIONS
+
+    flat = " ".join(ARCHITECT_INSTRUCTIONS.split())
+    assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
+    assert "1 to 8" not in flat and "8 steps" not in flat
+    assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())

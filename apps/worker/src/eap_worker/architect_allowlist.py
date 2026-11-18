@@ -16,10 +16,11 @@ list did not offer.
   Every granted MCP tool is gated.
 - knowledge_bases: the tenant's knowledge bases.
 - models: the worker's model policy (`EAP_ALLOWED_MODELS`) read worker-side, no snapshot table: the
-  concrete `provider:name` entries, `test:*` as the scripted test models, and `litellm:*` as what the
-  gateway's `/models` lists. Capabilities are left empty here (discovery metadata lives in the API).
-- agents: Architect-made agents of the tenant with a published version, which a created workflow's
-  agent steps may run (their row ids stay out of every dump).
+  concrete `provider:name` entries, `test:*` as the scripted test models, `litellm:*` as what the
+  gateway's `/models` lists and `anthropic:*` as Anthropic's catalogue (when ANTHROPIC_API_KEY is set). Capabilities are left empty here (discovery metadata lives in the API).
+- agents: Architect-made agents of the tenant (draft or published, not archived), which a created workflow's
+  agent steps may name (their row ids stay out of every dump). A workflow draft may name a draft agent;
+  publishing the workflow needs every agent it names to have a published version (`agent_not_published`).
 
 Reads are blocking SQL run in a thread; nothing here writes.
 """
@@ -29,8 +30,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import urllib.request
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from sqlalchemy import text
@@ -48,6 +50,7 @@ from eap_schemas.architect import (
     offer_tool,
 )
 from eap_schemas.architect_seed import rank_model_ids
+from eap_schemas.models_policy import ANTHROPIC_CATALOGUE
 
 log = logging.getLogger("eap_worker.architect_allowlist")
 
@@ -71,12 +74,14 @@ def registry_tools(registry: Any, allowed: frozenset[str]) -> tuple[AllowlistToo
             declaration = registry.get_declaration(tool_id)
             title, description = declaration.title, declaration.description
             schema, example = declaration.input_json_schema(), declaration.example
+            result_example, result_schema = declaration.result_example, declaration.result_schema
         except ValueError:  # registered with a string id: metadata only
             title, description = tool_id, str(meta.get("description") or tool_id)
-            schema, example = None, None
+            schema, example, result_example, result_schema = None, None, None, None
         offered = offer_tool(
             tool_id, title, description, side_effect=bool(meta.get("side_effect")), host_only=bool(meta.get("host_only")),
             input_schema=schema, example=example,
+            result_example=result_example, result_schema=result_schema,
         )
         if offered is not None:
             found.append(offered)
@@ -97,8 +102,12 @@ def _gateway_models(base_url: str, api_key: str | None) -> list[str]:
         return []
 
 
-def models_from_settings(settings: Any, gateway: GatewayLister = _gateway_models) -> tuple[AllowlistModel, ...]:
-    """The worker's model policy as allowlist models (see the module docstring)."""
+def models_from_settings(
+    settings: Any, gateway: GatewayLister = _gateway_models, environ: Mapping[str, str] | None = None,
+) -> tuple[AllowlistModel, ...]:
+    """The worker's model policy as allowlist models (see the module docstring). `anthropic:*` lists the
+    Anthropic catalogue when ANTHROPIC_API_KEY is set (the provider has no listing the worker calls)."""
+    env = os.environ if environ is None else environ
     policy = settings.allowed_models
     found: dict[str, AllowlistModel] = {}
 
@@ -113,6 +122,10 @@ def models_from_settings(settings: Any, gateway: GatewayLister = _gateway_models
         elif provider == "test":
             for scripted in SCRIPTED_TEST_MODEL_NAMES:
                 add("test", scripted)
+        elif provider == "anthropic" and (env.get("ANTHROPIC_API_KEY") or "").strip():
+            for listed in ANTHROPIC_CATALOGUE:
+                if policy.allows("anthropic", listed):
+                    add("anthropic", listed)
         elif provider == "litellm" and getattr(settings, "litellm_base_url", None):
             for listed in gateway(settings.litellm_base_url, getattr(settings, "litellm_api_key", None)):
                 if policy.allows("litellm", listed):
@@ -124,8 +137,7 @@ def models_from_settings(settings: Any, gateway: GatewayLister = _gateway_models
 _MCP_SERVERS = text("SELECT name FROM mcp_servers WHERE tenant_id = :t AND enabled ORDER BY name")
 _AGENTS = text(
     "SELECT a.slug, a.name, a.id FROM agents a WHERE a.tenant_id = :t AND a.slug IS NOT NULL "
-    "AND NOT a.archived AND NOT a.builtin "
-    "AND EXISTS (SELECT 1 FROM agent_versions v WHERE v.agent_id = a.id AND v.tenant_id = :t) ORDER BY a.slug"
+    "AND NOT a.archived AND NOT a.builtin ORDER BY a.slug"
 )
 
 
