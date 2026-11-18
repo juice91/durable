@@ -38,6 +38,9 @@ dependencies = [
     "pyyaml==6.0.3",
     # The MCP client Pydantic AI's [mcp] extra uses; the API may not import pydantic_ai itself.
     "fastmcp-slim[client]>=3.3.0,<5",
+    # The MCP control surface (eap_api.mcp_control mounts a FastMCP server at /api/v1/mcp). A runtime
+    # dependency: the image is built with --no-dev, and the API fails at import without it.
+    "fastmcp-slim[server]>=3.3.0,<5",
     # AG-UI 1.0 event models and encoder (D19); imported only inside eap_api.ag_ui.
     "ag-ui-protocol==1.0.0",
 ]
@@ -46,8 +49,6 @@ dependencies = [
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.24",
-    # A local MCP server for the connection-test tests.
-    "fastmcp-slim[server]>=3.3.0,<5",
 ]
 
 [tool.uv.sources]

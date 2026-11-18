@@ -775,7 +775,7 @@ dependencies = [
     { name = "eap-schemas" },
     { name = "eap-secrets" },
     { name = "fastapi" },
-    { name = "fastmcp-slim", extra = ["client"] },
+    { name = "fastmcp-slim", extra = ["client", "server"] },
     { name = "jsonschema" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -787,7 +787,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "fastmcp-slim", extra = ["server"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -809,6 +808,7 @@ requires-dist = [
     { name = "eap-secrets", editable = "packages/secrets" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3.0,<5" },
+    { name = "fastmcp-slim", extras = ["server"], specifier = ">=3.3.0,<5" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3" },
     { name = "pydantic", specifier = ">=2" },
@@ -820,7 +820,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "fastmcp-slim", extras = ["server"], specifier = ">=3.3.0,<5" },
     { name = "pytest", specifier = ">=7" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
 ]
