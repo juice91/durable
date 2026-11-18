@@ -30,7 +30,7 @@ from eap_kb_sources.errors import (
     SOURCE_ADAPTER_NOT_FOUND,
     SourceError,
 )
-from eap_kb_sources.registry import adapter_for
+from eap_kb_sources.registry import adapter_for_provider
 
 log = logging.getLogger("eap_kb_sources.check")
 
@@ -38,7 +38,6 @@ TIMEOUT_ENV = "EAP_KB_SOURCE_CHECK_TIMEOUT_SECONDS"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MIN_TIMEOUT_SECONDS = 0.5
 MAX_TIMEOUT_SECONDS = 30.0
-SOURCE_KIND = "product_catalog"
 
 
 class SecretReader(Protocol):
@@ -94,7 +93,7 @@ async def check_connection(
             if not isinstance(provider, str):
                 raise SourceError(SOURCE_ADAPTER_NOT_FOUND, "the connection names no provider")
             load_providers()
-            adapter = adapter_for(SOURCE_KIND, provider)
+            adapter = adapter_for_provider(provider)
             snapshot = ConnectionSnapshot(
                 tenant_id=tenant_id, connection_id=connection.id, name=connection.name, provider=provider,
                 config=connection.config, secret_refs=connection.credential_refs, base_url=connection.base_url,

@@ -1196,6 +1196,30 @@ class EntityStore:
             )
         return result.rowcount == 1
 
+    def list_documents(self, tenant_id: str, entity_id: str, relationship: str) -> list[EntityDocument]:
+        """Every ledger row of the entity with this relationship, by key."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"SELECT {_cols(EntityDocument)} FROM kb_entity_documents"
+                    " WHERE tenant_id = :t AND entity_id = :e AND relationship = :rel ORDER BY document_key"
+                ),
+                {"t": tenant_id, "e": entity_id, "rel": relationship},
+            ).all()
+        return [_build(EntityDocument, r) for r in rows]
+
+    def mark_document_removed(self, tenant_id: str, entity_id: str, document_key: str) -> bool:
+        """The provider no longer has the document (status `removed`; the hashes stay for history)."""
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE kb_entity_documents SET status = 'removed', error_code = NULL"
+                    " WHERE tenant_id = :t AND entity_id = :e AND document_key = :k"
+                ),
+                {"t": tenant_id, "e": entity_id, "k": document_key},
+            )
+        return result.rowcount == 1
+
     def mark_document_failed(self, tenant_id: str, entity_id: str, document_key: str, error_code: str) -> bool:
         with self._engine.begin() as conn:
             result = conn.execute(

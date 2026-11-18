@@ -83,3 +83,19 @@ def test_no_ti_identifier_in_the_public_layers():
                 if TI_IDENTIFIER.search(scrubbed):
                     hits.append(f"{path.relative_to(ROOT)}:{n}")
     assert hits == [], hits
+
+
+GITHUB_IDENTIFIER = re.compile(r"(?<![.@/\w-])github\.[a-z_]+\.[a-z_]+|[\"'`/]github\.[a-z_]+[\"'`]|/github/")
+
+
+def test_no_github_tool_or_route_in_the_public_layers():
+    """The GitHub adapter is a provider behind `kb.*` / `settings.*` / `workflow.*`: no `github.*` tool id and
+    no `/github` route in the public layers (the host names github.com and api.github.com are not identifiers)."""
+    hits = []
+    for rel in PUBLIC_LAYERS:
+        for path in _files(rel):
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                scrubbed = re.sub(r"(api\.)?github\.com|githubusercontent\.com", "", line)
+                if GITHUB_IDENTIFIER.search(scrubbed):
+                    hits.append(f"{path.relative_to(ROOT)}:{n}")
+    assert hits == [], hits
