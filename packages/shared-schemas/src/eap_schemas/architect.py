@@ -24,8 +24,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from eap_schemas import AgentSpec, ApprovalPolicy, KnowledgeBaseRef, McpToolRef, MemoryConfig, ModelRef, ModelSettings
+from eap_schemas.output import OutputSpec
 from eap_schemas.tools import ARCHITECT_GATED_TOOL_IDS, ungated_always_gated_tools
-from eap_schemas.workflows import AgentStep, ParallelStep, ToolStep, WorkflowSpec
+from eap_schemas.workflows import AgentStep, BranchStep, ParallelStep, ToolStep, WorkflowSpec
 
 AGENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
 STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -87,7 +88,9 @@ def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] 
 
 
 MAX_AGENT_TOOLS = 32
-MAX_STEPS = 8
+MAX_STEPS = 40
+END = "end"  # a step's `next` that ends the workflow
+RETURN_TOOL_ID = "workflow.return"
 MAX_BRANCHES = 4
 _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63})$")
@@ -115,11 +118,14 @@ def is_generic_id(value: str | None) -> bool:
 
 
 def is_denied_tool(tool_id: str) -> bool:
+    if tool_id == "workflow.return":  # the one `workflow.` tool a created workflow may use: it only shapes a result
+        return False
     return any(tool_id == p or tool_id.startswith(p) for p in ARCHITECT_DENIED_TOOL_PREFIXES)
 
 
 def offer_tool(
-    tool_id: str, title: str, description: str, *, side_effect: bool = False, host_only: bool = False
+    tool_id: str, title: str, description: str, *, side_effect: bool = False, host_only: bool = False,
+    input_schema: dict[str, Any] | None = None, example: dict[str, Any] | None = None,
 ) -> "AllowlistTool | None":
     """The allowlist entry for one platform tool, or None when the code denylist or `host_only` keeps it
     from created agents. `requires_approval` is the tool's side effect or its place in GATED_TOOL_IDS.
@@ -130,6 +136,7 @@ def offer_tool(
     return AllowlistTool(
         id=tool_id, title=title, description=description or title,
         requires_approval=bool(side_effect) or tool_id in GATED_TOOL_IDS,
+        input_schema=input_schema, example=example,
     )
 
 
@@ -143,6 +150,9 @@ class AllowlistTool(BaseModel):
     title: str
     description: str
     requires_approval: bool = False
+    # The tool's argument schema and one short example call (arguments), so a model can call it without guessing.
+    input_schema: dict[str, Any] | None = None
+    example: dict[str, Any] | None = None
 
 
 class AllowlistMcpServer(BaseModel):
@@ -231,6 +241,9 @@ class ArchitectAgentSpec(BaseModel):
     knowledge_bases: tuple[str, ...] = Field(default=(), max_length=8)
     memory: bool = False
     model_settings: ArchitectModelSettings | None = None
+    # A JSON Schema object every answer must match (structured output). A workflow step then reads a field as
+    # `steps.<id>.output.<field>`.
+    output_schema: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
@@ -286,20 +299,25 @@ def compile_agent(spec: ArchitectAgentSpec, allowlist: Allowlist) -> AgentSpec:
     gated = [t for t in spec.tools if offered[t].requires_approval]
     gated += [f"{ref.server}/{ref.tool}" for ref in spec.mcp_tools]
     settings = spec.model_settings
-    return AgentSpec(
-        name=spec.name,
-        instructions=spec.instructions,
-        model=ModelRef(provider=provider, name=name),
-        tools=tuple(spec.tools),
-        mcp_tools=tuple(McpToolRef(server=r.server, tool=r.tool) for r in spec.mcp_tools),
-        knowledge_bases=tuple(KnowledgeBaseRef(id=kb) for kb in spec.knowledge_bases),
-        memory=MemoryConfig() if spec.memory else None,
-        model_settings=ModelSettings(
-            temperature=settings.temperature if settings else None,
-            max_tokens=settings.max_tokens if settings else None,
-        ),
-        approvals=ApprovalPolicy(tools=tuple(dict.fromkeys(gated))) if gated else None,
-    )
+    try:
+        return AgentSpec(
+            name=spec.name,
+            instructions=spec.instructions,
+            model=ModelRef(provider=provider, name=name),
+            tools=tuple(spec.tools),
+            mcp_tools=tuple(McpToolRef(server=r.server, tool=r.tool) for r in spec.mcp_tools),
+            knowledge_bases=tuple(KnowledgeBaseRef(id=kb) for kb in spec.knowledge_bases),
+            memory=MemoryConfig() if spec.memory else None,
+            model_settings=ModelSettings(
+                temperature=settings.temperature if settings else None,
+                max_tokens=settings.max_tokens if settings else None,
+            ),
+            approvals=ApprovalPolicy(tools=tuple(dict.fromkeys(gated))) if gated else None,
+            output=OutputSpec(json_schema=spec.output_schema) if spec.output_schema is not None else None,
+        )
+    except ValidationError as exc:
+        problems = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
+        raise ValueError(f"agent_invalid: {problems}") from None
 
 
 # ------------------------------------------------------------------------------- workflow format
@@ -325,6 +343,31 @@ class _Step(BaseModel):
 
 
 class ArchitectAgentStep(_Step):
+    """Run an agent. Give `prompt` (text with `{{input}}`, `{{previous}}`, `{{steps.<id>}}` placeholders) or `input`
+    (an object of literals, `{"$ref": "steps.x.output.y"}` and `{"$template": ...}` values; a single string value
+    is the agent's whole prompt). `next` is a step id or "end"; absent means the following step."""
+
+    kind: Literal["agent"] = "agent"
+    agent: str
+    prompt: str | None = Field(default=None, min_length=1, max_length=4000)
+    input: dict[str, Any] | None = None
+    next: str | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def _agent(cls, value: str) -> str:
+        return _check_slug(value, "agent")  # type: ignore[return-value]
+
+    @model_validator(mode="after")
+    def _one_prompt(self) -> "ArchitectAgentStep":
+        if (self.prompt is None) == (self.input is None):
+            raise ValueError("an agent step needs exactly one of prompt and input")
+        return self
+
+
+class ArchitectBranch(_Step):
+    """A branch of a parallel step: an agent step with a prompt (the only kind a branch may be)."""
+
     kind: Literal["agent"] = "agent"
     agent: str
     prompt: str = Field(min_length=1, max_length=4000)
@@ -335,30 +378,43 @@ class ArchitectAgentStep(_Step):
         return _check_slug(value, "agent")  # type: ignore[return-value]
 
 
-class ArchitectBranch(ArchitectAgentStep):
-    """A branch of a parallel step: an agent step (the only kind a branch may be)."""
-
-
 class ArchitectParallelStep(_Step):
     kind: Literal["parallel"] = "parallel"
     branches: tuple[ArchitectBranch, ...] = Field(min_length=2, max_length=MAX_BRANCHES)
 
 
 class ArchitectToolStep(_Step):
+    """Call a tool. A param value is a literal, a whole-value `{{...}}` placeholder, `{"$ref": "steps.x.output.y"}`
+    or `{"$template": <json with "{{ steps.x.output.y }}" strings>}`. `next` is a step id or "end"; absent means the
+    following step, except for `workflow.return`, which ends the workflow."""
+
     kind: Literal["tool"] = "tool"
     tool: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = Field(default_factory=dict)
+    next: str | None = None
+
+
+class ArchitectBranchStep(_Step):
+    """Go to the first case whose `when` holds, else to `default`. A case is `{"when": <condition>, "next": <step id>}`;
+    a condition is `{"op": "eq|ne|gt|lt|contains|exists", "left": <$ref or literal>, "right": <$ref or literal>}`
+    or `{"all": [...]}`, `{"any": [...]}`, `{"not": <condition>}`."""
+
+    kind: Literal["branch"] = "branch"
+    cases: tuple[dict[str, Any], ...] = Field(min_length=1, max_length=8)
+    default: str = Field(min_length=1, max_length=32)
 
 
 ArchitectStep = Annotated[
-    Union[ArchitectAgentStep, ArchitectParallelStep, ArchitectToolStep], Field(discriminator="kind")
+    Union[ArchitectAgentStep, ArchitectParallelStep, ArchitectToolStep, ArchitectBranchStep], Field(discriminator="kind")
 ]
 
 
 class ArchitectWorkflowSpec(BaseModel):
-    """The workflow format the Architect may write: 1 to 8 steps of kind agent, parallel (2 to 4
-    agent branches) or tool, run in order. No loops, conditions or code steps. Prompts and tool
-    params may use `{{input}}`, `{{previous}}` and `{{steps.<id>}}`."""
+    """The workflow format the Architect may write: 1 to 40 steps of kind agent, tool, branch or parallel (2 to 4
+    agent branches). Steps run in list order unless a step names a `next` (or a branch picks one). No loops or code
+    steps. Without `input_schema` the workflow takes `{input: string}` and prompts and tool params may use
+    `{{input}}`, `{{previous}}` and `{{steps.<id>}}`; with `input_schema` (an object schema) a step reads
+    `input.<field>` through `$ref` / `$template`."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -366,6 +422,8 @@ class ArchitectWorkflowSpec(BaseModel):
     id: str | None = None
     description: str = Field(default="", max_length=300)
     input_description: str = Field(default="The text to work on.", max_length=300)
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
     steps: tuple[ArchitectStep, ...] = Field(min_length=1, max_length=MAX_STEPS)
 
     @field_validator("id")
@@ -430,7 +488,9 @@ def _params_input(params: dict[str, Any], previous: str | None, known: set[str])
         if isinstance(value, str) and "{{" in value:
             match = _PLACEHOLDER.fullmatch(value.strip())
             if match is None:
-                raise ValueError(f"placeholder_not_whole_value: param '{key}' must be exactly one placeholder")
+                raise ValueError(
+                    f"placeholder_not_whole_value: param '{key}' must be exactly one placeholder "
+                    "(or use {\"$template\": \"text {{ steps.x.output.y }}\"} to mix text and references)")
             out[key] = _ref(match.group(1), previous, known)
         else:
             out[key] = value
@@ -452,15 +512,27 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
         return UUID(found.row_id)
 
     top = spec.steps
+    ids = {sid for st in top for sid in ([b.id for b in st.branches] + [st.id] if isinstance(st, ArchitectParallelStep) else [st.id])}
     steps: list[Any] = []
     known: set[str] = set()
     previous: str | None = None  # the previous top-level step that has an output a placeholder may use
+
+    def target(value: str | None, following: str | None, default_end: bool = False) -> str | None:
+        """The compiled `next`: the step named, None for "end", else the following step."""
+        if value is None:
+            return None if default_end else following
+        if value == END:
+            return None
+        if value not in ids:
+            raise ValueError(f"unknown_step: next '{value}' is not a step of this workflow")
+        return value
+
     for i, step in enumerate(top):
         following = top[i + 1].id if i + 1 < len(top) else None
         if isinstance(step, ArchitectAgentStep):
             steps.append(AgentStep(
-                id=step.id, agent_id=agent_uuid(step.agent), next=following,
-                input=_prompt_input(step.prompt, previous, known),
+                id=step.id, agent_id=agent_uuid(step.agent), next=target(step.next, following),
+                input=_prompt_input(step.prompt, previous, known) if step.prompt is not None else step.input,
             ))
             known.add(step.id)
             previous = step.id
@@ -468,11 +540,20 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
             if is_denied_tool(step.tool) or step.tool not in tools:
                 raise ValueError(f"tool_not_allowed: {step.tool}")
             steps.append(ToolStep(
-                id=step.id, tool_id=step.tool, next=following,
+                id=step.id, tool_id=step.tool, next=target(step.next, following, default_end=step.tool == RETURN_TOOL_ID),
                 input=_params_input(step.params, previous, known),
             ))
             known.add(step.id)
             previous = step.id
+        elif isinstance(step, ArchitectBranchStep):
+            cases = tuple(
+                {**c, "next": target(c.get("next"), None)} if isinstance(c, dict) and c.get("next") is not None else c
+                for c in step.cases
+            )
+            if step.default not in ids:
+                raise ValueError(f"unknown_step: default '{step.default}' is not a step of this workflow")
+            steps.append(BranchStep(id=step.id, cases=cases, default=step.default))
+            previous = None
         else:
             if following is None:
                 raise ValueError("parallel_needs_following_step: a parallel step joins at the step after it")
@@ -484,16 +565,18 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
                 ))
             known.update(b.id for b in step.branches)
             previous = None  # the step after a parallel reads {{steps.<branch>}}, not {{previous}}
+    input_schema = spec.input_schema or {
+        "type": "object",
+        "properties": {"input": {"type": "string", "description": spec.input_description}},
+        "required": ["input"],
+        "additionalProperties": False,
+    }
     try:
         return WorkflowSpec(
             name=spec.name,
             description=spec.description,
-            input_schema={
-                "type": "object",
-                "properties": {"input": {"type": "string", "description": spec.input_description}},
-                "required": ["input"],
-                "additionalProperties": False,
-            },
+            input_schema=input_schema,
+            output_schema=spec.output_schema,
             steps=tuple(steps),
             start=top[0].id,
         )
@@ -514,6 +597,7 @@ __all__ = [
     "ArchitectAgentSpec",
     "ArchitectAgentStep",
     "ArchitectBranch",
+    "ArchitectBranchStep",
     "ArchitectMcpTool",
     "ArchitectModelSettings",
     "ArchitectParallelStep",

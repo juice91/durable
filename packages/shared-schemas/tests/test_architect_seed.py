@@ -183,3 +183,12 @@ def test_the_architect_knows_http_request_and_when_to_pick_it():
     assert "http.request" in text and "fetch" in text and "secret:<name>" in text
     assert "waits for the person's approval" in text and "workflow tool step" in text
     assert offer_tool("http.request", "HTTP request", "x", side_effect=True) is not None  # not a denied prefix
+
+
+def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_pattern():
+    text = ARCHITECT_INSTRUCTIONS
+    for tool in ("feed.parse", "json.query", "text.check", "http.request", "list_workflow_step_kinds", "$template", "branch"):
+        assert tool in text, tool
+    assert "collect with http.request" in text and "dry-run" in text
+    for provider_specific in ("Bluesky", "LTN", "Yahoo", "MLB"):
+        assert provider_specific not in text

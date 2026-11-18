@@ -37,6 +37,8 @@ class ToolDeclaration(BaseModel):
     side_effect: bool
     external_idempotent: bool
     input_model: type[BaseModel]
+    # One short example of the arguments, shown to the Architect next to the input schema.
+    example: dict[str, Any] | None = None
 
     @field_validator("id")
     @classmethod
@@ -340,11 +342,19 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "Send one HTTPS request (GET, POST, PUT, PATCH or DELETE) with optional headers, query and a JSON or "
             "text body, and return {status, ok, headers, json or text, elapsed_ms}. A non-2xx status is a result, "
             "not an error. Put a credential as secret:<name>; it is replaced at send time and never shown. "
+            "A JSON answer is returned as json, anything else (RSS, HTML) as text. A transport failure is {error: {code}} "
+            "(http_timeout, http_connect_failed, outbound_blocked, secret_not_found). drop_response_paths removes "
+            "JSON pointers from the answer before it is recorded. query is an object of strings. "
             "Private and metadata addresses are refused and redirects are not followed"
         ),
         side_effect=True,
         external_idempotent=False,
         input_model=HttpRequestInput,
+        example={
+            "method": "POST", "url": "https://api.example.com/v1/items",
+            "headers": {"Authorization": "Bearer secret:api-token"}, "json": {"name": "x"},
+            "drop_response_paths": ["/refreshToken"],
+        },
     ),
     "workflow.return": ToolDeclaration(
         id="workflow.return",
@@ -356,6 +366,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowReturnInput,
+        example={"value": {"ended": "nothing new"}},
     ),
     "feed.parse": ToolDeclaration(
         id="feed.parse",
@@ -372,6 +383,11 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=FeedParseInput,
+        example={
+            "feeds": [{"text": "<the text of an http.request GET>", "label": "Source A", "include_terms": ["keyword"]}],
+            "max_age_hours": 24, "exclude_urls": ["https://example.com/already-posted"], "exclude_terms": ["term to skip"],
+            "max_items": 10,
+        },
     ),
     "json.query": ToolDeclaration(
         id="json.query",
@@ -385,6 +401,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=JsonQueryInput,
+        example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
     ),
     "text.check": ToolDeclaration(
         id="text.check",
@@ -400,6 +417,15 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=TextCheckInput,
+        example={
+            "text": "the draft to check", "source": "the material it must not copy",
+            "rules": {
+                "min_graphemes": 20, "max_graphemes": 300, "forbid_urls": True, "forbid_hashtags": True,
+                "forbid_emoji": True, "forbid_simplified_chinese": True, "forbid_terms": ["a banned word"],
+                "rumour_terms": ["allegedly"], "attribution_terms": ["according to reports"],
+                "min_han_ratio": 0.5, "max_verbatim_run": 15,
+            },
+        },
     ),
 }
 
