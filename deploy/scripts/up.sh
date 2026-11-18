@@ -260,10 +260,37 @@ kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
   --from-env-file="$secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
 
 # Drain before applying a new worker template. See apps/worker/README.md ("drain, keep m1").
-# A run parked on a human approval (a pending_approvals row without decided_at) is not executing and
-# may wait for days; it is left out of the count and recovers across the deploy (its step layout is
-# unchanged while it waits). Counting it blocked every deploy on 2026-11-19 while the API was already
-# scaled to 0, so nobody could decide the approval either.
+# Not counted, because they do not block a deploy:
+#  - A run parked on a human approval (a pending_approvals row without decided_at) is not executing and
+#    may wait for days; its step layout is unchanged while it waits. Counting it blocked every deploy on
+#    2026-11-19 while the API was already scaled to 0, so nobody could decide the approval either.
+#  - Runs whose kind is in PYDANTICOS_DRAIN_EXCLUDE_KINDS (comma list, default "kb_ingest"). Knowledge-base
+#    ingestion is idempotent per document and recovers across a worker restart, and a catalogue sync
+#    queues hundreds of them (868 on 2026-11-19, two at a time), so waiting for them failed the deploy.
+#    A release that changes the eap.kb_ingest* step names must set the variable to "" for that deploy.
+exclude_kinds=${PYDANTICOS_DRAIN_EXCLUDE_KINDS-kb_ingest}
+exclude_list=""
+if [[ -n "${exclude_kinds//[[:space:],]/}" ]]; then
+  IFS=',' read -r -a exclude_kind_names <<<"$exclude_kinds"
+  for kind_name in "${exclude_kind_names[@]}"; do
+    kind_name=${kind_name//[[:space:]]/}
+    [[ -n "$kind_name" ]] || continue
+    [[ "$kind_name" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+      printf 'PYDANTICOS_DRAIN_EXCLUDE_KINDS must be a comma list of run kinds (letters, digits, _ . -); got: %s\n' "$kind_name" >&2
+      exit 1
+    }
+    exclude_list+="${exclude_list:+, }'${kind_name}'"
+  done
+fi
+# Two counts in one row: runs that must drain, and runs of an excluded kind that carry on.
+drain_sql="SELECT count(*) FILTER (WHERE true"
+excluded_sql="false"
+if [[ -n "$exclude_list" ]]; then
+  drain_sql+=" AND COALESCE(r.kind, '') NOT IN (${exclude_list})"
+  excluded_sql="COALESCE(r.kind, '') IN (${exclude_list})"
+fi
+drain_sql+="), count(*) FILTER (WHERE ${excluded_sql}) FROM public.runs r WHERE r.status IN ('queued', 'running') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"
+
 if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
@@ -271,6 +298,7 @@ fi
 # Registered here, in the main shell: query_active_runs runs inside $(...), where a registration
 # would be lost and the file would outlive the script.
 make_tmp runs-query runs_err_file
+# Prints "<active>|<excluded>". The SQL is a positional argument of the remote sh, so it needs no quoting.
 query_active_runs() {
   local output err rc
   err=$runs_err_file
@@ -278,24 +306,24 @@ query_active_runs() {
   # Single quotes are deliberate: the postgres container expands its own password.
   # shellcheck disable=SC2016
   output=$(kubectl_for_profile -n "$NAMESPACE" exec postgres-0 -- \
-    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "SELECT count(*) FROM public.runs r WHERE r.status IN ('"'"'queued'"'"', '"'"'running'"'"') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"' \
+    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "$1"' sh "$drain_sql" \
     2>"$err")
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
     if grep -Eqi 'does not exist|postgres-0.*not found|NotFound' "$err"; then
-      printf '0\n'
+      printf '0|0\n'
       return 0
     fi
     printf 'Could not query queued and running runs.\n' >&2
     cat "$err" >&2
     return 1
   fi
-  output=$(printf '%s' "$output" | tr -cd '0-9')
-  if [[ -z "$output" ]]; then
-    printf '0\n'
-  else
+  output=$(printf '%s' "$output" | tr -cd '0-9|')
+  if [[ "$output" =~ ^[0-9]+\|[0-9]+$ ]]; then
     printf '%s\n' "$output"
+  else
+    printf '0|0\n'
   fi
 }
 
@@ -303,8 +331,15 @@ if kubectl_for_profile -n "$NAMESPACE" get pod/postgres-0 >/dev/null 2>&1; then
   kubectl_for_profile -n "$NAMESPACE" rollout status statefulset/postgres --timeout=5m
   drain_timeout=${PYDANTICOS_DRAIN_TIMEOUT:-300}
   drain_started=$SECONDS
+  excluded_reported=0
   while true; do
-    active_runs=$(query_active_runs)
+    counts=$(query_active_runs)
+    active_runs=${counts%%|*}
+    excluded_runs=${counts#*|}
+    if ((! excluded_reported && excluded_runs > 0)); then
+      printf '%s %s runs continue across the deploy.\n' "$excluded_runs" "${exclude_list//\'/}"
+      excluded_reported=1
+    fi
     if [[ "$active_runs" == "0" ]]; then
       break
     fi

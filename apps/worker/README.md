@@ -69,6 +69,13 @@ must always share it.
 **Recommended default: drain, keep `m1`.** Stop the API (or stop new runs), let the queue empty,
 migrate, deploy the workers, then the API.
 
+**Ingestion runs do not need the drain.** `deploy/scripts/up.sh` leaves `kb_ingest` runs out of the
+drain count (`PYDANTICOS_DRAIN_EXCLUDE_KINDS`, default `kb_ingest`): they are idempotent per document,
+their steps are unchanged across releases, and they recover on the restarted worker. A catalogue sync
+queues hundreds of them, so waiting for them would block every deploy. When a release changes the
+`eap.kb_ingest*` step names or order, set `PYDANTICOS_DRAIN_EXCLUDE_KINDS=""` for that deploy so they
+drain like every other run.
+
 Bumping it (e.g. to `p0`) avoids the drain only if the old pool keeps running untouched. Start the
 new workers and API with the new value and leave the old `m1` workers up until their runs finish
 (including workflow runs waiting on an approval), then retire them. This breaks as soon as an old
