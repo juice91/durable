@@ -175,16 +175,16 @@ def test_deploy_secrets_come_from_1password_in_the_deploy_step_only():
 
 def test_ci_heavy_postgres_is_loopback_and_always_removed():
     text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
-    assert 'docker --context colima-pydanticos rm -f "$CI_PG_NAME"' in text
+    assert 'docker --context colima-pydanticos rm -fv "$CI_PG_NAME"' in text  # -v: the anonymous data volume goes too
     assert "-p '127.0.0.1::5432'" in text  # loopback only, free port chosen by Docker
     assert "kubectl" not in text
     assert "-n pydanticos" not in text
     steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
     start = next(step for step in steps if step.get("name") == "Start isolated CI Postgres")
     remove = next(step for step in steps if step.get("name") == "Remove isolated CI Postgres")
-    assert 'rm -f "$CI_PG_NAME"' in start["run"]
+    assert 'rm -fv "$CI_PG_NAME"' in start["run"]
     assert remove["if"] == "always()"
-    assert 'rm -f "$CI_PG_NAME"' in remove["run"]
+    assert 'rm -fv "$CI_PG_NAME"' in remove["run"]
 
 
 def test_nightly_skip_requires_schedule_and_the_same_sha():
