@@ -126,7 +126,9 @@ do_install() {
   hm upgrade --install "$OPERATOR_RELEASE" "$OPERATOR_CHART" --version "$TOOLHIVE_VERSION" \
     --namespace "$TOOLHIVE_NAMESPACE" --create-namespace --wait --timeout 5m
   kc wait --for=condition=Established "crd/${PROBE_CRD}" --timeout=2m
-  kc -n "$TOOLHIVE_NAMESPACE" wait --for=condition=Ready pod \
+  # rollout status, not `wait pod`: a pod evicted or completed earlier matches the label but never
+  # becomes Ready, and the deploy would time out on it (deploy-host, 2026-11-19 after disk pressure).
+  kc -n "$TOOLHIVE_NAMESPACE" rollout status deployment \
     -l app.kubernetes.io/name=toolhive-operator --timeout=5m
   printf 'ToolHive operator %s is ready on %s.\n' "$TOOLHIVE_VERSION" "$context"
 }
