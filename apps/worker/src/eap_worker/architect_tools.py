@@ -63,6 +63,7 @@ from eap_schemas.architect import (
     ArchitectWorkflowSpec,
     compile_agent,
     compile_workflow,
+    is_generic_id,
     slugify,
 )
 
@@ -328,7 +329,7 @@ async def save_agent(
         code, message = _code(exc)
         return error(code, message)
     result = await asyncio.to_thread(
-        _save, engine, tenant_id, AGENTS, slug=spec.id, derived_from=spec.name, name=compiled.name,
+        _save, engine, tenant_id, AGENTS, slug=None if is_generic_id(spec.id) else spec.id, derived_from=spec.name, name=compiled.name,
         spec_json=compiled.model_dump(mode="json"), confirm=confirm,
     )
     if "error" in result or result.get("status") != "draft":
@@ -354,7 +355,7 @@ async def save_workflow(
         code, message = _code(exc)
         return error(code, message)
     result = await asyncio.to_thread(
-        _save, engine, tenant_id, WORKFLOWS, slug=spec.id, derived_from=spec.name, name=compiled.name,
+        _save, engine, tenant_id, WORKFLOWS, slug=None if is_generic_id(spec.id) else spec.id, derived_from=spec.name, name=compiled.name,
         spec_json=compiled.model_dump(mode="json"), confirm=confirm,
     )
     if "error" in result or result.get("status") != "draft":

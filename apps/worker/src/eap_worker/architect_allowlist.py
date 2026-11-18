@@ -47,6 +47,7 @@ from eap_schemas.architect import (
     AllowlistTool,
     offer_tool,
 )
+from eap_schemas.architect_seed import rank_model_ids
 
 log = logging.getLogger("eap_worker.architect_allowlist")
 
@@ -113,7 +114,8 @@ def models_from_settings(settings: Any, gateway: GatewayLister = _gateway_models
             for listed in gateway(settings.litellm_base_url, getattr(settings, "litellm_api_key", None)):
                 if policy.allows("litellm", listed):
                     add("litellm", listed)
-    return tuple(found.values())
+    # Best first (the API's seed ranking), so the first model, `default_model`, is the ranked pick.
+    return tuple(found[model_id] for model_id in rank_model_ids(list(found)))
 
 
 _MCP_SERVERS = text("SELECT name FROM mcp_servers WHERE tenant_id = :t AND enabled ORDER BY name")
@@ -175,7 +177,8 @@ async def approved_for_tenant(
     gateway_lister: GatewayLister | None = None,
 ) -> Allowlist:
     """The tenant's allowlist. The worker's registry, settings and allowed tools are the defaults;
-    each can be passed in (tests). `default_model` is the first model of the list."""
+    each can be passed in (tests). Models are listed best first (`rank_model_ids`);
+    `default_model` is the first."""
     if registry is None or settings is None or allowed_tools is None:
         from eap_worker.runtime import get_runtime
 

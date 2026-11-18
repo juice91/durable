@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from types import SimpleNamespace
 
@@ -319,3 +320,48 @@ def test_a_string_spec_that_is_not_a_valid_object_is_an_error_object(engine, ten
     result = run(tool(engine, tenant, bad, allowlist=allowlist()))
     assert result["error"]["code"] == "invalid_spec" and result["error"]["message"], result
     assert "ValidationError" not in result["error"]["message"]
+
+
+# ------------------------------------------------- ranked default model, ids from the name
+
+
+def test_the_allowlist_lists_models_best_first_and_the_default_is_the_ranked_pick():
+    from eap_worker.architect_allowlist import models_from_settings
+
+    settings = SimpleNamespace(
+        allowed_models=ModelPolicy.parse("litellm:*"), litellm_base_url="http://gw", litellm_api_key=None)
+    listed = ["CausalLM-34b-beta-4bit", "bge-reranker", "qwen3.8-thinking", "qwen3.8"]
+    models = models_from_settings(settings, gateway=lambda _url, _key: listed)
+    assert [m.id for m in models][0] == "litellm:qwen3.8"
+    assert [m.id for m in models][-1] == "litellm:bge-reranker"
+
+
+def test_save_agent_without_a_model_uses_the_ranked_model_not_the_first_listed(engine, tenant):
+    models = tuple(AllowlistModel(id=f"litellm:{n}", provider="litellm")
+                   for n in ("CausalLM-34b-beta-4bit", "qwen3.8-thinking", "qwen3.8"))
+    result = run(save_agent(engine, tenant, agent_spec(id="bat"), allowlist=allowlist(models=models, default_model=models[0].id)))
+    assert result["status"] == "draft", result
+    assert agents_rows(engine, tenant)[0]["draft_spec"]["model"] == {"provider": "litellm", "name": "qwen3.8"}
+
+
+@pytest.mark.parametrize("placeholder", ["definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test"])
+def test_a_placeholder_id_is_replaced_by_one_from_the_name(engine, tenant, placeholder):
+    result = run(save_agent(engine, tenant, agent_spec(name="Weekly Reporter", id=placeholder), allowlist=allowlist()))
+    assert result["id"] == "weekly-reporter", result
+    missing = run(save_agent(engine, tenant, agent_spec(name="Weekly Reporter"), allowlist=allowlist()))
+    assert missing["id"] == "weekly-reporter"  # the same draft again, not a second agent
+    assert [r["slug"] for r in agents_rows(engine, tenant)] == ["weekly-reporter"]
+
+
+def test_a_cjk_name_gets_a_short_hashed_id(engine, tenant):
+    spec = agent_spec(name="球棒（棒球角色帳號）", id="definition")
+    first = run(save_agent(engine, tenant, spec, allowlist=allowlist()))
+    again = run(save_agent(engine, tenant, spec, allowlist=allowlist()))
+    assert re.fullmatch(r"agent-[0-9a-f]{4}", first["id"]), first
+    assert again["id"] == first["id"] and len(agents_rows(engine, tenant)) == 1
+
+
+def test_a_workflow_with_a_placeholder_id_gets_its_id_from_the_name(engine, tenant):
+    agents = allowlist(agents=(AllowlistAgent(id="writer", name="Writer", row_id=str(uuid.uuid4())),))
+    spec = {"name": "Daily Brief", "id": "workflow", "steps": [{"kind": "agent", "id": "w", "agent": "writer", "prompt": "{{input}}"}]}
+    assert run(save_workflow(engine, tenant, spec, allowlist=agents))["id"] == "daily-brief"
