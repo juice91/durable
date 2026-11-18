@@ -25,26 +25,19 @@ in events, run rows, DBOS outputs, API responses, spans or logs; the connection'
 the connection's `allowed_hosts`) is enforced on every request and every redirect hop; documents must be PDFs; a replayed step
 changes nothing; every table and route is tenant-scoped, and another tenant gets `404`.
 
-## 1. Bootstrap the tenant secrets
+## 1. Credentials enter through the platform, never through an API call
 
-The values go from 1Password into `PUT /api/v1/secrets/{name}` without touching argv, a log or a temp file. Open the
-tunnel first (`deploy/scripts/tunnel.sh`, API on `127.0.0.1:18000`), then:
+A data source is not a feature: its credentials are entered where every other tenant secret is entered, and the
+framework names no provider secret. Three surfaces, all backed by the same encrypted tenant secret store:
 
-```sh
-API=http://127.0.0.1:18000/api/v1
-AUTH="Authorization: Bearer dev:studio:operator"   # the dev principal of the studio tenant
+- **Studio → Settings → Connections**: the connection sheet's Client ID / Client secret pickers choose a stored secret by
+  name or create one inline through a masked input (the value is sent once, stored encrypted, never shown again).
+- **Studio → Settings → Secrets**: the same masked input, for secrets created ahead of time.
+- **An agent with `secrets.request`**: the tool pauses on an approval card with a masked input; the person types the value,
+  the agent only ever sees the reference `secret:<name>` (this is how an onboarding agent or the Architect connects a source).
 
-put_secret() {  # put_secret <secret name> <op:// reference>: the value is piped, never printed
-  op read "$2" | python3 -c 'import json, sys; print(json.dumps({"value": sys.stdin.read().rstrip("\n")}))' \
-    | curl -sf -X PUT "$API/secrets/$1" -H "$AUTH" -H 'Content-Type: application/json' --data-binary @-
-}
-put_secret <client-id-secret-name>     op://<vault>/<item>/<client id field>
-put_secret <client-secret-secret-name> op://<vault>/<item>/<client secret field>
-curl -sf "$API/secrets" -H "$AUTH" | jq '.[].name'   # names only
-```
-
-The secret names are free (a name matches `^[a-z][a-z0-9_.-]{0,63}$`); the connection refers to them. In Studio the same is
-Settings → Secrets, then pick them in Settings → Connections.
+`PUT /api/v1/secrets/{name}` is the storage behind these surfaces, not an operator entry point: do not script provider
+credentials into it from a password manager or a shell.
 
 ## 2. Create the connection and check it
 

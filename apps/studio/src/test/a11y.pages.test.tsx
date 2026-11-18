@@ -323,7 +323,7 @@ const PAGES: PageCase[] = [
   { name: "experiments", path: "/experiments", load: () => import("@/app/experiments/page"), h1: "Experiments", shows: "#experiment-row" },
   { name: "providers", path: "/settings/providers", load: () => import("@/app/settings/providers/page"), h1: "Providers", shows: "LiteLLM gateway" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
-  { name: "settings connections", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "ti-prod" },
+  { name: "settings connections", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "catalogue-prod" },
 ];
 
 describe("PAGES covers every page route in app/", () => {
