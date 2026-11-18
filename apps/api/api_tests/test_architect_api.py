@@ -167,6 +167,92 @@ def test_seed_adds_missing_gated_approvals(api):
     assert set(repaired["approvals"]["tools"]) == set(ARCHITECT_GATED_TOOL_IDS)
 
 
+def _age_architect(app, tenant: str, agent_id: str, *, extra_tool: str | None = None, edit: bool = False):
+    """Make the stored Architect look like one seeded before PR 45 (only the 15 architect.* tools), published;
+    then optionally leave unpublished edits on the draft."""
+    from eap_run_store import definitions
+
+    spec = agent_row(app, tenant, "architect")["draft_spec"]
+    spec["tools"] = [t for t in spec["tools"] if not t.startswith("platform.")]
+    assert len(spec["tools"]) == 15
+
+    def put(conn, value):
+        conn.execute(
+            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb) WHERE id = :i"), {"s": json.dumps(value), "i": agent_id}
+        )
+
+    with app.state.database_engine.begin() as conn:
+        put(conn, spec)
+        definitions.publish_agent(conn, tenant, agent_id, created_by="alice")
+        if extra_tool:
+            spec = {**spec, "tools": [*spec["tools"], extra_tool]}
+            put(conn, spec)
+            definitions.publish_agent(conn, tenant, agent_id, created_by="alice")
+        if edit:
+            put(conn, {**spec, "instructions": "My own rules."})
+
+
+def test_seed_adds_new_builtin_tools_to_a_clean_draft_and_publishes(api):
+    from eap_schemas.architect import ARCHITECT_PLATFORM_TOOL_IDS
+
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    body = seed(client, h)
+    _age_architect(app, tenant, body["architect_agent_id"])
+    before = len(_versions(app, tenant, "architect"))
+    seed(client, h)
+    spec = agent_row(app, tenant, "architect")["draft_spec"]
+    assert len(spec["tools"]) == 23 and set(ARCHITECT_PLATFORM_TOOL_IDS) <= set(spec["tools"])
+    assert len(_versions(app, tenant, "architect")) == before + 1
+    seed(client, h)  # idempotent: nothing changes
+    assert agent_row(app, tenant, "architect")["draft_spec"] == spec
+    assert len(_versions(app, tenant, "architect")) == before + 1
+
+
+def test_seed_with_unpublished_edits_repairs_the_draft_only(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    body = seed(client, h)
+    _age_architect(app, tenant, body["architect_agent_id"], edit=True)
+    before = len(_versions(app, tenant, "architect"))
+    seed(client, h)
+    spec = agent_row(app, tenant, "architect")["draft_spec"]
+    assert len(spec["tools"]) == 23 and spec["instructions"] == "My own rules."
+    assert len(_versions(app, tenant, "architect")) == before
+
+
+def test_seed_keeps_a_hand_added_tool_and_never_removes(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    body = seed(client, h)
+    _age_architect(app, tenant, body["architect_agent_id"], extra_tool="clock.now")
+    seed(client, h)
+    tools = agent_row(app, tenant, "architect")["draft_spec"]["tools"]
+    assert "clock.now" in tools and len(tools) == 24
+
+
+def test_seed_leaves_the_drafters_alone(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    before = {s: agent_row(app, tenant, s)["draft_spec"] for s in ("architect-drafter", "architect-workflow-drafter")}
+    versions = {s: _versions(app, tenant, s) for s in before}
+    seed(client, h)
+    assert {s: agent_row(app, tenant, s)["draft_spec"] for s in before} == before
+    assert {s: _versions(app, tenant, s) for s in before} == versions
+
+
+def test_startup_reconcile_reaches_existing_architects(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    body = seed(client, h)
+    _age_architect(app, tenant, body["architect_agent_id"])
+    from eap_api.routes.architect import reconcile_all_seeds
+
+    assert reconcile_all_seeds(app.state.database_engine) >= 1
+    assert len(agent_row(app, tenant, "architect")["draft_spec"]["tools"]) == 23
+
+
 def test_seed_without_a_model_returns_choose_model(api, monkeypatch):
     client, app, _, tenant_of = api
     tenant, h = tenant_of()
