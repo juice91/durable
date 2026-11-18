@@ -193,9 +193,26 @@ def test_the_dev_bearer_connects_in_dev_mode_and_a_revoked_key_stops(world):
 def test_the_manage_scope_is_a_key_scope_and_unknown_scopes_still_fail(world):
     _, h = world.tenant_of()
     with world.rest() as c:
-        ok = c.post("/api-keys", json={"name": "m", "scopes": ["agui:run", "manage"]}, headers=h)
-        assert ok.status_code == 201 and ok.json()["scopes"] == ["agui:run", "manage"]
+        ok = c.post("/api-keys", json={"name": "m", "scopes": ["agui:run", "mcp", "manage"]}, headers=h)
+        assert ok.status_code == 201 and ok.json()["scopes"] == ["agui:run", "mcp", "manage"]
         assert c.post("/api-keys", json={"name": "m", "scopes": ["admin"]}, headers=h).status_code == 422
+
+
+def test_a_run_only_key_is_refused_at_the_endpoint_and_scopes_stack(world):
+    import httpx2 as httpx
+
+    _, h = world.tenant_of()
+    run_only = world.make_key(h, scopes=["agui:run"])
+    r = httpx.post(world.url, json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers={"Authorization": f"Bearer {run_only}"})
+    assert r.status_code == 403 and r.json()["error"] == {"code": "forbidden", "message": "API key lacks the mcp scope"}
+    assert run_only not in r.text
+    agent_id = world.publish_agent(h)
+    reader = world.make_key(h, scopes=["mcp"])
+    assert [a["id"] for a in world.call(reader, "agent.list").data["items"]] == [agent_id]
+    assert world.call(reader, "agent.publish", {"agent_id": agent_id}).error["code"] == "scope_required"
+    manager = world.make_key(h, scopes=["manage"])  # manage implies mcp: reads and mutates
+    assert len(world.call(manager, "agent.list").data["items"]) == 1
+    assert world.call(manager, "agent.publish", {"agent_id": agent_id}).error["code"] == "conflict"  # reached the service
 
 
 def test_a_manage_only_key_can_read_but_cannot_run_over_ag_ui(world):

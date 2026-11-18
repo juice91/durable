@@ -16,13 +16,14 @@ The design and its reasons are in
 - **Credential:** `Authorization: Bearer <key>`, a tenant API key (`pos_<id>_<secret>`). Every call
   authenticates again, so a revoked key stops at once. The dev bearer (`dev:<tenant>:<user>`)
   works in `EAP_AUTH_MODE=dev` only. The tenant always comes from the key.
-- **Scopes:** every key of the tenant may call the **read** tools. A key created with **Allow
-  changes** (scope `manage`) may also call the **mutation** tools; without it a mutation answers
-  `{error: {code: "scope_required"}}`. A key keeps its `agent_ids` / `workflow_ids` allowlists
-  (other agents and workflows look like unknown ones, and the key cannot create new ones) and its
-  `allowed_origins`.
+- **Scopes:** a key needs the `mcp` scope to connect at all: without it (an AG-UI frontend key with
+  only `agui:run`) the endpoint answers 403 `forbidden` before any tool runs. `mcp` allows the
+  **read** tools. `manage` implies `mcp` and also allows the **mutation** tools; with `mcp` alone a
+  mutation answers `{error: {code: "scope_required"}}`. A key keeps its `agent_ids` / `workflow_ids`
+  allowlists (other agents and workflows look like unknown ones, and the key cannot create new ones)
+  and its `allowed_origins`.
 - Keys are created in Studio (Settings → API keys) or with `POST /api/v1/api-keys`
-  (`{"name": "...", "scopes": ["agui:run", "manage"]}`).
+  (`{"name": "...", "scopes": ["mcp"]}` to read, `["manage"]` to also change).
 
 ## Connect a client
 
@@ -47,7 +48,7 @@ to call `agent.list`, or `agent.chat` with the Architect (below).
 
 ### Manual smoke test (Claude Code)
 
-1. Create a key with Allow changes in Settings → API keys and export it as `PYDANTICOS_API_KEY`.
+1. Create a key with Connect over MCP (read), or Allow changes for mutations, in Settings → API keys and export it as `PYDANTICOS_API_KEY`.
 2. Register the server as above, then `claude mcp list` shows `pydanticos` connected.
 3. In Claude Code: "list my PydanticOS agents" calls `agent.list`.
 4. "Ask the Architect to draft a support-triage agent" calls `agent.list` to find the Architect and
@@ -61,7 +62,7 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 `next_offset`). A refusal is the platform's stable error object `{error: {code, message}}` with MCP
 `isError`, never a traceback.
 
-### Read (any key)
+### Read (`mcp` or `manage`)
 
 | Tool | Input | Returns |
 | --- | --- | --- |

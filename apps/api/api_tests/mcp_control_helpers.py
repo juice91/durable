@@ -77,7 +77,7 @@ class World:
 
     def make_key(self, headers: dict[str, str], *, scopes: list[str] | None = None, **body: Any) -> str:
         with self.rest() as c:
-            r = c.post("/api-keys", json={"name": "mcp", "scopes": scopes or ["agui:run"], **body}, headers=headers)
+            r = c.post("/api-keys", json={"name": "mcp", "scopes": scopes or ["mcp"], **body}, headers=headers)
         assert r.status_code == 201, r.text
         return r.json()["key"]
 

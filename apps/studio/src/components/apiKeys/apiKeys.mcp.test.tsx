@@ -87,11 +87,16 @@ describe("API keys and MCP", () => {
   it("sends the manage scope only when the toggle is on", async () => {
     render(<ApiKeysSection />);
     await screen.findAllByTestId("api-key-row");
-    for (const [label, expected] of [["Read only", undefined], ["Operator", ["agui:run", "manage"]]] as const) {
+    for (const [label, expected] of [["Run only", undefined], ["Reader", ["agui:run", "mcp"]], ["Operator", ["agui:run", "mcp", "manage"]]] as const) {
       fireEvent.click(screen.getByTestId("api-key-create"));
       const dialog = await screen.findByTestId("api-key-create-dialog");
       fireEvent.change(within(dialog).getByTestId("api-key-name"), { target: { value: label } });
-      if (expected) fireEvent.click(within(dialog).getByTestId("api-key-manage-scope"));
+      if (label === "Reader") fireEvent.click(within(dialog).getByTestId("api-key-mcp-scope"));
+      if (label === "Operator") {
+        fireEvent.click(within(dialog).getByTestId("api-key-manage-scope"));
+        expect(within(dialog).getByTestId("api-key-mcp-scope")).toBeChecked();
+        expect(within(dialog).getByTestId("api-key-mcp-scope")).toBeDisabled();
+      }
       fireEvent.click(within(dialog).getByTestId("api-key-create-submit"));
       fireEvent.click(await screen.findByTestId("api-key-done"));
       await waitFor(() => expect(screen.queryByTestId("api-key-create-dialog")).toBeNull());

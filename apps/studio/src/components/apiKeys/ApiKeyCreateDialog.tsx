@@ -104,6 +104,7 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
   const [workflowIds, setWorkflowIds] = useState<string[]>([]);
   const [origins, setOrigins] = useState("");
   const [expires, setExpires] = useState("");
+  const [mcp, setMcp] = useState(false);
   const [manage, setManage] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +126,7 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
       setError("The expiry is not a valid date and time.");
       return;
     }
-    const built = buildApiKeyCreate({ name, access, agentIds, workflowIds, origins, expiresAt, manage });
+    const built = buildApiKeyCreate({ name, access, agentIds, workflowIds, origins, expiresAt, mcp: mcp || manage, manage });
     if (!built.ok) {
       setError(built.message);
       return;
@@ -247,15 +248,23 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
                 />
                 <p id={`${id}-expires-hint`} className={hintClass}>Optional, in your local time.</p>
               </div>
-              <div className="space-y-1">
-                <label className="flex items-center gap-2 text-label font-medium text-foreground">
+              <fieldset className="min-w-0 space-y-2">
+                <legend className={labelClass}>MCP access</legend>
+                <label className="flex items-center gap-2 text-label text-foreground">
+                  <input type="checkbox" checked={mcp || manage} disabled={manage} onChange={(event) => setMcp(event.target.checked)} data-testid="api-key-mcp-scope" aria-describedby={`${id}-mcp-hint`} />
+                  Connect over MCP (read)
+                </label>
+                <p id={`${id}-mcp-hint`} className={hintClass}>
+                  Lets an MCP client using this key read agents, workflows, runs and knowledge bases. A key without it is refused at the MCP endpoint.
+                </p>
+                <label className="flex items-center gap-2 text-label text-foreground">
                   <input type="checkbox" checked={manage} onChange={(event) => setManage(event.target.checked)} data-testid="api-key-manage-scope" aria-describedby={`${id}-manage-hint`} />
                   Allow changes (MCP)
                 </label>
                 <p id={`${id}-manage-hint`} className={hintClass}>
-                  Lets an MCP client using this key publish and archive agents and workflows, start and cancel runs, sync knowledge sources and decide approvals. Without it the key can only read.
+                  Also lets it publish and archive agents and workflows, start and cancel runs, sync knowledge sources and decide approvals. Includes read access.
                 </p>
-              </div>
+              </fieldset>
               {error ? (
                 <p role="alert" className={alertClass} data-testid="api-key-create-error">
                   {error}

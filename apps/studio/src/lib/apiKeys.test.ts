@@ -13,6 +13,7 @@ import {
   curlSnippet,
   describeAccess,
   hasManageScope,
+  hasMcpScope,
   mcpEndpoint,
   parseOrigins,
   withoutSecret,
@@ -171,7 +172,14 @@ describe("MCP control endpoint", () => {
   it("adds the manage scope only when asked", () => {
     const base = { name: "k", access: "all" as const, agentIds: [], workflowIds: [], origins: "", expiresAt: null };
     expect(buildApiKeyCreate(base)).toEqual({ ok: true, body: { name: "k" } });
-    expect(buildApiKeyCreate({ ...base, manage: true })).toEqual({ ok: true, body: { name: "k", scopes: ["agui:run", "manage"] } });
+    expect(buildApiKeyCreate({ ...base, manage: true })).toEqual({ ok: true, body: { name: "k", scopes: ["agui:run", "mcp", "manage"] } });
+  });
+
+  it("adds mcp alone for a read connection", () => {
+    const base = { name: "k", access: "all" as const, agentIds: [], workflowIds: [], origins: "", expiresAt: null };
+    expect(buildApiKeyCreate({ ...base, mcp: true })).toEqual({ ok: true, body: { name: "k", scopes: ["agui:run", "mcp"] } });
+    expect(hasMcpScope({ scopes: ["agui:run"] })).toBe(false);
+    expect(hasMcpScope({ scopes: ["manage"] })).toBe(true);
   });
 
   it("tells a manage key from a read key", () => {

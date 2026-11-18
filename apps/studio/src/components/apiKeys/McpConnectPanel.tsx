@@ -7,7 +7,7 @@ import { CopyField } from "./CopyField";
 /**
  * "Connect an MCP client": the endpoint and the connect snippets for Claude Code and Codex. The
  * snippets name the key by an environment variable, never by value, so nothing here is secret.
- * Every key of the tenant may read through MCP; a key with the Manage scope may also change things.
+ * A key needs the MCP read scope to connect; the Manage scope adds changes.
  */
 export function McpConnectPanel() {
   return (
@@ -17,7 +17,7 @@ export function McpConnectPanel() {
           Connect an MCP client
         </h3>
         <p className="text-label text-muted-foreground">
-          An MCP client (Claude Code, Codex, another agent) can manage this workspace with a key: every key can read agents, workflows, runs and knowledge bases;
+          An MCP client (Claude Code, Codex, another agent) can manage this workspace with a key: a key created with <span className="font-medium text-foreground">Connect over MCP</span> can read agents, workflows, runs and knowledge bases;
           a key created with <span className="font-medium text-foreground">Allow changes</span> can also publish, run, sync and decide approvals. Secrets are never
           exposed.
         </p>

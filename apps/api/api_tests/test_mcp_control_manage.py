@@ -51,7 +51,7 @@ def test_every_mutation_tool_is_listed_and_no_secret_tool_exists(world):
 
 def test_every_mutation_is_refused_without_the_manage_scope(world):
     _, h = world.tenant_of()
-    read_key = world.make_key(h)  # agui:run only
+    read_key = world.make_key(h)  # mcp (read) only
     agent_id = world.publish_agent(h)
     some = str(uuid.uuid4())
     calls = {

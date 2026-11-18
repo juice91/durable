@@ -1,7 +1,7 @@
 """Who calls the MCP control endpoint, per request.
 
-`Authorization: Bearer pos_<id>_<secret>` is a tenant API key of any scope: read tools need only that,
-mutation tools need the `manage` scope (checked per call in `eap_api.mcp_control.server`). The dev
+`Authorization: Bearer pos_<id>_<secret>` is a tenant API key with the `mcp` scope (read tools) or `manage`
+(which implies it; mutation tools). A key with neither, such as an AG-UI frontend key, is refused with 403 (checked per call in `eap_api.mcp_control.server`). The dev
 bearer works in EAP_AUTH_MODE=dev only. A key keeps its `agent_ids` / `workflow_ids` allowlists and its
 `allowed_origins`; every request re-reads the key, so a revoked key stops at once. Nothing here logs a key.
 """
@@ -25,6 +25,8 @@ from eap_api.auth import (
 from fastapi import HTTPException
 
 MANAGE_SCOPE = "manage"
+MCP_SCOPE = "mcp"
+MISSING_MCP_SCOPE = "API key lacks the mcp scope"
 PRINCIPAL_SCOPE_KEY = "eap.mcp_principal"
 
 
@@ -54,6 +56,8 @@ async def authenticate(app: Any, authorization: str | None, origin: str | None) 
         record = await run_in_threadpool(store.authenticate, credential, touch=False)
         if record is None:
             raise McpAuthError(401, INVALID_API_KEY_DETAIL)
+        if MCP_SCOPE not in record.scopes and MANAGE_SCOPE not in record.scopes:
+            raise McpAuthError(403, MISSING_MCP_SCOPE)
         try:
             require_allowed_origin(record.allowed_origins, origin)
         except HTTPException as exc:
