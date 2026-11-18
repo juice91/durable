@@ -5,7 +5,7 @@
 // then GET /runs/{run_id}, /events and /stream like any run. Approval: POST
 // /api/v1/workflows/runs/{run_id}/steps/{step_id}/approve|reject with {"comment"?}.
 // Cancel (loops D12, LP.12): POST /api/v1/runs/{run_id}/cancel, no body.
-import { ApiError, apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
+import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
 import type { Run, RunStatus } from "./runs";
 import type { JsonSchema } from "./tools";
 import { mapToolRunError } from "./toolRuns";
@@ -218,9 +218,14 @@ export function listWorkflows({ archived = false }: { archived?: boolean } = {})
 }
 
 /** Archive refused (409 `runs_active`): the workflow has queued or running runs; `force` archives anyway. */
-export class WorkflowArchiveBlocked extends ApiError {
+// A plain Error, not an ApiError subclass: extending ApiError evaluates the import at module load, and
+// the many tests that partially mock "@/lib/api" without ApiError would break for every component that
+// imports this module.
+export class WorkflowArchiveBlocked extends Error {
+  public readonly status = 409;
+  public readonly code = "runs_active";
   constructor(message: string, public activeRuns: number) {
-    super(409, message);
+    super(message);
     this.name = "WorkflowArchiveBlocked";
   }
 }
