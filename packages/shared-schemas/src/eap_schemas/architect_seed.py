@@ -340,6 +340,29 @@ def _tokens_lower(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
+_CLAUDE_PREFERRED = ("sonnet-5-5", "opus-5-5", "haiku-5-5")
+_CLAUDE_FAMILIES = ("sonnet", "opus", "haiku")
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def _claude_rank(name: str) -> tuple[int, int, int]:
+    """Order among Claude ids (other names are all (0, 0, 0)): claude-sonnet-5-5, opus-5-5, haiku-5-5 first
+    (a dated alias counts as its model), then the other sonnet, opus and haiku ids, newest version first,
+    then Fable-class ids (they need a separate entitlement, so they are never the default pick)."""
+    lowered = _DATE_SUFFIX.sub("", name.lower())
+    if not lowered.startswith("claude-"):
+        return (0, 0, 0)
+    for position, preferred in enumerate(_CLAUDE_PREFERRED):
+        if lowered == f"claude-{preferred}":
+            return (position, 0, 0)
+    family = next((i for i, f in enumerate(_CLAUDE_FAMILIES) if f in lowered), None)
+    if family is None:  # fable and any other Claude name
+        return (5, 0, 0) if "fable" in lowered else (4, 0, 0)
+    digits = [int(n) for n in re.findall(r"(?<![a-z0-9])\d{1,2}(?![a-z0-9])", lowered)[:2]]
+    version = digits[0] * 100 + (digits[1] if len(digits) > 1 else 0) if digits else 0
+    return (3, -version, family)
+
+
 def _seed_rank(name: str, index: int) -> tuple[int, ...]:
     lowered = name.lower()
     spaced = _tokens_lower(name)
@@ -348,6 +371,7 @@ def _seed_rank(name: str, index: int) -> tuple[int, ...]:
         1 if _QUANTISED.search(spaced) else 0,
         0 if _STRUCTURED_FAMILIES.match(lowered) else 1,
         1 if is_thinking_model(name) else 0,
+        *_claude_rank(name),
         index,
     )
 
@@ -366,7 +390,9 @@ def pick_seed_model(provider_models: Sequence[tuple[str, Sequence[str]]], fallba
     4. families known to do structured output well (claude*, gpt-4*, gpt-5*, o3*, o4*, qwen3*,
        deepseek-v3*, gemini-2*, mistral-large*, llama-3.3*, llama-4*) before other names;
     5. thinking/reasoning models last (see `is_thinking_model`), so a known-family thinking model still
-       beats an unknown name but loses to a non-thinking sibling of a known family.
+       beats an unknown name but loses to a non-thinking sibling of a known family;
+    6. among Claude ids: claude-sonnet-5-5, claude-opus-5-5, claude-haiku-5-5, then the other
+       sonnet/opus/haiku by version (newest first), then Fable-class ids (separate entitlement).
     When no provider lists a model the first of `fallback` (the ids the allowlist names) is used; None
     when there is no model at all."""
     ranked = _ranked(provider_models)
