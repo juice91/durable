@@ -10,6 +10,7 @@ from fastapi import FastAPI
 async def lifespan(app: FastAPI):
     """Lifespan context manager - the database schema was already checked in create_app."""
     # The MCP control endpoint's streamable-HTTP session manager runs for the life of the app.
+    _reconcile_architect_seeds(app)
     mcp_app = getattr(app.state, "mcp_control_app", None)
     if mcp_app is None:
         yield
@@ -17,6 +18,18 @@ async def lifespan(app: FastAPI):
         async with mcp_app.router.lifespan_context(mcp_app):
             yield
     app.state.run_launcher.close()
+
+
+def _reconcile_architect_seeds(app: FastAPI) -> None:
+    """Bring every tenant's existing Architect up to the current seed's built-in tool ids (best effort)."""
+    import logging
+
+    try:
+        from eap_api.routes.architect import reconcile_all_seeds
+
+        reconcile_all_seeds(app.state.database_engine)
+    except Exception:
+        logging.getLogger(__name__).warning("architect seed: startup reconcile skipped", exc_info=True)
 
 
 def create_app(database_url: str | None = None) -> FastAPI:

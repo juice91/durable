@@ -157,7 +157,8 @@ def _spec_model(spec: dict[str, Any] | None) -> str | None:
 
 def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: str, build: Any, model: list[str]):
     """Create the built-in agent `slug` when missing (and publish its first version); when it exists keep
-    the tenant's edits and only add the gated approvals entries it lacks. Returns (row, created)."""
+    the tenant's edits and only add the built-in tool ids (and gated approvals entries) the current seed
+    declares and the draft lacks: published when the draft had no unpublished edits, draft-only otherwise. Returns (row, created)."""
     row = conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first()
     if row is None:
         if not model:
@@ -178,15 +179,24 @@ def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: s
             definitions.publish_agent(conn, tenant_id, str(inserted.id), created_by=user_id)
             return conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).one(), True
         return conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).one(), False  # a concurrent seed won
-    missing = gated_approvals_missing(row.draft_spec or {})
-    if missing:
+    stored = row.draft_spec or {}
+    stored_tools = set(stored.get("tools") or [])
+    # Built-in tool ids: whatever the current seed spec declares (the model does not change the tools).
+    new_tools = [t for t in build(_spec_model(stored) or "seed:tools").tools if t not in stored_tools]
+    stored_tools |= set(new_tools)
+    missing = gated_approvals_missing({**stored, "tools": list(stored_tools)})
+    if new_tools or missing:
         locked = definitions.lock_agent(conn, tenant_id, str(row.id))
         spec = dict(locked.draft_spec or {})
         latest = definitions.latest_agent_version(conn, str(row.id))
         clean = latest is not None and draft_hash(spec) == latest.spec_hash  # no unpublished edits
-        approvals = dict(spec.get("approvals") or {})
-        approvals["tools"] = [*(approvals.get("tools") or []), *missing]
-        spec["approvals"] = approvals
+        have = set(spec.get("tools") or [])
+        spec["tools"] = [*(spec.get("tools") or []), *(t for t in new_tools if t not in have)]  # never removes
+        missing = gated_approvals_missing(spec)
+        if missing:
+            approvals = dict(spec.get("approvals") or {})
+            approvals["tools"] = [*(approvals.get("tools") or []), *missing]
+            spec["approvals"] = approvals
         conn.execute(
             text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
             {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
@@ -197,6 +207,11 @@ def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: s
                     definitions.publish_agent(conn, tenant_id, str(row.id), created_by=user_id)
             except DefinitionError:
                 log.warning("architect seed: repaired draft could not be published tenant=%s slug=%s", tenant_id, slug)
+        else:
+            log.info(
+                "architect seed: repaired the draft only (unpublished edits) tenant=%s slug=%s tools=%s approvals=%s",
+                tenant_id, slug, new_tools, missing,
+            )
         row = conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).one()
     return row, False
 
@@ -217,6 +232,22 @@ def ensure_seed(engine: Engine, tenant_id: str, user_id: str) -> tuple[dict[str,
         "workflow_drafter_agent_id": str(wdrafter.id),
         "model": _spec_model(architect.draft_spec),
     }, made_a or made_d or made_w
+
+
+def reconcile_all_seeds(engine: Engine) -> int:
+    """At startup: run `ensure_seed` for every tenant that already has an Architect row, so a deploy that
+    adds built-in tool ids reaches existing tenants without a hand repair. Never raises (a tenant that
+    fails is logged and skipped). Returns the number of tenants reconciled."""
+    with engine.connect() as conn:
+        tenants = [r.tenant_id for r in conn.execute(text("SELECT DISTINCT tenant_id FROM agents WHERE slug = :s AND builtin"), {"s": ARCHITECT_SLUG})]
+    done = 0
+    for tenant in tenants:
+        try:
+            ensure_seed(engine, tenant, "system:seed")
+            done += 1
+        except Exception:
+            log.warning("architect seed: startup reconcile failed tenant=%s", tenant, exc_info=True)
+    return done
 
 
 @router.post("", responses={409: {"description": "choose_model"}})
