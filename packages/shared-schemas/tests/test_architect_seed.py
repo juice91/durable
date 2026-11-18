@@ -218,3 +218,33 @@ def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rul
     assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
     assert "1 to 8" not in flat and "8 steps" not in flat
     assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
+
+
+LIVE_ANTHROPIC = [
+    "claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-haiku-4-5", "claude-haiku-5-5",
+    "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-5-1", "claude-opus-5-5",
+    "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5-1", "claude-sonnet-5-5", "claude-sonnet-5-3",
+]
+LIVE_LITELLM = [
+    "CausalLM-34b-beta-4bit", "bge-reranker", "qwen3-coder", "qwen3.8", "qwen3.8-thinking", "qwen3-vl-embedding-8b",
+    "medgemma-27b", "llama-3.3-70b", "deepseek-v3.2", "mistral-large", "gpt-oss", "other-a", "other-b",
+]
+
+
+def test_the_default_prefers_claude_sonnet_5_5_over_fable_and_the_gateway():
+    from eap_schemas.architect_seed import rank_model_ids
+
+    assert len(LIVE_ANTHROPIC) == 15 and len(LIVE_LITELLM) == 13
+    both = [("litellm", LIVE_LITELLM), ("anthropic", LIVE_ANTHROPIC)]
+    assert pick_seed_model(both, []) == "anthropic:claude-sonnet-5-5"
+    ids = rank_model_ids([f"{p}:{n}" for p, names in both for n in names])
+    claude = [i.split(":")[1] for i in ids if i.startswith("anthropic:")]
+    assert claude[:3] == ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+    assert claude[3:-3] == [  # the rest by version, newest first
+        "claude-sonnet-5-3", "claude-sonnet-5-1", "claude-opus-5-1", "claude-opus-4-7", "claude-sonnet-4-6",
+        "claude-opus-4-6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5",
+    ]
+    assert claude[-3:] == ["claude-fable-5", "claude-fable-5-1", "claude-fable-5-2"]
+    assert ids.index("anthropic:claude-fable-5-2") < ids.index("litellm:qwen3.8")  # provider still outranks the gateway
+    assert ids[-1].startswith("litellm:") and any(m in ids[-1] for m in ("embedding", "reranker", "coder", "medgemma"))
+    assert rank_model_ids(["anthropic:claude-sonnet-5-5-20261001", "anthropic:claude-opus-5-5"])[0] == "anthropic:claude-sonnet-5-5-20261001"

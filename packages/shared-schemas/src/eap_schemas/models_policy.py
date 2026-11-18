@@ -20,12 +20,12 @@ from dataclasses import dataclass
 ALLOWED_MODELS_ENV = "EAP_ALLOWED_MODELS"
 DEFAULT_ALLOWED_MODELS = "test:*"
 
-# The Anthropic models offered when its key is set, whether or not the provider's own list answers (the API's
-# discovery and the worker's Architect allowlist both add them; `anthropic:*` or an exact entry still decides).
-ANTHROPIC_CATALOGUE: tuple[str, ...] = ("claude-fable-5-2", "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5")
+# What Anthropic offers when its own `GET /v1/models` cannot be read (a small, current set; the listing is the
+# truth when it answers). The API's discovery and the worker's Architect allowlist both use it as the fallback.
+ANTHROPIC_FALLBACK: tuple[str, ...] = ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5")
 
 __all__ = (
-    "ANTHROPIC_CATALOGUE",
+    "ANTHROPIC_FALLBACK",
     "ALLOWED_MODELS_ENV",
     "DEFAULT_ALLOWED_MODELS",
     "ModelNotAllowed",

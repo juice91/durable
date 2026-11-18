@@ -17,7 +17,7 @@ list did not offer.
 - knowledge_bases: the tenant's knowledge bases.
 - models: the worker's model policy (`EAP_ALLOWED_MODELS`) read worker-side, no snapshot table: the
   concrete `provider:name` entries, `test:*` as the scripted test models, `litellm:*` as what the
-  gateway's `/models` lists and `anthropic:*` as Anthropic's catalogue (when ANTHROPIC_API_KEY is set). Capabilities are left empty here (discovery metadata lives in the API).
+  gateway's `/models` lists and `anthropic:*` as what Anthropic's `GET /v1/models` lists for the key (when ANTHROPIC_API_KEY is set; a small fallback set when that fails). Capabilities are left empty here (discovery metadata lives in the API).
 - agents: Architect-made agents of the tenant (draft or published, not archived), which a created workflow's
   agent steps may name (their row ids stay out of every dump). A workflow draft may name a draft agent;
   publishing the workflow needs every agent it names to have a published version (`agent_not_published`).
@@ -50,7 +50,7 @@ from eap_schemas.architect import (
     offer_tool,
 )
 from eap_schemas.architect_seed import rank_model_ids
-from eap_schemas.models_policy import ANTHROPIC_CATALOGUE
+from eap_schemas.models_policy import ANTHROPIC_FALLBACK
 
 log = logging.getLogger("eap_worker.architect_allowlist")
 
@@ -102,11 +102,38 @@ def _gateway_models(base_url: str, api_key: str | None) -> list[str]:
         return []
 
 
+AnthropicLister = Callable[[str], list[str]]
+
+
+def _anthropic_models(api_key: str) -> list[str]:
+    """Ids Anthropic lists for the key (all `after_id` pages; blocking). The small fallback set on any failure."""
+    from urllib.parse import quote
+
+    names: set[str] = set()
+    after: str | None = None
+    try:
+        for _ in range(20):
+            url = "https://api.anthropic.com/v1/models?limit=1000" + (f"&after_id={quote(after)}" if after else "")
+            request = urllib.request.Request(url, headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+            with urllib.request.urlopen(request, timeout=GATEWAY_TIMEOUT_S) as response:  # noqa: S310 - fixed https URL
+                body = json.loads(response.read(2_000_000))
+            names.update(str(m["id"]) for m in body.get("data", []) if isinstance(m, dict) and m.get("id"))
+            last = body.get("last_id")
+            if body.get("has_more") is not True or not isinstance(last, str) or not last or last == after:
+                break
+            after = last
+    except Exception as exc:  # noqa: BLE001 - discovery is best effort
+        log.warning("architect allowlist: anthropic model list failed: %s", type(exc).__name__)
+        return list(ANTHROPIC_FALLBACK)
+    return sorted(names)
+
+
 def models_from_settings(
     settings: Any, gateway: GatewayLister = _gateway_models, environ: Mapping[str, str] | None = None,
+    anthropic: AnthropicLister = _anthropic_models,
 ) -> tuple[AllowlistModel, ...]:
-    """The worker's model policy as allowlist models (see the module docstring). `anthropic:*` lists the
-    Anthropic catalogue when ANTHROPIC_API_KEY is set (the provider has no listing the worker calls)."""
+    """The worker's model policy as allowlist models (see the module docstring). `anthropic:*` lists what
+    Anthropic offers the key (its fallback set when the listing fails) when ANTHROPIC_API_KEY is set."""
     env = os.environ if environ is None else environ
     policy = settings.allowed_models
     found: dict[str, AllowlistModel] = {}
@@ -123,7 +150,7 @@ def models_from_settings(
             for scripted in SCRIPTED_TEST_MODEL_NAMES:
                 add("test", scripted)
         elif provider == "anthropic" and (env.get("ANTHROPIC_API_KEY") or "").strip():
-            for listed in ANTHROPIC_CATALOGUE:
+            for listed in anthropic(env["ANTHROPIC_API_KEY"].strip()):
                 if policy.allows("anthropic", listed):
                     add("anthropic", listed)
         elif provider == "litellm" and getattr(settings, "litellm_base_url", None):

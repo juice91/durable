@@ -9,7 +9,9 @@ env var NAME and the base URL HOST, never a key value, and error text is a fixed
 Providers (the same environment the worker reads; see eap_worker.models / config):
 - `litellm`: EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL) + EAP_LITELLM_API_KEY (fallback
   LITELLM_API_KEY), listed at `<base>/v1/models` (a base that already ends in `/v1` is not doubled).
-- `anthropic`: ANTHROPIC_API_KEY, https://api.anthropic.com/v1/models.
+- `anthropic`: ANTHROPIC_API_KEY, https://api.anthropic.com/v1/models (the models the key can use, all
+  pages via `after_id`); when that listing fails a small fallback set (ANTHROPIC_FALLBACK) is offered,
+  marked source "fallback", and the status keeps its error.
 - `openai`: OPENAI_API_KEY, https://api.openai.com/v1/models.
 
 Each discovered model carries `Capabilities` (image and PDF input, and where that came from):
@@ -35,10 +37,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from eap_run_store.chat_attachments import IMAGE_TYPES, PDF_TYPE, model_accepts
-from eap_schemas.models_policy import ANTHROPIC_CATALOGUE
+from eap_schemas.models_policy import ANTHROPIC_FALLBACK
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +109,7 @@ class Capabilities:
 class ModelEntry:
     name: str
     capabilities: Capabilities
-    # "discovered" (the provider listed it) or "catalogue" (the static list above)
+    # "discovered" (the provider listed it) or "fallback" (the small static set used when its listing failed)
     source: str = "discovered"
 
 
@@ -245,16 +247,33 @@ def _entry(provider: str, name: str, gateway: dict[str, dict[str, Any]]) -> Mode
     return ModelEntry(name, static_capabilities(provider, name) or assumed)
 
 
-def _with_catalogue(provider: str, models: tuple[ModelEntry, ...]) -> tuple[ModelEntry, ...]:
-    """Anthropic's catalogue added to what the provider listed (a model it did list keeps its own entry)."""
+def _fallback(provider: str) -> tuple[ModelEntry, ...]:
+    """Anthropic's small static set, offered only when its own listing cannot be read."""
     if provider != "anthropic":
-        return models
-    listed = {m.name for m in models}
-    extra = tuple(
-        ModelEntry(n, static_capabilities(provider, n) or assumed_capabilities(provider, n), "catalogue")
-        for n in ANTHROPIC_CATALOGUE if n not in listed
+        return ()
+    return tuple(
+        ModelEntry(n, static_capabilities(provider, n) or assumed_capabilities(provider, n), "fallback")
+        for n in ANTHROPIC_FALLBACK
     )
-    return tuple(sorted((*models, *extra), key=lambda m: m.name))
+
+
+ANTHROPIC_PAGE_LIMIT = 1000
+ANTHROPIC_MAX_PAGES = 20
+
+
+def _anthropic_names(url: str, headers: Mapping[str, str]) -> list[str]:
+    """Every model id the key can use: `GET /v1/models?limit=N`, following `after_id` while `has_more`."""
+    names: set[str] = set()
+    after: str | None = None
+    for _ in range(ANTHROPIC_MAX_PAGES):
+        page_url = f"{url}?limit={ANTHROPIC_PAGE_LIMIT}" + (f"&after_id={quote(after)}" if after else "")
+        body = http_get(page_url, headers, REQUEST_TIMEOUT_S)
+        names.update(_model_names(body))
+        last = body.get("last_id") if isinstance(body, dict) else None
+        if not (isinstance(body, dict) and body.get("has_more") is True and isinstance(last, str) and last and last != after):
+            break
+        after = last
+    return sorted(names)
 
 
 def _now() -> str:
@@ -288,12 +307,12 @@ def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
         {"x-api-key": key, "anthropic-version": "2023-06-01"} if provider.header_style == "anthropic"
         else {"Authorization": f"Bearer {key}"}
     )
-    url = _list_url(base) + ("?limit=1000" if provider.id == "anthropic" else "")
+    url = _list_url(base)
     # A failed listing leaves the status unreachable (the Providers page tells the truth) but Anthropic's
-    # catalogue is still offered.
-    fallback = _with_catalogue(provider.id, ())
+    # small fallback set is still offered.
+    fallback = _fallback(provider.id)
     try:
-        names = _model_names(http_get(url, headers, REQUEST_TIMEOUT_S))
+        names = _anthropic_names(url, headers) if provider.id == "anthropic" else _model_names(http_get(url, headers, REQUEST_TIMEOUT_S))
         gateway = _fetch_gateway_info(provider, base, headers)
     except HttpStatusError as exc:
         error = "the provider rejected the server's key" if exc.status in (401, 403) else f"the provider answered HTTP {exc.status}"
@@ -305,7 +324,7 @@ def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
         name = type(exc).__name__.lower()
         error = "the provider did not answer in time" if "timeout" in name else "could not connect to the provider"
         return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=fallback, checked_at=_now(), error=error)
-    models = _with_catalogue(provider.id, tuple(_entry(provider.id, n, gateway) for n in names))
+    models = tuple(_entry(provider.id, n, gateway) for n in names)
     return ProviderStatus(**common, configured=True, status=OK, models=models, checked_at=_now(), error=None)
 
 
