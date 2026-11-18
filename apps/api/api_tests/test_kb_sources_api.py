@@ -337,12 +337,12 @@ def test_api_token_connection_and_repository_docs_source_kinds(env):
     client, _, _, tenant = env
     register_adapter("repository_docs", "fake", lambda: FakeCatalogAdapter())
     _, h = tenant()
-    tok = {**CONN, "name": "gh", "kind": "api_token", "credential_refs": {"token": "secret:gh-token"}}
+    tok = {**CONN, "name": "tok", "kind": "api_token", "credential_refs": {"token": "secret:example-token"}}
     assert client.post(f"{API}/settings/connections", json=tok, headers=h).status_code == 201
-    anonymous = mk_conn(client, h, name="gh-public", kind="api_token", credential_refs={})  # no token: allowed
+    anonymous = mk_conn(client, h, name="tok-public", kind="api_token", credential_refs={})  # no token: allowed
     assert anonymous["credential_refs"] == {} and anonymous["kind"] == "api_token"
-    other = {**tok, "name": "gh2", "credential_refs": {"client_id": "secret:x"}}
+    other = {**tok, "name": "tok2", "credential_refs": {"client_id": "secret:x"}}
     assert client.post(f"{API}/settings/connections", json=other, headers=h).status_code == 422  # only `token`
     kb = mk_kb(client, h)
-    made = mk_source(client, h, kb, anonymous["id"], kind="repository_docs", name="docs-repo")
+    made = mk_source(client, h, kb, anonymous["id"], kind="repository_docs", name="repo-source")
     assert made["kind"] == "repository_docs"

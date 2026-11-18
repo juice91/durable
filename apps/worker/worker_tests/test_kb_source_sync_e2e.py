@@ -194,7 +194,7 @@ class Stack:
         return found
 
 
-def dbos_leaks(schema: str) -> list[str]:
+def dbos_leaks(schema: str, sentinels: tuple[str, ...] = SENTINELS) -> list[str]:
     from sqlalchemy import create_engine
 
     eng = create_engine(DBOS_DB_URL.replace("postgresql://", "postgresql+psycopg://", 1))
@@ -204,7 +204,7 @@ def dbos_leaks(schema: str) -> list[str]:
             for (table,) in conn.execute(text(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema = :s AND table_type = 'BASE TABLE'"),
                     {"s": schema}).all():
-                for sentinel in SENTINELS:
+                for sentinel in sentinels:
                     n = conn.execute(text(f'SELECT count(*) FROM "{schema}"."{table}" x WHERE x::text LIKE :p'),
                                      {"p": f"%{sentinel}%"}).scalar_one()
                     if n:

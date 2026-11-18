@@ -385,13 +385,13 @@ def test_sync_run_kind_is_created_for_the_sources_knowledge_base(engine, tenants
 def test_api_token_connection_takes_an_optional_token_ref_and_repository_docs_sources(engine, tenants, kb):
     a, _ = tenants
     store = ConnectionStore(engine)
-    anonymous = store.create(a, name="gh0", kind="api_token", base_url="https://api.github.com", config={}, credential_refs={})
+    anonymous = store.create(a, name="tok0", kind="api_token", base_url="https://api.example.test", config={}, credential_refs={})
     with_token = store.create(
-        a, name="gh1", kind="api_token", base_url=None, config={}, credential_refs={"token": "secret:gh-token"}
+        a, name="tok1", kind="api_token", base_url=None, config={}, credential_refs={"token": "secret:example-token"}
     )
-    assert anonymous.credential_refs == {} and with_token.credential_refs == {"token": "secret:gh-token"}
+    assert anonymous.credential_refs == {} and with_token.credential_refs == {"token": "secret:example-token"}
     with pytest.raises(ValueError):
-        store.create(a, name="gh2", kind="api_token", base_url=None, config={}, credential_refs={"client_id": "secret:x"})
+        store.create(a, name="tok2", kind="api_token", base_url=None, config={}, credential_refs={"client_id": "secret:x"})
     s = SourceStore(engine).create(
         a, knowledge_base_id=kb[a], connection_id=anonymous.id, name="docs", kind="repository_docs", provider="github",
         config={"repository": "o/r"},
