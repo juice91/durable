@@ -46,6 +46,7 @@ from typing import Any, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic_ai import RunContext
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
@@ -135,6 +136,31 @@ def _code(exc: ValueError) -> tuple[str, str]:
     if sep and re.fullmatch(r"[a-z_]+", head):
         return head, message
     return "invalid_spec", message
+
+
+_SpecT = TypeVar("_SpecT", bound=BaseModel)
+
+
+def coerce_spec(model: type[_SpecT], value: Any) -> tuple[_SpecT | None, dict[str, Any] | None]:
+    """The spec as `model`: an instance, a dict, or a string that parses as a JSON object (thinking models
+    sometimes JSON-encode the argument). Anything else is the usual `invalid_spec` error object, never a
+    raw validation error, so the model reads one plain message."""
+    if isinstance(value, model):
+        return value, None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None, error("invalid_spec", "spec must be a JSON object (the definition itself), not text.")
+    if not isinstance(value, dict):
+        return None, error("invalid_spec", "spec must be a JSON object (the definition itself).")
+    try:
+        return model.model_validate(value), None
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc']) or 'spec'}: {e['msg']}" for e in exc.errors()[:6]
+        )
+        return None, error("invalid_spec", problems)
 
 
 def _marked(created_via: str | None) -> bool:
@@ -289,9 +315,12 @@ async def list_workflow_step_kinds() -> dict[str, Any]:
 
 
 async def save_agent(
-    engine: Engine, tenant_id: str, spec: ArchitectAgentSpec, confirm: bool = False,
+    engine: Engine, tenant_id: str, spec: ArchitectAgentSpec | dict[str, Any] | str, confirm: bool = False,
     *, allowlist: Allowlist | None = None, run_id: str | None = None,
 ) -> dict[str, Any]:
+    spec, problem = coerce_spec(ArchitectAgentSpec, spec)
+    if problem is not None:
+        return problem
     allowlist = allowlist or await approved_for_tenant(engine, tenant_id)
     try:
         compiled = compile_agent(spec, allowlist)
@@ -312,9 +341,12 @@ async def save_agent(
 
 
 async def save_workflow(
-    engine: Engine, tenant_id: str, spec: ArchitectWorkflowSpec, confirm: bool = False,
+    engine: Engine, tenant_id: str, spec: ArchitectWorkflowSpec | dict[str, Any] | str, confirm: bool = False,
     *, allowlist: Allowlist | None = None, run_id: str | None = None,
 ) -> dict[str, Any]:
+    spec, problem = coerce_spec(ArchitectWorkflowSpec, spec)
+    if problem is not None:
+        return problem
     allowlist = allowlist or await approved_for_tenant(engine, tenant_id)
     try:
         compiled = compile_workflow(spec, allowlist)
@@ -779,7 +811,9 @@ async def _list_workflow_step_kinds(ctx: RunContext[RunDeps]) -> dict[str, Any]:
     return await list_workflow_step_kinds()
 
 
-async def _save_agent(ctx: RunContext[RunDeps], spec: ArchitectAgentSpec, confirm: bool = False) -> dict[str, Any]:
+async def _save_agent(
+    ctx: RunContext[RunDeps], spec: ArchitectAgentSpec | str, confirm: bool = False
+) -> dict[str, Any]:
     """Save an agent definition as a draft (not live). New agent when `id` is unused, otherwise the next
     draft of that Architect-made agent. If the result is needs_confirmation, ask the person first and call
     again with confirm: true. Grant a tool only when the description names a capability."""
@@ -787,7 +821,7 @@ async def _save_agent(ctx: RunContext[RunDeps], spec: ArchitectAgentSpec, confir
 
 
 async def _save_workflow(
-    ctx: RunContext[RunDeps], spec: ArchitectWorkflowSpec, confirm: bool = False
+    ctx: RunContext[RunDeps], spec: ArchitectWorkflowSpec | str, confirm: bool = False
 ) -> dict[str, Any]:
     """Save a workflow definition as a draft (not live). Same rules as save_agent."""
     return await save_workflow(_engine(), ctx.deps.tenant_id, spec, confirm, run_id=str(ctx.deps.run_id))

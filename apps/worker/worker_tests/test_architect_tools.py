@@ -288,3 +288,34 @@ def test_workflow_step_kinds_lists_the_supported_kinds_only():
     result = run(list_workflow_step_kinds())
     assert [k["kind"] for k in result["step_kinds"]] == ["agent", "parallel", "tool"]
     assert "{{previous}}" in result["placeholders"]
+
+
+# ----------------------------------------------------------- a spec that arrives as a JSON string
+
+# The shape a thinking model sent in a real run: the whole spec JSON-encoded in the `spec` argument.
+STRING_WORKFLOW_SPEC = json.dumps({
+    "name": "Daily brief",
+    "id": "daily-brief",
+    "steps": [{"kind": "agent", "id": "write", "agent": "writer", "prompt": "Brief {{input}}"}],
+}, ensure_ascii=False)
+
+
+def test_save_agent_accepts_the_spec_as_a_json_string(engine, tenant):
+    raw = json.dumps({"name": "Helper", "id": "helper", "instructions": "Help the person."})
+    result = run(save_agent(engine, tenant, raw, allowlist=allowlist()))
+    assert result["id"] == "helper" and result["status"] == "draft", result
+    assert [r["slug"] for r in agents_rows(engine, tenant)] == ["helper"]
+
+
+def test_save_workflow_accepts_the_spec_as_a_json_string(engine, tenant):
+    agents = allowlist(agents=(AllowlistAgent(id="writer", name="Writer", row_id=str(uuid.uuid4())),))
+    result = run(save_workflow(engine, tenant, STRING_WORKFLOW_SPEC, allowlist=agents))
+    assert result["id"] == "daily-brief" and result["status"] == "draft", result
+
+
+@pytest.mark.parametrize("tool", [save_agent, save_workflow])
+@pytest.mark.parametrize("bad", ["not json at all", "[1, 2]", '"just a string"', '{"name": "x"}', "{broken"])
+def test_a_string_spec_that_is_not_a_valid_object_is_an_error_object(engine, tenant, tool, bad):
+    result = run(tool(engine, tenant, bad, allowlist=allowlist()))
+    assert result["error"]["code"] == "invalid_spec" and result["error"]["message"], result
+    assert "ValidationError" not in result["error"]["message"]
