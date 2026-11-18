@@ -121,14 +121,17 @@ the next run resumes from the stored checkpoint.
 
 | What happened | The parent run |
 |---|---|
-| connection check not `ok` | fails `output_invalid`; step `connection_failed` holds the check's `error_code` |
-| the sync failed (`provider_error`, ...) | fails `output_invalid`; step `report_*` says `sync_failed` |
-| the sync needs attention (`secret_missing`, `connection_auth_failed`) | fails `output_invalid`; step `report_*` says `sync_needs_attention` |
+| connection check not `ok` | fails with the check's error code (`secret_missing`, `connection_auth_failed`, `connection_disabled`, ...; `connection_failed` when it names none); step `connection_failed` is `settings.connection.check` with `require_ok` |
+| the sync failed (`provider_error`, ...) | fails `sync_failed`; step `report_*` |
+| the sync needs attention (`secret_missing`, `connection_auth_failed`) | fails `sync_needs_attention`; step `report_*` |
+| the parent's sync run was cancelled | fails `run_cancelled`; step `report_*` |
 | the sync outlasts the wait loop | fails `loop_max_iterations` |
 | the parent is cancelled | ends `run_cancelled`; the sync is cancelled with it |
 
-(`output_invalid` is the run's output refused by `output_schema`: the report tool answered a stable error
-object instead of a report.)
+A tool step whose tool answers `{error: {code, message}}` (as `workflow.run.result` with `require_success` and
+`settings.connection.check` with `require_ok` do) fails the step and the run with that `code`, so the run page
+shows the cause instead of an output that does not match `output_schema`. A `code` that is not
+`^[a-z][a-z0-9_]{0,63}$` becomes `tool_error`.
 
 ## Schedule it
 

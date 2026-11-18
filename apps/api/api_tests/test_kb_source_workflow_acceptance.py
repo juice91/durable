@@ -8,9 +8,9 @@ with whatever secrets it has).
 - the spec validates and publishes without warnings; the guide quotes it;
 - a targeted sync completes and the run output equals the sync report, valid under `output_schema` and
   far under the 32 KiB step cap; an incremental run without `part_numbers` (the engine applies no schema default) takes the `sync_all` path;
-- a failed child sync fails the parent `output_invalid` (the report tool answers `sync_failed`), a child
-  that needs attention (`secret_missing`) does too (`sync_needs_attention`), a failing connection check
-  stops before any sync, and a sync that outlasts the wait loop fails with `loop_max_iterations`;
+- a failed child sync fails the parent `sync_failed` (the report tool answers it as an error object, which
+  fails the tool step with that code), a child that needs attention (`secret_missing`) fails it
+  `sync_needs_attention`, a failing connection check stops before any sync with the check's own code, and a sync that outlasts the wait loop fails with `loop_max_iterations`;
 - a workflow schedule with input `{source_id, mode: "incremental"}` fires through `eap.schedule_tick`
   and its run starts a sync.
 """
@@ -133,8 +133,10 @@ def test_the_guide_quotes_the_example_and_every_snippet_matches():
         assert snippet["file"] == "kb-source-sync.json"
         assert json.loads(snippet["body"]) == resolve_pointer(load_example(), snippet["pointer"])
     assert "(../../examples/workflows/kb-source-sync.json)" in guide
-    for word in ("part_numbers", "incremental", "schedule", "output_invalid", "loop_max_iterations", "cancel"):
+    for word in ("part_numbers", "incremental", "schedule", "sync_failed", "sync_needs_attention", "connection_failed", "tool_error",
+                 "loop_max_iterations", "cancel"):
         assert word in guide
+    assert "output_invalid" not in guide
 
 
 # ------------------------------------------------------------------------------- through the API
@@ -334,9 +336,10 @@ def test_a_failed_child_sync_fails_the_parent_with_a_stable_code(stack, workflow
     source = stack.source()
     run_id, run = stack.run(workflow, {"source_id": source, "mode": "targeted", "part_numbers": ["BAD0001"]})
     assert run["status"] == "failed", run
-    assert stack.error_code(run_id) == "output_invalid"
+    assert stack.error_code(run_id) == "sync_failed"
     events = stack.events(run_id)
-    assert events["step:report_targeted:completed"][1]["output"]["error"]["code"] == "sync_failed"
+    assert events["step:report_targeted:failed"][1]["error_code"] == "sync_failed"
+    assert "step:report_targeted:completed" not in events
     [child] = stack.children(run_id)
     assert child["status"] == "failed"
 
@@ -346,8 +349,8 @@ def test_a_child_that_needs_attention_fails_the_parent_and_says_so(stack, workfl
     source = stack.source(refs={"client_secret": "secret:never-stored"})
     run_id, run = stack.run(workflow, {"source_id": source, "mode": "targeted", "part_numbers": ["FAKE0001"]})
     assert run["status"] == "failed", run
-    assert stack.error_code(run_id) == "output_invalid"
-    assert stack.events(run_id)["step:report_targeted:completed"][1]["output"]["error"]["code"] == "sync_needs_attention"
+    assert stack.error_code(run_id) == "sync_needs_attention"
+    assert stack.events(run_id)["step:report_targeted:failed"][1]["error_code"] == "sync_needs_attention"
     [child] = stack.children(run_id)
     assert (child["status"], child["sync_status"]) == ("needs_attention", "needs_attention")
     with stack.engine.connect() as conn:
@@ -360,10 +363,10 @@ def test_a_child_that_needs_attention_fails_the_parent_and_says_so(stack, workfl
 def test_a_failing_connection_check_stops_before_any_sync(stack, workflow):
     source = stack.source(refs={"client_secret": "secret:never-stored"}, skip_check=False)
     run_id, run = stack.run(workflow, {"source_id": source, "mode": "targeted", "part_numbers": ["FAKE0001"]})
-    assert run["status"] == "failed" and stack.error_code(run_id) == "output_invalid"
+    assert run["status"] == "failed" and stack.error_code(run_id) == "secret_missing"
     events = stack.events(run_id)
     assert events["step:check:completed"][1]["output"]["ok"] is False
-    assert events["step:connection_failed:completed"][1]["output"]["error_code"] == "secret_missing"
+    assert events["step:connection_failed:failed"][1]["error_code"] == "secret_missing"
     assert "step:sync_targeted:started" not in events and stack.children(run_id) == []
 
 
