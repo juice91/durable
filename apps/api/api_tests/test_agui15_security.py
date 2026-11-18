@@ -630,6 +630,6 @@ def test_no_values_reach_spans_or_logs(api, tenant, traced, caplog):
     exported = dump()
     assert exported, "nothing was exported"
     blob = exported + "\n" + caplog.text
-    secret_part = key.rsplit("_", 1)[-1]
+    secret_part = key.split("_", 2)[2]  # the secret after `pos_<id>_`; token_urlsafe may itself contain "_"
     leaks = [line[:200] for line in blob.splitlines() if SECRET in line or key in line or secret_part in line]
     assert leaks == [], leaks
