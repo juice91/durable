@@ -111,6 +111,23 @@ class WorkflowReturnInput(BaseModel):
     value: Any
 
 
+FEED_PARSE_TOOL_ID = "feed.parse"
+FEED_TEXT_MAX_CHARS = 1048576
+
+
+class FeedParseInput(BaseModel):
+    """Input for ``feed.parse``: an RSS 2.0 or Atom document and the filters to apply. Pure: no I/O."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=FEED_TEXT_MAX_CHARS)]
+    max_items: Annotated[int, Field(ge=1, le=50)] = 20
+    max_age_hours: Annotated[float, Field(gt=0)] | None = None
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    now: str | None = None
+
+
 class KbSourceGetInput(BaseModel):
     """Input for ``kb.source.get``."""
 
@@ -266,6 +283,20 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowReturnInput,
+    ),
+    "feed.parse": ToolDeclaration(
+        id="feed.parse",
+        title="Parse a feed",
+        description=(
+            "Parse an RSS 2.0 or Atom document (text, up to 1 MiB) into numbered items {id c1.., title, link, "
+            "summary (plain text, at most 400 characters), published_at}, newest first, plus a one-line-per-item "
+            "listing, the count and what was dropped. Filters: max_items (1-50, default 20), max_age_hours, "
+            "exclude_urls, exclude_terms (case-insensitive, over title and summary). Pure: it fetches nothing. "
+            "An unreadable or unsupported document is the error feed_invalid"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=FeedParseInput,
     ),
 }
 

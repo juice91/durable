@@ -812,6 +812,9 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.http_tool import register_http_tool
 
     register_http_tool(registry)
+    from eap_worker.feed_tool import register_feed_tool
+
+    register_feed_tool(registry)
 
 
 __all__ = [
