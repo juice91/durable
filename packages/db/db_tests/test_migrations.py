@@ -126,7 +126,7 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
 
 
 def test_single_head_is_the_kb_sources_revision():
-    assert head_revisions() == {"0030_kb_source_kinds"}
+    assert head_revisions() == {"0031_workflow_archived_at"}
 
 
 def test_revisions_after_api_keys_form_one_chain():
@@ -135,7 +135,7 @@ def test_revisions_after_api_keys_form_one_chain():
     from eap_db import alembic_config
 
     script = ScriptDirectory.from_config(alembic_config())
-    chain = ["0017_api_keys", "0018_run_model_settings", "0019_trace_feedback", "0020_scorers", "0021_chat_attachments", "0022_parity_round_2", "0024_mcp_runtime", "0023_attachments_r2", "0025_architect", "0026_architect_slugs", "0027_tenant_secrets", "0028_mcp_catalog_source", "0029_kb_sources", "0030_kb_source_kinds"]
+    chain = ["0017_api_keys", "0018_run_model_settings", "0019_trace_feedback", "0020_scorers", "0021_chat_attachments", "0022_parity_round_2", "0024_mcp_runtime", "0023_attachments_r2", "0025_architect", "0026_architect_slugs", "0027_tenant_secrets", "0028_mcp_catalog_source", "0029_kb_sources", "0030_kb_source_kinds", "0031_workflow_archived_at"]
     for down, up in zip(chain, chain[1:]):
         assert script.get_revision(up).down_revision == down
 

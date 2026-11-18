@@ -29,7 +29,7 @@ def _columns(conn, table: str) -> set[str]:
 
 
 def test_head_is_the_kb_sources_revision_after_0025():
-    assert head_revisions() == {"0030_kb_source_kinds"}
+    assert head_revisions() == {"0031_workflow_archived_at"}
 
 
 def test_upgrade_adds_the_columns_and_downgrade_removes_them():

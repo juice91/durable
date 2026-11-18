@@ -41,7 +41,7 @@ warning `path` is `steps[<i>].body.steps[<j>]`.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -139,6 +139,7 @@ def _workflow_response(workflow: WorkflowModel, latest_version: int | None) -> d
         "draft_spec": workflow.draft_spec,
         "latest_version": latest_version,
         "archived": bool(workflow.archived),
+        "archived_at": workflow.archived_at.isoformat() if workflow.archived_at else None,
     }
 
 
@@ -231,14 +232,15 @@ def create_workflow(request: WorkflowCreate, principal: PrincipalDep, db: Sessio
 
 
 @router.get("", response_class=JSONResponse)
-def list_workflows(principal: PrincipalDep, db: SessionDep) -> JSONResponse:
-    """List this tenant's workflows (not archived), oldest first."""
-    workflows = (
-        db.query(WorkflowModel)
-        .filter(WorkflowModel.tenant_id == principal.tenant_id, WorkflowModel.archived.is_(False))
-        .order_by(WorkflowModel.created_at, WorkflowModel.id)
-        .all()
-    )
+def list_workflows(
+    principal: PrincipalDep, db: SessionDep, archived: Literal["true", "false", "all"] = "false"
+) -> JSONResponse:
+    """List this tenant's workflows, oldest first: the active ones, or with `?archived=true` the
+    archived ones only, or with `?archived=all` both."""
+    query = db.query(WorkflowModel).filter(WorkflowModel.tenant_id == principal.tenant_id)
+    if archived != "all":
+        query = query.filter(WorkflowModel.archived.is_(archived == "true"))
+    workflows = query.order_by(WorkflowModel.created_at, WorkflowModel.id).all()
     return JSONResponse(content=[_workflow_response(w, _latest_version(db, w)) for w in workflows])
 
 
@@ -325,11 +327,23 @@ def restore_workflow_version_route(
     )
 
 
-def _archive(workflow_id: uuid.UUID, principal: Principal, db: Session, archived: bool) -> JSONResponse:
+class WorkflowArchive(BaseModel):
+    """Body of POST /workflows/{id}/archive (the body itself is optional)."""
+
+    model_config = ConfigDict(extra="forbid")
+    archived: bool = True
+    force: bool = False
+
+
+def _archive(
+    workflow_id: uuid.UUID, principal: Principal, db: Session, archived: bool, force: bool = False
+) -> JSONResponse:
     result = _run_definition_op(
-        db, lambda conn: set_workflow_archived(conn, principal.tenant_id, str(workflow_id), archived)
+        db,
+        lambda conn: set_workflow_archived(conn, principal.tenant_id, str(workflow_id), archived, force=force),
     )
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
+    db.refresh(workflow)
     return JSONResponse(
         content={**_workflow_response(workflow, _latest_version(db, workflow)), "paused_schedules": list(result.paused_schedules)}
     )
@@ -338,14 +352,23 @@ def _archive(workflow_id: uuid.UUID, principal: Principal, db: Session, archived
 @router.post(
     "/{workflow_id}/archive",
     response_class=JSONResponse,
-    responses={404: {"model": ErrorDetail}},
+    responses={404: {"model": ErrorDetail}, 409: {"description": "runs_active: queued or running runs"}},
 )
-def archive_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
-    """Archive the workflow (idempotent; 200 with the workflow, `archived: true`, and the ids of the
-    schedules the archive paused). It disappears from GET /workflows, refuses new runs and
-    schedules, and cannot be published or restored until unarchived; versions, runs and schedules
-    stay readable. Another tenant's workflow is 404."""
-    return _archive(workflow_id, principal, db, True)
+def archive_workflow(
+    workflow_id: uuid.UUID,
+    principal: PrincipalDep,
+    db: SessionDep,
+    body: Annotated[WorkflowArchive | None, Body()] = None,
+) -> JSONResponse:
+    """Archive the workflow, or with `{"archived": false}` unarchive it (body optional, default
+    `{"archived": true, "force": false}`; idempotent; 200 with the workflow, `archived`,
+    `archived_at`, and the ids of the schedules the archive paused). It disappears from
+    GET /workflows (listed with `?archived=true`), refuses new runs and schedules with 409
+    `workflow_archived`, and cannot be published or restored until unarchived; versions, runs and
+    schedules stay readable. 409 `runs_active` (with `active_runs`) while it has queued or running
+    runs, unless `force`. Unarchiving does not resume schedules. Another tenant's workflow is 404."""
+    body = body or WorkflowArchive()
+    return _archive(workflow_id, principal, db, body.archived, body.force)
 
 
 @router.post(
@@ -354,8 +377,8 @@ def archive_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: Sessio
     responses={404: {"model": ErrorDetail}},
 )
 def unarchive_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
-    """Unarchive the workflow (idempotent). Its paused schedules stay paused; resume them with
-    PATCH /workflows/schedules/{id} `{"active": true}`."""
+    """Unarchive the workflow (idempotent; same as POST archive with `{"archived": false}`). Its
+    paused schedules stay paused; resume them with PATCH /workflows/schedules/{id} `{"active": true}`."""
     return _archive(workflow_id, principal, db, False)
 
 

@@ -25,6 +25,7 @@ from eap_api.routes.runs import StoresDep
 from eap_api.schedules import check_cron, get_zone, next_fire, validate_schedule_input
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
+from eap_run_store.definition_errors import WORKFLOW_ARCHIVED_CODE, WORKFLOW_ARCHIVED_NEW_WORK, DefinitionConflict
 from eap_run_store import ScheduleNameConflict, ScheduleStore
 from eap_run_store.cursor import MAX_CURSOR_LENGTH, InvalidRunCursor, RunCursor
 from eap_schemas.workflows import WorkflowScheduleSpec, WorkflowScheduleUpdate, WorkflowSpec
@@ -74,11 +75,15 @@ def _workflow_names(db: Session, tenant_id: str, ids: set[str]) -> dict[str, str
     return {i: n for i, n in rows}
 
 
-def _workflow_or_404(db: Session, tenant_id: str, workflow_id: str) -> WorkflowModel:
+def _workflow_or_404(db: Session, tenant_id: str, workflow_id: str, *, allow_archived: bool = False) -> WorkflowModel:
+    """The tenant's workflow; an archived one is 409 `workflow_archived` unless `allow_archived`
+    (reading its schedules, pausing one)."""
     workflow = db.query(WorkflowModel).filter(
         WorkflowModel.id == workflow_id, WorkflowModel.tenant_id == tenant_id).first()
-    if workflow is None or workflow.archived:
+    if workflow is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workflow not found")
+    if workflow.archived and not allow_archived:
+        raise DefinitionConflict(WORKFLOW_ARCHIVED_NEW_WORK, code=WORKFLOW_ARCHIVED_CODE)
     return workflow
 
 
@@ -136,8 +141,9 @@ def update_schedule(schedule_id: str, body: WorkflowScheduleUpdate, principal: P
     current = store.get(tenant, schedule_id)
     if current is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
-    workflow = _workflow_or_404(db, tenant, current["workflow_id"])
     fields = body.model_dump(exclude_unset=True)
+    pausing = fields.keys() == {"active"} and fields["active"] is False
+    workflow = _workflow_or_404(db, tenant, current["workflow_id"], allow_archived=pausing)
     if fields.keys() == {"active"} and fields["active"] is False:
         # Pausing must always work: a stored cron or input that no longer validates (the workflow
         # changed) is not re-checked, and next_fire_at is left alone.
@@ -168,7 +174,7 @@ def delete_schedule(schedule_id: str, principal: PrincipalDep, store: StoreDep) 
 @router.get("/{workflow_id}/schedules")
 def list_workflow_schedules(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, store: StoreDep,
                             limit: LimitQ = 50, before: BeforeQ = None) -> dict[str, Any]:
-    _workflow_or_404(db, principal.tenant_id, str(workflow_id))
+    _workflow_or_404(db, principal.tenant_id, str(workflow_id), allow_archived=True)
     return _page(db, store, principal.tenant_id, str(workflow_id), limit, before)
 
 

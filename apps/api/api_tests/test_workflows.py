@@ -625,3 +625,111 @@ def test_archive_unarchive_restore_404_other_tenant(client, auth_header):
     assert client.post(f"{BASE}/{wid}/unarchive", headers=other).status_code == 404
     assert client.post(f"{BASE}/{wid}/versions/1/restore", headers=other).status_code == 404
     assert client.get(f"{BASE}/{wid}", headers=auth_header).json()["archived"] is False
+
+
+# --- archive contract: body, runs_active/force, archived_at, list filter, 409 workflow_archived ---
+
+
+def _tenant(headers: dict) -> str:
+    return headers["Authorization"].split(":")[1]
+
+
+def _insert_run(headers: dict, wid: str, status: str) -> str:
+    run_id = str(uuid.uuid4())
+    engine = create_engine(PG_URL)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO runs (id, tenant_id, kind, workflow_id, workflow_version, status, input, created_at, updated_at)"
+                    " VALUES (:id, :t, 'workflow', :w, 1, :s, '{}', now(), now())"
+                ),
+                {"id": run_id, "t": _tenant(headers), "w": wid, "s": status},
+            )
+    finally:
+        engine.dispose()
+    return run_id
+
+
+def _ids(client, headers, **params) -> list[str]:
+    resp = client.get(BASE, headers=headers, params=params)
+    assert resp.status_code == 200, resp.text
+    return [w["id"] for w in resp.json()]
+
+
+def test_archive_body_defaults_to_true_and_false_unarchives(client, auth_header):
+    wid = _published(client, auth_header)
+    got = client.get(f"{BASE}/{wid}", headers=auth_header).json()
+    assert got["archived"] is False and got["archived_at"] is None
+    resp = client.post(f"{BASE}/{wid}/archive", json={}, headers=auth_header)  # default archived=true
+    assert resp.status_code == 200 and resp.json()["archived"] is True
+    stamp = resp.json()["archived_at"]
+    assert stamp
+    assert client.get(f"{BASE}/{wid}", headers=auth_header).json()["archived_at"] == stamp
+    again = client.post(f"{BASE}/{wid}/archive", json={"archived": True}, headers=auth_header)
+    assert again.json()["archived_at"] == stamp  # idempotent: the first archive time stays
+    back = client.post(f"{BASE}/{wid}/archive", json={"archived": False}, headers=auth_header)
+    assert back.status_code == 200 and back.json()["archived"] is False and back.json()["archived_at"] is None
+    assert back.json()["paused_schedules"] == []
+
+
+def test_archive_refused_while_runs_are_active_unless_forced(client, auth_header):
+    wid = _published(client, auth_header)
+    _insert_run(auth_header, wid, "running")
+    _insert_run(auth_header, wid, "queued")
+    _insert_run(auth_header, wid, "succeeded")
+    resp = client.post(f"{BASE}/{wid}/archive", headers=auth_header)
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "runs_active" and resp.json()["active_runs"] == 2
+    assert client.get(f"{BASE}/{wid}", headers=auth_header).json()["archived"] is False
+    forced = client.post(f"{BASE}/{wid}/archive", json={"force": True}, headers=auth_header)
+    assert forced.status_code == 200 and forced.json()["archived"] is True
+
+
+def test_archive_allowed_when_only_finished_runs(client, auth_header):
+    wid = _published(client, auth_header)
+    for status in ("succeeded", "failed", "cancelled"):
+        _insert_run(auth_header, wid, status)
+    assert client.post(f"{BASE}/{wid}/archive", headers=auth_header).status_code == 200
+
+
+def test_unarchive_is_not_blocked_by_runs(client, auth_header):
+    wid = _published(client, auth_header)
+    assert client.post(f"{BASE}/{wid}/archive", headers=auth_header).status_code == 200
+    _insert_run(auth_header, wid, "running")
+    assert client.post(f"{BASE}/{wid}/archive", json={"archived": False}, headers=auth_header).status_code == 200
+
+
+def test_list_filter_archived_true_false_all(client, auth_header):
+    live = _published(client, auth_header, "Live")
+    gone = _published(client, auth_header, "Gone")
+    client.post(f"{BASE}/{gone}/archive", headers=auth_header)
+    assert _ids(client, auth_header) == [live]
+    assert _ids(client, auth_header, archived="false") == [live]
+    assert _ids(client, auth_header, archived="true") == [gone]
+    assert _ids(client, auth_header, archived="all") == [live, gone]
+    assert client.get(BASE, headers=auth_header, params={"archived": "maybe"}).status_code == 422
+    archived_row = client.get(BASE, headers=auth_header, params={"archived": "true"}).json()[0]
+    assert archived_row["archived"] is True and archived_row["archived_at"]
+
+
+def test_archived_workflow_refuses_runs_and_schedules_with_409(client, auth_header):
+    wid = _published(client, auth_header)
+    sched = client.post(
+        f"{BASE}/{wid}/schedules", json={"name": "n", "cron": "0 3 * * *", "input": {}}, headers=auth_header
+    ).json()["id"]
+    client.post(f"{BASE}/{wid}/archive", headers=auth_header)
+    run = client.post(f"{BASE}/{wid}/runs", json={"input": {}}, headers=auth_header)
+    assert run.status_code == 409 and run.json()["code"] == "workflow_archived"
+    new = client.post(
+        f"{BASE}/{wid}/schedules", json={"name": "m", "cron": "0 4 * * *", "input": {}}, headers=auth_header
+    )
+    assert new.status_code == 409 and new.json()["code"] == "workflow_archived"
+    # Resuming its paused schedule is refused too; reading and pausing still work.
+    resume = client.patch(f"{BASE}/schedules/{sched}", json={"active": True}, headers=auth_header)
+    assert resume.status_code == 409 and resume.json()["code"] == "workflow_archived"
+    assert client.patch(f"{BASE}/schedules/{sched}", json={"active": False}, headers=auth_header).status_code == 200
+    assert client.get(f"{BASE}/{wid}/schedules", headers=auth_header).status_code == 200
+    # A workflow of another tenant stays an indistinguishable 404.
+    other = get_auth_header(f"t{uuid.uuid4().hex[:10]}", "bob")
+    assert client.post(f"{BASE}/{wid}/runs", json={"input": {}}, headers=other).status_code == 404

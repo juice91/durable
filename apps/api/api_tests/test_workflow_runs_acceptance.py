@@ -159,7 +159,7 @@ def test_start_404_and_409(api, fake):
     with app.state.database_engine.begin() as conn:
         conn.execute(text("UPDATE workflows SET archived = true WHERE id = :id"), {"id": workflow_id})
     archived = client.post(_runs(client, workflow_id), json={"input": {"q": "x"}}, headers=headers)
-    assert archived.status_code == 404 and archived.json()["detail"] == "Workflow not found"
+    assert archived.status_code == 409 and archived.json()["code"] == "workflow_archived"
 
     draft = {
         "name": "Draft",
