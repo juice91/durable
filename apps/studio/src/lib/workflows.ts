@@ -169,6 +169,9 @@ export interface Workflow {
   name: string;
   draft_spec: WorkflowSpec | null;
   latest_version: number | null;
+  /** Archived workflows leave the list and refuse new runs and schedules (409 `workflow_archived`). */
+  archived?: boolean;
+  archived_at?: string | null;
 }
 
 export interface WorkflowVersion {
@@ -209,8 +212,49 @@ async function getJson<T>(path: string): Promise<T> {
 
 const enc = encodeURIComponent;
 
-export function listWorkflows(): Promise<Workflow[]> {
-  return getJson<Workflow[]>("/api/v1/workflows");
+/** The active workflows, or with `archived: true` the archived ones only (`?archived=true`). */
+export function listWorkflows({ archived = false }: { archived?: boolean } = {}): Promise<Workflow[]> {
+  return getJson<Workflow[]>(archived ? "/api/v1/workflows?archived=true" : "/api/v1/workflows");
+}
+
+/** Archive refused (409 `runs_active`): the workflow has queued or running runs; `force` archives anyway. */
+// A plain Error, not an ApiError subclass: extending ApiError evaluates the import at module load, and
+// the many tests that partially mock "@/lib/api" without ApiError would break for every component that
+// imports this module.
+export class WorkflowArchiveBlocked extends Error {
+  public readonly status = 409;
+  public readonly code = "runs_active";
+  constructor(message: string, public activeRuns: number) {
+    super(message);
+    this.name = "WorkflowArchiveBlocked";
+  }
+}
+
+async function postArchive(id: string, body: { archived: boolean; force?: boolean }): Promise<Workflow> {
+  const response = await fetch(`${BASE_URL}/api/v1/workflows/${enc(id)}/archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 409) {
+    const data = await response.clone().json().catch(() => null);
+    if (data && data.code === "runs_active") {
+      throw new WorkflowArchiveBlocked(typeof data.detail === "string" ? data.detail : "The workflow has active runs", Number(data.active_runs) || 0);
+    }
+  }
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
+/** Idempotent; answers the workflow with its new `archived` flag. Throws WorkflowArchiveBlocked
+ * (409 `runs_active`) while runs are queued or running, unless `force`. Archiving pauses its schedules. */
+export function archiveWorkflow(id: string, options: { force?: boolean } = {}): Promise<Workflow> {
+  return postArchive(id, { archived: true, force: options.force === true });
+}
+
+/** Idempotent. Its paused schedules stay paused. */
+export function unarchiveWorkflow(id: string): Promise<Workflow> {
+  return postArchive(id, { archived: false });
 }
 
 export function getWorkflow(id: string): Promise<Workflow> {

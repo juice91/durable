@@ -227,6 +227,14 @@ def test_workflow_publish_restore_archive_share_the_apis_behaviour(engine, tenan
     assert "archived" in run(restore_workflow_version(engine, tenant, "daily", 1))["error"]["message"]
 
 
+def test_archive_workflow_not_found_points_at_the_workflow_page(engine, tenant):
+    missing = run(archive_workflow(engine, tenant, "nope"))["error"]
+    assert missing["code"] == "not_found"
+    assert "archived from the workflow page in Studio" in missing["message"]
+    # Only the archive tool says so: publishing someone else's workflow is a plain not_found.
+    assert "Studio" not in run(publish_workflow(engine, tenant, "nope"))["error"]["message"]
+
+
 # --------------------------------------------------------------------------- schedules and summaries
 
 

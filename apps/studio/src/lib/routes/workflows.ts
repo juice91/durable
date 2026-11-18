@@ -1,4 +1,4 @@
-import { seg } from "./query";
+import { seg, withQuery } from "./query";
 
 /** The workflow detail page's tabs (SL.14). Graph is the default and is left out of URLs. */
 export const WORKFLOW_TABS = ["graph", "runs", "traces"] as const;
@@ -109,8 +109,8 @@ function query(entries: Array<[string, string | null]>): string {
 }
 
 export const workflowRoutes = {
-  /** `/workflows`: the workflows list. */
-  workflows: (): string => "/workflows",
+  /** `/workflows[?view=archived]`: the workflows list (the archived workflows with `archived`). */
+  workflows: (opts: { archived?: boolean } = {}): string => withQuery("/workflows", { view: opts.archived ? "archived" : undefined }),
   /** `/workflows/:id[?tab=runs]`: the workflow detail page (Graph, or the Runs tab). */
   workflow: (id: string, { tab = null, collapsed = null }: WorkflowRouteOptions = {}): string =>
     `/workflows/${seg(id)}${query([

@@ -44,6 +44,8 @@ class WorkflowModel(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     draft_spec: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # 0031: when it was archived (NULL while it is not).
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 0026: the Architect's short id for a definition it made (NULL for hand-made workflows).
     slug: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

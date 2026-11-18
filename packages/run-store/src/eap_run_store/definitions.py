@@ -40,6 +40,7 @@ from eap_run_store.agent_checks import check_publishable, draft_hash, publish_wa
 from eap_run_store.definition_errors import (
     AGENT_ARCHIVED,
     BUILTIN_AGENT,
+    RUNS_ACTIVE,
     DefinitionBadRequest,
     DefinitionConflict,
     DefinitionInvalid,
@@ -483,18 +484,38 @@ def pause_workflow_schedules(conn: Connection, tenant_id: str, workflow_id: str)
 
 
 def set_workflow_archived(
-    conn: Connection, tenant_id: str, workflow_id: str, archived: bool
+    conn: Connection, tenant_id: str, workflow_id: str, archived: bool, *, force: bool = False
 ) -> ArchiveResult:
     """Archive or unarchive the workflow (idempotent). An archive pauses the workflow's active
-    schedules (listed in `paused_schedules`); an unarchive does not resume them. An archived workflow
-    is hidden from the list, refuses new runs and schedules, and cannot be published or restored."""
+    schedules (listed in `paused_schedules`) and stamps `archived_at`; an unarchive clears the stamp
+    and does not resume schedules. An archived workflow is hidden from the list, refuses new runs
+    and schedules, and cannot be published or restored. 409 `runs_active` (with `active_runs`) when
+    it has queued or running runs, unless `force`; a repeat archive of an archived workflow is never
+    refused."""
     workflow = lock_workflow(conn, tenant_id, workflow_id)
     changed = bool(workflow.archived) != archived
     paused: list[str] = []
+    if changed and archived and not force:
+        active = conn.execute(
+            text(
+                "SELECT count(*) FROM runs WHERE tenant_id = :t AND workflow_id = :id"
+                " AND kind = 'workflow' AND status IN ('queued', 'running')"
+            ),
+            {"id": str(workflow_id), "t": tenant_id},
+        ).scalar_one()
+        if active:
+            raise DefinitionConflict(
+                f"workflow has {active} queued or running run(s); wait for them, cancel them, or archive with force=true",
+                code=RUNS_ACTIVE,
+                active_runs=int(active),
+            )
     if changed:
         conn.execute(
-            text("UPDATE workflows SET archived = :a, updated_at = :now WHERE id = :id AND tenant_id = :t"),
-            {"a": archived, "now": _now(), "id": str(workflow_id), "t": tenant_id},
+            text(
+                "UPDATE workflows SET archived = :a, archived_at = :at, updated_at = :now"
+                " WHERE id = :id AND tenant_id = :t"
+            ),
+            {"a": archived, "at": _now() if archived else None, "now": _now(), "id": str(workflow_id), "t": tenant_id},
         )
     if archived:
         paused = pause_workflow_schedules(conn, tenant_id, workflow_id)

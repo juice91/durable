@@ -10,6 +10,7 @@ import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
+import { WorkflowArchivedBanner, WorkflowArchiveMenu } from "@/components/workflows/WorkflowArchiveMenu";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
 import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
@@ -88,7 +89,13 @@ function WorkflowDetail() {
   return (
     <TraceSheetHost tabParam={WORKFLOW_TRACE_TAB_PARAM}>
       <div className="flex h-full min-h-[32rem] min-w-0 flex-col">
-        <WorkflowHeader workflowId={id} name={workflow?.name ?? null} tab={tab} actions={versionSelect} />
+        <WorkflowHeader workflowId={id} name={workflow?.name ?? null} tab={tab} actions={
+          <>
+            {versionSelect}
+            {workflow ? <WorkflowArchiveMenu workflow={workflow} onChanged={setWorkflow} /> : null}
+          </>
+        } />
+        {workflow?.archived ? <WorkflowArchivedBanner workflow={workflow} onChanged={setWorkflow} /> : null}
         {notFound || error || !workflow ? (
           <div className="p-4">
             {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">Workflow not found.</p> : null}

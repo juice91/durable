@@ -592,7 +592,14 @@ def archive_workflow_sync(engine: Engine, tenant_id: str, id: str, run_id: str |
             "paused_schedules": len(result.paused_schedules),
         }
 
-    return _apply(engine, WORKFLOWS, tenant_id, id, op)
+    result = _apply(engine, WORKFLOWS, tenant_id, id, op)
+    if result.get("error", {}).get("code") == "not_found":
+        # The Architect only archives what it made; any other workflow is archived by the person.
+        result["error"]["message"] += (
+            " Workflows made any other way are archived from the workflow page in Studio (or with the"
+            " workflow.archive MCP tool)."
+        )
+    return result
 
 
 # ---- schedules (eap_run_store.ScheduleStore; the checks are the API's, restated for the worker)

@@ -64,6 +64,7 @@ from eap_api.routes.workflows import reference_problems
 from eap_api.schemas import CancelNotSupportedDetail, ErrorDetail, RunCancelResponse
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability import current_trace_context, log_failure
+from eap_run_store.definition_errors import WORKFLOW_ARCHIVED_CODE, WORKFLOW_ARCHIVED_NEW_WORK, DefinitionConflict
 from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, RunIdConflict
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 from eap_schemas.workflows import STEP_ID_PATTERN, WorkflowSpec
@@ -192,8 +193,10 @@ def _workflow_or_404(db: Session, workflow_id: uuid.UUID, tenant_id: str) -> Wor
         .filter(WorkflowModel.id == str(workflow_id), WorkflowModel.tenant_id == tenant_id)
         .first()
     )
-    if workflow is None or workflow.archived:
+    if workflow is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    if workflow.archived:
+        raise DefinitionConflict(WORKFLOW_ARCHIVED_NEW_WORK, code=WORKFLOW_ARCHIVED_CODE)
     return workflow
 
 

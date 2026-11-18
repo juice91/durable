@@ -21,7 +21,7 @@ pytestmark = requires_pg
 
 MANAGE_TOOLS = {
     "agent.save_draft", "agent.publish", "agent.archive", "agent.chat", "workflow.save_draft", "workflow.publish",
-    "workflow.run.start", "workflow.run.cancel", "workflow.schedule.set", "kb.create", "kb.source.create",
+    "workflow.archive", "workflow.run.start", "workflow.run.cancel", "workflow.schedule.set", "kb.create", "kb.source.create",
     "kb.source.sync", "settings.connection.create", "mcp.server.install", "mcp.server.runtime", "approvals.decide",
 }
 SPEC = {"name": "Drafted", "instructions": "Help.", "model": {"provider": "test", "name": "echo"}}
@@ -57,7 +57,8 @@ def test_every_mutation_is_refused_without_the_manage_scope(world):
     calls = {
         "agent.save_draft": {"spec": SPEC}, "agent.publish": {"agent_id": agent_id}, "agent.archive": {"agent_id": agent_id},
         "agent.chat": {"agent_id": agent_id, "message": "hi"}, "workflow.save_draft": {"spec": {}},
-        "workflow.publish": {"workflow_id": some}, "workflow.run.start": {"workflow_id": some, "input": {}},
+        "workflow.publish": {"workflow_id": some}, "workflow.archive": {"workflow_id": some},
+        "workflow.run.start": {"workflow_id": some, "input": {}},
         "workflow.run.cancel": {"run_id": some}, "workflow.schedule.set": {"workflow_id": some},
         "kb.create": {"name": "x", "embedding_model": "test:hash"},
         "kb.source.create": {"kb_id": some, "connection_id": some, "name": "x", "provider": "fake"},
@@ -129,6 +130,28 @@ def test_workflow_save_publish_run_cancel_and_schedule(world):
     paused = world.call(key, "workflow.schedule.set", {"workflow_id": wid, "schedule_id": sched.data["id"], "active": False})
     assert paused.data["active"] is False, paused.data
     assert world.call(key, "workflow.schedule.set", {"workflow_id": wid, "name": "bad", "cron": "nope"}).is_error
+
+
+def test_workflow_archive_pauses_schedules_and_refuses_active_runs_unless_forced(world):
+    _, h = world.tenant_of()
+    key = manage_key(world, h)
+    agent_id = world.publish_agent(h)
+    wid = world.publish_workflow(h, agent_id)
+    sched = world.call(key, "workflow.schedule.set", {"workflow_id": wid, "name": "nightly", "cron": "0 3 * * *",
+                                                      "input": {"q": "s"}})
+    assert not sched.is_error, sched.data
+    run = world.call(key, "workflow.run.start", {"workflow_id": wid, "input": {"q": "hi"}})
+    assert run.data["status"] == "queued", run.data
+    busy = world.call(key, "workflow.archive", {"workflow_id": wid})
+    assert busy.is_error and busy.error["code"] == "runs_active", busy.error
+    done = world.call(key, "workflow.archive", {"workflow_id": wid, "force": True})
+    assert not done.is_error and done.data["archived"] is True and done.data["archived_at"], done.data
+    assert done.data["paused_schedules"] == [sched.data["id"]]
+    refused = world.call(key, "workflow.run.start", {"workflow_id": wid, "input": {"q": "x"}})
+    assert refused.error["code"] == "workflow_archived", refused.error
+    back = world.call(key, "workflow.archive", {"workflow_id": wid, "archived": False})
+    assert back.data["archived"] is False and back.data["archived_at"] is None
+    assert world.call(key, "workflow.archive", {"workflow_id": str(uuid.uuid4())}).error["code"] == "not_found"
 
 
 def test_kb_connection_and_source_tools(world, monkeypatch):
@@ -204,7 +227,8 @@ def test_another_tenants_manage_key_changes_nothing_of_mine(world):
         ("agent.save_draft", {"agent_id": agent_id, "spec": {**SPEC, "name": "Hijacked"}}),
         ("agent.publish", {"agent_id": agent_id}), ("agent.archive", {"agent_id": agent_id}),
         ("agent.chat", {"agent_id": agent_id, "message": "hi"}),
-        ("workflow.publish", {"workflow_id": wid}), ("workflow.run.start", {"workflow_id": wid, "input": {"q": "x"}}),
+        ("workflow.publish", {"workflow_id": wid}), ("workflow.archive", {"workflow_id": wid}),
+        ("workflow.run.start", {"workflow_id": wid, "input": {"q": "x"}}),
         ("workflow.run.cancel", {"run_id": run_id}),
         ("workflow.schedule.set", {"workflow_id": wid, "name": "n", "cron": "0 3 * * *"}),
         ("approvals.decide", {"run_id": run_id, "kind": "step", "key": "ask", "decision": "approve"}),

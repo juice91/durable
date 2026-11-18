@@ -68,3 +68,6 @@ def refuse(status_code: int, detail: str, **kwargs: Any) -> DefinitionError:
 # Codes the API has always used in a body, and a tool reports.
 AGENT_ARCHIVED = "Agent is archived; unarchive it to start runs, conversations or publish versions"
 BUILTIN_AGENT = "builtin_agent"
+RUNS_ACTIVE = "runs_active"
+WORKFLOW_ARCHIVED_CODE = "workflow_archived"
+WORKFLOW_ARCHIVED_NEW_WORK = "Workflow is archived; unarchive it to start runs or create or resume schedules"

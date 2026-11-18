@@ -1,13 +1,15 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { getWorkflowVersion, listWorkflowRuns, listWorkflows, type Workflow, type WorkflowSpec } from "@/lib/workflows";
 import type { RunStatus } from "@/lib/runs";
 import { routes } from "@/lib/routes";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { Button } from "@/components/ui/Button";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { navCrumb } from "@/lib/nav";
 
 /** A run that is still executing. `waiting_approval` is pending input, not running. */
@@ -42,7 +44,10 @@ function countCell(value: number | null): React.ReactNode {
  * `/workflows`: Name, Running, Pending input and Number of steps, matching the workflow tour.
  * A row opens the Graph tab. Schedules opens the cron list. Workflows are created through the API.
  */
-export default function WorkflowsPage() {
+function WorkflowsPageBody() {
+  const router = useRouter();
+  // `?view=archived` lists the archived workflows (the agents list's scope).
+  const archived = useSearchParams()?.get("view") === "archived";
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -50,7 +55,8 @@ export default function WorkflowsPage() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    listWorkflows()
+    setRows(null);
+    listWorkflows({ archived })
       .then(async (workflows) => {
         if (cancelled) return;
         setRows(workflows.map((w) => ({ ...w, latestSpec: null, running: null, pendingInput: null })));
@@ -74,7 +80,7 @@ export default function WorkflowsPage() {
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, archived]);
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
@@ -119,9 +125,21 @@ export default function WorkflowsPage() {
           getRowTestId={(row) => workflowRowTestId(row.id)}
           searchPlaceholder="Filter by name or description"
           toolbar={
-            <Button variant="primary" size="md" asChild>
-              <Link href={routes.workflowSchedules()} data-testid="workflows-schedules">Schedules</Link>
-            </Button>
+            <>
+              <SegmentedControl<"active" | "archived">
+                label="Which workflows"
+                size="sm"
+                value={archived ? "archived" : "active"}
+                onValueChange={(next) => router.replace(routes.workflows({ archived: next === "archived" }))}
+                options={[
+                  { value: "active", label: "Active" },
+                  { value: "archived", label: "Archived" },
+                ]}
+              />
+              <Button variant="primary" size="md" asChild>
+                <Link href={routes.workflowSchedules()} data-testid="workflows-schedules">Schedules</Link>
+              </Button>
+            </>
           }
           filterRow={(row, query) => {
             const q = query.toLowerCase();
@@ -131,13 +149,24 @@ export default function WorkflowsPage() {
           loading={rows === null && !error}
           error={error}
           onRetry={retry}
-          empty={{
-            title: "No workflows yet",
-            description: "Create a workflow definition through the API (POST /api/v1/workflows) and publish a version to run it here.",
-          }}
+          empty={archived
+            ? { title: "No archived workflows", description: "Archive a workflow from its page to retire it; it appears here." }
+            : {
+                title: "No workflows yet",
+                description: "Create a workflow definition through the API (POST /api/v1/workflows) and publish a version to run it here.",
+              }}
           testId="workflows-list"
         />
       </div>
     </>
+  );
+}
+
+export default function WorkflowsPage() {
+  // useSearchParams (the scope) needs a Suspense boundary for the static prerender.
+  return (
+    <Suspense fallback={<PageHeader crumbs={[navCrumb("workflows", { current: true })]} />}>
+      <WorkflowsPageBody />
+    </Suspense>
   );
 }
