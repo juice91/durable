@@ -39,14 +39,14 @@ from eap_schemas.secrets import is_secret_ref
 
 from eap_run_store.store import Base
 
-CONNECTION_KINDS = ("oauth2_client_credentials",)
+CONNECTION_KINDS = ("oauth2_client_credentials", "api_token")
 CHECK_STATUSES = ("ok", "error")
-SOURCE_KINDS = ("product_catalog",)
+SOURCE_KINDS = ("product_catalog", "repository_docs")
 SYNC_MODES = ("targeted", "incremental", "full")
 SYNC_STATUSES = ("running", "completed", "incomplete", "failed", "cancelled", "needs_attention")
 RECORD_STATUSES = ("active", "removed")
 VALUE_TYPES = ("numeric", "text", "boolean", "range")
-DOCUMENT_STATUSES = ("discovered", "queued", "failed")
+DOCUMENT_STATUSES = ("discovered", "queued", "failed", "removed")
 
 MAX_CHECKPOINT_BYTES = 8 * 1024
 MAX_COUNTERS_BYTES = 8 * 1024
@@ -55,18 +55,18 @@ MAX_BOUNDED_ERRORS_BYTES = 32 * 1024
 MAX_PAYLOAD_BYTES = 256 * 1024
 MAX_DOCUMENT_KEY_CHARS = 256
 
-# Same texts as migration 0029_kb_sources.
+# Same texts as migrations 0029_kb_sources and 0030_kb_source_kinds.
 PROVIDER_CHECK = "provider ~ '^[a-z][a-z0-9_]{0,63}$'"
-CONNECTION_KIND_CHECK = "kind IN ('oauth2_client_credentials')"
+CONNECTION_KIND_CHECK = "kind IN ('oauth2_client_credentials', 'api_token')"
 CONNECTION_STATUS_CHECK = "last_status IS NULL OR last_status IN ('ok', 'error')"
-SOURCE_KIND_CHECK = "kind IN ('product_catalog')"
+SOURCE_KIND_CHECK = "kind IN ('product_catalog', 'repository_docs')"
 CHECKPOINT_CHECK = "octet_length(last_checkpoint::text) <= 8192"
 SYNC_MODE_CHECK = "mode IN ('targeted', 'incremental', 'full')"
 SYNC_STATUS_CHECK = "status IN ('running', 'completed', 'incomplete', 'failed', 'cancelled', 'needs_attention')"
 RECORD_STATUS_CHECK = "status IN ('active', 'removed')"
 PARAMETER_TYPE_CHECK = "value_type IN ('numeric', 'text', 'boolean', 'range')"
 PARAMETER_CONFIDENCE_CHECK = "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)"
-DOCUMENT_STATUS_CHECK = "status IN ('discovered', 'queued', 'failed')"
+DOCUMENT_STATUS_CHECK = "status IN ('discovered', 'queued', 'failed', 'removed')"
 DOCUMENT_KEY_CHECK = "char_length(document_key) BETWEEN 1 AND 256"
 
 
@@ -463,10 +463,17 @@ def _cols(cls: type, prefix: str = "") -> str:
     return ", ".join(f"{prefix}{f.name}" for f in fields(cls))
 
 
-def _check_refs(credential_refs: dict[str, str]) -> None:
+API_TOKEN_REF_KEYS = frozenset({"token"})
+
+
+def _check_refs(credential_refs: dict[str, str], kind: str | None = None) -> None:
+    """References are `secret:<name>`; an `api_token` connection has at most one, named `token` (none:
+    the provider is used without credentials)."""
     for key, ref in credential_refs.items():
         if not isinstance(key, str) or not key or is_secret_ref(ref) is None:
             raise ValueError("credential_refs maps logical names to 'secret:<name>' references")
+    if kind == "api_token" and not set(credential_refs) <= API_TOKEN_REF_KEYS:
+        raise ValueError("an api_token connection takes only the 'token' reference")
 
 
 def _check_kind(kind: str) -> None:
@@ -495,7 +502,7 @@ class ConnectionStore:
         """ValueError for an unknown kind or a reference that is not `secret:<name>`;
         ConnectionNameConflict for a duplicate name."""
         _check_kind(kind)
-        _check_refs(credential_refs)
+        _check_refs(credential_refs, kind)
         try:
             with self._engine.begin() as conn:
                 row = conn.execute(

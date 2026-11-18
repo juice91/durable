@@ -33,6 +33,7 @@ from eap_api.routes.secrets import get_secret_store
 from eap_kb_sources.check import check_connection
 from eap_kb_sources.errors import CONNECTION_NOT_FOUND, SourceError
 from eap_run_store.kb_sources import (
+    API_TOKEN_REF_KEYS,
     CONNECTION_KINDS,
     Connection,
     ConnectionInUse,
@@ -149,6 +150,8 @@ async def create_connection(
         return body
     if body.kind not in CONNECTION_KINDS:
         return problem("invalid_request", "unknown connection kind")
+    if body.kind == "api_token" and not set(body.credential_refs) <= API_TOKEN_REF_KEYS:
+        return problem("invalid_request", "an api_token connection takes only the 'token' reference")
     for refused in (_refs_problem(body.credential_refs), _url_problem(body.base_url), _provider_problem(body.config)):
         if refused is not None:
             return refused
