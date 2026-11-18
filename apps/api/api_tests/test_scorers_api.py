@@ -69,6 +69,15 @@ def test_scorer_validation(api):
         r = post({"kind": "regex", "pattern": "(?P<a>"})
         assert r.status_code == 422 and "(?P<a>" not in r.json()["detail"]
         assert post({"kind": "regex", "pattern": "^ok$"}).status_code == 201
+        r = post({"kind": "regex", "pattern": "zq(", "negate": True})
+        assert r.status_code == 422 and "zq(" not in r.json()["detail"]
+        r = post({"kind": "regex", "pattern": "a", "field": "a..b"})
+        assert r.status_code == 422 and "evaluator.field" in r.json()["detail"]
+        r = client.post(f"{API}/scorers", headers=h, json={"name": "no-url", "evaluator": {
+            "kind": "regex", "pattern": "https?://", "negate": True, "field": "post"}})
+        assert r.status_code == 201
+        stored = r.json()["evaluator"]
+        assert stored["negate"] is True and stored["field"] == "post"
         scorer = _create(client, h, name="y")
         agent = _agent(client, h)
         for rate in ("0", "1.5"):

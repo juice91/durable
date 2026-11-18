@@ -182,3 +182,49 @@ def test_add_verdict_uses_pass_or_the_threshold():
 def test_field_equals_on_text_output_that_is_json():
     outcome = score([FieldEquals(path="a.b", value=True).model_dump(mode="json")], '{"a": {"b": true}}')
     assert outcome.assertions["field_equals"]["value"] is True
+
+
+def _rx(pattern: str, output: Any, **extra: Any) -> dict[str, Any]:
+    outcome = score([{"kind": "regex", "pattern": pattern, **extra}], output)
+    assert outcome.evaluator_failures == []
+    return outcome.assertions["regex"]
+
+
+def test_regex_without_negate_behaves_as_before():
+    assert _rx("hi", "say hi")["value"] is True
+    assert _rx("zzz", "say hi") == {"value": False, "reason": "pattern did not match"}
+    assert _rx("hi", "say hi", negate=False)["value"] is True
+
+
+def test_regex_negate_passes_only_when_the_pattern_does_not_match():
+    assert _rx(r"https?://", "no link here", negate=True)["value"] is True
+    assert _rx(r"https?://", "see https://x.y", negate=True) == {
+        "value": False, "reason": "pattern matched but must not"}
+    # structured output: canonical JSON text, as without negate
+    assert _rx("傳聞|爆料|疑似|據傳", {"post": "疑似"}, negate=True)["value"] is False
+    assert _rx("傳聞|爆料|疑似|據傳", {"post": "好"}, negate=True)["value"] is True
+
+
+def test_regex_field_runs_over_that_fields_string_only():
+    out = {"post": "plain text", "link": "https://x.y"}
+    assert _rx(r"https?://", out, field="post", negate=True)["value"] is True
+    assert _rx(r"https?://", out, negate=True)["value"] is False  # whole JSON trips on `link`
+    assert _rx("plain", out, field="post")["value"] is True
+    assert _rx("nope", out, field="post") == {"value": False, "reason": "pattern did not match"}
+    # a text output holding JSON is read as JSON, as field_equals does
+    assert _rx("plain", '{"post": "plain text"}', field="post")["value"] is True
+    assert _rx("x", {"items": ["abc", "x"]}, field="items.1")["value"] is True
+
+
+@pytest.mark.parametrize("negate", [False, True])
+def test_regex_field_missing_or_not_a_string_fails_with_a_reason(negate):
+    assert _rx("a", {"post": "a"}, field="nope", negate=negate) == {
+        "value": False, "reason": "the output has no field at nope"}
+    assert _rx("1", {"n": 1}, field="n", negate=negate) == {
+        "value": False, "reason": "the field at n is not a string"}
+    assert _rx("a", "not json", field="post", negate=negate)["value"] is False
+
+
+def test_regex_negate_still_refuses_invalid_pattern():
+    outcome = score([{"kind": "regex", "pattern": "a(", "negate": True}], "x")
+    assert outcome.evaluator_failures[0]["error"] == REGEX_INVALID

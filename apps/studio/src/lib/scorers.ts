@@ -16,7 +16,7 @@ export const SCORER_KIND_LABELS: Record<ScorerKind, string> = {
 
 export type ScorerEvaluator =
   | { kind: "contains"; value: string; case_sensitive?: boolean }
-  | { kind: "regex"; pattern: string }
+  | { kind: "regex"; pattern: string; negate?: boolean; field?: string }
   | { kind: "schema_valid"; json_schema?: Record<string, unknown> | null }
   | { kind: "field_equals"; path: string; value: unknown }
   | { kind: "max_cost"; usd: string | number };
@@ -152,19 +152,31 @@ export async function scoreRun(runId: string, scorerIds: string[]): Promise<void
 export function describeEvaluator(evaluator: ScorerEvaluator): string {
   switch (evaluator.kind) {
     case "contains": return `contains “${evaluator.value}”`;
-    case "regex": return `matches /${evaluator.pattern}/`;
+    case "regex": return `${evaluator.negate ? "must not match" : "matches"} /${evaluator.pattern}/${evaluator.field ? ` in ${evaluator.field}` : ""}`;
     case "schema_valid": return "valid against the output schema";
     case "field_equals": return `${evaluator.path} equals ${JSON.stringify(evaluator.value)}`;
     case "max_cost": return `costs at most $${evaluator.usd}`;
   }
 }
 
+const FIELD_PATH = /^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,15}$/;
+
 /** A form's fields as an evaluator, or an error message. */
-export function evaluatorFromForm(kind: ScorerKind, primary: string, secondary: string): ScorerEvaluator | string {
+export function evaluatorFromForm(
+  kind: ScorerKind,
+  primary: string,
+  secondary: string,
+  regex: { negate?: boolean; field?: string } = {},
+): ScorerEvaluator | string {
   const text = primary.trim();
   switch (kind) {
     case "contains": return text ? { kind, value: primary, case_sensitive: false } : "Enter the text to look for.";
-    case "regex": return text ? { kind, pattern: text } : "Enter a pattern.";
+    case "regex": {
+      if (!text) return "Enter a pattern.";
+      const field = (regex.field ?? "").trim();
+      if (field && !FIELD_PATH.test(field)) return "The field path is dot-separated names (letters, digits, _ or -), at most 16.";
+      return { kind, pattern: text, ...(regex.negate ? { negate: true } : {}), ...(field ? { field } : {}) };
+    }
     case "schema_valid": return { kind };
     case "max_cost": return Number(text) > 0 ? { kind, usd: text } : "Enter a cost above zero, in USD.";
     case "field_equals": {

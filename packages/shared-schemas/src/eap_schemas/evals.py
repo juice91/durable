@@ -95,6 +95,14 @@ def _check_json_bytes(value: Any, limit: int, what: str) -> Any:
     return value
 
 
+def _check_field_path(v: str, name: str = "field") -> str:
+    if not _FIELD_PATH.fullmatch(v):
+        raise ValueError(
+            f"{name} must be 1 to {MAX_FIELD_PATH_SEGMENTS} dot-separated segments of [A-Za-z0-9_-] (1 to 64 each)"
+        )
+    return v
+
+
 class _Evaluator(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -119,6 +127,17 @@ class Contains(_Evaluator):
 class Regex(_Evaluator):
     kind: Literal["regex"] = "regex"
     pattern: str = Field(min_length=1, max_length=MAX_REGEX_PATTERN_CHARS, description="RE2 syntax")
+    negate: bool = Field(default=False, description="Passes when the pattern does not match")
+    field: str | None = Field(
+        default=None,
+        description="Dotted path into the structured output (as field_equals.path); the pattern runs over that "
+        "field's string value instead of the whole output text",
+    )
+
+    @field_validator("field")
+    @classmethod
+    def _field(cls, v: str | None) -> str | None:
+        return None if v is None else _check_field_path(v)
 
 
 class SchemaValid(_Evaluator):
@@ -144,11 +163,7 @@ class FieldEquals(_Evaluator):
     @field_validator("path")
     @classmethod
     def _path(cls, v: str) -> str:
-        if not _FIELD_PATH.fullmatch(v):
-            raise ValueError(
-                f"path must be 1 to {MAX_FIELD_PATH_SEGMENTS} dot-separated segments of [A-Za-z0-9_-] (1 to 64 each)"
-            )
-        return v
+        return _check_field_path(v, "path")
 
     @field_validator("value")
     @classmethod

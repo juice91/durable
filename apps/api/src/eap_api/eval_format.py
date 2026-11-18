@@ -34,7 +34,7 @@ so nothing is lost on a round trip:
 | `llm_judge`       | `LLMJudge(rubric, model "provider:name", include_input?, include_expected_output?, |
 |                   | assertion: {evaluation_name}?)` (stock) without `pass_threshold`;               |
 |                   | `ThresholdLLMJudge(the same, pass_threshold)` (ours) with one                    |
-| `regex`           | `Regex(pattern, evaluation_name?)` (ours, RE2)                                   |
+| `regex`           | `Regex(pattern, negate?, field?, evaluation_name?)` (ours, RE2)                  |
 | `schema_valid`    | `SchemaValid(json_schema?, evaluation_name?)` (ours)                             |
 | `field_equals`    | `FieldEquals(path, value, evaluation_name?)` (ours)                              |
 | `max_cost`        | `MaxCost(usd, evaluation_name?)` (ours; a number, or decimal text when a float   |
@@ -50,10 +50,13 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 @dataclass
 class Regex(Evaluator):
     pattern: str
+    negate: bool = False
+    field: str | None = None
     evaluation_name: str | None = None
     def evaluate(self, ctx: EvaluatorContext) -> bool:
         import re
-        return re.search(self.pattern, str(ctx.output)) is not None
+        text = str(ctx.output) if self.field is None else str(ctx.output[self.field])  # simplified
+        return (re.search(self.pattern, text) is not None) != self.negate
 
 # ContainsExpected(case_sensitive=True, evaluation_name=None), NamedMaxDuration(seconds,
 # evaluation_name), ThresholdLLMJudge(rubric, model, include_input=False,
@@ -192,6 +195,10 @@ def evaluator_to_spec(evaluator: Any) -> str | dict[str, Any]:
             cls = "NamedMaxDuration"
     elif kind == "regex":
         args["pattern"] = evaluator.pattern
+        if evaluator.negate:
+            args["negate"] = True
+        if evaluator.field is not None:
+            args["field"] = evaluator.field
     elif kind == "schema_valid":
         if evaluator.json_schema is not None:
             args["json_schema"] = evaluator.json_schema

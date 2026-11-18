@@ -52,6 +52,7 @@ FAILED_REASONS = {
     "field_equals": "the output field does not have the expected value",
     "max_cost": "the run cost more than the limit",
 }
+NEGATED_REGEX_REASON = "the output matches a pattern it must not match"
 
 
 def score_data(scorer: dict[str, Any], outcome: Any) -> dict[str, Any] | None:
@@ -64,7 +65,12 @@ def score_data(scorer: dict[str, Any], outcome: Any) -> dict[str, Any] | None:
         for key, found in table.items():
             value = found["value"]
             if isinstance(value, bool):
-                reason = None if value else FAILED_REASONS.get(scorer.get("kind", ""), "the check failed")
+                if value:
+                    reason = None
+                elif scorer.get("kind") == "regex" and scorer.get("negate"):
+                    reason = NEGATED_REGEX_REASON
+                else:
+                    reason = FAILED_REASONS.get(scorer.get("kind", ""), "the check failed")
                 return {**base, "score": 1.0 if value else 0.0, "passed": value, "reason": reason}
             return {**base, "score": float(value), "passed": float(value) > 0, "reason": None}
     return None
@@ -107,7 +113,9 @@ async def score_run_step(
         except Exception:  # noqa: BLE001 - scoring never fails the run
             log.warning("run %s: scorer %s failed", run_id, scorer["id"])
             continue
-        data = score_data({**scorer, "kind": scorer["evaluator"]["kind"]}, outcome)
+        data = score_data(
+            {**scorer, "kind": scorer["evaluator"]["kind"], "negate": bool(scorer["evaluator"].get("negate"))}, outcome
+        )
         if data is None:
             continue
         result = await asyncio.to_thread(

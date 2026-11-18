@@ -263,7 +263,8 @@ There is no sleep step: each iteration starts as soon as the previous one ends. 
 - **`pass`** is `"all"` (the default) or `"any"`.
 - **Evaluators** are the eval suite evaluators: `equals_expected`, `contains`, `regex`,
   `schema_valid`, `field_equals` and `llm_judge`. `max_duration` and `max_cost` are not available,
-  because an evaluate step has no run to measure.
+  because an evaluate step has no run to measure. `regex` takes `negate` and `field` as in a suite
+  (see [Eval evaluators](../evals.md)).
 - **An `llm_judge` model** must be on the platform allowlist (`EAP_ALLOWED_MODELS`). Publish and
   run start check it.
 

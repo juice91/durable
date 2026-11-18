@@ -24,6 +24,8 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 @dataclass
 class Regex(Evaluator):
     pattern: str
+    negate: bool = False
+    field: str | None = None
     evaluation_name: str | None = None
 
     def evaluate(self, ctx: EvaluatorContext) -> bool:

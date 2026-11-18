@@ -38,6 +38,8 @@ export function ReusableScorers() {
   const [kind, setKind] = useState<ScorerKind>("contains");
   const [primary, setPrimary] = useState("");
   const [secondary, setSecondary] = useState("");
+  const [negate, setNegate] = useState(false);
+  const [regexField, setRegexField] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -61,7 +63,7 @@ export function ReusableScorers() {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!name.trim()) return setFormError("Enter a name.");
-    const evaluator = evaluatorFromForm(kind, primary, secondary);
+    const evaluator = evaluatorFromForm(kind, primary, secondary, { negate, field: regexField });
     if (typeof evaluator === "string") return setFormError(evaluator);
     setSaving(true);
     setFormError(null);
@@ -70,6 +72,8 @@ export function ReusableScorers() {
       setName("");
       setPrimary("");
       setSecondary("");
+      setNegate(false);
+      setRegexField("");
       await load();
     } catch (err) {
       setFormError(err instanceof Error && err.message ? err.message : "Could not save the scorer");
@@ -130,6 +134,18 @@ export function ReusableScorers() {
             {primaryField.label}
             <input className={field} value={primary} placeholder={primaryField.placeholder} onChange={(e) => setPrimary(e.target.value)} />
           </label>
+        ) : null}
+        {kind === "regex" ? (
+          <>
+            <label className="flex items-center gap-2 text-caption text-muted-foreground">
+              <input type="checkbox" checked={negate} onChange={(e) => setNegate(e.target.checked)} />
+              Must not match
+            </label>
+            <label className="flex flex-col gap-1 text-caption text-muted-foreground">
+              Field path (optional)
+              <input className={field} value={regexField} placeholder="post" onChange={(e) => setRegexField(e.target.value)} />
+            </label>
+          </>
         ) : null}
         {kind === "field_equals" ? (
           <label className="flex flex-col gap-1 text-caption text-muted-foreground">
