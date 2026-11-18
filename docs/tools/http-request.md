@@ -81,6 +81,12 @@ holds the secret from returning it in some reversible form.
 - **In a workflow tool step**, there is no approval: the person who published the workflow reviewed the URL
   and the references in the spec.
 
+## What a workflow records
+
+A workflow tool step's recorded input (the `step_started` event, spans, the run row) shows the values of sensitive
+headers as `[REDACTED]`: `authorization`, `cookie`, `proxy-authorization`, `x-api-key` and any header whose name
+contains `token` or `secret`, case-insensitively. The call itself sends the real value.
+
 ## Outbound policy
 
 The request goes through the tenant outbound policy (the same guard as MCP servers): `https` only, no

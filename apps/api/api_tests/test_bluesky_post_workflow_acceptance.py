@@ -295,6 +295,9 @@ def test_a_post_completes_and_the_password_stays_out_of_every_record(stack, work
     events = stack.events(run_id)
     assert events["step:session:completed"][1]["output"]["json"] == {
         "accessJwt": "jwt-access-1", "handle": HANDLE, "did": "did:plc:fakeaccount"}
+    # The recorded post input masks the Authorization header; the wire got the real token (asserted above).
+    assert events["step:post:started"][1]["input"]["headers"] == {"Authorization": "[REDACTED]"}
+    assert "Bearer jwt-access-1" not in stack.everything_recorded(run_id)
     assert events["step:session:started"][1]["input"]["json"]["password"] == f"secret:{SECRET}"  # the reference only
     assert "step:login_failed:started" not in events and "step:post_failed:started" not in events
 

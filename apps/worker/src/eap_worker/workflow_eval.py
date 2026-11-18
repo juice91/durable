@@ -54,6 +54,7 @@ from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
+from eap_secrets.redaction import REDACTED
 from eap_schemas.workflows import (
     REF_KEY,
     AllCondition,
@@ -85,6 +86,7 @@ __all__ = [
     "non_finite_path",
     "outcome",
     "resolve_ref",
+    "mask_recorded_input",
     "resolve_template",
     "while_holds",
     "while_outcome",
@@ -203,6 +205,24 @@ def render_template(inner: Any, context: dict[str, Any]) -> Any:
     if isinstance(inner, dict):
         return {k: render_template(v, context) for k, v in inner.items()}
     return inner
+
+
+SENSITIVE_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization", "x-api-key"})
+
+
+def sensitive_header(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in SENSITIVE_HEADERS or "token" in lowered or "secret" in lowered
+
+
+def mask_recorded_input(resolved: dict[str, Any]) -> dict[str, Any]:
+    """A tool step's resolved input as it is RECORDED (events, spans, the run row): the values of sensitive
+    headers (authorization, cookie, proxy-authorization, x-api-key, any name containing "token" or "secret",
+    case-insensitively) of a `headers` object are replaced by REDACTED. The live call keeps the real values."""
+    headers = resolved.get("headers")
+    if not isinstance(headers, dict) or not any(sensitive_header(str(k)) for k in headers):
+        return resolved
+    return {**resolved, "headers": {k: REDACTED if sensitive_header(str(k)) else v for k, v in headers.items()}}
 
 
 def resolve_template(template: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:

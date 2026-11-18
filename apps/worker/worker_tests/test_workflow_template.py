@@ -43,3 +43,20 @@ def test_a_placeholder_that_does_not_resolve_or_is_not_a_scalar_inside_text_is_r
 def test_a_resolved_value_is_never_rescanned():
     context = {"input": {"x": "{{steps.s.output.token}}"}, "steps": {"s": {"output": {"token": "T"}}}}
     assert resolve_template({"a": {"$template": "v={{input.x}}"}}, context) == {"a": "v={{steps.s.output.token}}"}
+
+
+def test_recorded_input_masks_sensitive_headers_only():
+    from eap_secrets.redaction import REDACTED
+    from eap_worker.workflow_eval import mask_recorded_input
+
+    live = {"method": "POST", "headers": {
+        "Authorization": "Bearer abc", "COOKIE": "s=1", "Proxy-Authorization": "x", "X-Api-Key": "k",
+        "X-Auth-Token": "t", "my-Secret-thing": "s", "Content-Type": "application/json", "Accept": "*/*"}}
+    masked = mask_recorded_input(live)
+    assert masked["headers"] == {
+        "Authorization": REDACTED, "COOKIE": REDACTED, "Proxy-Authorization": REDACTED, "X-Api-Key": REDACTED,
+        "X-Auth-Token": REDACTED, "my-Secret-thing": REDACTED, "Content-Type": "application/json", "Accept": "*/*"}
+    assert live["headers"]["Authorization"] == "Bearer abc"  # the live input is untouched
+    plain = {"headers": {"Accept": "*/*"}, "x": 1}
+    assert mask_recorded_input(plain) is plain
+    assert mask_recorded_input({"x": 1}) == {"x": 1} and mask_recorded_input({"headers": "str"}) == {"headers": "str"}

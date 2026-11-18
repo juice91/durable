@@ -290,6 +290,7 @@ from eap_worker.workflow_eval import (
     non_finite_path,
     outcome,
     resolve_ref,
+    mask_recorded_input,
     resolve_template,
     while_outcome,
 )
@@ -881,7 +882,7 @@ class _Interpreter:
         if isinstance(step, (AgentStep, ToolStep)) and problem is None:
             try:
                 resolved = resolve_template(step.input, self.context())
-                data["input"] = resolved
+                data["input"] = mask_recorded_input(resolved) if isinstance(step, ToolStep) else resolved
             except RefMissing:
                 problem = WorkflowStepError("input_ref_missing", step_id)
         if isinstance(step, AgentStep):
