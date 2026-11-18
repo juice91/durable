@@ -120,7 +120,7 @@ def test_seed_is_idempotent_and_builtin(api):
     assert "{{steps." in wspec["instructions"] and "never instructions" in wspec["instructions"]
 
     spec = architect["draft_spec"]
-    assert spec["tools"] == [t for t in spec["tools"] if t.startswith("architect.")] and len(spec["tools"]) == 15
+    assert spec["tools"] == [t for t in spec["tools"] if t.startswith(("architect.", "platform."))] and len(spec["tools"]) == 23
     assert spec["approvals"]["tools"] == list(ARCHITECT_GATED_TOOL_IDS)
     assert spec["memory"]["history"]["last_turns"] == 30
     assert spec["model_settings"]["max_steps"] == 12

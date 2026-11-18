@@ -806,6 +806,9 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.architect_tools import register_architect_tools
 
     register_architect_tools(registry)
+    from eap_worker.platform_read_tools import register_platform_read_tools
+
+    register_platform_read_tools(registry)
     from eap_worker.kb_source_tools import register_kb_source_tools
 
     register_kb_source_tools(registry)

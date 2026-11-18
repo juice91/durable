@@ -22,6 +22,7 @@ from eap_schemas import AgentSpec, ApprovalPolicy, MemoryConfig, ModelRef, Model
 from eap_schemas.architect import (
     AGENT_ID_PATTERN,
     ARCHITECT_GATED_TOOL_IDS,
+    ARCHITECT_PLATFORM_TOOL_IDS,
     ARCHITECT_TOOL_IDS,
     Allowlist,
     ArchitectAgentSpec,
@@ -149,7 +150,7 @@ def architect_agent_spec(model: str) -> AgentSpec:
         name=ARCHITECT_NAME,
         instructions=ARCHITECT_INSTRUCTIONS,
         model=ModelRef(provider=provider, name=name),
-        tools=ARCHITECT_TOOL_IDS,
+        tools=(*ARCHITECT_TOOL_IDS, *ARCHITECT_PLATFORM_TOOL_IDS),
         approvals=ApprovalPolicy(tools=ARCHITECT_GATED_TOOL_IDS),
         memory=MemoryConfig(history=HistoryConfig(last_turns=30)),
         model_settings=ModelSettings(max_steps=12),
