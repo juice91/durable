@@ -114,6 +114,51 @@ describe("ConnectionsSection", () => {
     await waitFor(() => expect(mocks.listConnections).toHaveBeenCalledTimes(2));
   });
 
+  it("adds an API-token connection: one optional Token picker, no OAuth fields, no value", async () => {
+    const sheet = await openAdd();
+    fireEvent.change(within(sheet).getByLabelText("Provider"), { target: { value: "github" } });
+    expect(within(sheet).getByLabelText("Base URL")).toHaveValue("https://api.github.com");
+    expect(within(sheet).queryByLabelText("Token URL")).toBeNull();
+    expect(within(sheet).queryByLabelText("Client ID")).toBeNull();
+    expect(within(sheet).queryByLabelText("Client secret")).toBeNull();
+    expect(within(sheet).getAllByRole("combobox").map((el) => el.id).length).toBe(2); // provider + Token
+    fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "repos" } });
+    // the token is optional: a public repository needs none
+    expect(within(sheet).getByRole("button", { name: "Add connection" })).toBeEnabled();
+    await waitFor(() => expect(within(sheet).getByLabelText("Token")).toHaveTextContent("conn-id"));
+    fireEvent.change(within(sheet).getByLabelText("Token"), { target: { value: "conn-secret" } });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Add connection" }));
+    await waitFor(() => expect(mocks.createConnection).toHaveBeenCalled());
+    expect(mocks.createConnection.mock.calls[0][0]).toEqual({
+      name: "repos", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" },
+      credential_refs: { token: "secret:conn-secret" }, enabled: true,
+    });
+  });
+
+  it("adds an API-token connection without a token as an empty reference map", async () => {
+    const sheet = await openAdd();
+    fireEvent.change(within(sheet).getByLabelText("Provider"), { target: { value: "github" } });
+    fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "public" } });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Add connection" }));
+    await waitFor(() => expect(mocks.createConnection).toHaveBeenCalled());
+    expect(mocks.createConnection.mock.calls[0][0].credential_refs).toEqual({});
+  });
+
+  it("edits an API-token connection with its token preselected and the provider fixed", async () => {
+    mocks.listConnections.mockResolvedValue([{ ...CONNECTION, id: "c9", name: "repos", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" }, credential_refs: { token: "secret:conn-secret" } }]);
+    render(<ConnectionsSection />);
+    await screen.findByText("repos");
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit repos" }));
+    const sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByLabelText("Provider")).toBeDisabled();
+    await waitFor(() => expect(within(sheet).getByLabelText("Token")).toHaveValue("conn-secret"));
+    fireEvent.change(within(sheet).getByLabelText("Token"), { target: { value: "" } });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mocks.updateConnection).toHaveBeenCalled());
+    expect(mocks.updateConnection.mock.calls[0][1]).toMatchObject({ credential_refs: {}, config: { provider: "github" } });
+  });
+
   it("keeps Add disabled until the name and both credentials are chosen", async () => {
     const sheet = await openAdd();
     expect(within(sheet).getByRole("button", { name: "Add connection" })).toBeDisabled();

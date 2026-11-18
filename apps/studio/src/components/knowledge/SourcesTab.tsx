@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -9,6 +9,8 @@ import { toast } from "@/components/ui/Toaster";
 import {
   MAX_TARGETED_PARTS,
   PROVIDERS,
+  REPOSITORY_PATTERN,
+  REPOSITORY_SOURCE_KIND,
   SOURCE_KIND,
   SYNC_MODES,
   createSource,
@@ -17,8 +19,12 @@ import {
   listConnections,
   listSources,
   listSyncs,
+  parseLines,
+  parseMetadataMap,
   parsePartNumbers,
+  providerInfo,
   publishSyncWorkflow,
+  repositoryConfig,
   reportSummary,
   startSourceSync,
   updateSource,
@@ -34,6 +40,8 @@ import { formatWhen } from "./knowledgeUi";
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const TERMINAL = new Set(["completed", "failed", "needs_attention", "cancelled"]);
 const MODE_LABEL: Record<SyncMode, string> = { targeted: "Targeted (part numbers)", incremental: "Incremental (new and changed)", full: "Full catalogue" };
+const REPOSITORY_MODE_LABEL: Record<SyncMode, string> = { targeted: "Targeted (file paths)", incremental: "Incremental (changed files)", full: "Full repository" };
+const MAP_PLACEHOLDER = "docs/api_guide/device/am263x/**: {sdk_family: mcu-plus-sdk, device: AM263x}\n\"**\": {sdk_family: mcu-plus-sdk}";
 
 function errorText(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
@@ -51,6 +59,12 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
   const [extended, setExtended] = useState(false);
   const [inactive, setInactive] = useState(false);
   const [datasheets, setDatasheets] = useState(true);
+  const [repository, setRepository] = useState("");
+  const [ref, setRef] = useState("");
+  const [include, setInclude] = useState("");
+  const [exclude, setExclude] = useState("");
+  const [mapText, setMapText] = useState("");
+  const [deleteMissing, setDeleteMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -62,9 +76,22 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
   }, []);
 
   const connection = connections.find((item) => item.id === connectionId);
+  const sourceKind = providerInfo(String(connection?.config.provider ?? ""))?.sourceKind ?? SOURCE_KIND;
+  const repoSource = sourceKind === REPOSITORY_SOURCE_KIND;
   const size = Number(pageSize);
   const sizeOk = Number.isInteger(size) && size >= 1 && size <= 1000;
-  const valid = !!connection && name.trim() !== "" && sizeOk;
+  const repositoryOk = REPOSITORY_PATTERN.test(repository.trim());
+  const includeOk = parseLines(include).length > 0;
+  const mapError = useMemo(() => {
+    if (!repoSource) return null;
+    try {
+      parseMetadataMap(mapText);
+      return null;
+    } catch (reason: unknown) {
+      return errorText(reason, "The map is not valid");
+    }
+  }, [repoSource, mapText]);
+  const valid = !!connection && name.trim() !== "" && (repoSource ? repositoryOk && includeOk && mapError === null : sizeOk);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -75,9 +102,11 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
       await createSource(kbId, {
         connection_id: connection.id,
         name: name.trim(),
-        kind: SOURCE_KIND,
+        kind: sourceKind,
         provider: String(connection.config.provider ?? ""),
-        config: { page_size: size, include_extended: extended, include_inactive: inactive, document_policy: { types: datasheets ? ["datasheet"] : [] } },
+        config: repoSource
+          ? repositoryConfig({ repository, ref, include, exclude, map: mapText, deleteMissing })
+          : { page_size: size, include_extended: extended, include_inactive: inactive, document_policy: { types: datasheets ? ["datasheet"] : [] } },
         enabled: true,
       });
       toast.success("Source added");
@@ -93,7 +122,7 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
   return (
     <Sheet open onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
       <SheetContent size="md" data-testid="source-sheet">
-        <SheetHeader title="Add source" description="A source syncs a provider's catalogue into this knowledge base." />
+        <SheetHeader title="Add source" description="A source syncs a provider's catalogue or repository into this knowledge base." />
         <form onSubmit={submit} className="flex min-h-0 min-w-0 flex-1 flex-col">
           <SheetBody className="flex flex-col gap-4">
             <div className="space-y-1">
@@ -110,6 +139,44 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
               <label htmlFor="source-name" className="block text-sm font-medium text-foreground">Name</label>
               <input id="source-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} autoComplete="off" className={inputClass} />
             </div>
+            {repoSource ? (
+              <>
+            <div className="space-y-1">
+              <label htmlFor="source-repository" className="block text-sm font-medium text-foreground">Repository</label>
+              <input id="source-repository" value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/name" autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+              {repository.trim() !== "" && !repositoryOk ? <p className="text-caption text-destructive-text">Use owner/name.</p> : null}
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="source-ref" className="block text-sm font-medium text-foreground">Ref</label>
+              <input id="source-ref" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="Default branch" autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+              <p className="text-caption text-muted-foreground">A branch, tag or commit; empty follows the default branch.</p>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="source-include" className="block text-sm font-medium text-foreground">Include</label>
+              <textarea id="source-include" value={include} onChange={(e) => setInclude(e.target.value)} rows={3} spellCheck={false} autoComplete="off" placeholder={"docs/**"} className={`${inputClass} font-mono`} />
+              <p className="text-caption text-muted-foreground">Path globs, one per line (at least one). Supported types: md, rst, html, txt, yaml, json, pdf.</p>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="source-exclude" className="block text-sm font-medium text-foreground">Exclude</label>
+              <textarea id="source-exclude" value={exclude} onChange={(e) => setExclude(e.target.value)} rows={2} spellCheck={false} autoComplete="off" placeholder={"docs/old/**"} className={`${inputClass} font-mono`} />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="source-map" className="block text-sm font-medium text-foreground">Metadata map (YAML)</label>
+              <textarea id="source-map" value={mapText} onChange={(e) => setMapText(e.target.value)} rows={6} spellCheck={false} autoComplete="off" placeholder={MAP_PLACEHOLDER} aria-invalid={mapError !== null} aria-describedby="source-map-help" className={`${inputClass} font-mono`} />
+              <p id="source-map-help" className={`text-caption ${mapError ? "text-destructive-text" : "text-muted-foreground"}`} role={mapError ? "alert" : undefined}>
+                {mapError ?? "glob: {key: value}, first match wins; the path is added to every document."}
+              </p>
+            </div>
+            <fieldset className="flex flex-col gap-2">
+              <legend className="mb-1 text-sm font-medium text-foreground">Policy</legend>
+              <label className="flex items-start gap-2 text-sm text-foreground">
+                <input type="checkbox" checked={deleteMissing} onChange={(e) => setDeleteMissing(e.target.checked)} className="mt-1" />
+                <span>Delete documents whose files disappeared<span className="block text-caption text-muted-foreground">After a complete walk; refused beyond 50 documents or 20 %.</span></span>
+              </label>
+            </fieldset>
+              </>
+            ) : (
+              <>
             <div className="space-y-1">
               <label htmlFor="source-page-size" className="block text-sm font-medium text-foreground">Page size</label>
               <input id="source-page-size" type="number" min={1} max={1000} value={pageSize} onChange={(e) => setPageSize(e.target.value)} className={inputClass} />
@@ -121,6 +188,8 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
               <label className="flex items-center gap-2 text-sm text-foreground"><input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> Include extended data (parametrics, quality)</label>
               <label className="flex items-center gap-2 text-sm text-foreground"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} /> Include inactive products</label>
             </fieldset>
+              </>
+            )}
             {error ? <p role="alert" className="text-label text-destructive-text">{error}</p> : null}
           </SheetBody>
           <SheetFooter>
@@ -140,6 +209,9 @@ function RunSyncSheet({ source, onClose, onStarted }: { source: Source; onClose:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const repoSource = source.kind === REPOSITORY_SOURCE_KIND;
+  const modeLabel = repoSource ? REPOSITORY_MODE_LABEL : MODE_LABEL;
+  const noun = repoSource ? "file paths" : "part numbers";
   const parts = parsePartNumbers(text);
   const tooMany = parts.length > MAX_TARGETED_PARTS;
   const valid = mode === "targeted" ? parts.length > 0 && !tooMany : true;
@@ -169,23 +241,23 @@ function RunSyncSheet({ source, onClose, onStarted }: { source: Source; onClose:
               <label htmlFor="sync-mode" className="block text-sm font-medium text-foreground">Mode</label>
               <select id="sync-mode" value={mode} onChange={(e) => setMode(e.target.value as SyncMode)} className={inputClass}>
                 {SYNC_MODES.map((item) => (
-                  <option key={item} value={item}>{MODE_LABEL[item]}</option>
+                  <option key={item} value={item}>{modeLabel[item]}</option>
                 ))}
               </select>
             </div>
             {mode === "targeted" ? (
               <div className="space-y-1">
-                <label htmlFor="sync-parts" className="block text-sm font-medium text-foreground">Part numbers</label>
-                <textarea id="sync-parts" value={text} onChange={(e) => setText(e.target.value)} rows={6} spellCheck={false} autoComplete="off" placeholder="One per line, or separated by commas" className={`${inputClass} font-mono`} />
+                <label htmlFor="sync-parts" className="block text-sm font-medium text-foreground">{repoSource ? "File paths" : "Part numbers"}</label>
+                <textarea id="sync-parts" value={text} onChange={(e) => setText(e.target.value)} rows={6} spellCheck={false} autoComplete="off" placeholder={repoSource ? "docs/guide/intro.md, one per line" : "One per line, or separated by commas"} className={`${inputClass} font-mono`} />
                 <p className={`text-caption ${tooMany ? "text-destructive-text" : "text-muted-foreground"}`}>
-                  {parts.length} of {MAX_TARGETED_PARTS} part numbers{tooMany ? `; use at most ${MAX_TARGETED_PARTS} per sync` : ""}
+                  {parts.length} of {MAX_TARGETED_PARTS} {noun}{tooMany ? `; use at most ${MAX_TARGETED_PARTS} per sync` : ""}
                 </p>
               </div>
             ) : null}
             {mode === "full" ? (
               <label className="flex items-start gap-2 text-sm text-foreground">
                 <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} className="mt-1" />
-                <span>Restart from the beginning<span className="block text-caption text-muted-foreground">Ignore the stored cursor and walk the catalogue again.</span></span>
+                <span>Restart from the beginning<span className="block text-caption text-muted-foreground">{repoSource ? "Ignore the stored position and walk the repository again." : "Ignore the stored cursor and walk the catalogue again."}</span></span>
               </label>
             ) : null}
             {error ? <p role="alert" className="text-label text-destructive-text">{error}</p> : null}

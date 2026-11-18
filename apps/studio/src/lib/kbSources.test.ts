@@ -7,8 +7,12 @@ import {
   createConnection,
   deleteConnection,
   findSyncWorkflow,
+  parseLines,
+  parseMetadataMap,
   parsePartNumbers,
   publishSyncWorkflow,
+  REPOSITORY_PATTERN,
+  repositoryConfig,
   reportSummary,
   sourcesUsingConnection,
   startSourceSync,
@@ -40,7 +44,7 @@ describe("check codes", () => {
 
 describe("connectionPayload", () => {
   it("sends refs, never values, and the token URL in config", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret" });
+    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret", tokenSecret: "" });
     expect(body).toEqual({
       name: "ti",
       kind: "oauth2_client_credentials",
@@ -51,8 +55,73 @@ describe("connectionPayload", () => {
     });
   });
   it("leaves an empty token URL out", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b" });
+    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b", tokenSecret: "" });
     expect(body.config).toEqual({ provider: "acme_catalog" });
+  });
+});
+
+describe("connectionPayload for an api_token provider", () => {
+  const form = { name: "repo", provider: "github", baseUrl: "https://api.github.com", tokenUrl: "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" };
+  it("sends the optional token as one reference", () => {
+    expect(connectionPayload({ ...form, tokenSecret: "repo-token" })).toEqual({
+      name: "repo", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" },
+      credential_refs: { token: "secret:repo-token" }, enabled: true,
+    });
+  });
+  it("sends no reference when there is no token, and no OAuth fields", () => {
+    const body = connectionPayload({ ...form, clientIdSecret: "leftover", tokenUrl: "https://x.test" });
+    expect(body.credential_refs).toEqual({});
+    expect(body.config).toEqual({ provider: "github" });
+    expect(body.kind).toBe("api_token");
+  });
+});
+
+describe("parseMetadataMap", () => {
+  it("reads the importer's glob: {metadata} mapping in file order", () => {
+    const rules = parseMetadataMap('# mcu\napi_guide/device/am263x/**: {sdk_family: mcu-plus-sdk, device: AM263x}\n"**":  {sdk_family: mcu-plus-sdk, rank: 2, public: true}\n');
+    expect(rules).toEqual([
+      { match: "api_guide/device/am263x/**", metadata: { sdk_family: "mcu-plus-sdk", device: "AM263x" } },
+      { match: "**", metadata: { sdk_family: "mcu-plus-sdk", rank: 2, public: true } },
+    ]);
+  });
+  it("reads the rules form and treats empty text as no map", () => {
+    expect(parseMetadataMap("rules:\n  - match: '*.md'\n    metadata: {kind: doc}\n")).toEqual([{ match: "*.md", metadata: { kind: "doc" } }]);
+    expect(parseMetadataMap("  \n")).toEqual([]);
+    expect(parseMetadataMap("# only a comment")).toEqual([]);
+  });
+  it.each([
+    ["a: [", /not valid YAML/],
+    ["- a\n- b", /mapping/],
+    ["a: 1", /mapping of key: value/],
+    ["a: {path: x}", /reserved/],
+    ["a: {eap: x}", /reserved/],
+    ["a: {k: [1]}", /string, number or boolean/],
+    ["a: {k: {n: 1}}", /string, number or boolean/],
+    ["a: {k: 1}\na: {k: 2}", /not valid YAML/],
+    [`a: {${Array.from({ length: 12 }, (_, i) => `k${i}: 1`).join(", ")}}`, /at most 11/],
+    ["rules:\n  - metadata: {a: 1}", /match/],
+  ])("refuses %j", (text, message) => {
+    expect(() => parseMetadataMap(text)).toThrow(message);
+  });
+});
+
+describe("repository source config", () => {
+  it("builds the config from the form", () => {
+    expect(
+      repositoryConfig({ repository: " o/r ", ref: " v1 ", include: "docs/**\n\n docs/**\n*.pdf", exclude: "docs/old/**", map: "'**': {family: x}", deleteMissing: true }),
+    ).toEqual({
+      repository: "o/r", ref: "v1", include: ["docs/**", "*.pdf"], exclude: ["docs/old/**"], map: [{ match: "**", metadata: { family: "x" } }],
+      document_policy: { delete_missing: true },
+    });
+  });
+  it("leaves the ref out for the default branch and throws for a broken map", () => {
+    const form = { repository: "o/r", ref: "", include: "**", exclude: "", map: "", deleteMissing: false };
+    expect(repositoryConfig(form)).not.toHaveProperty("ref");
+    expect(() => repositoryConfig({ ...form, map: "a: [" })).toThrow();
+    expect(REPOSITORY_PATTERN.test("owner/name.js")).toBe(true);
+    expect(REPOSITORY_PATTERN.test("owner")).toBe(false);
+    expect(REPOSITORY_PATTERN.test("a/b/c")).toBe(false);
+    expect(parseLines(" a \n\nb\na")).toEqual(["a", "b"]);
   });
 });
 
