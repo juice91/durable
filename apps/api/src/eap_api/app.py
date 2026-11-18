@@ -141,9 +141,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(evals_router, prefix="/api/v1")
     # Reusable scorers (W2.3): /scorers CRUD and /agents/{id}/scorers attachments.
+    from eap_api.routes.scorer_suggestions import router as scorer_suggestions_router
     from eap_api.routes.scorers import router as scorers_router
 
     app.include_router(scorers_router, prefix="/api/v1")
+    app.include_router(scorer_suggestions_router, prefix="/api/v1")  # AI-suggested rules for an agent or workflow
     # Log search over Loki (EAP_LOKI_URL), tenant-scoped: GET /logs.
     from eap_api.routes.logs import router as logs_router
 

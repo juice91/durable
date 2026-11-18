@@ -94,7 +94,7 @@ def _builtin_role(agent: AgentModel) -> str | None:
     slug = agent.slug or ""
     if slug == "architect":
         return "architect"
-    if slug.endswith("-drafter"):
+    if slug.endswith("-drafter") or slug == "scorer-suggester":  # helpers the page hides by default
         return "drafter"
     return None
 

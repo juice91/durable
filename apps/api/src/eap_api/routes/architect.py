@@ -85,6 +85,7 @@ from eap_schemas.architect_seed import (
     workflow_drafter_agent_spec,
 )
 from eap_schemas.models_policy import ModelPolicy
+from eap_schemas.scorer_suggestions import SUGGESTER_SLUG
 from eap_schemas.tools import TOOL_DECLARATIONS
 from eap_schemas.workflows import WorkflowSpec, canonical_workflow_hash
 
@@ -255,7 +256,8 @@ def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> 
         rows = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in BUILTIN_SLUGS]
         if any(r is None for r in rows):
             raise refuse(404, "The Architect is not set up yet.", code="not_seeded")
-        for row in rows:
+        suggester = conn.execute(_BY_SLUG, {"t": tenant_id, "s": SUGGESTER_SLUG}).first()  # seeded on first use
+        for row in [*rows, *([suggester] if suggester is not None else [])]:
             locked = definitions.lock_agent(conn, tenant_id, str(row.id))
             spec = dict(locked.draft_spec or {})
             spec["model"] = {**(spec.get("model") or {}), "provider": provider, "name": name}
