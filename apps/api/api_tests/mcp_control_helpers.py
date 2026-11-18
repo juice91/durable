@@ -26,6 +26,17 @@ from .test_workflow_runs_api import FakeClient
 AGENT_SPEC = {"name": "Helper", "instructions": "Help.", "model": {"provider": "test", "name": "echo"}}
 
 
+class McpFake(FakeClient):
+    """FakeClient that also records DBOS cancels (workflow.run.cancel)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancels: list[tuple[str, bool]] = []
+
+    def cancel_workflow(self, workflow_id: str, *, cancel_children: bool = False, shard_key: str | None = None) -> None:
+        self.cancels.append((workflow_id, cancel_children))
+
+
 @dataclass
 class Reply:
     is_error: bool
@@ -43,6 +54,14 @@ class World:
     base: str
     fake: FakeClient
     tenants: list[str] = field(default_factory=list)
+    seeded: list[str] = field(default_factory=list)
+    runtime: Any = None
+
+    def seed(self, *entries: Any) -> None:
+        from eap_run_store.mcp_catalog import CatalogStore
+
+        CatalogStore(self.app.state.database_engine).upsert(list(entries))
+        self.seeded.extend(e.name for e in entries)
 
     @property
     def url(self) -> str:
@@ -124,13 +143,23 @@ def secrets_key(monkeypatch: pytest.MonkeyPatch) -> str:
     return key
 
 
-@pytest.fixture
-def world():
+def _serve(real_launcher: bool = False):
+    """Start the app in a uvicorn thread; yield the World; stop it and remove the tenants' rows."""
+    from eap_api.mcp_servers.managed import get_mcp_runtime
+    from eap_api.routes.mcp_servers import get_outbound_policy
+    from eap_secrets.outbound import OutboundPolicy
+
+    from .mcp_runtime_helpers import FakeRuntime, _public
+
     app = create_app(database_url=PG_URL)
-    fake = FakeClient()
-    app.dependency_overrides[get_run_launcher] = lambda: DBOSRunLauncher(
-        LauncherSettings("postgresql://unused/x", "dbos", "m1-test"), client=fake
-    )
+    fake = McpFake()
+    if not real_launcher:
+        app.dependency_overrides[get_run_launcher] = lambda: DBOSRunLauncher(
+            LauncherSettings("postgresql://unused/x", "dbos", "m1-test"), client=fake
+        )
+    runtime = FakeRuntime()
+    app.dependency_overrides[get_mcp_runtime] = lambda: runtime
+    app.dependency_overrides[get_outbound_policy] = lambda: OutboundPolicy(resolver=_public)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -141,11 +170,14 @@ def world():
         time.sleep(0.02)
     port = server.servers[0].sockets[0].getsockname()[1]
     w = World(app=app, base=f"http://127.0.0.1:{port}", fake=fake)
-    with hard_timeout(120):
+    w.runtime = runtime
+    with hard_timeout(150):
         yield w
     server.should_exit = True
     thread.join(timeout=10)
     engine = app.state.database_engine
+    for name in w.seeded:
+        w.sql("DELETE FROM mcp_catalog_entries WHERE name = :n", n=name)
     for t in w.tenants:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM workflow_schedules WHERE tenant_id = :t"), {"t": t})
@@ -153,5 +185,20 @@ def world():
             conn.execute(text("DELETE FROM workflows WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM api_keys WHERE tenant_id = :t"), {"t": t})
             conn.execute(text("DELETE FROM pending_approvals WHERE tenant_id = :t"), {"t": t})
+            for table in ("kb_source_syncs", "kb_sources", "settings_connections", "knowledge_bases", "mcp_servers"):
+                conn.execute(text(f"DELETE FROM {table} WHERE tenant_id = :t"), {"t": t})
         cleanup_tenant(engine, t)
     engine.dispose()
+
+
+@pytest.fixture
+def world():
+    yield from _serve()
+
+
+@pytest.fixture
+def live_world(worker_env, monkeypatch):
+    """The real app on the real DBOS queue with a real `python -m eap_worker` (scripted `test:` models)."""
+    for key, value in worker_env.items():
+        monkeypatch.setenv(key, value)
+    yield from _serve(real_launcher=True)
