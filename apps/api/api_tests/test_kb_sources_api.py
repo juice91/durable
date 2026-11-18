@@ -331,3 +331,18 @@ def test_syncs_list_and_report(env):
     assert done["report"] == report and done["run_status"] == "completed"
     assert client.get(f"{base}/syncs/{uuid.uuid4()}", headers=h).status_code == 404
     assert client.get(f"{base}/syncs?limit=1", headers=h).json()["items"][0]["run_id"] == ids[1]
+
+
+def test_api_token_connection_and_repository_docs_source_kinds(env):
+    client, _, _, tenant = env
+    register_adapter("repository_docs", "fake", lambda: FakeCatalogAdapter())
+    _, h = tenant()
+    tok = {**CONN, "name": "tok", "kind": "api_token", "credential_refs": {"token": "secret:example-token"}}
+    assert client.post(f"{API}/settings/connections", json=tok, headers=h).status_code == 201
+    anonymous = mk_conn(client, h, name="tok-public", kind="api_token", credential_refs={})  # no token: allowed
+    assert anonymous["credential_refs"] == {} and anonymous["kind"] == "api_token"
+    other = {**tok, "name": "tok2", "credential_refs": {"client_id": "secret:x"}}
+    assert client.post(f"{API}/settings/connections", json=other, headers=h).status_code == 422  # only `token`
+    kb = mk_kb(client, h)
+    made = mk_source(client, h, kb, anonymous["id"], kind="repository_docs", name="repo-source")
+    assert made["kind"] == "repository_docs"

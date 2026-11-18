@@ -10,6 +10,7 @@ import { formatWhen } from "@/components/knowledge/knowledgeUi";
 import {
   CHECK_CODE_TEXT,
   KbSourceError,
+  API_TOKEN_KIND,
   PROVIDERS,
   checkConnection,
   checkText,
@@ -17,6 +18,7 @@ import {
   createConnection,
   deleteConnection,
   listConnections,
+  providerInfo,
   sourcesUsingConnection,
   updateConnection,
   type CheckResult,
@@ -39,7 +41,7 @@ function providerLabel(connection: Connection): string {
 
 function emptyForm(): ConnectionForm {
   const provider = PROVIDERS[0];
-  return { name: "", provider: provider.value, baseUrl: provider.baseUrl, tokenUrl: provider.tokenUrl, clientIdSecret: "", clientSecretSecret: "" };
+  return { name: "", provider: provider.value, baseUrl: provider.baseUrl, tokenUrl: provider.tokenUrl, clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" };
 }
 
 function refName(ref: string | undefined): string {
@@ -54,6 +56,7 @@ function formFor(connection: Connection): ConnectionForm {
     tokenUrl: typeof connection.config.token_url === "string" ? connection.config.token_url : "",
     clientIdSecret: refName(connection.credential_refs.client_id),
     clientSecretSecret: refName(connection.credential_refs.client_secret),
+    tokenSecret: refName(connection.credential_refs.token),
   };
 }
 
@@ -79,7 +82,13 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
   useEffect(refreshNames, [refreshNames]);
 
   const set = (patch: Partial<ConnectionForm>) => setForm((current) => ({ ...current, ...patch }));
-  const valid = form.name.trim() !== "" && form.clientIdSecret !== "" && form.clientSecretSecret !== "" && form.baseUrl.trim() !== "";
+  const apiToken = providerInfo(form.provider)?.connectionKind === API_TOKEN_KIND;
+  // An API-token connection's token is optional (a public repository needs none); OAuth needs both secrets.
+  const valid = form.name.trim() !== "" && form.baseUrl.trim() !== "" && (apiToken || (form.clientIdSecret !== "" && form.clientSecretSecret !== ""));
+  const chooseProvider = (value: string) => {
+    const info = providerInfo(value);
+    set({ provider: value, baseUrl: info?.baseUrl ?? "", tokenUrl: info?.tokenUrl ?? "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" });
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -113,7 +122,7 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
             </div>
             <div className="space-y-1">
               <label htmlFor="connection-provider" className="block text-sm font-medium text-foreground">Provider</label>
-              <select id="connection-provider" value={form.provider} onChange={(e) => set({ provider: e.target.value })} className={inputClass}>
+              <select id="connection-provider" value={form.provider} onChange={(e) => chooseProvider(e.target.value)} disabled={!!editing} className={inputClass}>
                 {PROVIDERS.map((provider) => (
                   <option key={provider.value} value={provider.value}>{provider.label}</option>
                 ))}
@@ -123,12 +132,21 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
               <label htmlFor="connection-base-url" className="block text-sm font-medium text-foreground">Base URL</label>
               <input id="connection-base-url" value={form.baseUrl} onChange={(e) => set({ baseUrl: e.target.value })} inputMode="url" autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
             </div>
-            <div className="space-y-1">
-              <label htmlFor="connection-token-url" className="block text-sm font-medium text-foreground">Token URL</label>
-              <input id="connection-token-url" value={form.tokenUrl} onChange={(e) => set({ tokenUrl: e.target.value })} inputMode="url" autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
-            </div>
-            <SecretPicker label="Client ID" names={names} value={form.clientIdSecret} onChange={(name) => set({ clientIdSecret: name })} onCreated={refreshNames} />
-            <SecretPicker label="Client secret" names={names} value={form.clientSecretSecret} onChange={(name) => set({ clientSecretSecret: name })} onCreated={refreshNames} />
+            {apiToken ? (
+              <>
+                <SecretPicker label="Token" names={names} value={form.tokenSecret} onChange={(name) => set({ tokenSecret: name })} onCreated={refreshNames} />
+                <p className="-mt-2 text-caption text-muted-foreground">Optional. Without a token only public repositories can be read, under the provider&apos;s lower unauthenticated rate limit.</p>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1">
+                  <label htmlFor="connection-token-url" className="block text-sm font-medium text-foreground">Token URL</label>
+                  <input id="connection-token-url" value={form.tokenUrl} onChange={(e) => set({ tokenUrl: e.target.value })} inputMode="url" autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+                </div>
+                <SecretPicker label="Client ID" names={names} value={form.clientIdSecret} onChange={(name) => set({ clientIdSecret: name })} onCreated={refreshNames} />
+                <SecretPicker label="Client secret" names={names} value={form.clientSecretSecret} onChange={(name) => set({ clientSecretSecret: name })} onCreated={refreshNames} />
+              </>
+            )}
             {error ? (
               <p role="alert" data-testid="connection-form-error" className="text-label text-destructive-text">{error}</p>
             ) : null}

@@ -31,3 +31,13 @@ def adapter_for(kind: str, provider: str) -> SourceAdapter:
 def registered() -> list[tuple[str, str]]:
     _load_providers()
     return sorted(_FACTORIES)
+
+
+def adapter_for_provider(provider: str) -> SourceAdapter:
+    """The adapter of a provider whatever its source kind (a connection names its provider, not a kind:
+    `check_connection` needs only the provider). Unknown: SourceError `source_adapter_not_found`."""
+    _load_providers()
+    for (_kind, name), factory in sorted(_FACTORIES.items()):
+        if name == provider:
+            return factory()
+    raise SourceError(SOURCE_ADAPTER_NOT_FOUND, "no adapter for this connection's provider")

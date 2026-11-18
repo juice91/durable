@@ -2,6 +2,7 @@
 // /api/v1/knowledge-bases/{kb}/sources) and the published "KB Source Synchronization" workflow
 // Studio starts syncs through. A connection holds `secret:<name>` references only: no value is ever
 // typed into, returned by or shown through this module.
+import { load as loadYaml } from "js-yaml";
 import { apiHeaders, BASE_URL } from "./api";
 import { listKnowledgeBases } from "./knowledge";
 import { secretRef } from "./secrets";
@@ -10,8 +11,18 @@ import { listWorkflows, startWorkflowRun, type Workflow } from "./workflows";
 export const SYNC_WORKFLOW_NAME = "KB Source Synchronization";
 export const CONNECTION_KIND = "oauth2_client_credentials";
 export const SOURCE_KIND = "product_catalog";
-/** Providers an adapter exists for. */
-export const PROVIDERS = [{ value: "acme_catalog", label: "Acme Semiconductor", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken" }] as const;
+export const API_TOKEN_KIND = "api_token";
+export const REPOSITORY_SOURCE_KIND = "repository_docs";
+/**
+ * Providers an adapter exists for: the connection kind they use (OAuth client credentials, or one optional API
+ * token), the source kind they serve and the connection form's defaults.
+ */
+export const PROVIDERS = [
+  { value: "acme_catalog", label: "Acme Semiconductor", connectionKind: CONNECTION_KIND, sourceKind: SOURCE_KIND, baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken" },
+  { value: "github", label: "GitHub", connectionKind: API_TOKEN_KIND, sourceKind: REPOSITORY_SOURCE_KIND, baseUrl: "https://api.github.com", tokenUrl: "" },
+] as const;
+export type ProviderInfo = (typeof PROVIDERS)[number];
+export const providerInfo = (value: string): ProviderInfo | undefined => PROVIDERS.find((item) => item.value === value);
 export const MAX_TARGETED_PARTS = 100;
 
 export type SyncMode = "targeted" | "incremental" | "full";
@@ -121,15 +132,23 @@ export interface ConnectionForm {
   tokenUrl: string;
   clientIdSecret: string;
   clientSecretSecret: string;
+  /** api_token connections: the optional token's secret name ("" = the provider is used without one). */
+  tokenSecret: string;
 }
 
 /** The request body for a connection form: secret NAMES become `secret:<name>` references. */
 export function connectionPayload(form: ConnectionForm, enabled = true): ConnectionBody {
   const config: Record<string, unknown> = { provider: form.provider };
+  const kind = providerInfo(form.provider)?.connectionKind ?? CONNECTION_KIND;
+  if (kind === API_TOKEN_KIND) {
+    const body: ConnectionBody = { name: form.name.trim(), kind, config, credential_refs: form.tokenSecret ? { token: secretRef(form.tokenSecret) } : {}, enabled };
+    if (form.baseUrl.trim()) body.base_url = form.baseUrl.trim();
+    return body;
+  }
   if (form.tokenUrl.trim()) config.token_url = form.tokenUrl.trim();
   const body: ConnectionBody = {
     name: form.name.trim(),
-    kind: CONNECTION_KIND,
+    kind,
     config,
     credential_refs: { client_id: secretRef(form.clientIdSecret), client_secret: secretRef(form.clientSecretSecret) },
     enabled,
@@ -180,6 +199,99 @@ export async function listSources(kbId: string): Promise<Source[]> {
 export const createSource = (kbId: string, body: SourceCreate) => request<Source>(`/knowledge-bases/${enc(kbId)}/sources`, { method: "POST", body: JSON.stringify(body) });
 export const updateSource = (kbId: string, id: string, body: { name?: string; config?: Record<string, unknown>; enabled?: boolean }) =>
   request<Source>(`/knowledge-bases/${enc(kbId)}/sources/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) });
+
+// ---------------------------------------------------------------------------------------------
+// Repository sources: the source config a form builds, and the metadata map's text
+
+export const MAX_MAP_METADATA_KEYS = 11;
+export const MAX_MAP_RULES = 200;
+const RESERVED_MAP_KEYS = new Set(["source", "source_id", "external_id", "relationship", "path", "eap"]);
+
+export interface MapRule {
+  match: string;
+  metadata: Record<string, string | number | boolean>;
+}
+
+function ruleList(where: string, metadata: unknown): Record<string, string | number | boolean> {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error(`${where}: the metadata must be a mapping of key: value`);
+  const entries = Object.entries(metadata as Record<string, unknown>);
+  if (entries.length > MAX_MAP_METADATA_KEYS) throw new Error(`${where}: at most ${MAX_MAP_METADATA_KEYS} metadata keys`);
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, value] of entries) {
+    if (!key.trim()) throw new Error(`${where}: metadata keys must be non-empty`);
+    if (RESERVED_MAP_KEYS.has(key)) throw new Error(`${where}: the metadata key "${key}" is reserved`);
+    if (typeof value === "number" && !Number.isFinite(value)) throw new Error(`${where}: "${key}" is not a finite number`);
+    if (typeof value === "string" && value.length > 256) throw new Error(`${where}: the value of "${key}" is longer than 256 characters`);
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") throw new Error(`${where}: "${key}" must be a string, number or boolean`);
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The map textarea's YAML as the ordered rule list the API stores: either a mapping `glob: {key: value}` (file order
+ * is rule order, first match wins) or `rules: [{match, metadata}]`, like the importer's map files. Empty text is no
+ * map. Throws an Error with a short message the form shows.
+ */
+export function parseMetadataMap(text: string): MapRule[] {
+  if (!text.trim()) return [];
+  let data: unknown;
+  try {
+    data = loadYaml(text);
+  } catch (reason: unknown) {
+    const message = reason instanceof Error ? reason.message.split("\n")[0] : "invalid YAML";
+    throw new Error(`The map is not valid YAML: ${message}`);
+  }
+  if (data === null || data === undefined) return [];
+  if (typeof data !== "object" || Array.isArray(data)) throw new Error("The map must be a mapping of glob: metadata, or rules: [...]");
+  const record = data as Record<string, unknown>;
+  const rules: MapRule[] = [];
+  const keys = Object.keys(record);
+  if (keys.length === 1 && keys[0] === "rules" && Array.isArray(record.rules)) {
+    record.rules.forEach((rule, index) => {
+      const where = `Rule ${index + 1}`;
+      const item = rule as { match?: unknown; metadata?: unknown } | null;
+      if (!item || typeof item !== "object" || typeof item.match !== "string" || !item.match.trim()) throw new Error(`${where}: each rule needs match: <glob> and metadata: {...}`);
+      rules.push({ match: item.match, metadata: ruleList(where, item.metadata) });
+    });
+  } else {
+    for (const [glob, metadata] of Object.entries(record)) {
+      if (!glob.trim()) throw new Error("Every glob must be a non-empty string");
+      rules.push({ match: glob, metadata: ruleList(`"${glob}"`, metadata) });
+    }
+  }
+  if (rules.length > MAX_MAP_RULES) throw new Error(`The map has more than ${MAX_MAP_RULES} rules`);
+  return rules;
+}
+
+/** Lines of a textarea as a list: trimmed, empty lines and duplicates dropped. */
+export function parseLines(text: string): string[] {
+  return [...new Set(text.split("\n").map((line) => line.trim()).filter(Boolean))];
+}
+
+export interface RepositoryForm {
+  repository: string;
+  ref: string;
+  include: string;
+  exclude: string;
+  map: string;
+  deleteMissing: boolean;
+}
+
+export const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/** The `repository_docs` source config for the form. Throws (a short message) for a map that does not parse. */
+export function repositoryConfig(form: RepositoryForm): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    repository: form.repository.trim(),
+    include: parseLines(form.include),
+    exclude: parseLines(form.exclude),
+    map: parseMetadataMap(form.map),
+    document_policy: { delete_missing: form.deleteMissing },
+  };
+  if (form.ref.trim()) config.ref = form.ref.trim();
+  return config;
+}
 
 export interface SourceRef {
   id: string;

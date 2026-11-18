@@ -47,7 +47,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -59,6 +59,7 @@ from eap_kb_sources import (
     ConnectionSnapshot,
     DocumentPolicy,
     DocumentState,
+    LedgerDocument,
     EntityRef,
     SegmentCounters,
     SourceError,
@@ -67,7 +68,7 @@ from eap_kb_sources import (
     document_key,
     error_entry,
 )
-from eap_kb_sources.adapter import MAX_CURSOR_BYTES, MAX_SEGMENT_ERRORS, MAX_TARGETED_PARTS, MODES, secret_name
+from eap_kb_sources.adapter import MAX_CURSOR_BYTES, MAX_DOCUMENT_KEY_CHARS, MAX_SEGMENT_ERRORS, MAX_TARGETED_PARTS, MODES, secret_name
 from eap_kb_sources.errors import (
     CONNECTION_DISABLED,
     CONNECTION_NOT_FOUND,
@@ -331,14 +332,32 @@ class WorkerStoreFacade:
         self._entities.replace_parameters(self.tenant_id, entity.id, list(parameters))
         return EntityRef(entity.id, external_id, entity_type)
 
-    def _key(self, entity: EntityRef, relationship: str, url: str) -> str:
+    def _key(self, entity: EntityRef, relationship: str, url: str, key: str | None = None) -> str:
+        if key is not None:
+            if not 1 <= len(key) <= MAX_DOCUMENT_KEY_CHARS:
+                raise SourceError(INVALID_DOCUMENT, "the document key is empty or too long")
+            return key
         return document_key(self.source_id, entity.entity_type, entity.external_id, relationship, url)
 
-    def document_state(self, entity: EntityRef, relationship: str, url: str) -> DocumentState | None:
-        doc = self._entities.get_document(self.tenant_id, entity.entity_id, self._key(entity, relationship, url))
+    def document_state(
+        self, entity: EntityRef, relationship: str, url: str, *, key: str | None = None
+    ) -> DocumentState | None:
+        doc = self._entities.get_document(self.tenant_id, entity.entity_id, self._key(entity, relationship, url, key))
         if doc is None or doc.status != "queued":
             return None
-        return DocumentState(content_hash=doc.content_hash, etag=doc.etag, last_modified=doc.last_modified, status=doc.status)
+        return DocumentState(
+            content_hash=doc.content_hash, etag=doc.etag, last_modified=doc.last_modified, status=doc.status,
+            source_revision=doc.source_revision,
+        )
+
+    def list_documents(self, entity: EntityRef, relationship: str) -> list[LedgerDocument]:
+        rows = self._entities.list_documents(self.tenant_id, entity.entity_id, relationship)
+        return [LedgerDocument(r.document_key, r.source_url, r.source_revision, r.status) for r in rows]
+
+    def remove_document(self, entity: EntityRef, key: str, *, delete: bool) -> None:
+        if delete:  # the ledger row follows the knowledge-base document (FK cascade)
+            self._kb.delete_document(self.tenant_id, self.kb_id, key)
+        self._entities.mark_document_removed(self.tenant_id, entity.entity_id, key)
 
     def submit_document(
         self,
@@ -352,8 +371,10 @@ class WorkerStoreFacade:
         etag: str | None = None,
         last_modified: str | None = None,
         source_revision: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        key: str | None = None,
     ) -> Literal["queued", "unchanged"]:
-        key = self._key(entity, relationship, url)
+        key = self._key(entity, relationship, url, key)
         ledger, tenant = self._entities, self.tenant_id
         ledger.upsert_document(
             tenant, entity.entity_id, document_key=key, relationship=relationship, source_url=url,
@@ -366,6 +387,7 @@ class WorkerStoreFacade:
             raise
         run = self._rt.run_store.get_run(tenant, UUID(self.run_id)) or {}
         metadata = {
+            **{k: v for k, v in (metadata or {}).items() if k != "eap"},
             "source": "kb_source", "source_id": self.source_id, "external_id": entity.external_id[:256],
             "relationship": relationship,
         }

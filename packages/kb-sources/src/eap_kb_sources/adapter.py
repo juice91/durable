@@ -140,6 +140,17 @@ class DocumentState:
     etag: str | None = None
     last_modified: str | None = None
     status: str | None = None
+    source_revision: str | None = None  # what the adapter recorded as the provider's version (a git blob sha)
+
+
+@dataclass(frozen=True)
+class LedgerDocument:
+    """One ledger row of an entity's documents (for an adapter that must find what disappeared)."""
+
+    key: str
+    source_url: str
+    source_revision: str | None
+    status: str
 
 
 @dataclass(frozen=True)
@@ -180,7 +191,12 @@ class SourceStoreFacade(Protocol):
         incremental walk skip the detail calls of an item whose listing entry did not change."""
         ...
 
-    def document_state(self, entity: EntityRef, relationship: str, url: str) -> DocumentState | None: ...
+    def document_state(
+        self, entity: EntityRef, relationship: str, url: str, *, key: str | None = None
+    ) -> DocumentState | None:
+        """`key`: the adapter's own document key (<= 256 characters) instead of the derived one, for a
+        provider whose documents are named by a stable path while their URL changes with every revision."""
+        ...
 
     def submit_document(
         self,
@@ -194,9 +210,13 @@ class SourceStoreFacade(Protocol):
         etag: str | None = None,
         last_modified: str | None = None,
         source_revision: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        key: str | None = None,
     ) -> Literal["queued", "unchanged"]:
         """Store the document in the knowledge base and enqueue its ingest through the shared
-        hand-off. `unchanged`: the same bytes are already there (no new version, no run).
+        hand-off. `metadata`: flat scalar keys merged under the platform's own stamps (which win); with
+        the stamps at most 16 keys. `key`: see `document_state`. `unchanged`: the same bytes and metadata
+        are already there (no new version, no run).
         Raises SourceError (`response_too_large`, `invalid_document`, `kb_capacity`, `enqueue_failed`)."""
         ...
 

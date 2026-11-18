@@ -99,6 +99,93 @@ describe("SourcesTab", () => {
     ]);
   });
 
+  describe("repository sources", () => {
+    const GH = { ...CONNECTION, id: "c2", name: "repos", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" } };
+    const REPO_SOURCE = { ...SOURCE, id: "s3", kind: "repository_docs", provider: "github", name: "TI docs", connection_id: "c2", config: { repository: "o/r" } };
+
+    async function openSheet() {
+      mocks.listConnections.mockResolvedValue([CONNECTION, GH]);
+      render(<SourcesTab kbId="kb1" kbName="Docs" />);
+      await screen.findByText("TI parts");
+      fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+      const sheet = await screen.findByRole("dialog");
+      await waitFor(() => expect(within(sheet).getByLabelText("Connection")).toHaveTextContent("repos"));
+      fireEvent.change(within(sheet).getByLabelText("Connection"), { target: { value: "c2" } });
+      fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "TI docs" } });
+      return sheet;
+    }
+
+    it("adds a repository source: repository, ref, include, exclude, map and the delete-missing toggle", async () => {
+      const sheet = await openSheet();
+      expect(within(sheet).queryByLabelText("Page size")).toBeNull();
+      const add = within(sheet).getByRole("button", { name: "Add source" });
+      expect(add).toBeDisabled();
+      fireEvent.change(within(sheet).getByLabelText("Repository"), { target: { value: "TexasInstruments/mcupsdk-core" } });
+      expect(add).toBeDisabled(); // include is required
+      fireEvent.change(within(sheet).getByLabelText("Include"), { target: { value: "docs/**\nsource/**/*.md" } });
+      fireEvent.change(within(sheet).getByLabelText("Exclude"), { target: { value: "docs/old/**" } });
+      fireEvent.change(within(sheet).getByLabelText("Ref"), { target: { value: "main" } });
+      fireEvent.change(within(sheet).getByLabelText("Metadata map (YAML)"), { target: { value: "docs/am263x/**: {sdk_family: mcu-plus-sdk, device: AM263x}\n\"**\": {sdk_family: mcu-plus-sdk}" } });
+      fireEvent.click(within(sheet).getByLabelText(/Delete documents whose files disappeared/));
+      expect(add).toBeEnabled();
+      fireEvent.click(add);
+      await waitFor(() => expect(mocks.createSource).toHaveBeenCalled());
+      expect(mocks.createSource.mock.calls[0]).toEqual([
+        "kb1",
+        {
+          connection_id: "c2", name: "TI docs", kind: "repository_docs", provider: "github",
+          config: {
+            repository: "TexasInstruments/mcupsdk-core", ref: "main", include: ["docs/**", "source/**/*.md"], exclude: ["docs/old/**"],
+            map: [
+              { match: "docs/am263x/**", metadata: { sdk_family: "mcu-plus-sdk", device: "AM263x" } },
+              { match: "**", metadata: { sdk_family: "mcu-plus-sdk" } },
+            ],
+            document_policy: { delete_missing: true },
+          },
+          enabled: true,
+        },
+      ]);
+    });
+
+    it("validates the repository name and the map before it can be added", async () => {
+      const sheet = await openSheet();
+      const add = within(sheet).getByRole("button", { name: "Add source" });
+      fireEvent.change(within(sheet).getByLabelText("Repository"), { target: { value: "just-a-name" } });
+      expect(within(sheet).getByText("Use owner/name.")).toBeInTheDocument();
+      fireEvent.change(within(sheet).getByLabelText("Repository"), { target: { value: "o/r" } });
+      fireEvent.change(within(sheet).getByLabelText("Include"), { target: { value: "**" } });
+      expect(add).toBeEnabled();
+      fireEvent.change(within(sheet).getByLabelText("Metadata map (YAML)"), { target: { value: "a: {path: x}" } });
+      expect(add).toBeDisabled();
+      expect(within(sheet).getByRole("alert")).toHaveTextContent(/reserved/);
+      fireEvent.change(within(sheet).getByLabelText("Metadata map (YAML)"), { target: { value: "a: [" } });
+      expect(within(sheet).getByRole("alert")).toHaveTextContent(/not valid YAML/);
+      fireEvent.change(within(sheet).getByLabelText("Metadata map (YAML)"), { target: { value: "" } });
+      expect(add).toBeEnabled();
+      expect(mocks.createSource).not.toHaveBeenCalled();
+    });
+
+    it("has no axe violations in the repository form", async () => {
+      const sheet = await openSheet();
+      fireEvent.change(within(sheet).getByLabelText("Metadata map (YAML)"), { target: { value: "a: [" } });
+      await expectNoAxeViolations(document.body);
+    }, AXE_TIMEOUT_MS);
+
+    it("runs a targeted sync of file paths", async () => {
+      mocks.listSources.mockResolvedValue([REPO_SOURCE]);
+      render(<SourcesTab kbId="kb1" kbName="Docs" />);
+      const row = (await screen.findByText("TI docs")).closest("li") as HTMLElement;
+      expect(within(row).getByText("GitHub")).toBeInTheDocument();
+      fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI docs" }));
+      const sheet = await screen.findByRole("dialog");
+      expect(within(sheet).getByRole("option", { name: "Full repository" })).toBeInTheDocument();
+      fireEvent.change(within(sheet).getByLabelText("File paths"), { target: { value: "docs/a.md\ndocs/b.rst" } });
+      expect(within(sheet).getByText("2 of 100 file paths")).toBeInTheDocument();
+      fireEvent.click(within(sheet).getByRole("button", { name: "Start sync" }));
+      await waitFor(() => expect(mocks.startSourceSync).toHaveBeenCalledWith("s3", "targeted", { partNumbers: ["docs/a.md", "docs/b.rst"], restart: false }));
+    });
+  });
+
   it("starts a targeted sync through the workflow and links to the run", async () => {
     const row = await ready();
     fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
