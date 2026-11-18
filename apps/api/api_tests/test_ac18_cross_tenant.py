@@ -576,11 +576,11 @@ def test_kb_source_routes_are_in_the_inventory_and_closed_to_another_tenant(api,
     other_tenant, other = tenant_of("mallory")
     engine = app.state.database_engine
     try:
-        for name in ("ti-id", "ti-secret"):
+        for name in ("conn-id", "conn-secret"):
             assert client.put(f"{API}/secrets/{name}", json={"value": "fake-not-real"}, headers=h).status_code == 200
         conn = client.post(f"{API}/settings/connections", headers=h, json={
             "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://x.example.com",
-            "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}},
+            "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}},
         ).json()
         kb = client.post(f"{API}/knowledge-bases", json={"name": "d", "embedding_model": "test:hash"}, headers=h).json()["id"]
         src = client.post(f"{API}/knowledge-bases/{kb}/sources", headers=h, json={

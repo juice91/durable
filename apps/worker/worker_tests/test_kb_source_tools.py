@@ -31,7 +31,7 @@ from worker_tests.kb_ingest_helpers import cleanup_knowledge, create_kb
 
 IDS = ("kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result")
 SENTINEL = "sentinel-client-secret-VALUE-0002"
-REFS = {"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}
+REFS = {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}
 
 
 class Adapter(FakeCatalogAdapter):
@@ -156,8 +156,8 @@ def test_connection_check_codes_and_no_leak(env):
                                                connection_id=cid or env.conn.id)
     assert check()["error_code"] == "secret_missing"
     store = SecretStore(env.rt.engine, load_keyring())
-    store.put(env.tenant, "ti-id", "id-value", "t")
-    store.put(env.tenant, "ti-secret", SENTINEL, "t")
+    store.put(env.tenant, "conn-id", "id-value", "t")
+    store.put(env.tenant, "conn-secret", SENTINEL, "t")
     ok = check()
     assert ok["ok"] is True and ok["error_code"] is None and ok["checked_at"]
     assert SENTINEL not in json.dumps(ok) and env.adapter.secret_values[-1]["client_secret"] == SENTINEL
@@ -169,6 +169,25 @@ def test_connection_check_codes_and_no_leak(env):
     assert code(check(cid=str(uuid.uuid4()))) == "connection_not_found"
     ConnectionStore(env.rt.engine).update(env.tenant, env.conn.id, enabled=False)
     assert check()["error_code"] == "connection_disabled"
+
+
+def test_connection_check_require_ok_returns_an_error_object_when_not_ok(env):
+    from eap_run_store.secrets import SecretStore
+
+    run = lambda **kw: call("settings.connection.check", ctx(env), connection_id=env.conn.id, **kw)  # noqa: E731
+    plain = run()
+    assert plain["ok"] is False and plain["error_code"] == "secret_missing"  # without require_ok: unchanged
+    assert run(require_ok=False)["error_code"] == "secret_missing"
+    assert code(run(require_ok=True)) == "secret_missing"
+    store = SecretStore(env.rt.engine, load_keyring())
+    store.put(env.tenant, "ti-id", "id-value", "t")
+    store.put(env.tenant, "ti-secret", SENTINEL, "t")
+    ok = run(require_ok=True)
+    assert ok["ok"] is True and "error" not in ok
+    env.adapter.result = ConnectionCheck(False, "connection_auth_failed")
+    failed = run(require_ok=True)
+    assert set(failed) == {"error"} and failed["error"]["code"] == "connection_auth_failed"
+    assert failed["error"]["message"] and SENTINEL not in json.dumps(failed)
 
 
 # ------------------------------------------------------------------------------------------ kb.source.sync

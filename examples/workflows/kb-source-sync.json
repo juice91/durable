@@ -1,5 +1,5 @@
 {
-  "description": "Synchronise a knowledge-base source: read the source, check its connection, start the sync, wait for it with a bounded loop and return its bounded report. Run it with {source_id, mode, part_numbers}; schedule it with {source_id, mode: \"incremental\"} for a recurring incremental sync. Every tool answers a stable error code instead of an exception text, so a refused step ends the run with a stable code: a failed, cancelled or attention-needing sync makes workflow.run.result (require_success) return an error object, which fails the run output_schema (output_invalid); a sync that outlasts the wait loop fails with loop_max_iterations (100 waits of up to 300 s). The example needs no agent: it uses the platform tools only.",
+  "description": "Synchronise a knowledge-base source: read the source, check its connection, start the sync, wait for it with a bounded loop and return its bounded report. Run it with {source_id, mode, part_numbers}; schedule it with {source_id, mode: \"incremental\"} for a recurring incremental sync. Every tool answers a stable error code instead of an exception text, so a refused step ends the run with a stable code: a failed, cancelled or attention-needing sync makes workflow.run.result (require_success) return an error object, and a tool step whose tool returns an error object fails the run with that code (sync_failed, sync_needs_attention, run_cancelled; a failing connection check fails with the check's own code, for example secret_missing); a sync that outlasts the wait loop fails with loop_max_iterations (100 waits of up to 300 s). The example needs no agent: it uses the platform tools only.",
   "agents": {},
   "input": {
     "source_id": "00000000-0000-0000-0000-000000000000",
@@ -180,7 +180,8 @@
         "input": {
           "connection_id": {
             "$ref": "steps.source.output.connection_id"
-          }
+          },
+          "require_ok": true
         }
       },
       {

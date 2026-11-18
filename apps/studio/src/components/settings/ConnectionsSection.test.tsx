@@ -35,7 +35,7 @@ const CONNECTION = {
   kind: "oauth2_client_credentials",
   base_url: "https://api.vendor.example",
   config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
-  credential_refs: { client_id: "secret:ti-id", client_secret: "secret:ti-secret" },
+  credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
   enabled: true,
   last_checked_at: T,
   last_status: "ok",
@@ -52,8 +52,8 @@ beforeEach(() => {
   mocks.checkConnection.mockReset().mockResolvedValue({ ok: true, checked_at: T, error_code: null });
   mocks.sourcesUsingConnection.mockReset().mockResolvedValue([]);
   mocks.listSecrets.mockReset().mockResolvedValue([
-    { name: "ti-id", created_at: T, updated_at: T },
-    { name: "ti-secret", created_at: T, updated_at: T },
+    { name: "conn-id", created_at: T, updated_at: T },
+    { name: "conn-secret", created_at: T, updated_at: T },
   ]);
   mocks.putSecret.mockReset().mockResolvedValue({ restarted: [] });
 });
@@ -98,9 +98,9 @@ describe("ConnectionsSection", () => {
     expect(within(sheet).getByLabelText("Base URL")).toHaveValue("https://api.vendor.example");
     expect(within(sheet).getByLabelText("Token URL")).toHaveValue("https://api.vendor.example/v1/oauth/accesstoken");
     fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "ti-new" } });
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("ti-id"));
-    fireEvent.change(within(sheet).getByLabelText("Client ID"), { target: { value: "ti-id" } });
-    fireEvent.change(within(sheet).getByLabelText("Client secret"), { target: { value: "ti-secret" } });
+    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("conn-id"));
+    fireEvent.change(within(sheet).getByLabelText("Client ID"), { target: { value: "conn-id" } });
+    fireEvent.change(within(sheet).getByLabelText("Client secret"), { target: { value: "conn-secret" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Add connection" }));
     await waitFor(() => expect(mocks.createConnection).toHaveBeenCalled());
     expect(mocks.createConnection.mock.calls[0][0]).toEqual({
@@ -108,7 +108,7 @@ describe("ConnectionsSection", () => {
       kind: "oauth2_client_credentials",
       base_url: "https://api.vendor.example",
       config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
-      credential_refs: { client_id: "secret:ti-id", client_secret: "secret:ti-secret" },
+      credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
       enabled: true,
     });
     await waitFor(() => expect(mocks.listConnections).toHaveBeenCalledTimes(2));
@@ -126,11 +126,11 @@ describe("ConnectionsSection", () => {
     const value = within(sheet).getByLabelText("New secret value");
     expect(value).toHaveAttribute("type", "password");
     expect(value).toHaveAttribute("autocomplete", "off");
-    fireEvent.change(name, { target: { value: "ti-client-id" } });
+    fireEvent.change(name, { target: { value: "conn-client-id" } });
     fireEvent.change(value, { target: { value: FAKE } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Save secret" }));
-    await waitFor(() => expect(mocks.putSecret).toHaveBeenCalledWith("ti-client-id", FAKE));
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveValue("ti-client-id"));
+    await waitFor(() => expect(mocks.putSecret).toHaveBeenCalledWith("conn-client-id", FAKE));
+    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveValue("conn-client-id"));
     expect(within(sheet).queryByLabelText("New secret value")).toBeNull();
     expect(document.body.textContent).not.toContain(FAKE);
   });
@@ -151,14 +151,14 @@ describe("ConnectionsSection", () => {
     await screen.findByText("ti-prod");
     fireEvent.click(screen.getByRole("button", { name: "Edit ti-prod" }));
     const sheet = await screen.findByRole("dialog");
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveValue("ti-id"));
-    expect(within(sheet).getByLabelText("Client secret")).toHaveValue("ti-secret");
-    fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "ti-renamed" } });
+    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveValue("conn-id"));
+    expect(within(sheet).getByLabelText("Client secret")).toHaveValue("conn-secret");
+    fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "conn-renamed" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(mocks.updateConnection).toHaveBeenCalled());
     const [id, body] = mocks.updateConnection.mock.calls[0];
     expect(id).toBe("c1");
-    expect(body).toMatchObject({ name: "ti-renamed", credential_refs: { client_id: "secret:ti-id", client_secret: "secret:ti-secret" } });
+    expect(body).toMatchObject({ name: "conn-renamed", credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" } });
   });
 
   it("checks a connection and shows ok or the stable code text", async () => {
@@ -204,7 +204,7 @@ describe("ConnectionsSection", () => {
 
   it("has no axe violations, with the add sheet open too", async () => {
     const sheet = await openAdd();
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("ti-id"));
+    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("conn-id"));
     await expectNoAxeViolations(document.body);
   }, AXE_TIMEOUT_MS);
 });

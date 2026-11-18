@@ -84,11 +84,13 @@ class KbSourceGetInput(BaseModel):
 
 
 class SettingsConnectionCheckInput(BaseModel):
-    """Input for ``settings.connection.check``."""
+    """Input for ``settings.connection.check``; with `require_ok` a check that is not ok is returned as
+    `{error: {code, message}}` (the check's error code), which fails a workflow tool step with that code."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     connection_id: str
+    require_ok: bool = False
 
 
 class KbSourceSyncInput(BaseModel):

@@ -185,6 +185,7 @@ the cascade that is redundant but harmless.
 
 from __future__ import annotations
 
+import re
 import asyncio
 import dataclasses
 import json
@@ -1118,10 +1119,12 @@ class _Interpreter:
         check = await check_tool_step(step.tool_id, resolved)
         if check["rejected"] is not None:
             raise _REJECTIONS[check["rejected"]](step.tool_id)
-        return await workflow_tool_call_step(
+        result = await workflow_tool_call_step(
             self.run_id, self.tenant_id, step.id, step.tool_id, check["args"], bool(check["side_effect"]),
             *((self.scope_text,) if self.scope else ()),
         )
+        _raise_tool_error(result, step.id)
+        return result
 
     # ------------------------------------------------------------------ loop (while / until)
 
@@ -1576,6 +1579,27 @@ def evaluate_output(planned: list[PlannedEvaluator], outcome: CaseOutcome, mode:
         "reason": "\n".join(reasons)[:MAX_REASON_CHARS] or None,
         "results": results,
     }
+
+
+_TOOL_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_TOOL_ERROR_MESSAGE_MAX = 300
+
+
+def _raise_tool_error(result: Any, step_id: str) -> None:
+    """A tool that answers `{error: {code, message?}}` (the platform tools' convention) fails the
+    step, and so the run, with that code: a code outside ^[a-z][a-z0-9_]{0,63}$ becomes
+    `tool_error`; the message is the tool's, bounded. Any other result (a mapping with more keys,
+    an `error` that is not an object with a string `code`) is an ordinary output. It runs on the
+    result of the checkpointed tool step, so a replay takes the same path."""
+    if not isinstance(result, dict) or set(result) != {"error"}:
+        return
+    error = result["error"]
+    if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+        return
+    code = error["code"] if _TOOL_ERROR_CODE.fullmatch(error["code"]) else "tool_error"
+    message = error.get("message")
+    text = message.strip()[:_TOOL_ERROR_MESSAGE_MAX] if isinstance(message, str) and message.strip() else "the tool reported an error"
+    raise WorkflowStepError(code, step_id, "failed", f"ToolError: {text}")
 
 
 def _missing_last(step_id: str) -> WorkflowStepError:
