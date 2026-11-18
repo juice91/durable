@@ -24,7 +24,7 @@ export interface ModelRefValue {
 export type Evaluator =
   | { kind: "equals_expected"; name?: string | null }
   | { kind: "contains"; name?: string | null; value?: unknown; case_sensitive?: boolean }
-  | { kind: "regex"; name?: string | null; pattern: string }
+  | { kind: "regex"; name?: string | null; pattern: string; negate?: boolean; field?: string | null }
   | { kind: "schema_valid"; name?: string | null; json_schema?: Record<string, unknown> | null }
   | { kind: "field_equals"; name?: string | null; path: string; value: unknown }
   | { kind: "max_duration"; name?: string | null; seconds: number }
@@ -532,7 +532,7 @@ export function evaluatorSummary(evaluator: Evaluator): string {
       return `Output contains ${value}${evaluator.case_sensitive === false ? " (any case)" : ""}`;
     }
     case "regex":
-      return `Output matches /${evaluator.pattern}/`;
+      return `Output ${evaluator.negate ? "must not match" : "matches"} /${evaluator.pattern}/${evaluator.field ? ` in ${evaluator.field}` : ""}`;
     case "schema_valid":
       return evaluator.json_schema ? "Output matches the given schema" : "Output matches the agent's output schema";
     case "field_equals":
@@ -685,6 +685,10 @@ export interface EvaluatorDraft {
   valueIsJson: boolean;
   caseSensitive: boolean;
   pattern: string;
+  /** regex: passes when the pattern does NOT match. */
+  negate: boolean;
+  /** regex: dotted path of the field the pattern runs over ("" = the whole output). */
+  regexField: string;
   /** schema_valid: JSON Schema text ("" = the agent's output schema). */
   jsonSchema: string;
   path: string;
@@ -710,6 +714,9 @@ export function draftFormKey(draft: EvaluatorDraft): string {
 
 let draftCounter = 0;
 
+/** The API's field-path grammar (eap_schemas.evals): 1 to 16 dot-separated segments of [A-Za-z0-9_-]{1,64}. */
+const FIELD_PATH = /^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,15}$/;
+
 export function blankEvaluatorDraft(kind: EvaluatorKind = "equals_expected", defaultJudgeModel = ""): EvaluatorDraft {
   draftCounter += 1;
   return {
@@ -720,6 +727,8 @@ export function blankEvaluatorDraft(kind: EvaluatorKind = "equals_expected", def
     valueIsJson: false,
     caseSensitive: true,
     pattern: "",
+    negate: false,
+    regexField: "",
     jsonSchema: "",
     path: "",
     seconds: "",
@@ -758,6 +767,8 @@ export function evaluatorToDraft(evaluator: Evaluator): EvaluatorDraft {
       break;
     case "regex":
       draft.pattern = evaluator.pattern;
+      draft.negate = evaluator.negate === true;
+      draft.regexField = evaluator.field ?? "";
       break;
     case "schema_valid":
       draft.jsonSchema = evaluator.json_schema ? JSON.stringify(evaluator.json_schema, null, 2) : "";
@@ -822,7 +833,17 @@ export function draftToEvaluator(draft: EvaluatorDraft): { evaluator: Evaluator 
     case "regex": {
       if (!draft.pattern) return { error: "Enter a pattern" };
       if (draft.pattern.length > MAX_REGEX_PATTERN_CHARS) return { error: `The pattern must be at most ${MAX_REGEX_PATTERN_CHARS} characters` };
-      return { evaluator: { kind: "regex", ...named, pattern: draft.pattern } };
+      const regexField = draft.regexField.trim();
+      if (regexField && !FIELD_PATH.test(regexField)) return { error: "The field path is dot-separated names (letters, digits, _ or -), at most 16" };
+      return {
+        evaluator: {
+          kind: "regex",
+          ...named,
+          pattern: draft.pattern,
+          ...(draft.negate ? { negate: true } : {}),
+          ...(regexField ? { field: regexField } : {}),
+        },
+      };
     }
     case "schema_valid": {
       if (!draft.jsonSchema.trim()) return { evaluator: { kind: "schema_valid", ...named } };

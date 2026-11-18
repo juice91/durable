@@ -106,6 +106,44 @@ describe("suite evaluators: all 8 kinds", () => {
     ]);
   });
 
+  it("a regex evaluator saves Must not match and an optional field", async () => {
+    const sheet = await openSuiteSheet();
+    const rx = await addEvaluator(sheet, "regex");
+    set(within(rx).getByTestId("evaluator-pattern"), "https?://");
+    fireEvent.click(within(rx).getByTestId("evaluator-negate"));
+    set(within(rx).getByTestId("evaluator-regex-field"), " post ");
+    const plain = await addEvaluator(sheet, "regex");
+    set(within(plain).getByTestId("evaluator-pattern"), "ok");
+    fireEvent.click(within(sheet).getByTestId("eval-suite-save"));
+    await waitFor(() => expect(callsTo(fake.state, "PATCH", /eval-suites\/s1$/)).toHaveLength(1));
+    expect(patchBody(/eval-suites\/s1$/).evaluators).toEqual([
+      { kind: "regex", pattern: "https?://", negate: true, field: "post" },
+      { kind: "regex", pattern: "ok" },
+    ]);
+  });
+
+  it("a regex evaluator reopens with Must not match and its field", async () => {
+    const sheet = await openSuiteSheet([
+      { kind: "regex", pattern: "a+", negate: true, field: "post.0" },
+      { kind: "regex", pattern: "b" },
+    ]);
+    const rows = within(sheet).getAllByTestId("evaluator-row");
+    expect(within(rows[0]).getByTestId("evaluator-negate")).toBeChecked();
+    expect(within(rows[0]).getByTestId("evaluator-regex-field")).toHaveValue("post.0");
+    expect(within(rows[1]).getByTestId("evaluator-negate")).not.toBeChecked();
+    expect(within(rows[1]).getByTestId("evaluator-regex-field")).toHaveValue("");
+  });
+
+  it("refuses a malformed regex field path", async () => {
+    const sheet = await openSuiteSheet();
+    const rx = await addEvaluator(sheet, "regex");
+    set(within(rx).getByTestId("evaluator-pattern"), "a");
+    set(within(rx).getByTestId("evaluator-regex-field"), "a..b");
+    fireEvent.click(within(sheet).getByTestId("eval-suite-save"));
+    expect(await within(rx).findByTestId("evaluator-error")).toHaveTextContent(/field path/i);
+    expect(callsTo(fake.state, "PATCH", /eval-suites\/s1$/)).toHaveLength(0);
+  });
+
   it("reopens every stored evaluator with its settings", async () => {
     const stored = [
       { kind: "contains", value: "ok", case_sensitive: false },

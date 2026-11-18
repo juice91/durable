@@ -150,10 +150,20 @@ function EvaluatorRow({ draft, index, judgeModels, judgeOptions, judgeModelsErro
       ) : null}
 
       {draft.kind === "regex" ? (
-        <div className="space-y-1">
-          <label htmlFor={field("pattern")} className={labelClass}>Pattern (RE2)</label>
-          <input id={field("pattern")} className={monoFieldClass} value={draft.pattern} maxLength={200} onChange={(e) => onChange({ pattern: e.target.value })} data-testid="evaluator-pattern" />
-        </div>
+        <>
+          <div className="space-y-1">
+            <label htmlFor={field("pattern")} className={labelClass}>Pattern (RE2)</label>
+            <input id={field("pattern")} className={monoFieldClass} value={draft.pattern} maxLength={200} onChange={(e) => onChange({ pattern: e.target.value })} data-testid="evaluator-pattern" />
+          </div>
+          <label className="flex items-center gap-2 text-label text-foreground">
+            <input type="checkbox" checked={draft.negate} onChange={(e) => onChange({ negate: e.target.checked })} data-testid="evaluator-negate" />
+            Must not match (passes when the pattern is absent)
+          </label>
+          <div className="space-y-1">
+            <label htmlFor={field("regex-field")} className={labelClass}>Field path <span className="font-normal text-muted-foreground">(optional)</span></label>
+            <input id={field("regex-field")} className={monoFieldClass} value={draft.regexField} onChange={(e) => onChange({ regexField: e.target.value })} placeholder="Empty: the whole output. Example: post" data-testid="evaluator-regex-field" />
+          </div>
+        </>
       ) : null}
 
       {draft.kind === "schema_valid" ? (
