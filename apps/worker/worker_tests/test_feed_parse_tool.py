@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from eap_schemas.tools import TOOL_DECLARATIONS, FeedParseInput
+from eap_schemas.tools import TOOL_DECLARATIONS, FeedInput, FeedParseInput
 from eap_worker.feed_tool import feed_parse
 
 NOW = "2026-11-18T12:00:00Z"
@@ -38,6 +38,11 @@ def parse(text: str, **kw):
     return feed_parse(None, text=text, **kw)
 
 
+def multi(feeds, **kw):
+    kw.setdefault("now", NOW)
+    return feed_parse(None, feeds=[FeedInput(**f) for f in feeds], **kw)
+
+
 def test_rss_items_are_cleaned_numbered_and_newest_first():
     out = parse(RSS)
     assert [i["id"] for i in out["items"]] == ["c1", "c2", "c3", "c4"]
@@ -51,7 +56,7 @@ def test_rss_items_are_cleaned_numbered_and_newest_first():
     assert a["published_at"] == "2026-11-18T02:30:00Z"
     assert out["items"][0]["summary"] == "Film B opens soon"  # entity-escaped HTML is stripped as well
     assert out["items"][3]["published_at"] is None
-    assert out["count"] == 4 and out["dropped"] == {"excluded_url": 0, "old": 0, "term": 0, "malformed": 1}
+    assert out["count"] == 4 and out["dropped"] == {"excluded_url": 0, "old": 0, "no_term": 0, "term": 0, "malformed": 1}
     assert out["listing"].splitlines()[1] == "c2｜Star A announces a tour｜Star A will tour in 2027. Tickets&more."
 
 
@@ -72,7 +77,7 @@ def test_max_age_hours_drops_old_items_but_keeps_undated_ones():
 def test_exclude_urls_and_terms():
     out = parse(RSS, exclude_urls=["https://news.example.com/a"], exclude_terms=["FILM", "very old"])
     assert [i["link"][-1] for i in out["items"]] == ["c"]
-    assert out["dropped"] == {"excluded_url": 1, "old": 0, "term": 2, "malformed": 1}
+    assert out["dropped"] == {"excluded_url": 1, "old": 0, "term": 2, "no_term": 0, "malformed": 1}
     assert [i["id"] for i in out["items"]] == ["c1"]  # numbering follows what is left
 
 
@@ -127,3 +132,47 @@ def test_input_limits():
         with pytest.raises(ValidationError):
             FeedParseInput(**{"text": "<rss/>", **bad})
     assert TOOL_DECLARATIONS["feed.parse"].side_effect is False
+
+
+def test_include_terms_keep_only_matching_items_case_insensitively():
+    out = parse(RSS, include_terms=["FILM", "tour"])
+    assert [i["link"][-1] for i in out["items"]] == ["b", "a"] and out["dropped"]["no_term"] == 2  # c and d lack a term
+    assert out["dropped"]["malformed"] == 1
+
+
+def test_feeds_are_merged_numbered_once_and_carry_their_label():
+    out = multi([{"text": RSS, "label": "Alpha"}, {"text": ATOM, "label": "Beta"}])
+    assert [(i["id"], i["source"], i["link"][-1]) for i in out["items"]] == [
+        ("c1", "Beta", "1"), ("c2", "Alpha", "b"), ("c3", "Alpha", "a"), ("c4", "Beta", "2"), ("c5", "Alpha", "d"), ("c6", "Alpha", "c")]
+    assert out["count"] == 6 and out["failed_feeds"] == [] and out["dropped"]["malformed"] == 1
+    assert out["listing"].splitlines()[0].startswith("c1｜Entry one｜")
+
+
+def test_per_feed_include_terms_apply_to_that_feed_only_and_top_level_terms_to_all():
+    feeds = [{"text": RSS, "label": "Alpha", "include_terms": ["tour"]}, {"text": ATOM, "label": "Beta"}]
+    out = multi(feeds)
+    assert [i["source"] for i in out["items"]].count("Alpha") == 1 and [i["source"] for i in out["items"]].count("Beta") == 2
+    assert out["dropped"]["no_term"] == 3
+    both = multi(feeds, include_terms=["first"])  # top level: every feed; an item must pass both
+    assert [(i["source"], i["link"][-1]) for i in both["items"]] == [("Beta", "1")]
+
+
+def test_a_broken_feed_is_skipped_and_named_unless_none_is_readable():
+    out = multi([{"text": "nope", "label": "Bad"}, {"text": ATOM, "label": "Beta"}])
+    assert out["count"] == 2 and out["failed_feeds"] == ["Bad"]
+    assert multi([{"text": "nope", "label": "Bad"}])["error"]["code"] == "feed_invalid"
+
+
+def test_text_xor_feeds():
+    assert feed_parse(None)["error"]["code"] == "feed_args_invalid"
+    assert feed_parse(None, text=RSS, feeds=[FeedInput(text=ATOM, label="x")])["error"]["code"] == "feed_args_invalid"
+    assert "source" not in parse(RSS)["items"][0] and "failed_feeds" not in parse(RSS)
+
+
+def test_feeds_limits():
+    with pytest.raises(ValidationError):
+        FeedParseInput(feeds=[])
+    with pytest.raises(ValidationError):
+        FeedParseInput(feeds=[{"text": "<rss/>", "label": "x"}] * 7)
+    with pytest.raises(ValidationError):
+        FeedParseInput(feeds=[{"text": "<rss/>", "label": ""}])

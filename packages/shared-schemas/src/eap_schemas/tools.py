@@ -121,14 +121,28 @@ FEED_PARSE_TOOL_ID = "feed.parse"
 FEED_TEXT_MAX_CHARS = 1048576
 
 
-class FeedParseInput(BaseModel):
-    """Input for ``feed.parse``: an RSS 2.0 or Atom document and the filters to apply. Pure: no I/O."""
+class FeedInput(BaseModel):
+    """One feed of ``feed.parse``'s ``feeds``: its document, a label that becomes each item's ``source``, and an
+    optional any-of term filter for this feed alone."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     text: Annotated[str, Field(max_length=FEED_TEXT_MAX_CHARS)]
+    label: Annotated[str, Field(min_length=1, max_length=100)]
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
+
+
+class FeedParseInput(BaseModel):
+    """Input for ``feed.parse``: one RSS 2.0 or Atom document (`text`) or one to six labelled ones (`feeds`; exactly
+    one of the two, `feed_args_invalid` otherwise) and the filters to apply. Pure: no I/O."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=FEED_TEXT_MAX_CHARS)] | None = None
+    feeds: Annotated[list[FeedInput], Field(min_length=1, max_length=6)] | None = None
     max_items: Annotated[int, Field(ge=1, le=50)] = 20
     max_age_hours: Annotated[float, Field(gt=0)] | None = None
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
     exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
     exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
     now: str | None = None
@@ -347,11 +361,13 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         id="feed.parse",
         title="Parse a feed",
         description=(
-            "Parse an RSS 2.0 or Atom document (text, up to 1 MiB) into numbered items {id c1.., title, link, "
-            "summary (plain text, at most 400 characters), published_at}, newest first, plus a one-line-per-item "
-            "listing, the count and what was dropped. Filters: max_items (1-50, default 20), max_age_hours, "
-            "exclude_urls, exclude_terms (case-insensitive, over title and summary). Pure: it fetches nothing. "
-            "An unreadable or unsupported document is the error feed_invalid"
+            "Parse RSS 2.0 or Atom into numbered items {id c1.., title, link, summary (plain text, at most 400 "
+            "characters), published_at, source}, newest first, plus a one-line-per-item listing, the count and what "
+            "was dropped. Give one document as text (up to 1 MiB) or one to six as feeds [{text, label, "
+            "include_terms}], merged and numbered once; each item's source is its feed's label. Filters: max_items "
+            "(1-50, default 20), max_age_hours, include_terms (an item needs one), exclude_urls, exclude_terms "
+            "(all case-insensitive, over title and summary). Pure: it fetches nothing. An unreadable or "
+            "unsupported document is the error feed_invalid; a bad choice of text and feeds is feed_args_invalid"
         ),
         side_effect=False,
         external_idempotent=False,
