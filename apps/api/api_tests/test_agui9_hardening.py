@@ -290,6 +290,9 @@ def test_the_key_api_refuses_a_wildcard_origin_with_422(client, tenant):
 # --------------------------------------------------------------------------- AGUI.9 review fixes
 
 DOC_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+# The MCP control endpoint is the one other ASGI route: it authenticates every request itself (a tenant
+# API key, or the dev bearer in dev mode; 401 without a credential), see eap_api.mcp_control.
+MCP_CONTROL_PATH = "/api/v1/mcp"
 
 
 def _all_routes(routes, prefix: str = "", in_schema: bool = True):
@@ -320,7 +323,8 @@ def test_the_sweep_sees_every_route(client):
     # OpenAPI drops a path converter: `/x/{name:path}` is `/x/{name}` in the schema.
     route_ops = {(m.lower(), re.sub(r"\{(\w+):\w+\}", r"{\1}", path)) for path, r in api for m in r.methods - {"HEAD", "OPTIONS"}}
     assert route_ops == schema_ops and len(route_ops) > 50
-    assert {path for path, r, _ in routes if not isinstance(r, APIRoute)} <= set(DOC_PATHS)
+    assert {path for path, r, _ in routes if not isinstance(r, APIRoute)} <= set(DOC_PATHS) | {MCP_CONTROL_PATH}
+    assert client.post(MCP_CONTROL_PATH, json={}).status_code == 401
 
 
 def test_api_key_mode_serves_no_docs_or_schema(client, monkeypatch):

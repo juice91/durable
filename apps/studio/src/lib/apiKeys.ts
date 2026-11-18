@@ -34,6 +34,8 @@ export interface ApiKeyCreated extends ApiKey {
 
 export interface ApiKeyCreate {
   name: string;
+  /** Omitted: `agui:run` only. `mcp` reads through the MCP endpoint; `manage` implies it and also changes things. */
+  scopes?: Array<"agui:run" | "mcp" | "manage">;
   /** Leave both out for a tenant-wide key; giving one restricts the key on both. */
   agent_ids?: string[];
   workflow_ids?: string[];
@@ -80,6 +82,10 @@ export interface ApiKeyFormInput {
   origins: string;
   /** UTC ISO, or null for no expiry. */
   expiresAt: string | null;
+  /** Adds the `mcp` scope (read tools of the MCP endpoint). */
+  mcp?: boolean;
+  /** Adds the `manage` scope (mutation tools); implies `mcp`. */
+  manage?: boolean;
 }
 
 export type ApiKeyFormResult = { ok: true; body: ApiKeyCreate } | { ok: false; message: string };
@@ -94,6 +100,8 @@ export function buildApiKeyCreate(input: ApiKeyFormInput, now: Date = new Date()
   const name = input.name.trim();
   if (!name) return { ok: false, message: "Give the key a name." };
   const body: ApiKeyCreate = { name };
+  if (input.manage) body.scopes = ["agui:run", "mcp", "manage"];
+  else if (input.mcp) body.scopes = ["agui:run", "mcp"];
   if (input.access === "some") {
     if (input.agentIds.length === 0 && input.workflowIds.length === 0) {
       return { ok: false, message: "Pick at least one agent or workflow, or allow all of them." };
@@ -120,6 +128,16 @@ export function describeAccess(key: Pick<ApiKey, "agent_ids" | "workflow_ids">):
     return `${n} ${n === 1 ? one : many}`;
   };
   return `${count(key.agent_ids, "agent", "agents")}, ${count(key.workflow_ids, "workflow", "workflows")}`;
+}
+
+/** Whether the key may connect to the MCP endpoint and read (`manage` implies it). */
+export function hasMcpScope(key: Pick<ApiKey, "scopes">): boolean {
+  return key.scopes.includes("mcp") || key.scopes.includes("manage");
+}
+
+/** Whether the key may change the platform through the MCP endpoint (`mcp` alone only reads). */
+export function hasManageScope(key: Pick<ApiKey, "scopes">): boolean {
+  return key.scopes.includes("manage");
 }
 
 export const API_KEY_STATUS_LABELS: Record<ApiKeyStatus, string> = { active: "Active", revoked: "Revoked", expired: "Expired" };
@@ -237,5 +255,32 @@ export function curlSnippet(target: ConnectTarget, baseUrl: string = BASE_URL): 
     '  -H "Content-Type: application/json" \\',
     '  -H "Accept: text/event-stream" \\',
     `  -d '${JSON.stringify(body)}'`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connect an MCP client (/api/v1/mcp)
+
+/** The MCP control endpoint (Streamable HTTP): every request carries `Authorization: Bearer <key>`. */
+export function mcpEndpoint(baseUrl: string = BASE_URL): string {
+  return `${trimBase(baseUrl)}/api/v1/mcp`;
+}
+
+/** Claude Code: registers the endpoint; the key is read from the environment, never written here. */
+export function claudeCodeMcpSnippet(baseUrl: string = BASE_URL): string {
+  return [
+    `# export ${API_KEY_ENV_VAR}=<your key>`,
+    `claude mcp add pydanticos --transport http ${mcpEndpoint(baseUrl)} \\`,
+    `  --header "Authorization: Bearer $${API_KEY_ENV_VAR}"`,
+  ].join("\n");
+}
+
+/** Codex: an entry for ~/.codex/config.toml that reads the key from the environment. */
+export function codexMcpSnippet(baseUrl: string = BASE_URL): string {
+  return [
+    "# ~/.codex/config.toml",
+    "[mcp_servers.pydanticos]",
+    `url = ${jsString(mcpEndpoint(baseUrl))}`,
+    `bearer_token_env_var = ${jsString(API_KEY_ENV_VAR)}`,
   ].join("\n");
 }
