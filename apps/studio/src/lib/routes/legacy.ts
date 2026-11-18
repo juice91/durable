@@ -12,6 +12,7 @@
 import { agentRoutes, type RouteVersion } from "./agents";
 import { RouteIdError } from "./query";
 import { observabilityRoutes, TRACE_LEGACY_RULES } from "./observability";
+import { settingsRoutes } from "./settings";
 
 export type LegacySearchParams =
   | URLSearchParams
@@ -89,6 +90,8 @@ export const LEGACY_RULES: readonly LegacyRule[] = [
       return chatOrAgents(agent, { version: legacyVersion(search.get("version")), context: "open" });
     },
   },
+  // Settings tabs: the Providers page became the Providers tab of Settings.
+  { task: "ST.1", pattern: "/settings/providers", to: () => settingsRoutes.settingsProviders() },
   // SL.12: the run and trace pages became the trace Sheet on Traces (rules defined with the routes).
   ...TRACE_LEGACY_RULES,
 ];

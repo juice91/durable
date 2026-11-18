@@ -65,6 +65,7 @@ const CASES: Array<[string, Record<string, string | string[] | undefined>, strin
   ["/request-context", { agent: "a 1/b", version: "0" }, "/agents/a%201%2Fb/chat?context=open"],
   ["/request-context", { agent: "..", version: "2" }, "/agents"],
   ["/request-context/", { agent: "a1", unrelated: "x" }, "/agents/a1/chat?context=open"],
+  ["/settings/providers", {}, "/settings?tab=providers"],
   // SL.12: the run and trace pages are the trace Sheet on Traces.
   ["/traces/r1", {}, "/traces?trace=r1"],
   ["/traces/r1", { x: "1" }, "/traces?trace=r1"],
@@ -78,12 +79,13 @@ describe("legacyTarget: the table", () => {
     expect(legacyTarget(pathname, search)).toBe(expected);
   });
 
-  it("rows are grouped per task in plan order (SL.6, SL.7, SL.10, SL.12)", () => {
+  it("rows are grouped per task in plan order (SL.6, SL.7, SL.10, ST.1, SL.12)", () => {
     expect(LEGACY_RULES.map((rule) => [rule.task, rule.pattern])).toEqual([
       ["SL.6", "/agents/:id"],
       ["SL.6", "/playground"],
       ["SL.7", "/"],
       ["SL.10", "/request-context"],
+      ["ST.1", "/settings/providers"],
       ["SL.12", "/traces/:runId"],
       ["SL.12", "/runs/:id"],
     ]);

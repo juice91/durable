@@ -48,7 +48,7 @@ function ProviderRow({ provider, testing, onTest }: { provider: ProviderStatus; 
  * key variable name and base URL host, and a Test connection button. Read-only: the keys come from
  * the server's environment, never through Studio, and the API never returns one.
  */
-export function ProvidersSettings() {
+export function ProvidersSettings({ embedded = false }: { embedded?: boolean } = {}) {
   const [providers, setProviders] = useState<ProviderStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
@@ -72,7 +72,7 @@ export function ProvidersSettings() {
   };
 
   return (
-    <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6" data-testid="providers-settings">
+    <div className={embedded ? "flex min-w-0 flex-col gap-4" : "mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6"} data-testid="providers-settings">
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-label text-muted-foreground" data-testid="providers-readonly-note">
           Read-only. Provider keys come from the server&apos;s environment (deployment secrets); Studio never shows or stores them. Which models an agent may use is set by the platform allowlist (EAP_ALLOWED_MODELS).

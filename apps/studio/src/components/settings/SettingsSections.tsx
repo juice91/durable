@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { BASE_URL } from "@/lib/api";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { routes } from "@/lib/routes";
+import { SETTINGS_TABS, type SettingsTab } from "@/lib/routes/settings";
 import { applySidebarAttribute, SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
@@ -13,6 +14,8 @@ import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
 import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
 import { SecretsSection } from "./SecretsSection";
 import { ConnectionsSection } from "./ConnectionsSection";
+import { ProvidersSettings } from "./ProvidersSettings";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { useChatProtocol, type ChatProtocol } from "@/components/chat/chatProtocol";
@@ -196,11 +199,7 @@ function BrowserDataSection() {
 function ProvidersSection() {
   return (
     <Section id="providers" testId="settings-providers" title="Model providers" description="The providers the server reaches for models, their status and the models they list. Read-only: keys come from the server's environment.">
-      <div>
-        <Link href={routes.settingsProviders()} className="text-label font-medium text-foreground underline underline-offset-4 hover:text-muted-foreground" data-testid="settings-providers-link">
-          View providers
-        </Link>
-      </div>
+      <ProvidersSettings embedded />
     </Section>
   );
 }
@@ -220,21 +219,62 @@ function AboutSection() {
   );
 }
 
-/** The Settings page body (decision "Settings page"). */
+const TAB_LABELS: Record<SettingsTab, string> = {
+  appearance: "Appearance",
+  chat: "Chat",
+  shortcuts: "Shortcuts",
+  providers: "Providers",
+  secrets: "Secrets",
+  connections: "Connections",
+  "api-keys": "API keys",
+  "browser-data": "Browser data",
+  about: "About",
+};
+
+function ShortcutsSection() {
+  return (
+    <Section id="shortcuts" testId="settings-shortcuts" title="Keyboard shortcuts" description="Single keys work when focus is not in a text field. Press ? anywhere to see this list.">
+      <ShortcutTable headingLevel={3} />
+    </Section>
+  );
+}
+
+const TAB_CONTENT: Record<SettingsTab, () => React.ReactNode> = {
+  appearance: () => <AppearanceSection />,
+  chat: () => <ChatSection />,
+  shortcuts: () => <ShortcutsSection />,
+  providers: () => <ProvidersSection />,
+  secrets: () => <SecretsSection />,
+  connections: () => <ConnectionsSection />,
+  "api-keys": () => <ApiKeysSection />,
+  "browser-data": () => <BrowserDataSection />,
+  about: () => <AboutSection />,
+};
+
+function parseTab(value: string | null): SettingsTab {
+  return (SETTINGS_TABS as readonly string[]).includes(value ?? "") ? (value as SettingsTab) : "appearance";
+}
+
+/** The Settings page body: one section per tab; the selected tab lives in the URL (`/settings?tab=secrets`). */
 export function SettingsSections() {
+  const router = useRouter();
+  const tab = parseTab(useSearchParams().get("tab"));
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6">
-      <AppearanceSection />
-      <ChatSection />
-      <Section id="shortcuts" testId="settings-shortcuts" title="Keyboard shortcuts" description="Single keys work when focus is not in a text field. Press ? anywhere to see this list.">
-        <ShortcutTable headingLevel={3} />
-      </Section>
-      <ProvidersSection />
-      <SecretsSection />
-      <ConnectionsSection />
-      <ApiKeysSection />
-      <BrowserDataSection />
-      <AboutSection />
+      <Tabs value={tab} onValueChange={(next) => router.push(routes.settingsTab(parseTab(next)), { scroll: false })}>
+        <TabsList aria-label="Settings sections">
+          {SETTINGS_TABS.map((id) => (
+            <TabsTrigger key={id} value={id} data-testid={`settings-tab-${id}`}>
+              {TAB_LABELS[id]}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        {SETTINGS_TABS.map((id) => (
+          <TabsContent key={id} value={id} className="pt-4">
+            {TAB_CONTENT[id]()}
+          </TabsContent>
+        ))}
+      </Tabs>
     </div>
   );
 }

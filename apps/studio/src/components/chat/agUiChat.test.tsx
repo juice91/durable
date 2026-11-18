@@ -587,6 +587,8 @@ describe("ChatTab over AG-UI", () => {
   });
 
   it("switches back to the native runtime from Settings", async () => {
+    const before_ = window.location.pathname + window.location.search;
+    window.history.replaceState({}, "", "/?tab=chat");
     render(
       <ThemeProvider>
         <SettingsSections />
@@ -607,5 +609,6 @@ describe("ChatTab over AG-UI", () => {
     await send("native turn");
     await waitFor(() => expect(startTurnWithOptions).toHaveBeenCalled());
     expect(posts().length).toBe(before);
+    window.history.replaceState({}, "", before_);
   });
 });

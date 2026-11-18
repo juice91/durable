@@ -321,9 +321,10 @@ const PAGES: PageCase[] = [
   { name: "dataset detail", path: "/datasets/s1", params: { id: "s1" }, load: () => import("@/app/datasets/[id]/page"), h1: "Refund suite", shows: "#eval-case-row" },
   { name: "scorers", path: "/scorers", load: () => import("@/app/scorers/page"), h1: "Scorers", shows: "#scorer-row" },
   { name: "experiments", path: "/experiments", load: () => import("@/app/experiments/page"), h1: "Experiments", shows: "#experiment-row" },
-  { name: "providers", path: "/settings/providers", load: () => import("@/app/settings/providers/page"), h1: "Providers", shows: "LiteLLM gateway" },
-  { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
-  { name: "settings connections", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "ti-prod" },
+  { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Appearance" },
+  { name: "settings providers", path: "/settings", search: "tab=providers", load: () => import("@/app/settings/page"), h1: "Settings", shows: "LiteLLM gateway" },
+  { name: "settings connections", path: "/settings", search: "tab=connections", load: () => import("@/app/settings/page"), h1: "Settings", shows: "ti-prod" },
+  { name: "settings browser data", path: "/settings", search: "tab=browser-data", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
 ];
 
 describe("PAGES covers every page route in app/", () => {

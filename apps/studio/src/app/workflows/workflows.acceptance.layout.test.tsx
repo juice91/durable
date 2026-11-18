@@ -369,7 +369,7 @@ describe("collapse, persistence and Settings", () => {
     media = mockMatchMedia(true);
     localStorage.setItem(WORKFLOW_LAYOUT_STORAGE_KEY, JSON.stringify({ panelWidth: 300, panelCollapsed: true, timelineOpen: true, timelineHeight: 400 }));
     localStorage.setItem("studio.theme", "light");
-    go(routes.settings(), {});
+    go(routes.settingsTab("browser-data"), {});
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     fireEvent.click(await screen.findByTestId("settings-clear-layout"));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Clear" }));
@@ -386,7 +386,7 @@ describe("collapse, persistence and Settings", () => {
 
   it("Settings lists the workflow layout among the browser data it holds", async () => {
     media = mockMatchMedia(true);
-    go(routes.settings(), {});
+    go(routes.settingsTab("browser-data"), {});
     render(<FrameHarness><SettingsPage /></FrameHarness>);
     expect(await screen.findByText("Workflow page layout")).toBeInTheDocument();
     expect(screen.getByText(/run Timeline is open and its height/)).toBeInTheDocument();
