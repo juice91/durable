@@ -102,6 +102,14 @@ with warnings.catch_warnings():
         max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
 
 
+class WorkflowReturnInput(BaseModel):
+    """Input for ``workflow.return``: any JSON value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: Any
+
+
 class KbSourceGetInput(BaseModel):
     """Input for ``kb.source.get``."""
 
@@ -246,6 +254,17 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=False,
         input_model=HttpRequestInput,
+    ),
+    "workflow.return": ToolDeclaration(
+        id="workflow.return",
+        title="Return a value",
+        description=(
+            "Return the given value unchanged. As a workflow's last step it shapes the run's output; with a value "
+            "{error: {code, message}} it ends the run with that stable error code"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=WorkflowReturnInput,
     ),
 }
 

@@ -1,0 +1,189 @@
+{
+  "description": "Post a short text to a Bluesky (AT Protocol) account: log in with the account's app password, create an app.bsky.feed.post record and return its uri and cid. Run it with {text, langs}. The handle, the PDS URL and the secret name are constants in the steps below: change them for another account. The password is the tenant secret `bluesky-app-password`, referenced as secret:bluesky-app-password and never written in the spec; store it in Settings → Secrets (a masked input) or with the secrets.request tool. A refused login fails the run with `bluesky_auth_failed`, a refused post with `bluesky_post_failed`; a network failure fails it with the tool's own code (http_timeout, http_connect_failed, outbound_blocked, secret_not_found). The example needs no agent: it uses platform tools only.",
+  "agents": {},
+  "input": {
+    "text": "你好，Bluesky！這是一則來自工作流程的測試貼文。",
+    "langs": [
+      "zh-Hant"
+    ]
+  },
+  "spec": {
+    "name": "Bluesky Post",
+    "description": "Log in to a Bluesky account with its app password (a tenant secret) and publish one text post. Returns the post's uri and cid and the account's handle.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "langs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 35
+          },
+          "minItems": 1,
+          "maxItems": 3,
+          "description": "Language tags of the post, for example [\"zh-Hant\"]. Required: the workflow engine applies no input defaults."
+        }
+      },
+      "required": [
+        "text",
+        "langs"
+      ],
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "cid": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "cid",
+        "handle"
+      ],
+      "additionalProperties": false
+    },
+    "start": "now",
+    "steps": [
+      {
+        "id": "now",
+        "type": "tool",
+        "tool_id": "clock.now",
+        "input": {},
+        "next": "session"
+      },
+      {
+        "id": "session",
+        "type": "tool",
+        "tool_id": "http.request",
+        "input": {
+          "method": "POST",
+          "url": "https://pds.example.social/xrpc/com.atproto.server.createSession",
+          "json": {
+            "identifier": "example-account.pds.example.social",
+            "password": "secret:bluesky-app-password"
+          }
+        },
+        "next": "login_gate"
+      },
+      {
+        "id": "login_gate",
+        "type": "branch",
+        "cases": [
+          {
+            "when": {
+              "op": "eq",
+              "left": {
+                "$ref": "steps.session.output.ok"
+              },
+              "right": true
+            },
+            "next": "post"
+          }
+        ],
+        "default": "login_failed"
+      },
+      {
+        "id": "login_failed",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "error": {
+                "code": "bluesky_auth_failed",
+                "message": "Bluesky refused the login with status {{steps.session.output.status}}; check the handle and the app password secret"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "post",
+        "type": "tool",
+        "tool_id": "http.request",
+        "input": {
+          "method": "POST",
+          "url": "https://pds.example.social/xrpc/com.atproto.repo.createRecord",
+          "headers": {
+            "$template": {
+              "Authorization": "Bearer {{steps.session.output.json.accessJwt}}"
+            }
+          },
+          "json": {
+            "$template": {
+              "repo": "{{steps.session.output.json.did}}",
+              "collection": "app.bsky.feed.post",
+              "record": {
+                "$type": "app.bsky.feed.post",
+                "text": "{{input.text}}",
+                "createdAt": "{{steps.now.output}}",
+                "langs": "{{input.langs}}"
+              }
+            }
+          }
+        },
+        "next": "post_gate"
+      },
+      {
+        "id": "post_gate",
+        "type": "branch",
+        "cases": [
+          {
+            "when": {
+              "op": "eq",
+              "left": {
+                "$ref": "steps.post.output.ok"
+              },
+              "right": true
+            },
+            "next": "result"
+          }
+        ],
+        "default": "post_failed"
+      },
+      {
+        "id": "post_failed",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "error": {
+                "code": "bluesky_post_failed",
+                "message": "Bluesky refused the post with status {{steps.post.output.status}}"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "result",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "uri": "{{steps.post.output.json.uri}}",
+              "cid": "{{steps.post.output.json.cid}}",
+              "handle": "{{steps.session.output.json.handle}}"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

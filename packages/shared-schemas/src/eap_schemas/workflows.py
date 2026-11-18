@@ -1,7 +1,9 @@
 """Declarative workflow definitions (milestone 3, task 3.7).
 
 A workflow is DATA: a JSON graph of typed steps (agent, tool, branch, parallel, approval). Inputs
-are template mappings whose values are JSON literals or ``{"$ref": "<path>"}``; branch conditions
+are template mappings whose values are JSON literals, ``{"$ref": "<path>"}`` or ``{"$template": <json>}``
+(a literal whose strings may hold ``{{ <ref path> }}`` placeholders: a header ``"Bearer {{ steps.s.output.token }}"``
+or a nested body built from step outputs); branch conditions
 are ``{"op", "left", "right"}`` objects. Nothing here is ever evaluated as code.
 
 ``WorkflowSpec`` validates the graph: unique step ids, existing targets, a DAG reachable from
@@ -84,7 +86,9 @@ __all__ = (
     "MAX_SPEC_BYTES",
     "MAX_SPEC_DEPTH",
     "MAX_STEPS",
+    "MAX_TEMPLATE_PLACEHOLDERS",
     "PAUSE_STEP_SUFFIX",
+    "TEMPLATE_KEY",
     "AgentStep",
     "AllCondition",
     "AnyCondition",
@@ -131,6 +135,9 @@ REF_PATTERN = re.compile(
     rf"(?P<rest>(?:\.{_SEGMENT}){{0,16}})$"
 )
 REF_KEY = "$ref"
+TEMPLATE_KEY = "$template"
+MAX_TEMPLATE_PLACEHOLDERS = 64
+_PLACEHOLDER = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 ConditionOp = Literal["eq", "ne", "gt", "lt", "contains", "exists"]
 
 MAX_LOOP_ITERATIONS = 1000  # schema ceiling of max_items / max_iterations (the environment cap is lower)
@@ -159,6 +166,47 @@ def _ref_path(value: Any) -> str | None:
     if match.group("loop_root") == "index" and match.group("rest"):
         raise ValueError(f"invalid $ref '{path}': loop.<loop_id>.index is a number and has no fields")
     return path
+
+
+def is_template(value: Any) -> bool:
+    """Whether `value` is a ``{"$template": ...}`` input value (the key makes it one)."""
+    return isinstance(value, dict) and TEMPLATE_KEY in value
+
+
+def parse_placeholders(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, path)`` of each ``{{ <ref path> }}`` in `text`; raises on a malformed one (a path that
+    is not a valid ref, a stray ``{{`` or ``}}``)."""
+    found: list[tuple[int, int, str]] = []
+    rest = []
+    pos = 0
+    for match in _PLACEHOLDER.finditer(text):
+        path = match.group(1).strip()
+        _ref_path({REF_KEY: path})  # raises ValueError for a path that is not a valid ref
+        found.append((match.start(), match.end(), path))
+        rest.append(text[pos:match.start()])
+        pos = match.end()
+    rest.append(text[pos:])
+    if any("{{" in part or "}}" in part for part in rest):
+        raise ValueError(f"a placeholder in '{text[:60]}' is not of the form {{{{ <ref path> }}}}")
+    return found
+
+
+def template_paths(inner: Any) -> list[str]:
+    """Every ref path of the placeholders in the strings (not the keys) of a template's JSON value, in
+    order; raises ValueError for a malformed placeholder or more than MAX_TEMPLATE_PLACEHOLDERS."""
+    paths: list[str] = []
+    stack = [inner]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            paths.extend(path for _s, _e, path in parse_placeholders(item))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+        elif isinstance(item, dict):
+            stack.extend(reversed(list(item.values())))
+        if len(paths) > MAX_TEMPLATE_PLACEHOLDERS:
+            raise ValueError(f"a template holds at most {MAX_TEMPLATE_PLACEHOLDERS} placeholders")
+    return paths
 
 
 def parse_ref(path: str) -> tuple[str, str | None, str | None]:
@@ -219,7 +267,12 @@ def _validate_template(template: Any) -> dict[str, Any]:
     for key, value in template.items():
         if not isinstance(key, str) or not key or len(key) > 128:
             raise ValueError("input field names must be 1-128 character strings")
-        if _ref_path(value) is None:
+        if is_template(value):
+            if set(value) != {TEMPLATE_KEY}:
+                raise ValueError('a $template must be exactly {"$template": <json>}')
+            _check_literal(value[TEMPLATE_KEY], f"$template of '{key}'")
+            template_paths(value[TEMPLATE_KEY])
+        elif _ref_path(value) is None:
             _check_literal(value, f"value of '{key}'")
     return template
 
@@ -716,7 +769,13 @@ def step_targets(step: Step) -> list[str]:
 
 
 def _template_refs(template: dict[str, Any] | None) -> list[str]:
-    return [p for p in (_ref_path(v) for v in (template or {}).values()) if p is not None]
+    paths: list[str] = []
+    for value in (template or {}).values():
+        if is_template(value):
+            paths.extend(template_paths(value[TEMPLATE_KEY]))
+        elif (path := _ref_path(value)) is not None:
+            paths.append(path)
+    return paths
 
 
 def iter_refs(step: Step) -> list[str]:

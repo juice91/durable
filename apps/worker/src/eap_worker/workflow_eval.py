@@ -63,6 +63,9 @@ from eap_schemas.workflows import (
     ForeachStep,
     LoopStep,
     NotCondition,
+    TEMPLATE_KEY,
+    is_template,
+    parse_placeholders,
 )
 
 __all__ = [
@@ -154,10 +157,62 @@ def _ref_path(value: Any) -> str | None:
     return None
 
 
+def _scalar_text(value: Any) -> str | None:
+    """A placeholder value inside a longer string: a string as is, a number or boolean in JSON form."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    return None
+
+
+def _render_string(text: str, context: dict[str, Any]) -> Any:
+    """One template string: a string that is exactly one placeholder is the value itself (any JSON type); one
+    with other text around it is concatenated (each value a string, number or boolean). The resolved values
+    are never scanned again for placeholders."""
+    spans = parse_placeholders(text)
+    if not spans:
+        return text
+    if len(spans) == 1 and (spans[0][0], spans[0][1]) == (0, len(text)):
+        found = resolve_ref(context, spans[0][2])
+        if found is MISSING:
+            raise RefMissing(spans[0][2])
+        return found
+    parts: list[str] = []
+    pos = 0
+    for start, end, path in spans:
+        found = resolve_ref(context, path)
+        rendered = None if found is MISSING else _scalar_text(found)
+        if rendered is None:
+            raise RefMissing(path)
+        parts.extend((text[pos:start], rendered))
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def render_template(inner: Any, context: dict[str, Any]) -> Any:
+    """The JSON value of a `{"$template": inner}` with its placeholders resolved (keys are never templated);
+    RefMissing for a placeholder that does not resolve or is not a scalar inside a longer string."""
+    if isinstance(inner, str):
+        return _render_string(inner, context)
+    if isinstance(inner, list):
+        return [render_template(v, context) for v in inner]
+    if isinstance(inner, dict):
+        return {k: render_template(v, context) for k, v in inner.items()}
+    return inner
+
+
 def resolve_template(template: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """A step's input mapping with every `$ref` value replaced; RefMissing if one does not resolve."""
+    """A step's input mapping with every `$ref` and `$template` value replaced; RefMissing if one does not
+    resolve."""
     resolved: dict[str, Any] = {}
     for key, value in template.items():
+        if is_template(value):
+            resolved[key] = render_template(value[TEMPLATE_KEY], context)
+            continue
         path = _ref_path(value)
         if path is None:
             resolved[key] = value
