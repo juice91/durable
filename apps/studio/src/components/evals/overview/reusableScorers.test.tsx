@@ -54,6 +54,9 @@ describe("evaluatorFromForm", () => {
   it("builds each kind and refuses bad input", () => {
     expect(evaluatorFromForm("contains", "hi", "")).toEqual({ kind: "contains", value: "hi", case_sensitive: false });
     expect(evaluatorFromForm("regex", " ", "")).toBe("Enter a pattern.");
+    expect(evaluatorFromForm("regex", "x", "", { negate: true, field: " post " })).toEqual({ kind: "regex", pattern: "x", negate: true, field: "post" });
+    expect(evaluatorFromForm("regex", "x", "", { negate: false, field: "" })).toEqual({ kind: "regex", pattern: "x" });
+    expect(evaluatorFromForm("regex", "x", "", { field: "a..b" })).toMatch(/field path/);
     expect(evaluatorFromForm("max_cost", "0", "")).toMatch(/above zero/);
     expect(evaluatorFromForm("field_equals", "a.b", "3")).toEqual({ kind: "field_equals", path: "a.b", value: 3 });
     expect(evaluatorFromForm("field_equals", "a.b", "nope")).toMatch(/JSON/);
@@ -76,6 +79,21 @@ describe("ReusableScorers", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete scorer polite" }));
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path === "/scorers/s1")).toBe(true));
+  });
+
+  it("creates a regex scorer that must not match, over one field", async () => {
+    render(<ReusableScorers />);
+    await screen.findByTestId("reusable-scorer");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "no-url" } });
+    fireEvent.change(screen.getByLabelText("Check"), { target: { value: "regex" } });
+    fireEvent.change(screen.getByLabelText("Pattern"), { target: { value: "https?://" } });
+    fireEvent.click(screen.getByLabelText("Must not match"));
+    fireEvent.change(screen.getByLabelText("Field path (optional)"), { target: { value: "post" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add scorer" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({
+      name: "no-url", evaluator: { kind: "regex", pattern: "https?://", negate: true, field: "post" },
+    });
   });
 
   it("shows a form error without calling the API", async () => {

@@ -47,6 +47,26 @@ def test_score_data_maps_outcomes():
     assert score_data(scorer, CaseOutcome()) is None
 
 
+def test_a_negated_regex_scorer_passes_on_no_match_and_fails_with_its_own_reason():
+    import asyncio
+
+    from eap_worker.evaluators import PlannedEvaluator, score_deterministic
+
+    evaluator = {"kind": "regex", "pattern": "https?://", "negate": True, "field": "post"}
+    scorer = {"id": "s1", "name": "no-url", "kind": "regex", "negate": True}
+
+    def run(output):
+        planned = PlannedEvaluator(0, "no-url", "regex", evaluator)
+        outcome = asyncio.run(score_deterministic([planned], {"name": "no-url", "input": "x"}, output,
+                                                  duration_s=None, cost_usd=None, output_schema=None))
+        return score_data(scorer, outcome)
+
+    assert run({"post": "plain", "link": "https://x.y"})["passed"] is True  # `link` is not the field
+    failed = run({"post": "see https://x.y"})
+    assert failed["passed"] is False and failed["reason"] == "the output matches a pattern it must not match"
+    assert "https" not in failed["reason"]
+
+
 def test_sampling_is_stable_and_proportional():
     assert sampled("r", "s", 1) and not sampled("r", "s", 0.0)
     assert sampled("r", "s", 0.3) == sampled("r", "s", 0.3)
