@@ -413,6 +413,14 @@ def _enriched_summary(tenant_id: str, data: dict[str, Any]) -> str | None:
 
     rt = get_runtime()
     tool_id = rt.registry.tool_id_for_name(str(data.get("tool_name", "")))
+    if tool_id == "kb.source.sync":  # the source's name, for "Start a <mode> sync of source '<name>'"
+        try:
+            from eap_worker.kb_source_tools import approval_summary_text as sync_summary_text
+
+            args = data.get("args")
+            return sync_summary_text(rt.engine, tenant_id, args if isinstance(args, dict) else {})
+        except Exception:  # noqa: BLE001 - a summary is a courtesy, never a reason to fail the run
+            return None
     if tool_id is None or not tool_id.startswith("architect."):
         return None
     try:

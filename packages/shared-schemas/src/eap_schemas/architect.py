@@ -38,6 +38,9 @@ RESERVED_AGENT_IDS = frozenset({"architect", "architect-drafter", "architect-wor
 ARCHITECT_DENIED_TOOL_PREFIXES: tuple[str, ...] = (
     "architect.",
     "knowledge.",
+    "kb.",
+    "settings.",
+    "workflow.",
     "knowledge_search",
     "retrieve",
     "update_working_memory",

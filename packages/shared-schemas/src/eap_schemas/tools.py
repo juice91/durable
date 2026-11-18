@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -75,6 +75,53 @@ class SecretsRequestInput(BaseModel):
     purpose: str
 
 
+class KbSourceGetInput(BaseModel):
+    """Input for ``kb.source.get``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: str
+
+
+class SettingsConnectionCheckInput(BaseModel):
+    """Input for ``settings.connection.check``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    connection_id: str
+
+
+class KbSourceSyncInput(BaseModel):
+    """Input for ``kb.source.sync``. `part_numbers` only in a targeted sync (at most 100, each 1..128 characters of
+    ``[A-Za-z0-9._/-]``; the launch checks them and answers a stable code)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: str
+    mode: Literal["targeted", "incremental", "full"]
+    part_numbers: list[str] = []
+    restart: bool = False  # incremental / full: a new walk instead of resuming the stored cursor
+
+
+class WorkflowRunWaitInput(BaseModel):
+    """Input for ``workflow.run.wait``: wait up to `wait_seconds` (1..300) for a run to end."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    wait_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class WorkflowRunResultInput(BaseModel):
+    """Input for ``workflow.run.result``: the bounded report of a sync run; with `require_success` a failed,
+    cancelled or attention-needing run is a stable error."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    require_success: bool = False
+
+
 TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
     "clock.now": ToolDeclaration(
         id="clock.now",
@@ -102,6 +149,61 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=False,
         input_model=SecretsRequestInput,
+    ),
+    "kb.source.get": ToolDeclaration(
+        id="kb.source.get",
+        title="Get a knowledge-base source",
+        description=(
+            "Read one knowledge-base source of the tenant: its knowledge base, connection, kind, provider, "
+            "name, enabled flag, non-secret config, last successful sync and a summary of its checkpoint"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=KbSourceGetInput,
+    ),
+    "settings.connection.check": ToolDeclaration(
+        id="settings.connection.check",
+        title="Check a connection",
+        description=(
+            "Check that a tenant connection works (its stored credentials are accepted by the provider). "
+            "Returns ok, the time of the check and a stable error code; never a credential"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=SettingsConnectionCheckInput,
+    ),
+    "kb.source.sync": ToolDeclaration(
+        id="kb.source.sync",
+        title="Start a knowledge-base source sync",
+        description=(
+            "Start a targeted (with part_numbers), incremental or full synchronisation of a knowledge-base "
+            "source. Returns the run id of the sync; use workflow.run.wait and workflow.run.result to follow it"
+        ),
+        side_effect=True,
+        external_idempotent=True,
+        input_model=KbSourceSyncInput,
+    ),
+    "workflow.run.wait": ToolDeclaration(
+        id="workflow.run.wait",
+        title="Wait for a run",
+        description=(
+            "Wait up to wait_seconds (1 to 300) for a run of the tenant to end. Returns its status, when it "
+            "last changed and whether it has ended"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=WorkflowRunWaitInput,
+    ),
+    "workflow.run.result": ToolDeclaration(
+        id="workflow.run.result",
+        title="Get a sync run's report",
+        description=(
+            "The bounded report of a knowledge-base source sync run: counts, checkpoint and up to 50 errors. "
+            "With require_success a failed, cancelled or attention-needing run is returned as an error"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=WorkflowRunResultInput,
     ),
 }
 

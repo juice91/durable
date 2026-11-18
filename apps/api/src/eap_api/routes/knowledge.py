@@ -108,6 +108,14 @@ from eap_pricing import (
     override_period,
 )
 from eap_run_store import ENQUEUE_FAILED_ERROR, TERMINAL_RUN_STATUSES, RunIdConflict, RunStore
+from eap_run_store import kb_ingest_handoff as handoff
+from eap_run_store.kb_ingest_handoff import (  # noqa: F401  (re-exported: tests and routes use these names)
+    EMBED_SPLIT_KEY,
+    ENQUEUE_FAILED_DETAIL,
+    ORPHAN_AFTER_SECONDS,
+    ingest_input,
+    reindex_input,
+)
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
 from eap_run_store.knowledge import (
     DocumentNotFound,
@@ -365,37 +373,7 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-# P1.C5: new kb_ingest runs embed with the split steps (eap.kb_embed_call, then eap.kb_embed_write),
-# so a database retry of the write never calls the provider again. Runs enqueued before (no flag)
-# keep eap.kb_embed_batch, so in-flight workflows recover unchanged.
-EMBED_SPLIT_KEY = "embed_split"
-
-
-def ingest_input(document_id: str, doc_version: int) -> str:
-    """The `input` of a document ingest run (and the enqueued `input_json`)."""
-    return _canonical_json({"document_id": str(document_id), "doc_version": int(doc_version), EMBED_SPLIT_KEY: True})
-
-
-def reindex_input(generation: int) -> str:
-    """The `input` of a reindex run (and the enqueued `input_json`)."""
-    return _canonical_json({"reindex": int(generation), EMBED_SPLIT_KEY: True})
-
-
-def _same_ingest_input(stored: Any, input_json: str) -> bool:
-    """Whether a stored kb_ingest run input names the same work as `input_json`, ignoring the
-    `embed_split` flag (a run created before P1.C5 has none and is still that version's run)."""
-    if stored == input_json:
-        return True
-    try:
-        a, b = json.loads(stored), json.loads(input_json)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(a, dict) or not isinstance(b, dict):
-        return False
-    a.pop(EMBED_SPLIT_KEY, None)
-    b.pop(EMBED_SPLIT_KEY, None)
-    return a == b
-
+_same_ingest_input = handoff.same_ingest_input
 
 # ------------------------------------------------------------------ formats and uploads (RAG P1.A4)
 
@@ -668,26 +646,20 @@ def _json(status_code: int, content: Any) -> JSONResponse:
 
 # ------------------------------------------------------------------------ ingest run hand-off
 
-# A document left 'pending' whose recorded run does not exist is orphaned (its request crashed, or
-# its run_id clashed after the write) only after this long: a younger one belongs to a request that
-# is still between its document write and its run insert.
-ORPHAN_AFTER_SECONDS = 60
-ENQUEUE_FAILED_DETAIL = "Run recorded but could not be started; retry the same request (same run_id)"
 REINDEX_ENQUEUE_FAILED_DETAIL = (
     "Reindex could not be started and was cancelled; retry the request (without run_id, or with a new one)"
 )
 
 
-class HandOffFailed(Exception):
+class HandOffFailed(handoff.HandOffFailed):
     """The enqueue of a recorded run failed: the route answers 503 {"detail", "run_id"}."""
-
-    def __init__(self, run_id: str, detail: str = ENQUEUE_FAILED_DETAIL) -> None:
-        self.run_id = run_id
-        self.detail = detail
-        super().__init__(run_id, detail)
 
     def response(self) -> JSONResponse:
         return _json(status.HTTP_503_SERVICE_UNAVAILABLE, {"detail": self.detail, "run_id": self.run_id})
+
+
+def _run_in_use(exc: handoff.RunIdInUse) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
 
 
 def _create_ingest_run(
@@ -696,66 +668,24 @@ def _create_ingest_run(
     """Create (or find, for a retry with the same run_id) the kb_ingest run. 409 when `run_id` is
     another tenant's or another request's run (callers resolve run_id before writing; this is the
     last guard against a race)."""
-    run_uuid = uuid.UUID(str(run_id))
     trace_id, traceparent = current_trace_context()
     try:
-        _, created = run_store.create_kb_ingest_run(
-            tenant_id, kb_id, input_json, run_uuid, trace_id=trace_id, traceparent=traceparent
+        return handoff.create_ingest_run(
+            run_store, tenant_id, kb_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
         )
-    except RunIdConflict:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-    run = run_store.get_run(tenant_id, run_uuid)
-    if run is None:  # pragma: no cover - deleted between insert and read
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    if not created and not _is_run_of(run, kb_id, input_json):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-        )
-    return run, created
+    except handoff.RunIdInUse as exc:
+        raise _run_in_use(exc) from None
 
 
-def _is_run_of(run: dict[str, Any] | None, kb_id: str, input_json: str) -> bool:
-    return (
-        run is not None
-        and run.get("kind") == "kb_ingest"
-        and str(run.get("knowledge_base_id")) == str(kb_id)
-        and _same_ingest_input(run.get("input"), input_json)
-    )
-
-
-def _run_input(run: dict[str, Any]) -> dict[str, Any]:
-    try:
-        value = json.loads(run.get("input") or "")
-    except (ValueError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _is_document_run(run: dict[str, Any], kb_id: str, document_id: str) -> bool:
-    """A kb_ingest run of any version of this document."""
-    return (
-        run.get("kind") == "kb_ingest"
-        and str(run.get("knowledge_base_id")) == str(kb_id)
-        and str(_run_input(run).get("document_id")) == str(document_id)
-    )
-
-
-def _enqueue_failed(run: dict[str, Any] | None) -> bool:
-    return run is not None and run["status"] == "failed" and run["error"] == ENQUEUE_FAILED_ERROR
-
-
-def _run_view(run: dict[str, Any]) -> dict[str, Any]:
-    run_status, display_status = run["status"], run["display_status"]
-    if run["error"] == ENQUEUE_FAILED_ERROR and run["status"] != "failed":  # pragma: no cover - defensive
-        run_status = display_status = "queued"
-    return {
-        "run_id": str(run["id"]),
-        "kind": "kb_ingest",
-        "knowledge_base_id": str(run["knowledge_base_id"]),
-        "status": run_status,
-        "display_status": display_status,
-        "trace_id": run.get("trace_id"),
-    }
+_is_run_of = handoff.is_run_of
+_run_input = handoff.run_input
+_is_document_run = handoff.is_document_run
+_enqueue_failed = handoff.enqueue_failed
+_run_view = handoff.run_view
+_stale_queued = handoff.stale_queued
+_renew_claim = handoff.renew_claim
+_latest_run = handoff.latest_run
+_orphaned = handoff.orphaned
 
 
 def _hand_off(
@@ -766,75 +696,20 @@ def _hand_off(
     created: bool,
     failed_detail: str = ENQUEUE_FAILED_DETAIL,
 ) -> dict[str, Any]:
-    """Enqueue `eap.kb_ingest` for the stored run, exactly as tool runs do: this request owns the
-    hand-off of a row it created, or of one an earlier failed hand-off left failed (re-queued now).
-    A failed enqueue marks an owned run failed (ENQUEUE_FAILED_ERROR) and raises HandOffFailed
-    (503 with the run_id)."""
-    run_id = uuid.UUID(str(run["id"]))
-    owns_handoff = created or run_store.requeue_after_enqueue_failure(tenant_id, run_id)
+    """Enqueue `eap.kb_ingest` for the stored run (eap_run_store.kb_ingest_handoff.hand_off, shared
+    with the worker's source sync); a failed enqueue raises HandOffFailed (503 with the run_id)."""
     try:
-        launcher.launch_kb_ingest(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            knowledge_base_id=str(run["knowledge_base_id"]),
-            input_json=run["input"],
-            traceparent=run.get("traceparent"),
-        )
-    except Exception as exc:
-        # Type and code only: the error can quote the DBOS database URL or the enqueued payload.
-        log_failure(
-            log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
-            run_id=str(run_id), tenant_id=tenant_id,
-        )
-        if owns_handoff:
-            try:
-                run_store.mark_enqueue_failed(tenant_id, run_id)
-            except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
-                log_failure(
-                    log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
-                    level=logging.ERROR, run_id=str(run_id), tenant_id=tenant_id,
-                )
-        raise HandOffFailed(str(run_id), failed_detail) from None
-    run = run_store.get_run(tenant_id, run_id) or run
-    view = _run_view(run)
-    if run["error"] == ENQUEUE_FAILED_ERROR:
-        # A concurrent owner's enqueue failed and marked it, but this enqueue succeeded.
-        view["status"] = view["display_status"] = "queued"
-    log.info("kb_ingest run %s queued: tenant=%s kb=%s", run_id, tenant_id, run["knowledge_base_id"])
-    return view
+        return handoff.hand_off(run_store, launcher.launch_kb_ingest, tenant_id, run, created, failed_detail)
+    except handoff.HandOffFailed as exc:
+        raise HandOffFailed(exc.run_id, exc.detail) from None
 
 
 def _replay(run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any]) -> dict[str, Any]:
-    """A retry of the request that created `run`: hand it off again unless it has finished. The
-    enqueue is idempotent (DBOS returns the existing workflow of this workflow id), and it recovers
-    a run whose creating request died before its enqueue. A finished run is answered as recorded."""
-    if _enqueue_failed(run) or run["status"] not in TERMINAL_RUN_STATUSES:
-        return _hand_off(run_store, launcher, tenant_id, run, created=False)
-    return _run_view(run)
-
-
-def _stale_queued(run: dict[str, Any]) -> bool:
-    """Still 'queued' ORPHAN_AFTER_SECONDS after it was created: possibly never enqueued (its request
-    died between the run insert and the enqueue). Handing it off again is idempotent."""
-    created = run.get("created_at")
-    if run.get("status") != "queued" or not isinstance(created, datetime):
-        return False
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - created).total_seconds() > ORPHAN_AFTER_SECONDS
-
-
-def _renew_claim(store: KnowledgeStore, tenant_id: str, document: dict[str, Any], run_id: uuid.UUID | str) -> bool:
-    """Compare-and-set `last_run_id` onto itself (refreshing `updated_at`) right before creating
-    the run: False when a newer upload or an orphan recovery took the document over while this
-    request stalled, so it must not create a second run. A deleted document passes (its run ends
-    cancelled in the worker)."""
-    if store.attach_ingest_run(
-        tenant_id, document["id"], str(run_id),
-        doc_version=document["latest_version"], expected_last_run_id=str(run_id),
-    ):
-        return True
-    return store.get_document_by_id(tenant_id, document["id"]) is None
+    """A retry of the request that created `run`: hand it off again unless it has finished."""
+    try:
+        return handoff.replay(run_store, launcher.launch_kb_ingest, tenant_id, run)
+    except handoff.HandOffFailed as exc:
+        raise HandOffFailed(exc.run_id, exc.detail) from None
 
 
 def _resolve_client_run_id(
@@ -842,40 +717,10 @@ def _resolve_client_run_id(
 ) -> dict[str, Any] | None:
     """Resolve a client run_id BEFORE anything is written: None when unused, the tenant's run when
     it exists, 409 when another tenant holds it."""
-    if run_id is None:
-        return None
-    with store.engine.connect() as conn:
-        owner = conn.execute(text("SELECT tenant_id FROM runs WHERE id = :r"), {"r": str(run_id)}).scalar()
-    if owner is None:
-        return None
-    if owner != tenant_id:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-    return run_store.get_run(tenant_id, run_id)
-
-
-def _latest_run(run_store: RunStore, tenant_id: str, document: dict[str, Any]) -> dict[str, Any] | None:
-    """The document's recorded ingest run when it exists and ingests the latest version, else None."""
-    last_run_id = document.get("last_run_id")
-    if not last_run_id:
-        return None
     try:
-        run = run_store.get_run(tenant_id, uuid.UUID(str(last_run_id)))
-    except ValueError:
-        return None
-    if not _is_run_of(run, document["kb_id"], ingest_input(document["id"], document["latest_version"])):
-        return None
-    return run
-
-
-def _orphaned(document: dict[str, Any]) -> bool:
-    """'pending' for more than ORPHAN_AFTER_SECONDS (call only when its recorded run is missing)."""
-    updated = document.get("updated_at")
-    if document.get("status") != "pending" or not isinstance(updated, datetime):
-        return False
-    if updated.tzinfo is None:
-        updated = updated.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - updated).total_seconds() > ORPHAN_AFTER_SECONDS
-
+        return handoff.resolve_client_run_id(store, run_store, tenant_id, run_id)
+    except handoff.RunIdInUse as exc:
+        raise _run_in_use(exc) from None
 
 
 # ----------------------------------------------------------------------- references (409 on delete)
@@ -1220,96 +1065,43 @@ def _put_document(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the document has no extractable text"
             )
     run_store, _ = stores
+    trace_id, traceparent = current_trace_context()
     try:
-        existing = _resolve_client_run_id(store, run_store, tenant_id, body.run_id)
-        if existing is not None:
-            document = store.get_document(tenant_id, kb["id"], document_key)
-            if (
-                document is None
-                or not _is_document_run(existing, kb["id"], document["id"])
-                or _run_input(existing).get("doc_version") != document["latest_version"]
-                or document["content_hash"] != upload.content_hash
-            ):
-                # Not a retry of the request that stored the current version: refuse, write nothing.
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-                )
-            run = _replay(run_store, launcher, tenant_id, existing)
-            created = _run_input(existing).get("doc_version") == 1
-            return _json(
-                status.HTTP_202_ACCEPTED,
-                {"unchanged": False, "created": created, "document": document_view(document), **run},
-            )
-
-        new_run_id = body.run_id or uuid.uuid4()
-        try:
-            result = store.put_document(
-                tenant_id,
-                kb["id"],
-                document_key=document_key,
-                title=title,
-                content=upload.content,
-                mime_type=upload.mime_type,
-                source_url=body.source_url,
-                metadata=body.metadata,
-                run_id=str(new_run_id),  # last_run_id, in the same transaction as the new version
-                content_sha256=upload.digest,
-            )
-        except KnowledgeBaseNotFound:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-        except KnowledgeBaseLimitExceeded as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-        except ValueError as exc:  # metadata the store's validator refuses (the body model checks it first)
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-        document = result.document
-
-        if not result.unchanged:
-            if not _renew_claim(store, tenant_id, document, new_run_id):
-                # Stalled past ORPHAN_AFTER_SECONDS and taken over: the version is stored and its
-                # ingest belongs to the request that took over.
-                current = store.get_document(tenant_id, kb["id"], document_key) or document
-                return _json(
-                    status.HTTP_202_ACCEPTED,
-                    {"unchanged": False, "created": result.created, "document": document_view(current),
-                     "run_id": current["last_run_id"]},
-                )
-            input_json = ingest_input(document["id"], document["latest_version"])
-            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id)
-            view = _hand_off(run_store, launcher, tenant_id, run, created)
-            return _json(
-                status.HTTP_202_ACCEPTED,
-                {"unchanged": False, "created": result.created, "document": document_view(document), **view},
-            )
-
-        latest = _latest_run(run_store, tenant_id, document)
-        if latest is not None and (_enqueue_failed(latest) or _stale_queued(latest)):
-            # A retry of an upload whose hand-off failed, or whose request died before enqueuing:
-            # hand the recorded run off again (idempotent in DBOS).
-            view = _hand_off(run_store, launcher, tenant_id, latest, created=False)
-        elif latest is None and _orphaned(document) and store.attach_ingest_run(
+        outcome = handoff.ingest_document(
+            store,
+            run_store,
+            launcher.launch_kb_ingest,
             tenant_id,
-            document["id"],
-            str(new_run_id),
-            doc_version=document["latest_version"],
-            expected_last_run_id=document["last_run_id"],
-            expected_updated_at=document["updated_at"],  # a stalled owner's lease renewal makes this lose
-        ):
-            # Stored long ago by a request that never created its run: this upload won the
-            # compare-and-set on last_run_id and starts the run the version is waiting for.
-            input_json = ingest_input(document["id"], document["latest_version"])
-            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id)
-            view = _hand_off(run_store, launcher, tenant_id, run, created)
-        else:
-            return _json(
-                status.HTTP_200_OK,
-                {"unchanged": True, "created": False, "document": document_view(document), "run_id": None},
-            )
-    except HandOffFailed as exc:
-        return exc.response()
-    document = store.get_document(tenant_id, kb["id"], document_key) or document
+            kb["id"],
+            document_key=document_key,
+            title=title,
+            content=upload.content,
+            mime_type=upload.mime_type,
+            content_sha256=upload.digest,
+            source_url=body.source_url,
+            metadata=body.metadata,
+            run_id=body.run_id,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+    except KnowledgeBaseNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
+    except KnowledgeBaseLimitExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except handoff.InvalidDocument as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+    except handoff.RunIdInUse as exc:
+        raise _run_in_use(exc) from None
+    except handoff.HandOffFailed as exc:
+        return HandOffFailed(exc.run_id, exc.detail).response()
     return _json(
-        status.HTTP_202_ACCEPTED,
-        {"unchanged": False, "created": document["latest_version"] == 1, "document": document_view(document), **view},
+        status.HTTP_200_OK if outcome.unchanged else status.HTTP_202_ACCEPTED,
+        {
+            "unchanged": outcome.unchanged,
+            "created": outcome.created,
+            "document": document_view(outcome.document),
+            **outcome.run,
+        },
     )
 
 

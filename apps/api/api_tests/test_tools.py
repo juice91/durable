@@ -15,7 +15,14 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
     response = client.get("/api/v1/tools", headers=auth_header)
 
     assert response.status_code == 200
-    assert response.json() == [
+    body = response.json()
+    # The kb source sync tools (kb.source.*, settings.connection.check, workflow.run.*) follow the original three.
+    assert [t["id"] for t in body[3:]] == [
+        "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result",
+    ]
+    assert all(t["allowed"] for t in body[3:])
+    assert {t["id"]: t["side_effect"] for t in body[3:]}["kb.source.sync"] is True
+    assert body[:3] == [
         {
             "id": "clock.now",
             "title": "Current time",

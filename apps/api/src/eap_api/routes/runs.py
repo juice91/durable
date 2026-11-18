@@ -393,7 +393,7 @@ def list_runs(
     ] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
-    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     knowledge_base_id: uuid.UUID | None = None,
@@ -411,7 +411,7 @@ def list_runs(
     """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
     (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
     position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest' | 'eval'; eval
+    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest' | 'eval' | 'kb_source_sync'; eval
     runs exist from 0015_evals, until then the filter lists nothing), `tool_id`,
     `workflow_id` and `knowledge_base_id` filter (a knowledge base's runs: its kb_ingest runs and its
     search tester tool runs; add `kind=kb_ingest` for the ingest runs only). A workflow's child agent runs are listed only with `parent_run_id`.
@@ -498,7 +498,7 @@ def runs_histogram(
     spans: SpanStoreDep,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
-    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval"] | None, Query()] = None,
+    kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None, Query()] = None,
     tool_id: Annotated[str | None, Query(max_length=64)] = None,
     workflow_id: uuid.UUID | None = None,
     knowledge_base_id: uuid.UUID | None = None,

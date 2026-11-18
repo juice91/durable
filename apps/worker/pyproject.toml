@@ -22,6 +22,8 @@ dependencies = [
     "eap-processors",
     # Knowledge base extraction and chunking (RM.10, eap.kb_ingest).
     "eap-knowledge",
+    # Knowledge-base source adapters (eap.kb_source_sync drives them).
+    "eap-kb-sources",
     # The model price override file and cost arithmetic (shared by the worker and the API).
     "eap-pricing",
     "pydantic-ai-slim[anthropic,dbos,openai]>=2.67.0",
@@ -66,5 +68,6 @@ eap-secrets = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }
+eap-kb-sources = { workspace = true }
 eap-api = { workspace = true }
 eap-pricing = { workspace = true }

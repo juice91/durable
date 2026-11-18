@@ -70,7 +70,7 @@ class Base(DeclarativeBase):
 
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
-RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest", "eval")
+RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync")
 
 # runs.error of a run whose hand-off to the orchestrator failed (the API could not enqueue it).
 # Stable text: RunStore.requeue_after_enqueue_failure recognises the state by it.
@@ -81,7 +81,8 @@ ENQUEUE_FAILED_ERROR = (
 # An agent run names exactly one of its published agent version and a draft snapshot (a draft test
 # run), and no tool or workflow; a tool run names its tool only and is never a conversation turn
 # (it may name a knowledge base: the search tester); a workflow run names its published workflow
-# version only; a kb_ingest run names its knowledge base only; an eval run (0015_evals) names its
+# version only; a kb_ingest run names its knowledge base only (a kb_source_sync run too: the knowledge
+# base of its source, 0029_kb_sources); an eval run (0015_evals) names its
 # agent with exactly one of its version and a draft snapshot, and its test suite; a workflow suite's
 # eval run names the workflow and its version instead of an agent. Same text as migration 0022.
 RUN_KIND_TARGET_CHECK = (
@@ -101,6 +102,9 @@ RUN_KIND_TARGET_CHECK = (
     " OR (kind = 'eval' AND agent_id IS NULL AND agent_version IS NULL AND draft_spec IS NULL"
     " AND workflow_id IS NOT NULL AND workflow_version IS NOT NULL AND eval_suite_id IS NOT NULL"
     " AND tool_id IS NULL AND knowledge_base_id IS NULL AND conversation_id IS NULL)"
+    " OR (kind = 'kb_source_sync' AND knowledge_base_id IS NOT NULL AND agent_id IS NULL AND agent_version IS NULL"
+    " AND draft_spec IS NULL AND tool_id IS NULL AND conversation_id IS NULL AND workflow_id IS NULL"
+    " AND workflow_version IS NULL AND eval_suite_id IS NULL)"
 )
 # run_model_requests.operation (0011_knowledge_bases): a chat model request or an embedding call.
 MODEL_REQUEST_OPERATIONS = ("chat", "embedding")
@@ -1297,6 +1301,36 @@ class RunStore:
             kind="kb_ingest",
             knowledge_base_id=str(knowledge_base_id),
             input=input,
+            trace_id=trace_id,
+            traceparent=traceparent,
+        )
+
+    def create_kb_source_sync_run(
+        self,
+        tenant_id: str,
+        run_id: UUID,
+        source_id: str,
+        request: dict[str, Any],
+        trace_id: str | None = None,
+        traceparent: str | None = None,
+    ) -> tuple[UUID, bool]:
+        """Create a knowledge-base source sync run (kind 'kb_source_sync', 0029_kb_sources). The run names
+        the source's knowledge base; `input` is the canonical JSON of `request` plus `source_id`. ValueError
+        when the source is not `tenant_id`'s. Same idempotency and tenant rules as create_run."""
+        with self.Session() as session:
+            kb_id = session.execute(
+                text("SELECT knowledge_base_id FROM kb_sources WHERE tenant_id = :t AND id = :s"),
+                {"t": tenant_id, "s": str(source_id)},
+            ).scalar_one_or_none()
+        if kb_id is None:
+            raise ValueError("source not found")
+        body = json.dumps({**request, "source_id": str(source_id)}, sort_keys=True, separators=(",", ":"))
+        return self._insert_run(
+            tenant_id,
+            run_id,
+            kind="kb_source_sync",
+            knowledge_base_id=str(kb_id),
+            input=body,
             trace_id=trace_id,
             traceparent=traceparent,
         )

@@ -74,8 +74,9 @@ def resolve_pointer(doc: Any, pointer: str) -> Any:
 # ------------------------------------------------------------------------------- pure checks
 
 
-def test_the_examples_directory_holds_exactly_the_three_examples():
-    assert sorted(p.name for p in EXAMPLES_DIR.glob("*.json")) == sorted(EXAMPLES)
+def test_the_examples_directory_holds_exactly_the_three_loop_examples():
+    # kb-source-sync.json is the KB Source Synchronization example (test_kb_source_workflow_acceptance.py)
+    assert sorted(p.name for p in EXAMPLES_DIR.glob("*.json") if p.name != "kb-source-sync.json") == sorted(EXAMPLES)
 
 
 @pytest.mark.parametrize("name", EXAMPLES)

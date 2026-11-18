@@ -1,6 +1,16 @@
 """Postgres store for durable runs and event logging."""
 
 from eap_run_store.mcp_catalog import CatalogStore
+from eap_run_store.kb_sources import (
+    ConnectionInUse,
+    ConnectionNameConflict,
+    ConnectionStore,
+    EntityStore,
+    RecordStore,
+    SourceNameConflict,
+    SourceStore,
+    SyncStore,
+)
 from eap_run_store.secrets import SecretStore
 from eap_run_store.schedules import ScheduleNameConflict, ScheduleStore
 from eap_run_store.cursor import ConversationCursor, InvalidRunCursor, RunCursor
@@ -213,6 +223,14 @@ __all__ = [
     "EvalStore",
     "ScheduleNameConflict",
     "CatalogStore",
+    "ConnectionInUse",
+    "ConnectionNameConflict",
+    "ConnectionStore",
+    "EntityStore",
+    "RecordStore",
+    "SourceNameConflict",
+    "SourceStore",
+    "SyncStore",
     "SecretStore",
     "ScheduleStore",
     "ScorerNameConflict",

@@ -184,3 +184,36 @@ def test_cancel_does_not_write_spans_from_the_api(api, fake):  # noqa: F811
     assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers).status_code == 202
     spans = client.get("/api/v1/spans", headers=headers).json()["items"]
     assert [s for s in spans if s["run_id"] == run_id] == []
+
+
+def test_kb_source_sync_run_can_be_cancelled_like_a_workflow_run(api, fake):  # noqa: F811
+    from eap_run_store import ConnectionStore, KnowledgeStore, SourceStore
+
+    client, app, tenant_of = api
+    tenant, headers = tenant_of()
+    _, other = tenant_of()
+    run_store, _ = app.state.run_stores
+    engine = app.state.database_engine
+    kb = KnowledgeStore(engine).create_knowledge_base(tenant, name="kbs", embedding_model="openai:m", dimensions=768)
+    conn = ConnectionStore(engine).create(
+        tenant, name="c", kind="oauth2_client_credentials", base_url=None, config={}, credential_refs={}
+    )
+    source = SourceStore(engine).create(
+        tenant, knowledge_base_id=kb["id"], connection_id=conn.id, kind="product_catalog", provider="acme_catalog", name="s"
+    )
+    run_id = uuid.uuid4()
+    run_store.create_kb_source_sync_run(tenant, run_id, source.id, {"mode": "incremental"})
+
+    assert client.post(f"/api/v1/runs/{run_id}/cancel", headers=other).status_code == 404
+    assert fake.cancels == []
+    r = client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["kind"] == "kb_source_sync" and body["status"] == "failed" and body["cancelled"] is True
+    assert body["error_code"] == "run_cancelled" and body["requested_by"] == "alice"
+    assert fake.cancels == [(str(run_id), True)]
+    types = [e["type"] for e in _events(client, str(run_id), headers)]
+    assert types.count("cancel_requested") == 1 and types.count("run_failed") == 1
+    assert client.get(f"/api/v1/runs/{run_id}", headers=headers).json()["kind"] == "kb_source_sync"
+    again = client.post(f"/api/v1/runs/{run_id}/cancel", headers=headers)
+    assert again.status_code == 202 and again.json()["cancelled"] is True
