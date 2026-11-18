@@ -97,7 +97,7 @@ _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63}
 
 
 # Ids a model invents when it has nothing to say; a spec that carries one gets an id from its name.
-GENERIC_IDS = ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+GENERIC_IDS = ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
 
 
 def slugify(name: str) -> str:
@@ -246,6 +246,24 @@ class ArchitectMcpTool(BaseModel):
     tool: str = Field(min_length=1, max_length=128)
 
 
+def as_uuid(value: str | None) -> str | None:
+    """The canonical (lowercase, hyphenated) form of `value` when it is a UUID, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(UUID(value.strip()))
+    except ValueError:
+        return None
+
+
+def _check_id(value: str | None) -> str | None:
+    """A definition's `id`: a slug, or the UUID of an existing definition (a save then updates that one). A
+    placeholder (`definition`, `id`, `agent`, `workflow`, `<id>`, ...) is no id: the slug comes from the name."""
+    if value is None or is_generic_id(value):
+        return None
+    return as_uuid(value) or _check_slug(value)
+
+
 def _check_slug(value: str | None, what: str = "id") -> str | None:
     if value is not None and not AGENT_ID_PATTERN.fullmatch(value):
         raise ValueError(f"{what} must match ^[a-z][a-z0-9-]{{1,47}}$")
@@ -281,7 +299,7 @@ class ArchitectAgentSpec(BaseModel):
     @field_validator("id")
     @classmethod
     def _id(cls, value: str | None) -> str | None:
-        return _check_slug(value)
+        return _check_id(value)
 
     @field_validator("model")
     @classmethod
@@ -455,7 +473,7 @@ class ArchitectWorkflowSpec(BaseModel):
     @field_validator("id")
     @classmethod
     def _id(cls, value: str | None) -> str | None:
-        return _check_slug(value)
+        return _check_id(value)
 
     @field_validator("name")
     @classmethod
@@ -613,6 +631,7 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
 
 __all__ = [
     "AGENT_ID_PATTERN",
+    "as_uuid",
     "ARCHITECT_DENIED_TOOL_PREFIXES",
     "Allowlist",
     "AllowlistAgent",

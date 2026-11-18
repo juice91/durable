@@ -180,12 +180,14 @@ def test_save_agent_writes_a_draft_and_updates_it(engine, tenant):
     assert other["id"] == "billing-helper-2"
 
     listed = run(list_created_agents(engine, tenant))["agents"]
+    assert all(a["uuid"] for a in listed)
     assert [(a["id"], a["versions"], a["latest_created_via"], a["draft"]) for a in listed] == [
         ("billing-helper", 0, None, True), ("billing-helper-2", 0, None, True), ("helper", 0, None, True),
     ]
-    assert run(list_agent_versions(engine, tenant, "helper")) == {"id": "helper", "name": "Helper", "versions": []}
+    versions = run(list_agent_versions(engine, tenant, "helper"))
+    assert versions == {"id": "helper", "uuid": versions["uuid"], "name": "Helper", "versions": []}
     assert run(list_agent_versions(engine, tenant, "nope"))["error"]["code"] == "not_found"
-    assert str(row["id"]) not in json.dumps(listed)
+    assert {a["uuid"] for a in listed} == {str(r["id"]) for r in agents_rows(engine, tenant)}
 
 
 def test_created_definitions_are_tenant_scoped(engine, tenant):
@@ -261,7 +263,9 @@ def test_save_workflow_creates_a_draft_with_marker(engine, tenant):
     assert wf["slug"] == "daily-note" and wf["archived"] is False  # the slug is the Architect's marker
     assert wf["draft_spec"]["start"] == "draft" and wf["draft_spec"]["steps"][0]["agent_id"] == str(row["id"])
     listed = run(list_created_workflows(engine, tenant))["workflows"]
-    assert listed == [{"id": "daily-note", "name": "Daily note", "versions": 0, "latest_created_via": None, "draft": True}]
+    assert listed == [{"id": "daily-note", "uuid": listed[0]["uuid"], "name": "Daily note", "versions": 0,
+                       "latest_created_via": None, "draft": True}]
+    assert uuid.UUID(listed[0]["uuid"])
     assert run(list_workflow_versions(engine, tenant, "daily-note"))["versions"] == []
 
     # An agent the allowlist does not offer, an unknown placeholder and a denied tool are errors, not rows.
@@ -544,3 +548,45 @@ def test_condition_and_check_semantics_are_spelled_out():
     assert "steps.<id>.output" in json.dumps(kinds["step_output"])
     from eap_schemas.tools import TOOL_DECLARATIONS
     assert "fails when the longest shared run is >= max_verbatim_run" in TOOL_DECLARATIONS["text.check"].description
+
+
+def test_a_save_by_uuid_updates_the_existing_agent_and_workflow_instead_of_creating_one(engine, tenant):
+    first = run(save_agent(engine, tenant, agent_spec(id="helper"), allowlist=allowlist()))
+    (row,) = agents_rows(engine, tenant)
+    (listed,) = run(list_created_agents(engine, tenant))["agents"]
+    assert (listed["id"], listed["uuid"]) == ("helper", str(row["id"]))
+    for spelled in (str(row["id"]), str(row["id"]).upper()):
+        done = run(save_agent(engine, tenant, agent_spec(name="Helper 2", id=spelled, instructions=f"Changed {spelled[:2]}."),
+                              allowlist=allowlist()))
+        assert done["id"] == "helper" and done["status"] == "draft", done  # the slug comes back
+    (row,) = agents_rows(engine, tenant)  # still one agent
+    assert row["name"] == "Helper 2" and row["draft_spec"]["instructions"].startswith("Changed")
+    missing = run(save_agent(engine, tenant, agent_spec(id=str(uuid.uuid4())), allowlist=allowlist()))
+    assert missing["error"]["code"] == "not_found"
+    other = f"t_{uuid.uuid4().hex[:10]}"
+    assert run(save_agent(engine, other, agent_spec(id=str(row["id"])), allowlist=allowlist()))["error"]["code"] == "not_found"
+    assert len(agents_rows(engine, tenant)) == 1 and first["id"] == "helper"
+
+    wf = ArchitectWorkflowSpec(name="Note", id="note", steps=[{"kind": "tool", "id": "t", "tool": "clock.now"}])
+    run(save_workflow(engine, tenant, wf, allowlist=allowlist()))
+    (w,) = run(list_created_workflows(engine, tenant))["workflows"]
+    again = ArchitectWorkflowSpec(name="Note 2", id=w["uuid"], steps=[{"kind": "tool", "id": "t2", "tool": "clock.now"}])
+    done = run(save_workflow(engine, tenant, again, allowlist=allowlist()))
+    assert done["id"] == "note" and done["status"] == "draft"
+    (w2,) = run(list_created_workflows(engine, tenant))["workflows"]
+    assert w2["uuid"] == w["uuid"] and w2["name"] == "Note 2"
+
+
+def test_publish_and_other_gated_tools_also_take_the_uuid(engine, tenant):
+    run(save_agent(engine, tenant, agent_spec(id="helper"), allowlist=allowlist()))
+    (row,) = agents_rows(engine, tenant)
+    assert run(list_agent_versions(engine, tenant, str(row["id"])))["id"] == "helper"
+
+
+@pytest.mark.parametrize("placeholder", ["definition", "id", "agent", "workflow", "<id>"])
+def test_the_placeholder_ids_of_the_page_are_replaced_by_one_from_the_name(placeholder):
+    spec = ArchitectAgentSpec(name="Weekly Reporter", id=placeholder, instructions="x")
+    from eap_schemas.architect import is_generic_id
+    assert spec.id is None and is_generic_id(placeholder)
+    wf = ArchitectWorkflowSpec(name="W", id=placeholder, steps=[{"kind": "tool", "id": "t", "tool": "clock.now"}])
+    assert wf.id is None

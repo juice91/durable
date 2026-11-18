@@ -142,7 +142,7 @@ def test_seed_model_demotions_and_unquantised_siblings():
 def test_generic_ids_are_one_list_and_slugify_falls_back_for_names_without_latin_letters():
     from eap_schemas.architect import GENERIC_IDS, is_generic_id
 
-    assert GENERIC_IDS == ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+    assert GENERIC_IDS == ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
     assert all(is_generic_id(g) for g in GENERIC_IDS) and is_generic_id(None) and is_generic_id(" Draft ")
     assert not is_generic_id("weekly-report") and not is_generic_id("agent-7f3a")
     cjk = slugify("球棒（棒球角色帳號）")

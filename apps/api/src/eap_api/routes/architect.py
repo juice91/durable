@@ -65,6 +65,7 @@ from eap_schemas.architect import (
     AllowlistModel,
     ArchitectAgentSpec,
     ArchitectWorkflowSpec,
+    as_uuid,
     compile_agent,
     compile_workflow,
     offer_tool,
@@ -638,8 +639,13 @@ class _Kind:
     def __init__(self, table: str, versions: str, fk: str, builtin: str) -> None:
         self.table, self.versions, self.fk, self.label = table, versions, fk, "agent" if table == "agents" else "workflow"
         self.by_slug = text(
-            f"SELECT id, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
+            f"SELECT id, slug, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
             " WHERE tenant_id = :t AND slug = :s FOR NO KEY UPDATE"
+        )
+        # `spec.id` may be the UUID of an existing Architect-made definition (it has a slug): that one is updated.
+        self.by_id = text(
+            f"SELECT id, slug, name, draft_spec, archived, {builtin} AS builtin FROM {table}"
+            " WHERE tenant_id = :t AND id = :s AND slug IS NOT NULL FOR NO KEY UPDATE"
         )
         self.latest = text(
             f"SELECT max(version) FROM {versions} WHERE {fk} = :d AND tenant_id = :t"
@@ -682,6 +688,11 @@ def _save(
             row = None
             if expected_version is not None:
                 raise refuse(409, "This definition has no versions yet.", code="version_mismatch", latest_version=None)
+        elif as_uuid(slug) is not None:
+            row = conn.execute(kind.by_id, {"t": tenant_id, "s": as_uuid(slug)}).mappings().first()
+            if row is None:
+                raise refuse(404, f"No {kind.label} made by the Architect has the uuid {slug!r}.", code="not_found")
+            slug = row["slug"]
         else:
             if slug in RESERVED_AGENT_IDS:
                 raise refuse(422, f"{slug!r} is a built-in id; choose another id.", code="reserved_id")

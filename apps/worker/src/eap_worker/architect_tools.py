@@ -18,7 +18,8 @@ shows exactly the warnings, versions, referencing workflows and schedules the re
 
 Rules every tool follows:
 
-- Ids in tool inputs and outputs are slugs (`agents.slug`, `workflows.slug`), never row ids.
+- Ids in tool inputs and outputs are slugs (`agents.slug`, `workflows.slug`); a listing also gives each definition's
+  `uuid`, and any tool that takes an `id` takes either (a save by uuid updates that definition).
 - A tool never raises for a problem the model can fix: it returns `{"error": {"code", "message"}}`.
 - The Architect edits only what the Architect made: a definition is the Architect's when it has a
   slug (only these tools and the Architect page set one). It never edits a built-in agent or the
@@ -63,6 +64,7 @@ from eap_schemas.architect import (
     ArchitectWorkflowSpec,
     compile_agent,
     compile_workflow,
+    as_uuid,
     is_generic_id,
     slugify,
 )
@@ -261,10 +263,11 @@ class _Kind:
 
     def __init__(self, table: str, versions: str, fk: str) -> None:
         self.table, self.versions, self.fk = table, versions, fk
-        self.by_slug = text(
-            f"SELECT id, name, draft_spec, archived, {'builtin' if table == 'agents' else 'false AS builtin'} "
-            f"FROM {table} WHERE tenant_id = :t AND slug = :s"
-        )
+        columns = f"id, slug, name, draft_spec, archived, {'builtin' if table == 'agents' else 'false AS builtin'}"
+        self.by_slug = text(f"SELECT {columns} FROM {table} WHERE tenant_id = :t AND slug = :s")
+        # A reference may also be the row's UUID (`uuid` in the listings): only a definition with a slug is the
+        # Architect's, the same rule as by slug.
+        self.by_id = text(f"SELECT {columns} FROM {table} WHERE tenant_id = :t AND id = :s AND slug IS NOT NULL")
         self.latest = text(
             f"SELECT version, created_via, spec FROM {versions} WHERE {fk} = :d AND tenant_id = :t "
             "ORDER BY version DESC LIMIT 1"
@@ -292,6 +295,13 @@ AGENTS = _Kind("agents", "agent_versions", "agent_id")
 WORKFLOWS = _Kind("workflows", "workflow_versions", "workflow_id")
 
 
+def _fetch(conn: Connection, kind: _Kind, tenant_id: str, ref: str) -> Any:
+    """The Architect's definition named by `ref`, a slug or a UUID (the row's `uuid`); None when there is none."""
+    as_id = as_uuid(ref)
+    statement, key = (kind.by_id, as_id) if as_id is not None else (kind.by_slug, ref)
+    return conn.execute(statement, {"t": tenant_id, "s": key}).mappings().first()
+
+
 def _list_created(engine: Engine, tenant_id: str, kind: _Kind) -> list[dict[str, Any]]:
     out = []
     with engine.connect() as conn:
@@ -300,6 +310,7 @@ def _list_created(engine: Engine, tenant_id: str, kind: _Kind) -> list[dict[str,
             latest = conn.execute(kind.latest, {"d": row["id"], "t": tenant_id}).mappings().first()
             out.append({
                 "id": row["slug"],
+                "uuid": str(row["id"]),
                 "name": row["name"],
                 "versions": len(history),
                 "latest_created_via": history[0]["created_via"] if history else None,
@@ -310,12 +321,13 @@ def _list_created(engine: Engine, tenant_id: str, kind: _Kind) -> list[dict[str,
 
 def _list_versions(engine: Engine, tenant_id: str, kind: _Kind, slug: str) -> dict[str, Any]:
     with engine.connect() as conn:
-        row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
+        row = _fetch(conn, kind, tenant_id, slug)
         if row is None or row["builtin"]:
             return error("not_found", f"No definition made by the Architect has the id {slug!r}.")
         history = conn.execute(kind.history, {"d": row["id"], "t": tenant_id}).mappings().all()
     return {
-        "id": slug,
+        "id": row["slug"],
+        "uuid": str(row["id"]),
         "name": row["name"],
         "versions": [
             {"version": h["version"], "created_via": h["created_via"], "created_at": h["created_at"].isoformat()}
@@ -333,7 +345,13 @@ def _save(
     spec_text = json.dumps(spec_json)
     with engine.begin() as conn:
         row = None
-        if slug is not None:
+        if slug is not None and as_uuid(slug) is not None:
+            # The UUID of an existing definition: update that one (its slug stays), never create from a UUID.
+            row = _fetch(conn, kind, tenant_id, slug)
+            if row is None:
+                return error("not_found", f"No {label} made by the Architect has the uuid {slug!r}.")
+            slug = row["slug"]
+        elif slug is not None:
             if slug in RESERVED_AGENT_IDS:
                 return error("reserved_id", f"{slug!r} is a built-in {label} id; choose another id.")
             row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
@@ -474,7 +492,7 @@ def _refusal(exc: DefinitionError) -> dict[str, Any]:
 def _resolve(conn: Connection, kind: _Kind, tenant_id: str, slug: str) -> tuple[Any, dict[str, Any] | None]:
     """The Architect's definition by slug, or an error: a built-in agent, a definition without a slug
     (someone else's: not reachable by slug) and another tenant's all refuse."""
-    row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
+    row = _fetch(conn, kind, tenant_id, slug)
     label = "agent" if kind is AGENTS else "workflow"
     if row is None:
         return None, error("not_found", f"No {label} made by the Architect has the id {slug!r}.")

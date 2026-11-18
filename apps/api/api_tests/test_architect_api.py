@@ -415,6 +415,38 @@ def test_page_save_derives_an_id_from_the_name(api):
     assert agent_row(app, tenant, "weekly-report-writer")
 
 
+@pytest.mark.parametrize("placeholder", ["definition", "id", "agent", "workflow", "<id>"])
+def test_page_save_replaces_a_placeholder_id_with_one_from_the_name(api, placeholder):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    spec = {**SPEC, "id": placeholder, "name": "Weekly Report Writer"}
+    r = save(client, h, spec)
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == "weekly-report-writer"
+    assert agent_row(app, tenant, "weekly-report-writer")
+    with app.state.database_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t AND slug = :s"),
+                            {"t": tenant, "s": placeholder}).scalar() == 0
+    wf = {"name": "Greet Flow", "id": placeholder, "steps": [{"kind": "tool", "id": "t", "tool": "clock.now"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
+    assert r.status_code == 200 and r.json()["id"] == "greet-flow", r.text
+
+
+def test_page_save_by_uuid_updates_that_agent(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    first = save(client, h, {**SPEC, "id": "kept"})
+    assert first.status_code == 200
+    row_id = first.json()["agent_id"]
+    r = save(client, h, {**SPEC, "id": row_id, "name": "Kept 2"}, expected_version=None)
+    assert r.status_code == 200 and r.json()["id"] == "kept" and r.json()["agent_id"] == row_id, r.text
+    with app.state.database_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM agents WHERE tenant_id = :t AND slug IS NOT NULL AND NOT builtin"),
+                            {"t": tenant}).scalar() == 1
+    gone = save(client, h, {**SPEC, "id": str(uuid.uuid4())})
+    assert gone.status_code == 404 and gone.json()["code"] == "not_found"
+
+
 def test_page_save_workflow_publishes_with_marker(api):
     client, app, _, tenant_of = api
     tenant, h = tenant_of("alice")
