@@ -22,6 +22,7 @@ import { useUnsavedChangesGuard } from "@/components/agents/stepper/useUnsavedCh
 import { navigateGuarded } from "@/components/frame/navigationGuard";
 import { useRouter } from "next/navigation";
 import { useAgentPage } from "./AgentPageContext";
+import { SuggestedRules } from "@/components/evals/SuggestedRules";
 import { AttachedScorers } from "./AttachedScorers";
 
 const notice = "rounded-md border p-3 text-label";
@@ -47,6 +48,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
   // The 422 locations of `saveError` (pydantic `detail[].loc`), for routing it to a step.
   const [saveErrorLocations, setSaveErrorLocations] = useState<(string | number)[][]>([]);
   const [versions, setVersions] = useState<AgentVersion[]>([]);
+  const [scorersKey, setScorersKey] = useState(0); // bumped when a suggested rule was attached: reloads the list
   const [submitting, setSubmitting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [lastPublishResult, setLastPublishResult] = useState<{ type: "success"; version: number; warnings?: PublishWarning[] } | { type: "conflict"; message: string } | null>(null);
@@ -271,7 +273,10 @@ export function EditorTab({ agentId }: { agentId: string }) {
       />
       <section aria-labelledby="editor-scorers-title" className="mt-6 border-t border-border pt-4">
         <h2 id="editor-scorers-title" className="mb-2 text-title font-semibold text-foreground">Scorers</h2>
-        <AttachedScorers agentId={agent.id} />
+        <AttachedScorers key={scorersKey} agentId={agent.id} />
+        <div className="mt-4">
+          <SuggestedRules target={{ kind: "agent", id: agent.id, name: agent.name }} heading="Suggested scorers" onChanged={() => setScorersKey((k) => k + 1)} />
+        </div>
       </section>
       <CompareSheet
         agentId={agent.id}

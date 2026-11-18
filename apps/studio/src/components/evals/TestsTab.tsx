@@ -16,6 +16,7 @@ import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { agentHasMemory } from "@/components/memory/memoryModel";
 import { CompareView } from "./CompareView";
 import { EvalRunView } from "./EvalRunView";
+import { SuggestedRules } from "./SuggestedRules";
 import { SuiteView } from "./SuiteView";
 import { MemoryNote, alertClass, fieldClass, hintClass, labelClass } from "./evalsUi";
 
@@ -198,6 +199,7 @@ export function SuiteList({ target, runs }: { target: EvalTargetRef; runs: EvalR
 
   return (
     <div className="min-w-0 space-y-3" data-testid="eval-suite-list">
+      <SuggestedRules target={target} onChanged={() => setKey((k) => k + 1)} />
       <DataList<EvalSuite>
         label="Test suites"
         rows={suites ?? []}

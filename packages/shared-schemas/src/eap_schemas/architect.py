@@ -32,7 +32,7 @@ AGENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
 STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 RESERVED_STEP_IDS = frozenset({"run_end"})
 # Slugs the Architect may never create or edit: the built-in specs.
-RESERVED_AGENT_IDS = frozenset({"architect", "architect-drafter", "architect-workflow-drafter"})
+RESERVED_AGENT_IDS = frozenset({"architect", "architect-drafter", "architect-workflow-drafter", "scorer-suggester"})
 # The code denylist. A tool whose id starts with one of these is never offered to a created agent or
 # a created workflow, whatever the tool registry holds: the Architect's own tools, the platform
 # tools of the knowledge and memory features (they come with the spec's own fields), and anything

@@ -83,6 +83,9 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `mcp.server.list` | `limit?`, `offset?` | registered MCP servers (header and variable names only) |
 | `mcp.catalog.search` | `query?`, `limit?`, `after?`, `source?` | mirrored registry entries |
 | `approvals.list` | `status?`, `kind?`, `agent_id?`, `limit?`, `cursor?` | gated tool calls and workflow approval steps |
+| `scorer.list` | `limit?`, `offset?` | reusable scorers with the agents each is attached to |
+| `eval.suite.list` | `agent_id` or `workflow_id`, `include_archived?`, `limit?`, `offset?` | the target's test suites with their evaluators and case counts |
+| `eval.run.get` | `run_id`, `results_limit?` (≤ 100) | an eval run's status and aggregates, optionally its first per-case results |
 
 ### Mutations (`manage` scope)
 
@@ -105,6 +108,12 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `mcp.server.install` | `catalog_name`, `package_index?`, `remote_index?`, `name?`, `env?` | install a catalog entry |
 | `mcp.server.runtime` | `server_id`, `action` (`start` / `stop` / `restart`) | control a managed server's pod |
 | `approvals.decide` | `run_id`, `kind` (`tool` / `step`), `key`, `decision` (`approve` / `deny`), `comment?`, `resume_data?` | decide an approval |
+| `scorer.create` | `name`, `evaluator`, `description?` | create a reusable scorer (`contains`, `regex`, `schema_valid`, `field_equals`, `max_cost`); a restricted key cannot |
+| `scorer.attach` | `agent_id`, `scorer_id`, `sampling_rate?` (0..1] | attach a scorer to an agent; returns its attached scorers |
+| `scorer.suggest` | `agent_id` or `workflow_id`, `max?` (1..12, default 8), `include_runs?` | AI-suggested rules `{suggestions: [{title, rationale, scope, spec, evidence}], model, dropped}`; runs the built-in suggester (a model run), cached 10 minutes, adds nothing |
+| `eval.suite.create` | `name`, `agent_id` or `workflow_id`, `evaluators?`, `description?`, `suite_id?` | create a test suite |
+| `eval.case.add` | `suite_id`, `name`, `input`, `expected_output?`, `metadata?`, `evaluators?` | add a case to a suite |
+| `eval.run.start` | `suite_id`, `version?`, `max_concurrency?`, `run_id?` | run a suite against a published version (agents: also `"draft"`); read it with `eval.run.get` |
 
 Every mutation calls the code the HTTP route runs (the route function itself, or the shared
 service under it: publish, restore and archive in `eap_run_store.definitions`, syncs in

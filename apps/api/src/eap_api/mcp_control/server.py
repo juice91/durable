@@ -186,12 +186,13 @@ class McpControlASGI:
 
 
 def build_server() -> FastMCP:
-    from eap_api.mcp_control import resources, tools_manage, tools_read
+    from eap_api.mcp_control import resources, tools_evals, tools_manage, tools_read
 
     mcp = FastMCP("PydanticOS", instructions=INSTRUCTIONS)
     tool, resource = register(mcp)
     tools_read.register_tools(tool)
     tools_manage.register_tools(tool)
+    tools_evals.register_tools(tool)
     resources.register_resources(resource)
     return mcp
 
