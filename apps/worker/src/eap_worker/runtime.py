@@ -22,6 +22,7 @@ from eap_db import require_schema_at_head
 from eap_run_store import EventLog, PostgresSideEffectStore, RunStore
 from eap_runtime import RequestContext, RunDeps, ToolRegistry, default_registry
 from eap_schemas import AgentSpec
+from eap_schemas.architect import BUILTIN_ONLY_TOOL_PREFIXES
 from eap_schemas.request_context import RESERVED_CONTEXT_NAMES
 from eap_worker.config import DELTA_CHANNEL, WorkerSettings
 from eap_worker.crash import crash_point
@@ -55,7 +56,7 @@ class RetrieveTally:
     counts: dict[str, int] = field(default_factory=dict)
 
 
-ARCHITECT_TOOL_PREFIX = "architect."
+ARCHITECT_TOOL_PREFIX = BUILTIN_ONLY_TOOL_PREFIXES  # `architect.*` and `platform.*`
 
 
 @dataclass(frozen=True)

@@ -81,6 +81,22 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
     *ARCHITECT_GATED_TOOL_IDS,
 )
 
+# The Architect's read-only view of the tenant (not gated: nothing here writes). Like `architect.*` they belong
+# to the built-in Architect only; `platform.` is also in ARCHITECT_DENIED_TOOL_PREFIXES, so a created agent is
+# never offered one.
+ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
+    "platform.list_knowledge_bases",
+    "platform.get_knowledge_base",
+    "platform.list_source_syncs",
+    "platform.list_workflows",
+    "platform.get_workflow",
+    "platform.list_agents",
+    "platform.list_schedules",
+    "platform.list_recent_runs",
+)
+# Tool-id prefixes only a built-in agent row may list (the API refuses the spec, the worker the run).
+BUILTIN_ONLY_TOOL_PREFIXES: tuple[str, ...] = ("architect.", "platform.")
+
 
 def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] | None) -> list[str]:
     """The gated Architect tools in `tools` that `approval_tools` (spec.approvals.tools) does not list."""
@@ -633,6 +649,8 @@ __all__ = [
     "AGENT_ID_PATTERN",
     "as_uuid",
     "ARCHITECT_DENIED_TOOL_PREFIXES",
+    "ARCHITECT_PLATFORM_TOOL_IDS",
+    "BUILTIN_ONLY_TOOL_PREFIXES",
     "Allowlist",
     "AllowlistAgent",
     "AllowlistKnowledgeBase",

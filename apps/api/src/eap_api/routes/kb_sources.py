@@ -38,8 +38,9 @@ from eap_kb_sources.registry import adapter_for
 from eap_observability import current_trace_context
 from eap_run_store import RunStore
 from eap_run_store.kb_source_launch import LaunchFailed, SourceLaunchError, launch_sync, source_view
-from eap_run_store.kb_sources import SOURCE_KINDS, ConnectionStore, Source, SourceNameConflict, SourceStore, Sync, SyncStore
+from eap_run_store.kb_sources import SOURCE_KINDS, ConnectionStore, Source, SourceNameConflict, SourceStore, SyncStore
 from eap_run_store.knowledge import KnowledgeStore
+from eap_run_store.platform_reads import sync_view  # the shape the Architect's platform.* tools return too
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_BODY_DEPTH = 6
@@ -119,15 +120,6 @@ def _validate_config(kind: str, provider: str, config: dict[str, Any]) -> JSONRe
     except ValueError as exc:
         return problem("invalid_source_config", str(exc)[:300])
     return None
-
-
-def sync_view(s: Sync) -> dict[str, Any]:
-    return {
-        "run_id": s.run_id, "source_id": s.source_id, "parent_run_id": s.parent_run_id, "mode": s.mode,
-        "status": s.status, "counters": s.counters, "errors": s.bounded_errors,
-        "started_at": s.started_at.isoformat(),
-        "completed_at": s.completed_at.isoformat() if s.completed_at is not None else None,
-    }
 
 
 def load_workflow_template() -> dict[str, Any] | None:

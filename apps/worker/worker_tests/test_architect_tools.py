@@ -264,7 +264,8 @@ def test_save_workflow_creates_a_draft_with_marker(engine, tenant):
     assert wf["draft_spec"]["start"] == "draft" and wf["draft_spec"]["steps"][0]["agent_id"] == str(row["id"])
     listed = run(list_created_workflows(engine, tenant))["workflows"]
     assert listed == [{"id": "daily-note", "uuid": listed[0]["uuid"], "name": "Daily note", "versions": 0,
-                       "latest_created_via": None, "draft": True}]
+                       "latest_created_via": None, "draft": True, "published_version": None,
+                       "draft_pending": False, "archived": False}]
     assert uuid.UUID(listed[0]["uuid"])
     assert run(list_workflow_versions(engine, tenant, "daily-note"))["versions"] == []
 

@@ -127,7 +127,9 @@ def test_approved_publish_creates_a_version_with_marker(engine, tenant):
     assert v["created_via"] == "architect:run-42" and v["created_by"] == "architect"
     assert v["spec"]["name"] == "Helper" and v["restored_from"] is None
     assert run(list_created_agents(engine, tenant))["agents"] == [
-        {"id": "helper", "name": "Helper", "versions": 1, "latest_created_via": "architect:run-42", "draft": False}
+        {"id": "helper", "uuid": run(list_created_agents(engine, tenant))["agents"][0]["uuid"], "name": "Helper",
+         "versions": 1, "latest_created_via": "architect:run-42", "draft": False, "published_version": 1,
+         "draft_pending": False, "archived": False}
     ]
     again = run(publish_agent(engine, tenant, "helper", run_id="run-43"))
     assert again["error"]["code"] == "conflict" and "no changes since version 1" in again["error"]["message"]

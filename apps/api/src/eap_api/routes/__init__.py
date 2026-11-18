@@ -36,6 +36,7 @@ from eap_run_store.definitions import (
     set_agent_archived,
 )
 from eap_schemas import AgentSpec
+from eap_schemas.architect import BUILTIN_ONLY_TOOL_PREFIXES
 from eap_schemas.tools import ungated_always_gated_tools
 
 # Body cap, UTF-8, depth, unstorable strings and compact 422s: eap_api.request_guard.
@@ -47,7 +48,7 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 # Tool ids of the Architect's management tools: valid registry ids, but only an agent whose row is
 # `builtin` may list them (the check lives here, on create and patch; the worker re-checks per run).
-ARCHITECT_TOOL_PREFIX = "architect."
+ARCHITECT_TOOL_PREFIX = BUILTIN_ONLY_TOOL_PREFIXES  # `architect.*` and `platform.*`
 TOOL_NOT_ALLOWED = "tool_not_allowed"
 BUILTIN_AGENT = "builtin_agent"
 APPROVAL_REQUIRED = "approval_required"
