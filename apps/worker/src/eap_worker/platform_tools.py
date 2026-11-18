@@ -815,6 +815,9 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.feed_tool import register_feed_tool
 
     register_feed_tool(registry)
+    from eap_worker.json_query_tool import register_json_query_tool
+
+    register_json_query_tool(registry)
 
 
 __all__ = [

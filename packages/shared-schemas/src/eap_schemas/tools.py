@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from collections.abc import Iterable
@@ -126,6 +127,27 @@ class FeedParseInput(BaseModel):
     exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
     exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
     now: str | None = None
+
+
+JSON_QUERY_TOOL_ID = "json.query"
+JSON_QUERY_DATA_MAX_BYTES = 1048576
+JSON_QUERY_RESULT_MAX_BYTES = 262144
+
+
+class JsonQueryInput(BaseModel):
+    """Input for ``json.query``: any JSON value (at most 1 MiB serialised) and a JMESPath expression. Pure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    data: Any
+    expression: Annotated[str, Field(max_length=500)]
+
+    @field_validator("data")
+    @classmethod
+    def _data_fits(cls, value: Any) -> Any:
+        if len(json.dumps(value, ensure_ascii=False, default=str).encode()) > JSON_QUERY_DATA_MAX_BYTES:
+            raise ValueError("data is larger than 1 MiB")
+        return value
 
 
 class KbSourceGetInput(BaseModel):
@@ -297,6 +319,19 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=FeedParseInput,
+    ),
+    "json.query": ToolDeclaration(
+        id="json.query",
+        title="Query JSON",
+        description=(
+            "Run a JMESPath expression (at most 500 characters) over any JSON data (at most 1 MiB) and return "
+            "{result}; a missing path is a null result. Projections, filters, pipes and multiselect hashes work: "
+            "items[?id=='c3'] | [0], {links: feed[].uri}. Pure. Errors: expression_invalid, result_too_large "
+            "(over 256 KiB)"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=JsonQueryInput,
     ),
 }
 
