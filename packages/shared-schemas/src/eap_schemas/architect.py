@@ -205,7 +205,7 @@ class AllowlistModel(BaseModel):
 
 
 class AllowlistAgent(BaseModel):
-    """An Architect-made agent a created workflow may run (it has a published version)."""
+    """An Architect-made agent a created workflow may name (draft or published; publishing the workflow needs a published version)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

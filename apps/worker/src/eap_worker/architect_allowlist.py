@@ -18,8 +18,9 @@ list did not offer.
 - models: the worker's model policy (`EAP_ALLOWED_MODELS`) read worker-side, no snapshot table: the
   concrete `provider:name` entries, `test:*` as the scripted test models, `litellm:*` as what the
   gateway's `/models` lists and `anthropic:*` as Anthropic's catalogue (when ANTHROPIC_API_KEY is set). Capabilities are left empty here (discovery metadata lives in the API).
-- agents: Architect-made agents of the tenant with a published version, which a created workflow's
-  agent steps may run (their row ids stay out of every dump).
+- agents: Architect-made agents of the tenant (draft or published, not archived), which a created workflow's
+  agent steps may name (their row ids stay out of every dump). A workflow draft may name a draft agent;
+  publishing the workflow needs every agent it names to have a published version (`agent_not_published`).
 
 Reads are blocking SQL run in a thread; nothing here writes.
 """
@@ -136,8 +137,7 @@ def models_from_settings(
 _MCP_SERVERS = text("SELECT name FROM mcp_servers WHERE tenant_id = :t AND enabled ORDER BY name")
 _AGENTS = text(
     "SELECT a.slug, a.name, a.id FROM agents a WHERE a.tenant_id = :t AND a.slug IS NOT NULL "
-    "AND NOT a.archived AND NOT a.builtin "
-    "AND EXISTS (SELECT 1 FROM agent_versions v WHERE v.agent_id = a.id AND v.tenant_id = :t) ORDER BY a.slug"
+    "AND NOT a.archived AND NOT a.builtin ORDER BY a.slug"
 )
 
 

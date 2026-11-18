@@ -360,7 +360,17 @@ export function problemsFor(error: ArchitectApiError, spec: WfSpec): StepProblem
   switch (error.code ?? head) {
     case "agent_not_allowed": {
       const slug = detail.trim();
-      add(findStepIds(steps, (s) => s.kind === "agent" && s.agent === slug), `The agent "${slug}" is not available to workflows: it must be an Architect-made agent with a published version.`);
+      add(findStepIds(steps, (s) => s.kind === "agent" && s.agent === slug), `The agent "${slug}" is not available to workflows: it must be an Architect-made agent that is not archived.`);
+      break;
+    }
+    case "agent_not_published": {
+      // A draft may name a draft agent; going live needs every agent to have a published version.
+      const named = Array.isArray(error.body.agents) ? (error.body.agents as { id?: string | null; name?: string }[]) : [];
+      for (const agent of named) {
+        const label = agent.id ?? agent.name ?? "";
+        add(findStepIds(steps, (s) => s.kind === "agent" && s.agent === agent.id), `The agent "${label}" has no published version yet: publish it first, then go live.`);
+      }
+      if (named.length === 0) result.general.push(message);
       break;
     }
     case "tool_not_allowed": {

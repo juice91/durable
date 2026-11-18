@@ -469,7 +469,11 @@ def test_architect_routes_are_in_the_inventory_and_closed_to_another_tenant(api)
     state_b = client.get(f"{API}/architect", headers=other).json()
     assert [a["id"] for a in state_b["agents"]] == ["greeter"] and state_b["agents"][0]["versions"] == 0
     r = client.post(f"{API}/architect/workflows", json={"spec": bad, "publish": True}, headers=other)
-    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"  # B's greeter has no published version
+    # "greeter" resolves to B's own row (a draft: allowed in a draft, not published), never to A's published one
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_published"
+    ghost = {**bad, "steps": [{"kind": "agent", "id": "s", "agent": "only-in-a", "prompt": "x"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": ghost, "publish": False}, headers=other)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"
 
     a_row = client.get(f"{API}/architect", headers=h).json()
     assert [a["versions"] for a in a_row["agents"]] == [1] and [w["versions"] for w in a_row["workflows"]] == [1]

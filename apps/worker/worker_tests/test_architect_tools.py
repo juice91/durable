@@ -590,3 +590,36 @@ def test_the_placeholder_ids_of_the_page_are_replaced_by_one_from_the_name(place
     assert spec.id is None and is_generic_id(placeholder)
     wf = ArchitectWorkflowSpec(name="W", id=placeholder, steps=[{"kind": "tool", "id": "t", "tool": "clock.now"}])
     assert wf.id is None
+
+
+def test_a_workflow_draft_names_a_draft_agent_and_publishing_needs_the_agent_published(engine, tenant):
+    from eap_worker.architect_tools import publish_workflow_sync
+
+    registry = default_registry()
+    register_platform_tools(registry)
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("test:*"), litellm_base_url=None)
+
+    async def lister(_engine, tenant_id, names):
+        return {}
+
+    def approved():
+        return run(approved_for_tenant(
+            engine, tenant, registry=registry, settings=settings, allowed_tools=frozenset(registry.tool_ids()),
+            mcp_lister=lister))
+
+    run(save_agent(engine, tenant, agent_spec(id="writer", model="test:echo"), allowlist=approved()))
+    (row,) = agents_rows(engine, tenant)
+    assert [a.id for a in approved().agents] == ["writer"]  # a draft agent is offered
+    spec = ArchitectWorkflowSpec(name="Note", id="note", steps=[{"kind": "agent", "id": "w", "agent": "writer", "prompt": "{{input}}"}])
+    assert run(save_workflow(engine, tenant, spec, allowlist=approved()))["status"] == "draft"
+
+    refused = publish_workflow_sync(engine, tenant, "note")
+    assert refused["error"]["code"] == "agent_not_published", refused
+    assert "writer" in refused["error"]["message"] and refused["error"]["agents"][0]["id"] == "writer"
+    add_agent_version(engine, tenant, row["id"], 1, "architect:run-1")
+    done = publish_workflow_sync(engine, tenant, "note")
+    assert done["status"] == "published" and done["version"] == 1, done
+    # an archived agent leaves the list again
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE agents SET archived = true WHERE tenant_id = :t"), {"t": tenant})
+    assert approved().agents == ()

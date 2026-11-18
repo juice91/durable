@@ -447,6 +447,34 @@ def test_page_save_by_uuid_updates_that_agent(api):
     assert gone.status_code == 404 and gone.json()["code"] == "not_found"
 
 
+def test_a_workflow_draft_may_name_a_draft_agent_but_publishing_needs_a_published_one(api):
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of("alice")
+    assert save(client, h).status_code == 200  # greeter: a draft, no version
+    wf = {"name": "Greet flow", "id": "greet-flow", "steps": [{"kind": "agent", "id": "hi", "agent": "greeter", "prompt": "{{input}}"}]}
+    options = client.get(f"{API}/architect/options", headers=h).json()
+    assert "greeter" in {a["id"] for a in options["agents"]}  # offered while it is a draft
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": False}, headers=h)
+    assert r.status_code == 200, r.text
+    workflow_id = r.json()["workflow_id"]
+    # publishing together with the save, and the plain publish route, both name the agent
+    r = client.post(f"{API}/architect/workflows", json={"spec": wf, "publish": True, "expected_version": None}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_published", r.text
+    assert [a["id"] for a in r.json()["agents"]] == ["greeter"] and "greeter" in r.json()["detail"]
+    r = client.post(f"{API}/workflows/{workflow_id}/versions", headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_published" and r.json()["agents"][0]["name"] == "Greeter"
+    # once the agent has a published version the same workflow publishes
+    assert save(client, h, publish=True).status_code == 200
+    r = client.post(f"{API}/workflows/{workflow_id}/versions", headers=h)
+    assert r.status_code in (200, 201), r.text
+    # another tenant's agent, or an archived one, is still not allowed
+    other = f"t_{uuid.uuid4().hex[:8]}"
+    del other
+    gone = {**wf, "id": "other-flow", "steps": [{"kind": "agent", "id": "hi", "agent": "nobody", "prompt": "x"}]}
+    r = client.post(f"{API}/architect/workflows", json={"spec": gone, "publish": False}, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "agent_not_allowed"
+
+
 def test_page_save_workflow_publishes_with_marker(api):
     client, app, _, tenant_of = api
     tenant, h = tenant_of("alice")

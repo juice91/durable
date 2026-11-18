@@ -127,6 +127,13 @@ describe("the restricted format", () => {
       facts: [expect.stringContaining("reviewer")],
       tone: [expect.stringContaining("reviewer")],
     });
+    const unpublished = new ArchitectApiError(422, "step 'facts': agent 'x' has no published version", "agent_not_published", {
+      detail: "x", code: "agent_not_published", agents: [{ step: "facts", id: "reviewer", name: "Reviewer" }],
+    });
+    expect(problemsFor(unpublished, spec).byStep).toEqual({
+      facts: [expect.stringContaining("no published version yet")],
+      tone: [expect.stringContaining("no published version yet")],
+    });
     expect(problemsFor(err("tool_not_allowed", "tool_not_allowed: clock.now"), spec).byStep).toHaveProperty("stamp");
     expect(problemsFor(err("unknown_placeholder", "unknown_placeholder: {{steps.tone}} (no earlier step 'tone')"), spec).byStep).toHaveProperty("final");
     expect(problemsFor(err("placeholder_not_whole_value", "placeholder_not_whole_value: param 'zone' must be exactly one placeholder"), spec).byStep).toHaveProperty("stamp");

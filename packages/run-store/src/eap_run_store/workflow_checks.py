@@ -141,6 +141,37 @@ def judge_model_problems(spec: WorkflowSpec) -> list[str]:
     return problems
 
 
+def _agent_label(conn: Connection, agent_id: str, tenant_id: str) -> str:
+    """` ('<slug>', <name>)` for the message about an agent, or "" when it has neither."""
+    row = conn.execute(
+        text("SELECT slug, name FROM agents WHERE id = :id AND tenant_id = :t"), {"id": agent_id, "t": tenant_id}
+    ).first()
+    if row is None:
+        return ""
+    return f" ('{row.slug}', {row.name})" if row.slug else f" ({row.name})"
+
+
+def unpublished_agents(conn: Connection, spec: WorkflowSpec, tenant_id: str) -> list[dict[str, Any]]:
+    """The agents of the spec's unpinned agent steps (at every depth) that exist, are not archived and have no
+    published version: `[{step, agent_id, id (slug or None), name}]`, in step order. A workflow DRAFT may name
+    them; publishing may not (`agent_not_published`)."""
+    found: list[dict[str, Any]] = []
+    for _, step in walk_steps(spec.steps):
+        if not isinstance(step, AgentStep) or step.version is not None:
+            continue
+        agent_id = str(step.agent_id)
+        row = conn.execute(
+            text(
+                "SELECT slug, name FROM agents WHERE id = :id AND tenant_id = :t AND NOT archived AND NOT EXISTS ("
+                "SELECT 1 FROM agent_versions v WHERE v.agent_id = agents.id AND v.tenant_id = :t)"
+            ),
+            {"id": agent_id, "t": tenant_id},
+        ).first()
+        if row is not None:
+            found.append({"step": step.id, "agent_id": agent_id, "id": row.slug, "name": row.name})
+    return found
+
+
 def reference_problems(conn: Connection, spec: WorkflowSpec, tenant_id: str, *, lock: bool = False) -> list[str]:
     """What a spec points at that this tenant cannot run, one message per problem, naming the step:
     agent and tool steps at every depth (loop bodies included), judge models, and the loop caps.
@@ -174,7 +205,7 @@ def reference_problems(conn: Connection, spec: WorkflowSpec, tenant_id: str, *, 
                     {"id": agent_id, "t": tenant_id},
                 ).first()
                 if has_version is None:
-                    problems.append(f"step '{step.id}': agent '{agent_id}' has no published version")
+                    problems.append(f"step '{step.id}': agent '{agent_id}' has no published version{_agent_label(conn, agent_id, tenant_id)}")
             elif conn.execute(
                 text("SELECT 1 FROM agent_versions WHERE agent_id = :id AND tenant_id = :t AND version = :v"),
                 {"id": agent_id, "t": tenant_id, "v": step.version},

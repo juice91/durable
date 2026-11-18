@@ -103,7 +103,9 @@ STEP_KINDS: list[dict[str, Any]] = [
         "kind": "agent",
         "fields": {
             "id": "step id",
-            "agent": "id of an agent from list_approved_tools.agents",
+            "agent": "id of an agent from list_approved_tools.agents (it may still be a draft: the workflow saves, but "
+            "publish_workflow needs a published version of every agent it names, error agent_not_published; publish the "
+            "agent first)",
             "prompt": "text with {{input}} / {{previous}} / {{steps.<id>}} placeholders (simple workflows), or",
             "input": "an object of values (see input_values); one string value becomes the agent's whole prompt",
             "next": "optional: a step id, or \"end\"; absent means the following step",

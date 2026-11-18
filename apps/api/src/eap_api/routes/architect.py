@@ -375,8 +375,7 @@ async def _mcp_tools(request: Request, principal: Principal, servers: dict[str, 
 
 _CREATED_AGENTS = text(
     "SELECT a.slug, a.name, a.id FROM agents a WHERE a.tenant_id = :t AND a.slug IS NOT NULL AND NOT a.archived"
-    " AND NOT a.builtin AND EXISTS (SELECT 1 FROM agent_versions v WHERE v.agent_id = a.id AND v.tenant_id = :t)"
-    " ORDER BY a.slug"
+    " AND NOT a.builtin ORDER BY a.slug"
 )
 
 
@@ -423,7 +422,7 @@ def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[
 def options(request: Request, principal: PrincipalDep) -> JSONResponse:
     """The allowlist for the page: `{tools: [{id, title, description, requires_approval}], mcp_servers:
     [{id, name, tools: [name]}], knowledge_bases: [{id, name}], models: [{id, provider, capabilities:
-    {image, pdf, source}}], agents: [{id (slug), name}] (Architect-made, with a published version: what a
+    {image, pdf, source}}], agents: [{id (slug), name}] (Architect-made, draft or published, not archived: what a
     workflow step may run), default_model}`. Tools exclude the platform and host tools; a tool marked
     `requires_approval` is gated when granted (the save writes the approvals entry). MCP tools of a server
     that does not answer are not listed."""
@@ -758,7 +757,8 @@ def save_agent(body: SaveAgentRequest, request: Request, principal: PrincipalDep
 @router.post("/workflows", responses={409: {"description": "version_mismatch"}, 422: {"description": "not allowed"}})
 def save_workflow(body: SaveWorkflowRequest, request: Request, principal: PrincipalDep) -> JSONResponse:
     """The same for a workflow: the restricted format compiles to a full workflow spec (agent steps may
-    run only Architect-made agents with a published version, tool steps only offered tools). 200 `{id,
+    name any Architect-made agent, draft or published; publishing needs each to have a published version, 422
+    `agent_not_published`; tool steps only offered tools). 200 `{id,
     workflow_id, version, published, warnings}`; 422 `agent_not_allowed`, `tool_not_allowed`,
     `unknown_placeholder`, `workflow_invalid`, `reserved_id`; 409 `version_mismatch`."""
     spec = body.spec
