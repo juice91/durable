@@ -99,8 +99,15 @@ SCHEDULE_ACTIONS = ("create", "pause", "resume", "delete")
 STEP_KINDS: list[dict[str, Any]] = [
     {
         "kind": "agent",
-        "fields": {"id": "step id", "agent": "id of an agent from list_approved_tools.agents", "prompt": "text"},
-        "description": "Run one agent with the prompt and pass its answer on.",
+        "fields": {
+            "id": "step id",
+            "agent": "id of an agent from list_approved_tools.agents",
+            "prompt": "text with {{input}} / {{previous}} / {{steps.<id>}} placeholders (simple workflows), or",
+            "input": "an object of values (see input_values); one string value becomes the agent's whole prompt",
+            "next": "optional: a step id, or \"end\"; absent means the following step",
+        },
+        "description": "Run one agent and pass its answer on. Give exactly one of prompt and input. If the agent has "
+        "an output_schema its answer is an object and a later step reads a field as steps.<id>.output.<field>.",
     },
     {
         "kind": "parallel",
@@ -110,16 +117,80 @@ STEP_KINDS: list[dict[str, Any]] = [
     },
     {
         "kind": "tool",
-        "fields": {"id": "step id", "tool": "id of a tool from list_approved_tools.tools", "params": "object"},
-        "description": "Call one approved tool. A param value may be exactly one placeholder.",
+        "fields": {
+            "id": "step id", "tool": "id of a tool from list_approved_tools.tools",
+            "params": "object of the tool's arguments; values as in input_values",
+            "next": "optional: a step id, or \"end\"; absent means the following step (workflow.return ends)",
+        },
+        "description": "Call one approved tool (its arguments and an example are in list_approved_tools). The step's "
+        "output is the tool's result: steps.<id>.output.<field>.",
+    },
+    {
+        "kind": "branch",
+        "fields": {
+            "id": "step id",
+            "cases": "1 to 8 of {\"when\": <condition>, \"next\": <step id>}; the first whose condition holds is taken",
+            "default": "step id taken when no case holds",
+        },
+        "description": "Go to one of several steps. A branch has no output and no next. Use it to end early: send the "
+        "unwanted case to a workflow.return step, the rest to the following step.",
     },
 ]
 PLACEHOLDERS = {
-    "{{input}}": "the text the workflow was started with",
-    "{{previous}}": "the answer of the step before this one (not after a parallel step)",
+    "{{input}}": "the text the workflow was started with (only when the workflow has no input_schema)",
+    "{{previous}}": "the answer of the step before this one (not after a parallel step or a branch)",
     "{{steps.<id>}}": "the answer of an earlier step, or of a branch of an earlier parallel step",
 }
-LIMITS = {"steps": "1 to 8, run in order", "branches": "2 to 4", "loops_conditions_code": "not supported"}
+LIMITS = {
+    "steps": "1 to 40; they run in list order unless a step has next or a branch chooses",
+    "branches": "2 to 4 per parallel step",
+    "loops_conditions_code": "loops and code steps are not supported; conditions are branch steps",
+}
+INPUT_VALUES = {
+    "where": "an agent step's input, a tool step's params, and every value inside them",
+    "literal": "any JSON value is passed as it is: 24, true, [\"zh-Hant\"], {\"method\": \"GET\"}",
+    "ref": "{\"$ref\": \"steps.feed.output.text\"} passes the referenced value with its type; paths are "
+    "input.<field>, steps.<id>.output[.<field>|.<list index>...]. A $ref is allowed only as a whole value (a param or "
+    "input field), never inside a nested object or list: to put references inside one, use $template",
+    "template": "{\"$template\": <json>} is a literal whose strings may hold {{ steps.<id>.output.<field> }} "
+    "placeholders; a string that is exactly one placeholder keeps the value's type (an array stays an array), a string "
+    "with other text around it concatenates strings, numbers and booleans (\"Bearer {{ steps.session.output.json.token }}\"). "
+    "Keys are never templated. Example for an agent: {\"prompt\": {\"$template\": \"Task: summarise\\n{{ steps.pick.output.title }}\"}}",
+    "legacy": "in a workflow without input_schema a string param that is exactly {{input}}, {{previous}} or "
+    "{{steps.<id>}} is also accepted",
+    "workflow_input": "give the workflow an input_schema (an object schema with required fields; there are no input "
+    "defaults, so a run must pass every required field) and read a field as input.<field>",
+}
+CONDITIONS = {
+    "form": "{\"op\": \"eq|ne|gt|lt|contains|exists\", \"left\": <$ref or literal>, \"right\": <$ref or literal>}; "
+    "exists takes only left; combine with {\"all\": [...]}, {\"any\": [...]}, {\"not\": <condition>}",
+    "example": {
+        "id": "gate", "kind": "branch",
+        "cases": [{"when": {"op": "eq", "left": {"$ref": "steps.fetch.output.ok"}, "right": True}, "next": "parse"}],
+        "default": "failed",
+    },
+    "note": "a non-2xx http.request answer is a result ({status, ok, ...}), not an error: gate on steps.<id>.output.ok",
+}
+AGENT_OUTPUT = {
+    "how": "save_agent with output_schema (a JSON Schema object, for example {\"type\": \"object\", \"properties\": "
+    "{\"picks\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"maxItems\": 3}}, \"required\": "
+    "[\"picks\"], \"additionalProperties\": false}); every answer then matches it",
+    "reading": "a later step reads steps.<agent step id>.output.picks, or .picks.0 for the first element",
+    "one_agent_per_shape": "the schema belongs to the agent, so two steps that need different answer shapes need two agents",
+}
+RESULTS_AND_ERRORS = {
+    "tool_error": "a tool that returns {error: {code, message}} fails the run with that code (for example "
+    "http_timeout, feed_invalid, expression_invalid)",
+    "workflow.return": "workflow.return {value} returns its value unchanged and, as the last step of a path, ends the run "
+    "with it as the run's output; give it a value {error: {code: \"my_code\", message: ...}} to end the run failed "
+    "with that stable code, or a shaped result such as {ended: \"nothing new\"} to end it normally",
+    "output_schema": "the workflow's optional output_schema describes the shapes the run may end with",
+}
+PATTERN = (
+    "A common shape: collect with http.request (gate on .ok) -> shape with feed.parse / json.query -> agent steps that "
+    "pick and write -> text.check -> gate with branch -> post with http.request. Give the workflow a boolean input such "
+    "as dry that stops before the posting step (a branch to a workflow.return step), and offer a dry run first."
+)
 
 
 def error(code: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -312,7 +383,11 @@ async def list_workflow_versions(engine: Engine, tenant_id: str, id: str) -> dic
 
 
 async def list_workflow_step_kinds() -> dict[str, Any]:
-    return {"step_kinds": STEP_KINDS, "placeholders": PLACEHOLDERS, "limits": LIMITS}
+    return {
+        "step_kinds": STEP_KINDS, "placeholders": PLACEHOLDERS, "limits": LIMITS, "input_values": INPUT_VALUES,
+        "conditions": CONDITIONS, "agent_output": AGENT_OUTPUT, "results_and_errors": RESULTS_AND_ERRORS,
+        "pattern": PATTERN,
+    }
 
 
 async def save_agent(

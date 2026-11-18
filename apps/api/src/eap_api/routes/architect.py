@@ -389,7 +389,9 @@ def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[
     tools = tuple(
         offered for decl in TOOL_DECLARATIONS.values()
         if (allowed is None or decl.id in allowed)
-        and (offered := offer_tool(decl.id, decl.title, decl.description, side_effect=decl.side_effect)) is not None
+        and (offered := offer_tool(
+            decl.id, decl.title, decl.description, side_effect=decl.side_effect,
+            input_schema=decl.input_json_schema(), example=decl.example)) is not None
     )
     with engine.connect() as conn:
         servers = {

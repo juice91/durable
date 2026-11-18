@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from collections.abc import Iterable
@@ -36,6 +37,8 @@ class ToolDeclaration(BaseModel):
     side_effect: bool
     external_idempotent: bool
     input_model: type[BaseModel]
+    # One short example of the arguments, shown to the Architect next to the input schema.
+    example: dict[str, Any] | None = None
 
     @field_validator("id")
     @classmethod
@@ -50,6 +53,11 @@ class ToolDeclaration(BaseModel):
         schema = _without_titles(self.input_model.model_json_schema())
         schema.pop("description", None)
         return schema
+
+    def matches_implementation_schema(self, implementation_schema: dict[str, Any]) -> bool:
+        """True when a function's parameter schema is this declaration's input schema (presentation titles, which
+        Pydantic AI keeps on nested models, do not count)."""
+        return _without_titles(implementation_schema) == self.input_json_schema()
 
 
 class ClockNowInput(BaseModel):
@@ -109,6 +117,90 @@ class WorkflowReturnInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     value: Any
+
+
+FEED_PARSE_TOOL_ID = "feed.parse"
+FEED_TEXT_MAX_CHARS = 1048576
+
+
+class FeedInput(BaseModel):
+    """One feed of ``feed.parse``'s ``feeds``: its document, a label that becomes each item's ``source``, and an
+    optional any-of term filter for this feed alone."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=FEED_TEXT_MAX_CHARS)]
+    label: Annotated[str, Field(min_length=1, max_length=100)]
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
+
+
+class FeedParseInput(BaseModel):
+    """Input for ``feed.parse``: one RSS 2.0 or Atom document (`text`) or one to six labelled ones (`feeds`; exactly
+    one of the two, `feed_args_invalid` otherwise) and the filters to apply. Pure: no I/O."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=FEED_TEXT_MAX_CHARS)] | None = None
+    feeds: Annotated[list[FeedInput], Field(min_length=1, max_length=6)] | None = None
+    max_items: Annotated[int, Field(ge=1, le=50)] = 20
+    max_age_hours: Annotated[float, Field(gt=0)] | None = None
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    now: str | None = None
+
+
+JSON_QUERY_TOOL_ID = "json.query"
+JSON_QUERY_DATA_MAX_BYTES = 1048576
+JSON_QUERY_RESULT_MAX_BYTES = 262144
+
+
+class JsonQueryInput(BaseModel):
+    """Input for ``json.query``: any JSON value (at most 1 MiB serialised) and a JMESPath expression. Pure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    data: Any
+    expression: Annotated[str, Field(max_length=500)]
+
+    @field_validator("data")
+    @classmethod
+    def _data_fits(cls, value: Any) -> Any:
+        if len(json.dumps(value, ensure_ascii=False, default=str).encode()) > JSON_QUERY_DATA_MAX_BYTES:
+            raise ValueError("data is larger than 1 MiB")
+        return value
+
+
+TEXT_CHECK_TOOL_ID = "text.check"
+
+
+class TextCheckRules(BaseModel):
+    """The checks of ``text.check``; every one is off unless set."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    min_graphemes: Annotated[int, Field(ge=0, le=100000)] | None = None
+    max_graphemes: Annotated[int, Field(ge=1, le=100000)] | None = None
+    forbid_urls: bool = False
+    forbid_hashtags: bool = False
+    forbid_emoji: bool = False
+    forbid_simplified_chinese: bool = False
+    forbid_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    rumour_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    attribution_terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    forbid_terms_ci: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
+    min_han_ratio: Annotated[float, Field(ge=0, le=1)] | None = None
+    max_verbatim_run: Annotated[int, Field(ge=1, le=100000)] | None = None
+
+
+class TextCheckInput(BaseModel):
+    """Input for ``text.check``: a text, optionally the source it must not copy, and the rules. Pure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=20000)]
+    source: Annotated[str, Field(max_length=100000)] | None = None
+    rules: TextCheckRules
 
 
 class KbSourceGetInput(BaseModel):
@@ -250,11 +342,19 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "Send one HTTPS request (GET, POST, PUT, PATCH or DELETE) with optional headers, query and a JSON or "
             "text body, and return {status, ok, headers, json or text, elapsed_ms}. A non-2xx status is a result, "
             "not an error. Put a credential as secret:<name>; it is replaced at send time and never shown. "
+            "A JSON answer is returned as json, anything else (RSS, HTML) as text. A transport failure is {error: {code}} "
+            "(http_timeout, http_connect_failed, outbound_blocked, secret_not_found). drop_response_paths removes "
+            "JSON pointers from the answer before it is recorded. query is an object of strings. "
             "Private and metadata addresses are refused and redirects are not followed"
         ),
         side_effect=True,
         external_idempotent=False,
         input_model=HttpRequestInput,
+        example={
+            "method": "POST", "url": "https://api.example.com/v1/items",
+            "headers": {"Authorization": "Bearer secret:api-token"}, "json": {"name": "x"},
+            "drop_response_paths": ["/refreshToken"],
+        },
     ),
     "workflow.return": ToolDeclaration(
         id="workflow.return",
@@ -266,6 +366,66 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowReturnInput,
+        example={"value": {"ended": "nothing new"}},
+    ),
+    "feed.parse": ToolDeclaration(
+        id="feed.parse",
+        title="Parse a feed",
+        description=(
+            "Parse RSS 2.0 or Atom into numbered items {id c1.., title, link, summary (plain text, at most 400 "
+            "characters), published_at, source}, newest first, plus a one-line-per-item listing, the count and what "
+            "was dropped. Give one document as text (up to 1 MiB) or one to six as feeds [{text, label, "
+            "include_terms}], merged and numbered once; each item's source is its feed's label. Filters: max_items "
+            "(1-50, default 20), max_age_hours, include_terms (an item needs one), exclude_urls, exclude_terms "
+            "(all case-insensitive, over title and summary). Pure: it fetches nothing. An unreadable or "
+            "unsupported document is the error feed_invalid; a bad choice of text and feeds is feed_args_invalid"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=FeedParseInput,
+        example={
+            "feeds": [{"text": "<the text of an http.request GET>", "label": "Source A", "include_terms": ["keyword"]}],
+            "max_age_hours": 24, "exclude_urls": ["https://example.com/already-posted"], "exclude_terms": ["term to skip"],
+            "max_items": 10,
+        },
+    ),
+    "json.query": ToolDeclaration(
+        id="json.query",
+        title="Query JSON",
+        description=(
+            "Run a JMESPath expression (at most 500 characters) over any JSON data (at most 1 MiB) and return "
+            "{result}; a missing path is a null result. Projections, filters, pipes and multiselect hashes work: "
+            "items[?id=='c3'] | [0], {links: feed[].uri}. Pure. Errors: expression_invalid, result_too_large "
+            "(over 256 KiB)"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=JsonQueryInput,
+        example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
+    ),
+    "text.check": ToolDeclaration(
+        id="text.check",
+        title="Check a text",
+        description=(
+            "Clean a text (trim, drop think-tags, a surrounding quote pair and a leading 摘要：) and run mechanical "
+            "checks on it: grapheme length, no URLs, hashtags, emoji or Simplified Chinese, forbidden terms, a "
+            "rumour term needs an attribution term, a minimum share of Han characters, and no long run copied from "
+            "a source. Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
+            "too_short, url, hashtag, emoji, simplified, forbidden_term, unattributed_rumour, not_chinese, "
+            "verbatim) or null. Pure"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=TextCheckInput,
+        example={
+            "text": "the draft to check", "source": "the material it must not copy",
+            "rules": {
+                "min_graphemes": 20, "max_graphemes": 300, "forbid_urls": True, "forbid_hashtags": True,
+                "forbid_emoji": True, "forbid_simplified_chinese": True, "forbid_terms": ["a banned word"],
+                "rumour_terms": ["allegedly"], "attribution_terms": ["according to reports"],
+                "min_han_ratio": 0.5, "max_verbatim_run": 15,
+            },
+        },
     ),
 }
 

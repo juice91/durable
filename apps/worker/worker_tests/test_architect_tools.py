@@ -124,9 +124,10 @@ def test_list_approved_tools_excludes_architect_and_platform_tools(engine, tenan
         mcp_lister=lister,
     ))
     ids = [t.id for t in result.tools]
-    assert ids == ["clock.now", "http.request", "secrets.request", "tickets.create"]  # no architect.*, no knowledge.search
+    assert ids == ["clock.now", "feed.parse", "http.request", "json.query", "secrets.request", "text.check", "tickets.create", "workflow.return"]  # no architect.*, no knowledge.search
     assert {t.id: t.requires_approval for t in result.tools} == {
-        "clock.now": False, "http.request": True, "secrets.request": True, "tickets.create": True}
+        "clock.now": False, "feed.parse": False, "http.request": True, "json.query": False, "secrets.request": True, "text.check": False, "tickets.create": True,
+        "workflow.return": False}
     assert seen["call"] == (tenant, ["docs"])  # the disabled server is not offered
     assert [(s.id, s.tools) for s in result.mcp_servers] == [("docs", ("read", "search"))]
     assert "litellm:qwen" in {m.id for m in result.models} and "test:echo" in {m.id for m in result.models}
@@ -287,7 +288,7 @@ def test_save_workflow_creates_a_draft_with_marker(engine, tenant):
 
 def test_workflow_step_kinds_lists_the_supported_kinds_only():
     result = run(list_workflow_step_kinds())
-    assert [k["kind"] for k in result["step_kinds"]] == ["agent", "parallel", "tool"]
+    assert [k["kind"] for k in result["step_kinds"]] == ["agent", "parallel", "tool", "branch"]
     assert "{{previous}}" in result["placeholders"]
 
 
@@ -365,3 +366,118 @@ def test_a_workflow_with_a_placeholder_id_gets_its_id_from_the_name(engine, tena
     agents = allowlist(agents=(AllowlistAgent(id="writer", name="Writer", row_id=str(uuid.uuid4())),))
     spec = {"name": "Daily Brief", "id": "workflow", "steps": [{"kind": "agent", "id": "w", "agent": "writer", "prompt": "{{input}}"}]}
     assert run(save_workflow(engine, tenant, spec, allowlist=agents))["id"] == "daily-brief"
+
+
+# ----------------------------------------------------- composing a collect, write, check and post workflow
+
+FIVE = ("http.request", "workflow.return", "feed.parse", "json.query", "text.check")
+
+
+def test_step_kind_guidance_covers_inputs_conditions_structured_output_and_returns():
+    text_ = json.dumps(run(list_workflow_step_kinds()), ensure_ascii=False)
+    for needle in ("$template", "{{ steps.<id>.output.<field> }}", "$ref", "exactly one placeholder", "keeps the value's type", "only as a whole value",
+                   "branch", '"when"', "steps.fetch.output.ok", "output_schema", "steps.<agent step id>.output.picks",
+                   "workflow.return", "{error: {code", "fails the run", "input_schema", "dry"):
+        assert needle in text_, needle
+    for tool in FIVE:
+        assert tool in text_ or tool == "workflow.return", tool
+    for tool in ("http.request", "feed.parse", "json.query", "text.check"):
+        assert tool in run(list_workflow_step_kinds())["pattern"]
+
+
+def test_list_approved_tools_gives_the_five_general_tools_a_schema_and_an_example(engine, tenant):
+    registry = default_registry()
+    register_platform_tools(registry)
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("test:*"), litellm_base_url=None)
+
+    async def lister(_engine, tenant_id, names):
+        return {}
+
+    result = run(approved_for_tenant(
+        engine, tenant, registry=registry, settings=settings, allowed_tools=frozenset(registry.tool_ids()), mcp_lister=lister))
+    by_id = {t.id: t for t in result.tools}
+    assert set(FIVE) <= set(by_id)
+    for tool_id in FIVE:
+        tool = by_id[tool_id]
+        assert tool.input_schema and tool.input_schema["type"] == "object" and tool.example, tool_id
+        assert len(tool.description) > 40
+    assert "feeds" in by_id["feed.parse"].input_schema["properties"] and by_id["feed.parse"].example["feeds"][0]["label"]
+    assert "[?id==" in by_id["json.query"].example["expression"]
+    assert {"min_graphemes", "forbid_urls", "rumour_terms", "max_verbatim_run"} <= set(by_id["text.check"].example["rules"])
+    assert "secret:" in json.dumps(by_id["http.request"].example) and "drop_response_paths" in by_id["http.request"].input_schema["properties"]
+    assert "ended" in json.dumps(by_id["workflow.return"].example)
+    assert "{error" in by_id["http.request"].description and "text" in by_id["http.request"].description
+
+
+def test_save_workflow_accepts_a_collect_shape_check_gate_post_draft_using_template_inputs(engine, tenant):
+    picker_id, writer_id = str(uuid.uuid4()), str(uuid.uuid4())
+    tools = tuple(AllowlistTool(id=t, title=t, description=t * 5) for t in (*FIVE, "clock.now"))
+    wide = allowlist(tools=tools, agents=(
+        AllowlistAgent(id="picker", name="Picker", row_id=picker_id), AllowlistAgent(id="writer", name="Writer", row_id=writer_id)))
+    ret = lambda i, value: {"kind": "tool", "id": i, "tool": "workflow.return", "params": {"value": value}}  # noqa: E731
+    gate = lambda i, ref, nxt, default: {"kind": "branch", "id": i, "default": default, "cases": [  # noqa: E731
+        {"when": {"op": "eq", "left": {"$ref": ref}, "right": True}, "next": nxt}]}
+    steps = [
+        {"kind": "tool", "id": "now", "tool": "clock.now"},
+        {"kind": "tool", "id": "feed", "tool": "http.request", "params": {"method": "GET", "url": "https://feeds.example.com/a.xml"}},
+        gate("feed_gate", "steps.feed.output.ok", "candidates", "feed_failed"),
+        ret("feed_failed", {"$template": {"error": {"code": "feed_fetch_failed", "message": "status {{steps.feed.output.status}}"}}}),
+        {"kind": "tool", "id": "candidates", "tool": "feed.parse", "params": {
+            "feeds": {"$template": [{"text": "{{steps.feed.output.text}}", "label": "Source A", "include_terms": ["keyword"]}]},
+            "max_age_hours": 24, "now": {"$ref": "steps.now.output"}}},
+        {"kind": "branch", "id": "none_gate", "default": "pick", "cases": [
+            {"when": {"op": "eq", "left": {"$ref": "steps.candidates.output.count"}, "right": 0}, "next": "nothing"}]},
+        ret("nothing", {"ended": "nothing new"}),
+        {"kind": "agent", "id": "pick", "agent": "picker", "input": {"prompt": {"$template": "Task: pick\n{{steps.candidates.output.listing}}"}}},
+        {"kind": "tool", "id": "selected", "tool": "json.query", "params": {
+            "data": {"$template": {"items": "{{steps.candidates.output.items}}"}},
+            "expression": {"$template": "(items[?id=='{{steps.pick.output.picks.0}}'] | [0]) || items[0]"}}},
+        {"kind": "agent", "id": "write", "agent": "writer", "input": {"prompt": {"$template": "Task: write\n{{steps.selected.output.result.title}}"}}},
+        {"kind": "tool", "id": "check", "tool": "text.check", "params": {
+            "text": {"$ref": "steps.write.output.post"},
+            "rules": {"min_graphemes": 20, "max_graphemes": 300, "forbid_urls": True, "min_han_ratio": 0.5}}},
+        gate("check_gate", "steps.check.output.ok", "dry_gate", "check_failed"),
+        ret("check_failed", {"$template": {"ended": "check failed: {{steps.check.output.reason}}"}}),
+        {"kind": "branch", "id": "dry_gate", "default": "post", "cases": [
+            {"when": {"op": "eq", "left": {"$ref": "input.dry"}, "right": True}, "next": "dry_done"}]},
+        ret("dry_done", {"$template": {"ended": "dry", "text": "{{steps.check.output.text}}"}}),
+        {"kind": "tool", "id": "post", "tool": "http.request", "params": {
+            "method": "POST", "url": "https://api.example.com/posts",
+            "headers": {"$template": {"Authorization": "Bearer secret:api-token"}},
+            "json": {"$template": {"text": "{{steps.check.output.text}}", "createdAt": "{{steps.now.output}}", "langs": ["zh-Hant"]}}}},
+        ret("done", {"$template": {"ended": "posted", "status": "{{steps.post.output.status}}"}}),
+    ]
+    spec = {"name": "Collect and post", "id": "collect-and-post", "steps": steps,
+            "input_schema": {"type": "object", "properties": {"dry": {"type": "boolean"}}, "required": ["dry"],
+                             "additionalProperties": False}}
+    saved = run(save_workflow(engine, tenant, spec, allowlist=wide))
+    assert saved == {"id": "collect-and-post", "version": None, "status": "draft", "warnings": []}, saved
+    with engine.connect() as conn:
+        draft = conn.execute(text("SELECT draft_spec FROM workflows WHERE tenant_id = :t"), {"t": tenant}).scalar_one()
+    by_id = {s["id"]: s for s in draft["steps"]}
+    assert draft["start"] == "now" and by_id["pick"]["agent_id"] == picker_id
+    assert by_id["feed_failed"].get("next") is None and by_id["done"].get("next") is None  # workflow.return ends a path
+    assert by_id["post"]["next"] == "done" and by_id["pick"]["next"] == "selected"
+    assert by_id["post"]["input"]["json"]["$template"]["langs"] == ["zh-Hant"]
+    assert by_id["feed_gate"]["cases"][0]["next"] == "candidates" and by_id["feed_gate"]["default"] == "feed_failed"
+
+
+def test_save_workflow_refuses_what_the_format_cannot_express(engine, tenant):
+    wide = allowlist(tools=tuple(AllowlistTool(id=t, title=t, description=t * 5) for t in FIVE))
+    bad_next = [{"kind": "tool", "id": "a", "tool": "json.query", "params": {"data": 1, "expression": "@"}, "next": "ghost"}]
+    assert run(save_workflow(engine, tenant, {"name": "X", "steps": bad_next}, allowlist=wide))["error"]["code"] == "unknown_step"
+    both = [{"kind": "agent", "id": "a", "agent": "writer", "prompt": "p", "input": {"prompt": "q"}}]
+    assert run(save_workflow(engine, tenant, {"name": "X", "steps": both}, allowlist=wide))["error"]["code"] == "invalid_spec"
+    mixed = [{"kind": "tool", "id": "a", "tool": "workflow.return", "params": {"value": "x {{input}}"}}]
+    assert run(save_workflow(engine, tenant, {"name": "X", "steps": mixed}, allowlist=wide))["error"]["code"] == "placeholder_not_whole_value"
+
+
+def test_save_agent_takes_an_output_schema(engine, tenant):
+    schema = {"type": "object", "properties": {"picks": {"type": "array", "items": {"type": "string"}, "maxItems": 3}},
+              "required": ["picks"], "additionalProperties": False}
+    saved = run(save_agent(engine, tenant, agent_spec(id="picker", output_schema=schema), allowlist=allowlist()))
+    assert saved["status"] == "draft", saved
+    row = next(r for r in agents_rows(engine, tenant) if r["slug"] == "picker")
+    assert row["draft_spec"]["output"]["json_schema"] == schema
+    bad = run(save_agent(engine, tenant, agent_spec(id="picker2", output_schema={"type": "string"}), allowlist=allowlist()))
+    assert bad["error"]["code"] == "agent_invalid"

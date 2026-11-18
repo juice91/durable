@@ -83,7 +83,7 @@ class ToolRegistry:
                 name=self._derive_tool_name(tool_id),
                 description=declaration.description,
             ).tool_def.parameters_json_schema
-            if implementation_schema != declaration.input_json_schema():
+            if not declaration.matches_implementation_schema(implementation_schema):
                 raise ValueError(f"Tool '{tool_id}' implementation does not match its declaration")
             metadata = {
                 "description": declaration.description,

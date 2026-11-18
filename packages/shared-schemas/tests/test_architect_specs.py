@@ -163,7 +163,7 @@ def test_compile_workflow_rejects_loops_and_unknown_placeholders():
     with pytest.raises(ValidationError):
         wf([{"kind": "agent", "id": "run_end", "agent": "writer", "prompt": "x"}])  # reserved
     with pytest.raises(ValidationError):
-        wf([{"kind": "agent", "id": f"s{i}", "agent": "writer", "prompt": "x"} for i in range(9)])  # at most 8
+        wf([{"kind": "agent", "id": f"s{i}", "agent": "writer", "prompt": "x"} for i in range(41)])  # at most 40
     for prompt, message in [
         ("{{previous}}", "unknown_placeholder"),  # first step has no previous
         ("{{steps.later}}", "unknown_placeholder"),
