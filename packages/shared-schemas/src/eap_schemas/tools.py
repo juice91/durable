@@ -39,6 +39,10 @@ class ToolDeclaration(BaseModel):
     input_model: type[BaseModel]
     # One short example of the arguments, shown to the Architect next to the input schema.
     example: dict[str, Any] | None = None
+    # What the tool returns: one example result and, where cheap, its JSON Schema. A step's output is exactly this
+    # value (`steps.<id>.output`), so a workflow reads a field as `steps.<id>.output.<field>`.
+    result_example: Any = None
+    result_schema: dict[str, Any] | None = None
 
     @field_validator("id")
     @classmethod
@@ -260,6 +264,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=ClockNowInput,
+        result_example="2026-11-18T09:30:00+00:00",
+        result_schema={"type": "string", "format": "date-time"},
     ),
     "tickets.create": ToolDeclaration(
         id="tickets.create",
@@ -268,6 +274,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=True,
         input_model=TicketsCreateInput,
+        result_example={"ticket_id": "T-123", "created": True},
+        result_schema={"type": "object", "properties": {"ticket_id": {"type": "string"}, "created": {"type": "boolean"}}},
     ),
     "secrets.request": ToolDeclaration(
         id="secrets.request",
@@ -279,6 +287,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=False,
         input_model=SecretsRequestInput,
+        result_example={"ref": "secret:api-token", "stored": True},
+        result_schema={"type": "object", "properties": {"ref": {"type": "string"}, "stored": {"type": "boolean"}}},
     ),
     "kb.source.get": ToolDeclaration(
         id="kb.source.get",
@@ -290,6 +300,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=KbSourceGetInput,
+        result_example={"id": "…", "knowledge_base_id": "…", "connection_id": "…", "kind": "…", "provider": "…", "name": "Docs", "enabled": True, "config": {}, "last_successful_sync_at": "2026-11-18T09:00:00+00:00", "last_checkpoint_summary": {"segments": 3, "has_cursor": False}, "last_source_revision": None, "created_at": "…", "updated_at": "…"},
     ),
     "settings.connection.check": ToolDeclaration(
         id="settings.connection.check",
@@ -301,6 +312,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=SettingsConnectionCheckInput,
+        result_example={"ok": True, "checked_at": "2026-11-18T09:30:00+00:00", "error_code": None},
+        result_schema={"type": "object", "properties": {"ok": {"type": "boolean"}, "checked_at": {"type": "string"}, "error_code": {"type": ["string", "null"]}}},
     ),
     "kb.source.sync": ToolDeclaration(
         id="kb.source.sync",
@@ -312,6 +325,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=True,
         input_model=KbSourceSyncInput,
+        result_example={"run_id": "…", "status": "queued"},
+        result_schema={"type": "object", "properties": {"run_id": {"type": "string"}, "status": {"type": "string"}}},
     ),
     "workflow.run.wait": ToolDeclaration(
         id="workflow.run.wait",
@@ -323,6 +338,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowRunWaitInput,
+        result_example={"status": "completed", "updated_at": "2026-11-18T09:31:00+00:00", "terminal": True},
+        result_schema={"type": "object", "properties": {"status": {"type": "string"}, "updated_at": {"type": ["string", "null"]}, "terminal": {"type": "boolean"}}},
     ),
     "workflow.run.result": ToolDeclaration(
         id="workflow.run.result",
@@ -334,6 +351,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowRunResultInput,
+        result_example={"run_id": "…", "status": "completed", "source_id": "…", "mode": "incremental", "discovered": 10, "inserted": 2, "updated": 1, "unchanged": 7, "documents_queued": 3, "failed": 0, "checkpoint": {}, "errors": []},
     ),
     "http.request": ToolDeclaration(
         id="http.request",
@@ -350,6 +368,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=True,
         external_idempotent=False,
         input_model=HttpRequestInput,
+        result_example={"status": 200, "ok": True, "headers": {"content-type": "application/json"}, "json": {"id": "abc"}, "elapsed_ms": 120},
         example={
             "method": "POST", "url": "https://api.example.com/v1/items",
             "headers": {"Authorization": "Bearer secret:api-token"}, "json": {"name": "x"},
@@ -366,6 +385,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowReturnInput,
+        result_example={"ended": "nothing new"},
         example={"value": {"ended": "nothing new"}},
     ),
     "feed.parse": ToolDeclaration(
@@ -383,6 +403,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=FeedParseInput,
+        result_example={"items": [{"id": "c1", "title": "…", "link": "https://example.com/a", "summary": "…", "published_at": "2026-11-18T08:00:00Z", "source": "Source A"}], "listing": "c1｜…｜…", "count": 1, "dropped": {"excluded_url": 0, "old": 0, "no_term": 0, "term": 0, "malformed": 0}},
         example={
             "feeds": [{"text": "<the text of an http.request GET>", "label": "Source A", "include_terms": ["keyword"]}],
             "max_age_hours": 24, "exclude_urls": ["https://example.com/already-posted"], "exclude_terms": ["term to skip"],
@@ -401,6 +422,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=JsonQueryInput,
+        result_example={"result": {"id": "c2"}},
+        result_schema={"type": "object", "properties": {"result": {}}, "required": ["result"]},
         example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
     ),
     "text.check": ToolDeclaration(
@@ -410,13 +433,16 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "Clean a text (trim, drop think-tags, a surrounding quote pair and a leading 摘要：) and run mechanical "
             "checks on it: grapheme length, no URLs, hashtags, emoji or Simplified Chinese, forbidden terms, a "
             "rumour term needs an attribution term, a minimum share of Han characters, and no long run copied from "
-            "a source. Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
+            "a source (verbatim fails when the longest shared run is >= max_verbatim_run, so 15 refuses a text that "
+            "shares 15 characters in a row with the source and allows 14). Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
             "too_short, url, hashtag, emoji, simplified, forbidden_term, unattributed_rumour, not_chinese, "
             "verbatim) or null. Pure"
         ),
         side_effect=False,
         external_idempotent=False,
         input_model=TextCheckInput,
+        result_example={"ok": True, "text": "the cleaned text", "reason": None, "graphemes": 16},
+        result_schema={"type": "object", "properties": {"ok": {"type": "boolean"}, "text": {"type": "string"}, "reason": {"type": ["string", "null"]}, "graphemes": {"type": "integer"}}},
         example={
             "text": "the draft to check", "source": "the material it must not copy",
             "rules": {

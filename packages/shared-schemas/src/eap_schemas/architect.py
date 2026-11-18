@@ -123,9 +123,16 @@ def is_denied_tool(tool_id: str) -> bool:
     return any(tool_id == p or tool_id.startswith(p) for p in ARCHITECT_DENIED_TOOL_PREFIXES)
 
 
+APPROVAL_NOTE = (
+    "Approvals gate agent-initiated calls only: an agent's call to this tool waits for a person; a workflow tool "
+    "step runs as published, with no approval each run."
+)
+
+
 def offer_tool(
     tool_id: str, title: str, description: str, *, side_effect: bool = False, host_only: bool = False,
     input_schema: dict[str, Any] | None = None, example: dict[str, Any] | None = None,
+    result_example: Any = None, result_schema: dict[str, Any] | None = None,
 ) -> "AllowlistTool | None":
     """The allowlist entry for one platform tool, or None when the code denylist or `host_only` keeps it
     from created agents. `requires_approval` is the tool's side effect or its place in GATED_TOOL_IDS.
@@ -136,7 +143,7 @@ def offer_tool(
     return AllowlistTool(
         id=tool_id, title=title, description=description or title,
         requires_approval=bool(side_effect) or tool_id in GATED_TOOL_IDS,
-        input_schema=input_schema, example=example,
+        input_schema=input_schema, example=example, result_example=result_example, result_schema=result_schema,
     )
 
 
@@ -149,10 +156,29 @@ class AllowlistTool(BaseModel):
     id: str
     title: str
     description: str
+    # Kept for the Studio: true when an agent that is granted the tool waits for a person on each call.
     requires_approval: bool = False
+    # Where that applies: `agent_runs` an agent's own call waits for approval; `workflow_steps` is always false,
+    # because a workflow tool step runs as published (the person reviewed the workflow when publishing it).
+    approval: dict[str, bool] = Field(default_factory=dict)
+    approval_note: str = ""
     # The tool's argument schema and one short example call (arguments), so a model can call it without guessing.
     input_schema: dict[str, Any] | None = None
     example: dict[str, Any] | None = None
+    # What the tool returns (a step's output is exactly this value): an example and, where cheap, a JSON Schema.
+    result_example: Any = None
+    result_schema: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _approval(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        agent_runs = bool(data.get("requires_approval", False))
+        out = dict(data)
+        out["approval"] = {"agent_runs": agent_runs, "workflow_steps": False}
+        out["approval_note"] = APPROVAL_NOTE if agent_runs else ""
+        return out
 
 
 class AllowlistMcpServer(BaseModel):

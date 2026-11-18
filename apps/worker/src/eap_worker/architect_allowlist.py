@@ -73,12 +73,14 @@ def registry_tools(registry: Any, allowed: frozenset[str]) -> tuple[AllowlistToo
             declaration = registry.get_declaration(tool_id)
             title, description = declaration.title, declaration.description
             schema, example = declaration.input_json_schema(), declaration.example
+            result_example, result_schema = declaration.result_example, declaration.result_schema
         except ValueError:  # registered with a string id: metadata only
             title, description = tool_id, str(meta.get("description") or tool_id)
-            schema, example = None, None
+            schema, example, result_example, result_schema = None, None, None, None
         offered = offer_tool(
             tool_id, title, description, side_effect=bool(meta.get("side_effect")), host_only=bool(meta.get("host_only")),
             input_schema=schema, example=example,
+            result_example=result_example, result_schema=result_schema,
         )
         if offered is not None:
             found.append(offered)

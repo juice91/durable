@@ -496,3 +496,51 @@ def test_save_agent_takes_an_output_schema(engine, tenant):
     assert row["draft_spec"]["output"]["json_schema"] == schema
     bad = run(save_agent(engine, tenant, agent_spec(id="picker2", output_schema={"type": "string"}), allowlist=allowlist()))
     assert bad["error"]["code"] == "agent_invalid"
+
+
+def _approved(engine, tenant):
+    registry = default_registry()
+    register_platform_tools(registry)
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("test:*"), litellm_base_url=None)
+
+    async def lister(_engine, tenant_id, names):
+        return {}
+
+    result = run(approved_for_tenant(
+        engine, tenant, registry=registry, settings=settings, allowed_tools=frozenset(registry.tool_ids()), mcp_lister=lister))
+    return {t.id: t for t in result.tools}
+
+
+def test_list_approved_tools_gives_every_tool_its_result_shape(engine, tenant):
+    by_id = _approved(engine, tenant)
+    assert by_id["clock.now"].result_example == "2026-11-18T09:30:00+00:00"  # a bare RFC 3339 string, no field
+    assert by_id["clock.now"].result_schema == {"type": "string", "format": "date-time"}
+    assert {"status", "ok", "headers", "json", "elapsed_ms"} <= set(by_id["http.request"].result_example)
+    assert {"items", "listing", "count", "dropped"} <= set(by_id["feed.parse"].result_example)
+    assert by_id["json.query"].result_example == {"result": {"id": "c2"}}
+    assert {"ok", "text", "reason", "graphemes"} <= set(by_id["text.check"].result_example)
+    assert by_id["secrets.request"].result_example == {"ref": "secret:api-token", "stored": True}
+    assert {"ticket_id", "created"} <= set(by_id["tickets.create"].result_example)
+    assert by_id["workflow.return"].result_example == {"ended": "nothing new"}
+    from eap_schemas.tools import TOOL_DECLARATIONS
+    missing = [t for t, d in TOOL_DECLARATIONS.items() if d.result_example is None]
+    assert missing == []
+
+
+def test_approval_says_where_it_applies_and_requires_approval_stays(engine, tenant):
+    by_id = _approved(engine, tenant)
+    dumped = by_id["http.request"].model_dump(mode="json")
+    assert dumped["approval"] == {"agent_runs": True, "workflow_steps": False}
+    assert dumped["requires_approval"] is True  # the Studio still reads it
+    assert by_id["clock.now"].approval == {"agent_runs": False, "workflow_steps": False}
+    assert "agent-initiated calls only" in by_id["http.request"].approval_note
+
+
+def test_condition_and_check_semantics_are_spelled_out():
+    kinds = run(list_workflow_step_kinds())
+    text = json.dumps(kinds)
+    assert "exists is true when the path exists and is not null" in text
+    assert "ne compares values" in text and "path that does not exist makes the comparison unknown" in text
+    assert "steps.<id>.output" in json.dumps(kinds["step_output"])
+    from eap_schemas.tools import TOOL_DECLARATIONS
+    assert "fails when the longest shared run is >= max_verbatim_run" in TOOL_DECLARATIONS["text.check"].description

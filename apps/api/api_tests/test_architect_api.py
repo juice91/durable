@@ -231,6 +231,9 @@ def test_options_are_the_allowlist_without_platform_tools(api):
     assert not any(i.startswith(("architect.", "knowledge", "file", "shell")) for i in ids)
     tickets = next((t for t in body["tools"] if t["id"] == "tickets.create"), None)
     assert tickets is None or tickets["requires_approval"] is True
+    assert tickets is None or tickets["approval"] == {"agent_runs": True, "workflow_steps": False}
+    clock = next((t for t in body["tools"] if t["id"] == "clock.now"), None)
+    assert clock is None or (clock["result_example"] == "2026-11-18T09:30:00+00:00" and clock["approval"]["agent_runs"] is False)
     assert {"test:echo", "openai:gpt-4"} <= {m["id"] for m in body["models"]}
     echo = next(m for m in body["models"] if m["id"] == "test:echo")
     assert set(echo["capabilities"]) >= {"image", "pdf", "source"}  # real discovery metadata, not {}

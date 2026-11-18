@@ -170,6 +170,23 @@ CONDITIONS = {
         "default": "failed",
     },
     "note": "a non-2xx http.request answer is a result ({status, ok, ...}), not an error: gate on steps.<id>.output.ok",
+    "exists": "exists is true when the path exists and is not null (a missing path and a JSON null are both false); "
+    "it takes only left",
+    "ne": "ne compares values: it is true when the two values differ, and null is an ordinary value (ne against null is "
+    "true for any non-null value, false for null). A path that does not exist makes the comparison unknown, and an "
+    "unknown comparison is not satisfied, so the case is skipped (the same holds for eq, gt, lt and contains). "
+    "To accept both a null and a missing value test exists, not ne",
+    "other_ops": "gt and lt compare two numbers or two strings, otherwise false; contains is a substring of a string, "
+    "an element of a list or a key of an object",
+}
+STEP_OUTPUT = {
+    "tool": "a tool step's output is the tool's result, exactly as list_approved_tools shows in result_example: "
+    "reference it as steps.<id>.output, or a path into it such as steps.<id>.output.ok or steps.<id>.output.items.0.title; "
+    "clock.now returns a bare string, so its output is steps.<id>.output with no field",
+    "agent": "an agent step's output is its answer (text), or an object when the agent has an output_schema",
+    "approvals": "approvals gate agent-initiated calls only: an agent granted http.request waits for a person on each "
+    "call, but a workflow tool step runs as published, with no approval each run (the person reviewed the workflow "
+    "when publishing it); list_approved_tools says so in each tool's approval",
 }
 AGENT_OUTPUT = {
     "how": "save_agent with output_schema (a JSON Schema object, for example {\"type\": \"object\", \"properties\": "
@@ -385,7 +402,7 @@ async def list_workflow_versions(engine: Engine, tenant_id: str, id: str) -> dic
 async def list_workflow_step_kinds() -> dict[str, Any]:
     return {
         "step_kinds": STEP_KINDS, "placeholders": PLACEHOLDERS, "limits": LIMITS, "input_values": INPUT_VALUES,
-        "conditions": CONDITIONS, "agent_output": AGENT_OUTPUT, "results_and_errors": RESULTS_AND_ERRORS,
+        "conditions": CONDITIONS, "step_output": STEP_OUTPUT, "agent_output": AGENT_OUTPUT, "results_and_errors": RESULTS_AND_ERRORS,
         "pattern": PATTERN,
     }
 
