@@ -346,6 +346,34 @@ def test_discovery_and_call_start_a_stopped_server_on_demand(engine):
         assert fake.kinds().count("start") == 2 and server.call_count("lookup_order") == 1
 
 
+def test_architect_discovery_starts_a_managed_server_and_lists_its_tools(engine, caplog):
+    from eap_worker.architect_allowlist import discover_mcp_tools
+
+    with LocalMcpServer() as server:  # loopback stands in for the private in-cluster Service: no dev allowlist
+        fake = FakeRuntime(url=server.url, statuses=["running"])
+        _, rid = add_managed(engine, "t1", "orders", state="stopped")
+        set_mcp_runtime(fake)
+        found = asyncio.run(discover_mcp_tools(engine, "t1", ["orders"]))
+        assert found == {"orders": ("cancel_order", "lookup_order")}
+        assert fake.kinds().count("start") == 1 and state_of(engine, rid).state == "running"
+        # already running: no second start
+        assert asyncio.run(discover_mcp_tools(engine, "t1", ["orders"])) == found
+        assert fake.kinds().count("start") == 1
+
+
+def test_architect_discovery_of_an_unreachable_managed_server_is_empty_with_a_warning(engine, caplog, monkeypatch):
+    from eap_worker import architect_allowlist
+    from eap_worker.architect_allowlist import discover_mcp_tools
+
+    monkeypatch.setattr(architect_allowlist, "MCP_DISCOVERY_TIMEOUT_S", 0.5)
+    fake = FakeRuntime(statuses=["starting"])  # never becomes running: bounded by the discovery timeout
+    add_managed(engine, "t1", "orders", state="stopped")
+    set_mcp_runtime(fake)
+    with caplog.at_level("WARNING", logger="eap_worker.architect_allowlist"):
+        assert asyncio.run(discover_mcp_tools(engine, "t1", ["orders"])) == {"orders": ()}
+    assert "mcp discovery failed server=orders" in caplog.text
+
+
 # --------------------------------------------------------------------------- races (Task 6b)
 
 
