@@ -67,6 +67,22 @@ class RequestContextInvalid(Exception):
         return REQUEST_CONTEXT_INVALID_MESSAGE
 
 
+class ToolCallRepeated(Exception):
+    """The model repeated a tool call with identical arguments after a validation error (see
+    `capabilities.SpecCapability.on_tool_validate_error`). Carries the tool id and the first validation
+    message, so the person reads what the tool refused. Pickle-safe."""
+
+    def __init__(self, tool: str, detail: str) -> None:
+        self.tool = tool
+        self.detail = detail
+        super().__init__(tool, detail)
+
+    def __str__(self) -> str:
+        return (
+            f"the model repeated the same call to tool '{self.tool}' after it was refused: {self.detail}"
+        )
+
+
 class InputBlocked(Exception):
     """An input processor (P0.17) blocked the turn's input: the main model is never called. Carries
     no text, only the processor's position and type (from the published spec)."""
@@ -405,6 +421,7 @@ _KNOWN: tuple[tuple[type[BaseException], str, str, Callable[[BaseException], str
     (ModelHTTPError, "failed", "model_http_error", _http_message),
     (ModelAPIError, "failed", "model_api_error", lambda e: "the model provider request failed"),
     (UsageLimitExceeded, "failed", "usage_limit_exceeded", lambda e: USAGE_LIMIT_MESSAGE),
+    (ToolCallRepeated, "failed", "tool_call_repeated", lambda e: str(e)),
     (UnexpectedModelBehavior, "failed", "unexpected_model_behavior", lambda e: "the model responded in an unexpected way"),
 )
 

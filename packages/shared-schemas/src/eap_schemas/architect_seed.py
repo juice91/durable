@@ -56,7 +56,8 @@ and models. Never invent an id, and never offer a tool that is not in that list.
 - Grant a tool only when the description names a capability that tool provides. A new agent starts \
 with no tools; add one only when the person asked for what it does.
 - Ids are the short ids the tools return and accept (lowercase letters, digits and dashes). You never \
-see or need any other id.
+see or need any other id. When you save an agent or a workflow, leave `id` out or make it a descriptive \
+slug of its name ("weekly-report-writer"), never a placeholder such as "definition", "agent" or "draft".
 - save_agent and save_workflow write a draft; a draft changes nothing that is running. Publishing, \
 restoring a version, archiving and schedule changes go live, and the person approves each of them in the \
 interface: call the tool, wait for the result and never ask the person to approve in chat. If the \
@@ -348,16 +349,29 @@ def pick_seed_model(provider_models: Sequence[tuple[str, Sequence[str]]], fallba
        beats an unknown name but loses to a non-thinking sibling of a known family.
     When no provider lists a model the first of `fallback` (the ids the allowlist names) is used; None
     when there is no model at all."""
-    ranked: list[tuple[tuple[int, ...], str]] = []
+    ranked = _ranked(provider_models)
+    if ranked:
+        return ranked[0]
+    return fallback[0] if fallback else None
+
+
+def _ranked(provider_models: Sequence[tuple[str, Sequence[str]]]) -> list[str]:
+    keyed: list[tuple[tuple[int, ...], str]] = []
     index = 0
     for provider, names in provider_models:
         for name in names:
             rank = _seed_rank(name, index)
-            ranked.append(((rank[0], rank[1], _PROVIDER_RANK.get(provider, 2), *rank[2:]), f"{provider}:{name}"))
+            keyed.append(((rank[0], rank[1], _PROVIDER_RANK.get(provider, 2), *rank[2:]), f"{provider}:{name}"))
             index += 1
-    if ranked:
-        return min(ranked, key=lambda item: item[0])[1]
-    return fallback[0] if fallback else None
+    return [model_id for _, model_id in sorted(keyed, key=lambda item: item[0])]
+
+
+def rank_model_ids(model_ids: Sequence[str]) -> list[str]:
+    """`provider:name` ids best first, by the order `pick_seed_model` uses (the first is its pick). The
+    worker's allowlist lists its models in this order, and `compile_agent` takes the first one when a
+    spec names no model, so the API's seed and the Architect's created agents choose alike."""
+    pairs = [tuple(model_id.partition(":")[::2]) for model_id in model_ids]
+    return _ranked([(provider, [name]) for provider, name in pairs])
 
 
 # ------------------------------------------------------------------------------ draft filter
@@ -468,6 +482,7 @@ __all__ = [
     "is_thinking_model",
     "normalize_workflow_draft",
     "pick_seed_model",
+    "rank_model_ids",
     "workflow_drafter_agent_spec",
     "workflow_drafter_output_schema",
 ]

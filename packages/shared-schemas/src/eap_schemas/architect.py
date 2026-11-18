@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import hashlib
 import re
 from typing import Annotated, Any, Literal, Union
 from uuid import UUID
@@ -92,12 +93,25 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63})$")
 
 
+# Ids a model invents when it has nothing to say; a spec that carries one gets an id from its name.
+GENERIC_IDS = ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+
+
 def slugify(name: str) -> str:
-    """A slug (`AGENT_ID_PATTERN`) from a name: lowercase words joined by dashes, at most 48 characters."""
+    """A slug (`AGENT_ID_PATTERN`) from a name: lowercase words joined by dashes, at most 48 characters.
+    A name with no Latin letters or digits (CJK, say) gets `agent-` and four hex digits of its hash, so
+    the same name always maps to the same id."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48].strip("-")
-    if not slug or not slug[0].isalpha():
+    if not slug:
+        return f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+    if not slug[0].isalpha():
         slug = f"a-{slug}".strip("-")[:48].strip("-")
-    return slug if AGENT_ID_PATTERN.fullmatch(slug) else "definition"
+    return slug if AGENT_ID_PATTERN.fullmatch(slug) else f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+
+
+def is_generic_id(value: str | None) -> bool:
+    """True when `value` is missing or one of `GENERIC_IDS`: the id should come from the name."""
+    return value is None or value.strip().lower() in GENERIC_IDS
 
 
 def is_denied_tool(tool_id: str) -> bool:
@@ -258,7 +272,11 @@ def compile_agent(spec: ArchitectAgentSpec, allowlist: Allowlist) -> AgentSpec:
     for kb in spec.knowledge_bases:
         if kb not in kb_ids:
             raise ValueError(f"knowledge_base_not_allowed: {kb}")
-    model_id = spec.model or allowlist.default_model
+    from eap_schemas.architect_seed import rank_model_ids  # lazy: architect_seed imports this module
+
+    ranked = rank_model_ids([m.id for m in allowlist.models])
+    # A tenant with no default model has none to give; otherwise the ranked pick, not the first listed.
+    model_id = spec.model or ((ranked[0] if ranked else None) if allowlist.default_model else None)
     if model_id is None:
         raise ValueError("model_required: choose a model from the allowlist")
     if model_id not in {m.id for m in allowlist.models}:
@@ -509,6 +527,8 @@ __all__ = [
     "compile_workflow",
     "is_denied_tool",
     "offer_tool",
+    "GENERIC_IDS",
+    "is_generic_id",
     "slugify",
     "ungated_architect_tools",
 ]

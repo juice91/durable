@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from eap_schemas.architect import (
     ARCHITECT_GATED_TOOL_IDS,
@@ -135,3 +136,42 @@ def test_seed_model_demotions_and_unquantised_siblings():
     assert pick_seed_model([("litellm", ["only-thinking", "m-reasoner"])], []) == "litellm:only-thinking"
     assert pick_seed_model([("litellm", ["gguf-thing"])], []) == "litellm:gguf-thing"  # demoted, still the only one
     assert pick_seed_model([("litellm", ["mistral-medium-latest", "x-mlx"])], []) == "litellm:mistral-medium-latest"
+
+
+def test_generic_ids_are_one_list_and_slugify_falls_back_for_names_without_latin_letters():
+    from eap_schemas.architect import GENERIC_IDS, is_generic_id
+
+    assert GENERIC_IDS == ("definition", "agent", "workflow", "spec", "draft", "new", "untitled", "test")
+    assert all(is_generic_id(g) for g in GENERIC_IDS) and is_generic_id(None) and is_generic_id(" Draft ")
+    assert not is_generic_id("weekly-report") and not is_generic_id("agent-7f3a")
+    cjk = slugify("球棒（棒球角色帳號）")
+    assert re.fullmatch(r"agent-[0-9a-f]{4}", cjk) and cjk == slugify("球棒（棒球角色帳號）")
+    assert cjk != slugify("另一個名字") and not is_generic_id(cjk)
+    assert slugify("Baseball 球棒") == "baseball"
+
+
+def test_rank_model_ids_matches_the_seed_pick_and_compile_agent_takes_the_ranked_model():
+    from eap_schemas.architect import ArchitectAgentSpec, compile_agent
+    from eap_schemas.architect_seed import rank_model_ids
+
+    ids = ["litellm:CausalLM-34b-beta-4bit", "litellm:qwen3.8-thinking", "litellm:qwen3.8", "openai:gpt-4o"]
+    ranked = rank_model_ids(ids)
+    assert ranked[0] == "openai:gpt-4o" and sorted(ranked) == sorted(ids)
+    assert ranked[0] == pick_seed_model([("litellm", [i.split(":")[1] for i in ids[:3]]), ("openai", ["gpt-4o"])], [])
+    assert rank_model_ids(ids[:3])[0] == "litellm:qwen3.8"
+    assert rank_model_ids([]) == []
+
+    allow = Allowlist(
+        models=tuple(AllowlistModel(id=i, provider=i.split(":")[0]) for i in ids[:3]),
+        default_model=ids[0],  # the first listed, as the worker used to take
+    )
+    compiled = compile_agent(ArchitectAgentSpec(name="Bat", instructions="x"), allow)
+    assert (compiled.model.provider, compiled.model.name) == ("litellm", "qwen3.8")
+    named = compile_agent(ArchitectAgentSpec(name="Bat", instructions="x", model=ids[0]), allow)
+    assert named.model.name == "CausalLM-34b-beta-4bit"  # an explicit choice is kept
+
+
+def test_the_architect_is_told_to_use_descriptive_ids():
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+
+    assert "slug of its name" in ARCHITECT_INSTRUCTIONS and '"definition"' in ARCHITECT_INSTRUCTIONS
