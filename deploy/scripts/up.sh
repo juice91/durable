@@ -260,6 +260,10 @@ kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
   --from-env-file="$secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
 
 # Drain before applying a new worker template. See apps/worker/README.md ("drain, keep m1").
+# A run parked on a human approval (a pending_approvals row without decided_at) is not executing and
+# may wait for days; it is left out of the count and recovers across the deploy (its step layout is
+# unchanged while it waits). Counting it blocked every deploy on 2026-11-19 while the API was already
+# scaled to 0, so nobody could decide the approval either.
 if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
@@ -274,7 +278,7 @@ query_active_runs() {
   # Single quotes are deliberate: the postgres container expands its own password.
   # shellcheck disable=SC2016
   output=$(kubectl_for_profile -n "$NAMESPACE" exec postgres-0 -- \
-    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "SELECT count(*) FROM public.runs WHERE status IN ('"'"'queued'"'"', '"'"'running'"'"')"' \
+    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "SELECT count(*) FROM public.runs r WHERE r.status IN ('"'"'queued'"'"', '"'"'running'"'"') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"' \
     2>"$err")
   rc=$?
   set -e
