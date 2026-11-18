@@ -144,48 +144,64 @@ def test_anthropic_and_openai_need_their_key(client, tenant, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     stub = install(monkeypatch, Stub({"api.anthropic.com": models_body("claude-x")}))
     items = get_models(client, tenant)
-    assert [i["id"] for i in items] == [
-        "anthropic:claude-fable-5-2", "anthropic:claude-haiku-5-5", "anthropic:claude-opus-5-5",
-        "anthropic:claude-sonnet-5-5", "anthropic:claude-x", "openai:*",
-    ]
+    assert [i["id"] for i in items] == ["anthropic:claude-x", "openai:*"]
     assert [c[0].split("?")[0] for c in stub.calls] == ["https://api.anthropic.com/v1/models"]  # openai never called
     assert stub.calls[0][1]["x-api-key"] == ANTHROPIC_KEY
 
 
-CATALOGUE_IDS = [
-    "anthropic:claude-fable-5-2", "anthropic:claude-haiku-5-5", "anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5-5",
-]
+FALLBACK_IDS = ["anthropic:claude-haiku-5-5", "anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5-5"]
 
 
-def test_anthropic_catalogue_is_listed_when_the_provider_is_configured(client, tenant, monkeypatch):
+def anthropic_page(names, *, has_more=False, last_id=None):
+    return {"data": [{"id": n, "type": "model"} for n in names], "has_more": has_more, "first_id": names[0] if names else None,
+            "last_id": last_id or (names[-1] if names else None)}
+
+
+def test_anthropic_lists_what_the_key_can_use_and_nothing_else(client, tenant, monkeypatch):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:*")
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    install(monkeypatch, Stub({"api.anthropic.com": models_body("claude-sonnet-5-5", "claude-x")}))
+    stub = install(monkeypatch, Stub({"api.anthropic.com": anthropic_page(["claude-sonnet-5-5", "claude-x"])}))
     items = {i["id"]: i for i in get_models(client, tenant)}
-    assert sorted(items) == sorted([*CATALOGUE_IDS, "anthropic:claude-x"])
-    assert items["anthropic:claude-x"]["source"] == "discovered"
-    assert items["anthropic:claude-sonnet-5-5"]["source"] == "discovered"  # the provider listed it itself
-    assert items["anthropic:claude-opus-5-5"]["source"] == "catalogue"
-    assert items["anthropic:claude-fable-5-2"]["capabilities"] == {"image": True, "pdf": True, "source": "static"}
+    assert sorted(items) == ["anthropic:claude-sonnet-5-5", "anthropic:claude-x"]  # no invented extras
+    assert {i["source"] for i in items.values()} == {"discovered"}
+    url, headers = stub.calls[0]
+    assert url.startswith("https://api.anthropic.com/v1/models?limit=") and "after_id" not in url
+    assert headers == {"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"}
 
 
-def test_anthropic_catalogue_survives_a_failed_listing_and_needs_the_key(client, tenant, monkeypatch):
+def test_anthropic_discovery_follows_after_id_pages(client, tenant, monkeypatch):
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:*")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    pages = {None: anthropic_page(["claude-a", "claude-b"], has_more=True), "claude-b": anthropic_page(["claude-c"])}
+    calls = []
+
+    def paged(url, headers, timeout_s):
+        calls.append(url)
+        return pages["claude-b" if "after_id=claude-b" in url else None]
+
+    install(monkeypatch, paged)
+    assert [i["id"] for i in get_models(client, tenant)] == [f"anthropic:claude-{x}" for x in "abc"]
+    assert len(calls) == 2 and "after_id=claude-b" in calls[1]
+
+
+@pytest.mark.parametrize("failure", [model_discovery.HttpStatusError(401), TimeoutError("slow")])
+def test_anthropic_falls_back_to_the_small_catalogue_when_listing_fails(client, tenant, monkeypatch, failure):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:*")
     install(monkeypatch, Stub())
     assert [i["id"] for i in get_models(client, tenant)] == ["anthropic:*"]  # no key: nothing is invented
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     model_discovery.clear_cache()
-    install(monkeypatch, Stub(failures={"api.anthropic.com": model_discovery.HttpStatusError(500)}))
+    install(monkeypatch, Stub(failures={"api.anthropic.com": failure}))
     items = get_models(client, tenant)
-    assert [i["id"] for i in items] == CATALOGUE_IDS and {i["source"] for i in items} == {"catalogue"}
+    assert [i["id"] for i in items] == FALLBACK_IDS and {i["source"] for i in items} == {"fallback"}
     status = model_discovery.provider_status("anthropic")
     assert status.status == "unreachable" and status.error  # the provider page still tells the truth
 
 
-def test_the_catalogue_is_filtered_by_the_allowlist(client, tenant, monkeypatch):
+def test_the_listing_is_filtered_by_the_allowlist(client, tenant, monkeypatch):
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "anthropic:claude-sonnet-5-5,openai:*")
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    install(monkeypatch, Stub({"api.anthropic.com": models_body()}))
+    install(monkeypatch, Stub({"api.anthropic.com": anthropic_page(["claude-sonnet-5-5", "claude-fable-5"])}))
     assert [i["id"] for i in get_models(client, tenant)] == ["anthropic:claude-sonnet-5-5", "openai:*"]
 
 
@@ -266,7 +282,7 @@ def test_a_missing_key_is_not_cached_for_the_full_success_interval(client, tenan
     assert stub.calls == []
     monkeypatch.setattr(model_discovery, "FAILURE_TTL_S", 0.0)
     item = client.get("/api/v1/providers", headers=h).json()["items"][1]
-    assert item["status"] == "ok" and item["model_count"] == 5  # claude-x and the four of the catalogue
+    assert item["status"] == "ok" and item["model_count"] == 1
     assert len(stub.calls) == 1
 
 
