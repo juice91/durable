@@ -120,6 +120,19 @@ def test_deploy_is_manual_dispatch_only():
     assert inputs["allow_untested"]["type"] == "boolean"
 
 
+def test_deploy_skip_drain_input_exports_the_skip_variable_and_reports_it():
+    deploy = _load("deploy.yml")
+    skip = deploy["on"]["workflow_dispatch"]["inputs"]["skip_drain"]
+    assert skip["type"] == "boolean" and skip["default"] == "false"
+    steps = deploy["jobs"]["deploy"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Deploy this revision")
+    assert step["env"]["SKIP_DRAIN"] == "${{ inputs.skip_drain }}"
+    assert '[[ "$SKIP_DRAIN" == true ]]' in step["run"]
+    assert "export PYDANTICOS_SKIP_DRAIN=1" in step["run"]
+    assert "drain was skipped" in step["run"] and "GITHUB_STEP_SUMMARY" in step["run"]
+    assert step["run"].index("PYDANTICOS_SKIP_DRAIN=1") < step["run"].index("deploy/scripts/up.sh")
+
+
 def test_deploy_runs_only_for_the_owner_on_main():
     job = _load("deploy.yml")["jobs"]["deploy"]
     condition = " ".join(job["if"].split())

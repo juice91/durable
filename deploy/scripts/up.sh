@@ -268,6 +268,8 @@ kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
 #    ingestion is idempotent per document and recovers across a worker restart, and a catalogue sync
 #    queues hundreds of them (868 on 2026-11-19, two at a time), so waiting for them failed the deploy.
 #    A release that changes the eap.kb_ingest* step names must set the variable to "" for that deploy.
+# PYDANTICOS_SKIP_DRAIN=1 skips the wait entirely (the Deploy Studio skip_drain input): the API stays up
+# until right before the migration and is scaled back up at the end.
 exclude_kinds=${PYDANTICOS_DRAIN_EXCLUDE_KINDS-kb_ingest}
 exclude_list=""
 if [[ -n "${exclude_kinds//[[:space:],]/}" ]]; then
@@ -291,7 +293,14 @@ if [[ -n "$exclude_list" ]]; then
 fi
 drain_sql+="), count(*) FILTER (WHERE ${excluded_sql}) FROM public.runs r WHERE r.status IN ('queued', 'running') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"
 
+api_exists=0
 if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
+  api_exists=1
+fi
+
+if [[ "${PYDANTICOS_SKIP_DRAIN:-}" == 1 ]]; then
+  printf 'Drain skipped (PYDANTICOS_SKIP_DRAIN=1): queued and running runs are not waited for. The API stays up until right before the migration.\n'
+elif ((api_exists)); then
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
 
@@ -327,7 +336,7 @@ query_active_runs() {
   fi
 }
 
-if kubectl_for_profile -n "$NAMESPACE" get pod/postgres-0 >/dev/null 2>&1; then
+if [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]] && kubectl_for_profile -n "$NAMESPACE" get pod/postgres-0 >/dev/null 2>&1; then
   kubectl_for_profile -n "$NAMESPACE" rollout status statefulset/postgres --timeout=5m
   drain_timeout=${PYDANTICOS_DRAIN_TIMEOUT:-300}
   drain_started=$SECONDS
@@ -420,6 +429,11 @@ if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"
 fi
 
+# Skipped drain: the API took new runs until now. Stop it only for the migration window; it comes back
+# up at the end, after the workers.
+if [[ "${PYDANTICOS_SKIP_DRAIN:-}" == 1 ]] && ((api_exists)); then
+  kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
+fi
 kubectl_for_profile -n "$NAMESPACE" delete job migrate --ignore-not-found --wait=true
 kubectl_for_profile apply -f "$rendered_file"
 kubectl_for_profile -n "$NAMESPACE" rollout status statefulset/postgres --timeout=5m

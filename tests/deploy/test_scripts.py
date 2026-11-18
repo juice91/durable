@@ -601,3 +601,16 @@ def test_drain_exclude_kinds_rejects_unsafe_names(tmp_path: Path):
     assert proc.returncode != 0
     assert "PYDANTICOS_DRAIN_EXCLUDE_KINDS" in proc.stderr
     assert "exec postgres-0" not in _log(env)
+def test_skip_drain_keeps_the_api_up_until_the_migration(tmp_path: Path):
+    env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_SKIP_DRAIN": "1", "STUB_RUNS_COUNTS": "9|0"})
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    log = _log(env)
+    assert "exec postgres-0" not in log
+    assert "drain skipped" in proc.stdout.lower()
+    worker0 = _at(log, "scale statefulset/worker --replicas=0")
+    api0 = _at(log, "scale deployment/api --replicas=0")
+    migrate = _at(log, "delete job migrate")
+    api1 = _at(log, "scale deployment/api --replicas=1", migrate)
+    assert worker0 < api0 < migrate < api1
+    assert log.count("scale deployment/api --replicas=0") == 1
