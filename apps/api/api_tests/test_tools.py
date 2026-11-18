@@ -17,8 +17,10 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
     assert response.status_code == 200
     body = response.json()
     # The kb source sync tools (kb.source.*, settings.connection.check, workflow.run.*) follow the original three.
+    # `http.request` and `workflow.return` come last.
     assert [t["id"] for t in body[3:]] == [
         "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result",
+        "http.request", "workflow.return",
     ]
     assert all(t["allowed"] for t in body[3:])
     assert {t["id"]: t["side_effect"] for t in body[3:]}["kb.source.sync"] is True

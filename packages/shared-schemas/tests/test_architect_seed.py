@@ -19,6 +19,7 @@ from eap_schemas.architect import (
     slugify,
 )
 from eap_schemas.architect_seed import (
+    ARCHITECT_INSTRUCTIONS,
     architect_agent_spec,
     drafter_agent_spec,
     drafter_output_schema,
@@ -175,3 +176,10 @@ def test_the_architect_is_told_to_use_descriptive_ids():
     from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
 
     assert "slug of its name" in ARCHITECT_INSTRUCTIONS and '"definition"' in ARCHITECT_INSTRUCTIONS
+
+
+def test_the_architect_knows_http_request_and_when_to_pick_it():
+    text = ARCHITECT_INSTRUCTIONS
+    assert "http.request" in text and "fetch" in text and "secret:<name>" in text
+    assert "waits for the person's approval" in text and "workflow tool step" in text
+    assert offer_tool("http.request", "HTTP request", "x", side_effect=True) is not None  # not a denied prefix

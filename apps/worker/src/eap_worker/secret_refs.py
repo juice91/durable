@@ -165,6 +165,8 @@ class SecretFunctionToolset(FunctionToolset[Any]):
     async def call_tool(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[Any], tool: ToolsetTool[Any]
     ) -> Any:
+        if name == "http__request":  # resolves its own references (header substrings too) and answers its own codes
+            return await super().call_tool(name, tool_args, ctx, tool)
         return await call_with_secrets(
             self.engine, lambda args: super(SecretFunctionToolset, self).call_tool(name, args, ctx, tool),
             tool_args, ctx,

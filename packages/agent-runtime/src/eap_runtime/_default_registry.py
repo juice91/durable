@@ -17,6 +17,11 @@ def _clock_now(ctx: RunContext[RunDeps]) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _workflow_return(ctx: RunContext[RunDeps], value: Any) -> Any:
+    """Return the value unchanged."""
+    return value
+
+
 def _tickets_create(
     ctx: RunContext[RunDeps],
     title: str,
@@ -57,6 +62,11 @@ def default_registry() -> ToolRegistry:
     registry.register(
         TOOL_DECLARATIONS["clock.now"],
         _clock_now,
+    )
+
+    registry.register(
+        TOOL_DECLARATIONS["workflow.return"],
+        _workflow_return,
     )
 
     registry.register(

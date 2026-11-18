@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Iterable
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -73,6 +74,41 @@ class SecretsRequestInput(BaseModel):
 
     name: str
     purpose: str
+
+
+HTTP_REQUEST_TOOL_ID = "http.request"
+HTTP_MAX_RESPONSE_BYTES_CAP = 262144
+
+
+with warnings.catch_warnings():
+    # The tool's argument is named `json` (what a caller writes); it shadows BaseModel.json, which
+    # nothing here uses.
+    warnings.simplefilter("ignore", UserWarning)
+
+    class HttpRequestInput(BaseModel):
+        """Input for ``http.request``: one HTTPS request. `json` xor `body` (`body_conflict` otherwise; the
+        tool checks it). `https` only (`url_not_https`, checked by the tool). Any string equal to
+        ``secret:<name>`` (a header value may contain one) is the tenant's stored secret at send time."""
+
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+        url: str
+        headers: dict[str, str] | None = None
+        query: dict[str, str] | None = None
+        json: Any = None
+        body: str | None = None
+        timeout_s: int = Field(default=20, ge=1, le=30)
+        max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
+        drop_response_paths: list[Annotated[str, Field(pattern=r"^/")]] | None = Field(default=None, max_length=16)
+
+
+class WorkflowReturnInput(BaseModel):
+    """Input for ``workflow.return``: any JSON value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: Any
 
 
 class KbSourceGetInput(BaseModel):
@@ -206,6 +242,30 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         side_effect=False,
         external_idempotent=False,
         input_model=WorkflowRunResultInput,
+    ),
+    "http.request": ToolDeclaration(
+        id="http.request",
+        title="HTTP request",
+        description=(
+            "Send one HTTPS request (GET, POST, PUT, PATCH or DELETE) with optional headers, query and a JSON or "
+            "text body, and return {status, ok, headers, json or text, elapsed_ms}. A non-2xx status is a result, "
+            "not an error. Put a credential as secret:<name>; it is replaced at send time and never shown. "
+            "Private and metadata addresses are refused and redirects are not followed"
+        ),
+        side_effect=True,
+        external_idempotent=False,
+        input_model=HttpRequestInput,
+    ),
+    "workflow.return": ToolDeclaration(
+        id="workflow.return",
+        title="Return a value",
+        description=(
+            "Return the given value unchanged. As a workflow's last step it shapes the run's output; with a value "
+            "{error: {code, message}} it ends the run with that stable error code"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=WorkflowReturnInput,
     ),
 }
 
