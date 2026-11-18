@@ -294,7 +294,7 @@ def _report(run: dict[str, Any], sync: Any) -> dict[str, Any]:
         "checkpoint": report.get("checkpoint") if isinstance(report.get("checkpoint"), dict) else {},
         "errors": (errors if isinstance(errors, list) else list(sync.bounded_errors or []))[:MAX_REPORT_ERRORS],
     }
-    for name in ("complete", "stop_reason", "error_code", "removed", "budget", "source_revision"):
+    for name in ("complete", "stop_reason", "error_code", "removed", "budget", "source_revision", "diagnostics"):
         if name in report:
             out[name] = report[name]
     return out

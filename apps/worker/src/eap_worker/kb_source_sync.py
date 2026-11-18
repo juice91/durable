@@ -567,12 +567,44 @@ async def segment_step(
     if next_cursor is not None and len(json.dumps(next_cursor, separators=(",", ":")).encode("utf-8")) > MAX_CURSOR_BYTES:
         return {"fatal": PROVIDER_ERROR, "message": "the adapter cursor is over 8 KiB", "counters": result.counters.as_dict(), "errors": []}
     errors = secrets.scrub([{k: str(v)[:200] for k, v in e.items()} for e in result.errors[:MAX_SEGMENT_ERRORS]])
-    return {
+    out = {
         "next_cursor": next_cursor, "complete": bool(result.complete), "counters": result.counters.as_dict(),
         "errors": errors, "calls_used": int(result.calls_used), "sweep_ok": bool(result.sweep_ok),
         "source_revision": (str(result.source_revision)[:200] if result.source_revision else None),
         "budget": result.budget if _small(result.budget) else None,
     }
+    diagnostics = _bounded_diagnostics(result.diagnostics, secrets)
+    if diagnostics:
+        out["diagnostics"] = diagnostics
+    return out
+
+
+MAX_DIAGNOSTIC_ENTRIES = 3  # per list in a run's diagnostics
+MAX_DIAGNOSTICS_BYTES = 4096
+
+
+def _bounded_diagnostics(value: Any, secrets: Any) -> dict[str, Any] | None:
+    """The adapter's value-free diagnostics, scrubbed of secret values and cut to a bounded size."""
+    if not isinstance(value, dict) or not value:
+        return None
+    cut = {k: (v[:MAX_DIAGNOSTIC_ENTRIES] if isinstance(v, list) else v) for k, v in value.items()}
+    try:
+        cut = secrets.scrub(json.loads(json.dumps(cut, default=str)))
+    except (TypeError, ValueError):
+        return None
+    return cut if len(json.dumps(cut, separators=(",", ":")).encode("utf-8")) <= MAX_DIAGNOSTICS_BYTES else None
+
+
+def _merge_diagnostics(state: dict[str, Any], new: dict[str, Any] | None) -> None:
+    """Keep the first few entries per key across the run's segments."""
+    if not new:
+        return
+    have = state.setdefault("diagnostics", {})
+    for key, value in new.items():
+        if isinstance(value, list):
+            have[key] = [*have.get(key, []), *value][:MAX_DIAGNOSTIC_ENTRIES]
+        else:
+            have.setdefault(key, value)
 
 
 @DBOS.workflow(name=SEGMENT_WORKFLOW_NAME)
@@ -637,6 +669,7 @@ def _report(state: dict[str, Any], status: str, now: datetime) -> dict[str, Any]
         "calls_used": state["calls_used"], "started_at": state["started_at"], "completed_at": now.isoformat(),
         "removed": state.get("removed", 0), "budget": state.get("budget") or {},
         "source_revision": state.get("source_revision"),
+        **({"diagnostics": state["diagnostics"]} if state.get("diagnostics") else {}),
     }
 
 
@@ -805,6 +838,7 @@ async def _drive(
         if room > 0:
             state["errors"].extend(out["errors"][:room])
         state["segments"] = n
+        _merge_diagnostics(state, out.get("diagnostics"))
         if out.get("fatal"):
             return await _fail(run_id, tenant_id, source_id, out["fatal"], out.get("message", ""), state)
         state["calls_used"] += out["calls_used"]

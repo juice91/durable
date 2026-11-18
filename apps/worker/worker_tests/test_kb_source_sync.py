@@ -502,3 +502,26 @@ def test_the_workflow_and_step_names_are_frozen():
         "eap.kb_source_start", "eap.kb_source_sync_segment", "eap.kb_source_checkpoint", "eap.kb_source_finalize",
         "eap.kb_source_mark_failed",
     )
+
+
+def test_adapter_diagnostics_reach_the_report_and_the_run_output_bounded_and_scrubbed(env, fake):
+    from dataclasses import replace
+
+    original = fake.sync_segment
+
+    async def with_diagnostics(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        page = {"page": 0, "http_status": 200, "json_type": "object", "keys": ["Rows"], "expected": "expected key Content"}
+        return replace(result, diagnostics={"listing": [page] * 10})
+
+    fake.sync_segment = with_diagnostics
+    run_id, result = start(env, {"mode": "full"})
+    rep = report(result)
+    assert 1 <= len(rep["diagnostics"]["listing"]) <= 3 and rep["diagnostics"]["listing"][0]["keys"] == ["Rows"]
+    stored = json.loads(env.rt.run_store.get_run(env.tenant, run_id)["output"])
+    assert stored["diagnostics"] == rep["diagnostics"]
+
+
+def test_a_sync_without_diagnostics_has_no_diagnostics_key(env, fake):
+    _, result = start(env, {"mode": "full"})
+    assert "diagnostics" not in report(result)

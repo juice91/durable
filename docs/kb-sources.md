@@ -80,7 +80,7 @@ curl -sf -X POST "$API/workflows/$WF/versions" -H "$AUTH" | jq .warnings   # []
 
 Run it: `POST /workflows/$WF/runs` with `{"input": {"source_id": "...", "mode": "targeted", "part_numbers": ["<orderable part>"]}}`; poll
 `GET /runs/{run_id}`; the run's `output` is the bounded report (`discovered`, `inserted`, `updated`, `unchanged`,
-`documents_queued`, `failed`, `errors` up to 50, `checkpoint`, `complete`, `stop_reason`, `budget`, `source_revision`).
+`documents_queued`, `failed`, `errors` up to 50, `checkpoint`, `complete`, `stop_reason`, `budget`, `source_revision`, and `diagnostics` when an adapter reported something that looked wrong, e.g. a catalogue page that parsed to no products).
 Cancel with `POST /runs/{run_id}/cancel`: the child sync is cancelled too and keeps its checkpoint. Schedule an incremental
 sync with a workflow schedule of this workflow and the input `{"source_id": "...", "mode": "incremental"}`.
 
