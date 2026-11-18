@@ -11,7 +11,8 @@ Each spec evaluator (eap_schemas.evals) becomes a `pydantic_evals` evaluator, us
 | `contains`        | `pydantic_evals` `Contains` (value default: the case's expected output)    |
 | `max_duration`    | `pydantic_evals` `MaxDuration`                                             |
 | `regex`           | ours, `Regex`: RE2 search (eap_processors.compile_re2) on the output text   |
-|                   | (canonical JSON if structured)                                             |
+|                   | (canonical JSON if structured), or on the string at `field`; `negate`      |
+|                   | passes when it does not match                                              |
 | `schema_valid`    | ours, `SchemaValid` (default schema: the agent's `output.json_schema`)     |
 | `field_equals`    | ours, `FieldEquals` (eap_schemas.evals.field_path_value)                   |
 | `max_cost`        | ours, `MaxCost`: the child run's recorded cost (agent only, judge excluded) |
@@ -219,9 +220,13 @@ class ContainsText(Contains):
 
 @dataclass(repr=False)
 class Regex(Evaluator[object, object, object]):
-    """`regex`: an RE2 search on the output text (canonical JSON for a structured output)."""
+    """`regex`: an RE2 search on the output text (canonical JSON for a structured output), or, with
+    `field`, on the string at that dotted path (a text output is read as JSON, as `field_equals`
+    does; a missing or non-string field fails). `negate`: passes when the pattern does not match."""
 
     pattern: str
+    negate: bool = False
+    field: str | None = None
 
     def evaluate(self, ctx: EvaluatorContext[object, object, object]) -> EvaluationReason:
         # The processors' compile (cached, max_mem, program-size bound, log_errors off, so RE2 never
@@ -230,8 +235,20 @@ class Regex(Evaluator[object, object, object]):
             regexp = compile_re2(self.pattern, allow_empty_match=True)
         except Re2PatternError:
             raise EvaluatorUnavailable(REGEX_INVALID) from None
-        found = regexp.search(output_text(ctx.output)) is not None
-        return EvaluationReason(value=found, reason=None if found else "the output does not match the pattern")
+        if self.field is None:
+            text = output_text(ctx.output)
+        else:
+            ok, output = _parsed(ctx.output)
+            found, actual = field_path_value(output, self.field) if ok else (False, None)
+            if not found:
+                return EvaluationReason(value=False, reason=f"the output has no field at {self.field}")
+            if not isinstance(actual, str):
+                return EvaluationReason(value=False, reason=f"the field at {self.field} is not a string")
+            text = actual
+        matched = regexp.search(text) is not None
+        if self.negate:
+            return EvaluationReason(value=not matched, reason="pattern matched but must not" if matched else None)
+        return EvaluationReason(value=matched, reason=None if matched else "pattern did not match")
 
 
 @dataclass(repr=False)
@@ -304,7 +321,7 @@ def build_evaluator(
     if kind == "max_duration":
         return MaxDuration(seconds=parsed.seconds)
     if kind == "regex":
-        return Regex(pattern=parsed.pattern)
+        return Regex(pattern=parsed.pattern, negate=parsed.negate, field=parsed.field)
     if kind == "schema_valid":
         return SchemaValid(json_schema=parsed.json_schema)
     if kind == "field_equals":

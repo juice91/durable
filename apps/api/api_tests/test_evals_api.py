@@ -780,6 +780,7 @@ EXPORT_EVALUATORS = [
     {"kind": "contains", "value": "hi", "case_sensitive": False, "name": "has_hi"},
     {"kind": "contains", "name": "has_expected"},
     {"kind": "regex", "pattern": "^h.*$", "name": "rx"},
+    {"kind": "regex", "pattern": "https?://", "negate": True, "field": "post", "name": "no_url"},
     {"kind": "schema_valid", "json_schema": {"type": "object"}},
     {"kind": "field_equals", "path": "a.0", "value": None, "name": "fe"},
     {"kind": "max_duration", "seconds": 2.5},
@@ -806,11 +807,13 @@ def test_export_loads_with_real_pydantic_evals(fmt, tmp_path):
     path.write_text(dump_dataset(dataset_dict("S", suite_evaluators, cases), fmt), encoding="utf-8")
     loaded = _real_pydantic_evals(path)
     assert [name for name, _ in loaded["evaluators"]] == [
-        "EqualsExpected", "EqualsExpected", "Contains", "ContainsExpected", "Regex", "SchemaValid", "FieldEquals",
+        "EqualsExpected", "EqualsExpected", "Contains", "ContainsExpected", "Regex", "Regex", "SchemaValid", "FieldEquals",
         "MaxDuration", "NamedMaxDuration", "MaxCost",
     ]
     judges = loaded["cases"][0]["evaluators"]
     assert [name for name, _ in judges] == ["LLMJudge", "ThresholdLLMJudge", "LLMJudge"]
+    assert loaded["evaluators"][5][1] == {
+        "pattern": "https?://", "negate": True, "field": "post", "evaluation_name": "no_url"}
     assert judges[0][1]["assertion"] == {"evaluation_name": "polite"}
     assert judges[0][1]["include_expected_output"] is True
     assert [c["name"] for c in loaded["cases"]] == ["c1", "c2"]
