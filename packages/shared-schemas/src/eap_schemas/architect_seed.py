@@ -329,7 +329,7 @@ _STRUCTURED_FAMILIES = re.compile(
 )
 # Models that are not text chat models (or are tuned away from tool schemas): embeddings, rerankers,
 # speech, coder and medical tunes, vision-only ("-vl-") models.
-_UNSUITABLE = re.compile(r"embed|rerank|whisper|tts|coder|(?<![a-z])med(?![a-z])|medgemma|(?<![a-z0-9])vl(?![a-z0-9])")
+_UNSUITABLE = re.compile(r"embed|embedding|rerank|whisper|tts|coder|(?<![a-z])med(?![a-z])|medgemma|(?<![a-z0-9])vl(?![a-z0-9])")
 _QUANTISED = re.compile(r"(?<![a-z0-9])(?:[248]bit|q[2-8](?:_[a-z0-9_]+)?|gguf|mlx)(?![a-z0-9])")
 
 

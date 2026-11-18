@@ -192,3 +192,20 @@ def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_
     assert "collect with http.request" in text and "dry-run" in text
     for provider_specific in ("Bluesky", "LTN", "Yahoo", "MLB"):
         assert provider_specific not in text
+
+
+def test_the_picker_prefers_a_general_chat_model_over_tunes_code_embedding_and_medical_names():
+    from eap_schemas.architect_seed import rank_model_ids
+
+    names = [
+        "Qwen3-VL-Embedding-8B", "medgemma-27b", "Qwen3-Coder-30B", "CausalLM-34b-beta-4bit",
+        "text-embedding-3-small", "Qwen3.6-35B-A3B",
+    ]
+    assert pick_seed_model([("litellm", names)], []) == "litellm:Qwen3.6-35B-A3B"
+    ranked = rank_model_ids([f"litellm:{n}" for n in names])
+    assert ranked[0] == "litellm:Qwen3.6-35B-A3B"
+    for unsuitable in ("Qwen3-VL-Embedding-8B", "medgemma-27b", "Qwen3-Coder-30B", "text-embedding-3-small"):
+        assert ranked.index(f"litellm:{unsuitable}") > ranked.index("litellm:CausalLM-34b-beta-4bit")
+    # a direct Anthropic model still leads, and the newest catalogue names count as a known family
+    both = [("litellm", names), ("anthropic", ["claude-sonnet-5-5", "claude-fable-5-2"])]
+    assert pick_seed_model(both, []).startswith("anthropic:claude-")

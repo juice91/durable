@@ -127,10 +127,9 @@ def seed_model() -> str | None:
     policy = ModelPolicy.from_env()
     provider_models = []
     for status in model_discovery.all_provider_statuses():
-        if status.status == "ok":
-            names = [m.name for m in status.models if policy.allows(status.id, m.name)]
-            if names:
-                provider_models.append((status.id, names))
+        names = [m.name for m in status.models if policy.allows(status.id, m.name)]  # a catalogue counts too
+        if names:
+            provider_models.append((status.id, names))
     fallback = [item["id"] for item in model_items(policy) if not item["wildcard"]]
     return pick_seed_model(provider_models, fallback)
 

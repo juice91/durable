@@ -337,6 +337,21 @@ def test_the_allowlist_lists_models_best_first_and_the_default_is_the_ranked_pic
     assert [m.id for m in models][-1] == "litellm:bge-reranker"
 
 
+def test_anthropic_wildcard_lists_the_catalogue_when_the_key_is_set_and_the_policy_allows_it():
+    from eap_worker.architect_allowlist import models_from_settings
+
+    settings = SimpleNamespace(allowed_models=ModelPolicy.parse("litellm:*,anthropic:*"), litellm_base_url="http://gw",
+                               litellm_api_key=None)
+    got = models_from_settings(settings, gateway=lambda _u, _k: ["qwen3.8"], environ={"ANTHROPIC_API_KEY": "k"})
+    ids = [m.id for m in got]
+    assert {"anthropic:claude-fable-5-2", "anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5-5",
+            "anthropic:claude-haiku-5-5", "litellm:qwen3.8"} == set(ids)
+    assert ids[0].startswith("anthropic:claude-")  # the ranked pick is a general chat model
+    assert not [m for m in models_from_settings(settings, gateway=lambda _u, _k: [], environ={}) if m.provider == "anthropic"]
+    exact = SimpleNamespace(allowed_models=ModelPolicy.parse("anthropic:claude-sonnet-5-5"), litellm_base_url=None)
+    assert [m.id for m in models_from_settings(exact, environ={"ANTHROPIC_API_KEY": "k"})] == ["anthropic:claude-sonnet-5-5"]
+
+
 def test_save_agent_without_a_model_uses_the_ranked_model_not_the_first_listed(engine, tenant):
     models = tuple(AllowlistModel(id=f"litellm:{n}", provider="litellm")
                    for n in ("CausalLM-34b-beta-4bit", "qwen3.8-thinking", "qwen3.8"))
