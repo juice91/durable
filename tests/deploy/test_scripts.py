@@ -614,3 +614,19 @@ def test_skip_drain_keeps_the_api_up_until_the_migration(tmp_path: Path):
     api1 = _at(log, "scale deployment/api --replicas=1", migrate)
     assert worker0 < api0 < migrate < api1
     assert log.count("scale deployment/api --replicas=0") == 1
+def test_failed_drain_scales_the_api_back_up(tmp_path: Path):
+    env = _env(
+        tmp_path,
+        _install_stubs(tmp_path),
+        {"STUB_RUNS_COUNTS": "3|0", "PYDANTICOS_DRAIN_TIMEOUT": "0", "STUB_API_REPLICAS": "2"},
+    )
+    proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
+    assert proc.returncode == 1
+    assert "Timed out" in proc.stderr
+    log = _log(env)
+    api0 = _at(log, "scale deployment/api --replicas=0")
+    _at(log, "scale deployment/api --replicas=2", api0)
+    assert "scale statefulset/worker --replicas=0" not in log
+    assert "scaled back to 2" in proc.stderr
+
+

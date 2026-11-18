@@ -293,10 +293,22 @@ if [[ -n "$exclude_list" ]]; then
 fi
 drain_sql+="), count(*) FILTER (WHERE ${excluded_sql}) FROM public.runs r WHERE r.status IN ('queued', 'running') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"
 
+# The API's replica count before this deploy, so a failed drain can put it back.
+api_replicas=1
 api_exists=0
 if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
   api_exists=1
+  current_replicas=$(kubectl_for_profile -n "$NAMESPACE" get deployment/api -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+  if [[ "$current_replicas" =~ ^[1-9][0-9]*$ ]]; then api_replicas=$current_replicas; fi
 fi
+
+# A failed drain must not leave the platform down: put the API back to what it was.
+restore_api() {
+  if ((api_exists)) && [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]]; then
+    kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas="$api_replicas" >&2 || true
+    printf 'The API was scaled back to %s.\n' "$api_replicas" >&2
+  fi
+}
 
 if [[ "${PYDANTICOS_SKIP_DRAIN:-}" == 1 ]]; then
   printf 'Drain skipped (PYDANTICOS_SKIP_DRAIN=1): queued and running runs are not waited for. The API stays up until right before the migration.\n'
@@ -342,7 +354,7 @@ if [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]] && kubectl_for_profile -n "$NAMESPACE
   drain_started=$SECONDS
   excluded_reported=0
   while true; do
-    counts=$(query_active_runs)
+    counts=$(query_active_runs) || { restore_api; exit 1; }
     active_runs=${counts%%|*}
     excluded_runs=${counts#*|}
     if ((! excluded_reported && excluded_runs > 0)); then
@@ -353,7 +365,8 @@ if [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]] && kubectl_for_profile -n "$NAMESPACE
       break
     fi
     if (( SECONDS - drain_started >= drain_timeout )); then
-      printf 'Timed out after %s seconds waiting for queued and running runs to finish (%s still active). The API is scaled to 0, so it accepts no new runs. Let the workers finish those runs, then rerun up.sh.\n' "$drain_timeout" "$active_runs" >&2
+      printf 'Timed out after %s seconds waiting for queued and running runs to finish (%s still active). Scaling the API back to %s replicas so the platform stays up; rerun up.sh once the runs have finished (or set PYDANTICOS_SKIP_DRAIN=1).\n' "$drain_timeout" "$active_runs" "$api_replicas" >&2
+      restore_api
       exit 1
     fi
     sleep 5

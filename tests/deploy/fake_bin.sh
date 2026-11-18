@@ -81,6 +81,8 @@ case "$tool" in
     elif [[ "$verb" == exec && " $* " == *" psql "* ]]; then
       # The drain query: "<active>|<excluded>" (STUB_RUNS_COUNTS), 0|0 by default.
       printf '%s\n' "${STUB_RUNS_COUNTS:-0|0}"
+    elif [[ "$verb" == get && " $* " == *" get deployment/api "* && " $* " == *" jsonpath"* ]]; then
+      printf '%s' "${STUB_API_REPLICAS:-1}"
     elif [[ "$verb" == get && " $* " == *" get svc kubernetes "* ]]; then
       printf '%s' '10.43.0.1'
     elif [[ "$verb" == get && " $* " == *" get endpoints kubernetes "* ]]; then
