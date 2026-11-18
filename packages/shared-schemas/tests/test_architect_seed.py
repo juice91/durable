@@ -209,3 +209,12 @@ def test_the_picker_prefers_a_general_chat_model_over_tunes_code_embedding_and_m
     # a direct Anthropic model still leads, and the newest catalogue names count as a known family
     both = [("litellm", names), ("anthropic", ["claude-sonnet-5-5", "claude-fable-5-2"])]
     assert pick_seed_model(both, []).startswith("anthropic:claude-")
+
+
+def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rule_stays_in_the_drafter():
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS, WORKFLOW_DRAFTER_INSTRUCTIONS
+
+    flat = " ".join(ARCHITECT_INSTRUCTIONS.split())
+    assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
+    assert "1 to 8" not in flat and "8 steps" not in flat
+    assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
