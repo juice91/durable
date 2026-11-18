@@ -317,6 +317,12 @@ def _list_created(engine: Engine, tenant_id: str, kind: _Kind) -> list[dict[str,
                 "versions": len(history),
                 "latest_created_via": history[0]["created_via"] if history else None,
                 "draft": latest is None or row["draft_spec"] != latest["spec"],
+                # What is live: the published version (null = never published, so only a draft exists) and whether
+                # the draft has changes the published version does not. Archived definitions are left out of this
+                # listing, so `archived` is always false here (platform.list_workflows / list_agents show them).
+                "published_version": latest["version"] if latest is not None else None,
+                "draft_pending": latest is not None and row["draft_spec"] != latest["spec"],
+                "archived": False,
             })
     return out
 
@@ -907,7 +913,7 @@ async def _list_approved_tools(ctx: RunContext[RunDeps]) -> dict[str, Any]:
 
 
 async def _list_created_agents(ctx: RunContext[RunDeps]) -> dict[str, Any]:
-    """The agents the Architect made: id, name, number of versions, who made the latest version, draft."""
+    """The agents the Architect made: id, name, versions, published_version (null = never published: a draft), draft_pending (the draft has changes the published version lacks), archived."""
     return await list_created_agents(_engine(), ctx.deps.tenant_id)
 
 
@@ -917,7 +923,7 @@ async def _list_agent_versions(ctx: RunContext[RunDeps], id: str) -> dict[str, A
 
 
 async def _list_created_workflows(ctx: RunContext[RunDeps]) -> dict[str, Any]:
-    """The workflows the Architect made: id, name, number of versions, who made the latest version, draft."""
+    """The workflows the Architect made: id, name, versions, published_version (null = never published: a draft), draft_pending (the draft has changes the published version lacks), archived."""
     return await list_created_workflows(_engine(), ctx.deps.tenant_id)
 
 
