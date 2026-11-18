@@ -22,7 +22,7 @@ from eap_run_store.kb_sources import (
 )
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
-REFS = {"client_id": "secret:ti-client-id", "client_secret": "secret:ti-client-secret"}
+REFS = {"client_id": "secret:conn-client-id", "client_secret": "secret:conn-client-secret"}
 URL = "https://www.ti.com/lit/ds/symlink/lm317.pdf"
 
 

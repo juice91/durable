@@ -31,7 +31,7 @@ from worker_tests.kb_ingest_helpers import cleanup_knowledge, create_kb
 
 IDS = ("kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result")
 SENTINEL = "sentinel-client-secret-VALUE-0002"
-REFS = {"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}
+REFS = {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}
 
 
 class Adapter(FakeCatalogAdapter):
@@ -156,8 +156,8 @@ def test_connection_check_codes_and_no_leak(env):
                                                connection_id=cid or env.conn.id)
     assert check()["error_code"] == "secret_missing"
     store = SecretStore(env.rt.engine, load_keyring())
-    store.put(env.tenant, "ti-id", "id-value", "t")
-    store.put(env.tenant, "ti-secret", SENTINEL, "t")
+    store.put(env.tenant, "conn-id", "id-value", "t")
+    store.put(env.tenant, "conn-secret", SENTINEL, "t")
     ok = check()
     assert ok["ok"] is True and ok["error_code"] is None and ok["checked_at"]
     assert SENTINEL not in json.dumps(ok) and env.adapter.secret_values[-1]["client_secret"] == SENTINEL

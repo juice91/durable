@@ -441,10 +441,10 @@ def test_secret_values_absent_from_events_and_outputs(env, fake, worker, monkeyp
     monkeypatch.setenv(KEY_ENV, generate_key())
     secret, ident = "client-secret-VALUE-0123456789", "client-id-VALUE-9876543210"
     store = SecretStore(worker.engine, load_keyring())
-    store.put(env.tenant, "ti-secret", secret, "u1")
-    store.put(env.tenant, "ti-id", ident, "u1")
+    store.put(env.tenant, "conn-secret", secret, "u1")
+    store.put(env.tenant, "conn-id", ident, "u1")
     ConnectionStore(env.engine).update(
-        env.tenant, env.connection.id, credential_refs={"client_id": "secret:ti-id", "client_secret": "secret:ti-secret"}
+        env.tenant, env.connection.id, credential_refs={"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}
     )
     fake.fail = {"FAKE0002": "provider_error"}
     run_id, result = start(env, {"mode": "targeted", "part_numbers": ["FAKE0001", "FAKE0002"]})

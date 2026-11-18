@@ -40,7 +40,7 @@ SENTINEL_ID = "SENTINEL-CLIENT-ID-5c1e"
 SENTINEL_SECRET = "SENTINEL-CLIENT-SECRET-7f3a"
 SENTINELS = (SENTINEL_ID, SENTINEL_SECRET, TOKEN_PREFIX)
 TERMINAL = ("completed", "failed", "needs_attention", "cancelled")
-REFS = {"client_id": "secret:ti-client-id", "client_secret": "secret:ti-client-secret"}
+REFS = {"client_id": "secret:conn-client-id", "client_secret": "secret:conn-client-secret"}
 
 
 def datasheet(orderable: str, revision: int) -> bytes:
@@ -97,8 +97,8 @@ class Stack:
 
     def bootstrap(self, *, source_config: dict[str, Any] | None = None) -> None:
         """Secrets -> connection -> check -> knowledge base -> source -> published workflow (the guide's order)."""
-        self.call("PUT", "/secrets/ti-client-id", expect=200, json={"value": SENTINEL_ID})
-        self.call("PUT", "/secrets/ti-client-secret", expect=200, json={"value": SENTINEL_SECRET})
+        self.call("PUT", "/secrets/conn-client-id", expect=200, json={"value": SENTINEL_ID})
+        self.call("PUT", "/secrets/conn-client-secret", expect=200, json={"value": SENTINEL_SECRET})
         conn = self.call("POST", "/settings/connections", expect=201, json={
             "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://api.vendor.example",
             "config": {"provider": "acme_catalog", "allowed_hosts": ["api.vendor.example", "www.ti.com"]},
