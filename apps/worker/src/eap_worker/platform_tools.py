@@ -809,6 +809,9 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.kb_source_tools import register_kb_source_tools
 
     register_kb_source_tools(registry)
+    from eap_worker.http_tool import register_http_tool
+
+    register_http_tool(registry)
 
 
 __all__ = [

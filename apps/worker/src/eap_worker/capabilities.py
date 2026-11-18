@@ -77,7 +77,7 @@ from typing import Any
 from uuid import UUID
 
 from dbos import DBOS
-from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai import ApprovalRequired, ModelRetry, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic import ValidationError
 from pydantic_ai.messages import ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart, ToolReturnPart
@@ -87,7 +87,9 @@ from pydantic_core import to_jsonable_python
 
 from eap_run_store.approvals import decision_event_key, tool_approval_topic
 from eap_schemas import AgentSpec, approval_required_tool_names
-from eap_schemas.approvals import EVAL_DENIED_MESSAGE, TIMED_OUT_MESSAGE, denial_message
+from eap_schemas.approvals import DEFAULT_APPROVAL_TIMEOUT_HOURS, EVAL_DENIED_MESSAGE, TIMED_OUT_MESSAGE, denial_message
+from eap_schemas.http_request import http_request_secret_names
+from eap_schemas.tools import HTTP_REQUEST_TOOL_ID, builtin_tool_name
 from eap_schemas.output import MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_ERRORS, OUTPUT_TOOL_NAME
 from eap_worker.crash import crash_point
 from eap_worker.runtime import get_runtime
@@ -389,6 +391,17 @@ def _call_args(call: ToolCallPart) -> Any:
         return {}
 
 
+HTTP_REQUEST_TOOL_NAME = builtin_tool_name(HTTP_REQUEST_TOOL_ID)
+
+
+def _names_secret(args: Any) -> bool:
+    return bool(http_request_secret_names(args))
+
+
+def _http_call_with_secret(call: ToolCallPart) -> bool:
+    return call.tool_name == HTTP_REQUEST_TOOL_NAME and _names_secret(_call_args(call))
+
+
 def _approval_summary(call: ToolCallPart) -> str | None:
     """The registry's summary of a gated call, or None (no summariser, an MCP or client tool, or a
     summariser that fails: the card then shows the arguments alone)."""
@@ -654,18 +667,30 @@ class SpecCapability(AbstractCapability[Any]):
             for td in tool_defs
         ]
 
+    async def after_tool_validate(
+        self, ctx: RunContext[Any], *, call: ToolCallPart, tool_def: ToolDefinition, args: Any
+    ) -> Any:
+        """`http.request` is gated per call: one whose arguments name a secret (`secret:<name>`) needs a
+        person's approval, whatever the spec's `approvals`; one without runs as any tool. Pure (the
+        approved re-run passes)."""
+        if tool_def.name == HTTP_REQUEST_TOOL_NAME and not ctx.tool_call_approved and _names_secret(args):
+            raise ApprovalRequired()
+        return args
+
     async def handle_deferred_tool_calls(
         self, ctx: RunContext[Any], *, requests: DeferredToolRequests
     ) -> DeferredToolResults | None:
         spec = getattr(ctx.deps, "spec", None)
-        if getattr(spec, "approvals", None) is None or not requests.approvals:
+        if not requests.approvals:
             return None  # external calls (`requests.calls`) are never produced by our specs
-        gated = approval_required_tool_names(spec)
-        calls = [c for c in requests.approvals if c.tool_name in gated]
+        gated = approval_required_tool_names(spec) if getattr(spec, "approvals", None) is not None else set()
+        calls = [c for c in requests.approvals if c.tool_name in gated or _http_call_with_secret(c)]
         if not calls:
             return None
+        approvals = getattr(spec, "approvals", None)
         results = await wait_for_tool_approvals(
-            str(ctx.deps.run_id), ctx.deps.tenant_id, calls, spec.approvals.effective_timeout_hours(),
+            str(ctx.deps.run_id), ctx.deps.tenant_id, calls,
+            approvals.effective_timeout_hours() if approvals is not None else DEFAULT_APPROVAL_TIMEOUT_HOURS,
             current_approval_settings(),
             # The response's model request n (run_step counts requests from 1), as in `model:{n}:final`.
             model_request=ctx.run_step - 1,

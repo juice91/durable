@@ -11,7 +11,7 @@ data:
   EAP_LITELLM_EMBEDDING_BASE_URL: http://host.lima.internal:4001
   EAP_ALLOWED_MODELS: "litellm:*,anthropic:*"
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
-  EAP_ALLOWED_TOOLS: "clock.now,secrets.request,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
+  EAP_ALLOWED_TOOLS: "clock.now,secrets.request,http.request,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
   EAP_LOKI_URL: http://lgtm:3100
   # Chat attachment bytes live in Cloudflare R2 (S3 API), reached over HTTPS 443. The endpoint holds the account id, which
   # is not a secret; the access key and secret come from the Secret (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY). The bucket is created by the operator.

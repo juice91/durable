@@ -7,10 +7,10 @@ import pytest
 from eap_runtime import ToolRegistry, default_registry
 from eap_schemas.tools import ClockNowInput, TOOL_DECLARATIONS, ToolDeclaration
 
-# Declared here, bound by the worker (eap_worker.platform_tools; eap_worker.kb_source_tools): they read the
+# Declared here, bound by the worker (eap_worker.platform_tools; eap_worker.kb_source_tools; eap_worker.http_tool): they read the
 # tenant's secret store, the knowledge-base source tables and the run rows.
 WORKER_BOUND_TOOL_IDS = frozenset({
-    "secrets.request", "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
+    "secrets.request", "http.request", "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
     "workflow.run.result",
 })
 
