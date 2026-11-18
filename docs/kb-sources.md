@@ -86,7 +86,7 @@ sync with a workflow schedule of this workflow and the input `{"source_id": "...
 
 `GET /knowledge-bases/{kb}/sources/{src}/syncs` lists the sync runs and `.../syncs/{run_id}` returns the report.
 
-Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page, e.g. `docs/providers/texas-instruments.md`.
+Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: Acme Semiconductor product catalogue (`docs/providers/texas-instruments.md`, source kind `product_catalog`); GitHub repository documents (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`).
 
 ## 5. Staged live tests
 
