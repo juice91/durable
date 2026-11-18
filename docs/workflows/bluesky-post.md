@@ -51,7 +51,12 @@ the reference is all that is needed.
     "json": {
       "identifier": "example-account.pds.example.social",
       "password": "secret:bluesky-app-password"
-    }
+    },
+    "drop_response_paths": [
+      "/refreshJwt",
+      "/email",
+      "/emailConfirmed"
+    ]
   },
   "next": "login_gate"
 }
@@ -211,10 +216,12 @@ otherwise `result` shapes the output.
 
 ## Things to know
 
-- **Session tokens are recorded.** The `session` step's output is the login answer, which holds the account's
-  `accessJwt` and `refreshJwt`, and the `post` step's recorded input holds `Bearer <accessJwt>`. They are not the
-  password (which is never recorded) but they are credentials: anyone who can read the run's events can read them.
-  Treat run access accordingly.
+- **The access token is recorded, the refresh token is not.** `session` drops `/refreshJwt`, `/email` and
+  `/emailConfirmed` from the login answer (`drop_response_paths`) before it becomes the step output, so they never
+  reach the events, spans or checkpoints. `accessJwt` (valid for about two hours) is still recorded in the step
+  output, because the next step needs it. The `post` step's recorded input shows the Authorization header masked.
+  The password itself is never recorded. Anyone who can read the run's events can still read the access token
+  while it is valid; treat run access accordingly.
 - A post is not idempotent. A tool step that was started and whose outcome is unknown after a worker crash ends
   the run `needs_attention` instead of posting twice.
 - Rate limits: a 429 from the PDS is a refused post (`bluesky_post_failed`); the step output keeps the status and

@@ -73,7 +73,8 @@ def handler(request):
     if path == "/xrpc/com.atproto.server.createSession":
         if body.get("identifier") == "example-account.pds.example.social" and body.get("password") == PASSWORD:
             return httpx2.Response(200, json={"accessJwt": "jwt-access-1", "refreshJwt": "jwt-refresh-1",
-                                               "handle": "example-account.pds.example.social", "did": "did:plc:fakeaccount"})
+                                               "handle": "example-account.pds.example.social", "did": "did:plc:fakeaccount",
+                                               "email": "me@example.com", "emailConfirmed": True})
         return httpx2.Response(401, json={"error": "AuthenticationRequired", "message": "Invalid identifier or password"})
     if path == "/xrpc/com.atproto.repo.createRecord":
         if request.headers.get("authorization") != "Bearer jwt-access-1":
@@ -289,8 +290,11 @@ def test_a_post_completes_and_the_password_stays_out_of_every_record(stack, work
     assert record["$type"] == "app.bsky.feed.post" and record["text"] == "你好，Bluesky！" and record["langs"] == ["zh-Hant"]
     created = datetime.fromisoformat(record["createdAt"])  # RFC 3339 from clock.now
     assert created.tzinfo is not None and abs((created - started).total_seconds()) < 120
-    assert PASSWORD not in stack.everything_recorded(run_id)
+    recorded = stack.everything_recorded(run_id)
+    assert PASSWORD not in recorded and "jwt-refresh-1" not in recorded  # dropped by drop_response_paths
     events = stack.events(run_id)
+    assert events["step:session:completed"][1]["output"]["json"] == {
+        "accessJwt": "jwt-access-1", "handle": HANDLE, "did": "did:plc:fakeaccount"}
     assert events["step:session:started"][1]["input"]["json"]["password"] == f"secret:{SECRET}"  # the reference only
     assert "step:login_failed:started" not in events and "step:post_failed:started" not in events
 

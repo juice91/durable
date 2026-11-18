@@ -20,6 +20,7 @@ Grant it to an agent like any built-in tool (`tools: ["http.request"]`) or use i
 | `body` | string | optional; sent as is. `json` and `body` together answer `body_conflict` |
 | `timeout_s` | integer 1 to 30 | default 20; bounds the whole request |
 | `max_response_bytes` | integer 1 to 262144 | default 65536 |
+| `drop_response_paths` | array of JSON pointers, at most 16 | optional; see below |
 
 ## Result
 
@@ -35,6 +36,11 @@ Grant it to an agent like any built-in tool (`tools: ["http.request"]`) or use i
   `max_response_bytes`. Otherwise `text` holds the body as UTF-8; a longer body is cut at `max_response_bytes`
   and `truncated: true` is added.
 - A redirect (3xx) is returned as it is, with its `location`; it is never followed.
+
+`drop_response_paths` (RFC 6901 pointers such as `/refreshJwt` or `/user/email`) removes those members from the
+parsed `json` before the tool returns, so they never reach the step output, events, spans or checkpoints. It is
+the way to keep tokens you do not need out of the record. A path that does not exist, or a result that is not
+JSON, is left as it is. (Secret values you sent are redacted separately; this is for values the server sends.)
 
 A transport failure is the platform's error object, `{"error": {"code": "...", "message": "..."}}` (in a
 workflow tool step it fails the run with that code). The messages are fixed texts: never the URL, a header or

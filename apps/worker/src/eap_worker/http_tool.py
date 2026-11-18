@@ -28,7 +28,7 @@ import json as jsonlib
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx2
@@ -191,8 +191,34 @@ def _text_window(raw: bytes, cap: int, more: bool, variants: list[str]) -> tuple
     return cut.decode("utf-8", errors="ignore"), truncated
 
 
+def drop_paths(value: Any, pointers: Sequence[str]) -> Any:
+    """`value` without the members the JSON pointers (RFC 6901) name; a path that does not exist, or a value
+    that is not an object or array, is left alone."""
+    if not isinstance(value, (dict, list)):
+        return value
+    for pointer in pointers:
+        tokens = [t.replace("~1", "/").replace("~0", "~") for t in pointer.split("/")[1:]]
+        parent: Any = value
+        for token in tokens[:-1]:
+            if isinstance(parent, dict):
+                parent = parent.get(token)
+            elif isinstance(parent, list) and token.isdigit() and int(token) < len(parent):
+                parent = parent[int(token)]
+            else:
+                parent = None
+                break
+        last = tokens[-1] if tokens else None
+        if last is None:
+            continue
+        if isinstance(parent, dict):
+            parent.pop(last, None)
+        elif isinstance(parent, list) and last.isdigit() and int(last) < len(parent):
+            del parent[int(last)]
+    return value
+
+
 async def _answer(
-    response: httpx2.Response, max_bytes: int, variants: list[str], started: float
+    response: httpx2.Response, max_bytes: int, variants: list[str], started: float, drop: Sequence[str] = ()
 ) -> dict[str, Any]:
     content_type = response.headers.get("content-type", "")
     width = (max(len(v) for v in variants) + 4) * 4 if variants else 0
@@ -214,7 +240,7 @@ async def _answer(
         except ValueError:
             pass  # not JSON after all: the text path below
         else:
-            result["json"] = redact(mask_split_secrets(parsed, variants), variants)
+            result["json"] = redact(mask_split_secrets(drop_paths(parsed, drop), variants), variants)
             result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
             return result
     text, truncated = _text_window(raw, max_bytes, more, variants)
@@ -238,6 +264,7 @@ async def http_request(
     body: str | None = None,
     timeout_s: Annotated[int, Field(ge=1, le=30)] = 20,
     max_response_bytes: Annotated[int, Field(ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)] = 65536,
+    drop_response_paths: Annotated[list[Annotated[str, Field(pattern=r"^/")]] | None, Field(max_length=16)] = None,
 ) -> dict[str, Any]:
     """Send one HTTPS request (see the module docstring)."""
     if not url.lower().startswith("https://"):
@@ -264,7 +291,7 @@ async def http_request(
                     method, url, headers=request["headers"], params=request["query"], json=request["json"],
                     content=request["body"].encode("utf-8") if request["body"] is not None else None,
                 ) as response:
-                    return to_jsonable_python(await _answer(response, max_response_bytes, variants, started))
+                    return to_jsonable_python(await _answer(response, max_response_bytes, variants, started, drop_response_paths or ()))
     except Exception as exc:  # noqa: BLE001 - classified; the exception text is never returned
         code = _failure_code(exc)
         log.warning("http.request failed code=%s error_type=%s", code, type(exc).__name__)

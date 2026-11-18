@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import warnings
 from collections.abc import Iterable
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -100,6 +100,7 @@ with warnings.catch_warnings():
         body: str | None = None
         timeout_s: int = Field(default=20, ge=1, le=30)
         max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
+        drop_response_paths: list[Annotated[str, Field(pattern=r"^/")]] | None = Field(default=None, max_length=16)
 
 
 class WorkflowReturnInput(BaseModel):

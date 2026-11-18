@@ -276,3 +276,37 @@ def test_secret_names_and_the_card_words():
     assert http_request_secret_names({"method": "GET", "url": "https://a.example/"}) == []
     assert http_request_summary({"method": "GET", "url": "https://a.example"}) == "GET a.example/"
     assert "FAKE" not in http_request_summary({**args, "headers": {"A": "Bearer FAKE-literal"}})
+
+
+# ------------------------------------------------------------------------------- drop_response_paths
+
+
+@sync
+async def test_drop_response_paths_removes_members_before_the_result(wire):
+    wire.answer = lambda r: httpx2.Response(200, json={
+        "accessJwt": "a", "refreshJwt": "SECRET-R", "email": "x@y", "nested": {"k": 1, "a/b": 2, "t~": 3},
+        "items": [10, 11, 12],
+    })
+    result = await call(drop_response_paths=["/refreshJwt", "/email", "/nested/k", "/nested/a~1b", "/nested/t~0", "/items/1"])
+    assert result["json"] == {"accessJwt": "a", "nested": {}, "items": [10, 12]}
+    assert "SECRET-R" not in json.dumps(result)
+
+
+@sync
+async def test_drop_response_paths_missing_path_and_non_object_are_no_ops(wire):
+    wire.answer = lambda r: httpx2.Response(200, json={"a": 1})
+    assert (await call(drop_response_paths=["/nope", "/a/b/c", "/a/0", "/x/y"]))["json"] == {"a": 1}
+    wire.answer = lambda r: httpx2.Response(200, json=[1, 2])
+    assert (await call(drop_response_paths=["/a", "/5"]))["json"] == [1, 2]
+    wire.answer = lambda r: httpx2.Response(200, json="text")
+    assert (await call(drop_response_paths=["/a"]))["json"] == "text"
+    wire.answer = lambda r: httpx2.Response(200, text="plain", headers={"content-type": "text/plain"})
+    assert (await call(drop_response_paths=["/a"]))["text"] == "plain"
+
+
+def test_drop_response_paths_is_capped_at_16_and_must_be_pointers():
+    base = {"method": "GET", "url": "https://a.example/"}
+    HttpRequestInput.model_validate({**base, "drop_response_paths": ["/a"] * 16})
+    for bad in (["/a"] * 17, ["a"], [""], [1]):
+        with pytest.raises(ValidationError):
+            HttpRequestInput.model_validate({**base, "drop_response_paths": bad})

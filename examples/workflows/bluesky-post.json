@@ -75,7 +75,12 @@
           "json": {
             "identifier": "example-account.pds.example.social",
             "password": "secret:bluesky-app-password"
-          }
+          },
+          "drop_response_paths": [
+            "/refreshJwt",
+            "/email",
+            "/emailConfirmed"
+          ]
         },
         "next": "login_gate"
       },
