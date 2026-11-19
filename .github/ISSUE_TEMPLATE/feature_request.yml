@@ -1,0 +1,53 @@
+name: Feature Request
+description: Suggest a feature
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A concise description of the feature you'd like to see.
+      placeholder: "e.g., Add rate limiting to the API"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Describe the problem this feature would solve.
+      placeholder: "Currently, the API lacks rate limiting, which can lead to abuse."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like.
+      placeholder: "Add rate limiting using Redis with a configurable threshold."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions you've considered.
+      placeholder: "We could use a database-backed rate limiter, but Redis is faster."
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version/Commit
+      description: The current version or commit you're using.
+      placeholder: e.g., `a1b2c3d`
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Additional Context
+      description: Any additional context, screenshots, or details.
+      placeholder: "N/A"
+    validations:
+      required: false
