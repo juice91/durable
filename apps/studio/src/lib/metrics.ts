@@ -628,6 +628,7 @@ export function recentFailuresFilters(filters: MetricsFilters): TraceFilters {
     tags: [],
     metadata: [],
     q: null,
+    source: "all",
   };
 }
 

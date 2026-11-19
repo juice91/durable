@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { ApiError } from "@/lib/api";
-import { API_KEY_STATUS_LABELS, apiKeys, describeAccess, hasManageScope, type ApiKey, type ApiKeyStatus } from "@/lib/apiKeys";
+import { API_KEY_STATUS_LABELS, apiKeys, describeAccess, hasManageScope, hasOtlpScope, type ApiKey, type ApiKeyStatus } from "@/lib/apiKeys";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Badge, type BadgeProps } from "@/components/ui/Badge";
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toaster";
 import { ApiKeyCreateDialog } from "./ApiKeyCreateDialog";
 import { McpConnectPanel } from "./McpConnectPanel";
+import { OtlpConnectPanel } from "./OtlpConnectPanel";
 
 /** The section's element id: Connect (AG-UI) links to `/settings#api-keys`. */
 export const API_KEYS_SECTION_ID = "api-keys";
@@ -40,6 +41,11 @@ function KeyRow({ apiKey, onRevoke }: { apiKey: ApiKey; onRevoke: (key: ApiKey) 
           <Badge variant={STATUS_VARIANT[apiKey.status]} data-testid="api-key-status">
             {API_KEY_STATUS_LABELS[apiKey.status]}
           </Badge>
+          {hasOtlpScope(apiKey) ? (
+            <Badge variant="info" data-testid="api-key-otlp">
+              OTLP
+            </Badge>
+          ) : null}
           {hasManageScope(apiKey) ? (
             <Badge variant="info" data-testid="api-key-manage">
               Manage
@@ -220,6 +226,7 @@ export function ApiKeysSection() {
         {status}
       </p>
       {devOnly ? null : <McpConnectPanel />}
+      {devOnly ? null : <OtlpConnectPanel />}
       {creating ? <ApiKeyCreateDialog onCreated={onCreated} onClose={() => setCreating(false)} /> : null}
       {revoking ? (
         <ConfirmDialog

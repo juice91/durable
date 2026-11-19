@@ -7,6 +7,7 @@ import {
   Hand,
   ListChecks,
   ListOrdered,
+  Radio,
   Repeat,
   RotateCcw,
   Brain,
@@ -72,6 +73,7 @@ export const KIND_BADGE: Record<SpanKind, string> = {
   loop: "LOOP",
   loop_iteration: "ITER",
   evaluate: "EVAL",
+  external: "OTEL",
 };
 
 /** One icon per span kind (decorative: the badge and label carry the meaning). */
@@ -98,6 +100,7 @@ export const KIND_ICON: Record<SpanKind, LucideIcon> = {
   loop: Repeat,
   loop_iteration: ListOrdered,
   evaluate: ListChecks,
+  external: Radio,
 };
 
 /**
@@ -133,4 +136,6 @@ export const KIND_TONE: Record<SpanKind, string> = {
   loop_iteration: "text-muted-foreground",
   // LP.15: an evaluate step stays muted too.
   evaluate: "text-muted-foreground",
+  // External OTLP spans stay muted: the OTEL badge and the service badge carry the meaning.
+  external: "text-muted-foreground",
 };

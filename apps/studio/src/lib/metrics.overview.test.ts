@@ -110,6 +110,7 @@ describe("recent failures", () => {
       tags: [],
       metadata: [],
       q: null,
+      source: "all",
     });
     expect(ATTENTION_STATUSES).toEqual(["failed", "needs_attention"]);
   });

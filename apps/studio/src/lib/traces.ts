@@ -30,14 +30,16 @@ export type SpanKind =
   | "loop"
   | "loop_iteration"
   // LP.15: a workflow evaluate step (verdict, evaluator results, judge usage; never text).
-  | "evaluate";
+  | "evaluate"
+  // A span sent over OTLP by a program outside the platform (GET /spans, source "external").
+  | "external";
 
 /** Every span kind, in legend order. */
 export const SPAN_KINDS: readonly SpanKind[] = [
   "run", "child_run", "model_request", "tool_call", "processor", "workflow_step",
   "retrieve", "embedding", "memory_recall", "memory_index", "observer", "reflector", "working_memory", "ingest",
   "fallback_attempt", "tool_approval", "output_retry", "eval_case", "judge",
-  "loop", "loop_iteration", "evaluate",
+  "loop", "loop_iteration", "evaluate", "external",
 ];
 
 /** The agent capability span kinds (AC.17). */
@@ -509,6 +511,7 @@ export const KIND_LABELS: Record<SpanKind, string> = {
   loop: "Loop",
   loop_iteration: "Loop iteration",
   evaluate: "Evaluate step",
+  external: "External span",
 };
 
 // ---------------------------------------------------------------------------- formatting
@@ -543,11 +546,17 @@ export interface TraceFilters {
   metadata: string[];
   /** Free text over the run's input, output, error, tool id and model id. */
   q: string | null;
+  /** Platform runs, external OTLP traces, or both (`all`, the default). Not a `GET /runs` filter. */
+  source: TraceSource;
 }
+
+export type TraceSource = "all" | "platform" | "external";
+export const TRACE_SOURCES: readonly TraceSource[] = ["all", "platform", "external"];
+export const TRACE_SOURCE_LABELS: Record<TraceSource, string> = { all: "All", platform: "Platform", external: "External" };
 
 export const EMPTY_FILTERS: TraceFilters = {
   status: [], from: null, to: null, model: null, provider: null, agent_id: null, kind: null,
-  tags: [], metadata: [], q: null,
+  tags: [], metadata: [], q: null, source: "all",
 };
 
 const KINDS: ReadonlySet<string> = new Set<RunKind>(["agent", "tool", "workflow", "kb_ingest", "eval"]);
@@ -573,6 +582,7 @@ export function parseTraceFilters(params: URLSearchParams | { get(name: string):
     tags: Array.from(new Set((params.getAll ? params.getAll("tags") : [params.get("tags") ?? ""]).flatMap((t) => (t ?? "").split(",")).map((t) => t.trim()).filter(Boolean))),
     metadata: Array.from(new Set((params.getAll ? params.getAll("metadata") : [params.get("metadata") ?? ""]).map((m) => (m ?? "").trim()).filter((m) => m.includes("=")))),
     q: one("q"),
+    source: ((v) => (v === "platform" || v === "external" ? v : "all"))(one("source")),
   };
 }
 
@@ -587,7 +597,23 @@ export function traceFiltersToParams(filters: TraceFilters): URLSearchParams {
   if (filters.tags.length) params.set("tags", filters.tags.join(","));
   for (const pair of filters.metadata) params.append("metadata", pair);
   if (filters.q) params.set("q", filters.q);
+  if (filters.source !== "all") params.set("source", filters.source);
   return params;
+}
+
+/** The `GET /runs` query: the filters without `source` (which only picks what the page lists). */
+export function runQueryParams(filters: TraceFilters): URLSearchParams {
+  const params = traceFiltersToParams(filters);
+  params.delete("source");
+  return params;
+}
+
+/** Whether a filter that only runs have is set (an external trace matches none of them). */
+export function hasRunOnlyFilters(filters: TraceFilters): boolean {
+  return Boolean(
+    filters.status.length || filters.model || filters.provider || filters.agent_id || filters.kind ||
+      filters.tags.length || filters.metadata.length,
+  );
 }
 
 export function hasActiveFilters(filters: TraceFilters): boolean {
@@ -598,7 +624,7 @@ export async function listTraceRuns(
   filters: TraceFilters,
   { limit = 50, before, signal }: { limit?: number; before?: string; signal?: AbortSignal } = {},
 ): Promise<{ items: TraceRun[]; next_before: string | null }> {
-  const params = traceFiltersToParams(filters);
+  const params = runQueryParams(filters);
   params.set("limit", String(limit));
   if (before) params.set("before", before);
   const response = await fetch(`${BASE_URL}/api/v1/runs?${params.toString()}`, { headers: apiHeaders(), signal });
@@ -619,7 +645,7 @@ export interface RunsHistogram {
 
 /** GET /runs/histogram for the list filters: zero-filled buckets, hourly under 72 h, else daily. */
 export async function fetchRunsHistogram(filters: TraceFilters, signal?: AbortSignal): Promise<RunsHistogram> {
-  const params = traceFiltersToParams(filters);
+  const params = runQueryParams(filters);
   const response = await fetch(`${BASE_URL}/api/v1/runs/histogram?${params.toString()}`, { headers: apiHeaders(), signal });
   if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json();

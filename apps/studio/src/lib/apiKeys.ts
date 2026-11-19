@@ -35,7 +35,7 @@ export interface ApiKeyCreated extends ApiKey {
 export interface ApiKeyCreate {
   name: string;
   /** Omitted: `agui:run` only. `mcp` reads through the MCP endpoint; `manage` implies it and also changes things. */
-  scopes?: Array<"agui:run" | "mcp" | "manage">;
+  scopes?: Array<"agui:run" | "mcp" | "manage" | "otlp">;
   /** Leave both out for a tenant-wide key; giving one restricts the key on both. */
   agent_ids?: string[];
   workflow_ids?: string[];
@@ -86,6 +86,8 @@ export interface ApiKeyFormInput {
   mcp?: boolean;
   /** Adds the `manage` scope (mutation tools); implies `mcp`. */
   manage?: boolean;
+  /** Adds the `otlp` scope (send OpenTelemetry traces to POST /api/v1/otlp/v1/traces). */
+  otlp?: boolean;
 }
 
 export type ApiKeyFormResult = { ok: true; body: ApiKeyCreate } | { ok: false; message: string };
@@ -102,6 +104,7 @@ export function buildApiKeyCreate(input: ApiKeyFormInput, now: Date = new Date()
   const body: ApiKeyCreate = { name };
   if (input.manage) body.scopes = ["agui:run", "mcp", "manage"];
   else if (input.mcp) body.scopes = ["agui:run", "mcp"];
+  if (input.otlp) body.scopes = [...(body.scopes ?? ["agui:run"]), "otlp"];
   if (input.access === "some") {
     if (input.agentIds.length === 0 && input.workflowIds.length === 0) {
       return { ok: false, message: "Pick at least one agent or workflow, or allow all of them." };
@@ -138,6 +141,11 @@ export function hasMcpScope(key: Pick<ApiKey, "scopes">): boolean {
 /** Whether the key may change the platform through the MCP endpoint (`mcp` alone only reads). */
 export function hasManageScope(key: Pick<ApiKey, "scopes">): boolean {
   return key.scopes.includes("manage");
+}
+
+/** Whether the key may send OpenTelemetry traces to the OTLP endpoint. */
+export function hasOtlpScope(key: Pick<ApiKey, "scopes">): boolean {
+  return key.scopes.includes("otlp");
 }
 
 export const API_KEY_STATUS_LABELS: Record<ApiKeyStatus, string> = { active: "Active", revoked: "Revoked", expired: "Expired" };
@@ -282,5 +290,57 @@ export function codexMcpSnippet(baseUrl: string = BASE_URL): string {
     "[mcp_servers.pydanticos]",
     `url = ${jsString(mcpEndpoint(baseUrl))}`,
     `bearer_token_env_var = ${jsString(API_KEY_ENV_VAR)}`,
+  ].join("\n");
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Connect (OpenTelemetry): external traces
+
+/** The OTLP/HTTP trace endpoint: `POST` protobuf or JSON with a key that has the `otlp` scope. */
+export function otlpTracesEndpoint(baseUrl: string = BASE_URL): string {
+  return `${trimBase(baseUrl)}/api/v1/otlp/v1/traces`;
+}
+
+/** The standard OpenTelemetry exporter variables; the key is read from the environment, never written here. */
+export function otlpEnvSnippet(baseUrl: string = BASE_URL): string {
+  return [
+    `# export ${API_KEY_ENV_VAR}=<your key>`,
+    `export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otlpTracesEndpoint(baseUrl)}`,
+    `export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $${API_KEY_ENV_VAR}"`,
+    "export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
+    "export OTEL_SERVICE_NAME=my-agent",
+  ].join("\n");
+}
+
+/** Python: the OpenTelemetry SDK with the OTLP/HTTP exporter, configured by the variables above. */
+export function otlpPythonSnippet(): string {
+  return [
+    "# pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http",
+    "# (set the environment variables above first)",
+    "from opentelemetry import trace",
+    "from opentelemetry.sdk.trace import TracerProvider",
+    "from opentelemetry.sdk.trace.export import BatchSpanProcessor",
+    "from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter",
+    "",
+    "provider = TracerProvider()",
+    "provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))  # reads OTEL_EXPORTER_OTLP_*",
+    "trace.set_tracer_provider(provider)",
+    "",
+    'with trace.get_tracer("my-agent").start_as_current_span("answer") as span:',
+    '    span.set_attribute("pydanticos.run_id", "<a platform run id>")  # optional: links the trace to that run',
+  ].join("\n");
+}
+
+/** JavaScript (Node): the OpenTelemetry SDK with the OTLP/HTTP exporter, configured by the variables above. */
+export function otlpJavaScriptSnippet(): string {
+  return [
+    "// npm i @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-proto",
+    "// (set the environment variables above first)",
+    'import { NodeSDK } from "@opentelemetry/sdk-node";',
+    'import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";',
+    "",
+    "const sdk = new NodeSDK({ traceExporter: new OTLPTraceExporter() }); // reads OTEL_EXPORTER_OTLP_*",
+    "sdk.start();",
   ].join("\n");
 }
