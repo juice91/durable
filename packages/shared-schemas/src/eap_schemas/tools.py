@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Iterable
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _TOOL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
@@ -90,6 +90,7 @@ class SecretsRequestInput(BaseModel):
 
 HTTP_REQUEST_TOOL_ID = "http.request"
 HTTP_MAX_RESPONSE_BYTES_CAP = 262144
+HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP = 1_048_576
 HTTP_BODY_SOURCE_DEFAULT_BYTES = 1_000_000
 HTTP_BODY_SOURCE_MAX_BYTES = 5_000_000
 
@@ -103,6 +104,44 @@ class HttpBodySource(BaseModel):
     url: str
     max_bytes: int = Field(default=HTTP_BODY_SOURCE_DEFAULT_BYTES, ge=1, le=HTTP_BODY_SOURCE_MAX_BYTES)
     allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(min_length=1, max_length=20)]
+
+
+class HttpResponseQuery(BaseModel):
+    """``http.request``'s ``response_query``: a JMESPath expression (as ``json.query``) over the JSON body."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expression: Annotated[str, Field(max_length=500)]
+
+
+class HttpExtractHtml(BaseModel):
+    """``http.request``'s ``extract_html``: ``html.extract`` over the text body (``base_url`` defaults to the
+    request URL)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["article", "links"]
+    base_url: str | None = None
+    max_graphemes: Annotated[int, Field(ge=1, le=20000)] = 4000
+    root_selector: Annotated[str, Field(max_length=300)] | None = None
+    include_patterns: list[str] | None = None
+    exclude_patterns: list[str] | None = None
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
+    limit: Annotated[int, Field(ge=1, le=60)] = 20
+
+
+class HttpParseFeed(BaseModel):
+    """``http.request``'s ``parse_feed``: ``feed.parse`` over the text body (one document); ``label`` names its
+    source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_items: Annotated[int, Field(ge=1, le=50)] = 20
+    max_age_hours: Annotated[float, Field(gt=0)] | None = None
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    label: Annotated[str, Field(min_length=1, max_length=100)] | None = None
 
 
 with warnings.catch_warnings():
@@ -124,9 +163,18 @@ with warnings.catch_warnings():
         json: Any = None
         body: str | None = None
         timeout_s: int = Field(default=20, ge=1, le=30)
-        max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
+        max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP)
         drop_response_paths: list[Annotated[str, Field(pattern=r"^/")]] | None = Field(default=None, max_length=16)
         body_from_url: HttpBodySource | None = None
+        response_query: HttpResponseQuery | None = None
+        extract_html: HttpExtractHtml | None = None
+        parse_feed: HttpParseFeed | None = None
+
+        @model_validator(mode="after")
+        def _cap_needs_a_reducer(self) -> "HttpRequestInput":
+            if self.max_response_bytes > HTTP_MAX_RESPONSE_BYTES_CAP and not (self.response_query or self.extract_html or self.parse_feed):
+                raise ValueError("max_response_bytes above 262144 needs a reducer")
+            return self
 
 
 class WorkflowReturnInput(BaseModel):
@@ -406,7 +454,20 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "https URL as the body (for a link-card thumbnail: the og_image of html.extract to "
             "com.atproto.repo.uploadBlob): that URL's host must be in allowed_hosts, it must answer an image/* type "
             "within max_bytes, else {error: {code: body_source_rejected, detail}}; Content-Type is the fetched one "
-            "unless you set it; do not combine with json or body"
+            "unless you set it; do not combine with json or body. "
+            "REDUCERS: a workflow step's output is capped at 32 KiB, and a Bluesky feed or a web page is larger, "
+            "so give at most one reducer and only its result is recorded (the raw body never is; max_response_bytes "
+            "may then go up to 1048576, else 262144): "
+            "response_query {expression} runs a JMESPath expression (as json.query) over the JSON body and returns "
+            "it as json, e.g. a getAuthorFeed without reposts: {expression: \"feed[?!reason].post.{uri: uri, text: record.text}\"}; "
+            "extract_html {mode article|links, base_url (default the request url), max_graphemes, root_selector, "
+            "include_patterns, exclude_patterns, allowed_hosts, limit} runs html.extract over the text and returns it "
+            "as text, e.g. {mode: \"article\", max_graphemes: 3000}; "
+            "parse_feed {max_items, max_age_hours, include_terms, exclude_terms, exclude_urls, label} runs feed.parse "
+            "over the text, e.g. {max_items: 10, exclude_urls: [\"https://example.com/already-posted\"]}. "
+            "The result keeps status, ok, headers and elapsed_ms and adds reduced {kind, input_bytes}. A failed "
+            "reduction is that tool's own {error: {code}} with request {status} alongside; two reducers are "
+            "{error: {code: reducer_conflict}}"
         ),
         side_effect=True,
         external_idempotent=False,

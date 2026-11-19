@@ -19,8 +19,9 @@ Grant it to an agent like any built-in tool (`tools: ["http.request"]`) or use i
 | `json` | any JSON | optional; sent as `application/json`. A `null` is the same as leaving it out |
 | `body` | string | optional; sent as is. `json` and `body` together answer `body_conflict` |
 | `timeout_s` | integer 1 to 30 | default 20; bounds the whole request |
-| `max_response_bytes` | integer 1 to 262144 | default 65536 |
+| `max_response_bytes` | integer 1 to 262144 (1048576 with a reducer) | default 65536 |
 | `drop_response_paths` | array of JSON pointers, at most 16 | optional; see below |
+| `response_query`, `extract_html`, `parse_feed` | object | optional, at most one; shrink the body inside the tool; see [Reducers](#reducers) |
 | `body_from_url` | object | optional; the body is fetched from another URL first; see below. With `json` or `body` it answers `body_conflict` |
 
 ## Result
@@ -49,13 +50,62 @@ an exception text.
 
 | code | when |
 | --- | --- |
-| `url_not_https`, `body_conflict` | the arguments |
+| `url_not_https`, `body_conflict`, `reducer_conflict`, `max_response_bytes_too_large` | the arguments |
 | `outbound_blocked` | the outbound policy refused the host (see below) |
 | `http_timeout` | `timeout_s` passed |
 | `http_connect_failed` | the connection or TLS handshake failed |
 | `secret_not_found` | a `secret:<name>` has no stored value for the tenant; **nothing was sent** |
 | `secret_unreadable` | a stored secret could not be decrypted; nothing was sent |
 | `response_too_large` | a JSON body is larger than `max_response_bytes` (a text body is truncated instead) |
+
+## Reducers
+
+A workflow step's output is capped at 32 KiB (`EAP_WORKFLOW_MAX_STEP_OUTPUT_BYTES`; a larger one fails the step
+with `step_output_too_large`, see [Step output size](../workflows/step-output-size.md)). A Bluesky `getAuthorFeed`
+with 30 posts is 42 to 54 KB of JSON and an article or listing page is 140 to 280 KB of HTML, so the whole body
+cannot be the output. A **reducer** shrinks the body inside the tool, and only the reduced result is recorded: the
+raw body is never in the output, an event or a span. Give at most one (two answer `reducer_conflict`; nothing is
+sent). With a reducer `max_response_bytes` may go up to 1048576 (1 MiB); without one the cap stays 262144, and
+`max_response_bytes_too_large` answers a larger value. A body larger than `max_response_bytes` answers
+`response_too_large`.
+
+| reducer | runs | the result goes to |
+| --- | --- | --- |
+| `response_query: {expression}` | the JMESPath engine of [`json.query`](json-query.md) over the JSON body (expression at most 500 characters) | `json` (`text` is absent) |
+| `extract_html: {mode, base_url?, max_graphemes?, root_selector?, include_patterns?, exclude_patterns?, allowed_hosts?, limit?}` | [`html.extract`](html-extract.md) over the text body; `base_url` defaults to the request URL | `text` (`json` is absent) |
+| `parse_feed: {max_items?, max_age_hours?, include_terms?, exclude_terms?, exclude_urls?, label?}` | [`feed.parse`](feed-parse.md) over the text body | `text` |
+
+The output keeps `status`, `ok`, `headers` and `elapsed_ms` and adds `reduced: {kind, input_bytes}` (`kind` is the
+reducer's name, `input_bytes` the size of the body that was read), so a run shows what happened. `drop_response_paths`
+applies before `response_query`. `body_from_url` is unaffected.
+
+Examples:
+
+```json
+{"method": "GET", "url": "https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed", "query": {"actor": "example.bsky.social", "limit": "30"},
+ "max_response_bytes": 1048576,
+ "response_query": {"expression": "feed[?!reason].post.{uri: uri, text: record.text}"}}
+```
+
+```json
+{"method": "GET", "url": "https://news.example.com/a/1", "max_response_bytes": 1048576,
+ "extract_html": {"mode": "article", "max_graphemes": 3000}}
+```
+
+```json
+{"method": "GET", "url": "https://news.example.com/rss.xml", "max_response_bytes": 1048576,
+ "parse_feed": {"max_items": 10, "exclude_urls": ["https://news.example.com/already-posted"]}}
+```
+
+**A reducer failure** is that tool's own error, `{"error": {"code": "...", "message": "..."}}`, with the request's
+status in a `request` field: `{"error": {...}, "request": {"status": 200}}`, so a caller can tell "the fetch worked,
+the reduction did not". The codes are the tool's: `expression_invalid` or `result_too_large` (`response_query`),
+`html_too_large`, `html_unparseable`, `html_too_complex`, `no_patterns`, `invalid_pattern`, `selector_invalid`,
+`base_url_invalid` (`extract_html`), `feed_invalid` (`parse_feed`), plus `response_not_json` when `response_query`
+meets a body that is not JSON.
+
+**A non-2xx status** still applies the reducer when the body allows it (a JSON error body, say). When it does not,
+the normal result is returned with `text` cut to 4 KiB (`truncated: true` when cut): never the full body.
 
 ## Body from another URL
 
