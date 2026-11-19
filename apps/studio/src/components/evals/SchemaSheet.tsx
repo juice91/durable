@@ -59,7 +59,7 @@ export function SchemaSheet({ suite, onClose }: { suite: EvalSuite; onClose: () 
               ) : null}
             </section>
           ) : (
-            <p className={hintClass}>An agent dataset&apos;s item input is the text the agent receives.</p>
+            <p className={hintClass}>An agent test suite&apos;s case input is the text the agent receives.</p>
           )}
           <section className="min-w-0 space-y-2" aria-labelledby="eval-schema-evaluators-title">
             <h3 id="eval-schema-evaluators-title" className={sectionTitleClass}>Evaluators</h3>

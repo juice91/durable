@@ -54,7 +54,7 @@ export function DatasetDetail({ suiteId }: { suiteId: string }) {
       .catch((reason: unknown) => {
         if (controller.signal.aborted) return;
         if (reason instanceof ApiError && reason.status === 404) setNotFound(true);
-        else setError(reason instanceof Error && reason.message ? reason.message : "The dataset could not be loaded");
+        else setError(reason instanceof Error && reason.message ? reason.message : "The test suite could not be loaded");
       });
     return () => controller.abort();
   }, [suiteId]);
@@ -82,13 +82,13 @@ export function DatasetDetail({ suiteId }: { suiteId: string }) {
   return (
     <>
       <PageHeader
-        crumbs={[navCrumb("datasets"), { label: name ?? "Dataset", testId: "dataset-title" }]}
-        documentTitle={name ? `${name} · Datasets` : "Dataset"}
+        crumbs={[navCrumb("datasets"), { label: name ?? "Test suite", testId: "dataset-title" }]}
+        documentTitle={name ? `${name} · Test suites` : "Test suite"}
       />
       <div className="mx-auto w-full min-w-0 max-w-6xl space-y-4 p-4 md:p-6" data-testid="dataset-detail">
-        {notFound ? <p role="alert" className={alertClass}>Dataset not found.</p> : null}
+        {notFound ? <p role="alert" className={alertClass}>Test suite not found.</p> : null}
         {error ? <p role="alert" className={alertClass}>{error}</p> : null}
-        {!loaded && !notFound && !error ? <p className={hintClass} role="status">Loading dataset…</p> : null}
+        {!loaded && !notFound && !error ? <p className={hintClass} role="status">Loading test suite…</p> : null}
         {loaded ? (
           <>
             <p className={hintClass} data-testid="dataset-target-line">

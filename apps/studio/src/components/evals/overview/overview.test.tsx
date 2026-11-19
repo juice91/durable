@@ -55,10 +55,10 @@ afterEach(() => {
 });
 
 describe("Evaluation navigation", () => {
-  it("shows the Evaluation group with Scorers, Datasets and Experiments", () => {
+  it("shows the Evaluation group with Scorers, Test suites and Experiments", () => {
     const section = navSections.find((s) => s.group.id === "evaluation");
     expect(section?.group.title).toBe("Evaluation");
-    expect(section?.items.map((i) => i.label)).toEqual(["Datasets", "Scorers", "Experiments"]);
+    expect(section?.items.map((i) => i.label)).toEqual(["Test suites", "Scorers", "Experiments"]);
     expect(section?.items.map((i) => i.href)).toEqual(["/datasets", "/scorers", "/experiments"]);
   });
 });
@@ -77,7 +77,7 @@ describe("Datasets", () => {
     render(<DatasetsPage />);
     const rows = await screen.findAllByTestId("dataset-row");
     expect(rows).toHaveLength(3);
-    expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(expect.arrayContaining(["Dataset", "Target", "Items", "Last run"]));
+    expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(expect.arrayContaining(["Test suite", "Target", "Items", "Last run"]));
     expect(within(rows[0]).getByText("Suite 4")).toBeInTheDocument();
     expect(within(rows[0]).getByTestId("dataset-target")).toHaveTextContent("agent · Support bot");
     expect(within(rows[2]).getByTestId("dataset-target")).toHaveTextContent("workflow · Triage");

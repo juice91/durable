@@ -101,7 +101,7 @@ for the second key.
 | `g` then `m` | Go to MCP Servers |
 | `g` then `p` | Go to Processors |
 | `g` then `k` | Go to Knowledge |
-| `g` then `d` | Go to Datasets |
+| `g` then `d` | Go to Test suites |
 | `g` then `s` | Go to Scorers |
 | `g` then `e` | Go to Experiments |
 | `g` then `n` | Go to Metrics |

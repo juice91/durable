@@ -16,7 +16,7 @@ import { usePagedList } from "./usePagedList";
 const columns: DataListColumn<OverviewSuite>[] = [
   {
     id: "name",
-    header: "Dataset",
+    header: "Test suite",
     sortable: true,
     sortValue: (s) => s.name,
     cell: (s) => <span className="truncate">{s.name}</span>,
@@ -57,16 +57,16 @@ const columns: DataListColumn<OverviewSuite>[] = [
   },
 ];
 
-/** Datasets: every test suite of the tenant, across agents and workflows. A row opens the dataset. */
+/** Test suites: every test suite of the tenant, across agents and workflows. A row opens the suite. */
 export function DatasetsPage() {
-  const list = usePagedList((after, signal) => listAllSuites({ after, signal }), "Failed to load datasets");
+  const list = usePagedList((after, signal) => listAllSuites({ after, signal }), "Failed to load test suites");
   return (
     <>
       <PageHeader crumbs={[navCrumb("datasets", { current: true })]} />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
         <p className="text-body text-muted-foreground">The test suites of every agent and workflow. Open one to edit its items, import a file and run it.</p>
         <DataList<OverviewSuite>
-          label="Datasets"
+          label="Test suites"
           testId="datasets-list"
           rows={list.rows}
           columns={columns}
@@ -74,7 +74,7 @@ export function DatasetsPage() {
           getRowHref={(s) => routes.dataset(s.id)}
           getRowLabel={(s) => `${s.name}, ${targetText({ kind: s.target_kind, name: s.target_name ?? s.agent_name })}, ${s.case_count} items`}
           getRowTestId={() => "dataset-row"}
-          searchPlaceholder="Search by dataset or target"
+          searchPlaceholder="Search by test suite or target"
           filterRow={(s, q) => `${s.name}\n${s.target_name ?? s.agent_name ?? ""}`.toLowerCase().includes(q.toLowerCase())}
           loading={list.loading}
           error={list.error}
