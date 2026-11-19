@@ -130,6 +130,7 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agent page layout | `studio.agent-layout.v1.<agentId>…`, `studio.agent-config.v1.<agentId>` | Pane widths on each agent's page, and whether its Config panel was left open or closed. | Layout |
 | Agents list view | `studio.agents.view` | List or Compact. | Layout |
 | Agents system rows | `studio.agents.show-system` | Whether the Agents list also shows the Architect's system helpers (the drafters). | Layout |
+| Architect list | `studio.architect.show-archived` | Whether the Architect page's created list shows archived agents and workflows. | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
 | Trace list columns | `studio.traces.hiddenColumns` | Which columns the Traces list shows. | Layout |
 | Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |
