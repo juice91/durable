@@ -111,6 +111,7 @@ jobs:
           unit="packages/shared-schemas/tests
           packages/agent-runtime/runtime_tests
           packages/kb-sources/kb_sources_tests
+          packages/kb-sources-acme/kb_sources_ti_tests
           packages/knowledge/knowledge_tests
           packages/observability/tests
           packages/pricing/pricing_tests

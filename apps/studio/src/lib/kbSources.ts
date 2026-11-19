@@ -14,15 +14,44 @@ export const SOURCE_KIND = "product_catalog";
 export const API_TOKEN_KIND = "api_token";
 export const REPOSITORY_SOURCE_KIND = "repository_docs";
 /**
- * Providers an adapter exists for: the connection kind they use (OAuth client credentials, or one optional API
- * token), the source kind they serve and the connection form's defaults.
+ * A provider adapter the server has (GET /kb-sources/adapters): built in or installed as a plug-in. Studio names no
+ * provider itself; the connection and source forms build their options from this list.
  */
-export const PROVIDERS = [
-  { value: "acme_catalog", label: "Acme Semiconductor", connectionKind: CONNECTION_KIND, sourceKind: SOURCE_KIND, baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken" },
-  { value: "github", label: "GitHub", connectionKind: API_TOKEN_KIND, sourceKind: REPOSITORY_SOURCE_KIND, baseUrl: "https://api.github.com", tokenUrl: "" },
-] as const;
-export type ProviderInfo = (typeof PROVIDERS)[number];
-export const providerInfo = (value: string): ProviderInfo | undefined => PROVIDERS.find((item) => item.value === value);
+export interface AdapterInfo {
+  kind: string;
+  provider: string;
+  distribution: string;
+  display_name: string;
+  /** The connection kind the provider uses: OAuth client credentials, or one optional API token. */
+  connection_kind: string;
+  base_url: string | null;
+  token_url: string | null;
+  config_schema: Record<string, unknown> | null;
+}
+
+let adaptersCache: Promise<AdapterInfo[]> | null = null;
+
+/** The server's adapters, fetched once per page load (a failed fetch is retried by the next call). */
+export function listAdapters(): Promise<AdapterInfo[]> {
+  if (!adaptersCache) {
+    adaptersCache = request<{ items: AdapterInfo[] }>("/kb-sources/adapters").then(
+      (body) => body.items,
+      (reason: unknown) => {
+        adaptersCache = null;
+        throw reason;
+      },
+    );
+  }
+  return adaptersCache;
+}
+
+/** Forget the cached list (tests). */
+export function resetAdapterCache(): void {
+  adaptersCache = null;
+}
+
+export const providerInfo = (adapters: readonly AdapterInfo[], value: string): AdapterInfo | undefined => adapters.find((item) => item.provider === value);
+export const providerLabel = (adapters: readonly AdapterInfo[], value: string): string => providerInfo(adapters, value)?.display_name ?? value;
 export const MAX_TARGETED_PARTS = 100;
 
 export type SyncMode = "targeted" | "incremental" | "full";
@@ -137,9 +166,9 @@ export interface ConnectionForm {
 }
 
 /** The request body for a connection form: secret NAMES become `secret:<name>` references. */
-export function connectionPayload(form: ConnectionForm, enabled = true): ConnectionBody {
+export function connectionPayload(form: ConnectionForm, enabled = true, adapters: readonly AdapterInfo[] = []): ConnectionBody {
   const config: Record<string, unknown> = { provider: form.provider };
-  const kind = providerInfo(form.provider)?.connectionKind ?? CONNECTION_KIND;
+  const kind = providerInfo(adapters, form.provider)?.connection_kind ?? CONNECTION_KIND;
   if (kind === API_TOKEN_KIND) {
     const body: ConnectionBody = { name: form.name.trim(), kind, config, credential_refs: form.tokenSecret ? { token: secretRef(form.tokenSecret) } : {}, enabled };
     if (form.baseUrl.trim()) body.base_url = form.baseUrl.trim();

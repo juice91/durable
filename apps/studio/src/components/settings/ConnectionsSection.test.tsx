@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  listAdapters: vi.fn(),
   listConnections: vi.fn(),
   createConnection: vi.fn(),
   updateConnection: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/kbSources", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  listAdapters: mocks.listAdapters,
   listConnections: mocks.listConnections,
   createConnection: mocks.createConnection,
   updateConnection: mocks.updateConnection,
@@ -27,14 +29,18 @@ import { ConnectionsSection } from "./ConnectionsSection";
 import { KbSourceError } from "@/lib/kbSources";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 
+const ADAPTERS = [
+  { kind: "product_catalog", provider: "acme", distribution: "eap-kb-sources-acme", display_name: "Acme Parts", connection_kind: "oauth2_client_credentials", base_url: "https://api.acme.test", token_url: "https://auth.acme.test/token", config_schema: null },
+  { kind: "repository_docs", provider: "github", distribution: "eap-kb-sources", display_name: "GitHub", connection_kind: "api_token", base_url: "https://api.github.com", token_url: null, config_schema: null },
+];
 const FAKE = "fake-client-secret-value-0001";
 const T = "2026-11-18T10:00:00Z";
 const CONNECTION = {
   id: "c1",
   name: "ti-prod",
   kind: "oauth2_client_credentials",
-  base_url: "https://api.vendor.example",
-  config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
+  base_url: "https://api.acme.test",
+  config: { provider: "acme", token_url: "https://auth.acme.test/token" },
   credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
   enabled: true,
   last_checked_at: T,
@@ -45,6 +51,7 @@ const CONNECTION = {
 };
 
 beforeEach(() => {
+  mocks.listAdapters.mockReset().mockResolvedValue(ADAPTERS);
   mocks.listConnections.mockReset().mockResolvedValue([CONNECTION]);
   mocks.createConnection.mockReset().mockResolvedValue({ ...CONNECTION, id: "c2", name: "ti-new" });
   mocks.updateConnection.mockReset().mockResolvedValue({ ...CONNECTION, enabled: false });
@@ -67,11 +74,20 @@ async function openAdd() {
 }
 
 describe("ConnectionsSection", () => {
+  it("offers a plug-in provider when the server lists it", async () => {
+    mocks.listAdapters.mockResolvedValue([...ADAPTERS, { kind: "product_catalog", provider: "zeta", distribution: "eap-kb-sources-zeta", display_name: "Zeta Catalogue", connection_kind: "oauth2_client_credentials", base_url: "https://zeta.test", token_url: null, config_schema: null }]);
+    render(<ConnectionsSection />);
+    await screen.findByText("ti-prod");
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    const sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByRole("option", { name: "Zeta Catalogue" })).toBeInTheDocument();
+  });
+
   it("lists name, provider, status chip and when it was checked, in a labelled region", async () => {
     render(<ConnectionsSection />);
     const row = (await screen.findByText("ti-prod")).closest("li") as HTMLElement;
     expect(screen.getByRole("region", { name: "Connections" })).toBeInTheDocument();
-    expect(within(row).getByText("Acme Semiconductor")).toBeInTheDocument();
+    expect(within(row).getByText("Acme Parts")).toBeInTheDocument();
     expect(within(row).getByText("Ok")).toBeInTheDocument();
     expect(row.textContent).toMatch(/Checked/);
   });
@@ -95,8 +111,8 @@ describe("ConnectionsSection", () => {
 
   it("adds a connection with secret references chosen from the stored names", async () => {
     const sheet = await openAdd();
-    expect(within(sheet).getByLabelText("Base URL")).toHaveValue("https://api.vendor.example");
-    expect(within(sheet).getByLabelText("Token URL")).toHaveValue("https://api.vendor.example/v1/oauth/accesstoken");
+    expect(within(sheet).getByLabelText("Base URL")).toHaveValue("https://api.acme.test");
+    expect(within(sheet).getByLabelText("Token URL")).toHaveValue("https://auth.acme.test/token");
     fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "ti-new" } });
     await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("conn-id"));
     fireEvent.change(within(sheet).getByLabelText("Client ID"), { target: { value: "conn-id" } });
@@ -106,8 +122,8 @@ describe("ConnectionsSection", () => {
     expect(mocks.createConnection.mock.calls[0][0]).toEqual({
       name: "ti-new",
       kind: "oauth2_client_credentials",
-      base_url: "https://api.vendor.example",
-      config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
+      base_url: "https://api.acme.test",
+      config: { provider: "acme", token_url: "https://auth.acme.test/token" },
       credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
       enabled: true,
     });

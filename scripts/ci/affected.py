@@ -59,6 +59,7 @@ TEST_ONLY_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "eap-api": ("eap-worker",),
     "eap-pricing": ("eap-api", "eap-worker"),
     "eap-schemas": ("eap-agent-runtime", "eap-worker"),
+    "eap-worker": ("eap-kb-sources-acme",),
 }
 
 _NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")

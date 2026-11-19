@@ -8,7 +8,7 @@ import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader } from "@/comp
 import { toast } from "@/components/ui/Toaster";
 import {
   MAX_TARGETED_PARTS,
-  PROVIDERS,
+  listAdapters,
   REPOSITORY_PATTERN,
   REPOSITORY_SOURCE_KIND,
   SOURCE_KIND,
@@ -23,11 +23,13 @@ import {
   parseMetadataMap,
   parsePartNumbers,
   providerInfo,
+  providerLabel as adapterLabel,
   publishSyncWorkflow,
   repositoryConfig,
   reportSummary,
   startSourceSync,
   updateSource,
+  type AdapterInfo,
   type Connection,
   type Source,
   type SyncDetail,
@@ -47,12 +49,9 @@ function errorText(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
-function providerLabel(provider: string): string {
-  return PROVIDERS.find((item) => item.value === provider)?.label ?? provider;
-}
-
 function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () => void; onAdded: () => void }) {
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
   const [connectionId, setConnectionId] = useState("");
   const [name, setName] = useState("");
   const [pageSize, setPageSize] = useState("100");
@@ -69,6 +68,7 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    listAdapters().then(setAdapters, () => undefined);
     listConnections().then(
       (items) => setConnections(items.filter((item) => item.enabled)),
       (reason: unknown) => setError(errorText(reason, "Could not load connections")),
@@ -76,7 +76,7 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
   }, []);
 
   const connection = connections.find((item) => item.id === connectionId);
-  const sourceKind = providerInfo(String(connection?.config.provider ?? ""))?.sourceKind ?? SOURCE_KIND;
+  const sourceKind = providerInfo(adapters, String(connection?.config.provider ?? ""))?.kind ?? SOURCE_KIND;
   const repoSource = sourceKind === REPOSITORY_SOURCE_KIND;
   const size = Number(pageSize);
   const sizeOk = Number.isInteger(size) && size >= 1 && size <= 1000;
@@ -332,6 +332,10 @@ function SyncList({ kbId, sourceId, workflowId, refreshKey }: { kbId: string; so
  */
 export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
   const [sources, setSources] = useState<Source[] | null>(null);
+  const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
+  useEffect(() => {
+    listAdapters().then(setAdapters, () => undefined);
+  }, []);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
   const [workflowKnown, setWorkflowKnown] = useState(false);
@@ -443,7 +447,7 @@ export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
                   <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                     <span className="break-all text-label font-medium text-foreground">{source.name}</span>
-                    <span className="text-caption text-muted-foreground">{providerLabel(source.provider)}</span>
+                    <span className="text-caption text-muted-foreground">{adapterLabel(adapters, source.provider)}</span>
                     <Badge variant={source.enabled ? "success" : "neutral"}>{source.enabled ? "Enabled" : "Disabled"}</Badge>
                   </span>
                   <span className="flex flex-wrap gap-1.5">

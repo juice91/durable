@@ -86,7 +86,7 @@ sync with a workflow schedule of this workflow and the input `{"source_id": "...
 
 `GET /knowledge-bases/{kb}/sources/{src}/syncs` lists the sync runs and `.../syncs/{run_id}` returns the report.
 
-Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: Acme Semiconductor product catalogue (`docs/providers/texas-instruments.md`, source kind `product_catalog`); GitHub repository documents (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`).
+Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: GitHub repository documents is built in (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`); other providers are separate packages (`docs/providers/index.md`), for example the Acme Semiconductor product catalogue (`packages/kb-sources-acme/README.md`, source kind `product_catalog`).
 
 ## 5. Staged live tests
 
@@ -94,7 +94,54 @@ Never start with a full catalogue. Stage it: (1) check the connection; (2) a tar
 report (`discovered 1`, `failed 0`, one datasheet queued, `kb_ingest` completes); (3) a targeted sync of 10-100 parts;
 (4) one listing page in `full` mode and confirm the checkpoint and the resume on the next run; (5) only then a full walk,
 which spans days under the provider's daily quota. Provider-specific parts, hosts, quotas and secret field names live on the
-provider page (for Acme Semiconductor: `docs/providers/texas-instruments.md`).
+provider page (for Acme Semiconductor: `packages/kb-sources-acme/README.md`).
+
+## Writing a provider plug-in
+
+An adapter is a plug-in: a separate Python distribution that registers itself with `eap-kb-sources` through an entry point. The
+platform contains no provider code except the built-in GitHub adapter.
+
+**The protocol.** An adapter implements `eap_kb_sources.SourceAdapter`: `provider` and `kind` (strings), `validate_config(config)`
+(raise `ValueError` with a short, secret-free message), `async check_connection(connection, secrets)` and
+`async sync_segment(request, connection, secrets, store)`. It reads records through the `SourceStoreFacade` it is given, spends
+its budget with `Budget`/`DailyBudget`, and classifies every provider failure into a `SourceError` code (see the failure codes
+below). `eap_kb_sources.fake.FakeCatalogAdapter` is the smallest worked example.
+
+**Registering.** `register_adapter(kind, provider, factory)` binds a zero-argument factory to a (kind, provider) pair. The
+worker calls the factory once per segment, so it may return a fresh adapter.
+
+**The entry-point group.** Declare it in the distribution's `pyproject.toml`; the target is a module (importing it registers) or a
+callable (called once, it registers):
+
+```toml
+[project.entry-points."eap.kb_sources.adapters"]
+acme = "eap_kb_sources_acme:register"
+```
+
+```python
+from eap_kb_sources import register_adapter
+
+def register() -> None:
+    register_adapter("product_catalog", "acme", AcmeCatalogAdapter)
+```
+
+Discovery runs once, lazily, on the first registry use in a process. A plug-in that fails to import or whose callable raises is
+logged as a warning with its distribution name and skipped; it never stops the worker or the API. Two plug-ins (or a plug-in and
+the built-in GitHub adapter) registering the same (kind, provider) raise `DuplicateAdapterError` at discovery, naming both
+distributions. `eap_kb_sources.list_adapters()` returns every adapter with the distribution it came from.
+
+**Packaging.** Ship it as its own distribution (`eap-kb-sources-acme`, package `eap_kb_sources_acme`) that depends on
+`eap-kb-sources` and nothing of the platform's web, worker or database layers (`lint-imports` enforces this for the in-repo
+example, `packages/kb-sources-acme`). The core must never import it. Keep its tests and fixtures inside the package.
+
+**How a deployment installs it.** Today the repository's uv workspace includes `packages/kb-sources-acme`, so
+`uv sync --all-packages` installs it into the API and worker image; dropping a plug-in from a deployment means removing its member
+from the workspace. Later a plug-in is a wheel installed into the image with pip or uv. Nothing else changes: the entry point is
+found from the installed distribution's metadata.
+
+**Credentials.** A plug-in never carries credentials. A connection holds `secret:<name>` references; the adapter resolves them
+through the `SecretResolver` it is handed, at the moment of use (section 1). Do not read environment variables, files or
+package data for secrets, and never put a token or key in an error message or the sync report.
 
 ## Failure codes you will see
 

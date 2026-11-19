@@ -12,7 +12,7 @@
 A connection holds `credential_refs` (logical name -> `secret:<name>`), never a value: a body whose reference
 is not a secret reference is refused without echoing it, and a response shows the references only. The check
 resolves the references inside the request (eap_kb_sources.check) and answers a stable code, never a token, a
-provider body or an exception text. `config.provider` names the adapter (e.g. "acme_catalog") and must
+provider body or an exception text. `config.provider` names the adapter (e.g. "github") and must
 be set; `base_url`, when given, is an https URL.
 """
 

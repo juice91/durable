@@ -225,6 +225,10 @@ class _Tree:
 class GithubRepositoryDocsAdapter:
     kind = "repository_docs"
     provider = "github"
+    # Optional display data for Studio's forms (GET /kb-sources/adapters).
+    display_name = "GitHub"
+    connection_kind = "api_token"
+    default_base_url = "https://api.github.com"
 
     def __init__(
         self,
