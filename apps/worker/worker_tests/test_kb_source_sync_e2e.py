@@ -22,7 +22,7 @@ from sqlalchemy import text
 
 pytest.importorskip("eap_kb_sources_acme")  # the TI plug-in is optional: this runs the real worker against it
 
-from eap_kb_sources_acme import TiProductCatalogAdapter, TokenCache
+from eap_kb_sources_acme import PROVIDER as TI_PROVIDER, TiProductCatalogAdapter, TokenCache
 from eap_kb_sources_acme.fixtures import FakeTiServer, Part, TOKEN_PREFIX, template_part
 from eap_kb_sources.registry import register_adapter
 from eap_secrets import KEY_ENV, generate_key
@@ -103,7 +103,7 @@ class Stack:
         self.call("PUT", "/secrets/conn-client-secret", expect=200, json={"value": SENTINEL_SECRET})
         conn = self.call("POST", "/settings/connections", expect=201, json={
             "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://api.vendor.example",
-            "config": {"provider": "acme_catalog", "allowed_hosts": ["api.vendor.example", "www.ti.com"]},
+            "config": {"provider": TI_PROVIDER, "allowed_hosts": ["api.vendor.example", "www.ti.com"]},
             "credential_refs": REFS}).json()
         self.connection_id = conn["id"]
         assert conn["credential_refs"] == REFS
@@ -115,7 +115,7 @@ class Stack:
         config = {"document_policy": {"types": ["datasheet"]}, "page_size": 3, **(source_config or {})}
         src = self.call("POST", f"/knowledge-bases/{self.kb_id}/sources", expect=201, json={
             "connection_id": self.connection_id, "name": "ti-catalogue", "kind": "product_catalog",
-            "provider": "acme_catalog", "config": config}).json()
+            "provider": TI_PROVIDER, "config": config}).json()
         self.source_id = src["id"]
         created = self.call("POST", "/workflows", expect=201, json={"spec": EXAMPLE}).json()
         self.workflow_id = created["id"]
@@ -238,7 +238,7 @@ def make_stack(api, worker, tenant, monkeypatch, caplog):
         else:
             server = FakeTiServer(parts, client_id=SENTINEL_ID, client_secret=SENTINEL_SECRET)
         handler = Slow(server, pause) if pause else server
-        register_adapter("product_catalog", "acme_catalog", lambda: TiProductCatalogAdapter(
+        register_adapter("product_catalog", TI_PROVIDER, lambda: TiProductCatalogAdapter(
             http_factory=lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
             rate_per_second=None, token_cache=TokenCache(), jitter=lambda: 0.0))
         stack = Stack(api, worker, tenant, server)
@@ -248,7 +248,7 @@ def make_stack(api, worker, tenant, monkeypatch, caplog):
         return stack
 
     yield build
-    register_adapter("product_catalog", "acme_catalog", TiProductCatalogAdapter)
+    register_adapter("product_catalog", TI_PROVIDER, TiProductCatalogAdapter)
     cleanup_knowledge(worker.engine, tenant)
     with worker.engine.begin() as conn:
         for table in ("workflow_schedules", "settings_connections", "tenant_secrets", "workflow_versions", "workflows"):

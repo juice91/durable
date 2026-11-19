@@ -11,7 +11,7 @@ import {
   CHECK_CODE_TEXT,
   KbSourceError,
   API_TOKEN_KIND,
-  PROVIDERS,
+  listAdapters,
   checkConnection,
   checkText,
   connectionPayload,
@@ -19,8 +19,10 @@ import {
   deleteConnection,
   listConnections,
   providerInfo,
+  providerLabel as adapterLabel,
   sourcesUsingConnection,
   updateConnection,
+  type AdapterInfo,
   type CheckResult,
   type Connection,
   type ConnectionForm,
@@ -34,14 +36,14 @@ function errorText(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
-function providerLabel(connection: Connection): string {
+function providerLabel(adapters: AdapterInfo[], connection: Connection): string {
   const provider = String(connection.config.provider ?? "");
-  return PROVIDERS.find((item) => item.value === provider)?.label ?? (provider || "Unknown provider");
+  return provider ? adapterLabel(adapters, provider) : "Unknown provider";
 }
 
-function emptyForm(): ConnectionForm {
-  const provider = PROVIDERS[0];
-  return { name: "", provider: provider.value, baseUrl: provider.baseUrl, tokenUrl: provider.tokenUrl, clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" };
+function emptyForm(adapters: AdapterInfo[]): ConnectionForm {
+  const provider = adapters[0];
+  return { name: "", provider: provider?.provider ?? "", baseUrl: provider?.base_url ?? "", tokenUrl: provider?.token_url ?? "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" };
 }
 
 function refName(ref: string | undefined): string {
@@ -51,13 +53,21 @@ function refName(ref: string | undefined): string {
 function formFor(connection: Connection): ConnectionForm {
   return {
     name: connection.name,
-    provider: String(connection.config.provider ?? PROVIDERS[0].value),
+    provider: String(connection.config.provider ?? ""),
     baseUrl: connection.base_url ?? "",
     tokenUrl: typeof connection.config.token_url === "string" ? connection.config.token_url : "",
     clientIdSecret: refName(connection.credential_refs.client_id),
     clientSecretSecret: refName(connection.credential_refs.client_secret),
     tokenSecret: refName(connection.credential_refs.token),
   };
+}
+
+/** One option per provider (a provider with several source kinds lists once); the edited connection's own provider stays selectable. */
+function providerOptions(adapters: AdapterInfo[], current: string): AdapterInfo[] {
+  const seen = new Set<string>();
+  const list = adapters.filter((item) => (seen.has(item.provider) ? false : (seen.add(item.provider), true)));
+  if (current && !seen.has(current)) list.push({ kind: "", provider: current, distribution: "", display_name: current, connection_kind: "", base_url: null, token_url: null, config_schema: null });
+  return list;
 }
 
 function StatusChip({ connection }: { connection: Connection }) {
@@ -67,8 +77,8 @@ function StatusChip({ connection }: { connection: Connection }) {
   return <Badge variant="outline">Not checked</Badge>;
 }
 
-function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | null; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState<ConnectionForm>(() => (editing ? formFor(editing) : emptyForm()));
+function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Connection | null; adapters: AdapterInfo[]; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState<ConnectionForm>(() => (editing ? formFor(editing) : emptyForm(adapters)));
   const [names, setNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,12 +92,12 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
   useEffect(refreshNames, [refreshNames]);
 
   const set = (patch: Partial<ConnectionForm>) => setForm((current) => ({ ...current, ...patch }));
-  const apiToken = providerInfo(form.provider)?.connectionKind === API_TOKEN_KIND;
+  const apiToken = providerInfo(adapters, form.provider)?.connection_kind === API_TOKEN_KIND;
   // An API-token connection's token is optional (a public repository needs none); OAuth needs both secrets.
   const valid = form.name.trim() !== "" && form.baseUrl.trim() !== "" && (apiToken || (form.clientIdSecret !== "" && form.clientSecretSecret !== ""));
   const chooseProvider = (value: string) => {
-    const info = providerInfo(value);
-    set({ provider: value, baseUrl: info?.baseUrl ?? "", tokenUrl: info?.tokenUrl ?? "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" });
+    const info = providerInfo(adapters, value);
+    set({ provider: value, baseUrl: info?.base_url ?? "", tokenUrl: info?.token_url ?? "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" });
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -96,7 +106,7 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
     setBusy(true);
     setError(null);
     try {
-      const body = connectionPayload(form, editing?.enabled ?? true);
+      const body = connectionPayload(form, editing?.enabled ?? true, adapters);
       if (editing) await updateConnection(editing.id, { name: body.name, base_url: body.base_url, config: body.config, credential_refs: body.credential_refs });
       else await createConnection(body);
       toast.success(editing ? "Connection saved" : "Connection added");
@@ -123,8 +133,8 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
             <div className="space-y-1">
               <label htmlFor="connection-provider" className="block text-sm font-medium text-foreground">Provider</label>
               <select id="connection-provider" value={form.provider} onChange={(e) => chooseProvider(e.target.value)} disabled={!!editing} className={inputClass}>
-                {PROVIDERS.map((provider) => (
-                  <option key={provider.value} value={provider.value}>{provider.label}</option>
+                {providerOptions(adapters, form.provider).map((provider) => (
+                  <option key={provider.provider} value={provider.provider}>{provider.display_name}</option>
                 ))}
               </select>
             </div>
@@ -169,6 +179,10 @@ function ConnectionSheet({ editing, onClose, onSaved }: { editing: Connection | 
 export function ConnectionsSection() {
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null);
+  useEffect(() => {
+    listAdapters().then(setAdapters, () => setAdapters([]));
+  }, []);
   const [sheet, setSheet] = useState<{ editing: Connection | null } | null>(null);
   const [checks, setChecks] = useState<Record<string, { busy: boolean; result?: CheckResult; error?: string }>>({});
   const [status, setStatus] = useState<string | null>(null);
@@ -270,7 +284,7 @@ export function ConnectionsSection() {
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
                   <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                     <span className="break-all text-label font-medium text-foreground">{connection.name}</span>
-                    <span className="text-caption text-muted-foreground">{providerLabel(connection)}</span>
+                    <span className="text-caption text-muted-foreground">{providerLabel(adapters ?? [], connection)}</span>
                     <StatusChip connection={connection} />
                   </span>
                   <span className="flex flex-wrap gap-1.5">
@@ -299,7 +313,7 @@ export function ConnectionsSection() {
         </ul>
       )}
       <p role="status" data-testid="connections-status" className="min-h-5 text-label text-muted-foreground">{status}</p>
-      {sheet ? <ConnectionSheet editing={sheet.editing} onClose={() => setSheet(null)} onSaved={() => void load()} /> : null}
+      {sheet && adapters ? <ConnectionSheet editing={sheet.editing} adapters={adapters} onClose={() => setSheet(null)} onSaved={() => void load()} /> : null}
       {deleting ? (
         <ConfirmDialog
           title={`Delete ${deleting.name}?`}

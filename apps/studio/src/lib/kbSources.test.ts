@@ -5,6 +5,11 @@ import {
   checkText,
   connectionPayload,
   createConnection,
+  listAdapters,
+  providerInfo,
+  providerLabel,
+  resetAdapterCache,
+  type AdapterInfo,
   deleteConnection,
   findSyncWorkflow,
   parseLines,
@@ -28,6 +33,8 @@ afterEach(() => {
   fetchMock.mockReset();
   vi.unstubAllGlobals();
 });
+const GITHUB: AdapterInfo = { kind: "repository_docs", provider: "github", distribution: "eap-kb-sources", display_name: "GitHub", connection_kind: "api_token", base_url: "https://api.github.com", token_url: null, config_schema: null };
+const PLUGIN: AdapterInfo = { kind: "product_catalog", provider: "acme", distribution: "eap-kb-sources-acme", display_name: "Acme Parts", connection_kind: "oauth2_client_credentials", base_url: null, token_url: null, config_schema: null };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const urls = () => fetchMock.mock.calls.map(([url, init]) => `${(init?.method as string) ?? "GET"} ${String(url).replace(/^.*?\/api\/v1/, "")}`);
 
@@ -44,32 +51,32 @@ describe("check codes", () => {
 
 describe("connectionPayload", () => {
   it("sends refs, never values, and the token URL in config", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://api.vendor.example", tokenUrl: "https://api.vendor.example/v1/oauth/accesstoken", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret", tokenSecret: "" });
+    const body = connectionPayload({ name: "ti", provider: "acme", baseUrl: "https://api.acme.test", tokenUrl: "https://auth.acme.test/token", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret", tokenSecret: "" });
     expect(body).toEqual({
       name: "ti",
       kind: "oauth2_client_credentials",
-      base_url: "https://api.vendor.example",
-      config: { provider: "acme_catalog", token_url: "https://api.vendor.example/v1/oauth/accesstoken" },
+      base_url: "https://api.acme.test",
+      config: { provider: "acme", token_url: "https://auth.acme.test/token" },
       credential_refs: { client_id: "secret:conn-id", client_secret: "secret:conn-secret" },
       enabled: true,
     });
   });
   it("leaves an empty token URL out", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme_catalog", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b", tokenSecret: "" });
-    expect(body.config).toEqual({ provider: "acme_catalog" });
+    const body = connectionPayload({ name: "ti", provider: "acme", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b", tokenSecret: "" });
+    expect(body.config).toEqual({ provider: "acme" });
   });
 });
 
 describe("connectionPayload for an api_token provider", () => {
   const form = { name: "repo", provider: "github", baseUrl: "https://api.github.com", tokenUrl: "", clientIdSecret: "", clientSecretSecret: "", tokenSecret: "" };
   it("sends the optional token as one reference", () => {
-    expect(connectionPayload({ ...form, tokenSecret: "repo-token" })).toEqual({
+    expect(connectionPayload({ ...form, tokenSecret: "repo-token" }, true, [GITHUB])).toEqual({
       name: "repo", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" },
       credential_refs: { token: "secret:repo-token" }, enabled: true,
     });
   });
   it("sends no reference when there is no token, and no OAuth fields", () => {
-    const body = connectionPayload({ ...form, clientIdSecret: "leftover", tokenUrl: "https://x.test" });
+    const body = connectionPayload({ ...form, clientIdSecret: "leftover", tokenUrl: "https://x.test" }, true, [GITHUB]);
     expect(body.credential_refs).toEqual({});
     expect(body.config).toEqual({ provider: "github" });
     expect(body.kind).toBe("api_token");
@@ -227,5 +234,28 @@ describe("the sync workflow", () => {
   it("refuses with a stable error when the workflow is not published", async () => {
     fetchMock.mockResolvedValue(json([]));
     await expect(startSourceSync("s1", "incremental", {})).rejects.toMatchObject({ code: "sync_workflow_missing" });
+  });
+});
+
+describe("the adapter list", () => {
+  beforeEach(() => resetAdapterCache());
+
+  it("is fetched once per page load and a plug-in provider appears when the server lists it", async () => {
+    fetchMock.mockResolvedValue(json({ items: [GITHUB, PLUGIN] }));
+    const first = await listAdapters();
+    await listAdapters();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v1/kb-sources/adapters");
+    expect(first.map((item) => item.provider)).toEqual(["github", "acme"]);
+    expect(providerInfo(first, "acme")?.kind).toBe("product_catalog");
+    expect(providerLabel(first, "acme")).toBe("Acme Parts");
+    expect(providerLabel(first, "unlisted")).toBe("unlisted");
+  });
+
+  it("retries after a failed fetch", async () => {
+    fetchMock.mockResolvedValueOnce(json({ detail: "x" }, 500));
+    await expect(listAdapters()).rejects.toBeDefined();
+    fetchMock.mockResolvedValueOnce(json({ items: [GITHUB] }));
+    expect(await listAdapters()).toHaveLength(1);
   });
 });

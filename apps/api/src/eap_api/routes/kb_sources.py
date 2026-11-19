@@ -34,7 +34,7 @@ from eap_api.request_guard import guarded_json_route
 from eap_api.routes.connections import parse_body, parse_uuid, problem
 from eap_kb_sources.check import load_providers
 from eap_kb_sources.errors import SOURCE_ADAPTER_NOT_FOUND, SourceError
-from eap_kb_sources.registry import adapter_for
+from eap_kb_sources.registry import adapter_for, list_adapters
 from eap_observability import current_trace_context
 from eap_run_store import RunStore
 from eap_run_store.kb_source_launch import LaunchFailed, SourceLaunchError, launch_sync, source_view
@@ -138,6 +138,41 @@ async def workflow_template(principal: PrincipalDep) -> JSONResponse:
     if spec is None:
         return problem("workflow_template_unavailable", "the sync workflow template is not available", status.HTTP_503_SERVICE_UNAVAILABLE)
     return JSONResponse(content=spec)
+
+
+DEFAULT_CONNECTION_KIND = "oauth2_client_credentials"
+
+
+def adapter_view(info: Any) -> dict[str, Any]:
+    """One registered adapter for Studio's forms. Display data is optional on an adapter (`display_name`,
+    `connection_kind`, `default_base_url`, `default_token_url`, `config_schema`); a plug-in that exposes
+    none still lists, with the provider name and OAuth client credentials."""
+    try:
+        adapter = adapter_for(info.kind, info.provider)
+    except Exception:  # a factory that cannot build without a store must not hide the adapter
+        adapter = None
+
+    def attr(name: str) -> Any:
+        return getattr(adapter, name, None)
+
+    schema = attr("config_schema")
+    return {
+        "kind": info.kind,
+        "provider": info.provider,
+        "distribution": info.distribution,
+        "display_name": attr("display_name") or info.provider,
+        "connection_kind": attr("connection_kind") or DEFAULT_CONNECTION_KIND,
+        "base_url": attr("default_base_url"),
+        "token_url": attr("default_token_url"),
+        "config_schema": schema if isinstance(schema, dict) else None,
+    }
+
+
+@router.get("/kb-sources/adapters")
+async def list_source_adapters(principal: PrincipalDep) -> JSONResponse:
+    """The adapters this server has (built in or installed as plug-ins): what Studio's connection and source forms offer."""
+    items = await run_in_threadpool(lambda: [adapter_view(info) for info in list_adapters()])
+    return JSONResponse(content={"items": items})
 
 
 @router.post(BASE, status_code=status.HTTP_201_CREATED)

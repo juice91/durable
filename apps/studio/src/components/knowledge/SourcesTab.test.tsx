@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  listAdapters: vi.fn(),
   listSources: vi.fn(),
   createSource: vi.fn(),
   updateSource: vi.fn(),
@@ -19,13 +20,17 @@ import { SourcesTab } from "./SourcesTab";
 import { KbSourceError } from "@/lib/kbSources";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 
+const ADAPTERS = [
+  { kind: "product_catalog", provider: "acme", distribution: "eap-kb-sources-acme", display_name: "Acme Parts", connection_kind: "oauth2_client_credentials", base_url: "https://api.acme.test", token_url: "https://auth.acme.test/token", config_schema: null },
+  { kind: "repository_docs", provider: "github", distribution: "eap-kb-sources", display_name: "GitHub", connection_kind: "api_token", base_url: "https://api.github.com", token_url: null, config_schema: null },
+];
 const T = "2026-11-18T10:00:00Z";
 const SOURCE = {
   id: "s1",
   knowledge_base_id: "kb1",
   connection_id: "c1",
   kind: "product_catalog",
-  provider: "acme_catalog",
+  provider: "acme",
   name: "TI parts",
   enabled: true,
   config: { page_size: 100 },
@@ -35,12 +40,13 @@ const SOURCE = {
   created_at: T,
   updated_at: T,
 };
-const CONNECTION = { id: "c1", name: "ti-prod", kind: "oauth2_client_credentials", base_url: "https://api.vendor.example", config: { provider: "acme_catalog" }, credential_refs: {}, enabled: true, last_checked_at: null, last_status: null, last_error_code: null, created_at: T, updated_at: T };
+const CONNECTION = { id: "c1", name: "ti-prod", kind: "oauth2_client_credentials", base_url: "https://api.acme.test", config: { provider: "acme" }, credential_refs: {}, enabled: true, last_checked_at: null, last_status: null, last_error_code: null, created_at: T, updated_at: T };
 const SYNC = { run_id: "r-child", source_id: "s1", parent_run_id: "r-parent", mode: "targeted", status: "completed", counters: {}, errors: [], started_at: T, completed_at: T };
 const DETAIL = { ...SYNC, report: { discovered: 5, inserted: 2, updated: 1, unchanged: 2, documents_queued: 3, failed: 0, stop_reason: "budget" }, run_status: "completed" };
 const WORKFLOW = { id: "w1", name: "KB Source Synchronization", draft_spec: null, latest_version: 1 };
 
 beforeEach(() => {
+  mocks.listAdapters.mockReset().mockResolvedValue(ADAPTERS);
   mocks.listSources.mockReset().mockResolvedValue([SOURCE]);
   mocks.createSource.mockReset().mockResolvedValue({ ...SOURCE, id: "s2", name: "New" });
   mocks.updateSource.mockReset().mockResolvedValue({ ...SOURCE, enabled: false });
@@ -61,7 +67,7 @@ async function ready() {
 describe("SourcesTab", () => {
   it("lists name, provider, enabled, last successful sync and the checkpoint summary", async () => {
     const row = await ready();
-    expect(within(row).getByText("Acme Semiconductor")).toBeInTheDocument();
+    expect(within(row).getByText("Acme Parts")).toBeInTheDocument();
     expect(within(row).getByText("Enabled")).toBeInTheDocument();
     expect(row.textContent).toMatch(/Last successful sync/);
     expect(row.textContent).toMatch(/3 segments/);
@@ -92,7 +98,7 @@ describe("SourcesTab", () => {
         connection_id: "c1",
         name: "New",
         kind: "product_catalog",
-        provider: "acme_catalog",
+        provider: "acme",
         config: { page_size: 50, include_extended: true, include_inactive: false, document_policy: { types: ["datasheet"] } },
         enabled: true,
       },
