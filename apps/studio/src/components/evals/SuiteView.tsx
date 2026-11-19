@@ -43,6 +43,8 @@ import { CaseSheet, SuiteSheet } from "./EditSheets";
 import { RunDialog, type RunVersion } from "./RunDialog";
 import { SchemaSheet } from "./SchemaSheet";
 import { rememberCaseCount } from "./useEvalRun";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import { alertClass, cardClass, fieldClass, hintClass, labelClass, sectionTitleClass } from "./evalsUi";
 
 /** The editor Sheet's query parameter: `suite` (the suite), `new` (a new case) or a case id. */
@@ -157,10 +159,13 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
     }
   };
 
+  // 412: the suite changed elsewhere; 重新載入 shows their version, 覆寫 resends on top of it.
+  const conflict = useConflict<EvalSuiteWithCases>({ onSaved: () => load() });
   const setArchived = async (value: boolean) => {
     setActionError(null);
     try {
-      await updateSuite(suiteId, { archived: value });
+      const saved = await conflict.guard(() => updateSuite(suiteId, { archived: value }));
+      if (saved === undefined) return;
       load();
     } catch (reason: unknown) {
       setActionError(reason instanceof Error && reason.message ? reason.message : "The suite could not be changed");
@@ -276,6 +281,7 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
         Import takes a pydantic_evals dataset file (YAML or JSON) or a CSV file (name, input, expected_output, metadata), at most 1 MiB; cases are matched by name.{isWorkflow ? " A workflow case's input is JSON text of an object." : ""}
       </p>
       {archived ? <p className={hintClass} data-testid="eval-suite-archived">This suite is archived: it can be viewed and exported, not edited or run.</p> : null}
+      <ConflictNotice state={conflict} onReload={() => load()} />
       {actionError ? <p role="alert" className={alertClass} data-testid="eval-suite-action-error">{actionError}</p> : null}
       {importError ? <p role="alert" className={alertClass} data-testid="eval-suite-import-error">Import failed: {importError}</p> : null}
 

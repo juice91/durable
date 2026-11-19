@@ -3,6 +3,7 @@
 // GET /api/v1/workflows/schedules (all), GET|POST /workflows/{id}/schedules,
 // PATCH|DELETE /workflows/schedules/{id}. A schedule fires the workflow's latest published version.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 
 export interface WorkflowSchedule {
   id: string;
@@ -19,6 +20,8 @@ export interface WorkflowSchedule {
   next_fire_at: string | null;
   created_at: string;
   updated_at: string;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface WorkflowScheduleCreate {
@@ -53,7 +56,7 @@ const CODE_MESSAGES: Record<string, string> = {
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
   const response = await fetch(`${BASE_URL}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    headers: { "Content-Type": "application/json", ...apiHeaders(), ...(init.headers as Record<string, string> | undefined) },
   });
   if (!response.ok) {
     const error = await apiErrorFromResponse(response.clone());
@@ -80,17 +83,24 @@ export async function listSchedules({ workflowId, before, limit, signal }: { wor
   if (before) params.set("before", before);
   const query = params.toString();
   const path = workflowId ? `/api/v1/workflows/${enc(workflowId)}/schedules` : "/api/v1/workflows/schedules";
-  return (await call(`${path}${query ? `?${query}` : ""}`, { signal })).json();
+  const page: SchedulePage = await (await call(`${path}${query ? `?${query}` : ""}`, { signal })).json();
+  trackAll(page.items, (item) => revisionKey.schedule(item.id));
+  return page;
 }
 
 /** Create a schedule (201). Throws ApiError: 409 schedule_name_taken, 422 invalid_cron / invalid_timezone / input_schema_errors. */
 export async function createSchedule(workflowId: string, body: WorkflowScheduleCreate): Promise<WorkflowSchedule> {
-  return (await call(`/api/v1/workflows/${enc(workflowId)}/schedules`, { method: "POST", body: JSON.stringify(body) })).json();
+  const made: WorkflowSchedule = await (await call(`/api/v1/workflows/${enc(workflowId)}/schedules`, { method: "POST", body: JSON.stringify(body) })).json();
+  return track(revisionKey.schedule(made.id), made);
 }
 
-/** Patch a schedule; `{active: true}` resumes a stopped one (the API re-validates and clears last_error). */
+/**
+ * Patch a schedule; `{active: true}` resumes a stopped one (the API re-validates and clears last_error).
+ * Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412).
+ */
 export async function updateSchedule(id: string, patch: WorkflowSchedulePatch): Promise<WorkflowSchedule> {
-  return (await call(`/api/v1/workflows/schedules/${enc(id)}`, { method: "PATCH", body: JSON.stringify(patch) })).json();
+  return writeResource(revisionKey.schedule(id), async (headers) =>
+    (await call(`/api/v1/workflows/schedules/${enc(id)}`, { method: "PATCH", headers, body: JSON.stringify(patch) })).json());
 }
 
 export async function deleteSchedule(id: string): Promise<void> {

@@ -3,7 +3,8 @@
 // Studio starts syncs through. A connection holds `secret:<name>` references only: no value is ever
 // typed into, returned by or shown through this module.
 import { load as loadYaml } from "js-yaml";
-import { apiHeaders, BASE_URL } from "./api";
+import { apiErrorFromResponse, apiHeaders, BASE_URL, type ApiError } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 import { listKnowledgeBases } from "./knowledge";
 import { secretRef } from "./secrets";
 import { listWorkflows, startWorkflowRun, type Workflow } from "./workflows";
@@ -99,7 +100,9 @@ export function checkText(result: CheckResult): string {
   return CHECK_CODE_TEXT[code] ?? `The check failed (${code}).`;
 }
 
-async function failure(response: Response): Promise<KbSourceError> {
+async function failure(response: Response): Promise<KbSourceError | ApiError> {
+  // 412 revision_mismatch: a ConflictError, which carries the current resource for the page to reload.
+  if (response.status === 412) return apiErrorFromResponse(response);
   let code = "";
   let detail = "";
   try {
@@ -117,7 +120,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${BASE_URL}/api/v1${path}`, {
     ...init,
     cache: "no-store",
-    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    headers: { "Content-Type": "application/json", ...apiHeaders(), ...(init.headers as Record<string, string> | undefined) },
   });
   if (!response.ok) throw await failure(response);
   if (response.status === 204) return undefined as T;
@@ -143,6 +146,8 @@ export interface Connection {
   last_error_code: string | null;
   created_at: string;
   updated_at: string;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface ConnectionBody {
@@ -187,10 +192,13 @@ export function connectionPayload(form: ConnectionForm, enabled = true, adapters
 }
 
 export async function listConnections(): Promise<Connection[]> {
-  return (await request<{ items: Connection[] }>("/settings/connections")).items;
+  return trackAll((await request<{ items: Connection[] }>("/settings/connections")).items, (c) => revisionKey.connection(c.id));
 }
 export const createConnection = (body: ConnectionBody) => request<Connection>("/settings/connections", { method: "POST", body: JSON.stringify(body) });
-export const updateConnection = (id: string, body: Partial<ConnectionBody>) => request<Connection>(`/settings/connections/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) });
+/** Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412). */
+export const updateConnection = (id: string, body: Partial<ConnectionBody>) =>
+  writeResource(revisionKey.connection(id), (headers) =>
+    request<Connection>(`/settings/connections/${enc(id)}`, { method: "PATCH", headers, body: JSON.stringify(body) }));
 export const deleteConnection = (id: string) => request<void>(`/settings/connections/${enc(id)}`, { method: "DELETE" });
 export const checkConnection = (id: string) => request<CheckResult>(`/settings/connections/${enc(id)}/check`, { method: "POST" });
 
@@ -211,6 +219,8 @@ export interface Source {
   last_source_revision: string | null;
   created_at: string;
   updated_at: string;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface SourceCreate {
@@ -223,11 +233,13 @@ export interface SourceCreate {
 }
 
 export async function listSources(kbId: string): Promise<Source[]> {
-  return (await request<{ items: Source[] }>(`/knowledge-bases/${enc(kbId)}/sources`)).items;
+  return trackAll((await request<{ items: Source[] }>(`/knowledge-bases/${enc(kbId)}/sources`)).items, (s) => revisionKey.source(s.id));
 }
 export const createSource = (kbId: string, body: SourceCreate) => request<Source>(`/knowledge-bases/${enc(kbId)}/sources`, { method: "POST", body: JSON.stringify(body) });
+/** Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412). */
 export const updateSource = (kbId: string, id: string, body: { name?: string; config?: Record<string, unknown>; enabled?: boolean }) =>
-  request<Source>(`/knowledge-bases/${enc(kbId)}/sources/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) });
+  writeResource(revisionKey.source(id), (headers) =>
+    request<Source>(`/knowledge-bases/${enc(kbId)}/sources/${enc(id)}`, { method: "PATCH", headers, body: JSON.stringify(body) }));
 
 // ---------------------------------------------------------------------------------------------
 // Repository sources: the source config a form builds, and the metadata map's text

@@ -5,6 +5,8 @@ import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import { deleteSchedule, listSchedules, scheduleState, updateSchedule, type WorkflowSchedule } from "@/lib/schedules";
 import type { WorkflowSpec } from "@/lib/workflows";
 import { ScheduleDialog } from "./ScheduleDialog";
@@ -64,12 +66,16 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
     return () => controller.abort();
   }, [load]);
 
+  // 412: someone else changed the schedule; 重新載入 shows their version, 覆寫 resends on top of it.
+  const conflict = useConflict<WorkflowSchedule>({ onSaved: (saved) => replaceRow(saved as WorkflowSchedule) });
+  const replaceRow = (saved: WorkflowSchedule) => apply((rows ?? []).map((r) => (r.id === saved.id ? saved : r)));
+
   const setActive = async (row: WorkflowSchedule, active: boolean) => {
     setBusyId(row.id);
     setActionError(null);
     try {
-      const saved = await updateSchedule(row.id, { active });
-      apply((rows ?? []).map((r) => (r.id === row.id ? saved : r)));
+      const saved = await conflict.guard(() => updateSchedule(row.id, { active }));
+      if (saved !== undefined) replaceRow(saved);
     } catch (reason) {
       setActionError(`${row.name}: ${reason instanceof Error ? reason.message : "Failed to update the schedule"}`);
     } finally {
@@ -130,6 +136,7 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
+      <ConflictNotice state={conflict} onReload={(current) => (current ? replaceRow(current) : void load())} />
       {actionError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{actionError}</p> : null}
       <DataList<WorkflowSchedule>
         label="Schedules"

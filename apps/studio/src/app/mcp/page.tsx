@@ -18,6 +18,8 @@ import { Kbd } from "@/components/ui/Kbd";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 import { ApiError } from "@/lib/api";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { describeMcpApiMessage, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
 import { navCrumb } from "@/lib/nav";
@@ -115,8 +117,11 @@ export default function McpServersPage() {
     replaceServer(await mcpServers.get(server.id));
   });
 
+  // 412: the server changed elsewhere; 重新載入 shows their version, 覆寫 resends the toggle on top of it.
+  const conflict = useConflict<McpServer>({ onSaved: (saved) => replaceServer(saved as McpServer) });
   const toggleEnabled = (server: McpServer) => withBusy(server.id, async () => {
-    replaceServer(await mcpServers.setEnabled(server.id, !server.enabled));
+    const saved = await conflict.guard(() => mcpServers.setEnabled(server.id, !server.enabled));
+    if (saved !== undefined) replaceServer(saved);
   });
 
   const openDeleteDialog = (server: McpServer | null) => {
@@ -299,6 +304,7 @@ export default function McpServersPage() {
         <p className="text-body text-muted-foreground">MCP servers that agents connect to: remote endpoints you register, and servers run here from the catalog. Test one and see the tools it offers.</p>
 
         {notice ? <p role="status" data-testid="mcp-notice" className="rounded-md border border-border bg-muted/40 p-3 text-body text-foreground">{notice}</p> : null}
+        <ConflictNotice state={conflict} onReload={(current) => current && replaceServer(current)} />
         {actionError ? <p role="alert" data-testid="mcp-action-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
 
         <DataList
