@@ -219,6 +219,7 @@ def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rul
     flat = " ".join(ARCHITECT_INSTRUCTIONS.split())
     assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
     assert "1 to 8" not in flat and "8 steps" not in flat
+    assert "must use an http.request reducer" in flat and "response_query" in flat
     assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
 
 

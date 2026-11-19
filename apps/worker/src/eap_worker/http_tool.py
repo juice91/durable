@@ -24,6 +24,16 @@ The platform's general HTTP tool: a workflow can call a JSON API with a credenti
   body, with `Content-Type` set to the fetched one unless the caller set one. Any refusal is
   `{error: {code: "body_source_rejected", detail}}` with a fixed detail (never the URL), and nothing is sent.
   It excludes `json` and `body` (`body_conflict`). The main request's result is unchanged.
+- Reducers (`response_query`, `extract_html`, `parse_feed`; at most one, else `reducer_conflict`): a workflow step's
+  output is capped at 32 KiB, so one reducer shrinks the body in this tool and only its result is recorded (the raw
+  body never is). With a reducer `max_response_bytes` may go up to 1 MiB (256 KiB without one:
+  `max_response_bytes_too_large`). `response_query` is `json.query` over the JSON body (the result is `json`);
+  `extract_html` is `html.extract` over the text (the extraction is `text`; `base_url` defaults to the request
+  url); `parse_feed` is `feed.parse` over the text (the parsed result is `text`). The result keeps `status`, `ok`,
+  `headers`, `elapsed_ms` and adds `reduced: {kind, input_bytes}`. A reducer failure is that tool's own
+  `{error: {code, message}}` with `request: {status}` alongside (`response_not_json` when `response_query` met a
+  body that is not JSON). A non-2xx status applies the reducer when the body allows it; otherwise the normal
+  result with `text` cut to 4 KiB. `drop_response_paths` applies before `response_query`.
 - Gating: an agent run's call that names a secret waits for an approval (`SpecCapability`,
   eap_worker.capabilities); a workflow tool step does not (the spec was published by a person).
 """
@@ -47,13 +57,25 @@ from pydantic_core import to_jsonable_python
 from eap_runtime import RunDeps, ToolRegistry
 from eap_schemas.http_request import EMBEDDED_REF, http_request_secret_names, http_request_summary
 from eap_schemas.secrets import is_secret_ref
-from eap_schemas.tools import HTTP_MAX_RESPONSE_BYTES_CAP, TOOL_DECLARATIONS, HttpBodySource
+from eap_schemas.tools import (
+    HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP,
+    HTTP_MAX_RESPONSE_BYTES_CAP,
+    TOOL_DECLARATIONS,
+    FeedInput,
+    HttpBodySource,
+    HttpExtractHtml,
+    HttpParseFeed,
+    HttpResponseQuery,
+)
 from eap_secrets import SecretsError
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 from eap_secrets.outbound_errors import walk_chain
 from eap_secrets.redaction import mask_split_secrets, redact, secret_variants
 from typing import Annotated, Literal
 
+from eap_worker.feed_tool import feed_parse
+from eap_worker.html_extract_tool import html_extract
+from eap_worker.json_query_tool import json_query
 from eap_worker.secret_refs import SecretRefNotFound, secret_store
 
 log = logging.getLogger("eap_worker.http_tool")
@@ -62,6 +84,7 @@ TOOL_ID = "http.request"
 RESPONSE_HEADERS = ("content-type", "content-length", "location", "retry-after", "x-request-id")
 RESPONSE_HEADER_PREFIXES = ("ratelimit-",)
 MAX_HEADER_VALUE_CHARS = 512
+NON_2XX_TEXT_BYTES = 4096
 
 
 def _error(code: str, message: str) -> dict[str, Any]:
@@ -225,19 +248,70 @@ def drop_paths(value: Any, pointers: Sequence[str]) -> Any:
     return value
 
 
+Reducer = tuple[str, Callable[[Any], dict[str, Any]]]
+
+
+def _reduce(kind: str, reduce: Callable[[Any], dict[str, Any]], raw: bytes, variants: list[str],
+            drop: Sequence[str]) -> dict[str, Any]:
+    """`{value}` or the reducer's own `{error}`."""
+    if kind == "response_query":
+        try:
+            parsed = jsonlib.loads(raw.decode("utf-8"))
+        except ValueError:
+            return _error("response_not_json", "the response body is not JSON")
+        outcome = reduce(redact(mask_split_secrets(drop_paths(parsed, drop), variants), variants))
+        if "error" in outcome:
+            return outcome
+        return {"value": redact(mask_split_secrets(outcome["result"], variants), variants)}
+    outcome = reduce(redact(raw.decode("utf-8", errors="replace"), variants))
+    if "error" in outcome:
+        return outcome
+    return {"value": redact(mask_split_secrets(outcome, variants), variants)}
+
+
 async def _answer(
-    response: httpx2.Response, max_bytes: int, variants: list[str], started: float, drop: Sequence[str] = ()
+    response: httpx2.Response, max_bytes: int, variants: list[str], started: float, drop: Sequence[str] = (),
+    reducer: Reducer | None = None,
 ) -> dict[str, Any]:
     content_type = response.headers.get("content-type", "")
     width = (max(len(v) for v in variants) + 4) * 4 if variants else 0
     declared = response.headers.get("content-length")
     is_json = _is_json(content_type)
+    ok = 200 <= response.status_code < 300
+    if reducer is not None:
+        if ok and declared and declared.isdigit() and int(declared) > max_bytes:
+            return _error("response_too_large", "the response body is larger than max_response_bytes")
+        raw, more = await _read(response, max_bytes)
+        if ok and more:
+            return _error("response_too_large", "the response body is larger than max_response_bytes")
+        if not more:
+            kind, reduce = reducer
+            outcome = _reduce(kind, reduce, raw, variants, drop)
+            if "error" not in outcome:
+                reduced: dict[str, Any] = {
+                    "status": response.status_code,
+                    "ok": ok,
+                    "headers": _kept_headers(response.headers, variants),
+                    "reduced": {"kind": kind, "input_bytes": len(raw)},
+                    "json" if kind == "response_query" else "text": outcome["value"],
+                }
+                reduced["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                return reduced
+            if ok:
+                return {**outcome, "request": {"status": response.status_code}}
+        # a non-2xx answer the reducer cannot read: the normal result, the body cut to 4 KiB
+        text, truncated = _text_window(raw, NON_2XX_TEXT_BYTES, more, variants)
+        result = {"status": response.status_code, "ok": ok, "headers": _kept_headers(response.headers, variants), "text": text}
+        if truncated:
+            result["truncated"] = True
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
     if is_json and declared and declared.isdigit() and int(declared) > max_bytes:
         return _error("response_too_large", "the response body is larger than max_response_bytes")
     raw, more = await _read(response, max_bytes + width + 1 if not is_json else max_bytes)
-    result: dict[str, Any] = {
+    result = {
         "status": response.status_code,
-        "ok": 200 <= response.status_code < 300,
+        "ok": ok,
         "headers": _kept_headers(response.headers, variants),
     }
     if is_json:
@@ -302,6 +376,35 @@ async def _fetch_source(source: HttpBodySource, timeout_s: int) -> tuple[bytes, 
     return raw, media
 
 
+# ------------------------------------------------------------------------------------- reducers
+
+
+def _reducer(ctx: RunContext[RunDeps], url: str, response_query: Any, extract_html: Any, parse_feed: Any) -> Reducer | None:
+    """The one reducer the call names, as (kind, function), or None."""
+    if response_query is not None:
+        q = response_query if isinstance(response_query, HttpResponseQuery) else HttpResponseQuery.model_validate(response_query)
+        return "response_query", lambda data: json_query(ctx, data, q.expression)
+    if extract_html is not None:
+        e = extract_html if isinstance(extract_html, HttpExtractHtml) else HttpExtractHtml.model_validate(extract_html)
+        return "extract_html", lambda text: html_extract(
+            ctx, text, e.base_url or url, e.mode, e.max_graphemes, e.root_selector, e.include_patterns,
+            e.exclude_patterns, e.allowed_hosts, e.limit,
+        )
+    if parse_feed is not None:
+        f = parse_feed if isinstance(parse_feed, HttpParseFeed) else HttpParseFeed.model_validate(parse_feed)
+
+        def parse(text: str) -> dict[str, Any]:
+            if f.label is None:
+                return feed_parse(ctx, text=text, max_items=f.max_items, max_age_hours=f.max_age_hours,
+                                  include_terms=f.include_terms, exclude_urls=f.exclude_urls, exclude_terms=f.exclude_terms)
+            return feed_parse(ctx, feeds=[FeedInput(text=text, label=f.label)], max_items=f.max_items,
+                              max_age_hours=f.max_age_hours, include_terms=f.include_terms,
+                              exclude_urls=f.exclude_urls, exclude_terms=f.exclude_terms)
+
+        return "parse_feed", parse
+    return None
+
+
 # ------------------------------------------------------------------------------------- the tool
 
 
@@ -314,15 +417,23 @@ async def http_request(
     json: Any = None,
     body: str | None = None,
     timeout_s: Annotated[int, Field(ge=1, le=30)] = 20,
-    max_response_bytes: Annotated[int, Field(ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)] = 65536,
+    max_response_bytes: Annotated[int, Field(ge=1, le=HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP)] = 65536,
     drop_response_paths: Annotated[list[Annotated[str, Field(pattern=r"^/")]] | None, Field(max_length=16)] = None,
     body_from_url: HttpBodySource | None = None,
+    response_query: HttpResponseQuery | None = None,
+    extract_html: HttpExtractHtml | None = None,
+    parse_feed: HttpParseFeed | None = None,
 ) -> dict[str, Any]:
     """Send one HTTPS request (see the module docstring)."""
     if not url.lower().startswith("https://"):
         return _error("url_not_https", "the url must start with https://")
     if (json is not None and body is not None) or (body_from_url is not None and (json is not None or body is not None)):
         return _error("body_conflict", "send json, body or body_from_url, only one")
+    if sum(r is not None for r in (response_query, extract_html, parse_feed)) > 1:
+        return _error("reducer_conflict", "give at most one of response_query, extract_html and parse_feed")
+    reducer = _reducer(ctx, url, response_query, extract_html, parse_feed)
+    if reducer is None and max_response_bytes > HTTP_MAX_RESPONSE_BYTES_CAP:
+        return _error("max_response_bytes_too_large", "max_response_bytes above 262144 needs a reducer")
     request = {"headers": headers, "query": query, "json": json, "body": body}
     used: list[str] = []
     if http_request_secret_names({"headers": headers, "query": query, "json": json, "body": body}):
@@ -352,7 +463,7 @@ async def http_request(
                     method, url, headers=request["headers"], params=request["query"], json=request["json"],
                     content=content,
                 ) as response:
-                    return to_jsonable_python(await _answer(response, max_response_bytes, variants, started, drop_response_paths or ()))
+                    return to_jsonable_python(await _answer(response, max_response_bytes, variants, started, drop_response_paths or (), reducer))
     except Exception as exc:  # noqa: BLE001 - classified; the exception text is never returned
         code = _failure_code(exc)
         log.warning("http.request failed code=%s error_type=%s", code, type(exc).__name__)
