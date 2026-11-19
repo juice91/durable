@@ -102,14 +102,31 @@ def _builtin_role(agent: AgentModel) -> str | None:
     return None
 
 
-def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
-    """Convert AgentModel to response dict."""
+def _latest_spec_summary(latest: AgentVersionModel | None) -> dict | None:
+    """What the latest published version runs: version, model, tool count and spec hash (None: draft-only)."""
+    if latest is None:
+        return None
+    spec = latest.spec or {}
+    model = spec.get("model") or {}
+    return {
+        "version": latest.version,
+        "model": {"provider": model.get("provider"), "name": model.get("name")},
+        "tool_count": len(spec.get("tools") or []) + len(spec.get("mcp_tools") or []),
+        "spec_hash": latest.spec_hash,
+    }
+
+
+def _agent_to_response(agent: AgentModel, latest: AgentVersionModel | None) -> dict:
+    """Convert AgentModel to response dict. `latest` is the newest published version (None: draft-only);
+    `draft_dirty` is true only when a version exists and the draft's canonical hash differs from it."""
     return {
         "builtin_role": _builtin_role(agent),
         "id": str(agent.id),
         "name": agent.name,
         "draft_spec": agent.draft_spec,
-        "latest_version": latest_version,
+        "latest_version": latest.version if latest is not None else None,
+        "latest_spec_summary": _latest_spec_summary(latest),
+        "draft_dirty": latest is not None and draft_hash(agent.draft_spec) != latest.spec_hash,
         "archived": bool(agent.archived),
         "builtin": bool(agent.builtin),
         "revision": agent.revision,
@@ -194,16 +211,21 @@ def list_agents(
         .all()
     )
 
-    results = []
-    for agent in agents:
-        if not include_system and _builtin_role(agent) == "drafter":
-            continue
-        latest = (
-            db.query(func.max(AgentVersionModel.version))
-            .filter(AgentVersionModel.agent_id == agent.id)
-            .scalar()
+    agents = [a for a in agents if include_system or _builtin_role(a) != "drafter"]
+    # One query for every agent's newest version (spec included), not one per agent.
+    newest = (
+        db.query(AgentVersionModel.agent_id, func.max(AgentVersionModel.version).label("v"))
+        .filter(AgentVersionModel.agent_id.in_([str(a.id) for a in agents]))
+        .group_by(AgentVersionModel.agent_id)
+        .subquery()
+    )
+    latest_by_agent = {
+        str(row.agent_id): row
+        for row in db.query(AgentVersionModel).join(
+            newest, (AgentVersionModel.agent_id == newest.c.agent_id) & (AgentVersionModel.version == newest.c.v)
         )
-        results.append(_agent_to_response(agent, latest))
+    }
+    results = [_agent_to_response(agent, latest_by_agent.get(str(agent.id))) for agent in agents]
 
     return JSONResponse(content=results)
 
@@ -234,13 +256,7 @@ def get_agent(
             detail="Agent not found",
         )
 
-    latest = (
-        db.query(func.max(AgentVersionModel.version))
-        .filter(AgentVersionModel.agent_id == str(agent_id))
-        .scalar()
-    )
-
-    return read_response(_agent_to_response(agent, latest), agent.revision)
+    return read_response(_agent_to_response(agent, _latest_version(db, str(agent_id))), agent.revision)
 
 
 @router.patch(
@@ -274,7 +290,7 @@ def patch_agent(
 
     def current() -> tuple[dict, int]:
         db.refresh(agent)
-        return _agent_to_response(agent, _latest_number(db, agent_id)), agent.revision
+        return _agent_to_response(agent, _latest_version(db, str(agent_id))), agent.revision
 
     pre.check(agent.revision, current)
     refused = _refuse_architect_tools(request.spec, builtin=bool(agent.builtin))
@@ -288,7 +304,7 @@ def patch_agent(
         agent.draft_spec = spec_dict
         db.commit()
     db.refresh(agent)
-    return pre.respond(_agent_to_response(agent, _latest_number(db, agent_id)), agent.revision)
+    return pre.respond(_agent_to_response(agent, _latest_version(db, str(agent_id))), agent.revision)
 
 
 def _latest_number(db: Session, agent_id: uuid.UUID | str) -> int | None:
@@ -304,7 +320,7 @@ def _set_archived(
         db, lambda conn: set_agent_archived(conn, principal.tenant_id, str(agent_id), archived, force=force)
     )
     agent = _tenant_agent(db, principal.tenant_id, agent_id)
-    return read_response(_agent_to_response(agent, _latest_number(db, agent_id)), agent.revision)
+    return read_response(_agent_to_response(agent, _latest_version(db, str(agent_id))), agent.revision)
 
 
 @router.post(

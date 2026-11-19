@@ -113,3 +113,26 @@ describe("AgentsListUI system agents", () => {
     expect(onChange).toHaveBeenCalledWith(true);
   });
 });
+
+describe("AgentsListUI published summary", () => {
+  const draft = { ...spec("x"), model: { provider: "anthropic", name: "claude-sonnet-5-5" }, tools: ["a", "b"] };
+  const summary = { version: 2, model: { provider: "litellm", name: "gemma4-mlx-bf16" }, tool_count: 1, spec_hash: "h" };
+
+  it("shows the published model and tool count, and flags unpublished draft changes", () => {
+    render(<AgentsListUI agents={[{ id: "1", name: "球棒", latest_version: 2, latest_spec_summary: summary, draft_dirty: true, draft_spec: draft }]} />);
+    const row = screen.getByTestId("agent-row");
+    expect(within(row).getByText("litellm:gemma4-mlx-bf16")).toBeInTheDocument();
+    expect(within(row).queryByText("anthropic:claude-sonnet-5-5")).toBeNull();
+    expect(within(row).getByText("v2")).toBeInTheDocument();
+    expect(within(row).getByText("草稿未發佈")).toBeInTheDocument();
+    expect(within(row).getByText("1")).toBeInTheDocument();
+  });
+
+  it("a draft-only agent shows the draft model with a draft tag and no badge", () => {
+    render(<AgentsListUI agents={[{ id: "1", name: "A", latest_version: null, latest_spec_summary: null, draft_dirty: false, draft_spec: draft }]} />);
+    const row = screen.getByTestId("agent-row");
+    expect(within(row).getByText("anthropic:claude-sonnet-5-5")).toBeInTheDocument();
+    expect(within(row).getByText("draft")).toBeInTheDocument();
+    expect(within(row).queryByText("草稿未發佈")).toBeNull();
+  });
+});

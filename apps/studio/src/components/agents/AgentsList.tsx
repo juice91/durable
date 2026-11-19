@@ -3,7 +3,8 @@
 import React, { useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { LayoutGrid, List } from "lucide-react";
-import type { AgentSpec } from "@/lib/api";
+import type { AgentSpec, AgentSpecSummary } from "@/lib/api";
+import { DraftDirtyBadge } from "@/components/agents/DraftDirtyBadge";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { routes } from "@/lib/routes";
@@ -19,6 +20,8 @@ export interface AgentListItem {
   id: string;
   name: string;
   latest_version: number | null;
+  latest_spec_summary?: AgentSpecSummary | null;
+  draft_dirty?: boolean;
   draft_spec?: AgentSpec;
   builtin?: boolean;
   builtin_role?: "architect" | "drafter" | null;
@@ -63,9 +66,27 @@ export function filterAgents<T extends { name: string; draft_spec?: AgentSpec }>
   );
 }
 
-function modelOf(agent: AgentListItem): string | null {
+/** The model that runs: the published version's, else the draft's (flagged `draft`). */
+function modelOf(agent: AgentListItem): { label: string; isDraft: boolean } | null {
+  const published = agent.latest_spec_summary?.model;
+  if (published?.provider && published.name) return { label: `${published.provider}:${published.name}`, isDraft: false };
   const model = agent.draft_spec?.model;
-  return model ? `${model.provider}:${model.name}` : null;
+  return model ? { label: `${model.provider}:${model.name}`, isDraft: true } : null;
+}
+
+function ModelCell({ agent }: { agent: AgentListItem }) {
+  const model = modelOf(agent);
+  if (!model) return <span className="font-mono text-caption">-</span>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <span className="font-mono text-caption">{model.label}</span>
+      {model.isDraft ? <span className="text-caption text-muted-foreground">draft</span> : null}
+    </span>
+  );
+}
+
+function toolCount(agent: AgentListItem): number {
+  return agent.latest_spec_summary ? agent.latest_spec_summary.tool_count : toolNames(agent).length;
 }
 
 function toolNames(agent: AgentListItem): string[] {
@@ -81,7 +102,10 @@ function versionLabel(agent: AgentListItem): string {
 /** The tool count, with the names in a tooltip (a focusable trigger, so keyboard users get it too). */
 function ToolCount({ agent }: { agent: AgentListItem }) {
   const names = toolNames(agent);
-  if (names.length === 0) return <span className="tabular-nums text-muted-foreground">0</span>;
+  const total = toolCount(agent);
+  if (total === 0) return <span className="tabular-nums text-muted-foreground">0</span>;
+  // The published summary carries a count only; the names come from the draft, which may differ.
+  if (agent.latest_spec_summary) return <span className="tabular-nums">{total}</span>;
   return (
     <Tooltip content={names.join(", ")}>
       <button type="button" aria-label={`${names.length} tools: ${names.join(", ")}`} className={cn("rounded-sm tabular-nums underline decoration-dotted underline-offset-2", focusRing)}>
@@ -126,17 +150,22 @@ const columns: DataListColumn<AgentListItem>[] = [
   {
     id: "model",
     header: "Model",
-    cell: (agent) => <span className="font-mono text-caption">{modelOf(agent) ?? "-"}</span>,
-    sortValue: (agent) => modelOf(agent),
+    cell: (agent) => <ModelCell agent={agent} />,
+    sortValue: (agent) => modelOf(agent)?.label ?? null,
     sortable: true,
     className: "hidden lg:table-cell",
     headerClassName: "hidden lg:table-cell",
   },
-  { id: "tools", header: "Tools", cell: (agent) => <ToolCount agent={agent} />, sortValue: (agent) => toolNames(agent).length, sortable: true, align: "end" },
+  { id: "tools", header: "Tools", cell: (agent) => <ToolCount agent={agent} />, sortValue: (agent) => toolCount(agent), sortable: true, align: "end" },
   {
     id: "version",
     header: "Version",
-    cell: (agent) => versionLabel(agent),
+    cell: (agent) => (
+      <span className="inline-flex flex-wrap items-center gap-1.5">
+        {versionLabel(agent)}
+        <DraftDirtyBadge dirty={agent.draft_dirty} version={agent.latest_version} />
+      </span>
+    ),
     sortValue: (agent) => agent.latest_version ?? -1,
     sortable: true,
   },
@@ -308,9 +337,12 @@ export function AgentsListUI({
                 </span>
                 <span className="line-clamp-2 text-label text-muted-foreground">{agentPurpose(agent.draft_spec)}</span>
                 <span className="mt-auto flex flex-wrap gap-x-3 text-caption text-muted-foreground">
-                  <span className="font-mono">{modelOf(agent) ?? "-"}</span>
-                  <span>{toolNames(agent).length} tools</span>
-                  <span>{versionLabel(agent)}</span>
+                  <ModelCell agent={agent} />
+                  <span>{toolCount(agent)} tools</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    {versionLabel(agent)}
+                    <DraftDirtyBadge dirty={agent.draft_dirty} version={agent.latest_version} />
+                  </span>
                 </span>
               </Link>
               {unarchiveButton(agent) ? <div className="flex justify-end">{unarchiveButton(agent)}</div> : null}
