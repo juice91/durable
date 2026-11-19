@@ -226,7 +226,7 @@ class SourceStoreFacade(Protocol):
 
 @runtime_checkable
 class SourceAdapter(Protocol):
-    provider: str  # "acme_catalog", "fake"
+    provider: str  # "github", "fake", a plug-in's value
     kind: str  # "product_catalog"
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
