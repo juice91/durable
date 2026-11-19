@@ -15,6 +15,7 @@ import {
   formatDuration,
   hasActiveFilters,
   listTraceRuns,
+  hasRunOnlyFilters,
   parseTraceFilters,
   runDurationMs,
   traceFiltersToParams,
@@ -34,6 +35,9 @@ import { usePendingQuery } from "@/components/traces/usePendingQuery";
 import { TraceFilterBar } from "@/components/traces/TraceFilterBar";
 import { TracesTabs } from "@/components/traces/TracesTabs";
 import { RunsHistogram } from "@/components/traces/RunsHistogram";
+import { ExternalTraceSheet } from "@/components/traces/ExternalTraceSheet";
+import { Badge } from "@/components/ui/Badge";
+import { externalDurationMs, listExternalTraces, type ExternalTrace } from "@/lib/externalTraces";
 
 /** The list row's test id (kept from P0.13), as a `testId` key so the test-id inventory sees it rendered. */
 const TRACE_ROW = { testId: "trace-row" } as const;
@@ -101,8 +105,52 @@ function TracesList() {
   // never overwrites or extends newer results.
   const requestRef = useRef(0);
 
+  // External OpenTelemetry traces (Source: External or All). Run-only filters (status, agent, model, tags...)
+  // match none of them, so they are not asked for then.
+  const showRuns = filters.source !== "external";
+  const showExternal = filters.source !== "platform" && !hasRunOnlyFilters(filters);
+  const [external, setExternal] = useState<ExternalTrace[]>([]);
+  const [externalNext, setExternalNext] = useState<string | null>(null);
+  const [externalError, setExternalError] = useState<string | null>(null);
+  const [openExternal, setOpenExternal] = useState<string | null>(searchParams?.get("external") || null);
+  const externalRequestRef = useRef(0);
+  const loadExternal = useCallback(async (before?: string) => {
+    const request = ++externalRequestRef.current;
+    if (!showExternal) {
+      setExternal([]);
+      setExternalNext(null);
+      setExternalError(null);
+      return;
+    }
+    try {
+      const result = await listExternalTraces(filters, { limit: 50, before });
+      if (request !== externalRequestRef.current) return;
+      setExternal((prev) => (before ? [...prev, ...result.items] : result.items));
+      setExternalNext(result.next_before);
+      setExternalError(null);
+    } catch (err) {
+      if (request !== externalRequestRef.current) return;
+      setExternalError(err instanceof Error && err.message ? err.message : "Failed to load external traces");
+      if (!before) {
+        setExternal([]);
+        setExternalNext(null);
+      }
+    }
+  }, [filters, showExternal]);
+  useEffect(() => {
+    void loadExternal();
+  }, [loadExternal]);
+
   const loadRuns = useCallback(async (before?: string) => {
     const request = ++requestRef.current;
+    if (!showRuns) {
+      setRuns([]);
+      setNextBefore(null);
+      setError(null);
+      setLoading(false);
+      setReloading(false);
+      return;
+    }
     setLoading(true);
     if (!before) {
       // A new first page: the old cursor and error belong to the old filters.
@@ -132,12 +180,26 @@ function TracesList() {
         setReloading(false);
       }
     }
-  }, [filters]);
+  }, [filters, showRuns]);
 
   useEffect(() => {
     void loadRuns();
   }, [loadRuns]);
 
+
+  const externalColumns: DataListColumn<ExternalTrace>[] = [
+    { id: "time", header: "Time", cell: (trace) => <span className="whitespace-nowrap font-mono text-caption">{new Date(trace.start).toLocaleString()}</span> },
+    {
+      id: "service",
+      header: "Service",
+      cell: (trace) => <Badge variant="info" data-testid="external-trace-service-badge">{trace.service_name ?? "unknown service"}</Badge>,
+    },
+    { id: "name", header: "Trace", cell: (trace) => <span className="font-medium">{trace.name ?? "(unnamed)"}</span> },
+    { id: "status", header: "Status", cell: (trace) => <Badge variant={trace.status === "error" ? "destructive" : "success"}>{trace.status === "error" ? "error" : "ok"}</Badge> },
+    { id: "spans", header: "Spans", align: "end", cell: (trace) => <span className="font-mono text-caption">{trace.span_count}</span> },
+    { id: "duration", header: "Duration", align: "end", cell: (trace) => <span className={`whitespace-nowrap ${dim}`}>{formatDuration(externalDurationMs(trace))}</span> },
+    { id: "trace_id", header: "Trace id", cell: (trace) => <span className="font-mono text-caption">{trace.trace_id.slice(0, 8)}</span> },
+  ];
 
   const allColumns: DataListColumn<TraceRun>[] = [
     {
@@ -272,8 +334,8 @@ function TracesList() {
         {(sheet) => (
           <div className="flex min-w-0 flex-col gap-4 p-4">
             <p className="text-label text-muted-foreground">Runs with their span tree, tokens and cost</p>
-            <RunsHistogram filters={filters} onPickBucket={({ from, to }) => setFilters({ from, to })}
-              onResetRange={() => setFilters({ from: null, to: null })} />
+            {showRuns ? <RunsHistogram filters={filters} onPickBucket={({ from, to }) => setFilters({ from, to })}
+              onResetRange={() => setFilters({ from: null, to: null })} /> : null}
 
             <TraceFilterBar
               filters={filters}
@@ -283,13 +345,13 @@ function TracesList() {
               trailing={<ColumnChooser columns={chooserColumns} hidden={columnChoice.hidden} onVisibleChange={columnChoice.setVisible} onReset={columnChoice.reset} />}
             />
 
-            {error ? (
+            {showRuns && error ? (
               <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">
                 {error}
               </div>
             ) : null}
 
-            {loading && runs.length === 0 ? (
+            {!showRuns ? null : loading && runs.length === 0 ? (
               <div className="flex items-center justify-center py-12">
                 <p className="text-muted-foreground">Loading runs...</p>
               </div>
@@ -324,6 +386,31 @@ function TracesList() {
                 ) : null}
               </>
             )}
+
+            {showExternal ? (
+              <section className="flex min-w-0 flex-col gap-2" aria-label="External traces" data-testid="external-traces">
+                <h2 className="text-label font-semibold text-foreground">External traces (OpenTelemetry)</h2>
+                {externalError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive-text">{externalError}</div> : null}
+                <DataList<ExternalTrace>
+                  label="External traces"
+                  rows={external}
+                  columns={externalColumns}
+                  getRowId={(trace) => trace.trace_id}
+                  onRowOpen={(trace) => setOpenExternal(trace.trace_id)}
+                  getRowLabel={(trace) => `Open the external trace ${trace.name ?? trace.trace_id}`}
+                  getRowTestId={() => "external-trace-row"}
+                  selectedRowId={openExternal}
+                  empty={{ title: "No external traces. Send OpenTelemetry traces with an API key that has the otlp scope (Settings, API keys)." }}
+                  testId="external-traces-list"
+                />
+                {externalNext ? (
+                  <div className="flex justify-center">
+                    <Button variant="secondary" size="sm" onClick={() => loadExternal(externalNext)}>Load more</Button>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+            {openExternal ? <ExternalTraceSheet traceId={openExternal} onClose={() => setOpenExternal(null)} /> : null}
           </div>
         )}
       </TraceSheetHost>

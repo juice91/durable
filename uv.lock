@@ -926,6 +926,7 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "opentelemetry-instrumentation-logging" },
+    { name = "opentelemetry-proto" },
     { name = "opentelemetry-sdk" },
     { name = "pydantic-ai-slim" },
 ]
@@ -937,6 +938,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.27.0" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.48b0" },
     { name = "opentelemetry-instrumentation-logging", specifier = ">=0.63b0" },
+    { name = "opentelemetry-proto", specifier = ">=1.27.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.67.0" },
 ]

@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { RUN_KIND_LABELS, type RunKind } from "@/lib/runs";
-import { hasActiveFilters, type TraceFilters } from "@/lib/traces";
+import { TRACE_SOURCES, TRACE_SOURCE_LABELS, hasActiveFilters, type TraceFilters, type TraceSource } from "@/lib/traces";
 import { Button } from "@/components/ui/Button";
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
@@ -88,6 +88,20 @@ export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, on
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
           {customStatus ? <option value={statusValue}>{filters.status.join(", ").replace(/_/g, " ")}</option> : null}
+        </select>
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <label htmlFor="source-filter" className={labelClass}>Source</label>
+        <select
+          id="source-filter"
+          data-testid="source-filter"
+          value={filters.source}
+          onChange={(e) => setFilters({ source: e.target.value as TraceSource })}
+          className={inputClass}
+        >
+          {TRACE_SOURCES.map((source) => (
+            <option key={source} value={source}>{TRACE_SOURCE_LABELS[source]}</option>
+          ))}
         </select>
       </div>
       <div className="flex min-w-0 flex-col gap-1">

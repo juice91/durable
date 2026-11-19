@@ -1,7 +1,7 @@
 "use client";
 
 import React, { Suspense, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { EMPTY_SPAN_FILTERS, parseSpanFilters, spanFiltersToParams, type SpanFilters } from "@/lib/spans";
 import { KIND_LABELS, SPAN_KINDS } from "@/lib/traces";
@@ -17,6 +17,7 @@ import { usePendingQuery } from "@/components/traces/usePendingQuery";
 
 function SpansPageBody() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   // Only the filters: opening or closing the trace Sheet must not reload the list.
   const filterKey = spanFiltersToParams(parseSpanFilters(new URLSearchParams(searchParams?.toString() ?? ""))).toString();
   const filters = useMemo(() => parseSpanFilters(new URLSearchParams(filterKey)), [filterKey]);
@@ -71,7 +72,7 @@ function SpansPageBody() {
                 </div>
               }
             />
-            <SpansList filters={filters} onOpen={(runId, spanId) => sheet.open(runId, null, spanId)} selectedRunId={sheet.runId} selectedSpanId={openSpanId} />
+            <SpansList filters={filters} onOpenExternal={(traceId) => router.push(routes.traces({ source: "external", external: traceId }))} onOpen={(runId, spanId) => sheet.open(runId, null, spanId)} selectedRunId={sheet.runId} selectedSpanId={openSpanId} />
           </div>
         )}
       </TraceSheetHost>

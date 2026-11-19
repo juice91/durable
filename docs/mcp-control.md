@@ -23,7 +23,8 @@ The design and its reasons are in
   allowlists (other agents and workflows look like unknown ones, and the key cannot create new ones)
   and its `allowed_origins`.
 - Keys are created in Studio (Settings → API keys) or with `POST /api/v1/api-keys`
-  (`{"name": "...", "scopes": ["mcp"]}` to read, `["manage"]` to also change).
+  (`{"name": "...", "scopes": ["mcp"]}` to read, `["manage"]` to also change). A key can also carry
+  `otlp`, which only sends OpenTelemetry traces (see [external traces](observability/external-traces.md)).
 
 ## Connect a client
 

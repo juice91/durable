@@ -90,6 +90,24 @@ def redact(text: str, *, max_length: int = 500) -> str:
     return text
 
 
+_SENSITIVE_KEY = re.compile(rf"(?i)(?<![A-Za-z0-9])(?:{_SENSITIVE_KEYS})(?![A-Za-z0-9])")
+
+
+def redact_attribute(key: str, value: Any, *, max_length: int = _MAX_ATTRIBUTE) -> Any:
+    """An attribute value from outside (external OTLP spans) cleaned for storage: a string passes
+    through `redact`; a credential-like key (`api_key`, `Authorization`, `db.password`, ...) hides the
+    whole value, scalar or not; lists and maps are cleaned element by element."""
+    if _SENSITIVE_KEY.search(key) and value not in (None, "", [], {}):
+        return REDACTED
+    if isinstance(value, str):
+        return redact(value, max_length=max_length)
+    if isinstance(value, (list, tuple)):
+        return [redact_attribute(key, v, max_length=max_length) for v in value]
+    if isinstance(value, Mapping):
+        return {str(k): redact_attribute(str(k), v, max_length=max_length) for k, v in value.items()}
+    return value
+
+
 def exception_type(exc: BaseException) -> str:
     """The exception's class name when it is a plain identifier (bounded), else "Exception"."""
     name = type(exc).__name__
@@ -258,7 +276,9 @@ __all__ = [
     "RedactingLogProcessor",
     "RedactingSpanExporter",
     "exception_type",
+    "redact_attribute",
     "log_failure",
     "redact",
+    "redact_attribute",
     "safe_code",
 ]

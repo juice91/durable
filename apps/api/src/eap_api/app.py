@@ -184,6 +184,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.spans import router as spans_router  # parity round 2: GET /spans
 
     app.include_router(spans_router, prefix="/api/v1")
+    # External OpenTelemetry traces: POST /api/v1/otlp/v1/traces (tenant API key, scope `otlp`).
+    from eap_api.routes.otlp import router as otlp_router
+
+    app.include_router(otlp_router, prefix="/api/v1")
     # Knowledge bases (RM.7): CRUD, document upload, ingest and reindex runs, GET /embedding-models.
     # A malformed embedding allowlist or knowledge base limit fails startup here.
     from eap_api.routes.knowledge import check_knowledge_configuration, router as knowledge_router

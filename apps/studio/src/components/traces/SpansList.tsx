@@ -12,6 +12,8 @@ export interface SpansListProps {
   filters: SpanFilters;
   /** A row was opened: the trace Sheet at this run and span. */
   onOpen: (runId: string, spanId: string) => void;
+  /** An external (OTLP) span was opened: its trace, in the Traces page's external sheet. */
+  onOpenExternal?: (traceId: string) => void;
   /** The open trace Sheet's run and span: that row is highlighted. */
   selectedRunId?: string | null;
   selectedSpanId?: string | null;
@@ -20,7 +22,7 @@ export interface SpansListProps {
 const dim = "text-muted-foreground";
 
 /** The flat list of spans (GET /spans), newest first, paged with the API's opaque cursor. */
-export function SpansList({ filters, onOpen, selectedRunId = null, selectedSpanId = null }: SpansListProps) {
+export function SpansList({ filters, onOpen, onOpenExternal, selectedRunId = null, selectedSpanId = null }: SpansListProps) {
   const [rows, setRows] = useState<SpanRow[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,7 +84,12 @@ export function SpansList({ filters, onOpen, selectedRunId = null, selectedSpanI
     {
       id: "run",
       header: "Run",
-      cell: (row) => (
+      cell: (row) => row.source === "external" ? (
+        <span className="inline-flex items-center gap-1" data-testid="span-external">
+          <Badge variant="info">{row.service_name ?? "external"}</Badge>
+          <span className="font-mono text-caption">{(row.trace_id ?? "").slice(0, 8)}</span>
+        </span>
+      ) : (
         <TraceLink runId={row.run_id} className="font-mono text-caption text-info-text underline-offset-4 hover:underline" onClick={(event) => event.stopPropagation()}>
           {row.run_id.slice(0, 8)}
         </TraceLink>
@@ -104,7 +111,7 @@ export function SpansList({ filters, onOpen, selectedRunId = null, selectedSpanI
           rows={rows}
           columns={columns}
           getRowId={(row) => `${row.run_id}:${row.span_id}`}
-          onRowOpen={(row) => onOpen(row.run_id, row.span_id)}
+          onRowOpen={(row) => (row.source === "external" && row.trace_id && onOpenExternal ? onOpenExternal(row.trace_id) : onOpen(row.run_id, row.span_id))}
           getRowLabel={(row) => `Open ${row.name} in the trace of run ${row.run_id.slice(0, 8)}`}
           getRowTestId={() => "span-row"}
           selectedRowId={selectedRunId && selectedSpanId ? `${selectedRunId}:${selectedSpanId}` : null}

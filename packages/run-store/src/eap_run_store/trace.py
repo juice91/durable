@@ -226,6 +226,8 @@ SPAN_KINDS = (
     "loop", "loop_iteration",
     # LP.15
     "evaluate",
+    # External OTLP spans (0032_external_spans): listed by GET /spans, never part of a run's trace.
+    "external",
 )
 SPAN_STATUSES = ("ok", "error", "running", "waiting", "incomplete")
 

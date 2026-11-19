@@ -106,6 +106,7 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
   const [expires, setExpires] = useState("");
   const [mcp, setMcp] = useState(false);
   const [manage, setManage] = useState(false);
+  const [otlp, setOtlp] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Only here, only while the dialog is open.
@@ -126,7 +127,7 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
       setError("The expiry is not a valid date and time.");
       return;
     }
-    const built = buildApiKeyCreate({ name, access, agentIds, workflowIds, origins, expiresAt, mcp: mcp || manage, manage });
+    const built = buildApiKeyCreate({ name, access, agentIds, workflowIds, origins, expiresAt, mcp: mcp || manage, manage, otlp });
     if (!built.ok) {
       setError(built.message);
       return;
@@ -263,6 +264,16 @@ export function ApiKeyCreateDialog({ onCreated, onClose }: ApiKeyCreateDialogPro
                 </label>
                 <p id={`${id}-manage-hint`} className={hintClass}>
                   Also lets it publish and archive agents and workflows, start and cancel runs, sync knowledge sources and decide approvals. Includes read access.
+                </p>
+              </fieldset>
+              <fieldset className="min-w-0 space-y-2">
+                <legend className={labelClass}>OpenTelemetry</legend>
+                <label className="flex items-center gap-2 text-label text-foreground">
+                  <input type="checkbox" checked={otlp} onChange={(event) => setOtlp(event.target.checked)} data-testid="api-key-otlp-scope" aria-describedby={`${id}-otlp-hint`} />
+                  Send traces (OTLP)
+                </label>
+                <p id={`${id}-otlp-hint`} className={hintClass}>
+                  Lets a program outside the platform send OpenTelemetry traces with this key; they appear in the Traces page as external traces.
                 </p>
               </fieldset>
               {error ? (

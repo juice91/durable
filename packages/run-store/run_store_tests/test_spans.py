@@ -150,3 +150,56 @@ def test_list_bounds_the_limit_and_the_name_query_in_the_store(engine, run_store
     # q is cut to 200 characters in the store: the over-long query matches the 200-character name
     assert [i["span_id"] for i in store.list(tenant, {"q": long_name + "zzz"}, 50, None)[0]] == ["long"]
     assert store.list(tenant, {"q": "b" * 300}, 50, None)[0] == []
+
+
+# ---------------------------------------------------------------------------- external spans (0032)
+
+
+def _external(trace_id: str, span_id: str, parent: str | None = None, *, at: int = 0, status: str = "ok",
+              service: str | None = "svc", name: str = "op") -> dict:
+    return {
+        "trace_id": trace_id, "span_id": span_id, "parent_id": parent, "kind": "external", "name": name,
+        "start": T0 + timedelta(seconds=at), "end": T0 + timedelta(seconds=at + 1), "status": status,
+        "service_name": service, "attributes": {"a": 1}, "resource_attributes": {"service.name": service},
+    }
+
+
+def test_external_spans_are_grouped_by_trace_listed_and_tenant_scoped(store, tenant):
+    t1, t2 = "1" * 32, "2" * 32
+    other = f"{tenant}_other"
+    assert store.insert_external(tenant, "key1", [
+        _external(t1, "a" * 16, name="root", at=0), _external(t1, "b" * 16, "a" * 16, at=1, status="error"),
+        _external(t2, "c" * 16, at=10, service="other-svc"),
+    ]) == 3
+    store.insert_external(tenant, "key1", [_external(t1, "a" * 16)])  # a retry stores nothing twice
+    try:
+        items, nxt = store.list_traces(tenant)
+        assert [(i["trace_id"], i["span_count"], i["status"], i["name"]) for i in items] == [
+            (t2, 1, "ok", "op"), (t1, 2, "error", "root")]
+        assert nxt is None and items[1]["api_key_id"] == "key1"
+        page, cursor = store.list_traces(tenant, limit=1)
+        assert [i["trace_id"] for i in page] == [t2] and cursor
+        assert [i["trace_id"] for i in store.list_traces(tenant, limit=1, before=SpanCursor.decode(cursor))[0]] == [t1]
+        assert [i["trace_id"] for i in store.list_traces(tenant, {"service": "other-svc"})[0]] == [t2]
+        assert [i["trace_id"] for i in store.list_traces(tenant, {"status": "error"})[0]] == [t1]
+        assert [i["trace_id"] for i in store.list_traces(tenant, {"q": "ROOT"})[0]] == [t1]
+        assert store.list_traces(other)[0] == [] and store.read_external_trace(other, t1) is None
+        trace = store.read_external_trace(tenant, t1)
+        assert [s["span_id"] for s in trace["spans"]] == ["a" * 16, "b" * 16] and not trace["truncated"]
+        assert trace["resource_attributes"] == {"service.name": "svc"} and trace["spans"][0]["attributes"] == {"a": 1}
+        spans = store.list(tenant, {"source": "external"})[0]
+        assert {s["source"] for s in spans} == {"external"} and store.list(tenant, {"source": "platform"})[0] == []
+        # a run's own materialisation never touches them
+        store.replace_for_run(tenant, uuid4(), [])
+        assert len(store.list(tenant, {})[0]) == 3
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(text("DELETE FROM spans WHERE tenant_id = :t"), {"t": other})
+
+
+def test_external_run_id_is_stable_and_differs_per_tenant():
+    from eap_run_store.spans import external_run_id
+
+    assert external_run_id("a", "1" * 32) == external_run_id("a", "1" * 32)
+    assert external_run_id("a", "1" * 32) != external_run_id("b", "1" * 32)
+    assert external_run_id("a", "1" * 32) != external_run_id("a", "2" * 32)

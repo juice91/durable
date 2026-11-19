@@ -148,6 +148,14 @@ def test_litellm_url_defaults_to_host_lima_internal_4001():
         assert data[key] == "http://host.lima.internal:4001", (key, data[key])
 
 
+def test_external_otlp_forwarding_is_off_by_default_and_the_limit_is_set():
+    cm = next(d for d in kustomize_docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
+    data = cm["data"]
+    assert data["EAP_OTLP_FORWARD_ENDPOINT"] == ""  # off: set to http://lgtm:4318/v1/traces to forward
+    assert int(data["EAP_OTLP_RATE_LIMIT_PER_MINUTE"]) > 0
+    assert data["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://lgtm:4318"
+
+
 def test_r2_endpoint_is_in_the_configmap_not_a_secret():
     cm = next(d for d in kustomize_docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
     data = cm["data"]

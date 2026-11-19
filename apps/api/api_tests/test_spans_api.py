@@ -66,7 +66,7 @@ def test_spans_list_is_tenant_scoped_and_filters_by_span_kind(pg, tenant_of):
             "run_id": run_id, "span_id": f"{run_id}:3", "parent_id": f"{run_id}:0", "kind": "model_request",
             "name": "model 1", "start": (T0 + timedelta(seconds=3)).isoformat(),
             "end": (T0 + timedelta(seconds=4)).isoformat(), "status": "ok", "agent_id": agent_id,
-            "workflow_id": None, "model": "test:echo",
+            "workflow_id": None, "model": "test:echo", "source": "platform", "trace_id": None, "service_name": None,
         }
         assert client.get("/api/v1/spans", headers=oh).json() == {"items": [], "next_before": None}
         tools = client.get("/api/v1/spans", params={"span_kind": "tool_call"}, headers=h).json()["items"]

@@ -14,6 +14,10 @@ export interface SpanRow {
   agent_id: string | null;
   workflow_id: string | null;
   model: string | null;
+  /** `external`: sent over OTLP; `trace_id` is then the client's and `run_id` a derived id no run has. */
+  source?: "platform" | "external";
+  trace_id?: string | null;
+  service_name?: string | null;
 }
 
 /** The Traces filters plus the span's own kind. */
