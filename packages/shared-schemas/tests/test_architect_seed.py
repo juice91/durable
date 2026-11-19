@@ -189,7 +189,7 @@ def test_the_architect_knows_http_request_and_when_to_pick_it():
 
 def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_pattern():
     text = ARCHITECT_INSTRUCTIONS
-    for tool in ("feed.parse", "json.query", "text.check", "http.request", "list_workflow_step_kinds", "$template", "branch"):
+    for tool in ("feed.parse", "json.query", "text.check", "html.extract", "body_from_url", "http.request", "list_workflow_step_kinds", "$template", "branch"):
         assert tool in text, tool
     assert "collect with http.request" in text and "dry-run" in text
     for provider_specific in ("Bluesky", "LTN", "Yahoo", "MLB"):

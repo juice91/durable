@@ -17,6 +17,13 @@ The platform's general HTTP tool: a workflow can call a JSON API with a credenti
   transport failure is `{error: {code, message}}` with `outbound_blocked`, `http_timeout`,
   `http_connect_failed`, `secret_not_found`, `secret_unreadable`, `response_too_large`. The messages are fixed
   texts: never the URL, a header or an exception text.
+- `body_from_url` (`HttpBodySource`: `url`, `max_bytes` default 1,000,000 and at most 5,000,000, `allowed_hosts`): the
+  request body is fetched first, by a GET through the same guarded client (https only, public addresses only,
+  redirects not followed: a 3xx is refused), from a host in `allowed_hosts` only, and must answer `image/*`; at
+  most `max_bytes` are read (a longer body, or a larger content-length, is refused). Those bytes are the request
+  body, with `Content-Type` set to the fetched one unless the caller set one. Any refusal is
+  `{error: {code: "body_source_rejected", detail}}` with a fixed detail (never the URL), and nothing is sent.
+  It excludes `json` and `body` (`body_conflict`). The main request's result is unchanged.
 - Gating: an agent run's call that names a secret waits for an approval (`SpecCapability`,
   eap_worker.capabilities); a workflow tool step does not (the spec was published by a person).
 """
@@ -28,6 +35,7 @@ import json as jsonlib
 import logging
 import re
 import time
+from urllib.parse import urlsplit
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -39,7 +47,7 @@ from pydantic_core import to_jsonable_python
 from eap_runtime import RunDeps, ToolRegistry
 from eap_schemas.http_request import EMBEDDED_REF, http_request_secret_names, http_request_summary
 from eap_schemas.secrets import is_secret_ref
-from eap_schemas.tools import HTTP_MAX_RESPONSE_BYTES_CAP, TOOL_DECLARATIONS
+from eap_schemas.tools import HTTP_MAX_RESPONSE_BYTES_CAP, TOOL_DECLARATIONS, HttpBodySource
 from eap_secrets import SecretsError
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 from eap_secrets.outbound_errors import walk_chain
@@ -251,6 +259,49 @@ async def _answer(
     return result
 
 
+# ------------------------------------------------------------------------------------- body source
+
+
+def _rejected(detail: str) -> dict[str, Any]:
+    return {"error": {"code": "body_source_rejected", "detail": detail}}
+
+
+async def _fetch_source(source: HttpBodySource, timeout_s: int) -> tuple[bytes, str] | dict[str, Any]:
+    """The bytes and content type of `source.url`, or a `body_source_rejected` result."""
+    try:
+        parts = urlsplit(source.url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return _rejected("the body source url is not valid")
+    if parts.scheme != "https" or not host:
+        return _rejected("the body source url must start with https://")
+    if host not in {h.strip().lower() for h in source.allowed_hosts}:
+        return _rejected("the body source host is not in allowed_hosts")
+    try:
+        async with new_client(outbound_policy(), float(timeout_s)) as client:
+            async with asyncio.timeout(timeout_s):
+                async with client.stream("GET", source.url) as response:
+                    if not 200 <= response.status_code < 300:
+                        return _rejected(
+                            "the body source redirected (redirects are not followed)"
+                            if 300 <= response.status_code < 400 else f"the body source answered status {response.status_code}"
+                        )
+                    media = response.headers.get("content-type", "").strip()
+                    if not media.lower().startswith("image/"):
+                        return _rejected("the body source is not an image (content-type must start with image/)")
+                    declared = response.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > source.max_bytes:
+                        return _rejected("the body source is larger than max_bytes")
+                    raw, more = await _read(response, source.max_bytes)
+    except Exception as exc:  # noqa: BLE001 - classified; the exception text is never returned
+        code = _failure_code(exc)
+        log.warning("http.request body source failed code=%s error_type=%s", code, type(exc).__name__)
+        return _rejected(f"the body source could not be fetched ({_FAILURES[code]})")
+    if more:
+        return _rejected("the body source is larger than max_bytes")
+    return raw, media
+
+
 # ------------------------------------------------------------------------------------- the tool
 
 
@@ -265,12 +316,13 @@ async def http_request(
     timeout_s: Annotated[int, Field(ge=1, le=30)] = 20,
     max_response_bytes: Annotated[int, Field(ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)] = 65536,
     drop_response_paths: Annotated[list[Annotated[str, Field(pattern=r"^/")]] | None, Field(max_length=16)] = None,
+    body_from_url: HttpBodySource | None = None,
 ) -> dict[str, Any]:
     """Send one HTTPS request (see the module docstring)."""
     if not url.lower().startswith("https://"):
         return _error("url_not_https", "the url must start with https://")
-    if json is not None and body is not None:
-        return _error("body_conflict", "send json or body, not both")
+    if (json is not None and body is not None) or (body_from_url is not None and (json is not None or body is not None)):
+        return _error("body_conflict", "send json, body or body_from_url, only one")
     request = {"headers": headers, "query": query, "json": json, "body": body}
     used: list[str] = []
     if http_request_secret_names({"headers": headers, "query": query, "json": json, "body": body}):
@@ -283,13 +335,22 @@ async def http_request(
             log.warning("http.request secret could not be decrypted tenant=%s", ctx.deps.tenant_id)
             return _error("secret_unreadable", "a referenced secret could not be read")
     variants = list(secret_variants(used))
+    content: bytes | None = request["body"].encode("utf-8") if request["body"] is not None else None
+    if body_from_url is not None:
+        source = body_from_url if isinstance(body_from_url, HttpBodySource) else HttpBodySource.model_validate(body_from_url)
+        fetched = await _fetch_source(source, timeout_s)
+        if isinstance(fetched, dict):
+            return fetched
+        content, media = fetched
+        if not any(k.lower() == "content-type" for k in (request["headers"] or {})):
+            request["headers"] = {**(request["headers"] or {}), "Content-Type": media}
     started = time.monotonic()
     try:
         async with new_client(outbound_policy(), float(timeout_s)) as client:
             async with asyncio.timeout(timeout_s):
                 async with client.stream(
                     method, url, headers=request["headers"], params=request["query"], json=request["json"],
-                    content=request["body"].encode("utf-8") if request["body"] is not None else None,
+                    content=content,
                 ) as response:
                     return to_jsonable_python(await _answer(response, max_response_bytes, variants, started, drop_response_paths or ()))
     except Exception as exc:  # noqa: BLE001 - classified; the exception text is never returned

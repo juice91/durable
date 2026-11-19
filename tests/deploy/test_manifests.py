@@ -328,7 +328,7 @@ def test_allowed_tools_name_the_kb_source_tools_and_spell_tickets_correctly():
     config = next(d for d in kustomize_docs() if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
     allowed = set(config["data"]["EAP_ALLOWED_TOOLS"].split(","))
     assert "ticket.create" not in allowed and "tickets.create" in allowed
-    assert {"clock.now", "secrets.request", "http.request", "workflow.return", "feed.parse", "json.query", "text.check"} <= allowed  # general tools every tenant agent may be granted
+    assert {"clock.now", "secrets.request", "http.request", "workflow.return", "feed.parse", "json.query", "text.check", "html.extract"} <= allowed  # general tools every tenant agent may be granted
     assert {"kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
             "workflow.run.result"} <= allowed
 

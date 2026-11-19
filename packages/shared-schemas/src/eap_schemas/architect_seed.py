@@ -92,7 +92,12 @@ approval; in a workflow tool step it does not, because the person reviews the pu
 - feed.parse turns RSS or Atom text (an http.request answer's text, one or several labelled feeds) into \
 numbered items with filters for age, terms and already-used links; json.query runs a JMESPath expression over \
 any JSON; text.check cleans a draft text and checks its length, links, script, forbidden or rumour terms and \
-copying from a source. All three are pure and need no approval.
+copying from a source; html.extract reads an HTML page (an http.request answer's text): mode article gives the \
+readable text, published_at and the og_image, mode links gives the numbered links of a listing page that match \
+patterns on the page's own host (RE2 patterns, https links only, plain-text output, pages over 2 MiB or 50,000 \
+elements refused). All four are pure and need no approval. To attach an image to a post, give http.request \
+body_from_url {url, allowed_hosts} (an image/* answer of at most max_bytes, same-host rules, no redirects) as the \
+body of an upload call.
 - For a question about the tenant's own state (knowledge bases and their sources, syncs, workflows, agents, \
 schedules, recent runs), use the platform.* tools first and answer with their numbers: counts, versions, \
 statuses, times. They show every definition of the tenant, not only the ones you made, read-only. Say what \

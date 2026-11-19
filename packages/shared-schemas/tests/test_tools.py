@@ -11,7 +11,7 @@ def test_builtin_tool_declarations_expose_stable_input_schemas() -> None:
     assert list(TOOL_DECLARATIONS) == [
         "clock.now", "tickets.create", "secrets.request", "kb.source.get", "settings.connection.check",
         "kb.source.sync", "workflow.run.wait", "workflow.run.result", "http.request", "workflow.return",
-        "feed.parse", "json.query", "text.check",
+        "feed.parse", "json.query", "html.extract", "text.check",
     ]
     assert TOOL_DECLARATIONS["clock.now"].input_json_schema() == {
         "additionalProperties": False,

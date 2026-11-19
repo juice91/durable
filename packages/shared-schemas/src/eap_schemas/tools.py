@@ -90,6 +90,19 @@ class SecretsRequestInput(BaseModel):
 
 HTTP_REQUEST_TOOL_ID = "http.request"
 HTTP_MAX_RESPONSE_BYTES_CAP = 262144
+HTTP_BODY_SOURCE_DEFAULT_BYTES = 1_000_000
+HTTP_BODY_SOURCE_MAX_BYTES = 5_000_000
+
+
+class HttpBodySource(BaseModel):
+    """``http.request``'s ``body_from_url``: the bytes to send are fetched first from an https image URL whose
+    host is in ``allowed_hosts`` (at most ``max_bytes``)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    max_bytes: int = Field(default=HTTP_BODY_SOURCE_DEFAULT_BYTES, ge=1, le=HTTP_BODY_SOURCE_MAX_BYTES)
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(min_length=1, max_length=20)]
 
 
 with warnings.catch_warnings():
@@ -113,6 +126,7 @@ with warnings.catch_warnings():
         timeout_s: int = Field(default=20, ge=1, le=30)
         max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
         drop_response_paths: list[Annotated[str, Field(pattern=r"^/")]] | None = Field(default=None, max_length=16)
+        body_from_url: HttpBodySource | None = None
 
 
 class WorkflowReturnInput(BaseModel):
@@ -205,6 +219,30 @@ class TextCheckInput(BaseModel):
     text: Annotated[str, Field(max_length=20000)]
     source: Annotated[str, Field(max_length=100000)] | None = None
     rules: TextCheckRules
+
+
+HTML_EXTRACT_TOOL_ID = "html.extract"
+HTML_EXTRACT_MAX_CHARS = 2 * 1024 * 1024
+HTML_EXTRACT_MAX_LINKS = 60
+
+
+class HtmlExtractInput(BaseModel):
+    """Input for ``html.extract``: an HTML page (at most 2 MiB), the https URL it was fetched from (relative links
+    are resolved against it) and a mode: ``article`` (one article's readable text and metadata) or ``links`` (the
+    anchors of a listing page that match ``include_patterns``). Pure: no I/O. The size cap is the tool's own
+    result (``html_too_large``), not a validation error."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    html: str
+    base_url: str
+    mode: Literal["article", "links"]
+    max_graphemes: Annotated[int, Field(ge=1, le=20000)] = 4000
+    root_selector: Annotated[str, Field(max_length=300)] | None = None
+    include_patterns: list[str] | None = None  # at most 10 of 200 characters: the tool answers invalid_pattern
+    exclude_patterns: list[str] | None = None
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
+    limit: Annotated[int, Field(ge=1, le=HTML_EXTRACT_MAX_LINKS)] = 20
 
 
 class KbSourceGetInput(BaseModel):
@@ -363,7 +401,12 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "A JSON answer is returned as json, anything else (RSS, HTML) as text. A transport failure is {error: {code}} "
             "(http_timeout, http_connect_failed, outbound_blocked, secret_not_found). drop_response_paths removes "
             "JSON pointers from the answer before it is recorded. query is an object of strings. "
-            "Private and metadata addresses are refused and redirects are not followed"
+            "Private and metadata addresses are refused and redirects are not followed. body_from_url "
+            "{url, max_bytes (default 1000000, at most 5000000), allowed_hosts} sends bytes fetched from another "
+            "https URL as the body (for a link-card thumbnail: the og_image of html.extract to "
+            "com.atproto.repo.uploadBlob): that URL's host must be in allowed_hosts, it must answer an image/* type "
+            "within max_bytes, else {error: {code: body_source_rejected, detail}}; Content-Type is the fetched one "
+            "unless you set it; do not combine with json or body"
         ),
         side_effect=True,
         external_idempotent=False,
@@ -425,6 +468,43 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         result_example={"result": {"id": "c2"}},
         result_schema={"type": "object", "properties": {"result": {}}, "required": ["result"]},
         example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
+    ),
+    "html.extract": ToolDeclaration(
+        id="html.extract",
+        title="Extract from HTML",
+        description=(
+            "Read an HTML page (http.request's text, up to 2 MiB) without a browser. base_url is the https URL it came "
+            "from. mode article returns {title, text, published_at, canonical_url, og_image, description, lang, "
+            "graphemes}: text is the main readable content with navigation, ads, scripts and styles removed, cut at "
+            "max_graphemes (default 4000); published_at is ISO or null; og_image is an absolute https URL or null "
+            "(a link-card thumbnail for http.request body_from_url). mode links returns {items: [{id l1.., url, title, "
+            "order}]}: the anchors (under root_selector, a CSS selector, if given) whose absolute URL matches one of "
+            "include_patterns (RE2 regular expressions: at most 10 of 200 characters, no look-around or back-references; "
+            "at least one) and none of exclude_patterns, de-duplicated "
+            "(fragment, utm_* and fbclid dropped), the first limit (default 20, at most 60) in page order. Only https "
+            "links are returned (javascript:, data: and http: are dropped), and a link to "
+            "another host than base_url's is dropped unless the host is in allowed_hosts; og_image likewise needs "
+            "its host to be base_url's or in allowed_hosts, else null. The output is plain text (all markup, "
+            "scripts, styles and frames removed). Pure: it fetches nothing; a page of over 50,000 elements or 150 "
+            "nesting levels is refused. Errors are results: {error: {code}} with html_too_large, html_unparseable, "
+            "html_too_complex, no_patterns, invalid_pattern, selector_invalid, base_url_invalid"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=HtmlExtractInput,
+        result_example={"title": "…", "text": "the article text", "published_at": "2026-11-18T08:00:00+00:00", "canonical_url": "https://news.example.com/a/1", "og_image": "https://news.example.com/a/1.jpg", "description": "…", "lang": "zh-Hant", "graphemes": 16},
+        result_schema={"type": "object", "properties": {
+            "title": {"type": "string"}, "text": {"type": "string"}, "published_at": {"type": ["string", "null"]},
+            "canonical_url": {"type": ["string", "null"]}, "og_image": {"type": ["string", "null"]},
+            "description": {"type": "string"}, "lang": {"type": ["string", "null"]}, "graphemes": {"type": "integer"},
+            "items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "url": {"type": "string"}, "title": {"type": "string"}, "order": {"type": "integer"}}}},
+            "error": {"type": "object", "properties": {"code": {"type": "string"}}},
+        }},
+        example={
+            "html": "<the text of an http.request GET>", "base_url": "https://news.example.com/section/politics",
+            "mode": "links", "root_selector": "main", "include_patterns": ["^https://news\\.example\\.com/story/\\d+"],
+            "exclude_patterns": ["/video/"], "limit": 10,
+        },
     ),
     "text.check": ToolDeclaration(
         id="text.check",

@@ -824,6 +824,9 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.text_check_tool import register_text_check_tool
 
     register_text_check_tool(registry)
+    from eap_worker.html_extract_tool import register_html_extract_tool
+
+    register_html_extract_tool(registry)
 
 
 __all__ = [

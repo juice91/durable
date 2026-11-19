@@ -21,6 +21,7 @@ Grant it to an agent like any built-in tool (`tools: ["http.request"]`) or use i
 | `timeout_s` | integer 1 to 30 | default 20; bounds the whole request |
 | `max_response_bytes` | integer 1 to 262144 | default 65536 |
 | `drop_response_paths` | array of JSON pointers, at most 16 | optional; see below |
+| `body_from_url` | object | optional; the body is fetched from another URL first; see below. With `json` or `body` it answers `body_conflict` |
 
 ## Result
 
@@ -55,6 +56,35 @@ an exception text.
 | `secret_not_found` | a `secret:<name>` has no stored value for the tenant; **nothing was sent** |
 | `secret_unreadable` | a stored secret could not be decrypted; nothing was sent |
 | `response_too_large` | a JSON body is larger than `max_response_bytes` (a text body is truncated instead) |
+
+## Body from another URL
+
+`body_from_url` sends bytes fetched from another URL as the request body. Its use is a binary upload such as
+`com.atproto.repo.uploadBlob` for a link-card thumbnail (take the address from `html.extract`'s `og_image`),
+without a tool for any one service.
+
+```json
+{"method": "POST", "url": "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
+ "headers": {"Authorization": "Bearer secret:bsky-token"},
+ "body_from_url": {"url": "https://cdn.example.com/thumb.jpg", "allowed_hosts": ["cdn.example.com"]}}
+```
+
+| name | type | |
+| --- | --- | --- |
+| `url` | string | required; `https://` only |
+| `allowed_hosts` | array of hostnames, 1 to 20 | required; the URL's host must be one of them (case ignored) |
+| `max_bytes` | integer 1 to 5000000 | default 1000000; at most this many bytes are read |
+
+The worker fetches the URL first with a GET through the same outbound policy as the main request: public addresses
+only, checked again at connect, and **redirects are not followed** (a 3xx is refused). The answer must be 2xx with a
+`Content-Type` that starts with `image/`, and no longer than `max_bytes`. Those bytes are then the request body, and
+`Content-Type` is the fetched one unless the caller set a `Content-Type` header. The credential headers go to the
+main request only, never to the image host. The result has the same shape as any other call.
+
+Any refusal is `{"error": {"code": "body_source_rejected", "detail": "..."}}` and **nothing is sent**: the host is not
+in `allowed_hosts`, the URL is not https, the answer is a redirect, a non-2xx status, not an image or too large, or
+the fetch failed (timeout, blocked address, connection). The detail is a fixed sentence; it never contains the URL.
+The approval card of an agent call names the image host.
 
 ## Secrets
 
