@@ -180,8 +180,8 @@ def test_connection_check_require_ok_returns_an_error_object_when_not_ok(env):
     assert run(require_ok=False)["error_code"] == "secret_missing"
     assert code(run(require_ok=True)) == "secret_missing"
     store = SecretStore(env.rt.engine, load_keyring())
-    store.put(env.tenant, "ti-id", "id-value", "t")
-    store.put(env.tenant, "ti-secret", SENTINEL, "t")
+    store.put(env.tenant, "conn-id", "id-value", "t")
+    store.put(env.tenant, "conn-secret", SENTINEL, "t")
     ok = run(require_ok=True)
     assert ok["ok"] is True and "error" not in ok
     env.adapter.result = ConnectionCheck(False, "connection_auth_failed")
