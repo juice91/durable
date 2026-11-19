@@ -1,4 +1,8 @@
-"""Provider adapters. Importing this package registers every provider's adapter in the registry."""
+"""Built-in provider adapters. Other providers are separate distributions found through entry points."""
 
-from eap_kb_sources.providers import ti  # noqa: F401  (registers ("product_catalog", "acme_catalog"))
-from eap_kb_sources.providers import github  # noqa: F401,E402  (registers ("repository_docs", "github"))
+
+def register_builtin_adapters() -> None:
+    from eap_kb_sources.providers.github import GithubRepositoryDocsAdapter
+    from eap_kb_sources.registry import register_adapter
+
+    register_adapter("repository_docs", "github", GithubRepositoryDocsAdapter)
