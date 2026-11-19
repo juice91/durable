@@ -448,3 +448,19 @@ def test_selection_scripts_exist_and_do_not_use_untrusted_input():
     assert (ROOT / "scripts" / "ci" / "affected.py").exists()
     # PR_NUMBER and the labels are the only pull request data the script reads, never branch or title text.
     assert "PR_TITLE" not in script.read_text() and "HEAD_REF" not in script.read_text()
+
+
+def test_deploy_gate_reuses_only_full_runs_for_the_same_tree():
+    text = (WORKFLOW_DIR / "deploy.yml").read_text()
+    # The candidate filter: pushes to main, and manual runs whose run-name says full=true.
+    assert '(.event == \\"push\\" or (.event == \\"workflow_dispatch\\" and (.display_title | endswith(\\"full=true)\\"))))' in text
+    # A pull request run is selective: never accepted, however green.
+    candidates = next(line for line in text.splitlines() if "select(.name ==" in line and "created" not in line)
+    assert "pull_request" not in candidates
+    # The exact-commit check was already push-only.
+    assert "event=push" in text
+    # The marker the gate reads comes from the run-name of both workflows, built from a trusted input.
+    for name in ("ci.yml", "ci-heavy.yml"):
+        run_name = _load(name)["run-name"]
+        assert "workflow_dispatch" in run_name and "full={1}" in run_name and "inputs.full" in run_name, name
+        assert _load(name)["on"]["workflow_dispatch"]["inputs"]["full"]["type"] == "boolean"

@@ -1,5 +1,9 @@
 name: CI
 
+# A manual run says whether it was full in its title; deploy.yml reads that to decide whether a run
+# on the same tree counts as proof. Other events keep the usual title (pull request title or commit message).
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('{0} (manual, full={1})', github.workflow, inputs.full) || github.event.pull_request.title || github.event.head_commit.message }}
+
 on:
   push:
     branches: [main]

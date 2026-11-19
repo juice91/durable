@@ -72,9 +72,11 @@ reach a deploy unnoticed. Pushes to `main`, the nightly CI Heavy and every manua
 therefore run every suite. A pull request that selects too little is caught on main, and the guard
 test above plus `ci:full` keep that rare.
 
-Note that `deploy.yml` also accepts a green run with the same tree hash as the commit being
-deployed. A selective pull request run on that tree is accepted by that rule; the main push run
-(full) is still required to be green when one exists for the commit.
+The deploy gate counts only **full** runs. It accepts a green run for the exact commit (a push to
+main), or a green run of a different commit with an identical tree if that run was a push to main or
+a manual run with `full=true`. A manual run says so in its title (`run-name` in `ci.yml` and
+`ci-heavy.yml`: "... (manual, full=true)"), which the gate reads from the runs API; a pull request
+run is selective, so it is ignored even when green.
 
 ## Running the selection locally
 
