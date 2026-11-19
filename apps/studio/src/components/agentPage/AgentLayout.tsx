@@ -21,6 +21,7 @@ import { ConnectAgUiAction } from "@/components/apiKeys/ConnectAgUiSheet";
 import type { VersionRef } from "@/components/chat/runOptions";
 import { AgentPageContext, type AgentPageValue, type ThreadsCloseGuard } from "./AgentPageContext";
 import { ConfigPanel } from "./ConfigPanel";
+import { DraftDirtyBadge } from "@/components/agents/DraftDirtyBadge";
 import type { RunStatus } from "@/lib/runs";
 import { AgentArchiveMenu, ArchivedBanner } from "./AgentArchiveMenu";
 import { THREADS_TITLE } from "./AgentChatPanes";
@@ -318,6 +319,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const icon = (Icon: typeof Link2) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
   const actions = (
     <>
+      {agent ? <DraftDirtyBadge dirty={agent.draft_dirty} version={agent.latest_version} /> : null}
       {tab === "chat" ? (
         <IconButton
           label={THREADS_TITLE}

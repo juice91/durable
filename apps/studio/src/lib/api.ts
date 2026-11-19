@@ -31,11 +31,22 @@ export interface AgentSpec {
   };
 }
 
+export interface AgentSpecSummary {
+  version: number;
+  model: { provider: string | null; name: string | null };
+  tool_count: number;
+  spec_hash: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
   draft_spec: AgentSpec;
   latest_version: number | null;
+  /** What the latest published version runs; null for a draft-only agent. */
+  latest_spec_summary?: AgentSpecSummary | null;
+  /** True when a published version exists and the draft differs from it. */
+  draft_dirty?: boolean;
   /** Archived agents are hidden from `list`, and refuse new runs, conversations and publishes (409). */
   archived?: boolean;
   /** A built-in agent (the Architect and its helpers). */

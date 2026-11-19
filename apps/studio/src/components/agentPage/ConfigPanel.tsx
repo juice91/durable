@@ -8,6 +8,7 @@ import { routes } from "@/lib/routes";
 import { PROCESSOR_PHASES, PROCESSOR_PHASE_LABELS } from "@/lib/processors";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
+import { DraftDirtyBadge } from "@/components/agents/DraftDirtyBadge";
 import { Button, focusRing } from "@/components/ui/Button";
 import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
 import type { VersionRef } from "@/components/chat/runOptions";
@@ -130,6 +131,7 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
         <p className="flex flex-wrap items-center gap-1.5">
           <span data-testid="config-version">{config.versionLabel}</span>
           {config.isDraft ? <Badge variant="warning">Unpublished</Badge> : null}
+          <DraftDirtyBadge dirty={agent.draft_dirty} version={agent.latest_version} />
           {config.restoredFrom ? <span className={muted}>restored from v{config.restoredFrom}</span> : null}
         </p>
       </Section>

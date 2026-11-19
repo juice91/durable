@@ -26,7 +26,7 @@ components never write paths by hand. Query parameters below are part of the URL
 
 | URL | Page |
 |---|---|
-| `/agents` | Agents list (List or Compact view). |
+| `/agents` | Agents list (List or Compact view). Model and Tools show the latest published version (a draft-only agent shows its draft model, tagged "draft"); 「草稿未發佈」 marks a draft that differs from it. |
 | `/agents/new` | Create an agent. |
 | `/agents/:id` | Redirects to the agent's Chat tab. |
 | `/agents/:id/chat` | Agent page, Chat tab, new conversation. |
