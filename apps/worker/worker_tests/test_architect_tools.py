@@ -255,7 +255,7 @@ def test_save_workflow_creates_a_draft_with_marker(engine, tenant):
         {"kind": "tool", "id": "stamp", "tool": "clock.now"},
     ])
     saved = run(save_workflow(engine, tenant, spec, allowlist=with_agents, run_id="r1"))
-    assert saved == {"id": "daily-note", "version": None, "status": "draft", "warnings": []}
+    assert saved == {"id": "daily-note", "version": None, "status": "draft", "revision": 1, "warnings": []}
     with engine.connect() as conn:
         wf = conn.execute(
             text("SELECT slug, name, draft_spec, archived FROM workflows WHERE tenant_id = :t"), {"t": tenant}
@@ -484,7 +484,7 @@ def test_save_workflow_accepts_a_collect_shape_check_gate_post_draft_using_templ
             "input_schema": {"type": "object", "properties": {"dry": {"type": "boolean"}}, "required": ["dry"],
                              "additionalProperties": False}}
     saved = run(save_workflow(engine, tenant, spec, allowlist=wide))
-    assert saved == {"id": "collect-and-post", "version": None, "status": "draft", "warnings": []}, saved
+    assert saved == {"id": "collect-and-post", "version": None, "status": "draft", "revision": 1, "warnings": []}, saved
     with engine.connect() as conn:
         draft = conn.execute(text("SELECT draft_spec FROM workflows WHERE tenant_id = :t"), {"t": tenant}).scalar_one()
     by_id = {s["id"]: s for s in draft["steps"]}

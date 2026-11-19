@@ -50,6 +50,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, schema_checks_storable
@@ -57,6 +58,7 @@ from eap_api.routes import _run_definition_op
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
+from eap_run_store.revisions import bump_row
 from eap_run_store.definitions import (
     publish_workflow,
     restore_workflow_version,
@@ -140,6 +142,7 @@ def _workflow_response(workflow: WorkflowModel, latest_version: int | None) -> d
         "latest_version": latest_version,
         "archived": bool(workflow.archived),
         "archived_at": workflow.archived_at.isoformat() if workflow.archived_at else None,
+        "revision": workflow.revision,
     }
 
 
@@ -228,7 +231,7 @@ def create_workflow(request: WorkflowCreate, principal: PrincipalDep, db: Sessio
     db.add(workflow)
     db.commit()
     db.refresh(workflow)
-    return JSONResponse(content=_workflow_response(workflow, None), status_code=201)
+    return stamp(JSONResponse(content=_workflow_response(workflow, None), status_code=201), workflow.revision)
 
 
 @router.get("", response_class=JSONResponse)
@@ -244,28 +247,40 @@ def list_workflows(
     return JSONResponse(content=[_workflow_response(w, _latest_version(db, w)) for w in workflows])
 
 
-@router.get("/{workflow_id}", response_class=JSONResponse, responses={404: {"model": ErrorDetail}})
+@router.get(
+    "/{workflow_id}", response_class=JSONResponse,
+    responses={404: {"model": ErrorDetail}, **etag_responses(write=False)},
+)
 def get_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    return JSONResponse(content=_workflow_response(workflow, _latest_version(db, workflow)))
+    return read_response(_workflow_response(workflow, _latest_version(db, workflow)), workflow.revision)
 
 
 @router.patch(
     "/{workflow_id}",
     response_class=JSONResponse,
-    responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
+    responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}, **etag_responses()},
 )
 @schema_checks_storable
 def patch_workflow(
-    workflow_id: uuid.UUID, request: WorkflowUpdate, principal: PrincipalDep, db: SessionDep
+    workflow_id: uuid.UUID, request: WorkflowUpdate, principal: PrincipalDep, db: SessionDep, pre: IfMatch
 ) -> JSONResponse:
-    """Replace the draft. Published versions never change."""
+    """Replace the draft. Published versions never change. Send the ETag you read as `If-Match`: a
+    stale one is 412 `revision_mismatch` with the current workflow (see eap_api.concurrency)."""
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    workflow.name = request.spec.name
-    workflow.draft_spec = request.spec.model_dump(mode="json")
-    db.commit()
+
+    def current() -> tuple[dict, int]:
+        db.refresh(workflow)
+        return _workflow_response(workflow, _latest_version(db, workflow)), workflow.revision
+
+    pre.check(workflow.revision, current)
+    with pre.guard(current, db):
+        bump_row(db, workflow, pre.expected)
+        workflow.name = request.spec.name
+        workflow.draft_spec = request.spec.model_dump(mode="json")
+        db.commit()
     db.refresh(workflow)
-    return JSONResponse(content=_workflow_response(workflow, _latest_version(db, workflow)))
+    return pre.respond(_workflow_response(workflow, _latest_version(db, workflow)), workflow.revision)
 
 
 @router.post(
@@ -283,7 +298,10 @@ def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db
     result = _run_definition_op(
         db, lambda conn: publish_workflow(conn, principal.tenant_id, str(workflow_id), created_by=principal.user_id)
     )
-    return JSONResponse(content={**_version_response_dict(result.version), "warnings": result.warnings}, status_code=201)
+    return stamp(
+        JSONResponse(content={**_version_response_dict(result.version), "warnings": result.warnings}, status_code=201),
+        result.revision,
+    )
 
 
 class WorkflowVersionRestore(BaseModel):
@@ -321,9 +339,12 @@ def restore_workflow_version_route(
             discard_draft=discard,
         ),
     )
-    return JSONResponse(
-        content={**_version_response_dict(result.version), "restored_from": version_num, "warnings": result.warnings},
-        status_code=201,
+    return stamp(
+        JSONResponse(
+            content={**_version_response_dict(result.version), "restored_from": version_num, "warnings": result.warnings},
+            status_code=201,
+        ),
+        result.revision,
     )
 
 
@@ -344,8 +365,9 @@ def _archive(
     )
     workflow = _get_workflow(db, workflow_id, principal.tenant_id)
     db.refresh(workflow)
-    return JSONResponse(
-        content={**_workflow_response(workflow, _latest_version(db, workflow)), "paused_schedules": list(result.paused_schedules)}
+    return read_response(
+        {**_workflow_response(workflow, _latest_version(db, workflow)), "paused_schedules": list(result.paused_schedules)},
+        workflow.revision,
     )
 
 

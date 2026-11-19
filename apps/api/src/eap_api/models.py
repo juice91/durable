@@ -63,6 +63,8 @@ class AgentModel(Base):
     )
     # 0026: the Architect's short id for a definition it made (NULL for hand-made agents).
     slug: Mapped[str | None] = mapped_column("slug", String, nullable=True)
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -81,7 +81,7 @@ def _seed(engine):
 
 
 def _is_0025(diff) -> bool:
-    return any(name in repr(diff) for name in ("'builtin'", "'created_via'", "'slug'", "'archived_at'", "ix_spans_external", "ck_spans_source", "<spans>", "_tenant_slug", "tenant_secrets", "mcp_catalog_entries", "settings_connections", "kb_sources", "kb_source_syncs", "kb_source_records", "kb_entit"))
+    return any(name in repr(diff) for name in ("'revision'", "'builtin'", "'created_via'", "'slug'", "'archived_at'", "ix_spans_external", "ck_spans_source", "<spans>", "_tenant_slug", "tenant_secrets", "mcp_catalog_entries", "settings_connections", "kb_sources", "kb_source_syncs", "kb_source_records", "kb_entit"))
 
 
 def test_backfill_moves_bytes_into_the_store_and_drops_the_column(schema_engine, monkeypatch, tmp_path):

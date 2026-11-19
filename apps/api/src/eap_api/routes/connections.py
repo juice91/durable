@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.secrets import get_secret_store
 from eap_kb_sources.check import check_connection
@@ -102,7 +103,7 @@ def view(c: Connection) -> dict[str, Any]:
         "credential_refs": c.credential_refs, "enabled": c.enabled,
         "last_checked_at": checked.isoformat() if checked is not None else None,
         "last_status": c.last_status, "last_error_code": c.last_error_code,
-        "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
+        "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(), "revision": c.revision,
     }
 
 
@@ -164,7 +165,7 @@ async def create_connection(
         )
     except ConnectionNameConflict:
         return problem("connection_name_conflict", "a connection with this name exists", status.HTTP_409_CONFLICT)
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=view(made))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=view(made)), made.revision)
 
 
 @router.get("/settings/connections")
@@ -173,7 +174,7 @@ async def list_connections(request: Request, principal: PrincipalDep) -> JSONRes
     return JSONResponse(content={"items": [view(c) for c in rows]})
 
 
-@router.get("/settings/connections/{connection_id}")
+@router.get("/settings/connections/{connection_id}", responses={**etag_responses(write=False)})
 async def get_connection(connection_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
     cid = parse_uuid(connection_id)
     found = await run_in_threadpool(_store(request).get, principal.tenant_id, cid) if cid else None
@@ -181,13 +182,16 @@ async def get_connection(connection_id: str, request: Request, principal: Princi
 
 
 def view_or_404(found: Connection | None) -> JSONResponse:
-    return _not_found() if found is None else JSONResponse(content=view(found))
+    return _not_found() if found is None else read_response(view(found), found.revision)
 
 
-@router.patch("/settings/connections/{connection_id}")
+@router.patch("/settings/connections/{connection_id}", responses={**etag_responses()})
 async def update_connection(
-    connection_id: str, request: Request, principal: PrincipalDep, payload: Annotated[Any, Body()] = None
+    connection_id: str, request: Request, principal: PrincipalDep, pre: IfMatch,
+    payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
+    """Change a connection. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
+    with the current connection (see eap_api.concurrency)."""
     body = parse_body(payload, ConnectionPatch)
     if isinstance(body, JSONResponse):
         return body
@@ -197,16 +201,27 @@ async def update_connection(
     for refused in (_refs_problem(body.credential_refs), _url_problem(body.base_url), _provider_problem(body.config)):
         if refused is not None:
             return refused
+    def current() -> tuple[dict[str, Any], int]:
+        found = _store(request).get(principal.tenant_id, cid)
+        return (view(found), found.revision) if found is not None else ({}, 0)
+
     try:
-        changed = await run_in_threadpool(
-            lambda: _store(request).update(
-                principal.tenant_id, cid, name=body.name, base_url=body.base_url, config=body.config,
-                credential_refs=body.credential_refs, enabled=body.enabled,
+        if pre.expected is not None:
+            body_now, revision_now = await run_in_threadpool(current)
+            if revision_now:  # a missing row is the 404 below
+                pre.check(revision_now, lambda: (body_now, revision_now))
+        with pre.guard(current):
+            changed = await run_in_threadpool(
+                lambda: _store(request).update(
+                    principal.tenant_id, cid, name=body.name, base_url=body.base_url, config=body.config,
+                    credential_refs=body.credential_refs, enabled=body.enabled, expected_revision=pre.expected,
+                )
             )
-        )
     except ConnectionNameConflict:
         return problem("connection_name_conflict", "a connection with this name exists", status.HTTP_409_CONFLICT)
-    return view_or_404(changed)
+    if changed is None:
+        return _not_found()
+    return pre.respond(view(changed), changed.revision)
 
 
 @router.delete("/settings/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)

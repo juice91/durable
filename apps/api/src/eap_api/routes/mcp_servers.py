@@ -52,10 +52,12 @@ from eap_secrets import (
 from eap_mcp_runtime import McpRuntime, RuntimeHandle, handle_for
 from eap_mcp_runtime.images import UnsupportedPackage
 from eap_run_store.mcp_catalog import CatalogStore
+from eap_run_store.revisions import bump_row
 from eap_run_store.secrets import SecretStore
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
 from eap_api.mcp_servers import managed
@@ -274,6 +276,7 @@ def _server_json(
         "last_checked_at": _iso(server.last_checked_at),
         "last_status": server.last_status,
         "last_error_code": server.last_error_code,
+        "revision": server.revision,
     }
 
 
@@ -321,7 +324,10 @@ def create_mcp_server(
     if ring is not None:
         db.add_all(_seal(ring, tenant_id, server.id, headers))
     _commit_or_409(db)
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_server_json(server, sorted(headers)))
+    return stamp(
+        JSONResponse(status_code=status.HTTP_201_CREATED, content=_server_json(server, sorted(headers))),
+        server.revision,
+    )
 
 
 @router.get("/mcp-servers")
@@ -344,13 +350,13 @@ def list_mcp_servers(principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     ])
 
 
-@router.get("/mcp-servers/{server_id}")
+@router.get("/mcp-servers/{server_id}", responses={**etag_responses(write=False)})
 def get_mcp_server(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     server = _get_or_404(db, principal.tenant_id, server_id)
-    return JSONResponse(content=_json_of(db, principal.tenant_id, server))
+    return read_response(_json_of(db, principal.tenant_id, server), server.revision)
 
 
-@router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}})
+@router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}, **etag_responses()})
 def update_mcp_server(
     request: Request,
     server_id: uuid.UUID,
@@ -358,9 +364,11 @@ def update_mcp_server(
     db: SessionDep,
     policy: PolicyDep,
     runtime: RuntimeDep,
+    pre: IfMatch,
     payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
-    """Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing
+    """Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch` with the current
+    server (see eap_api.concurrency). Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing
     the url or headers clears the last test result, which no longer describes the server. A managed
     server takes `env` (`{VARIABLE: value | "secret:<name>"}`, only the variables it changes): the
     server's pod is restarted so the new values are projected (the response carries the resulting
@@ -370,6 +378,12 @@ def update_mcp_server(
     assert isinstance(body, McpServerUpdate)
     tenant_id = principal.tenant_id
     server = _get_or_404(db, tenant_id, server_id)
+
+    def current() -> tuple[dict[str, Any], int]:
+        db.refresh(server)
+        return _json_of(db, tenant_id, server), server.revision
+
+    pre.check(server.revision, current)
     if server.runtime == "managed" and (body.url is not None or body.headers is not None):
         raise _unprocessable("a managed server has no url or headers; its endpoint is the platform's")
     if body.env is not None and server.runtime != "managed":
@@ -380,6 +394,8 @@ def update_mcp_server(
         _check_url_sync(policy, body.url)
     ring = _keyring() if headers else None
 
+    with pre.guard(current, db):
+        bump_row(db, server, pre.expected)
     if body.name is not None:
         server.name = body.name
     if body.enabled is not None:
@@ -404,7 +420,7 @@ def update_mcp_server(
         row = _runtime_of(db, tenant_id, server.id)
         if row is not None and row.state in managed.RESTARTABLE:
             restart_runtime(db, server, row, runtime)
-    return JSONResponse(content=_json_of(db, tenant_id, server))
+    return pre.respond(_json_of(db, tenant_id, server), server.revision)
 
 
 @router.delete(

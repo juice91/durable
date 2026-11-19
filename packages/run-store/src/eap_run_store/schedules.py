@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Index, String, Text, UniqueConstraint, cast, select, text, tuple_
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, cast, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from eap_run_store.cursor import RunCursor
+from eap_run_store.revisions import bump_row
 from eap_run_store.store import Base
 
 
@@ -35,6 +36,8 @@ class WorkflowScheduleModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         "updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "workflow_id", "name", name="uq_workflow_schedules_tenant_workflow_name"),
@@ -73,6 +76,7 @@ def _schedule_dict(row: WorkflowScheduleModel) -> dict[str, Any]:
         "next_fire_at": row.next_fire_at,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
+        "revision": row.revision,
     }
 
 
@@ -126,9 +130,12 @@ class ScheduleStore:
         next_before = RunCursor.after(items[-1]).encode() if len(items) == limit and items else None
         return items, next_before
 
-    def update(self, tenant_id: str, schedule_id: str, **fields: Any) -> dict[str, Any] | None:
-        """Sets the given columns (name, cron, timezone, input, active, next_fire_at, last_error) and
-        bumps updated_at; None when the tenant has no such schedule."""
+    def update(
+        self, tenant_id: str, schedule_id: str, *, expected_revision: int | None = None, **fields: Any
+    ) -> dict[str, Any] | None:
+        """Sets the given columns (name, cron, timezone, input, active, next_fire_at, last_error), bumps
+        updated_at and the revision; None when the tenant has no such schedule. RevisionMismatch when
+        `expected_revision` is given and the row has moved on (nothing is written)."""
         unknown = set(fields) - _EDITABLE
         if unknown:
             raise TypeError(f"not editable: {sorted(unknown)}")
@@ -136,6 +143,7 @@ class ScheduleStore:
             row = self._row(session, tenant_id, schedule_id, lock=True)
             if row is None:
                 return None
+            bump_row(session, row, expected_revision)
             for key, value in fields.items():
                 setattr(row, key, value)
             row.updated_at = _now()
@@ -194,14 +202,17 @@ class ScheduleStore:
 
     def stop(self, schedule_id: str, last_error: str, *, session: Any = None) -> None:
         """Deactivate with a reason (the tick found the input or workflow no longer runnable)."""
-        self._worker_update(schedule_id, session, active=False, last_error=last_error, updated_at=_now())
+        self._worker_update(
+            schedule_id, session, bump=True, active=False, last_error=last_error, updated_at=_now())
 
     # ------------------------------------------------------------------ internals
 
-    def _worker_update(self, schedule_id: str, session: Any, **values: Any) -> None:
+    def _worker_update(self, schedule_id: str, session: Any, *, bump: bool = False, **values: Any) -> None:
         def apply(s: Any) -> None:
             row = s.get(WorkflowScheduleModel, str(schedule_id))
             if row is not None:
+                if bump:  # a stop changes what the editor shows (`active`, `last_error`); a fire does not
+                    row.revision = row.revision + 1
                 for key, value in values.items():
                     setattr(row, key, value)
 

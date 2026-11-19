@@ -72,6 +72,7 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api import eval_overview
 from eap_api.eval_format import (
     MAX_IMPORT_BYTES,
@@ -195,6 +196,7 @@ def suite_json(suite: EvalSuiteRecord, target_name: str | None = None) -> dict[s
         "archived_at": _iso(suite.archived_at),
         "created_at": _iso(suite.created_at),
         "updated_at": _iso(suite.updated_at),
+        "revision": suite.revision,
     }
 
 
@@ -210,6 +212,7 @@ def case_json(case: EvalCaseRecord) -> dict[str, Any]:
         "position": case.position,
         "created_at": _iso(case.created_at),
         "updated_at": _iso(case.updated_at),
+        "revision": case.revision,
     }
 
 
@@ -602,7 +605,7 @@ def _create_suite(
         raise _http(status.HTTP_409_CONFLICT, SUITE_ID_IN_USE) from None
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=suite_json(suite, target_name))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=suite_json(suite, target_name)), suite.revision)
 
 
 def _same_suite(
@@ -621,7 +624,7 @@ def _same_suite(
     return existing
 
 
-@_json_router.get("/eval-suites/{suite_id}")
+@_json_router.get("/eval-suites/{suite_id}", responses={**etag_responses(write=False)})
 def get_suite(suite_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep) -> JSONResponse:
     """The suite with its cases in execution order."""
     try:
@@ -630,14 +633,17 @@ def get_suite(suite_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, stor
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
     name = _target_name(db, principal.tenant_id, suite)
-    return JSONResponse(content={**suite_json(suite, name), "cases": [case_json(c) for c in cases]})
+    return read_response({**suite_json(suite, name), "cases": [case_json(c) for c in cases]}, suite.revision)
 
 
-@_json_router.patch("/eval-suites/{suite_id}")
+@_json_router.patch("/eval-suites/{suite_id}", responses={**etag_responses()})
 def update_suite(
-    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep
+    suite_id: uuid.UUID, body: EvalSuiteUpdate, principal: PrincipalDep, db: SessionDep, store: EvalStoreDep,
+    pre: IfMatch,
 ) -> JSONResponse:
-    """Change the fields present in the body. An archived suite accepts only `archived: false` (409)."""
+    """Change the fields present in the body. An archived suite accepts only `archived: false` (409).
+    Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch` with the current suite
+    (see eap_api.concurrency). Case edits have their own revision and do not move the suite's."""
     fields = body.model_fields_set
     if "evaluators" in fields and body.evaluators is None:
         raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, EVALUATORS_NULL)
@@ -646,12 +652,21 @@ def update_suite(
     kwargs: dict[str, Any] = {k: getattr(body, k) for k in ("name", "description", "evaluators") if k in fields}
     if "archived" in fields and body.archived is not None:
         kwargs["archived"] = body.archived
+    def current() -> tuple[dict[str, Any], int]:
+        found = store.get_suite(principal.tenant_id, suite_id)
+        cases = store.list_cases(principal.tenant_id, suite_id)
+        name = _target_name(db, principal.tenant_id, found)
+        return {**suite_json(found, name), "cases": [case_json(c) for c in cases]}, found.revision
+
     try:
+        if pre.expected is not None:
+            pre.check(store.get_suite(principal.tenant_id, suite_id).revision, current)
         check_regex_evaluators(kwargs.get("evaluators"), "evaluators")
-        suite = store.update_suite(principal.tenant_id, suite_id, **kwargs)
+        with pre.guard(current):
+            suite = store.update_suite(principal.tenant_id, suite_id, expected_revision=pre.expected, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content=suite_json(suite, _target_name(db, principal.tenant_id, suite)))
+    return pre.respond(suite_json(suite, _target_name(db, principal.tenant_id, suite)), suite.revision)
 
 
 @_json_router.delete("/eval-suites/{suite_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -709,19 +724,19 @@ def add_case(
         raise _store_error(exc) from None
     except IntegrityError:
         raise _http(status.HTTP_409_CONFLICT, CASE_ID_IN_USE) from None
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=case_json(record))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=case_json(record)), record.revision)
 
 
-@_json_router.get("/eval-suites/{suite_id}/cases/{case_id}")
+@_json_router.get("/eval-suites/{suite_id}/cases/{case_id}", responses={**etag_responses(write=False)})
 def get_case(suite_id: uuid.UUID, case_id: uuid.UUID, principal: PrincipalDep, store: EvalStoreDep) -> JSONResponse:
     try:
         record = store.get_case(principal.tenant_id, case_id, suite_id=suite_id)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content=case_json(record))
+    return read_response(case_json(record), record.revision)
 
 
-@_json_router.patch("/eval-suites/{suite_id}/cases/{case_id}")
+@_json_router.patch("/eval-suites/{suite_id}/cases/{case_id}", responses={**etag_responses()})
 def update_case(
     suite_id: uuid.UUID,
     case_id: uuid.UUID,
@@ -729,8 +744,10 @@ def update_case(
     principal: PrincipalDep,
     db: SessionDep,
     store: EvalStoreDep,
+    pre: IfMatch,
 ) -> JSONResponse:
-    """Change the fields present in the body; the merged case is validated (422)."""
+    """Change the fields present in the body; the merged case is validated (422). Send the ETag you
+    read as `If-Match`: a stale one is 412 `revision_mismatch` with the current case."""
     kwargs = {k: getattr(body, k) for k in body.model_fields_set}
     if kwargs.get("position", 0) is None:
         kwargs.pop("position")
@@ -741,10 +758,19 @@ def update_case(
                 name = store.get_case(principal.tenant_id, case_id, suite_id=suite_id).name
             _check_workflow_case_input(db, store, principal.tenant_id, suite_id, name, kwargs["input"])
         check_regex_evaluators(kwargs.get("evaluators"), "case.evaluators")
-        record = store.update_case(principal.tenant_id, case_id, suite_id=suite_id, **kwargs)
+
+        def current() -> tuple[dict[str, Any], int]:
+            found = store.get_case(principal.tenant_id, case_id, suite_id=suite_id)
+            return case_json(found), found.revision
+
+        if pre.expected is not None:
+            pre.check(current()[1], current)
+        with pre.guard(current):
+            record = store.update_case(
+                principal.tenant_id, case_id, suite_id=suite_id, expected_revision=pre.expected, **kwargs)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
-    return JSONResponse(content=case_json(record))
+    return pre.respond(case_json(record), record.revision)
 
 
 @_json_router.delete("/eval-suites/{suite_id}/cases/{case_id}", status_code=status.HTTP_204_NO_CONTENT)

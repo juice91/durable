@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     PrimaryKeyConstraint,
     String,
@@ -63,6 +64,8 @@ class McpServerModel(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
 
 
 class McpServerSecretModel(Base):

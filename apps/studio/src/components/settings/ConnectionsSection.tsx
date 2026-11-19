@@ -28,6 +28,8 @@ import {
   type ConnectionForm,
 } from "@/lib/kbSources";
 import { listSecrets } from "@/lib/secrets";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import { SecretPicker } from "./SecretPicker";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -82,6 +84,13 @@ function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Con
   const [names, setNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 412: the connection changed elsewhere; 重新載入 refills the form from their version, 覆寫 saves on top of it.
+  const conflict = useConflict<Connection>({ onSaved: () => finishSave() });
+  const finishSave = () => {
+    toast.success(editing ? "Connection saved" : "Connection added");
+    onSaved();
+    onClose();
+  };
 
   const refreshNames = useCallback(() => {
     listSecrets().then(
@@ -107,11 +116,14 @@ function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Con
     setError(null);
     try {
       const body = connectionPayload(form, editing?.enabled ?? true, adapters);
-      if (editing) await updateConnection(editing.id, { name: body.name, base_url: body.base_url, config: body.config, credential_refs: body.credential_refs });
-      else await createConnection(body);
-      toast.success(editing ? "Connection saved" : "Connection added");
-      onSaved();
-      onClose();
+      if (editing) {
+        const saved = await conflict.guard(() =>
+          updateConnection(editing.id, { name: body.name, base_url: body.base_url, config: body.config, credential_refs: body.credential_refs }));
+        if (saved === undefined) return; // held as a conflict notice
+      } else {
+        await createConnection(body);
+      }
+      finishSave();
     } catch (reason: unknown) {
       setError(errorText(reason, "The connection could not be saved"));
     } finally {
@@ -157,6 +169,7 @@ function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Con
                 <SecretPicker label="Client secret" names={names} value={form.clientSecretSecret} onChange={(name) => set({ clientSecretSecret: name })} onCreated={refreshNames} />
               </>
             )}
+            <ConflictNotice state={conflict} onReload={(current) => current && setForm(formFor(current))} />
             {error ? (
               <p role="alert" data-testid="connection-form-error" className="text-label text-destructive-text">{error}</p>
             ) : null}
@@ -217,9 +230,11 @@ export function ConnectionsSection() {
     }
   };
 
+  const toggleConflict = useConflict<Connection>({ onSaved: () => void load() });
   const toggle = async (connection: Connection) => {
     try {
-      await updateConnection(connection.id, { enabled: !connection.enabled });
+      const saved = await toggleConflict.guard(() => updateConnection(connection.id, { enabled: !connection.enabled }));
+      if (saved === undefined) return; // held: the notice offers reload or overwrite
       setStatus(`Connection ${connection.name} ${connection.enabled ? "disabled" : "enabled"}.`);
       void load();
     } catch (reason: unknown) {
@@ -312,6 +327,7 @@ export function ConnectionsSection() {
           })}
         </ul>
       )}
+      <ConflictNotice state={toggleConflict} onReload={() => void load()} />
       <p role="status" data-testid="connections-status" className="min-h-5 text-label text-muted-foreground">{status}</p>
       {sheet && adapters ? <ConnectionSheet editing={sheet.editing} adapters={adapters} onClose={() => setSheet(null)} onSaved={() => void load()} /> : null}
       {deleting ? (

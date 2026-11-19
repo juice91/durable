@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     PrimaryKeyConstraint,
     String,
@@ -33,6 +34,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
+from eap_run_store.revisions import bump_row
 from eap_run_store.store import Base
 from eap_schemas.scorers import MAX_SCORERS_PER_AGENT, validate_scorer_evaluator
 
@@ -65,6 +67,8 @@ class ScorerModel(Base):
     name: Mapped[str] = mapped_column("name", String, nullable=False)
     description: Mapped[str | None] = mapped_column("description", Text, nullable=True)
     evaluator: Mapped[dict] = mapped_column("evaluator", JSONB, nullable=False)
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         "created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -116,11 +120,13 @@ class ScorerRecord:
     created_at: datetime
     updated_at: datetime
     agent_ids: tuple[str, ...] = ()
+    revision: int = 1
 
 
 def _record(row: ScorerModel, agent_ids: tuple[str, ...] = ()) -> ScorerRecord:
     return ScorerRecord(
-        str(row.id), row.name, row.description, dict(row.evaluator), row.created_at, row.updated_at, agent_ids
+        str(row.id), row.name, row.description, dict(row.evaluator), row.created_at, row.updated_at, agent_ids,
+        row.revision,
     )
 
 
@@ -193,9 +199,12 @@ class ScorerStore:
     def update(
         self, tenant_id: str, scorer_id: UUID | str, *, name: str | None = None,
         description: str | None = None, set_description: bool = False, evaluator: Any = None,
+        expected_revision: int | None = None,
     ) -> ScorerRecord:
+        """RevisionMismatch when `expected_revision` is given and the scorer has moved on."""
         with self.Session() as session:
             row = self._get(session, tenant_id, scorer_id)
+            bump_row(session, row, expected_revision)
             if name is not None:
                 row.name = name
             if set_description:

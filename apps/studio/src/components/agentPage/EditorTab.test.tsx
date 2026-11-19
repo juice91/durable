@@ -48,6 +48,72 @@ vi.mock("@/components/agents/specSections", async (importOriginal) => {
   return { ...actual, fetchProcessorCatalog: vi.fn(() => new Promise(() => undefined)), fetchModels: vi.fn(() => new Promise(() => undefined)) };
 });
 
+// 412 revision_mismatch (migration 0033): the save is refused, the page offers reload or overwrite.
+class FakeConflict extends Error {
+  status = 412;
+  key = "agent:a1";
+  constructor(public currentRevision: number, public current: unknown) {
+    super("changed");
+  }
+}
+
+describe("AgentDetailPage concurrency", () => {
+  let restoreWidth: () => void = () => undefined;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    restoreWidth = setWindowWidth(TEST_WIDE_WIDTH);
+  });
+  afterEach(() => restoreWidth());
+
+  const agentWith = (name: string, revision: number) => ({
+    id: "a1",
+    name,
+    revision,
+    draft_spec: { spec_version: 1, name, instructions: "Test", model: { provider: "openai", name: "gpt-4" }, tools: [] },
+    latest_version: 1,
+  });
+
+  async function editAndSave() {
+    (api.agents.get as any).mockResolvedValueOnce(agentWith("Mine", 1));
+    (api.versions.list as any).mockResolvedValueOnce([]);
+    render(<AgentDetailPage />);
+    fireEvent.change(await screen.findByDisplayValue("Mine"), { target: { value: "My edit" } });
+    fireEvent.click(screen.getByText("Save draft"));
+    return await screen.findByTestId("conflict-notice");
+  }
+
+  it("a 412 shows the notice with 重新載入 and 覆寫, not an error", async () => {
+    (api.agents.update as any).mockRejectedValueOnce(new FakeConflict(2, agentWith("Theirs", 2)));
+    const notice = await editAndSave();
+    expect(notice).toHaveTextContent("這份內容已被他人修改");
+    expect(screen.getByTestId("conflict-reload")).toHaveTextContent("重新載入");
+    expect(screen.getByTestId("conflict-overwrite")).toHaveTextContent("覆寫");
+    expect(screen.queryByTestId("agent-save-error")).not.toBeInTheDocument();
+  });
+
+  it("重新載入 puts their version in the editor and discards the local edit", async () => {
+    (api.agents.update as any).mockRejectedValueOnce(new FakeConflict(2, agentWith("Theirs", 2)));
+    await editAndSave();
+    fireEvent.click(screen.getByTestId("conflict-reload"));
+    expect(await screen.findByDisplayValue("Theirs")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("My edit")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conflict-notice")).not.toBeInTheDocument();
+    expect(api.agents.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("覆寫 resends the same save and shows the saved result", async () => {
+    (api.agents.update as any)
+      .mockRejectedValueOnce(new FakeConflict(2, agentWith("Theirs", 2)))
+      .mockResolvedValueOnce(agentWith("My edit", 3));
+    await editAndSave();
+    fireEvent.click(screen.getByTestId("conflict-overwrite"));
+    await waitFor(() => expect(api.agents.update).toHaveBeenCalledTimes(2));
+    expect((api.agents.update as any).mock.calls[1][1].name).toBe("My edit");
+    await waitFor(() => expect(screen.queryByTestId("conflict-notice")).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue("My edit")).toBeInTheDocument();
+  });
+});
+
 describe("AgentDetailPage", () => {
   let restoreWidth: () => void = () => undefined;
   beforeEach(() => {

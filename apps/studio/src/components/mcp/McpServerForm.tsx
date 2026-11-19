@@ -15,6 +15,8 @@ import {
 } from "@/lib/mcpServers";
 import { listSecrets, secretRef } from "@/lib/secrets";
 import { routes } from "@/lib/routes";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -38,6 +40,8 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
   const [rows, setRows] = useState<HeaderRow[]>(() => rowsFromServer(server?.header_names ?? []));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 412: the server changed elsewhere; 重新載入 refills the form from their version, 覆寫 saves on top of it.
+  const conflict = useConflict<McpServer>({ onSaved: (saved) => onSaved(saved as McpServer) });
   // Stored secret names for the "use secret" pickers; a failed list just leaves no picker.
   const [secretNames, setSecretNames] = useState<string[]>([]);
   useEffect(() => {
@@ -81,7 +85,13 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
         if (headers.kind === "set") body.headers = headers.headers;
         // Nothing changed: send nothing and hand back nothing, so the list keeps its current row
         // (which may have changed since this form opened: enabled, last test, or deleted).
-        saved = Object.keys(body).length > 0 ? await mcpServers.update(server.id, body) : null;
+        if (Object.keys(body).length > 0) {
+          const updated = await conflict.guard(() => mcpServers.update(server.id, body));
+          if (updated === undefined) return; // held as a conflict notice
+          saved = updated;
+        } else {
+          saved = null;
+        }
       }
       onSaved(saved);
     } catch (reason: unknown) {
@@ -95,6 +105,16 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
   return (
     <form onSubmit={submit} aria-label={isCreate ? "Register MCP server" : `Edit MCP server ${server.name}`} data-testid="mcp-server-form" className={embedded ? "min-w-0 space-y-4" : "min-w-0 space-y-4 rounded-lg border border-border bg-card p-5"}>
       {embedded ? null : <h2 className="text-lg font-semibold text-card-foreground">{isCreate ? "Register MCP server" : `Edit ${server.name}`}</h2>}
+      <ConflictNotice
+        state={conflict}
+        onReload={(current) => {
+          if (!current) return;
+          setName(current.name);
+          setUrl(current.url);
+          setEnabled(current.enabled);
+          setRows(rowsFromServer(current.header_names));
+        }}
+      />
       {error ? <p role="alert" data-testid="mcp-form-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text">{error}</p> : null}
       {isCreate ? (
         <p data-testid="mcp-catalog-pointer" className="text-sm text-muted-foreground">

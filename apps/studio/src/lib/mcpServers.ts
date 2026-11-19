@@ -4,6 +4,7 @@
 // with `headers` replaces the whole set. The Studio therefore never holds an existing value, never
 // prefills one, and only sends `headers` when the user changed them.
 import { apiErrorFromResponse, apiHeaders, BASE_URL, type AgentSpec, type McpToolRef } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 
 export interface McpServer {
   id: string;
@@ -23,6 +24,8 @@ export interface McpServer {
   runtime_error?: string | null;
   catalog_name?: string | null;
   env_names?: string[];
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export type McpRuntimeState = "pending" | "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
@@ -75,7 +78,7 @@ export interface McpServerUpdate {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${BASE_URL}/api/v1/mcp-servers${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...apiHeaders() },
+    headers: { "Content-Type": "application/json", ...apiHeaders(), ...(init.headers as Record<string, string> | undefined) },
   });
   if (!response.ok) throw await apiErrorFromResponse(response);
   if (response.status === 204) return undefined as T;
@@ -83,13 +86,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const mcpServers = {
-  list: () => request<McpServer[]>(""),
-  get: (id: string) => request<McpServer>(`/${encodeURIComponent(id)}`),
+  list: () => request<McpServer[]>("").then((items) => trackAll(items, (s) => revisionKey.mcpServer(s.id))),
+  get: (id: string) => request<McpServer>(`/${encodeURIComponent(id)}`).then((server) => track(revisionKey.mcpServer(id), server)),
   create: (body: McpServerCreate) => request<McpServer>("", { method: "POST", body: JSON.stringify(body) }),
+  /** Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412). */
   update: (id: string, body: McpServerUpdate) =>
-    request<McpServer>(`/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+    writeResource(revisionKey.mcpServer(id), (headers) =>
+      request<McpServer>(`/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify(body) })),
   setEnabled: (id: string, enabled: boolean) =>
-    request<McpServer>(`/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+    writeResource(revisionKey.mcpServer(id), (headers) =>
+      request<McpServer>(`/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify({ enabled }) })),
   remove: (id: string) => request<void>(`/${encodeURIComponent(id)}`, { method: "DELETE" }),
   test: (id: string) => request<McpTestResult>(`/${encodeURIComponent(id)}/test`, { method: "POST" }),
   runtime: (id: string) => request<McpRuntime>(`/${encodeURIComponent(id)}/runtime`),
