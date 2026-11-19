@@ -1,4 +1,5 @@
 import { SIDE_PANEL_STORAGE_KEY } from "@/components/frame/frameStorage";
+import { ARCHITECT_SHOW_ARCHIVED_KEY } from "@/components/architect/CreatedList";
 import { PRESETS_PREFIX, SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
 import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
@@ -77,6 +78,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Agents list view",
     description: "List or Compact, and whether system agents are shown.",
     keys: [AGENTS_VIEW_KEY, AGENTS_SHOW_SYSTEM_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "architect-archived",
+    label: "Architect list",
+    description: "Whether the Architect page's created list shows archived agents and workflows.",
+    keys: [ARCHITECT_SHOW_ARCHIVED_KEY],
     prefixes: [],
     clearGroup: "layout",
   },
