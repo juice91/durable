@@ -448,8 +448,8 @@ def test_the_benchmark_world_through_the_real_workflow(make_stack, caplog, capfd
     """Brief §19 through the published workflow, the real worker, the real stores and `eap.kb_ingest`: 10 products of
     2 families, 3 datasheets (one unchanged, one changed revision), one missing product, one transient 503 and one
     malformed response. Reports the table and holds the size caps of the design (step 32 KiB, checkpoint 8 KiB)."""
-    sys.path.insert(0, str(REPO_ROOT / "packages" / "kb-sources"))
-    from kb_sources_tests.benchmark import fixtures as bench
+    sys.path.insert(0, str(REPO_ROOT / "packages" / "kb-sources-acme"))
+    from kb_sources_ti_tests.benchmark import fixtures as bench
 
     server, names = bench.world()
     for part in server.parts.values():  # real PDFs: the ingest extracts and embeds them
@@ -521,7 +521,7 @@ def test_the_benchmark_world_through_the_real_workflow(make_stack, caplog, capfd
     assert max(checkpoint_bytes, source_checkpoint) < 8 * 1024
 
     # resume: a walk of the benchmark catalogue in one-page segments equals the single pass (adapter level in
-    # kb_sources_tests/benchmark; here the real stores): the budget stop of the full-walk test above is the resume proof.
+    # kb_sources_ti_tests/benchmark; here the real stores): the budget stop of the full-walk test above is the resume proof.
     leaks = s.leaks()
     logs = caplog.text + capfd.readouterr().out
     assert leaks == [] and not any(x in logs for x in SENTINELS)
