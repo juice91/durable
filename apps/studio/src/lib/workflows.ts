@@ -48,6 +48,7 @@ export interface AgentStep extends StepBase {
 export interface ToolStep extends StepBase {
   type: "tool";
   tool_id: string;
+  on_error?: "fail" | "continue";
   input?: Record<string, unknown>;
   next?: string | null;
 }

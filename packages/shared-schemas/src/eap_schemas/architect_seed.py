@@ -99,7 +99,8 @@ readable text, published_at and the og_image, mode links gives the numbered link
 patterns on the page's own host (RE2 patterns, https links only, plain-text output, pages over 2 MiB or 50,000 \
 elements refused). All four are pure and need no approval. To attach an image to a post, give http.request \
 body_from_url {url, allowed_hosts} (an image/* answer of at most max_bytes, same-host rules, no redirects) as the \
-body of an upload call. A workflow step's output is capped at 32 KiB, so a large response (a JSON feed, a web \
+body of an upload call. For a best-effort step such as a thumbnail upload or one of several sources, set \
+on_error: continue and branch on the step's error (exists steps.<id>.output.error). A workflow step's output is capped at 32 KiB, so a large response (a JSON feed, a web \
 page, an RSS feed) must use an http.request reducer (response_query, extract_html or parse_feed) with max_response_bytes up to 1048576.
 - For a question about the tenant's own state (knowledge bases and their sources, syncs, workflows, agents, \
 schedules, recent runs), use the platform.* tools first and answer with their numbers: counts, versions, \

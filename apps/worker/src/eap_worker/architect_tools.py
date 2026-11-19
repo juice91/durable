@@ -125,6 +125,8 @@ STEP_KINDS: list[dict[str, Any]] = [
             "id": "step id", "tool": "id of a tool from list_approved_tools.tools",
             "params": "object of the tool's arguments; values as in input_values",
             "next": "optional: a step id, or \"end\"; absent means the following step (workflow.return ends)",
+            "on_error": "optional: \"fail\" (default: a tool error result fails the run) or \"continue\" (the error "
+            "result is kept as the output and the run goes on; test it with a branch: exists steps.<id>.output.error)",
         },
         "description": "Call one approved tool (its arguments and an example are in list_approved_tools). The step's "
         "output is the tool's result: steps.<id>.output.<field>.",

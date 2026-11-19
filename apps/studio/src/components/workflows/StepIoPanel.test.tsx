@@ -90,3 +90,27 @@ describe("StepIoPanel", () => {
     expect(isStructuredAgentOutput("tool", { a: 1 })).toBe(false);
   });
 });
+
+describe("StepIoPanel: error kept (on_error: continue)", () => {
+  it("shows an amber badge with the code for a step that kept its error, derived from the run's events", async () => {
+    const { deriveRunView } = await import("@/lib/workflowRunState");
+    const { demoSpec } = await import("@/test/workflowFixtures");
+    const events = [
+      { seq: 0, type: "run_started", data: {}, ts: "2026-11-20T10:00:00Z" },
+      { seq: 1, type: "step_started", data: { step_id: "lookup", step_type: "tool", tool_id: "http.request", input: {} }, ts: "2026-11-20T10:00:01Z" },
+      { seq: 2, type: "step_completed", data: { step_id: "lookup", output: { error: { code: "body_source_rejected" } }, outcome: "error_kept", error_code: "body_source_rejected" }, ts: "2026-11-20T10:00:02Z" },
+    ] as Parameters<typeof deriveRunView>[1];
+    const view = deriveRunView(demoSpec, events, "running");
+    render(<StepIoPanel step={null} detail={view.steps.lookup} onClose={() => undefined} />);
+    const badge = screen.getByTestId("step-io-error-kept");
+    expect(badge).toHaveTextContent("error kept: body_source_rejected");
+    expect(badge.className).toContain("text-warning-text");
+    expect(screen.getByTestId("step-io-state")).toHaveTextContent("Completed");
+    expect(screen.queryByTestId("step-io-error")).toBeNull();
+  });
+
+  it("shows no badge for an ordinary completed step", () => {
+    render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "tool", started: true, hasOutput: true, output: { ok: true } })} onClose={() => undefined} />);
+    expect(screen.queryByTestId("step-io-error-kept")).toBeNull();
+  });
+});

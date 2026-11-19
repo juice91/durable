@@ -45,7 +45,7 @@ the way to keep tokens you do not need out of the record. A path that does not e
 JSON, is left as it is. (Secret values you sent are redacted separately; this is for values the server sends.)
 
 A transport failure is the platform's error object, `{"error": {"code": "...", "message": "..."}}` (in a
-workflow tool step it fails the run with that code). The messages are fixed texts: never the URL, a header or
+workflow tool step it fails the run with that code, unless the step sets [`on_error: continue`](#keeping-an-error-and-going-on)). The messages are fixed texts: never the URL, a header or
 an exception text.
 
 | code | when |
@@ -106,6 +106,26 @@ meets a body that is not JSON.
 
 **A non-2xx status** still applies the reducer when the body allows it (a JSON error body, say). When it does not,
 the normal result is returned with `text` cut to 4 KiB (`truncated: true` when cut): never the full body.
+
+## Keeping an error and going on
+
+A workflow tool step whose result is `{"error": {"code": ...}}` fails the run with that code. For a best-effort
+step, such as a link-card thumbnail upload that may answer `body_source_rejected` (an oversize or non-image file),
+or one of several news sources answering `http_timeout`, set `"on_error": "continue"` on the step (`"fail"` is the
+default; only tool steps take it). The error result is then kept, unchanged, as the step's output, the step's
+`step_completed` event says `"outcome": "error_kept"` (with the `error_code`), and the run goes on to `next`. A branch
+can route on it. An exception inside the tool is still a step failure.
+
+```json
+{"id": "thumb", "type": "tool", "tool_id": "http.request", "on_error": "continue", "next": "thumb_gate",
+ "input": {"method": "POST", "url": "https://bsky.social/xrpc/com.atproto.repo.uploadBlob",
+           "headers": {"Authorization": "Bearer secret:bsky-token"},
+           "body_from_url": {"url": {"$ref": "steps.page.output.og_image"}, "allowed_hosts": ["cdn.example.com"]}}}
+{"id": "thumb_gate", "type": "branch", "default": "post_with_card",
+ "cases": [{"when": {"op": "exists", "left": {"$ref": "steps.thumb.output.error"}}, "next": "post_plain"}]}
+```
+
+A runnable example is [`best-effort-fetch.json`](../../examples/workflows/best-effort-fetch.json).
 
 ## Body from another URL
 
