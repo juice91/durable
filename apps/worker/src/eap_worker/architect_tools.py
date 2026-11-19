@@ -208,7 +208,7 @@ RESULTS_AND_ERRORS = {
     "output_schema": "the workflow's optional output_schema describes the shapes the run may end with",
 }
 PATTERN = (
-    "A common shape: collect with http.request (gate on .ok) -> shape with feed.parse / json.query -> agent steps that "
+    "A common shape: collect with http.request (gate on .ok) -> shape with feed.parse / json.query / html.extract -> agent steps that "
     "pick and write -> text.check -> gate with branch -> post with http.request. Give the workflow a boolean input such "
     "as dry that stops before the posting step (a branch to a workflow.return step), and offer a dry run first."
 )
