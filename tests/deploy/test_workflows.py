@@ -11,7 +11,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
-WORKFLOW_NAMES = ("ci.yml", "ci-heavy.yml", "deploy.yml")
+# Every workflow present: the hosted CI here, plus the self-hosted CI Heavy and the deploy workflow in a
+# checkout that carries them (tests/deploy/ops covers what is specific to those two).
+WORKFLOW_NAMES = tuple(sorted(p.name for p in WORKFLOW_DIR.glob("*.yml")))
 SHA = re.compile(r"^[^\s@]+@[0-9a-f]{40}$")
 UNTRUSTED_EVENT = re.compile(r"\$\{\{[^}]*github\.event\.", re.IGNORECASE)
 
@@ -30,6 +32,10 @@ def _values_for_key(value: Any, key: str):
     elif isinstance(value, list):
         for child in value:
             yield from _values_for_key(child, key)
+
+
+def test_the_hosted_ci_workflow_is_present():
+    assert "ci.yml" in WORKFLOW_NAMES
 
 
 def test_every_action_is_pinned_to_a_full_commit_sha():
@@ -87,15 +93,6 @@ def test_deploy_credentials_do_not_come_from_github_secrets():
         assert not re.search(r"\$\{\{\s*secrets\.", text), name
 
 
-def test_deploy_is_serialized_and_uses_the_studio_environment():
-    deploy = _load("deploy.yml")
-    assert deploy.get("concurrency") == {"group": "deploy-studio", "cancel-in-progress": "false"}
-    # GitHub Pro: the `studio` environment carries a main-only deployment branch policy. It is not
-    # the approval (required reviewers need Team/Enterprise for private repos); the manual gate is.
-    assert deploy["jobs"]["deploy"]["environment"] == "studio"
-    assert deploy["jobs"]["deploy"]["if"].count("github.repository_owner") == 2
-
-
 def test_hosted_ci_never_builds_studio():
     text = (WORKFLOW_DIR / "ci.yml").read_text()
     assert "pnpm build" not in text
@@ -107,111 +104,6 @@ def test_no_workflow_lists_issue_comment_or_a_write_permission():
         assert "issue_comment" not in text, name
         assert "contents: write" not in text, name
         assert "pull-requests: write" not in text, name
-
-
-def test_deploy_is_manual_dispatch_only():
-    deploy = _load("deploy.yml")
-    assert list(deploy["on"]) == ["workflow_dispatch"]
-    text = (WORKFLOW_DIR / "deploy.yml").read_text()
-    assert "workflow_run:" not in text
-    inputs = deploy["on"]["workflow_dispatch"]["inputs"]
-    assert inputs["confirm"]["required"] == "true"
-    assert inputs["allow_untested"]["default"] == "false"
-    assert inputs["allow_untested"]["type"] == "boolean"
-
-
-def test_deploy_skip_drain_input_exports_the_skip_variable_and_reports_it():
-    deploy = _load("deploy.yml")
-    skip = deploy["on"]["workflow_dispatch"]["inputs"]["skip_drain"]
-    assert skip["type"] == "boolean" and skip["default"] == "false"
-    steps = deploy["jobs"]["deploy"]["steps"]
-    step = next(s for s in steps if s.get("name") == "Deploy this revision")
-    assert step["env"]["SKIP_DRAIN"] == "${{ inputs.skip_drain }}"
-    assert '[[ "$SKIP_DRAIN" == true ]]' in step["run"]
-    assert "export PYDANTICOS_SKIP_DRAIN=1" in step["run"]
-    assert "drain was skipped" in step["run"] and "GITHUB_STEP_SUMMARY" in step["run"]
-    assert step["run"].index("PYDANTICOS_SKIP_DRAIN=1") < step["run"].index("deploy/scripts/up.sh")
-
-
-def test_deploy_runs_only_for_the_owner_on_main():
-    job = _load("deploy.yml")["jobs"]["deploy"]
-    condition = " ".join(job["if"].split())
-    assert condition == "github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner"
-    assert job["permissions"] == {"contents": "read", "actions": "read"}
-
-
-def test_deploy_fails_immediately_unless_confirm_is_deploy():
-    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
-    first = steps[0]
-    assert first["env"]["CONFIRM"] == "${{ inputs.confirm }}"
-    assert '[[ "$CONFIRM" != deploy ]]' in first["run"]
-    assert "exit 1" in first["run"]
-    # Nothing that touches the host runs before the confirmation.
-    assert not any("uses" in step for step in steps[:1])
-
-
-def test_deploy_checks_out_exactly_github_sha_and_never_uses_event_fields():
-    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
-    checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
-    assert checkout["with"]["ref"] == "${{ github.sha }}"
-    assert checkout["with"]["persist-credentials"] == "false"
-    for step in steps:
-        assert "github.event" not in step.get("run", "")
-    # Untrusted input reaches the shell only through env.
-    for step in steps:
-        assert "inputs." not in step.get("run", "")
-
-
-def test_deploy_reports_ci_status_and_needs_allow_untested_to_override():
-    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
-    check = next(step for step in steps if step.get("name") == "Report CI status for this commit")
-    assert check["env"]["ALLOW_UNTESTED"] == "${{ inputs.allow_untested }}"
-    assert check["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert "GITHUB_STEP_SUMMARY" in check["run"]
-    assert "'CI' 'CI Heavy'" in check["run"]
-    assert '[[ "$ALLOW_UNTESTED" == true ]]' in check["run"]
-    assert steps.index(check) < next(i for i, s in enumerate(steps) if "uses" in s)
-
-
-def test_deploy_secrets_come_from_1password_in_the_deploy_step_only():
-    text = (WORKFLOW_DIR / "deploy.yml").read_text()
-    assert "up.sh --op-refs deploy/secrets.op.env" in text
-    assert "--sops" not in text and "sops" not in text.lower()
-    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
-    sourcing = [step for step in steps if "runner.env" in step.get("run", "")]
-    assert [step["name"] for step in sourcing] == ["Deploy this revision"]
-    assert "OP_SERVICE_ACCOUNT_TOKEN" in sourcing[0]["run"]
-    # The token is never exported at workflow or job level.
-    deploy = _load("deploy.yml")
-    assert "env" not in deploy and "env" not in deploy["jobs"]["deploy"]
-
-
-def test_ci_heavy_postgres_is_loopback_and_always_removed():
-    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
-    assert 'docker --context colima-pydanticos rm -fv "$CI_PG_NAME"' in text  # -v: the anonymous data volume goes too
-    assert "-p '127.0.0.1::5432'" in text  # loopback only, free port chosen by Docker
-    assert "kubectl" not in text
-    assert "-n pydanticos" not in text
-    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
-    start = next(step for step in steps if step.get("name") == "Start isolated CI Postgres")
-    remove = next(step for step in steps if step.get("name") == "Remove isolated CI Postgres")
-    assert 'rm -fv "$CI_PG_NAME"' in start["run"]
-    assert remove["if"] == "always()"
-    assert 'rm -fv "$CI_PG_NAME"' in remove["run"]
-
-
-def test_nightly_skip_requires_schedule_and_the_same_sha():
-    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
-    assert (
-        '[[ "$EVENT_NAME" == schedule && -r "$marker" && "$(<"$marker")" == "$HEAD_SHA" ]]' in text
-    )
-    assert "run=false" in text
-    record = next(
-        step
-        for step in _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
-        if step.get("name") == "Record green nightly SHA"
-    )
-    assert record["if"] == "success() && steps.nightly.outputs.run == 'true' && github.event_name == 'schedule'"
 
 
 def test_hosted_path_filters_skip_unaffected_jobs():
@@ -244,61 +136,6 @@ def test_pnpm_action_setup_is_pinned_to_the_v6_1_1_commit():
             "pnpm/action-setup must be pinned to commit "
             f"{PNPM_ACTION_COMMIT} (v6.1.1); the annotated tag object is not a commit"
         )
-
-
-def test_ci_heavy_skips_docs_only_pushes():
-    push = _load("ci-heavy.yml")["on"]["push"]
-    assert push["branches"] == ["main"]
-    assert push["paths-ignore"] == ["docs/**", "**/*.md", ".planning/**"]
-    assert _load("ci-heavy.yml")["on"]["pull_request"]["paths-ignore"] == push["paths-ignore"]
-    # Only the push trigger is path-filtered: the nightly and manual runs always run.
-    assert "schedule" in _load("ci-heavy.yml")["on"]
-    assert "workflow_dispatch" in _load("ci-heavy.yml")["on"]
-
-
-def test_ci_heavy_cancels_superseded_runs_of_the_same_ref_only():
-    concurrency = _load("ci-heavy.yml")["concurrency"]
-    # One group per ref: a newer run cancels an older run of the same branch, and a run of another
-    # branch (or main) is never in that group, so it is never cancelled by it.
-    assert concurrency["group"] == "ci-heavy-${{ github.ref }}"
-    # Only pull request runs are superseded; main, nightly and manual runs always finish.
-    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
-
-
-def test_ci_heavy_runs_for_pull_requests_with_a_read_only_token():
-    heavy = _load("ci-heavy.yml")
-    assert "pull_request" in heavy["on"] and "workflow_dispatch" in heavy["on"] and "schedule" in heavy["on"]
-    assert heavy["permissions"] == {"contents": "read"}
-    # Checkout, the main-ref fetch, the status report and the ci:full label lookup need nothing beyond these.
-    assert heavy["jobs"]["heavy"]["permissions"] == {
-        "actions": "read",
-        "contents": "read",
-        "pull-requests": "read",
-    }
-    assert "pull_request_target" not in heavy["on"]
-
-
-def test_ci_heavy_postgres_is_unique_per_run_so_two_runners_do_not_collide():
-    heavy = _load("ci-heavy.yml")["jobs"]["heavy"]
-    assert heavy["env"]["CI_PG_NAME"] == "pydanticos-ci-pg-${{ github.run_id }}-${{ github.run_attempt }}"
-    assert "CI_PG_PORT" not in heavy["env"]  # Docker picks a free host port
-    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
-    assert "54359" not in text
-    assert "CI_PG_PORT=${port}" in text and 'GITHUB_ENV' in text
-    for step in heavy["steps"]:
-        for value in (step.get("env") or {}).values():
-            if "127.0.0.1" in value:
-                assert "${{ env.CI_PG_PORT }}" in value
-
-
-def test_ci_heavy_runs_the_api_suite_under_xdist_on_six_workers():
-    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
-    api = next(step for step in steps if step.get("name") == "API suite")
-    # The paths come from the selection step (all of apps/api/api_tests on main).
-    assert 'uv run pytest "${paths[@]}" -q -n 6' in api["run"]
-    # The worker suite stays serial: every worker test shares the one DBOS database.
-    worker = next(step for step in steps if step.get("name") == "Nightly worker suite")
-    assert "-n" not in worker["run"].split()
 
 
 def test_pytest_xdist_is_a_dev_dependency():
@@ -336,17 +173,6 @@ def test_hosted_jobs_cache_the_uv_and_pnpm_stores_on_their_lockfiles():
         assert "cache-dependency-path" not in node["with"], name
 
 
-def test_ci_heavy_does_not_wait_for_hosted_ci():
-    steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
-    text = (WORKFLOW_DIR / "ci-heavy.yml").read_text()
-    assert not any(step.get("name") == "Require the hosted CI gate" for step in steps)
-    assert "sleep 15" not in text and "Timed out waiting for CI" not in text
-    report = next(step for step in steps if "hosted CI status" in step.get("name", ""))
-    # Information only: no loop, no exit 1, so it can never block or fail the run.
-    assert "exit 1" not in report["run"] and "sleep" not in report["run"]
-    assert "|| conclusion=unknown" in report["run"]
-
-
 def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_config():
     steps = _load("ci.yml")["jobs"]["studio-test"]["steps"]
     cache = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache@"))
@@ -363,7 +189,6 @@ def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_confi
 
 # Branch protection and the deploy gate key on these names; the selection must not rename them.
 CI_JOB_NAMES = ("changes", "python", "studio", "studio-test", "deploy-checks")
-HEAVY_JOB_NAMES = ("heavy",)
 
 
 def _steps(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -372,12 +197,10 @@ def _steps(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def test_ci_job_names_are_unchanged():
     assert tuple(_load("ci.yml")["jobs"]) == CI_JOB_NAMES
-    assert tuple(_load("ci-heavy.yml")["jobs"]) == HEAVY_JOB_NAMES
     # No job sets a display name that would rename its check.
-    for name in ("ci.yml", "ci-heavy.yml"):
-        assert all("name" not in job for job in _load(name)["jobs"].values()), name
+    assert all("name" not in job for job in _load("ci.yml")["jobs"].values())
     assert _load("ci.yml")["jobs"]["studio-test"]["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4", "5"]
-    assert _load("ci.yml")["name"] == "CI" and _load("ci-heavy.yml")["name"] == "CI Heavy"
+    assert _load("ci.yml")["name"] == "CI"
 
 
 def test_ci_python_job_runs_the_selected_unit_paths():
@@ -410,24 +233,8 @@ def test_ci_studio_tests_use_vitest_changed_on_pull_requests_only():
     assert _load("ci.yml")["jobs"]["studio"]["if"] == "needs.changes.outputs.studio == 'true'"
 
 
-def test_heavy_suites_take_the_selection_and_skip_the_infrastructure_when_empty():
-    job = _load("ci-heavy.yml")["jobs"]["heavy"]
-    steps = _steps(job)
-    assert "scripts/ci/select-tests.sh python" in steps["Select the affected suites"]["run"]
-    for name in ("Start isolated CI Postgres", "Install Python dependencies", "Migrate the CI database"):
-        assert "steps.select.outputs.any == 'true'" in steps[name]["if"], name
-    for name, key in (("Package suites", "packages"), ("Run-store suite", "runstore"), ("API suite", "api")):
-        assert f"steps.select.outputs.{key}_run == 'true'" in steps[name]["if"], name
-        assert steps[name]["env"]["TEST_PATHS"] == f"${{{{ steps.select.outputs.{key}_paths }}}}", name
-    assert "-n 6" in steps["API suite"]["run"]
-    assert "No affected Python tests" in steps["No affected Python tests"]["run"]
-    # The nightly-only suites and the cleanup are untouched by the selection.
-    assert steps["Nightly worker suite"]["if"].endswith("github.event_name == 'schedule'")
-    assert steps["Remove isolated CI Postgres"]["if"] == "always()"
-
-
 def test_selection_reads_labels_and_is_full_by_default_off_pull_requests():
-    for name, job_name in (("ci.yml", "python"), ("ci.yml", "studio-test"), ("ci-heavy.yml", "heavy")):
+    for name, job_name in (("ci.yml", "python"), ("ci.yml", "studio-test")):
         workflow = _load(name)
         job = workflow["jobs"][job_name]
         assert job["permissions"]["pull-requests"] == "read", (name, job_name)
@@ -450,17 +257,3 @@ def test_selection_scripts_exist_and_do_not_use_untrusted_input():
     assert "PR_TITLE" not in script.read_text() and "HEAD_REF" not in script.read_text()
 
 
-def test_deploy_gate_reuses_only_full_runs_for_the_same_tree():
-    text = (WORKFLOW_DIR / "deploy.yml").read_text()
-    # The candidate filter: pushes to main, and manual runs whose run-name says full=true.
-    assert '(.event == \\"push\\" or (.event == \\"workflow_dispatch\\" and (.display_title | endswith(\\"full=true)\\"))))' in text
-    # A pull request run is selective: never accepted, however green.
-    candidates = next(line for line in text.splitlines() if "select(.path ==" in line and "created" not in line)
-    assert "pull_request" not in candidates
-    # The exact-commit check was already push-only.
-    assert "event=push" in text
-    # The marker the gate reads comes from the run-name of both workflows, built from a trusted input.
-    for name in ("ci.yml", "ci-heavy.yml"):
-        run_name = _load(name)["run-name"]
-        assert "workflow_dispatch" in run_name and "full={1}" in run_name and "inputs.full" in run_name, name
-        assert _load(name)["on"]["workflow_dispatch"]["inputs"]["full"]["type"] == "boolean"
