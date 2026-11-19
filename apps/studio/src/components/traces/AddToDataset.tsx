@@ -17,7 +17,7 @@ function outputText(run: TraceRun): string {
 }
 
 /**
- * "Add to dataset": pick one of the tenant's test suites and create a case from the trace's input,
+ * "Add to test suite": pick one of the tenant's test suites and create a case from the trace's input,
  * with the trace's output as the expected output (editable before saving).
  */
 export function AddToDataset({ run }: { run: TraceRun }) {
@@ -45,7 +45,7 @@ export function AddToDataset({ run }: { run: TraceRun }) {
       .catch((err) => {
         if (controller.signal.aborted) return;
         setSuites([]);
-        setLoadError(err instanceof Error && err.message ? err.message : "Could not load the datasets");
+        setLoadError(err instanceof Error && err.message ? err.message : "Could not load the test suites");
       });
     return () => controller.abort();
   }, [open, run]);
@@ -53,7 +53,7 @@ export function AddToDataset({ run }: { run: TraceRun }) {
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!suiteId) {
-      setError("Choose a dataset.");
+      setError("Choose a test suite.");
       return;
     }
     if (!name.trim()) {
@@ -71,7 +71,7 @@ export function AddToDataset({ run }: { run: TraceRun }) {
         evaluators: [],
       });
       const suite = suites?.find((s) => s.id === suiteId);
-      toast(`Added to ${suite?.name ?? "the dataset"}`);
+      toast(`Added to ${suite?.name ?? "the test suite"}`);
       setOpen(false);
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : "Could not add the case");
@@ -83,17 +83,17 @@ export function AddToDataset({ run }: { run: TraceRun }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="secondary" size="sm" data-testid="add-to-dataset">Add to dataset</Button>
+        <Button variant="secondary" size="sm" data-testid="add-to-dataset">Add to test suite</Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add to dataset</DialogTitle>
+          <DialogTitle>Add to test suite</DialogTitle>
           <DialogDescription>Creates a test case from this trace&apos;s input. The expected output starts as the trace&apos;s output; edit it before saving.</DialogDescription>
         </DialogHeader>
         <form onSubmit={save} className="flex min-w-0 flex-col gap-3">
-          <label htmlFor={`${id}-suite`} className="text-caption font-medium text-muted-foreground">Dataset</label>
+          <label htmlFor={`${id}-suite`} className="text-caption font-medium text-muted-foreground">Test suite</label>
           <select id={`${id}-suite`} value={suiteId} onChange={(e) => setSuiteId(e.target.value)} className={`${field} h-8`} disabled={suites === null}>
-            <option value="">{suites === null ? "Loading..." : suites.length === 0 ? "No datasets" : "Choose a dataset"}</option>
+            <option value="">{suites === null ? "Loading..." : suites.length === 0 ? "No test suites" : "Choose a test suite"}</option>
             {(suites ?? []).map((s) => (
               <option key={s.id} value={s.id}>{s.agent_name ? `${s.agent_name} / ${s.name}` : s.name}</option>
             ))}

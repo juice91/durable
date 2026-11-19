@@ -60,7 +60,7 @@ describe("Navigation", () => {
       const permanent = (groupId: string) =>
         navSections.find((section) => section.group.id === groupId)!.items.filter((item) => !item.transitional).map((item) => item.label);
       expect(permanent("primitives")).toEqual(["Agents", "Architect", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge"]);
-      expect(permanent("evaluation")).toEqual(["Datasets", "Scorers", "Experiments"]);
+      expect(permanent("evaluation")).toEqual(["Test suites", "Scorers", "Experiments"]);
       expect(permanent("observability")).toEqual(["Metrics", "Threads", "Traces", "Logs"]);
       expect(permanent("settings")).toEqual(["Settings"]);
       expect(navSections.find((section) => section.group.id === "settings")!.group.placement).toBe("footer");

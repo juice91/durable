@@ -90,7 +90,7 @@ export const navItems: readonly NavItem[] = [
   // RM.16
   { id: "knowledge", label: "Knowledge", href: routes.knowledge(), icon: KnowledgeIcon, group: "primitives", gKey: "k", keywords: ["knowledge bases", "rag", "documents", "retrieval"] },
   // Evaluation (W1.5): evals across every agent of the tenant
-  { id: "datasets", label: "Datasets", href: routes.datasets(), icon: DatasetsIcon, group: "evaluation", gKey: "d", keywords: ["test suites", "eval suites", "cases", "evals"] },
+  { id: "datasets", label: "Test suites", href: routes.datasets(), icon: DatasetsIcon, group: "evaluation", gKey: "d", keywords: ["datasets", "eval suites", "cases", "evals"] },
   { id: "scorers", label: "Scorers", href: routes.scorers(), icon: ScorersIcon, group: "evaluation", gKey: "s", keywords: ["evaluators", "judges", "scores", "metrics"] },
   { id: "experiments", label: "Experiments", href: routes.experiments(), icon: ExperimentsIcon, group: "evaluation", gKey: "e", keywords: ["eval runs", "runs", "results", "compare"] },
   // Observability

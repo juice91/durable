@@ -117,6 +117,6 @@ describe("DatasetDetail", () => {
   it("says when the dataset does not exist", async () => {
     handlers["/eval-suites/s1"] = () => json({ detail: "Eval suite not found" }, 404);
     renderDetail();
-    expect(await screen.findByText("Dataset not found.")).toBeInTheDocument();
+    expect(await screen.findByText("Test suite not found.")).toBeInTheDocument();
   });
 });

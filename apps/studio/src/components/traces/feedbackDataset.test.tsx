@@ -1,4 +1,4 @@
-// W2.2: feedback on a trace and a span, and "Add to dataset" from the trace detail.
+// W2.2: feedback on a trace and a span, and "Add to test suite" from the trace detail.
 import React from "react";
 import "@testing-library/jest-dom";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -115,7 +115,7 @@ describe("AddToDataset", () => {
 
   it("creates a case from the trace's input with the output as the editable expected output", async () => {
     render(<AddToDataset run={RUN} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add to dataset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: "Tutor / Math" });
     expect(within(dialog).getByLabelText("Input (from the trace)")).toHaveValue("What is 2+2?");
@@ -125,10 +125,10 @@ describe("AddToDataset", () => {
 
     // No dataset chosen yet.
     fireEvent.click(within(dialog).getByRole("button", { name: "Add case" }));
-    expect(within(dialog).getByRole("alert")).toHaveTextContent("Choose a dataset.");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Choose a test suite.");
     expect(addCase).not.toHaveBeenCalled();
 
-    fireEvent.change(within(dialog).getByLabelText("Dataset"), { target: { value: "s1" } });
+    fireEvent.change(within(dialog).getByLabelText("Test suite"), { target: { value: "s1" } });
     fireEvent.change(within(dialog).getByLabelText("Expected output"), { target: { value: "four" } });
     vi.mocked(addCase).mockResolvedValue({} as never);
     fireEvent.click(within(dialog).getByRole("button", { name: "Add case" }));
@@ -142,10 +142,10 @@ describe("AddToDataset", () => {
   it("shows the API error (a name already in the suite) and keeps the dialog open", async () => {
     vi.mocked(addCase).mockRejectedValue(new Error("A case with this name already exists"));
     render(<AddToDataset run={RUN} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add to dataset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: "Tutor / Math" });
-    fireEvent.change(within(dialog).getByLabelText("Dataset"), { target: { value: "s1" } });
+    fireEvent.change(within(dialog).getByLabelText("Test suite"), { target: { value: "s1" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add case" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("already exists");
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -153,7 +153,7 @@ describe("AddToDataset", () => {
 
   it("has no axe violations with the dialog open", async () => {
     render(<AddToDataset run={RUN} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add to dataset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: "Tutor / Math" });
     await expectNoAxeViolations(document.body);
