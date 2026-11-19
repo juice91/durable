@@ -15,6 +15,7 @@ SCRIPT_ROOTS = (
     REPO_ROOT / "deploy" / "runner",
     REPO_ROOT / "deploy" / "k8s",
     REPO_ROOT / "deploy" / "docker",
+    REPO_ROOT / "scripts" / "ci",
 )
 
 

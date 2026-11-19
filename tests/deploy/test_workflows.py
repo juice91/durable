@@ -269,8 +269,12 @@ def test_ci_heavy_runs_for_pull_requests_with_a_read_only_token():
     heavy = _load("ci-heavy.yml")
     assert "pull_request" in heavy["on"] and "workflow_dispatch" in heavy["on"] and "schedule" in heavy["on"]
     assert heavy["permissions"] == {"contents": "read"}
-    # Checkout, the main-ref fetch and the status report need nothing beyond these.
-    assert heavy["jobs"]["heavy"]["permissions"] == {"actions": "read", "contents": "read"}
+    # Checkout, the main-ref fetch, the status report and the ci:full label lookup need nothing beyond these.
+    assert heavy["jobs"]["heavy"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
     assert "pull_request_target" not in heavy["on"]
 
 
@@ -290,7 +294,8 @@ def test_ci_heavy_postgres_is_unique_per_run_so_two_runners_do_not_collide():
 def test_ci_heavy_runs_the_api_suite_under_xdist_on_six_workers():
     steps = _load("ci-heavy.yml")["jobs"]["heavy"]["steps"]
     api = next(step for step in steps if step.get("name") == "API suite")
-    assert api["run"] == "uv run pytest apps/api/api_tests -q -n 6"
+    # The paths come from the selection step (all of apps/api/api_tests on main).
+    assert 'uv run pytest "${paths[@]}" -q -n 6' in api["run"]
     # The worker suite stays serial: every worker test shares the one DBOS database.
     worker = next(step for step in steps if step.get("name") == "Nightly worker suite")
     assert "-n" not in worker["run"].split()
@@ -312,7 +317,7 @@ def test_studio_vitest_is_sharded_in_five_jobs_and_static_checks_run_once():
     assert tests["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4", "5"]
     assert tests["strategy"]["fail-fast"] == "false"
     test_runs = [step.get("run", "") for step in tests["steps"]]
-    assert "pnpm -C apps/studio exec vitest run --shard=${{ matrix.shard }}/5" in test_runs
+    assert any('vitest run --shard="${SHARD}/5" "${args[@]}"' in run for run in test_runs)
     assert not any("lint" in run or "tsc" in run for run in test_runs)
     assert static["timeout-minutes"] == "30"
     assert tests["timeout-minutes"] == "30"
@@ -352,3 +357,94 @@ def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_confi
     names = [s.get("run") or s.get("uses") for s in steps]
     assert steps.index(cache) > names.index("pnpm install --frozen-lockfile")
     assert steps.index(cache) < next(i for i, s in enumerate(steps) if "vitest run" in s.get("run", ""))
+
+
+# ---- CI round 3: pull requests run the affected tests, main runs everything ----------------------
+
+# Branch protection and the deploy gate key on these names; the selection must not rename them.
+CI_JOB_NAMES = ("changes", "python", "studio", "studio-test", "deploy-checks")
+HEAVY_JOB_NAMES = ("heavy",)
+
+
+def _steps(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {step.get("name", step.get("run", "")): step for step in job["steps"]}
+
+
+def test_ci_job_names_are_unchanged():
+    assert tuple(_load("ci.yml")["jobs"]) == CI_JOB_NAMES
+    assert tuple(_load("ci-heavy.yml")["jobs"]) == HEAVY_JOB_NAMES
+    # No job sets a display name that would rename its check.
+    for name in ("ci.yml", "ci-heavy.yml"):
+        assert all("name" not in job for job in _load(name)["jobs"].values()), name
+    assert _load("ci.yml")["jobs"]["studio-test"]["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4", "5"]
+    assert _load("ci.yml")["name"] == "CI" and _load("ci-heavy.yml")["name"] == "CI Heavy"
+
+
+def test_ci_python_job_runs_the_selected_unit_paths():
+    job = _load("ci.yml")["jobs"]["python"]
+    steps = _steps(job)
+    select = steps["Select the affected tests"]
+    assert select["id"] == "select"
+    assert "scripts/ci/select-tests.sh python" in select["run"]
+    for suite in ("packages/shared-schemas/tests", "packages/secrets/secrets_tests"):
+        assert suite in select["run"]
+    unit = steps["DB-free unit tests"]
+    assert unit["if"] == "steps.select.outputs.unit_run == 'true'"
+    assert unit["env"]["TEST_PATHS"] == "${{ steps.select.outputs.unit_paths }}"
+    assert "-p no:eap_db" in unit["run"]
+    assert "No affected Python tests" in steps["No affected Python tests"]["run"]
+    # lint-imports always runs: an import-contract break does not depend on the selected tests.
+    assert steps["uv run lint-imports"]["run"] == "uv run lint-imports"
+
+
+def test_ci_studio_tests_use_vitest_changed_on_pull_requests_only():
+    job = _load("ci.yml")["jobs"]["studio-test"]
+    steps = _steps(job)
+    assert steps["Select the Studio tests"]["run"] == "bash scripts/ci/select-tests.sh studio"
+    checkout = job["steps"][0]
+    assert checkout["with"]["fetch-depth"] == "0"
+    shard = steps["Vitest shard ${{ matrix.shard }}/5"]
+    assert shard["env"]["VITEST_ARGS"] == "${{ steps.select.outputs.vitest_args }}"
+    assert "--shard=" in shard["run"]
+    # Lint and tsc stay behind the studio path filter (they never ran for a Python-only change).
+    assert _load("ci.yml")["jobs"]["studio"]["if"] == "needs.changes.outputs.studio == 'true'"
+
+
+def test_heavy_suites_take_the_selection_and_skip_the_infrastructure_when_empty():
+    job = _load("ci-heavy.yml")["jobs"]["heavy"]
+    steps = _steps(job)
+    assert "scripts/ci/select-tests.sh python" in steps["Select the affected suites"]["run"]
+    for name in ("Start isolated CI Postgres", "Install Python dependencies", "Migrate the CI database"):
+        assert "steps.select.outputs.any == 'true'" in steps[name]["if"], name
+    for name, key in (("Package suites", "packages"), ("Run-store suite", "runstore"), ("API suite", "api")):
+        assert f"steps.select.outputs.{key}_run == 'true'" in steps[name]["if"], name
+        assert steps[name]["env"]["TEST_PATHS"] == f"${{{{ steps.select.outputs.{key}_paths }}}}", name
+    assert "-n 6" in steps["API suite"]["run"]
+    assert "No affected Python tests" in steps["No affected Python tests"]["run"]
+    # The nightly-only suites and the cleanup are untouched by the selection.
+    assert steps["Nightly worker suite"]["if"].endswith("github.event_name == 'schedule'")
+    assert steps["Remove isolated CI Postgres"]["if"] == "always()"
+
+
+def test_selection_reads_labels_and_is_full_by_default_off_pull_requests():
+    for name, job_name in (("ci.yml", "python"), ("ci.yml", "studio-test"), ("ci-heavy.yml", "heavy")):
+        workflow = _load(name)
+        job = workflow["jobs"][job_name]
+        assert job["permissions"]["pull-requests"] == "read", (name, job_name)
+        assert "pull-requests: write" not in (WORKFLOW_DIR / name).read_text()
+        for key in ("EVENT_NAME", "PR_NUMBER", "FULL_INPUT", "GH_TOKEN"):
+            assert key in job["env"], (name, job_name, key)
+        full = workflow["on"]["workflow_dispatch"]["inputs"]["full"]
+        assert full["type"] == "boolean" and full["default"] == "true"
+    script = (ROOT / "scripts" / "ci" / "select-tests.sh").read_text()
+    assert 'full_label="ci:full"' in script
+    # Anything that is not a pull request (push to main, schedule, dispatch) runs the full suites.
+    assert re.search(r"\*\)\s+mode=full", script)
+
+
+def test_selection_scripts_exist_and_do_not_use_untrusted_input():
+    script = ROOT / "scripts" / "ci" / "select-tests.sh"
+    assert script.exists() and script.stat().st_mode & 0o111
+    assert (ROOT / "scripts" / "ci" / "affected.py").exists()
+    # PR_NUMBER and the labels are the only pull request data the script reads, never branch or title text.
+    assert "PR_TITLE" not in script.read_text() and "HEAD_REF" not in script.read_text()
