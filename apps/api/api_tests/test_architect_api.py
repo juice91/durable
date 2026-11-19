@@ -802,3 +802,78 @@ def test_put_model_before_the_seed_is_404(api):
     _t, h = tenant_of()
     r = client.put(f"{API}/architect/model", json={"model": "test:echo"}, headers=h)
     assert r.status_code == 404 and r.json()["code"] == "not_seeded"
+
+
+# ------------------------------------------------------------------- seed text republish
+
+
+def _set_text(app, tenant, slug, instructions, *, publish=True, extra_tool=None):
+    from eap_run_store import definitions
+
+    row = agent_row(app, tenant, slug)
+    spec = {**row["draft_spec"], "instructions": instructions}
+    if extra_tool:
+        spec["tools"] = [*spec.get("tools", []), extra_tool]
+    with app.state.database_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb) WHERE id = :i"), {"s": json.dumps(spec), "i": str(row["id"])}
+        )
+        if publish:
+            definitions.publish_agent(conn, tenant, str(row["id"]), created_by="alice")
+
+
+def _latest_via(app, tenant, slug):
+    with app.state.database_engine.connect() as conn:
+        return conn.execute(
+            text("SELECT v.version, v.created_via, v.spec FROM agent_versions v JOIN agents a ON a.id = v.agent_id"
+                 " WHERE a.tenant_id = :t AND a.slug = :s ORDER BY v.version DESC LIMIT 1"),
+            {"t": tenant, "s": slug},
+        ).first()
+
+
+def test_reconcile_republishes_an_old_seed_text_once(api):
+    from eap_api.routes.architect import reconcile_all_seeds
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    model = agent_row(app, tenant, "architect")["draft_spec"]["model"]
+    _set_text(app, tenant, "architect", "old text, 1 to 8 steps", extra_tool="clock.now")
+    before = len(_versions(app, tenant, "architect"))
+    reconcile_all_seeds(app.state.database_engine)
+    spec = agent_row(app, tenant, "architect")["draft_spec"]
+    assert spec["instructions"] == ARCHITECT_INSTRUCTIONS
+    assert spec["model"] == model and "clock.now" in spec["tools"]  # model and tenant tool survive
+    latest = _latest_via(app, tenant, "architect")
+    assert latest.created_via == "seed" and latest.spec["instructions"] == ARCHITECT_INSTRUCTIONS
+    assert len(_versions(app, tenant, "architect")) == before + 1
+    reconcile_all_seeds(app.state.database_engine)  # idempotent
+    assert len(_versions(app, tenant, "architect")) == before + 1
+
+
+def test_reconcile_skips_an_agent_with_a_dirty_draft(api):
+    from eap_api.routes.architect import reconcile_all_seeds
+
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    _set_text(app, tenant, "architect", "published old text")
+    _set_text(app, tenant, "architect", "my unpublished edit", publish=False)
+    before = len(_versions(app, tenant, "architect"))
+    reconcile_all_seeds(app.state.database_engine)
+    assert agent_row(app, tenant, "architect")["draft_spec"]["instructions"] == "my unpublished edit"
+    assert len(_versions(app, tenant, "architect")) == before
+
+
+def test_reconcile_republishes_the_drafters_too(api):
+    from eap_api.routes.architect import reconcile_all_seeds
+    from eap_schemas.architect_seed import DRAFTER_INSTRUCTIONS
+
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    _set_text(app, tenant, "architect-drafter", "stale")
+    reconcile_all_seeds(app.state.database_engine)
+    assert agent_row(app, tenant, "architect-drafter")["draft_spec"]["instructions"] == DRAFTER_INSTRUCTIONS
+    assert _latest_via(app, tenant, "architect-drafter").created_via == "seed"

@@ -235,19 +235,78 @@ def ensure_seed(engine: Engine, tenant_id: str, user_id: str) -> tuple[dict[str,
     }, made_a or made_d or made_w
 
 
+_SEEDED = (
+    (ARCHITECT_SLUG, architect_agent_spec),
+    (DRAFTER_SLUG, drafter_agent_spec),
+    (WORKFLOW_DRAFTER_SLUG, workflow_drafter_agent_spec),
+)
+
+
+def _republish_seed(conn: Connection, tenant_id: str, slug: str, build: Any) -> bool:
+    """Bring one seeded agent's published text up to the current seed. The target is the seed spec with
+    the agent's own model, plus any tools (and approvals entries) the tenant added. Skipped when the draft
+    has unpublished edits (a human or the Architect changed it) or the latest version already equals the
+    target. Returns True when a new version was published (created_via "seed")."""
+    row = conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first()
+    if row is None or row.archived:
+        return False
+    locked = definitions.lock_agent(conn, tenant_id, str(row.id))
+    latest = definitions.latest_agent_version(conn, str(row.id))
+    draft = dict(locked.draft_spec or {})
+    model = _spec_model(draft)
+    if latest is None or model is None:
+        return False
+    if draft_hash(draft) != latest.spec_hash:
+        log.info("architect seed: draft has unpublished edits, seed text not republished tenant=%s slug=%s", tenant_id, slug)
+        return False
+    target = build(model).model_dump(mode="json")
+    extra = [t for t in (draft.get("tools") or []) if t not in target["tools"]]
+    target["tools"] = [*target["tools"], *extra]
+    approvals = dict(target.get("approvals") or {})
+    seeded = list(approvals.get("tools") or [])
+    extra_approved = [t for t in ((draft.get("approvals") or {}).get("tools") or []) if t not in seeded]
+    if extra_approved:
+        target["approvals"] = {**approvals, "tools": [*seeded, *extra_approved]}
+    if draft_hash(target) == latest.spec_hash:
+        return False
+    conn.execute(
+        text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+             " WHERE id = :i AND tenant_id = :t"),
+        {"s": json.dumps(target), "i": str(row.id), "t": tenant_id},
+    )
+    try:
+        with conn.begin_nested():
+            definitions.publish_agent(conn, tenant_id, str(row.id), created_by="system:seed", created_via="seed")
+    except DefinitionError:
+        log.warning("architect seed: seed text could not be published tenant=%s slug=%s", tenant_id, slug, exc_info=True)
+        raise
+    return True
+
+
 def reconcile_all_seeds(engine: Engine) -> int:
-    """At startup: run `ensure_seed` for every tenant that already has an Architect row, so a deploy that
-    adds built-in tool ids reaches existing tenants without a hand repair. Never raises (a tenant that
-    fails is logged and skipped). Returns the number of tenants reconciled."""
+    """At startup: run `ensure_seed` for every tenant that already has an Architect row (new built-in tool
+    ids reach existing tenants), then republish each seeded agent whose latest version differs from the
+    current seed text (model and tenant-added tools kept; agents with unpublished draft edits skipped).
+    Never raises (a tenant that fails is logged and skipped). Returns the number of tenants reconciled;
+    the log line also counts the republished agents."""
     with engine.connect() as conn:
         tenants = [r.tenant_id for r in conn.execute(text("SELECT DISTINCT tenant_id FROM agents WHERE slug = :s AND builtin"), {"s": ARCHITECT_SLUG})]
     done = 0
+    republished = 0
     for tenant in tenants:
         try:
             ensure_seed(engine, tenant, "system:seed")
             done += 1
         except Exception:
             log.warning("architect seed: startup reconcile failed tenant=%s", tenant, exc_info=True)
+            continue
+        for slug, build in _SEEDED:
+            try:
+                with engine.begin() as conn:
+                    republished += _republish_seed(conn, tenant, slug, build)
+            except Exception:
+                log.warning("architect seed: republish failed tenant=%s slug=%s", tenant, slug, exc_info=True)
+    log.info("architect seed: reconciled %d tenants, republished %d seeded agents", done, republished)
     return done
 
 
