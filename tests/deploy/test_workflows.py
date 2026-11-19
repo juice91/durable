@@ -455,7 +455,7 @@ def test_deploy_gate_reuses_only_full_runs_for_the_same_tree():
     # The candidate filter: pushes to main, and manual runs whose run-name says full=true.
     assert '(.event == \\"push\\" or (.event == \\"workflow_dispatch\\" and (.display_title | endswith(\\"full=true)\\"))))' in text
     # A pull request run is selective: never accepted, however green.
-    candidates = next(line for line in text.splitlines() if "select(.name ==" in line and "created" not in line)
+    candidates = next(line for line in text.splitlines() if "select(.path ==" in line and "created" not in line)
     assert "pull_request" not in candidates
     # The exact-commit check was already push-only.
     assert "event=push" in text
