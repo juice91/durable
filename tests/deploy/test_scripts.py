@@ -32,6 +32,9 @@ SECRET_KEYS = (
     "EAP_BLOB_S3_SECRET_KEY",
 )
 CLASH_PORTS = {"3000", "8000", "3002"}
+requires_tunnel = pytest.mark.skipif(
+    not (SCRIPTS_DIR / "tunnel.sh").exists(), reason="tunnel.sh belongs to the private deployment repository"
+)
 
 
 def _install_stubs(tmp: Path) -> Path:
@@ -272,6 +275,7 @@ def test_destroy_sh_prompts_before_deleting(tmp_path: Path):
     assert f"colima delete {PROFILE}" in _log(env2)
 
 
+@requires_tunnel
 def test_tunnel_sh_local_ports_do_not_clash(tmp_path: Path):
     env = _env(tmp_path, _install_stubs(tmp_path), {"PYDANTICOS_TUNNEL_ONCE": "1"})
     proc = _run("tunnel.sh", env, ["deploy-host"], timeout=30)
@@ -555,6 +559,7 @@ def test_colima_start_is_not_tracked_by_the_actions_runner(tmp_path: Path):
     assert all(line == "COLIMA_START_TRACKING_ID=[]" for line in starts), starts
 
 
+@requires_tunnel
 def test_tunnel_sh_reconnects_until_stopped(tmp_path: Path):
     # Cloudflare's SSH proxy drops long sessions; the default loop must reconnect, not exit.
     env = _env(tmp_path, _install_stubs(tmp_path))
