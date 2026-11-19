@@ -139,6 +139,13 @@ Read-only, tenant-scoped, at most 256 KiB:
 - `pydanticos://runs/{id}/report`: a run's bounded report (any kind)
 - `pydanticos://knowledge-bases/{id}`: a knowledge base with counts
 
+## Concurrent edits
+
+`agent.save_draft`, `workflow.save_draft` and `workflow.schedule.set` (with `schedule_id`) pass the
+revision they read. If someone saved in between, the tool reads again, re-applies its change and retries
+once; a second conflict is the error `{error: {code: "revision_mismatch", message, current_revision}}`:
+read the resource again before saving. See [concurrency.md](concurrency.md).
+
 ## What is not exposed, and why
 
 - **Secrets and connection credentials.** There is no tool to store or read a secret: the
