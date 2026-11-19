@@ -55,6 +55,7 @@ export function track<T>(key: string, resource: T): T {
 
 /** Remember every item of a list under `keyOf(item)`. */
 export function trackAll<T extends { revision?: number }>(items: T[], keyOf: (item: T) => string): T[] {
+  if (!Array.isArray(items)) return items; // a mocked or odd answer: nothing to remember
   for (const item of items) rememberRevision(keyOf(item), item.revision);
   return items;
 }
