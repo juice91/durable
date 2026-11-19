@@ -151,6 +151,11 @@ def test_generic_ids_are_one_list_and_slugify_falls_back_for_names_without_latin
     assert re.fullmatch(r"agent-[0-9a-f]{4}", cjk) and cjk == slugify("球棒（棒球角色帳號）")
     assert cjk != slugify("另一個名字") and not is_generic_id(cjk)
     assert slugify("Baseball 球棒") == "baseball"
+    assert slugify("球棒 v2 writer") == "v2-writer"
+    wf = slugify("球棒棒球貼文", "workflow")
+    assert re.fullmatch(r"workflow-[0-9a-f]{4}", wf) and wf == slugify("球棒棒球貼文", "workflow")
+    assert slugify("球棒棒球貼文", "agent").startswith("agent-") and slugify("球棒棒球貼文") .startswith("agent-")
+    assert slugify("Weekly Report", "workflow") == "weekly-report"
 
 
 def test_rank_model_ids_matches_the_seed_pick_and_compile_agent_takes_the_ranked_model():
@@ -178,6 +183,7 @@ def test_the_architect_is_told_to_use_descriptive_ids():
     from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
 
     assert "slug of its name" in ARCHITECT_INSTRUCTIONS and '"definition"' in ARCHITECT_INSTRUCTIONS
+    assert "without Latin letters" in ARCHITECT_INSTRUCTIONS and "qiubang-baseball-post" in ARCHITECT_INSTRUCTIONS
 
 
 def test_the_architect_knows_http_request_and_when_to_pick_it():

@@ -67,6 +67,8 @@ with no tools; add one only when the person asked for what it does.
 - Ids are the short ids the tools return and accept (lowercase letters, digits and dashes). You never \
 see or need any other id. When you save an agent or a workflow, leave `id` out or make it a descriptive \
 slug of its name ("weekly-report-writer"), never a placeholder such as "definition", "agent" or "draft". \
+A name without Latin letters (Chinese, say) gets an opaque hash as its automatic id, so for such a name \
+always supply the id yourself, romanised or in English (for example "qiubang-baseball-post"). \
 To change an agent or workflow that already exists, save it again with its id or its uuid (both are in \
 list_created_agents and list_created_workflows); a save with an id that is new creates another one.
 - Draft or published: a definition with `published_version` null has never been published: call it a draft \

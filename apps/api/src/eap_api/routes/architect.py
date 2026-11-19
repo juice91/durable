@@ -761,7 +761,7 @@ WORKFLOWS = _Kind("workflows", "workflow_versions", "workflow_id", "false")
 
 
 def _free_slug(conn: Connection, kind: _Kind, tenant_id: str, name: str) -> str:
-    base = slugify(name)
+    base = slugify(name, kind.label)  # type: ignore[arg-type]
     for n in range(1, 100):
         candidate = base if n == 1 else f"{base[: 47 - len(str(n))].rstrip('-')}-{n}"
         if candidate not in RESERVED_AGENT_IDS and conn.execute(kind.taken, {"t": tenant_id, "s": candidate}).first() is None:

@@ -116,16 +116,17 @@ _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63}
 GENERIC_IDS = ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
 
 
-def slugify(name: str) -> str:
+def slugify(name: str, kind: Literal["agent", "workflow"] = "agent") -> str:
     """A slug (`AGENT_ID_PATTERN`) from a name: lowercase words joined by dashes, at most 48 characters.
-    A name with no Latin letters or digits (CJK, say) gets `agent-` and four hex digits of its hash, so
-    the same name always maps to the same id."""
+    A name with no Latin letters or digits (CJK, say) gets `<kind>-` and four hex digits of its hash, so
+    the same name always maps to the same id. (No transliteration library is a dependency, so CJK is not romanised.)"""
+    fallback = f"{kind}-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48].strip("-")
     if not slug:
-        return f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+        return fallback
     if not slug[0].isalpha():
         slug = f"a-{slug}".strip("-")[:48].strip("-")
-    return slug if AGENT_ID_PATTERN.fullmatch(slug) else f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+    return slug if AGENT_ID_PATTERN.fullmatch(slug) else fallback
 
 
 def is_generic_id(value: str | None) -> bool:
