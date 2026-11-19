@@ -86,7 +86,7 @@ sync with a workflow schedule of this workflow and the input `{"source_id": "...
 
 `GET /knowledge-bases/{kb}/sources/{src}/syncs` lists the sync runs and `.../syncs/{run_id}` returns the report.
 
-Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: Acme Semiconductor product catalogue (`docs/providers/texas-instruments.md`, source kind `product_catalog`); GitHub repository documents (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`).
+Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: GitHub repository documents is built in (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`); other providers are separate packages (`docs/providers/index.md`), for example the Acme Semiconductor product catalogue (`packages/kb-sources-acme/README.md`, source kind `product_catalog`).
 
 ## 5. Staged live tests
 
@@ -94,7 +94,7 @@ Never start with a full catalogue. Stage it: (1) check the connection; (2) a tar
 report (`discovered 1`, `failed 0`, one datasheet queued, `kb_ingest` completes); (3) a targeted sync of 10-100 parts;
 (4) one listing page in `full` mode and confirm the checkpoint and the resume on the next run; (5) only then a full walk,
 which spans days under the provider's daily quota. Provider-specific parts, hosts, quotas and secret field names live on the
-provider page (for Acme Semiconductor: `docs/providers/texas-instruments.md`).
+provider page (for Acme Semiconductor: `packages/kb-sources-acme/README.md`).
 
 ## Failure codes you will see
 

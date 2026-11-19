@@ -54,7 +54,7 @@ def _conn(engine, tenant, name="ti"):
 def _source(engine, tenant, kb_id, conn_id, name="parts"):
     return SourceStore(engine).create(
         tenant, knowledge_base_id=kb_id, connection_id=conn_id, name=name, kind="product_catalog",
-        provider="acme_catalog", config={"include_extended": False},
+        provider="fake", config={"include_extended": False},
     )
 
 

@@ -24,7 +24,7 @@ eap-schemas = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_kb_sources_acme"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -87,6 +87,23 @@ type = "forbidden"
 # workflow that drives an adapter and the API owns the routes.
 source_modules = ["eap_kb_sources"]
 forbidden_modules = ["eap_api", "eap_worker", "eap_runtime", "fastapi", "starlette", "dbos", "pydantic_ai"]
+
+[[tool.importlinter.contracts]]
+name = "The core never imports a provider plug-in (eap_kb_sources_acme)"
+type = "forbidden"
+# Provider adapters are separate distributions found through the eap.kb_sources.adapters entry-point
+# group; they may import eap_kb_sources, nothing in the core may import them.
+source_modules = [
+    "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db",
+    "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources",
+]
+forbidden_modules = ["eap_kb_sources_acme"]
+
+[[tool.importlinter.contracts]]
+name = "Provider plug-ins import eap_kb_sources, never the platform"
+type = "forbidden"
+source_modules = ["eap_kb_sources_acme"]
+forbidden_modules = ["eap_api", "eap_worker", "eap_runtime", "eap_run_store", "eap_db", "fastapi", "starlette", "dbos", "pydantic_ai"]
 
 [[tool.importlinter.contracts]]
 name = "Processors import only the standard library, eap_schemas and re2"

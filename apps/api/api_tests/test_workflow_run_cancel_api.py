@@ -199,7 +199,7 @@ def test_kb_source_sync_run_can_be_cancelled_like_a_workflow_run(api, fake):  # 
         tenant, name="c", kind="oauth2_client_credentials", base_url=None, config={}, credential_refs={}
     )
     source = SourceStore(engine).create(
-        tenant, knowledge_base_id=kb["id"], connection_id=conn.id, kind="product_catalog", provider="acme_catalog", name="s"
+        tenant, knowledge_base_id=kb["id"], connection_id=conn.id, kind="product_catalog", provider="fake", name="s"
     )
     run_id = uuid.uuid4()
     run_store.create_kb_source_sync_run(tenant, run_id, source.id, {"mode": "incremental"})

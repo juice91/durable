@@ -20,8 +20,10 @@ import jsonschema
 import pytest
 from sqlalchemy import text
 
-from eap_kb_sources.providers.ti import TiProductCatalogAdapter, TokenCache
-from eap_kb_sources.providers.ti.fixtures import FakeTiServer, Part, TOKEN_PREFIX, template_part
+pytest.importorskip("eap_kb_sources_acme")  # the TI plug-in is optional: this runs the real worker against it
+
+from eap_kb_sources_acme import TiProductCatalogAdapter, TokenCache
+from eap_kb_sources_acme.fixtures import FakeTiServer, Part, TOKEN_PREFIX, template_part
 from eap_kb_sources.registry import register_adapter
 from eap_secrets import KEY_ENV, generate_key
 from worker_tests.conftest import DBOS_DB_URL, wait_for
