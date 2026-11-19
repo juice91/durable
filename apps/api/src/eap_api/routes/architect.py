@@ -198,7 +198,8 @@ def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: s
             approvals["tools"] = [*(approvals.get("tools") or []), *missing]
             spec["approvals"] = approvals
         conn.execute(
-            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
+            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+                " WHERE id = :i AND tenant_id = :t"),
             {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
         )
         if clean:
@@ -293,7 +294,8 @@ def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> 
             spec = dict(locked.draft_spec or {})
             spec["model"] = {**(spec.get("model") or {}), "provider": provider, "name": name}
             conn.execute(
-                text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
+                text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+                " WHERE id = :i AND tenant_id = :t"),
                 {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
             )
             latest = definitions.latest_agent_version(conn, str(row.id))
@@ -683,7 +685,8 @@ class _Kind:
             f"SELECT max(version) FROM {versions} WHERE {fk} = :d AND tenant_id = :t"
         )
         self.update = text(
-            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = now()"
+            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = now(),"
+            " revision = revision + 1"
             " WHERE id = :id AND tenant_id = :t"
         )
         self.insert = text(

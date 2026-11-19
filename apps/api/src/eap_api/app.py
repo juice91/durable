@@ -97,6 +97,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
         return JSONResponse(status_code=exc.status_code, content=exc.body)
 
+    from eap_api import concurrency
+
+    concurrency.register(app)  # 412 / 428 / 400 of ETag + If-Match (eap_api.concurrency)
+
     # Import and register routes
     from eap_api.routes import router as agents_router
     

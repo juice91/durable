@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import StoresDep
@@ -59,7 +60,7 @@ def _json(row: dict[str, Any], workflow_name: str | None) -> dict[str, Any]:
         "cron": row["cron"], "timezone": row["timezone"], "input": row["input"], "active": row["active"],
         "last_error": row["last_error"], "last_fired_at": _utc(row["last_fired_at"]),
         "next_fire_at": _utc(row["next_fire_at"]), "created_at": _utc(row["created_at"]),
-        "updated_at": _utc(row["updated_at"]),
+        "updated_at": _utc(row["updated_at"]), "revision": row["revision"],
     }
 
 
@@ -134,13 +135,31 @@ def list_all_schedules(principal: PrincipalDep, db: SessionDep, store: StoreDep,
     return _page(db, store, principal.tenant_id, None, limit, before)
 
 
-@router.patch("/schedules/{schedule_id}")
+@router.get("/schedules/{schedule_id}", responses={404: {"model": ErrorDetail}, **etag_responses(write=False)})
+def get_schedule(schedule_id: str, principal: PrincipalDep, db: SessionDep, store: StoreDep) -> JSONResponse:
+    row = store.get(principal.tenant_id, schedule_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
+    names = _workflow_names(db, principal.tenant_id, {row["workflow_id"]})
+    return read_response(_json(row, names.get(row["workflow_id"])), row["revision"])
+
+
+@router.patch("/schedules/{schedule_id}", responses={**etag_responses()})
 def update_schedule(schedule_id: str, body: WorkflowScheduleUpdate, principal: PrincipalDep, db: SessionDep,
-                    store: StoreDep) -> dict[str, Any]:
+                    store: StoreDep, pre: IfMatch) -> JSONResponse:
+    """Change a schedule. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
+    with the current schedule (see eap_api.concurrency)."""
     tenant = principal.tenant_id
     current = store.get(tenant, schedule_id)
     if current is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
+
+    def latest() -> tuple[dict[str, Any], int]:
+        row = store.get(tenant, schedule_id) or current
+        names = _workflow_names(db, tenant, {row["workflow_id"]})
+        return _json(row, names.get(row["workflow_id"])), row["revision"]
+
+    pre.check(current["revision"], latest)
     fields = body.model_dump(exclude_unset=True)
     pausing = fields.keys() == {"active"} and fields["active"] is False
     workflow = _workflow_or_404(db, tenant, current["workflow_id"], allow_archived=pausing)
@@ -156,12 +175,13 @@ def update_schedule(schedule_id: str, body: WorkflowScheduleUpdate, principal: P
         fields["next_fire_at"] = next_fire(cron, zone, datetime.now(timezone.utc))
         fields["last_error"] = None
     try:
-        row = store.update(tenant, schedule_id, **fields)
+        with pre.guard(latest):
+            row = store.update(tenant, schedule_id, expected_revision=pre.expected, **fields)
     except ScheduleNameConflict:
         raise _fail(409, "schedule_name_taken") from None
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
-    return _json(row, workflow.name)
+    return pre.respond(_json(row, workflow.name), row["revision"])
 
 
 @router.delete("/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -191,4 +211,4 @@ def create_schedule(workflow_id: uuid.UUID, body: WorkflowScheduleSpec, principa
                            input=body.input, next_fire_at=next_fire(body.cron, body.timezone, datetime.now(timezone.utc)))
     except ScheduleNameConflict:
         raise _fail(409, "schedule_name_taken") from None
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_json(row, workflow.name))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=_json(row, workflow.name)), row["revision"])

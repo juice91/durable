@@ -12,6 +12,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.request_guard import GuardedJsonRoute
@@ -30,6 +31,7 @@ from eap_run_store.agent_checks import (  # noqa: F401 - re-exported: the API's 
     publish_warnings,
     validate_stored_draft,
 )
+from eap_run_store.revisions import bump_row
 from eap_run_store.definitions import (
     publish_agent,
     restore_agent_version,
@@ -110,6 +112,7 @@ def _agent_to_response(agent: AgentModel, latest_version: int | None) -> dict:
         "latest_version": latest_version,
         "archived": bool(agent.archived),
         "builtin": bool(agent.builtin),
+        "revision": agent.revision,
     }
 
 
@@ -146,7 +149,7 @@ def _version_to_response(version: AgentVersionModel) -> dict:
     status_code=status.HTTP_201_CREATED,
     response_class=JSONResponse,
     tags=["agents"],
-    responses={422: {"model": ErrorDetail}},
+    responses={422: {"model": ErrorDetail}, **etag_responses(success=201, write=False)},
 )
 def create_agent(
     request: AgentCreate,
@@ -168,18 +171,7 @@ def create_agent(
     db.commit()
     db.refresh(agent)
 
-    return JSONResponse(
-        content={
-            "id": str(agent.id),
-            "name": agent.name,
-            "draft_spec": agent.draft_spec,
-            "latest_version": None,
-            "archived": False,
-            "builtin": False,
-            "builtin_role": None,
-        },
-        status_code=201,
-    )
+    return stamp(JSONResponse(content={**_agent_to_response(agent, None), "builtin_role": None}, status_code=201), agent.revision)
 
 
 @router.get(
@@ -220,7 +212,7 @@ def list_agents(
     "/agents/{agent_id}",
     response_class=JSONResponse,
     tags=["agents"],
-    responses={404: {"model": ErrorDetail}},
+    responses={404: {"model": ErrorDetail}, **etag_responses(write=False)},
 )
 def get_agent(
     agent_id: uuid.UUID,
@@ -248,22 +240,24 @@ def get_agent(
         .scalar()
     )
 
-    return JSONResponse(content=_agent_to_response(agent, latest))
+    return read_response(_agent_to_response(agent, latest), agent.revision)
 
 
 @router.patch(
     "/agents/{agent_id}",
     response_class=JSONResponse,
     tags=["agents"],
-    responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
+    responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}, **etag_responses()},
 )
 def patch_agent(
     agent_id: uuid.UUID,
     request: AgentUpdate,
     principal: Annotated[Principal, Depends(current_principal)],
     db: SessionDep,
+    pre: IfMatch,
 ) -> dict:
-    """Update an agent's draft spec."""
+    """Update an agent's draft spec. Send the ETag you read as `If-Match`: a stale one is 412
+    `revision_mismatch` with the current agent (see eap_api.concurrency)."""
     agent = (
         db.query(AgentModel)
         .filter(
@@ -278,23 +272,27 @@ def patch_agent(
             detail="Agent not found",
         )
 
+    def current() -> tuple[dict, int]:
+        db.refresh(agent)
+        return _agent_to_response(agent, _latest_number(db, agent_id)), agent.revision
+
+    pre.check(agent.revision, current)
     refused = _refuse_architect_tools(request.spec, builtin=bool(agent.builtin))
     if refused is not None:
         return refused
     spec_dict = request.spec.model_dump(mode="json")
 
-    agent.name = request.spec.name
-    agent.draft_spec = spec_dict
-    db.commit()
+    with pre.guard(current, db):
+        bump_row(db, agent, pre.expected)
+        agent.name = request.spec.name
+        agent.draft_spec = spec_dict
+        db.commit()
     db.refresh(agent)
+    return pre.respond(_agent_to_response(agent, _latest_number(db, agent_id)), agent.revision)
 
-    latest = (
-        db.query(func.max(AgentVersionModel.version))
-        .filter(AgentVersionModel.agent_id == str(agent_id))
-        .scalar()
-    )
 
-    return JSONResponse(content=_agent_to_response(agent, latest))
+def _latest_number(db: Session, agent_id: uuid.UUID | str) -> int | None:
+    return db.query(func.max(AgentVersionModel.version)).filter(AgentVersionModel.agent_id == str(agent_id)).scalar()
 
 
 def _set_archived(
@@ -306,12 +304,7 @@ def _set_archived(
         db, lambda conn: set_agent_archived(conn, principal.tenant_id, str(agent_id), archived, force=force)
     )
     agent = _tenant_agent(db, principal.tenant_id, agent_id)
-    latest = (
-        db.query(func.max(AgentVersionModel.version))
-        .filter(AgentVersionModel.agent_id == str(agent_id))
-        .scalar()
-    )
-    return JSONResponse(content=_agent_to_response(agent, latest))
+    return read_response(_agent_to_response(agent, _latest_number(db, agent_id)), agent.revision)
 
 
 @router.post(
@@ -426,7 +419,10 @@ def publish_version(
             after_lock=lambda: _latest_version(db, str(agent_id)),
         ),
     )
-    return JSONResponse(content={**_version_dict_to_response(result.version), "warnings": result.warnings}, status_code=201)
+    return stamp(
+        JSONResponse(content={**_version_dict_to_response(result.version), "warnings": result.warnings}, status_code=201),
+        result.revision,
+    )
 
 
 @router.get(
@@ -575,8 +571,9 @@ def restore_version(
             discard_draft=discard_draft, after_lock=lambda: _latest_version(db, str(agent_id)),
         ),
     )
-    return JSONResponse(
-        content={**_version_dict_to_response(result.version), "warnings": result.warnings}, status_code=201
+    return stamp(
+        JSONResponse(content={**_version_dict_to_response(result.version), "warnings": result.warnings}, status_code=201),
+        result.revision,
     )
 
 
