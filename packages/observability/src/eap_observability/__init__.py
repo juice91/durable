@@ -56,6 +56,7 @@ from eap_observability.redaction import (
     exception_type,
     log_failure,
     redact,
+    redact_attribute,
 )
 
 ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
@@ -392,6 +393,7 @@ __all__ = [
     "exception_type",
     "log_failure",
     "redact",
+    "redact_attribute",
     "current_trace_context",
     "current_trace_id",
     "dbos_otel_config",

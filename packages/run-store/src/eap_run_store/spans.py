@@ -14,12 +14,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Index, PrimaryKeyConstraint, String, cast, delete, exists, func, or_, select, text, tuple_
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, insert as pg_insert
+from sqlalchemy import CheckConstraint, DateTime, Index, PrimaryKeyConstraint, String, cast, delete, exists, func, or_, select, text, tuple_
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
@@ -42,10 +43,20 @@ class SpanModel(Base):
     agent_id: Mapped[str | None] = mapped_column("agent_id", String, nullable=True)
     workflow_id: Mapped[str | None] = mapped_column("workflow_id", String, nullable=True)
     model: Mapped[str | None] = mapped_column("model", String, nullable=True)
+    # 0032_external_spans: spans sent over OTLP by a tenant API key (source "external").
+    source: Mapped[str] = mapped_column("source", String, nullable=False, server_default="platform")
+    trace_id: Mapped[str | None] = mapped_column("trace_id", String, nullable=True)
+    service_name: Mapped[str | None] = mapped_column("service_name", String, nullable=True)
+    api_key_id: Mapped[str | None] = mapped_column("api_key_id", String, nullable=True)
+    attributes: Mapped[dict[str, Any] | None] = mapped_column("attributes", JSONB, nullable=True)
+    resource_attributes: Mapped[dict[str, Any] | None] = mapped_column("resource_attributes", JSONB, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("run_id", "span_id", name="spans_pkey"),
+        CheckConstraint("source IN ('platform', 'external')", name="ck_spans_source"),
         Index("ix_spans_tenant_start", "tenant_id", text("start DESC")),
+        Index("ix_spans_external_trace", "tenant_id", "trace_id", "start", postgresql_where=text("source = 'external'")),
+        Index("ix_spans_external_start", "tenant_id", text("start DESC"), postgresql_where=text("source = 'external'")),
     )
 
 
@@ -176,12 +187,24 @@ def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
 
 _SPAN_COLUMNS = ("run_id", "span_id", "parent_id", "kind", "name", "start", "end", "status",
                  "agent_id", "workflow_id", "model")
+# What the list shows besides those (the attributes are read with one external trace, not in the list).
+_LIST_COLUMNS = _SPAN_COLUMNS + ("source", "trace_id", "service_name")
+EXTERNAL_TRACE_NAMESPACE = uuid_lib.UUID("5d7a0c3e-8f1b-4c52-9a6e-3b2f4d1e7c90")
+MAX_TRACE_SPANS = 2000
+MAX_TRACE_LIST_LIMIT = 200
+SPAN_SOURCES = ("platform", "external")
+
+
+def external_run_id(tenant_id: str, trace_id: str) -> str:
+    """The `run_id` an external trace's spans are stored under: derived from the tenant and the
+    OpenTelemetry trace id, so one trace's spans share it, two tenants never do, and no run has it."""
+    return str(uuid_lib.uuid5(EXTERNAL_TRACE_NAMESPACE, f"{tenant_id}:{trace_id}"))
 # `list` keys that are conditions on the span's run (see run_filter_conditions).
 _RUN_FILTERS = ("status", "kind", "tool_id", "workflow_id", "model", "provider", "tags", "metadata")
 
 
 def _span_dict(row: SpanModel) -> dict[str, Any]:
-    return {c: getattr(row, c) for c in _SPAN_COLUMNS}
+    return {c: getattr(row, c) for c in _LIST_COLUMNS}
 
 
 class SpanStore:
@@ -203,6 +226,119 @@ class SpanStore:
                 session.execute(pg_insert(SpanModel).values(rows).on_conflict_do_nothing())
         return len(rows)
 
+    def insert_external(self, tenant_id: str, api_key_id: str | None, spans: list[dict[str, Any]]) -> int:
+        """Store spans sent over OTLP (`eap_observability.otlp.prepare_spans` rows) for `tenant_id`,
+        marked source "external" with the key that sent them. A repeated (trace, span) is kept as first
+        stored (an exporter's retry is harmless). Returns the rows offered."""
+        rows = [
+            {
+                "tenant_id": tenant_id, "run_id": external_run_id(tenant_id, s["trace_id"]), "source": "external",
+                "api_key_id": api_key_id, "agent_id": None, "workflow_id": None, "model": None,
+                **{k: s.get(k) for k in (
+                    "span_id", "parent_id", "kind", "name", "start", "end", "status", "trace_id", "service_name",
+                    "attributes", "resource_attributes",
+                )},
+            }
+            for s in spans
+        ]
+        if rows:
+            with self.Session() as session, session.begin():
+                session.execute(pg_insert(SpanModel).values(rows).on_conflict_do_nothing())
+        return len(rows)
+
+    def list_traces(
+        self,
+        tenant_id: str,
+        filters: dict[str, Any] | None = None,
+        limit: int = 50,
+        before: SpanCursor | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """The tenant's external traces, newest first by start, one row per trace id:
+        `{trace_id, name (the root span), service_name, start, end, span_count, status, api_key_id}`
+        with status `error` when any span errored. `filters`: `service`, `q` (substring of any span
+        name), `from` / `to` (the trace's first span start), `status` ("error" or "ok"). The cursor
+        is the same opaque token as the span list's (position = first start, trace id)."""
+        limit = min(max(int(limit), 1), MAX_TRACE_LIST_LIMIT)
+        f = dict(filters or {})
+        first = func.min(SpanModel.start).label("start")
+        has_error = func.bool_or(SpanModel.status == "error").label("has_error")
+        stmt = (
+            select(
+                SpanModel.trace_id, first,
+                func.max(func.coalesce(SpanModel.end, SpanModel.start)).label("end"),
+                func.count().label("span_count"), has_error,
+                func.max(SpanModel.service_name).label("service_name"),
+                func.max(SpanModel.api_key_id).label("api_key_id"),
+                func.min(SpanModel.name).filter(SpanModel.parent_id.is_(None)).label("root_name"),
+                func.min(SpanModel.name).label("any_name"),
+            )
+            .where(SpanModel.tenant_id == tenant_id, SpanModel.source == "external")
+            .group_by(SpanModel.trace_id)
+        )
+        if f.get("service"):
+            stmt = stmt.where(SpanModel.service_name == str(f["service"]))
+        if f.get("q"):
+            stmt = stmt.where(SpanModel.name.ilike(_like(str(f["q"])[:MAX_NAME_QUERY]), escape="\\"))
+        having = []
+        if f.get("from") is not None:
+            having.append(first >= f["from"])
+        if f.get("to") is not None:
+            having.append(first < f["to"])
+        if f.get("status") == "error":
+            having.append(has_error)
+        elif f.get("status") == "ok":
+            having.append(~has_error)
+        if before is not None:
+            having.append(tuple_(first, SpanModel.trace_id) < tuple_(before.start, before.span_id))
+        if having:
+            stmt = stmt.having(*having)
+        stmt = stmt.order_by(first.desc(), SpanModel.trace_id.desc()).limit(limit)
+        with self.Session() as session:
+            rows = session.execute(stmt).all()
+        items = [
+            {
+                "trace_id": r.trace_id, "name": r.root_name or r.any_name, "service_name": r.service_name,
+                "start": r.start, "end": r.end, "span_count": r.span_count,
+                "status": "error" if r.has_error else "ok", "api_key_id": r.api_key_id,
+            }
+            for r in rows
+        ]
+        next_before = SpanCursor(items[-1]["start"], items[-1]["trace_id"]).encode() if len(items) == limit else None
+        return items, next_before
+
+    def read_external_trace(self, tenant_id: str, trace_id: str) -> dict[str, Any] | None:
+        """One external trace of the tenant: `{trace_id, service_name, api_key_id, resource_attributes,
+        spans: [{span_id, parent_id, name, start, end, status, attributes}], truncated}` in start order
+        (at most MAX_TRACE_SPANS), or None when the tenant has no such trace."""
+        stmt = (
+            select(SpanModel)
+            .where(SpanModel.tenant_id == tenant_id, SpanModel.source == "external", SpanModel.trace_id == trace_id)
+            .order_by(SpanModel.start, SpanModel.span_id)
+            .limit(MAX_TRACE_SPANS + 1)
+        )
+        with self.Session() as session:
+            rows = list(session.execute(stmt).scalars())
+        if not rows:
+            return None
+        truncated = len(rows) > MAX_TRACE_SPANS
+        rows = rows[:MAX_TRACE_SPANS]
+        resource: dict[str, Any] = {}
+        for r in rows:  # the first span's resource wins; later spans add what it lacks
+            for k, v in (r.resource_attributes or {}).items():
+                resource.setdefault(k, v)
+        return {
+            "trace_id": trace_id,
+            "service_name": next((r.service_name for r in rows if r.service_name), None),
+            "api_key_id": rows[0].api_key_id,
+            "resource_attributes": resource,
+            "spans": [
+                {"span_id": r.span_id, "parent_id": r.parent_id, "name": r.name, "start": r.start, "end": r.end,
+                 "status": r.status, "attributes": r.attributes or {}, "service_name": r.service_name}
+                for r in rows
+            ],
+            "truncated": truncated,
+        }
+
     def list(
         self,
         tenant_id: str,
@@ -212,7 +348,7 @@ class SpanStore:
         statement_timeout_ms: int | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Newest first by (start, span_id). `filters`: `from` / `to` (span start, `[from, to)`),
-        `span_kind`, `q` (case-insensitive substring of the span name), `agent_id`, `workflow_id`,
+        `source` ("platform" | "external"; absent = both), `span_kind`, `q` (case-insensitive substring of the span name), `agent_id`, `workflow_id`,
         `model` and `provider` (as `GET /runs`: the run used that model), and `status`, `kind`,
         `tool_id`, `tags`, `metadata` of the span's run. The second item is an opaque cursor when
         a full page came back, else None. `limit` is clamped to 1..200 and `q` to its first 200
@@ -230,6 +366,8 @@ class SpanStore:
             stmt = stmt.where(SpanModel.start >= f["from"])
         if f.get("to") is not None:
             stmt = stmt.where(SpanModel.start < f["to"])
+        if f.get("source"):
+            stmt = stmt.where(SpanModel.source == f["source"])
         if f.get("span_kind"):
             stmt = stmt.where(SpanModel.kind == f["span_kind"])
         if f.get("q"):
@@ -294,4 +432,4 @@ class SpanStore:
         return buckets
 
 
-__all__ = ["WorkerStateModel", "MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_filter_conditions"]
+__all__ = ["WorkerStateModel", "MAX_LIST_LIMIT", "MAX_NAME_QUERY", "SPAN_RUN_KINDS", "SPAN_SOURCES", "MAX_TRACE_SPANS", "external_run_id", "materialise_spans", "InvalidSpanCursor", "SpanCursor", "SpanModel", "SpanStore", "run_filter_conditions"]

@@ -10,6 +10,9 @@ has span status `waiting` and `display_status` `waiting_approval`. Tenant-scoped
 tenant's, is a 404 (its child runs are read under the caller's tenant only). The DBOS and HTTP
 spans stay in Grafana (the run's `trace_id`).
 
+External traces (sent over OTLP, POST /otlp/v1/traces): `GET /traces` lists them, `GET /traces/{trace_id}`
+reads one (32 hex trace id, as the client sent it); both tenant-scoped.
+
 Feedback (W2.2, 0019_trace_feedback): `POST | GET /traces/{trace_id}/feedback`; a trace id is the run id.
 
 Response: `{run, spans, totals, truncated, limits}`; `run` is the GET /runs/{id} shape. See
@@ -19,19 +22,22 @@ eap_run_store.trace for the span shape, ids, statuses, timing and the payload bo
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
-from eap_api.routes.runs import StoresDep, _run_json
+from eap_api.routes.runs import SpanStoreDep, StoresDep, _run_json, _utc
 from eap_api.models import AgentVersionModel
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowVersionModel
+from eap_run_store.cursor import MAX_CURSOR_LENGTH
+from eap_run_store.spans import InvalidSpanCursor, SpanCursor
 from eap_run_store.trace import TraceQueryTimeout, TraceReader
 from eap_run_store.trace_feedback import (
     FEEDBACK_COMMENT_MAX_CHARS,
@@ -99,6 +105,89 @@ def get_run_trace(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep,
     """The run's span tree with tokens and cost. 404 for an unknown run or another tenant's; 503
     when reading it hits the statement timeout."""
     return JSONResponse(content=_read_trace(run_id, principal, stores, db))
+
+
+# ---------------------------------------------------------------------------- external traces (OTLP)
+
+TRACE_ID_PATTERN = r"^[0-9a-f]{32}$"
+RUN_ID_ATTRIBUTE = "pydanticos.run_id"
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+@router.get("/traces")
+def list_external_traces(
+    principal: PrincipalDep,
+    spans: SpanStoreDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH, description="The previous page's next_before, verbatim")] = None,
+    source: Annotated[Literal["external"], Query(description="Only external OTLP traces are listed here; platform traces are runs (GET /runs)")] = "external",
+    service: Annotated[str | None, Query(min_length=1, max_length=128, description="The resource service.name")] = None,
+    q: Annotated[str | None, Query(min_length=1, max_length=200, description="Substring of a span name")] = None,
+    trace_status: Annotated[Literal["ok", "error"] | None, Query(alias="status")] = None,
+    created_from: Annotated[datetime | None, Query(alias="from")] = None,
+    created_to: Annotated[datetime | None, Query(alias="to")] = None,
+) -> JSONResponse:
+    """The tenant's external traces (sent over OTLP), newest first, one item per trace id:
+    `{items: [{trace_id, source, name, service_name, start, end, span_count, status}], next_before}`.
+    `status` is `error` when any span of the trace errored. 422 for a `before` this API did not issue."""
+    start = _utc(created_from) if created_from is not None else None
+    end = _utc(created_to) if created_to is not None else None
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
+    cursor = None
+    if before is not None:
+        try:
+            cursor = SpanCursor.decode(before)
+        except InvalidSpanCursor:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="before is not a valid cursor; pass the previous page's next_before verbatim",
+            ) from None
+    filters = {"service": service, "q": q.strip() if q and q.strip() else None, "status": trace_status,
+               "from": start, "to": end}
+    items, next_before = spans.list_traces(principal.tenant_id, {k: v for k, v in filters.items() if v is not None}, limit, cursor)
+    return JSONResponse(content={
+        "items": [
+            {"trace_id": i["trace_id"], "source": "external", "name": i["name"], "service_name": i["service_name"],
+             "start": _iso(i["start"]), "end": _iso(i["end"]), "span_count": i["span_count"], "status": i["status"]}
+            for i in items
+        ],
+        "next_before": next_before,
+    })
+
+
+@router.get("/traces/{trace_id}")
+def get_external_trace(
+    trace_id: Annotated[str, Path(pattern=TRACE_ID_PATTERN)], principal: PrincipalDep, spans: SpanStoreDep, stores: StoresDep,
+) -> JSONResponse:
+    """One external trace: `{trace_id, source, service_name, resource_attributes, spans: [{span_id,
+    parent_id, name, start, end, status, attributes}], run_id, truncated}`. `run_id` is the platform run
+    named by a span's `pydanticos.run_id` attribute when that run is the tenant's, else null. 404 for an
+    unknown trace or another tenant's."""
+    trace = spans.read_external_trace(principal.tenant_id, trace_id)
+    if trace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trace not found")
+    run_store, _ = stores
+    run_id = None
+    for span in trace["spans"]:
+        candidate = span["attributes"].get(RUN_ID_ATTRIBUTE)
+        try:
+            parsed = uuid.UUID(candidate) if isinstance(candidate, str) else None
+        except ValueError:
+            parsed = None
+        if parsed is not None and run_store.get_run(principal.tenant_id, parsed) is not None:
+            run_id = str(parsed)
+            break
+    return JSONResponse(content={
+        "trace_id": trace["trace_id"], "source": "external", "service_name": trace["service_name"],
+        "resource_attributes": trace["resource_attributes"],
+        "spans": [{**{k: v for k, v in s.items() if k != "service_name"}, "start": _iso(s["start"]), "end": _iso(s["end"])}
+                  for s in trace["spans"]],
+        "run_id": run_id, "truncated": trace["truncated"],
+    })
 
 
 # ---------------------------------------------------------------------------- feedback (W2.2)

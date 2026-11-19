@@ -65,7 +65,7 @@ class ApiKeyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=API_KEY_NAME_MAX_CHARS)
-    scopes: list[Literal["agui:run", "mcp", "manage"]] = Field(default_factory=lambda: ["agui:run"], min_length=1, max_length=8)
+    scopes: list[Literal["agui:run", "mcp", "manage", "otlp"]] = Field(default_factory=lambda: ["agui:run"], min_length=1, max_length=8)
     agent_ids: list[IdItem] | None = Field(default=None, max_length=API_KEY_ALLOWLIST_MAX_ITEMS)
     workflow_ids: list[IdItem] | None = Field(default=None, max_length=API_KEY_ALLOWLIST_MAX_ITEMS)
     allowed_origins: list[OriginItem] | None = Field(default=None, max_length=API_KEY_ORIGINS_MAX_ITEMS)

@@ -253,6 +253,44 @@ async def agui_principal(
     return AgUiPrincipal(tenant_id=dev.tenant_id, kind="dev", user_id=dev.user_id, scopes=(AGUI_RUN_SCOPE,))
 
 
+OTLP_SCOPE = "otlp"
+MISSING_OTLP_SCOPE_DETAIL = f"API key lacks the {OTLP_SCOPE} scope"
+
+
+async def otlp_principal(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> AgUiPrincipal:
+    """The principal of `POST /api/v1/otlp/v1/traces`: a tenant API key with the `otlp` scope, or the
+    dev bearer (EAP_AUTH_MODE=dev). Unknown, revoked or expired key: 401 `Invalid API key`; a key
+    without the scope: 403. The tenant is the key's, never anything the payload says. An `Origin`
+    header (a browser exporter) must be one the key allows; exporters outside a browser send none."""
+    if authorization is None:
+        raise _unauthorized("Missing Authorization header")
+    scheme, _, credential = authorization.partition(" ")
+    credential = credential.strip()
+    if scheme.lower() == "bearer" and looks_like_api_key(credential):
+        store = get_api_key_store(request)
+        record = await run_in_threadpool(store.authenticate, credential, touch=False)
+        if record is None:
+            raise _unauthorized(INVALID_API_KEY_DETAIL)
+        if OTLP_SCOPE not in record.scopes:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MISSING_OTLP_SCOPE_DETAIL)
+        origin = request.headers.get("origin")
+        if origin is not None:
+            require_allowed_origin(record.allowed_origins, origin)
+        await run_in_threadpool(store.touch_last_used, record.id)
+        bind_log_context(tenant_id=record.tenant_id)
+        return AgUiPrincipal(
+            tenant_id=record.tenant_id, kind="api_key", key_id=record.id, scopes=record.scopes,
+            agent_ids=record.agent_ids, workflow_ids=record.workflow_ids, allowed_origins=record.allowed_origins,
+        )
+    if not dev_auth_enabled():
+        raise _unauthorized(DEV_AUTH_DISABLED_DETAIL)
+    dev = await current_principal(authorization)
+    return AgUiPrincipal(tenant_id=dev.tenant_id, kind="dev", user_id=dev.user_id, scopes=(OTLP_SCOPE,))
+
+
 def _normalized_origins(origins: tuple[str, ...]) -> set[str]:
     """A key's stored origins, normalized again (they are normalized on write; a hand-edited row
     may not be). An entry that is not an origin matches nothing."""

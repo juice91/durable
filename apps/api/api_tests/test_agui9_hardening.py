@@ -242,7 +242,8 @@ def _sweep(c, headers) -> dict[tuple[str, str], int]:
     failures = {}
     for method, path in _non_agui_api_routes(c.app):
         r = c.request(method, path, headers=headers)
-        if r.status_code != 401:
+        # The OTLP endpoint takes keys with the `otlp` scope: a key without it (an AG-UI key) is 403, not accepted.
+        if r.status_code != 401 and not (r.status_code == 403 and path == "/api/v1/otlp/v1/traces"):
             failures[(method, path)] = r.status_code
     return failures
 

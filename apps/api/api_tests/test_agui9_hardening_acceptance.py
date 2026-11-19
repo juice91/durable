@@ -57,6 +57,9 @@ def _routes(app):
     return out
 
 
+OTLP = ("POST", "/api/v1/otlp/v1/traces")
+
+
 def _outside(app):
     return [(m, p) for m, p in _routes(app) if p != "/healthz" and not is_agui_path(p)]
 
@@ -87,7 +90,9 @@ def test_sweep_outside_ag_ui_no_key_is_ever_accepted(c, world, monkeypatch, mode
     monkeypatch.setenv("EAP_AUTH_MODE", mode)
     assert len(_outside(c.app)) > 50
     for name in ("valid", "revoked", "foreign"):
-        bad = {k: s for k, s in _statuses(c, _bearer(world[name])).items() if s != 401}
+        # The OTLP endpoint takes keys too, but only with the `otlp` scope: an AG-UI key there is 403, not accepted.
+        bad = {k: s for k, s in _statuses(c, _bearer(world[name])).items()
+               if s != (403 if (name != "revoked" and k == OTLP) else 401)}
         assert bad == {}, (mode, name, bad)
     none = {k: s for k, s in _statuses(c, {}).items() if s != 401}
     assert none == {}, (mode, none)

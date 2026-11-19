@@ -39,7 +39,7 @@ from eap_run_store.store import Base
 API_KEY_PREFIX = "pos_"
 # `agui:run` runs agents and workflows over AG-UI; `mcp` reads the tenant's platform through the MCP control
 # endpoint (/api/v1/mcp); `manage` implies `mcp` and also changes it. A key without either is refused there.
-API_KEY_SCOPES = ("agui:run", "mcp", "manage")
+API_KEY_SCOPES = ("agui:run", "mcp", "manage", "otlp")
 DEFAULT_API_KEY_SCOPES = ("agui:run",)
 API_KEY_NAME_MAX_CHARS = 100
 API_KEY_ALLOWLIST_MAX_ITEMS = 100

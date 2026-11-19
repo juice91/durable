@@ -48,6 +48,7 @@ def list_spans(
         Query(max_length=MAX_CURSOR_LENGTH, description="Opaque cursor: the previous page's next_before, verbatim"),
     ] = None,
     span_kind: Annotated[Literal[*SPAN_KINDS] | None, Query()] = None,
+    source: Annotated[Literal["platform", "external"] | None, Query(description="Only the platform's own spans or only external OTLP spans; absent = both")] = None,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
     kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None, Query()] = None,
@@ -62,7 +63,9 @@ def list_spans(
     q: Annotated[str | None, Query(min_length=1, max_length=200, description="Substring of the span name")] = None,
 ) -> JSONResponse:
     """`{items: [{run_id, span_id, parent_id, kind, name, start, end, status, agent_id, workflow_id,
-    model}], next_before}`, newest span first. `from` / `to` bound the span's `start` to `[from, to)`;
+    model, source, trace_id, service_name}], next_before}`; `source` is `platform` or `external` (spans
+    sent over OTLP, see POST /otlp/v1/traces; their `trace_id` is the client's and their `run_id`
+    a derived id no run has), newest span first. `from` / `to` bound the span's `start` to `[from, to)`;
     `span_kind` is the span's kind (run, model_request, tool_call, ...); `q` matches the span name
     (case-insensitive). The other filters are `GET /runs`' and apply to the span's run: `status`
     (any of, at most 10), `kind` (the run's kind), `tool_id`, `workflow_id`, `tags`, `metadata=key=value`,
@@ -83,7 +86,7 @@ def list_spans(
                 detail="before is not a valid cursor; pass the previous page's next_before verbatim",
             )
     filters = {
-        "from": start, "to": end, "span_kind": span_kind, "q": q.strip() if q and q.strip() else None,
+        "from": start, "to": end, "span_kind": span_kind, "source": source, "q": q.strip() if q and q.strip() else None,
         "agent_id": agent_id, "status": _status_filter(run_status), "kind": kind, "tool_id": tool_id,
         "workflow_id": workflow_id, "model": model, "provider": provider,
         "tags": _list_param(tags, "tags", split=True), "metadata": metadata_filter(metadata),
