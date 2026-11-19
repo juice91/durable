@@ -393,7 +393,7 @@ def _save_once(
                 return error("reserved_id", f"{slug!r} is a built-in {label} id; choose another id.")
             row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
         else:
-            base = slugify(derived_from)
+            base = slugify(derived_from, "agent" if kind.table == "agents" else "workflow")
             for n in range(1, 50):
                 candidate = base if n == 1 else f"{base[:44]}-{n}"
                 if candidate in RESERVED_AGENT_IDS:
