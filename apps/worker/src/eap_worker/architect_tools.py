@@ -52,7 +52,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from eap_run_store import ScheduleNameConflict, ScheduleStore, definitions
+from eap_run_store import RevisionMismatch, ScheduleNameConflict, ScheduleStore, definitions
 from eap_run_store.definition_errors import DefinitionError
 from eap_runtime import RunDeps, ToolRegistry, run_side_effect
 from eap_schemas import reserved_tool_name_conflicts
@@ -265,7 +265,7 @@ class _Kind:
 
     def __init__(self, table: str, versions: str, fk: str) -> None:
         self.table, self.versions, self.fk = table, versions, fk
-        columns = f"id, slug, name, draft_spec, archived, {'builtin' if table == 'agents' else 'false AS builtin'}"
+        columns = f"id, slug, name, draft_spec, archived, revision, {'builtin' if table == 'agents' else 'false AS builtin'}"
         self.by_slug = text(f"SELECT {columns} FROM {table} WHERE tenant_id = :t AND slug = :s")
         # A reference may also be the row's UUID (`uuid` in the listings): only a definition with a slug is the
         # Architect's, the same rule as by slug.
@@ -288,8 +288,8 @@ class _Kind:
             f":s, :now, :now{', false' if table == 'agents' else ''})"
         )
         self.update = text(
-            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = :now "
-            "WHERE id = :id AND tenant_id = :t"
+            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = :now, "
+            "revision = revision + 1 WHERE id = :id AND tenant_id = :t AND revision = :expected RETURNING revision"
         )
 
 
@@ -346,9 +346,38 @@ def _list_versions(engine: Engine, tenant_id: str, kind: _Kind, slug: str) -> di
 
 def _save(
     engine: Engine, tenant_id: str, kind: _Kind, *, slug: str | None, derived_from: str, name: str,
-    spec_json: dict[str, Any], confirm: bool,
+    spec_json: dict[str, Any], confirm: bool, before_write: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
-    """Write the draft of one definition (blocking). `slug` None derives one from the name."""
+    """Write the draft of one definition (blocking). `slug` None derives one from the name.
+
+    Optimistic concurrency (eap_run_store.revisions): the write is guarded by the revision this call read, so
+    a person or another run that saved the same draft in between is never silently overwritten. On a
+    conflict the whole call runs once more against the fresh row (every check is re-made, then the same
+    change is applied on it); a second conflict is the tool error `revision_mismatch` with the current
+    revision, which the model reads and decides on. `before_write(attempt)` is a test seam."""
+    mismatch: RevisionMismatch | None = None
+    for attempt in (1, 2):
+        try:
+            return _save_once(
+                engine, tenant_id, kind, slug=slug, derived_from=derived_from, name=name, spec_json=spec_json,
+                confirm=confirm, before_write=(lambda: before_write(attempt)) if before_write else None,
+            )
+        except RevisionMismatch as exc:
+            mismatch = exc
+    assert mismatch is not None
+    label = "agent" if kind is AGENTS else "workflow"
+    return error(
+        "revision_mismatch",
+        f"The {label} was changed by someone else while this save ran (now at revision {mismatch.current_revision}) "
+        "and again on the retry. Read it again before saving, so their change is not lost.",
+        current_revision=mismatch.current_revision,
+    )
+
+
+def _save_once(
+    engine: Engine, tenant_id: str, kind: _Kind, *, slug: str | None, derived_from: str, name: str,
+    spec_json: dict[str, Any], confirm: bool, before_write: Callable[[], None] | None,
+) -> dict[str, Any]:
     label = "agent" if kind is AGENTS else "workflow"
     spec_text = json.dumps(spec_json)
     with engine.begin() as conn:
@@ -392,7 +421,21 @@ def _save(
                     "message": f"The latest version of {slug!r} (v{latest['version']}) was made or edited by hand. "
                     "Tell the person, and call this tool again with confirm: true only after they say yes.",
                 }
-            conn.execute(kind.update, {"id": row["id"], "t": tenant_id, "name": name, "spec": spec_text, "now": _now()})
+            if before_write is not None:
+                before_write()
+            written = conn.execute(kind.update, {
+                "id": row["id"], "t": tenant_id, "name": name, "spec": spec_text, "now": _now(),
+                "expected": row["revision"],
+            }).scalar_one_or_none()
+            if written is None:  # the row moved on since this call read it (or is gone)
+                current = conn.execute(
+                    text(f"SELECT revision FROM {kind.table} WHERE id = :id AND tenant_id = :t"),
+                    {"id": row["id"], "t": tenant_id},
+                ).scalar_one_or_none()
+                if current is None:
+                    return error("not_found", f"The {label} {slug!r} was deleted while this save ran.")
+                raise RevisionMismatch(int(current), int(row["revision"]))
+            revision = int(written)
         else:
             try:
                 with conn.begin_nested():
@@ -402,7 +445,8 @@ def _save(
                     })
             except IntegrityError:
                 return error("id_conflict", f"The id {slug!r} was taken a moment ago; call again.")
-    return {"id": slug, "version": None, "status": "draft"}
+            revision = 1
+    return {"id": slug, "version": None, "status": "draft", "revision": revision}
 
 
 async def list_approved_tools(engine: Engine, tenant_id: str) -> dict[str, Any]:
@@ -655,6 +699,7 @@ def _schedule_json(row: dict[str, Any]) -> dict[str, Any]:
         "timezone": row["timezone"],
         "active": row["active"],
         "next_fire_at": row["next_fire_at"].isoformat(),
+        "revision": row["revision"],
     }
 
 
@@ -715,27 +760,50 @@ def set_workflow_schedule_sync(
         log.info("architect.set_workflow_schedule tenant=%s run=%s create=%s", tenant_id, run_id, created["id"])
         return {"id": workflow_id, "status": "created", **_schedule_json(created)}
 
-    current = find()
-    if current is None:
-        return error("not_found", "No schedule of this workflow has that schedule_id or name.")
-    if action == "delete":
-        store.delete(tenant_id, current["id"])
-        return {"id": workflow_id, "status": "deleted", "schedule_id": current["id"], "name": current["name"]}
-    if action == "pause":
-        updated = store.update(tenant_id, current["id"], active=False, last_error=None)
-        return {"id": workflow_id, "status": "paused", **_schedule_json(updated)}
-    # resume: re-checked like the API's PATCH (the stored cron and input may no longer fit)
-    if (problem := _cron_problem(current["cron"], current["timezone"])) is not None:
-        return problem
-    if latest is None:
-        return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
-    if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
-        return error("input_schema_errors", "The stored input no longer fits the workflow's input schema.", errors=problems)
-    updated = store.update(
-        tenant_id, current["id"], active=True, last_error=None,
-        next_fire_at=next_fire(current["cron"], current["timezone"], _now()),
+    def act() -> dict[str, Any]:
+        """One attempt on the schedule as it is now; the write is guarded by the revision this attempt read."""
+        current = find()
+        if current is None:
+            return error("not_found", "No schedule of this workflow has that schedule_id or name.")
+        if action == "delete":
+            store.delete(tenant_id, current["id"])
+            return {"id": workflow_id, "status": "deleted", "schedule_id": current["id"], "name": current["name"]}
+        if action == "pause":
+            updated = store.update(
+                tenant_id, current["id"], expected_revision=current["revision"], active=False, last_error=None)
+            if updated is None:
+                return error("not_found", "The schedule was deleted while this call ran.")
+            return {"id": workflow_id, "status": "paused", **_schedule_json(updated)}
+        # resume: re-checked like the API's PATCH (the stored cron and input may no longer fit)
+        if (problem := _cron_problem(current["cron"], current["timezone"])) is not None:
+            return problem
+        if latest is None:
+            return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
+        if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
+            return error("input_schema_errors", "The stored input no longer fits the workflow's input schema.", errors=problems)
+        updated = store.update(
+            tenant_id, current["id"], expected_revision=current["revision"], active=True, last_error=None,
+            next_fire_at=next_fire(current["cron"], current["timezone"], _now()),
+        )
+        if updated is None:
+            return error("not_found", "The schedule was deleted while this call ran.")
+        return {"id": workflow_id, "status": "resumed", **_schedule_json(updated)}
+
+    # Optimistic concurrency: a person who edited the schedule in between makes the guarded write fail; the
+    # call then runs once more on the fresh schedule (every check re-made), and a second conflict is a tool error.
+    mismatch: RevisionMismatch | None = None
+    for _attempt in (1, 2):
+        try:
+            return act()
+        except RevisionMismatch as exc:
+            mismatch = exc
+    assert mismatch is not None
+    return error(
+        "revision_mismatch",
+        "The schedule was changed by someone else while this call ran, and again on the retry. Look at it again "
+        "before changing it, so their change is not lost.",
+        current_revision=mismatch.current_revision,
     )
-    return {"id": workflow_id, "status": "resumed", **_schedule_json(updated)}
 
 
 # ---- async entry points (what the tests and the registered tools call)
