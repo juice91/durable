@@ -871,6 +871,7 @@ class _Interpreter:
     async def run_step(self, step: Any) -> Any:
         step_id = step.id
         self._warnings = []
+        self._kept_error = None
         data: dict[str, Any] = {"step_id": step_id, "step_type": step.type}
         problem: WorkflowStepError | None = None
         if step_id in self.executed or len(self.executed) >= MAX_STEPS:
@@ -949,6 +950,10 @@ class _Interpreter:
                 "workflow branch read missing structured fields",
                 extra={"run_id": self.run_id, "step_id": step_id, "paths": unresolved},
             )
+        if self._kept_error is not None:
+            # `on_error: continue`: the tool's error result is the output; the marker is on the existing event.
+            completed["outcome"] = "error_kept"
+            completed["error_code"] = self._kept_error
         if self._warnings:
             # LP.7: `condition_unknown` (D9), on the existing event (no new durable step).
             completed["warnings"] = list(self._warnings)
@@ -1124,7 +1129,12 @@ class _Interpreter:
             self.run_id, self.tenant_id, step.id, step.tool_id, check["args"], bool(check["side_effect"]),
             *((self.scope_text,) if self.scope else ()),
         )
-        _raise_tool_error(result, step.id)
+        try:
+            _raise_tool_error(result, step.id)
+        except WorkflowStepError as failure:
+            if step.on_error != "continue":
+                raise
+            self._kept_error = failure.code  # the result stays the output (an exception still fails)
         return result
 
     # ------------------------------------------------------------------ loop (while / until)

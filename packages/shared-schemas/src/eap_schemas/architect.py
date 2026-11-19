@@ -453,6 +453,7 @@ class ArchitectToolStep(_Step):
     tool: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = Field(default_factory=dict)
     next: str | None = None
+    on_error: Literal["fail", "continue"] = "fail"
 
 
 class ArchitectBranchStep(_Step):
@@ -602,7 +603,7 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
                 raise ValueError(f"tool_not_allowed: {step.tool}")
             steps.append(ToolStep(
                 id=step.id, tool_id=step.tool, next=target(step.next, following, default_end=step.tool == RETURN_TOOL_ID),
-                input=_params_input(step.params, previous, known),
+                input=_params_input(step.params, previous, known), on_error=step.on_error,
             ))
             known.add(step.id)
             previous = step.id

@@ -1,0 +1,65 @@
+{
+  "description": "A best-effort step: fetch a page, and if the fetch fails (a timeout, a refused host) carry on with a fallback text instead of failing the run. The fetch step sets on_error \"continue\", so the http.request error result {error: {code, message}} is kept as its output and the run goes to the branch, which tests exists steps.fetch.output.error. The same pattern fits a link-card thumbnail upload (http.request with body_from_url, which answers body_source_rejected for an oversize or non-image file) or one of several news sources being down. The example needs no agent: it uses platform tools only.",
+  "agents": {},
+  "input": {"url": "https://example.com/"},
+  "spec": {
+    "name": "Best-effort fetch",
+    "description": "Fetch a page; use its text, or a fallback text when the fetch reported an error.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"url": {"type": "string", "minLength": 1}},
+      "required": ["url"],
+      "additionalProperties": false
+    },
+    "start": "fetch",
+    "steps": [
+      {
+        "id": "fetch",
+        "type": "tool",
+        "tool_id": "http.request",
+        "on_error": "continue",
+        "input": {
+          "method": "GET",
+          "url": {"$ref": "input.url"},
+          "timeout_s": 10,
+          "max_response_bytes": 4096
+        },
+        "next": "gate"
+      },
+      {
+        "id": "gate",
+        "type": "branch",
+        "cases": [
+          {"when": {"op": "exists", "left": {"$ref": "steps.fetch.output.error"}}, "next": "fallback"}
+        ],
+        "default": "use_page"
+      },
+      {
+        "id": "fallback",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "source": "fallback",
+              "reason": "{{steps.fetch.output.error.code}}"
+            }
+          }
+        }
+      },
+      {
+        "id": "use_page",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "source": "page",
+              "status": "{{steps.fetch.output.status}}"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

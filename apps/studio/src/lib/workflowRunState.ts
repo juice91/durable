@@ -55,6 +55,8 @@ export interface StepDetail {
   endedAt: string | null;
   /** AC.9: structured-field refs (paths, never values) that resolved to nothing in this step. */
   unresolvedRefs?: string[];
+  /** `on_error: continue`: the tool's error code, from a step_completed with `outcome: "error_kept"`; null otherwise. */
+  errorKept?: string | null;
 }
 
 /** One frame of a loop scope (loops D4): the loop step's id and the 0-based iteration index. */
@@ -267,6 +269,7 @@ function applyStepEvent(d: StepDetail, event: RunEvent, chosen: Map<string, stri
         d.output = data.output;
       }
       d.endedAt = event.ts ?? d.endedAt;
+      if (data.outcome === "error_kept") d.errorKept = str(data.error_code) ?? "error";
       if (Array.isArray(data.unresolved_refs)) {
         d.unresolvedRefs = data.unresolved_refs.filter((ref): ref is string => typeof ref === "string");
       }

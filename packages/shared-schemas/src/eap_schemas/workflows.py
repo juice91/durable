@@ -63,7 +63,7 @@ from pydantic import (
     Tag,
     ValidationError,
     field_validator,
-    model_validator,
+    model_serializer, model_validator,
 )
 
 from eap_schemas._omit import OmitNoneModel
@@ -451,6 +451,14 @@ class _StepBase(BaseModel):
     def _id(cls, value: str) -> str:
         return _check_step_id(value)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _on_error_only_on_tool_steps(cls, data: Any) -> Any:
+        kind = cls.model_fields["type"].default if "type" in cls.model_fields else None
+        if isinstance(data, dict) and "on_error" in data and kind != "tool":
+            raise ValueError(f"on_error is only allowed on tool steps, not on a step of type {kind}")
+        return data
+
     @model_validator(mode="wrap")
     @classmethod
     def _name_the_step(cls, data: Any, handler: Any) -> Any:
@@ -502,6 +510,17 @@ class ToolStep(_WithInput):
 
     type: Literal["tool"] = "tool"
     tool_id: str
+    # "continue": an `{error: {code, ...}}` result is kept as the step's output and the run goes on
+    # (best-effort steps); "fail" (default) fails the run with the error's code.
+    on_error: Literal["fail", "continue"] = "fail"
+
+    @model_serializer(mode="wrap")
+    def _omit_default_on_error(self, handler: Any) -> Any:
+        """The default is left out of the dump, so every spec saved before `on_error` keeps its canonical JSON and hash."""
+        data = handler(self)
+        if isinstance(data, dict) and data.get("on_error") == "fail":
+            del data["on_error"]
+        return data
 
     @field_validator("tool_id")
     @classmethod

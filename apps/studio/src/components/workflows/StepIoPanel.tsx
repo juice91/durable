@@ -157,6 +157,11 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
       </div>
       <p>
         <span data-testid="step-io-state" className={`inline-block rounded border px-2 py-0.5 text-xs ${NODE_STATE_CLASSES[detail.state]}`}>{NODE_STATE_LABELS[detail.state]}</span>
+        {detail.errorKept ? (
+          <span data-testid="step-io-error-kept" title="The tool reported an error; the step kept it as its output and the run went on." className="ml-2 inline-block rounded border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs text-warning-text">
+            error kept: <code className="font-mono">{detail.errorKept}</code>
+          </span>
+        ) : null}
         {detail.startedAt ? <span className="ml-2 text-xs text-muted-foreground">started {formatDateTime(detail.startedAt)}</span> : null}
       </p>
       {iterationLabel ? <p data-testid="step-io-iteration" className="text-caption text-muted-foreground">{iterationLabel}</p> : null}

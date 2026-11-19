@@ -78,11 +78,20 @@ def resolve_pointer(doc: Any, pointer: str) -> Any:
 OTHER_EXAMPLES = {
     "kb-source-sync.json",  # KB Source Synchronization (test_kb_source_workflow_acceptance.py)
     "bluesky-post.json",  # Bluesky post (test_bluesky_post_workflow_acceptance.py)
+    "best-effort-fetch.json",  # on_error: continue (test_best_effort_fetch_example_loads)
 }
 
 
 def test_the_examples_directory_holds_exactly_the_three_loop_examples():
     assert sorted(p.name for p in EXAMPLES_DIR.glob("*.json") if p.name not in OTHER_EXAMPLES) == sorted(EXAMPLES)
+
+
+def test_best_effort_fetch_example_loads():
+    example = load_example("best-effort-fetch.json")
+    spec = WorkflowSpec.model_validate(example["spec"])
+    fetch = next(step for step in spec.steps if step.id == "fetch")
+    assert fetch.on_error == "continue"
+    assert all(getattr(step, "on_error", "fail") == "fail" for step in spec.steps if step.id != "fetch")
 
 
 @pytest.mark.parametrize("name", EXAMPLES)
