@@ -23,6 +23,12 @@ data:
   EAP_MCP_API_SERVER_CIDRS: 10.43.0.1/32,192.168.5.3/32
   EAP_MCP_API_SERVER_PORTS: 443,6443
   OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+  # External OpenTelemetry traces (POST /api/v1/otlp/v1/traces, API key scope `otlp`). Off by default: set
+  # EAP_OTLP_FORWARD_ENDPOINT to http://lgtm:4318/v1/traces to ALSO forward each received request, unchanged
+  # (so not redacted), to the collector; the API's egress to lgtm:4318 is already allowed. The rate limit is
+  # requests per minute per key and per API replica (0 = no limit).
+  EAP_OTLP_FORWARD_ENDPOINT: ""
+  EAP_OTLP_RATE_LIMIT_PER_MINUTE: "600"
 ---
 apiVersion: v1
 kind: ConfigMap
