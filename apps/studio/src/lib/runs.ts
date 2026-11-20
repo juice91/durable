@@ -82,6 +82,10 @@ export interface Run {
   trace_id: string | null;
   conversation_id: string | null;
   turn: number | null;
+  /** An eval run's suite id (from the API's eval runs endpoint). */
+  suite_id?: string | null;
+  /** An eval run's suite name (from the API's eval runs endpoint). */
+  suite_name?: string | null;
 }
 
 export interface RunEventData {

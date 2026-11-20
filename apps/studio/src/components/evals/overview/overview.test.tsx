@@ -138,6 +138,22 @@ describe("Scorers", () => {
     expect(within(rows[1]).getByTestId("scorer-history")).toHaveTextContent("0.62");
   });
 
+  it("shows the target kind and name in the suite tooltip", async () => {
+    responses["/evals/scorers"] = () =>
+      json({
+        items: [
+          scorer("has_hi", {
+            suites: [{ id: "s5", name: "Wf suite", agent_id: null, agent_name: null, workflow_id: "wf1", target_kind: "workflow", target_name: "Triage", case_level_uses: 0 }],
+          }),
+        ],
+        next_cursor: null,
+      });
+    render(<ScorersPage />);
+    const link = await screen.findByRole("link", { name: "Wf suite" });
+    expect(link).toHaveAttribute("href", routes.workflowTests("wf1", { suite: "s5" }));
+    expect(link).toHaveAttribute("title", "Wf suite (workflow Triage)");
+  });
+
   it("links a workflow suite of a scorer to the workflow's Tests tab", async () => {
     responses["/evals/scorers"] = () =>
       json({ items: [scorer("has_hi", { suites: [{ id: "s5", name: "Wf suite", agent_id: null, agent_name: null, workflow_id: "wf1", target_kind: "workflow", target_name: "Triage", case_level_uses: 0 }] })], next_cursor: null });

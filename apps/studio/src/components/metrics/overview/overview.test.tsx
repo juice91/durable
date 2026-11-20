@@ -158,6 +158,34 @@ describe("runLabel", () => {
     expect(runLabel(run({ kind: "workflow", agent_id: null, workflow_id: "w-1" }), {}, { "w-1": "Intake" })).toBe("Workflow: Intake");
     expect(runLabel(run({ kind: "tool", agent_id: null, tool_id: "http.get" }))).toBe("Tool: http.get");
   });
+  it("labels eval runs with the target and suite name when available", () => {
+    expect(
+      runLabel(
+        run({ kind: "eval", agent_id: null, workflow_id: "wf-1" }),
+        {},
+        { "wf-1": "Triage" },
+      ),
+    ).toBe("Test run: Triage");
+    expect(runLabel(run({ kind: "eval", agent_id: null, workflow_id: "1234567890abcdef" }))).toBe("Test run: Workflow 12345678...");
+    // Eval run with agent target
+    expect(
+      runLabel(
+        run({ kind: "eval", agent_id: "a-1" }),
+        { "a-1": "Support bot" },
+      ),
+    ).toBe("Test run: Support bot");
+    expect(runLabel(run({ kind: "eval", agent_id: "a-1" }))).toBe("Test run: Agent a-1");
+    // Eval run with suite name
+    expect(
+      runLabel(
+        run({ kind: "eval", agent_id: null, workflow_id: "wf-1", suite_name: "Q4 suite" }),
+        {},
+        { "wf-1": "Triage" },
+      ),
+    ).toBe("Test run: Triage · Q4 suite");
+    // Eval run without target (shouldn't happen in practice, but handle it)
+    expect(runLabel(run({ kind: "eval", agent_id: null, workflow_id: null }))).toBe("Test run: unknown");
+  });
 });
 
 describe("RecentFailures", () => {
@@ -179,6 +207,36 @@ describe("RecentFailures", () => {
     expect(within(rows[1]).getByText("Needs Attention")).toBeInTheDocument();
     expect(screen.getByTestId("recent-failures-all")).toHaveTextContent("View all 7 in Traces");
     expect(screen.getByTestId("recent-failures-all")).toHaveAttribute("href", routes.traces({ status: "failed,needs_attention" }));
+  });
+
+  it("labels eval runs with the target and suite name when available", () => {
+    const workflowEvalRun = run({
+      kind: "eval",
+      agent_id: null,
+      workflow_id: "wf-1",
+      suite_name: "Q4 suite",
+    });
+    const agentEvalRun = run({
+      kind: "eval",
+      agent_id: "a-1",
+      workflow_id: null,
+      suite_name: "Agent eval suite",
+    });
+
+    render(
+      <RecentFailures
+        runs={[workflowEvalRun, agentEvalRun]}
+        total={2}
+        viewAllHref={routes.traces()}
+        agentNames={{ "a-1": "Support bot" }}
+        workflowNames={{ "wf-1": "Triage" }}
+      />,
+    );
+    const rows = screen.getAllByTestId("recent-failure");
+    // First row: workflow eval run with suite name (target is just the name)
+    expect(within(rows[0]).getByText("Test run: Triage · Q4 suite")).toBeInTheDocument();
+    // Second row: agent eval run with suite name (target is just the name)
+    expect(within(rows[1]).getByText("Test run: Support bot · Agent eval suite")).toBeInTheDocument();
   });
 
   it("shows empty, loading and error states", () => {

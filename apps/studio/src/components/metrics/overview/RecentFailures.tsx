@@ -14,9 +14,9 @@ function short(id: string): string {
 }
 
 /** A plain-text run label (the row is one link, so no nested links): "Support bot",
- * "Workflow: Intake", "Tool: http.get", "Agent 1a2b3c4d...". */
+ * "Workflow: Intake", "Tool: http.get", "Agent 1a2b3c4d...", or "Test run: <target>" for evals. */
 export function runLabel(
-  run: Pick<Run, "kind" | "agent_id" | "tool_id" | "workflow_id">,
+  run: Pick<Run, "kind" | "agent_id" | "tool_id" | "workflow_id" | "suite_name">,
   agentNames: Record<string, string> = {},
   workflowNames: Record<string, string> = {},
 ): string {
@@ -26,6 +26,21 @@ export function runLabel(
     return `Workflow: ${id ? (workflowNames[id] ?? short(id)) : "unknown"}`;
   }
   if (kind === "tool") return `Tool: ${run.tool_id ?? "unknown"}`;
+  if (kind === "eval") {
+    // An eval run: target is a workflow or agent; include suite name if available.
+    const id = run.workflow_id ?? run.agent_id ?? null;
+    const names = run.workflow_id ? workflowNames : agentNames;
+    const prefix = run.workflow_id ? "Workflow" : "Agent";
+    if (!id) {
+      return run.suite_name ? `Test run · ${run.suite_name}` : "Test run";
+    }
+    // Target is the name from the map (like "Triage") or "Workflow <short id>" when not found.
+    const name = names[id] ?? short(id);
+    const target = names[id] ? name : `${prefix} ${short(id)}`;
+    // Base label is "Test run: <target>"; append " · <suite name>" if available.
+    const baseLabel = `Test run: ${target}`;
+    return run.suite_name ? `${baseLabel} · ${run.suite_name}` : baseLabel;
+  }
   if (!run.agent_id) return "Agent: unknown";
   return agentNames[run.agent_id] ?? `Agent ${short(run.agent_id)}`;
 }
