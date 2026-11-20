@@ -41,6 +41,7 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "breakdown-change-": "BreakdownTable p99/change cell per breakdown and key: breakdown-change-<agent|model|provider>-<key> (Task 18)",
   "phase-": "ProcessorList row per processor phase id: phase-<phase> (Task 11)",
   "workflow-row-": "Workflows list row per workflow id",
+  "schedule-last-run-": "WorkflowSchedules last-run cell per schedule id (PR 73)",
   "workflow-step-": "WorkflowGraph node per step id",
   "workflow-node-": "WorkflowRunView graph node per step id",
   "workflow-loop-badge-": "WorkflowGraph loop node's ×n badge per loop step id (LP.6)",
