@@ -11,7 +11,7 @@ def test_builtin_tool_declarations_expose_stable_input_schemas() -> None:
     assert list(TOOL_DECLARATIONS) == [
         "clock.now", "tickets.create", "secrets.request", "kb.source.get", "settings.connection.check",
         "kb.source.sync", "workflow.run.wait", "workflow.run.result", "http.request", "workflow.return",
-        "feed.parse", "json.query", "html.extract", "text.check",
+        "feed.parse", "json.query", "html.extract", "text.check", "clock.sleep",
     ]
     assert TOOL_DECLARATIONS["clock.now"].input_json_schema() == {
         "additionalProperties": False,
@@ -27,6 +27,24 @@ def test_builtin_tool_declarations_expose_stable_input_schemas() -> None:
         "required": ["title", "body"],
         "type": "object",
     }
+
+
+def test_clock_sleep_declaration_is_pure_and_bounded() -> None:
+    """`clock.sleep` takes whole seconds 1..120, is pure, and says it is for pacing inside one durable step."""
+    sleep = TOOL_DECLARATIONS["clock.sleep"]
+    assert sleep.input_json_schema() == {
+        "additionalProperties": False,
+        "properties": {"seconds": {"maximum": 120, "minimum": 1, "type": "integer"}},
+        "required": ["seconds"],
+        "type": "object",
+    }
+    assert (sleep.title, sleep.side_effect, sleep.external_idempotent) == ("Sleep", False, False)
+    assert "pacing" in sleep.description and "one durable step" in sleep.description
+    assert sleep.input_model.model_validate({"seconds": 1}).seconds == 1
+    assert sleep.input_model.model_validate({"seconds": 120}).seconds == 120
+    for bad in ({}, {"seconds": 0}, {"seconds": 121}, {"seconds": 1.5}, {"seconds": "5x"}, {"seconds": 1, "extra": 1}):
+        with pytest.raises(ValidationError):
+            sleep.input_model.model_validate(bad)
 
 
 def test_builtin_tool_declarations_expose_catalog_metadata() -> None:

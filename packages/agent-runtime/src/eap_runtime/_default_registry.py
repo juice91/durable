@@ -1,7 +1,10 @@
 """Default tool registry with demo tools."""
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 from pydantic_ai import RunContext
 
@@ -15,6 +18,12 @@ from eap_runtime._types import RunDeps
 def _clock_now(ctx: RunContext[RunDeps]) -> str:
     """Return current UTC ISO time."""
     return datetime.now(timezone.utc).isoformat()
+
+
+async def _clock_sleep(ctx: RunContext[RunDeps], seconds: Annotated[int, Field(ge=1, le=120)]) -> dict[str, Any]:
+    """Sleep `seconds` (1..120) and report when it finished."""
+    await asyncio.sleep(seconds)
+    return {"slept_seconds": seconds, "finished_at": datetime.now(timezone.utc).isoformat()}
 
 
 def _workflow_return(ctx: RunContext[RunDeps], value: Any, outcome: Literal["completed", "skipped"] = "completed") -> Any:
@@ -72,6 +81,11 @@ def default_registry() -> ToolRegistry:
     registry.register(
         TOOL_DECLARATIONS["tickets.create"],
         _tickets_create,
+    )
+
+    registry.register(
+        TOOL_DECLARATIONS["clock.sleep"],
+        _clock_sleep,
     )
 
     return registry
