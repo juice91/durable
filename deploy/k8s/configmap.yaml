@@ -13,6 +13,9 @@ data:
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
   EAP_ALLOWED_TOOLS: "clock.now,secrets.request,http.request,workflow.return,feed.parse,json.query,text.check,html.extract,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
   EAP_LOKI_URL: http://lgtm:3100
+  # The worker reaches the API's MCP control endpoint as the Architect's run (the `control__*` tools); the bearer is a
+  # two-minute run token signed with a key derived from EAP_SECRETS_KEY, so nothing else is configured.
+  EAP_API_INTERNAL_URL: http://api:8000
   # Cloudflare Workers AI provider (optional; model ids cloudflare:@cf/...). The account id is not a secret; the API token
   # comes from the Secret (CLOUDFLARE_API_TOKEN). Leave both empty to keep the provider off. A gateway id routes every request
   # through Cloudflare AI Gateway (logging, caching, rate limits); empty calls Workers AI directly.

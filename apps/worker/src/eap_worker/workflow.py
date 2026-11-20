@@ -417,6 +417,7 @@ from eap_worker.scoring import score_run_step
 from eap_worker.spans_step import record_spans
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.step_processors import StepProcessorCapability
+from eap_worker.control_bridge import control_toolset_for_run
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
 from eap_worker.pricing import (
@@ -495,9 +496,12 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     # AGUI.7: an AG-UI turn's client tools (`external`: never called here), from the run's recorded
     # declarations (set by _drive_agent); None for every other run.
     client = client_toolset_for_run()
-    if mcp is None and platform is None and client is None:
+    # The Architect's bridge to the MCP control plane (`control__*`): only a spec that lists
+    # `platform.list_capabilities`, which only a built-in agent may (eap_worker.control_bridge).
+    control = control_toolset_for_run(spec)
+    if mcp is None and platform is None and client is None and control is None:
         return builtin
-    return RunToolset(builtin, mcp, platform, client)
+    return RunToolset(builtin, mcp, platform, client, control)
 
 
 def _text_of(event: Any) -> str | None:

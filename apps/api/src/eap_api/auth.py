@@ -143,14 +143,16 @@ WORKFLOW_NOT_FOUND_DETAIL = "Workflow not found"
 
 
 class AgUiPrincipal(BaseModel):
-    """Who calls an AG-UI route: a tenant API key (`kind="api_key"`) or the dev bearer (`"dev"`).
+    """Who calls an AG-UI route: a tenant API key (`kind="api_key"`) or the dev bearer (`"dev"`). The MCP control
+    endpoint also takes `"architect_run"`: a live run of the built-in Architect calling its `control__*` tools
+    (`user_id` is `architect-run:<run id>`; see `eap_api.mcp_control.auth`).
 
     A key carries its scopes and optional allowlists. Both `agent_ids` and `workflow_ids` None is
     a tenant-wide key; once either is set, a None list on the other dimension allows nothing
     (fail closed). `allowed_origins` None means any origin. The dev bearer has no limits. Keys may not run drafts or override the model (D16)."""
 
     tenant_id: str
-    kind: Literal["dev", "api_key"]
+    kind: Literal["dev", "api_key", "architect_run"]
     user_id: str | None = None
     key_id: str | None = None
     scopes: tuple[str, ...] = ()
@@ -174,6 +176,8 @@ class AgUiPrincipal(BaseModel):
     def default_resource_id(self) -> str:
         """The resource of a conversation derived from a thread when the client names none (D3):
         the dev bearer's user id, else `apikey:<key_id>`."""
+        if self.kind == "architect_run":
+            return str(self.user_id)
         return self.user_id if self.kind == "dev" and self.user_id else f"apikey:{self.key_id}"
 
     @property

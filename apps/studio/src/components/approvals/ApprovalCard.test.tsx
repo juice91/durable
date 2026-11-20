@@ -89,6 +89,23 @@ describe("ApprovalCard summary", () => {
     expect(summary.compareDocumentPosition(args) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("reads well for a control__ call: summary first, arguments as a copyable block", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const args = { name: "小天娛樂新聞貼文", agent_id: "xiaotian-post" };
+    render(
+      <ApprovalCard
+        approval={{ ...tool, toolName: "control__eval_suite_create", args, summary: "Create a test suite for an agent or a workflow. With name '小天娛樂新聞貼文', agent_id 'xiaotian-post'." }}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("approval-summary-tool-call-1")).toHaveTextContent("Create a test suite");
+    expect(screen.getByLabelText("Approval for tool control__eval_suite_create")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Copy arguments" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(JSON.stringify(args, null, 2)));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy arguments" })).toHaveAttribute("data-copied", "true"));
+  });
+
   it("shows no summary block when there is none", () => {
     render(<ApprovalCard approval={tool} onRefresh={vi.fn()} />);
     expect(screen.queryByTestId("approval-summary-tool-call-1")).toBeNull();
