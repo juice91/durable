@@ -16,6 +16,8 @@ import {
   findApproval,
   hasActiveApprovalFilters,
   listApprovals,
+  noteApprovalDecided,
+  onPendingChange,
   parseApprovalFilters,
   parseApprovalId,
   raceNotice,
@@ -39,6 +41,8 @@ import { ApprovalStatusBadge } from "./ApprovalStatusBadge";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+/** How long a card that arrived while the inbox was open stays highlighted. */
+const NEW_CARD_HIGHLIGHT_MS = 5_000;
 const labelClass = "text-caption font-medium text-muted-foreground";
 
 function formatWhen(iso: string | null): string {
@@ -82,6 +86,8 @@ export function ApprovalsInbox() {
   // After a lost race (409): the explanation for the open Sheet, keyed by its approval id.
   const [notice, setNotice] = useState<{ id: string; text: string } | null>(null);
   const request = useRef(0);
+  // Cards that just arrived while the inbox is open: highlighted for a few seconds.
+  const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set());
 
   const filterKey = `${filters.status}|${filters.kind ?? ""}|${filters.agent_id ?? ""}`;
 
@@ -140,6 +146,59 @@ export function ApprovalsInbox() {
     }
   }, [filters, nextCursor]);
 
+  const rowsRef = useRef<Approval[]>(rows);
+  const filtersRef = useRef(filters);
+  useEffect(() => {
+    rowsRef.current = rows;
+    filtersRef.current = filters;
+  });
+
+  // Live list: follow the shared pending poll. New cards go in at the top in place; cards that
+  // left the pending list (decided elsewhere) are re-read and put in place.
+  useEffect(() => {
+    let live = true;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const off = onPendingChange(({ items, added, more }) => {
+      const current = filtersRef.current;
+      if (current.status === "pending") {
+        const have = new Set(rowsRef.current.map(approvalId));
+        const incoming = added.filter(
+          (item) => !have.has(approvalId(item)) && (!current.kind || item.kind === current.kind) && (!current.agent_id || item.agent_id === current.agent_id),
+        );
+        if (incoming.length > 0) {
+          setRows((previous) => {
+            const seen = new Set(previous.map(approvalId));
+            return [...incoming.filter((item) => !seen.has(approvalId(item))), ...previous];
+          });
+          const ids = incoming.map(approvalId);
+          setFresh((previous) => new Set([...previous, ...ids]));
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            if (live) setFresh((previous) => new Set([...previous].filter((id) => !ids.includes(id))));
+          }, NEW_CARD_HIGHLIGHT_MS);
+          timers.add(timer);
+        }
+      }
+      if (!more) {
+        const open = new Set(items.map(approvalId));
+        for (const row of rowsRef.current) {
+          const id = approvalId(row);
+          if (row.status !== "pending" || open.has(id)) continue;
+          findApproval(row.run_id, row.approval_key, { kind: row.kind })
+            .then((latest) => {
+              if (live && latest && latest.decision !== null) putFreshRef.current(id, latest);
+            })
+            .catch(() => undefined);
+        }
+      }
+    });
+    return () => {
+      live = false;
+      off();
+      timers.forEach(clearTimeout);
+    };
+  }, []);
+
   const setFilters = useCallback(
     (change: Partial<ApprovalFilters>) => {
       const params = approvalFiltersToParams({ ...filters, ...change });
@@ -180,6 +239,12 @@ export function ApprovalsInbox() {
   const looked = lookup && lookup.id === selectedId ? lookup : null;
   const selected = inRows ?? looked?.approval ?? null;
   const missing = Boolean(selectedId && !selected && looked && looked.approval === null);
+  // Bring a card chosen from a toast (「查看」) into view.
+  useEffect(() => {
+    if (!selectedId || !inRows) return;
+    const row = Array.from(document.querySelectorAll<HTMLElement>("[data-row-id]")).find((el) => el.dataset.rowId === selectedId);
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedId, inRows]);
   const lookupError = missing ? looked?.error ?? null : null;
 
   // A notice belongs to one Sheet: closing it or moving to another approval drops it.
@@ -193,11 +258,17 @@ export function ApprovalsInbox() {
     setLookup({ id, approval: fresh, error: null });
   }, []);
 
+  const putFreshRef = useRef(putFresh);
+  useEffect(() => {
+    putFreshRef.current = putFresh;
+  });
+
   const onDecided = useCallback(
     (approval: Approval, decision: "approved" | "denied") => {
       const id = approvalId(approval);
       setRows((previous) => previous.map((row) => (approvalId(row) === id ? applyDecision(row, decision) : row)));
       setLookup((previous) => (previous && previous.approval && previous.id === id ? { ...previous, approval: applyDecision(previous.approval, decision) } : previous));
+      noteApprovalDecided();
       void refreshPendingApprovals();
       // The card hands over only the decision: re-read the item for who decided and when.
       findApproval(approval.run_id, approval.approval_key, { kind: approval.kind })
@@ -412,6 +483,7 @@ export function ApprovalsInbox() {
           onRowOpen={(row) => sheet.open(approvalId(row))}
           getRowLabel={(row) => `Open the approval for ${APPROVAL_KIND_LABELS[row.kind].toLowerCase()} ${approvalSubject(row)}`}
           getRowTestId={(row) => `approval-row-${approvalId(row)}`}
+          getRowClassName={(row) => (fresh.has(approvalId(row)) ? "bg-fill-selected ring-1 ring-inset ring-ring" : undefined)}
           selectedRowId={selected ? approvalId(selected) : null}
           loading={loading && rows.length === 0}
           error={error}

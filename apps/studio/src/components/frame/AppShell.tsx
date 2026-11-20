@@ -1,5 +1,6 @@
 "use client";
 
+import { PendingApprovalToasts } from "@/components/approvals/PendingApprovalToasts";
 import React, { useCallback } from "react";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { Toaster } from "@/components/ui/Toaster";
@@ -64,6 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <MobileNavDrawer />
           <Toaster />
+          <PendingApprovalToasts />
         </SidePanelProvider>
       </FrameProvider>
     </TooltipProvider>

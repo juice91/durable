@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
-import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, parseSecretRequest, refreshPendingApprovals } from "@/lib/approvals";
+import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, parseSecretRequest, noteApprovalDecided, refreshPendingApprovals } from "@/lib/approvals";
 import { putSecret } from "@/lib/secrets";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
@@ -159,6 +159,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       onDecided?.(decision === "approve" ? "approved" : "denied");
       if (tool) announceToolDecided(decision === "approve" ? "approved" : "denied");
       // The sidebar's pending count (AC.15) drops by one.
+      noteApprovalDecided();
       void refreshPendingApprovals().catch(() => undefined);
       // Stay busy until the view has reloaded: the approval is no longer waiting, and a second
       // click before the card disappears would only earn a 409.
