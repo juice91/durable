@@ -22,8 +22,11 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
     # `http.request` and `workflow.return` come last.
     assert [t["id"] for t in body[3:]] == [
         "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result",
-        "http.request", "workflow.return", "feed.parse", "json.query", "html.extract", "text.check",
+        "http.request", "workflow.return", "feed.parse", "json.query", "html.extract", "text.check", "clock.sleep",
     ]
+    sleep = next(t for t in body if t["id"] == "clock.sleep")
+    assert (sleep["side_effect"], sleep["input_schema"]["properties"]) == (
+        False, {"seconds": {"maximum": 120, "minimum": 1, "type": "integer"}})
     assert all(t["allowed"] for t in body[3:])
     assert {t["id"]: t["side_effect"] for t in body[3:]}["kb.source.sync"] is True
     assert body[:3] == [

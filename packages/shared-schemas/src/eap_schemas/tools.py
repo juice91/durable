@@ -89,6 +89,14 @@ class ClockNowInput(BaseModel):
     parts: bool = False
 
 
+class ClockSleepInput(BaseModel):
+    """Input for ``clock.sleep``: how long to wait, 1 to 120 whole seconds."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seconds: Annotated[int, Field(ge=1, le=120)]
+
+
 class TicketsCreateInput(BaseModel):
     """Input for ``tickets.create``."""
 
@@ -644,6 +652,25 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
                 "rumour_terms": ["allegedly"], "attribution_terms": ["according to reports"],
                 "min_han_ratio": 0.5, "max_verbatim_run": 15,
             },
+        },
+    ),
+    "clock.sleep": ToolDeclaration(
+        id="clock.sleep",
+        title="Sleep",
+        description=(
+            "Waits 1 to 120 whole seconds, then returns {slept_seconds, finished_at} (UTC ISO). For pacing and demos "
+            "(for example a durability demo), not for polling: use workflow.run.wait to wait for a run. Pure. The whole "
+            "sleep happens inside one durable step, so a worker crash during it repeats only this step."
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=ClockSleepInput,
+        example={"seconds": 15},
+        result_example={"slept_seconds": 15, "finished_at": "2026-11-20T09:30:15+00:00"},
+        result_schema={
+            "type": "object",
+            "properties": {"slept_seconds": {"type": "integer"}, "finished_at": {"type": "string", "format": "date-time"}},
+            "required": ["slept_seconds", "finished_at"],
         },
     ),
 }

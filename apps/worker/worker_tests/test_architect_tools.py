@@ -124,9 +124,9 @@ def test_list_approved_tools_excludes_architect_and_platform_tools(engine, tenan
         mcp_lister=lister,
     ))
     ids = [t.id for t in result.tools]
-    assert ids == ["clock.now", "feed.parse", "html.extract", "http.request", "json.query", "secrets.request", "text.check", "tickets.create", "workflow.return"]  # no architect.*, no knowledge.search
+    assert ids == ["clock.now", "clock.sleep", "feed.parse", "html.extract", "http.request", "json.query", "secrets.request", "text.check", "tickets.create", "workflow.return"]  # no architect.*, no knowledge.search
     assert {t.id: t.requires_approval for t in result.tools} == {
-        "clock.now": False, "feed.parse": False, "html.extract": False, "http.request": True, "json.query": False, "secrets.request": True, "text.check": False, "tickets.create": True,
+        "clock.now": False, "clock.sleep": False, "feed.parse": False, "html.extract": False, "http.request": True, "json.query": False, "secrets.request": True, "text.check": False, "tickets.create": True,
         "workflow.return": False}
     assert seen["call"] == (tenant, ["docs"])  # the disabled server is not offered
     assert [(s.id, s.tools) for s in result.mcp_servers] == [("docs", ("read", "search"))]

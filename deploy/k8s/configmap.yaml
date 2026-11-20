@@ -11,7 +11,7 @@ data:
   EAP_LITELLM_EMBEDDING_BASE_URL: http://host.lima.internal:4001
   EAP_ALLOWED_MODELS: "litellm:*,anthropic:*"
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
-  EAP_ALLOWED_TOOLS: "clock.now,secrets.request,http.request,workflow.return,feed.parse,json.query,text.check,html.extract,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
+  EAP_ALLOWED_TOOLS: "clock.now,clock.sleep,secrets.request,http.request,workflow.return,feed.parse,json.query,text.check,html.extract,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
   EAP_LOKI_URL: http://lgtm:3100
   # The worker reaches the API's MCP control endpoint as the Architect's run (the `control__*` tools); the bearer is a
   # two-minute run token signed with a key derived from EAP_SECRETS_KEY, so nothing else is configured.
