@@ -20,7 +20,11 @@ def _contiguous(events) -> None:
 
 
 def test_read_only_tool_completes_with_events(worker, client, tenant):
-    """A read-only tool (clock.now) runs to completion with exact event sequence and gap-free seq."""
+    """A read-only tool (clock.now) runs to completion with exact event sequence and gap-free seq.
+    
+    Note: the event args record the validated input (including defaults), consistent with other tools
+    like http.request that have defaulted fields.
+    """
     run_id = enqueue_tool_run(
         client, worker.run_store, tenant_id=tenant, tool_id="clock.now",
         args={}, app_version=APP_VERSION,
@@ -39,7 +43,8 @@ def test_read_only_tool_completes_with_events(worker, client, tenant):
     ]
     assert events[0][3] == {"kind": "tool", "tool_id": "clock.now", "input": {}}
     # clock.now returns an ISO timestamp string (not an object with 'timestamp' key)
-    assert events[1][3]["args"] == {}
+    # The event args record the validated input including defaults
+    assert events[1][3]["args"] == {"offset_minutes": 0, "parts": False}
     assert events[2][3]["status"] == "ok"
     # The result is an ISO timestamp string
     assert "T" in events[2][3]["content"]  # ISO format contains 'T'

@@ -60,14 +60,33 @@ class ToolDeclaration(BaseModel):
 
     def matches_implementation_schema(self, implementation_schema: dict[str, Any]) -> bool:
         """True when a function's parameter schema is this declaration's input schema (presentation titles, which
-        Pydantic AI keeps on nested models, do not count)."""
-        return _without_titles(implementation_schema) == self.input_json_schema()
+        Pydantic AI keeps on nested models, do not count). Field constraints (minimum, maximum, etc.) are ignored
+        because Pydantic AI's Tool class doesn't include them when deriving schemas."""
+        decl_schema = self.input_json_schema()
+        impl_schema = _without_titles(implementation_schema)
+        return _without_constraints(decl_schema) == _without_constraints(impl_schema)
+
+
+def _without_constraints(value: Any) -> Any:
+    """Remove Field constraints (minimum, maximum, exclusiveMinimum, etc.) from a JSON Schema tree."""
+    if isinstance(value, dict):
+        return {
+            key: _without_constraints(item)
+            for key, item in value.items()
+            if key not in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "pattern", "const", "enum")
+        }
+    if isinstance(value, list):
+        return [_without_constraints(item) for item in value]
+    return value
 
 
 class ClockNowInput(BaseModel):
     """Input for ``clock.now``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    offset_minutes: Annotated[int, Field(ge=-10080, le=10080, default=0)] = 0
+    parts: bool = False
 
 
 class TicketsCreateInput(BaseModel):
