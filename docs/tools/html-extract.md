@@ -56,7 +56,7 @@ characters each; anything else answers `invalid_pattern`. They see the normalise
 - `dropped` counts what was left out: `{scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term}`
   (anchors examined; scanning stops once `limit` links are kept).
 - The title is the anchor's text, else its `title` or `aria-label`, else an image's `alt`; whitespace collapsed, at
-  most 200 characters. An anchor without a title is skipped.
+  most 200 characters. For an image-only link (a thumbnail with no text, `title` or alt) the title is the headline of the enclosing card: the first heading, else the first paragraph, within three levels up, ignoring text inside other links and inside `nav`, `aside`, `footer` or `button`, and only when that card holds no other article link. An anchor still without a title is skipped.
 
 ## Errors
 
