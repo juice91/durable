@@ -174,7 +174,7 @@
 <section data-n="10" id="arch-trade">
 <div class="head">
 <p class="eyebrow">Architecture · 設計取捨</p>
-<h2>架構簡單，解法不是最小</h2>
+<h2>架構精簡，模組可持續擴充</h2>
 </div>
 <table class="tbl rise" style="--i:0">
 <tr><th style="width:18%">決定</th><th style="width:26%">選了</th><th style="width:22%">沒選</th><th style="width:34%">理由與代價</th></tr>
@@ -185,9 +185,9 @@
 <tr><td>Identity 與授權</td><td>外部 IdP + 平台 grants 表</td><td>OpenFGA、OPA、自建登入</td><td>Organization 等於 tenant；資源授權資料本就在 Postgres</td></tr>
 <tr><td>Console</td><td>自寫 Studio</td><td>現成 console</td><td>現成品綁自己的 runtime；代價是最大的自製量</td></tr>
 </table>
-<p class="note">架構簡單：一個 database、兩個 process、一句話的故障模型。解法不是最小：約 36,000 行 Python、89,000 行 TypeScript、102,000 行測試；多出來的全是正確性與 tenant 這一種複雜度。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md" target="_blank" rel="noopener">Architecture</a></p>
+<p class="note">架構精簡：一個 database、兩個 process、一句話的故障模型。模組在這個基礎上延伸：多租戶、審批、記憶、評測都沿用同一套 durable execution 與 tenant 隔離，沒有為新功能再加元件。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md" target="_blank" rel="noopener">Architecture</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
-<aside>Architecture 節收尾。「簡單」與「最小」的區別是要留下的印象：沒有重造 engine，造的是把 engine 接起來的車身。</aside>
+<aside>Architecture 節收尾。重點是精簡的核心讓模組能持續擴充：沒有重造 engine，新模組都建在同一套基礎上。</aside>
 </section>
 <section data-n="11" id="dev-roles">
 <div class="head">
