@@ -11,6 +11,7 @@ export function runKind(run: Pick<Run, "kind" | "agent_id" | "tool_id" | "workfl
   if (run.kind) return run.kind;
   if (run.workflow_id) return "workflow";
   if (run.agent_id === null && run.tool_id) return "tool";
+  if (run.agent_id === null && run.workflow_id === null) return "eval";
   return "agent";
 }
 
@@ -29,8 +30,8 @@ interface RunSubjectProps {
 }
 
 /** What a run executed: an agent (and, for a workflow's agent step, the workflow run it belongs
- * to), a tool, a workflow (linking to its execution view) or a knowledge base ingest (linking to the
- * knowledge base). */
+ * to), a tool, a workflow (linking to its execution view), a knowledge base ingest (linking to the
+ * knowledge base), or an eval run (showing the target agent or workflow). */
 export function RunSubject({ run, agentNames = {}, workflowNames = {}, knowledgeBaseNames = {}, showVersion = false }: RunSubjectProps) {
   const kind = runKind(run);
   if (kind === "workflow") {
@@ -68,6 +69,18 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, knowledge
             {label}
           </a>
         ) : label}
+      </span>
+    );
+  }
+  if (kind === "eval") {
+    // An eval run: target is a workflow or agent; show "Test run: <target>"
+    const id = run.workflow_id ?? run.agent_id ?? null;
+    const names = run.workflow_id ? workflowNames : agentNames;
+    const prefix = run.workflow_id ? "Workflow" : "Agent";
+    const name = id ? (names[id] ?? `${prefix} ${short(id)}`) : "unknown";
+    return (
+      <span data-testid="run-subject" data-kind="eval">
+        Test run: {name}
       </span>
     );
   }
