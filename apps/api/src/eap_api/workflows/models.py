@@ -78,3 +78,28 @@ class WorkflowVersionModel(Base):
     created_by: Mapped[str] = mapped_column(String, nullable=False)
     # 0025: `architect:<run_id>` or `architect-page` for a version the Architect made; NULL otherwise.
     created_via: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkflowExplanationModel(Base):
+    """The cached AI explanation of one published version in one locale (Alembic revision 0034)."""
+
+    __tablename__ = "workflow_explanations"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="workflow_explanations_pkey"),
+        UniqueConstraint("tenant_id", "workflow_id", "version", "locale", name="uq_workflow_explanations_version_locale"),
+        ForeignKeyConstraint(
+            ["tenant_id", "workflow_id"],
+            ["workflows.tenant_id", "workflows.id"],
+            name="fk_workflow_explanations_tenant_workflow",
+            ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, default=lambda: str(uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    workflow_id: Mapped[str] = mapped_column(String, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    locale: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

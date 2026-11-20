@@ -22,6 +22,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
+import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { listWorkflowRuns } from "@/lib/workflows";
@@ -118,6 +119,8 @@ export function WorkflowRunView({
   const setCollapsed = onCollapsedLoopsChange ?? setOwnCollapsed;
   const [run, setRun] = useState<Run | null>(null);
   const [spec, setSpec] = useState<WorkflowSpec | null>(null);
+  // The cached AI explanation of the run's workflow version: each step's note shows in its panel (never generated here).
+  const aiNotes = useWorkflowExplanation(run?.workflow_id ?? "", run?.workflow_version ?? null).notes;
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [status, setStatus] = useState<RunStatus>("queued");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -412,7 +415,7 @@ export function WorkflowRunView({
     </section>
   ) : null;
   const floatingDetail = selectedDetail && layout.stepDetail === "floating" ? (
-    <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
+    <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
   ) : null;
   const rightLeft = layout.leftOccupied > 0 ? layout.leftOccupied + 2 * CANVAS_INSET_PX : CANVAS_INSET_PX;
 
@@ -603,7 +606,7 @@ export function WorkflowRunView({
           <SheetContent size="md" aria-describedby={undefined} data-testid="workflow-step-sheet">
             <SheetHeader title={`Step ${selectedDetail.stepId}`} />
             <SheetBody>
-              <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
+              <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
             </SheetBody>
           </SheetContent>
         </Sheet>
