@@ -340,7 +340,7 @@ class DBOSRunLauncher:
 
     def recovered_run_ids(self, *, since: datetime, until: datetime) -> list[str]:
         """Ids of the DBOS workflows created in `[since - RECOVERED_LOOKBACK, until)` that were resumed at least
-        once (`recovery_attempts > 0`). Child workflows (`{run_id}:seg:{n}` and other `:`-ids) are not runs and
+        once (`recovery_attempts > 1`). Child workflows (`{run_id}:seg:{n}` and other `:`-ids) are not runs and
         are skipped. DBOS has no recovery filter, so this pages the light status rows (no input or output) and
         keeps the few recovered ones; the caller intersects them with the tenant's runs."""
         start = (since - RECOVERED_LOOKBACK).astimezone(UTC).isoformat()
@@ -353,7 +353,7 @@ class DBOSRunLauncher:
                     start_time=start, end_time=end, load_input=False, load_output=False,
                     limit=RECOVERED_PAGE, offset=page * RECOVERED_PAGE,
                 )
-                found += [r.workflow_id for r in rows if (r.recovery_attempts or 0) > 0 and ":" not in r.workflow_id]
+                found += [r.workflow_id for r in rows if (r.recovery_attempts or 0) > 1 and ":" not in r.workflow_id]
                 if len(rows) < RECOVERED_PAGE:
                     break
         except Exception:  # noqa: BLE001

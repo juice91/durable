@@ -175,7 +175,7 @@ def metrics_summary(
     of agent chat requests not answered by the primary model, exhausted runs counted (see
     eap_run_store.metrics; `fallback_rate` null without agent chat requests or exhausted runs).
     Each period also has `recovered_runs`: the tenant's top-level runs that DBOS resumed at least once
-    (`recovery_attempts > 0`, read from the DBOS system database) whose last update falls in the period."""
+    (`recovery_attempts > 1`, read from the DBOS system database) whose last update falls in the period."""
     result = _call(store.summary, q, compare_previous=compare == "previous")
     prev = q.previous()
     result["current"]["recovered_runs"] = _recovered_runs(store, launcher, q)

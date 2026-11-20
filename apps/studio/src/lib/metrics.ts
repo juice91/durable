@@ -76,7 +76,7 @@ export interface MetricValues {
   operations?: Partial<Record<MetricsOperation, UsageValues>>;
   /** Summary periods only (AC.17; absent from older APIs): requests not answered by the primary model. */
   fallback?: FallbackValues;
-  /** Summary periods only: runs DBOS resumed after a restart (`recovery_attempts > 0`) whose last event is in the period. */
+  /** Summary periods only: runs DBOS resumed after a restart (`recovery_attempts > 1`) whose last event is in the period. */
   recovered_runs?: number;
 }
 

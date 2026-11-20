@@ -94,9 +94,13 @@ def _run_json(
     are null (no usage recorded).
 
     `recovery_attempts` is DBOS's count of how often the run's workflow was resumed after a worker crash or
-    a deploy (0 when DBOS has no row yet; RunLauncher.recovery_attempts), `recovered` is `recovery_attempts > 0`.
-    The callers that have a launcher pass it; the others show 0."""
+    a deploy (0 when DBOS has no row yet; RunLauncher.recovery_attempts). DBOS increments this on the first
+    start, so a run that was never recovered shows `recovery_attempts == 1`.
+    `recovered` is `True` only when the run was actually resumed (`recovery_attempts > 1`).
+    `restarts` is the number of times the run was resumed (`max(recovery_attempts - 1, 0)`).
+    The callers that have a launcher pass it; the others show 0 for all three."""
     iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
+    restarts = max(recovery_attempts - 1, 0)
     return {
         "run_id": str(run["id"]),
         "kind": run.get("kind") or "agent",
@@ -114,7 +118,8 @@ def _run_json(
         # A step-by-step run: the worker waits after every top-level step.
         "pause_after_each_step": bool(run.get("pause_after_each_step")),
         "recovery_attempts": recovery_attempts,
-        "recovered": recovery_attempts > 0,
+        "recovered": recovery_attempts > 1,
+        "restarts": restarts,
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],
