@@ -39,6 +39,7 @@ from eap_schemas.workflows import (
     WorkflowSpec,
     iter_refs,
     loop_exit_refs,
+    parse_ref,
     run_concurrency,
     static_execution_bound,
     walk_steps,
@@ -366,6 +367,47 @@ def _ref_segments(path: str) -> tuple[str | None, str | None, str | None, list[s
         return None, None, None, []
     rest = [seg for seg in (match.group("rest") or "").split(".") if seg]
     return match.group("step"), match.group("loop"), match.group("loop_root"), rest
+
+
+def optional_input_ref_warnings(spec: WorkflowSpec) -> list[dict[str, str]]:
+    """One warning per `input.<name>` ref or template placeholder where `<name>` is not in the
+    input schema's `required` list and has no `default` in the schema properties. A run that lacks
+    the input value will fail with `input_ref_missing` when the step evaluates. Warnings, never
+    a refusal; the Architect's publish card prints warnings.
+    
+    Checks step `input` templates, but not branch conditions (they tolerate unknown refs)."""
+    if not spec.input_schema:
+        return []
+    
+    schema = spec.input_schema
+    required = set(schema.get("required", []))
+    properties = schema.get("properties", {})
+    
+    warnings: list[dict[str, str]] = []
+    for where, _, step in _walk_with_paths(spec.steps):
+        # Check step input templates for input.<name> refs with no default
+        for path in iter_refs(step):
+            root, name, _ = parse_ref(path)
+            if root != "input" or name is None:
+                continue
+            # Only warn if the field is explicitly defined in properties (not just allowed)
+            # and is optional without a default
+            prop = properties.get(name)
+            if prop is None:
+                # Field not defined in properties - we can't determine if it has a default
+                continue
+            if not isinstance(prop, dict):
+                continue
+            if name in required:
+                continue
+            if "default" in prop:
+                continue
+            warnings.append({
+                "code": "optional_input_ref_without_default",
+                "path": where,
+                "message": f"step '{step.id}': reads input.{name}, which is optional and has no default; a run without it fails with input_ref_missing",
+            })
+    return warnings
 
 
 def output_ref_checks(

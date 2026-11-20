@@ -51,6 +51,7 @@ from eap_run_store.workflow_checks import (
     agent_step_cost_cap_warnings,
     judge_cost_cap_warnings,
     loop_agent_approval_warnings,
+    optional_input_ref_warnings,
     output_ref_checks,
     reference_problems,
     unpublished_agents,
@@ -374,6 +375,7 @@ def _workflow_problems_and_warnings(
     warnings += loop_agent_approval_warnings(conn, spec, tenant_id)
     warnings += judge_cost_cap_warnings(spec)
     warnings += agent_step_cost_cap_warnings(conn, spec, tenant_id)
+    warnings += optional_input_ref_warnings(spec)
     if problems:
         unpublished = unpublished_agents(conn, spec, tenant_id)
         if unpublished:

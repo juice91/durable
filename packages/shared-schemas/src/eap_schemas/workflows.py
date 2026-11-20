@@ -219,7 +219,11 @@ def parse_ref(path: str) -> tuple[str, str | None, str | None]:
         return "steps", match.group("step"), None
     if match.group("loop") is not None:
         return "loop", match.group("loop"), match.group("loop_root")
-    return "input", None, None
+    # For input refs, extract the first field from the rest group
+    rest = match.group("rest") or ""
+    fields = rest.split(".")
+    name = fields[1] if len(fields) > 1 else None  # fields[0] is empty (the leading .)
+    return "input", name, None
 
 
 def nesting_depth(value: Any, limit: int) -> int:
