@@ -88,7 +88,7 @@ describe("/workflows/[id]", () => {
 
   it("renders the published graph, switches versions and shows run history", async () => {
     await renderDetail();
-    expect(screen.getByTestId("workflow-step-route")).toHaveTextContent("1: input.urgent eq true");
+    expect(screen.getByTestId("workflow-step-route")).toHaveTextContent("input.urgent eq true");
     expect(screen.getByTestId("workflow-node-route")).toHaveAttribute("data-step-type", "branch");
     fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
     await waitFor(() => expect(screen.queryByTestId("workflow-step-route")).toBeNull());

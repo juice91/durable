@@ -88,6 +88,23 @@ export function conditionSummary(when: Expression): string {
   return isRecord(when) && typeof when.op === "string" ? text : truncate(text, MAX_EXPRESSION);
 }
 
+/** One condition as a tree for display: a comparison is a leaf; `all`, `any` and `not` list their clauses. */
+export interface ConditionNode {
+  kind: "leaf" | "all" | "any" | "not";
+  /** The leaf's comparison text ("steps.feed.output.ok eq false"); empty for a combinator. */
+  text: string;
+  clauses: ConditionNode[];
+}
+
+export function conditionTree(when: unknown): ConditionNode {
+  if (isRecord(when)) {
+    if (Array.isArray(when.all)) return { kind: "all", text: "", clauses: when.all.map(conditionTree) };
+    if (Array.isArray(when.any)) return { kind: "any", text: "", clauses: when.any.map(conditionTree) };
+    if ("not" in when && !("op" in when)) return { kind: "not", text: "", clauses: [conditionTree(when.not)] };
+  }
+  return { kind: "leaf", text: expressionText(when), clauses: [] };
+}
+
 /** Every hand-off of a step, in declaration order (a parallel's join last). */
 export function stepEdges(step: WorkflowStep): GraphEdge[] {
   const edge = (target: string, kind: EdgeKind, index: number, label?: string): GraphEdge => ({

@@ -1,4 +1,5 @@
 import React from "react";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { SafeMarkdown } from "@/components/markdown/SafeMarkdown";
 import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
@@ -35,9 +36,11 @@ export function formatValue(value: unknown): string {
 
 function JsonBlock({ value, label }: { value: unknown; label?: string }) {
   return (
-    <pre aria-label={label} className="mt-1 text-xs text-muted-foreground bg-muted p-2 rounded whitespace-pre-wrap break-words">
-      {formatValue(value)}
-    </pre>
+    <CopyableText label={label?.toLowerCase() ?? "payload"} copyText={formatValue(value)} className="mt-1">
+      <pre aria-label={label} className="text-xs text-muted-foreground bg-muted p-2 pr-9 rounded whitespace-pre-wrap break-words">
+        {formatValue(value)}
+      </pre>
+    </CopyableText>
   );
 }
 

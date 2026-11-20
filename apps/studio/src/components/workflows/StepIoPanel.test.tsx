@@ -1,5 +1,5 @@
 import React from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StepDetail } from "@/lib/workflowRunState";
 
@@ -33,7 +33,7 @@ afterEach(() => cleanup());
 describe("StepIoPanel", () => {
   it("labels an untaken branch arm", () => {
     render(<StepIoPanel step={null} detail={detail({ state: "skipped", skipReason: "branch_not_taken" })} onClose={() => undefined} />);
-    expect(screen.getByTestId("step-io-skip-reason")).toHaveTextContent("Skipped: this branch arm was not taken.");
+    expect(screen.getByTestId("step-io-skip-reason")).toHaveTextContent("Not reached: this branch arm was not taken.");
   });
 
   it("labels a step the run ended before reaching, distinctly from an untaken arm", () => {
@@ -75,7 +75,7 @@ describe("StepIoPanel", () => {
     const output = { summary: "<img src=x onerror=alert(1)>", note: "<b>bold</b>" };
     const { container } = render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "agent", started: true, hasOutput: true, output })} onClose={() => undefined} />);
     const block = screen.getByTestId("step-io-output");
-    expect(block.previousElementSibling).toHaveTextContent("Structured output");
+    expect(block.parentElement?.previousElementSibling).toHaveTextContent("Structured output");
     expect(block).toHaveAttribute("data-output-format", "json");
     expect(block.textContent).toContain("<img src=x onerror=alert(1)>");
     expect(block.innerHTML).toContain("&lt;img src=x onerror=alert(1)&gt;");
@@ -112,5 +112,29 @@ describe("StepIoPanel: error kept (on_error: continue)", () => {
   it("shows no badge for an ordinary completed step", () => {
     render(<StepIoPanel step={null} detail={detail({ state: "completed", stepType: "tool", started: true, hasOutput: true, output: { ok: true } })} onClose={() => undefined} />);
     expect(screen.queryByTestId("step-io-error-kept")).toBeNull();
+  });
+});
+
+describe("StepIoPanel copy", () => {
+  it("copies the raw JSON of the input and the output, and the step id", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const input = { a: 1, nested: { b: [1, 2] } };
+    render(<StepIoPanel step={null} detail={detail({ stepId: "feed_gate", state: "completed", started: true, hasOutput: true, input, output: { ok: true } })} onClose={() => undefined} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy input" })); });
+    expect(writeText).toHaveBeenLastCalledWith(JSON.stringify(input, null, 2));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy output" })); });
+    expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({ ok: true }, null, 2));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy step id" })); });
+    expect(writeText).toHaveBeenLastCalledWith("feed_gate");
+    expect(screen.getByTestId("step-io-input").parentElement?.className).toContain("select-text");
+  });
+
+  it("copies an error", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<StepIoPanel step={null} detail={detail({ state: "failed", started: true, error: "boom", errorCode: "E1" })} onClose={() => undefined} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy error" })); });
+    expect(writeText).toHaveBeenLastCalledWith("boom\nError code: E1");
   });
 });

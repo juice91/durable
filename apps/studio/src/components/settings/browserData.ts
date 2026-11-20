@@ -12,6 +12,7 @@ import {
   LAST_AGENT_KEY,
 } from "@/components/agentPage/agentPageModel";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
+import { NOT_REACHED_OPEN_KEY } from "@/lib/notReached";
 import { RUNS_SHOW_SKIPPED_KEY } from "@/lib/showSkipped";
 import { MEMORY_CARD_KEY } from "@/components/memory/memoryModel";
 import { TRACE_COLUMNS_STORAGE_KEY } from "@/lib/traces";
@@ -95,6 +96,14 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Skipped runs",
     description: "Whether the Traces list and a workflow's run history also list skipped runs (nothing to do).",
     keys: [RUNS_SHOW_SKIPPED_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "run-not-reached",
+    label: "Steps not reached",
+    description: "Whether a workflow run's step list shows the steps the run never reached (folded away unless opened).",
+    keys: [NOT_REACHED_OPEN_KEY],
     prefixes: [],
     clearGroup: "layout",
   },

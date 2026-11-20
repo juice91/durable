@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyableText } from "@/components/ui/CopyableText";
 import React, { createContext, useContext, useMemo, useState } from "react";
 import Link from "next/link";
 import { useAuiState, type TextMessagePartProps, type ToolCallMessagePartProps } from "@assistant-ui/react";
@@ -109,16 +110,20 @@ export function ToolCallCard({ toolCallId, toolName, args, result }: ToolCallMes
         <CollapsibleContent className="space-y-2 border-t border-border px-3 py-2">
           <div>
             <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
-            <pre data-testid="tool-call-args" className={monoBlock}>
-              {json(args)}
-            </pre>
+            <CopyableText label="arguments" copyText={json(args)}>
+              <pre data-testid="tool-call-args" className={`${monoBlock} pr-9`}>
+                {json(args)}
+              </pre>
+            </CopyableText>
           </div>
           {result !== undefined ? (
             <div>
               <p className="mb-1 text-caption font-medium text-muted-foreground">Result</p>
-              <pre data-testid="tool-call-result" className={monoBlock}>
-                {json(result)}
-              </pre>
+              <CopyableText label="result" copyText={json(result)}>
+                <pre data-testid="tool-call-result" className={`${monoBlock} pr-9`}>
+                  {json(result)}
+                </pre>
+              </CopyableText>
             </div>
           ) : null}
         </CollapsibleContent>
