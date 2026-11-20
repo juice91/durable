@@ -181,6 +181,8 @@ def test_invalid_step_ids_rejected():
 def test_status_for_end():
     assert status_for_end("run_completed", {"output": "x"}) == "completed"
     assert status_for_end("run_completed") == "completed"
+    assert status_for_end("run_completed", {"output": "x", "outcome": "skipped"}) == "skipped"
+    assert status_for_end("run_completed", {"output": "x", "outcome": "completed"}) == "completed"
     assert status_for_end("run_failed", {"status": "failed", "error_code": "run_cancelled"}) == "failed"
     assert status_for_end("run_failed", {"status": "needs_attention"}) == "needs_attention"
     assert status_for_end("run_failed", {}) == "failed"

@@ -632,7 +632,7 @@ export function failureReason(result: EvalCaseResult): string | null {
 
 /** A run that will not produce more results. */
 export function isFinishedStatus(status: string | null | undefined): boolean {
-  return status === "completed" || status === "failed" || status === "needs_attention";
+  return status === "completed" || status === "skipped" || status === "failed" || status === "needs_attention";
 }
 
 // ---------------------------------------------------------------------------- expected output

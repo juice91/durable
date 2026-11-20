@@ -521,7 +521,7 @@ export { formatDuration } from "./format";
 
 /** Run duration: started_at → finished_at when recorded, else created_at → updated_at for a finished run. */
 export function runDurationMs(run: TraceRun): number | null {
-  const terminal = ["completed", "failed", "needs_attention"].includes(run.display_status);
+  const terminal = ["completed", "skipped", "failed", "needs_attention"].includes(run.display_status);
   const start = ms(run.started_at) ?? ms(run.created_at);
   const end = ms(run.finished_at) ?? (terminal ? ms(run.updated_at) : null);
   if (start === null || end === null) return null;

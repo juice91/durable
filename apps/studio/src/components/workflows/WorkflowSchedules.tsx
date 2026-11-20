@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
-import { deleteSchedule, listSchedules, scheduleState, updateSchedule, type WorkflowSchedule } from "@/lib/schedules";
+import { deleteSchedule, lastRunText, listSchedules, scheduleState, updateSchedule, type WorkflowSchedule } from "@/lib/schedules";
 import type { WorkflowSpec } from "@/lib/workflows";
 import { ScheduleDialog } from "./ScheduleDialog";
 
@@ -116,7 +116,13 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
       id: "state", header: "State",
       cell: (row) => {
         const text = scheduleState(row);
-        return <span data-state={row.active ? "active" : row.last_error ? "stopped" : "paused"} className={row.last_error && !row.active ? "text-destructive-text" : undefined}>{text}</span>;
+        const lastRun = lastRunText(row);
+        return (
+          <span className="flex min-w-0 flex-col">
+            <span data-state={row.active ? "active" : row.last_error ? "stopped" : "paused"} className={row.last_error && !row.active ? "text-destructive-text" : undefined}>{text}</span>
+            {lastRun ? <span data-testid={`schedule-last-run-${row.id}`} data-status={row.last_run_status} className="text-caption text-muted-foreground">{lastRun}</span> : null}
+          </span>
+        );
       },
     },
     {

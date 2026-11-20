@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, cast, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, distinct_on
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from eap_run_store.cursor import RunCursor
@@ -129,6 +130,35 @@ class ScheduleStore:
             items = [_schedule_dict(r) for r in session.scalars(stmt)]
         next_before = RunCursor.after(items[-1]).encode() if len(items) == limit and items else None
         return items, next_before
+
+    def last_runs(self, tenant_id: str, schedule_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """The newest run each schedule's ticks created: {schedule_id: {run_id, status, detail}}
+        (absent for a schedule that never ran). `detail` is the `status` string of a finished run's JSON
+        object output (a "nothing to do" exit such as `outside_slot`), else None."""
+        if not schedule_ids:
+            return {}
+        from eap_run_store.store import RunModel
+
+        stmt = (
+            select(RunModel.schedule_id, RunModel.id, RunModel.status, RunModel.output)
+            .where(RunModel.tenant_id == tenant_id, RunModel.schedule_id.in_(schedule_ids))
+            .ext(distinct_on(RunModel.schedule_id))
+            .order_by(RunModel.schedule_id, RunModel.created_at.desc(), RunModel.id.desc())
+        )
+        with self.Session() as session:
+            rows = session.execute(stmt).all()
+        out: dict[str, dict[str, Any]] = {}
+        for schedule_id, run_id, status, output in rows:
+            detail = None
+            if status in ("completed", "skipped") and isinstance(output, str) and output.startswith("{"):
+                try:
+                    value = json.loads(output)
+                except ValueError:
+                    value = None
+                if isinstance(value, dict) and isinstance(value.get("status"), str):
+                    detail = value["status"][:64]
+            out[schedule_id] = {"run_id": run_id, "status": status, "detail": detail}
+        return out
 
     def update(
         self, tenant_id: str, schedule_id: str, *, expected_revision: int | None = None, **fields: Any

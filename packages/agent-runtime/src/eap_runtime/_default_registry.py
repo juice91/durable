@@ -1,7 +1,7 @@
 """Default tool registry with demo tools."""
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import RunContext
 
@@ -17,8 +17,8 @@ def _clock_now(ctx: RunContext[RunDeps]) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _workflow_return(ctx: RunContext[RunDeps], value: Any) -> Any:
-    """Return the value unchanged."""
+def _workflow_return(ctx: RunContext[RunDeps], value: Any, outcome: Literal["completed", "skipped"] = "completed") -> Any:
+    """Return the value unchanged (`outcome` only classes the workflow run that ends here)."""
     return value
 
 

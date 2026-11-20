@@ -185,3 +185,27 @@ def test_pausing_skips_revalidation_of_cron_and_input(api):
     # resuming still validates
     r = client.patch(f"{API}/workflows/schedules/{sid}", json={"active": True}, headers=h)
     assert r.status_code == 422, r.text
+
+
+def test_schedule_reports_its_last_run_status_and_detail(api):
+    client, app, tenant_of = api
+    tenant, h = tenant_of()
+    wf = publish_demo(client, h)
+    sid = make(client, h, wf).json()["id"]
+    first = client.get(f"{API}/workflows/schedules/{sid}", headers=h).json()
+    assert first["last_run_id"] is None and first["last_run_status"] is None and first["last_run_detail"] is None
+    older, newer = str(uuid.uuid4()), str(uuid.uuid4())
+    with app.state.database_engine.begin() as conn:
+        for run_id, minute, status, output in (
+            (older, 1, "completed", '{"posted":true}'), (newer, 2, "skipped", '{"status":"outside_slot"}'),
+        ):
+            conn.execute(
+                text("INSERT INTO runs (id, tenant_id, kind, status, workflow_id, workflow_version, schedule_id, output, created_at, updated_at)"
+                     " VALUES (:i, :t, 'workflow', :s, :w, 1, :sid, :o, :c, :c)"),
+                {"i": run_id, "t": tenant, "s": status, "w": wf, "sid": sid, "o": output,
+                 "c": datetime(2026, 1, 1, 0, minute, tzinfo=timezone.utc)},
+            )
+    got = client.get(f"{API}/workflows/schedules/{sid}", headers=h).json()
+    assert (got["last_run_id"], got["last_run_status"], got["last_run_detail"]) == (newer, "skipped", "outside_slot")
+    listed = client.get(f"{API}/workflows/{wf}/schedules", headers=h).json()["items"][0]
+    assert listed["last_run_status"] == "skipped" and listed["last_run_detail"] == "outside_slot"

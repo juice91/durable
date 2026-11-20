@@ -9,6 +9,8 @@ import { listWorkflowRuns } from "@/lib/workflows";
 import { listSchedules } from "@/lib/schedules";
 import { isTerminal } from "@/lib/workflowRunState";
 import { RerunButton } from "./RerunButton";
+import { ShowSkippedToggle } from "@/components/runs/ShowSkippedToggle";
+import { splitSkipped, useShowSkipped } from "@/lib/showSkipped";
 import { routes } from "@/lib/routes";
 import { durationBetween, formatDuration } from "@/lib/format";
 
@@ -44,7 +46,12 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
   // Every load (effect or Refresh button) takes a ticket; only the latest one may write state.
   const loadSeq = useRef(0);
   const loadedRuns = loaded && loaded.workflowId === workflowId ? loaded.runs : null;
-  const runs = loadedRuns && limit !== undefined ? loadedRuns.slice(0, limit) : loadedRuns;
+  const [showSkipped, setShowSkipped] = useShowSkipped();
+  const windowRuns = loadedRuns && limit !== undefined ? loadedRuns.slice(0, limit) : loadedRuns;
+  // Skipped runs ("nothing to do" exits of a schedule) are hidden unless asked for; the Recent runs card
+  // (a `limit`) shows its newest runs of any kind, so it fills up with the others instead.
+  const split = windowRuns ? splitSkipped(windowRuns, showSkipped) : null;
+  const runs = split ? split.visible : null;
   const panel = variant === "panel";
 
   const load = useCallback(async () => {
@@ -96,12 +103,19 @@ export function WorkflowRunHistory({ workflowId, refreshKey = 0, limit, title = 
     >
       <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
         <h2 id="workflow-runs-heading" className={panel ? "text-label font-semibold text-foreground" : "text-title font-semibold text-foreground"}>{title}</h2>
-        <button type="button" onClick={() => void load()} disabled={loading} className="rounded-md border border-border px-2 py-0.5 text-caption text-foreground outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        <div className="flex items-center gap-2">
+          <ShowSkippedToggle show={showSkipped} onChange={setShowSkipped} count={split?.skippedCount ?? 0} />
+          <button type="button" onClick={() => void load()} disabled={loading} className="rounded-md border border-border px-2 py-0.5 text-caption text-foreground outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
       </div>
       {error ? <p role="alert" className="text-sm text-destructive-text">{error}</p> : null}
-      {runs && runs.length === 0 ? <p className="text-label text-muted-foreground">No runs yet.</p> : null}
+      {runs && runs.length === 0 ? (
+        <p className="text-label text-muted-foreground">
+          {split && split.skippedCount > 0 ? `No runs to show: ${split.skippedCount} skipped.` : "No runs yet."}
+        </p>
+      ) : null}
       {runs && runs.length > 0 ? (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-label" aria-label="Workflow runs">

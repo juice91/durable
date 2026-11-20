@@ -158,3 +158,15 @@ def test_summary_operations_split_sums_to_totals(engine, seeded):
     # Under an operation filter the other operations are zero.
     filtered = MetricsStore(engine).summary(_q(tenant, operation="chat"))["current"]["operations"]
     assert filtered["chat"]["requests"] == 1 and filtered["embedding"]["requests"] == 0
+
+
+def test_skipped_runs_are_counted_apart_from_completed_and_failed(engine, seeded):
+    tenant, _ = seeded
+    at = BASE + timedelta(hours=1)
+    with engine.begin() as conn:
+        for _ in range(3):
+            _run(conn, tenant, "skipped", at)
+    runs = MetricsStore(engine).summary(_q(tenant))["current"]
+    assert runs["skipped"] == 3 and runs["completed"] == 2 and runs["failed"] == 1
+    assert runs["runs"] == 6 and runs["in_progress"] == 0
+    assert runs["error_rate"] == pytest.approx(1 / 3)  # skipped runs are left out of the rate

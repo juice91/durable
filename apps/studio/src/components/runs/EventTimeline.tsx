@@ -24,7 +24,7 @@ interface EventTimelineProps {
   status?: RunStatus;
 }
 
-const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["completed", "failed", "needs_attention"]);
+const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["completed", "skipped", "failed", "needs_attention"]);
 
 /** Event payload values are JSON: text stays as is, anything else is shown as pretty JSON (a tool
  * run's input and result are objects, which React cannot render as children). */
@@ -471,7 +471,11 @@ function EventItem({ event }: EventItemProps) {
         }
         return (
           <div className="text-sm">
-            <span className="text-success font-semibold">Run completed successfully</span>
+            {event.data.outcome === "skipped" ? (
+              <span className="font-semibold text-muted-foreground">Run skipped (nothing to do)</span>
+            ) : (
+              <span className="text-success font-semibold">Run completed successfully</span>
+            )}
             {/* A tool run's end event carries the tool result (any JSON value) */}
             {event.data.result !== undefined && <JsonBlock value={event.data.result} label="Run result" />}
             {/* AC.4: a structured agent's validated object. */}

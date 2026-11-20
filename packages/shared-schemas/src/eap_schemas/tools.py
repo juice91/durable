@@ -180,11 +180,15 @@ with warnings.catch_warnings():
 
 
 class WorkflowReturnInput(BaseModel):
-    """Input for ``workflow.return``: any JSON value."""
+    """Input for ``workflow.return``: any JSON value, and optionally how the run it ends is classed.
+
+    ``outcome: "skipped"`` ends the run `skipped` (a "nothing to do" exit: outside a time slot, already
+    posted, nothing new); the value is still the run's output. Absent, the run is `completed`."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     value: Any
+    outcome: Literal["completed", "skipped"] = "completed"
 
 
 FEED_PARSE_TOOL_ID = "feed.parse"
@@ -488,7 +492,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         title="Return a value",
         description=(
             "Return the given value unchanged. As a workflow's last step it shapes the run's output; with a value "
-            "{error: {code, message}} it ends the run with that stable error code"
+            "{error: {code, message}} it ends the run with that stable error code; with outcome \"skipped\" "
+            "(default \"completed\") the run ends `skipped`, for a \"nothing to do\" exit"
         ),
         side_effect=False,
         external_idempotent=False,

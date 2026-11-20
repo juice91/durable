@@ -455,7 +455,7 @@ async def _case_result(
         failure = classify(exc)
         result = {"status": "failed", "error_code": failure.code}
     crash_point("eval_child_done", event_key=f"position:{case.position}")
-    completed = result.get("status") == "completed"
+    completed = result.get("status") in ("completed", "skipped")  # a skipped workflow run has its output too
     output = None
     if completed:
         if workflow:

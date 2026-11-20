@@ -1,5 +1,5 @@
 import React from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Run } from "@/lib/runs";
 
@@ -26,8 +26,45 @@ function deferred() {
   return { promise, resolve };
 }
 
-beforeEach(() => wfMock.listWorkflowRuns.mockReset());
+beforeEach(() => {
+  wfMock.listWorkflowRuns.mockReset();
+  window.localStorage.clear();
+});
 afterEach(() => cleanup());
+
+describe("WorkflowRunHistory skipped runs", () => {
+  const skipped = (id: string): Run => ({ ...run(id, "wf-s"), status: "skipped", display_status: "skipped" });
+  const page = { items: [run("done0001", "wf-s"), skipped("skip0001"), skipped("skip0002")], next_before: null };
+
+  it("hides skipped runs by default and offers Show skipped (n)", async () => {
+    wfMock.listWorkflowRuns.mockResolvedValue(page);
+    render(<WorkflowRunHistory workflowId="wf-s" />);
+    expect(await screen.findByTestId("workflow-run-row-done0001")).toBeInTheDocument();
+    expect(screen.queryByTestId("workflow-run-row-skip0001")).toBeNull();
+    expect(screen.getByTestId("show-skipped-toggle")).toHaveTextContent("Show skipped (2)");
+  });
+
+  it("the toggle lists them with a grey Skipped badge and remembers the choice", async () => {
+    wfMock.listWorkflowRuns.mockResolvedValue(page);
+    render(<WorkflowRunHistory workflowId="wf-s" />);
+    fireEvent.click(await screen.findByTestId("show-skipped-toggle"));
+    const row = screen.getByTestId("workflow-run-row-skip0001");
+    expect(row).toHaveAttribute("data-status", "skipped");
+    expect(within(row).getByTestId("status-pill")).toHaveTextContent("Skipped");
+    expect(window.localStorage.getItem("studio.runs.show-skipped")).toBe("true");
+    cleanup();
+    render(<WorkflowRunHistory workflowId="wf-s" />);
+    expect(await screen.findByTestId("workflow-run-row-skip0001")).toBeInTheDocument();
+    expect(screen.getByTestId("show-skipped-toggle")).toHaveTextContent("Hide skipped (2)");
+  });
+
+  it("has no toggle when no run is skipped", async () => {
+    wfMock.listWorkflowRuns.mockResolvedValue({ items: [run("done0001", "wf-s")], next_before: null });
+    render(<WorkflowRunHistory workflowId="wf-s" />);
+    await screen.findByTestId("workflow-run-row-done0001");
+    expect(screen.queryByTestId("show-skipped-toggle")).toBeNull();
+  });
+});
 
 describe("WorkflowRunHistory", () => {
   it("tags a scheduled run with the schedule's name, or just Scheduled before names load", async () => {

@@ -14,7 +14,7 @@ the semantic recall and index embeddings). Bounds: `from < to`, a range of at mo
 buckets, at most 50 breakdown groups; all 422 with a fixed message. A query that exceeds the 5 s
 statement timeout answers 503. `cost_usd` is a decimal string (same form as the run API); latency
 is in milliseconds (float, null when no run in the period has finished); `error_rate` is
-`failed / (completed + failed + needs_attention)`, null when no run has finished.
+`failed / (completed + failed + needs_attention)` (skipped runs are counted apart and left out), null when no run has finished.
 """
 
 from __future__ import annotations

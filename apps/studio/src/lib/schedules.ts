@@ -17,6 +17,11 @@ export interface WorkflowSchedule {
   /** Why the worker stopped the schedule ("input_schema_errors: ..."); null while healthy. */
   last_error: string | null;
   last_fired_at: string | null;
+  /** The newest run a tick of this schedule created: its id and status (null before the first run). */
+  last_run_id?: string | null;
+  last_run_status?: string | null;
+  /** The `status` of that run's JSON output (`outside_slot`, `slot_done`): why a skipped run had nothing to do. */
+  last_run_detail?: string | null;
   next_fire_at: string | null;
   created_at: string;
   updated_at: string;
@@ -111,4 +116,11 @@ export async function deleteSchedule(id: string): Promise<void> {
 export function scheduleState(schedule: Pick<WorkflowSchedule, "active" | "last_error">): string {
   if (schedule.active) return "Active";
   return schedule.last_error ? `Stopped: ${schedule.last_error}` : "Paused";
+}
+
+/** "last run: skipped (outside_slot)"; null before the schedule's first run. */
+export function lastRunText(schedule: Pick<WorkflowSchedule, "last_run_status" | "last_run_detail">): string | null {
+  if (!schedule.last_run_status) return null;
+  const status = schedule.last_run_status.replace(/_/g, " ");
+  return `last run: ${status}${schedule.last_run_detail ? ` (${schedule.last_run_detail})` : ""}`;
 }

@@ -32,7 +32,7 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
 }
 
 /** `waiting_approval` (AC.6) is a display status only: a running run with an open tool approval. */
-export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval" | "completed" | "failed" | "needs_attention";
+export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval" | "completed" | "skipped" | "failed" | "needs_attention";
 
 /**
  * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
@@ -176,7 +176,7 @@ export interface SubscribeOptions {
 }
 
 const TERMINAL_EVENT_TYPES = new Set(["run_completed", "run_failed"]);
-const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL_RUN_STATUSES = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 export async function startRun(
   agentId: string,

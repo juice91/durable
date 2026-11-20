@@ -179,7 +179,7 @@ def materialise_spans(engine: Any, tenant_id: str, run_id: UUID | str) -> int:
             "span_id": f"run:{run['id']}", "parent_id": None, "kind": "run", "name": str(run.get("name") or "run"),
             "start": run.get("started_at") or run["created_at"],
             "end": run.get("finished_at") or run.get("updated_at"),
-            "status": "ok" if run["status"] == "completed" else "error",
+            "status": "ok" if run["status"] in ("completed", "skipped") else "error",
             "agent_id": run.get("agent_id"), "workflow_id": run.get("workflow_id"), "model": run.get("model_id"),
         }]
     return SpanStore(engine).replace_for_run(tenant_id, run_id, spans)
