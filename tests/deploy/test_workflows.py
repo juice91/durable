@@ -56,12 +56,35 @@ SAME_REPO_ONLY = (
 )
 
 
+CI_RUNNER_EXPRESSION = "${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}"
+
+
+def _may_be_self_hosted(job: dict[str, Any]) -> bool:
+    runs_on = job.get("runs-on", [])
+    # ci.yml picks its runner from the CI_RUNNER variable, so any of its jobs may land on self-hosted.
+    return "self-hosted" in runs_on or runs_on == CI_RUNNER_EXPRESSION
+
+
+def _guarded(job: dict[str, Any]) -> bool:
+    return " ".join(job.get("if", "").split()).startswith(f"({SAME_REPO_ONLY})") or " ".join(
+        job.get("if", "").split()
+    ) == SAME_REPO_ONLY
+
+
+def test_ci_runs_on_defaults_to_hosted_and_reads_only_ci_runner():
+    workflow = _load("ci.yml")
+    for name, job in workflow["jobs"].items():
+        assert job["runs-on"] == CI_RUNNER_EXPRESSION, name
+        assert "timeout-minutes" in job, name
+    text = (WORKFLOW_DIR / "ci.yml").read_text()
+    assert set(re.findall(r"\bvars\.(\w+)", text)) == {"CI_RUNNER"}
+    assert text.count("|| 'ubuntu-latest' }}") == len(workflow["jobs"])
+
+
 def test_self_hosted_workflows_never_run_fork_code():
     for name in WORKFLOW_NAMES:
         workflow = _load(name)
-        self_hosted = [
-            job for job in workflow["jobs"].values() if "self-hosted" in job.get("runs-on", [])
-        ]
+        self_hosted = [job for job in workflow["jobs"].values() if _may_be_self_hosted(job)]
         if not self_hosted:
             continue
         events = workflow.get("on", {})
@@ -69,10 +92,11 @@ def test_self_hosted_workflows_never_run_fork_code():
         for forbidden in ("pull_request_target", "issue_comment"):
             assert forbidden not in events, name
         if "pull_request" in events:
-            # Only CI Heavy runs for pull requests, and only for branches of this repository.
-            assert name == "ci-heavy.yml", name
+            # Only CI Heavy and CI (when CI_RUNNER is set) run for pull requests, and only for
+            # branches of this repository.
+            assert name in ("ci-heavy.yml", "ci.yml"), name
             for job in self_hosted:
-                assert " ".join(job["if"].split()) == SAME_REPO_ONLY, name
+                assert _guarded(job), name
         push = events.get("push")
         if isinstance(push, dict):
             assert push.get("branches") == ["main"], name
@@ -108,11 +132,12 @@ def test_no_workflow_lists_issue_comment_or_a_write_permission():
 
 def test_hosted_path_filters_skip_unaffected_jobs():
     ci = _load("ci.yml")
-    assert "if" not in ci["jobs"]["changes"]
-    assert ci["jobs"]["python"]["if"] == "needs.changes.outputs.python == 'true'"
-    assert ci["jobs"]["studio"]["if"] == "needs.changes.outputs.studio == 'true'"
-    assert ci["jobs"]["studio-test"]["if"] == "needs.changes.outputs.studio == 'true'"
-    assert ci["jobs"]["deploy-checks"]["if"] == "needs.changes.outputs.deploy == 'true'"
+    def condition(job: str) -> str:
+        return " ".join(ci["jobs"][job]["if"].split())
+
+    assert condition("changes") == SAME_REPO_ONLY
+    for job, output in (("python", "python"), ("studio", "studio"), ("studio-test", "studio"), ("deploy-checks", "deploy")):
+        assert condition(job) == f"({SAME_REPO_ONLY}) && needs.changes.outputs.{output} == 'true'", job
     filters = ci["jobs"]["changes"]["steps"][1]["with"]["filters"]
     assert "packages/**" in filters
     assert "apps/studio/**" in filters
@@ -156,6 +181,7 @@ def test_studio_vitest_is_sharded_in_five_jobs_and_static_checks_run_once():
     test_runs = [step.get("run", "") for step in tests["steps"]]
     assert any('vitest run --shard="${SHARD}/5" "${args[@]}"' in run for run in test_runs)
     assert not any("lint" in run or "tsc" in run for run in test_runs)
+    assert _load("ci.yml")["jobs"]["changes"]["timeout-minutes"] == "10"
     assert static["timeout-minutes"] == "30"
     assert tests["timeout-minutes"] == "30"
 
@@ -230,7 +256,7 @@ def test_ci_studio_tests_use_vitest_changed_on_pull_requests_only():
     assert shard["env"]["VITEST_ARGS"] == "${{ steps.select.outputs.vitest_args }}"
     assert "--shard=" in shard["run"]
     # Lint and tsc stay behind the studio path filter (they never ran for a Python-only change).
-    assert _load("ci.yml")["jobs"]["studio"]["if"] == "needs.changes.outputs.studio == 'true'"
+    assert _load("ci.yml")["jobs"]["studio"]["if"].endswith("needs.changes.outputs.studio == 'true'")
 
 
 def test_selection_reads_labels_and_is_full_by_default_off_pull_requests():
