@@ -1,3 +1,4 @@
+from eap_schemas.tools import TOOL_DECLARATIONS
 """Authenticated tool catalog API tests."""
 
 
@@ -28,12 +29,15 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
         {
             "id": "clock.now",
             "title": "Current time",
-            "description": "Returns current UTC ISO time",
+            "description": TOOL_DECLARATIONS["clock.now"].description,
             "side_effect": False,
             "external_idempotent": False,
             "input_schema": {
                 "additionalProperties": False,
-                "properties": {},
+                "properties": {
+                    "offset_minutes": {"default": 0, "maximum": 10080, "minimum": -10080, "type": "integer"},
+                    "parts": {"default": False, "type": "boolean"},
+                },
                 "type": "object",
             },
             "allowed": True,
