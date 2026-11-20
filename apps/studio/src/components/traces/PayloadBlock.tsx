@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyableText } from "@/components/ui/CopyableText";
 import React, { useState } from "react";
 
 /** Characters shown before a payload is collapsed behind "Show all". */
@@ -64,12 +65,14 @@ export function PayloadBlock({ label, value, truncatedBytes }: PayloadBlockProps
           Truncated by the server: showing a preview of {formatBytes(truncatedBytes)}.
         </p>
       ) : null}
-      <pre
-        id={`${id}-body`}
-        className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-2 font-mono text-xs text-card-foreground"
-      >
-        {shown}
-      </pre>
+      <CopyableText label={label.toLowerCase()} copyText={text} className="mt-1">
+        <pre
+          id={`${id}-body`}
+          className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-2 pr-9 font-mono text-xs text-card-foreground"
+        >
+          {shown}
+        </pre>
+      </CopyableText>
     </div>
   );
 }

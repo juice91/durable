@@ -26,7 +26,8 @@ import { buildWorkflowGraph, loopBadge, loopStepIds, loopSummary, type GraphEdge
 import { NODE_STATES, type NodeState, type StepDetail } from "@/lib/workflowRunState";
 import { readStorage, writeStorage } from "@/lib/safeStorage";
 import { NOT_REACHED_OPEN_KEY } from "@/lib/notReached";
-import { BranchCases, branchTaken } from "./BranchCases";
+import { BranchCases, branchCasesText, branchTaken } from "./BranchCases";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { isLoopStep, type LoopKindStep, type WorkflowSpec, type WorkflowStep } from "@/lib/workflows";
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {
@@ -597,15 +598,8 @@ export function WorkflowStepList({
     const loop = isLoopStep(n.step) ? n.step : null;
     const label = stepTypeLabel(n.step.type);
     const branch = n.step.type === "branch" ? n.step : null;
-    const body = (
+    const desc = (
       <>
-        <span className="flex min-w-0 items-center justify-between gap-2">
-          <span className="truncate font-mono text-label font-medium text-foreground">{n.id}</span>
-          <span className="shrink-0 text-caption text-muted-foreground">
-            {loop ? `${label} ${loopBadge(loop)}` : label}{state ? " · " : ""}
-            {state ? <span title={state === "skipped" ? notReachedHint(details?.[n.id]?.skipReason) : undefined}>{NODE_STATE_LABELS[state]}</span> : null}
-          </span>
-        </span>
         {loop ? <span className="mt-0.5 block break-words font-mono text-caption text-muted-foreground">{loopSummary(loop).join(" · ")}</span> : null}
         {branch ? (
           <BranchCases step={branch} taken={branchTaken(details?.[n.id]?.output)} warnings={details?.[n.id]?.warnings} />
@@ -617,23 +611,58 @@ export function WorkflowStepList({
       </>
     );
     const cls = cn(
-      "block w-full min-w-0 rounded-md border px-2 py-1.5 text-left",
+      "group/row relative block w-full min-w-0 rounded-md border px-2 py-1.5 text-left",
       n.id === selectedStepId ? "border-foreground bg-fill-selected" : "border-border bg-surface",
+      onSelectStep ? "cursor-pointer hover:bg-fill-hover" : null,
     );
     const inner = children.get(n.id) ?? [];
     const shut = Boolean(loop) && collapsed.has(n.id);
     const bodyId = `${baseId}-body-${n.id}`;
-    const select = onSelectStep ? (
+    const head = (
+      <span className="flex min-w-0 items-center justify-between gap-2">
+        <span className="truncate font-mono text-label font-medium text-foreground">{n.id}</span>
+        <span className="shrink-0 text-caption text-muted-foreground">
+          {loop ? `${label} ${loopBadge(loop)}` : label}{state ? " · " : ""}
+          {state ? <span title={state === "skipped" ? notReachedHint(details?.[n.id]?.skipReason) : undefined}>{NODE_STATE_LABELS[state]}</span> : null}
+        </span>
+      </span>
+    );
+    const copyBody = [
+      `${n.id} (${label})`,
+      branch ? branchCasesText(branch) : loop ? loopSummary(loop).join(" · ") : targets.map((e) => `→ ${e.target}${e.label ? ` (${e.label})` : ""}`).join(", "),
+    ].filter(Boolean).join("\n");
+    // The row is a div, not one big button: the description is selectable text with a copy button, and a
+    // button cannot hold either. The head is the button (name, state, keyboard); a click anywhere else
+    // on the row selects too, except on the description and a drag that ended in a selection.
+    const select = (
+      <div
+        className={cls}
+        data-copy-text={copyBody}
+        onClick={onSelectStep ? () => { if (!window.getSelection()?.toString()) onSelectStep(n.id); } : undefined}
+      >
+        {onSelectStep ? (
           <button
             type="button"
             aria-pressed={n.id === selectedStepId}
             aria-label={`Step ${n.id}, ${label}${loop ? `, up to ${loopBadge(loop).slice(1)} times` : ""}${state ? `, ${NODE_STATE_LABELS[state]}` : ""}`}
-            onClick={() => onSelectStep(n.id)}
-            className={cn(cls, "outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring")}
+            className="block w-full min-w-0 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            {body}
+            {head}
           </button>
-        ) : <div className={cls}>{body}</div>;
+        ) : head}
+        <span
+          data-testid={`step-row-text-${n.id}`}
+          className="block min-w-0 cursor-text select-text pr-6"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {desc}
+        </span>
+        <span className="absolute bottom-1 right-1 opacity-0 focus-within:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+          <CopyButton text={copyBody} label={`step ${n.id}`} />
+        </span>
+      </div>
+    );
     return (
       <li key={n.id} data-testid={`workflow-step-${n.id}`} data-state={state ?? "definition"} data-step-type={n.step.type} data-depth={n.depth} {...(loop ? { "data-collapsed": String(shut) } : {})}>
         {loop && inner.length > 0 ? (

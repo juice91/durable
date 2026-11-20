@@ -103,7 +103,7 @@ describe("ApprovalCard summary", () => {
     expect(screen.getByLabelText("Approval for tool control__eval_suite_create")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Copy arguments" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(JSON.stringify(args, null, 2)));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Copy arguments" })).toHaveTextContent("Copied"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy arguments" })).toHaveAttribute("data-copied", "true"));
   });
 
   it("shows no summary block when there is none", () => {

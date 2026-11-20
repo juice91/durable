@@ -18,6 +18,7 @@ import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { ArrowDown } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { focusRing } from "@/components/ui/Button";
 import { TurnFooter, type TurnView } from "@/components/chat/TurnFooter";
 import { MarkdownText, MessageRunsContext, ToolCallCard, ToolCallInfoContext, ToolDecisionsContext, useMessageRunId, useTurnSources, type ToolDecisionEntry } from "@/components/chat/messageParts";
@@ -124,7 +125,18 @@ const DATA_PARTS = {
 
 const NO_ACTIONS: ChatRunActions = { refreshRun: async () => undefined };
 
+/** The text parts of the current message, joined: what a copy of the bubble gives. */
+function useMessageText(): string {
+  return useAuiState((s) =>
+    (s.message.content as readonly { type: string; text?: string }[])
+      .filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n\n"),
+  );
+}
+
 function ChatMessage() {
+  const messageText = useMessageText();
   const messageId = useAuiState((s) => s.message.id);
   const settled = useAuiState((s) => s.message.status?.type !== "running");
   const turn = useContext(TurnViewsContext).get(messageId);
@@ -135,17 +147,21 @@ function ChatMessage() {
   return (
     <MessagePrimitive.Root className={cn("flex w-full min-w-0 flex-col", turnStart ? "mt-8" : "mt-3 first:mt-0")} data-turn-start={turnStart || undefined}>
       <MessagePrimitive.If user>
-        <div data-testid="chat-message-user" className="ml-auto max-w-[85%] min-w-0 break-words rounded-lg bg-fill-selected px-3 py-2 text-body text-foreground">
-          <MessageAttachmentList />
-          <MessagePrimitive.Parts components={{ tools: { Fallback: ToolCallCard } }} />
-        </div>
+        <CopyableText label="message" copyText={messageText} className="ml-auto max-w-[85%]">
+          <div data-testid="chat-message-user" className="min-w-0 select-text break-words rounded-lg bg-fill-selected px-3 py-2 text-body text-foreground">
+            <MessageAttachmentList />
+            <MessagePrimitive.Parts components={{ tools: { Fallback: ToolCallCard } }} />
+          </div>
+        </CopyableText>
       </MessagePrimitive.If>
       <MessagePrimitive.If assistant>
-        <div data-testid="chat-message-assistant" className="mr-auto w-full min-w-0 text-foreground">
+        <CopyableText label="message" copyText={messageText} className="mr-auto w-full">
+        <div data-testid="chat-message-assistant" className="w-full min-w-0 select-text text-foreground">
           {retries?.map((retry, index) => <OutputRetryPart key={index} {...({ data: retry } as React.ComponentProps<typeof OutputRetryPart>)} />)}
           <MessagePrimitive.Parts components={{ Text: ChatText, tools: { Fallback: ToolCallCard }, data: DATA_PARTS }} />
           {settled && isRatableMessage(messageId) ? <MessageFeedback messageId={messageId} /> : null}
         </div>
+        </CopyableText>
       </MessagePrimitive.If>
       {turn ? <TurnFooter turn={turn} /> : null}
     </MessagePrimitive.Root>

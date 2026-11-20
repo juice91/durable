@@ -5,11 +5,37 @@
  */
 export async function copyText(text: string): Promise<boolean> {
   try {
-    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return false;
-    await navigator.clipboard.writeText(text);
-    return true;
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the textarea fallback (a refused write, an insecure context)
+  }
+  return execCommandCopy(text);
+}
+
+/** The old path: a hidden textarea, selected, and `execCommand("copy")`. False when it is not there. */
+function execCommandCopy(text: string): boolean {
+  if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  area.style.position = "fixed";
+  area.style.top = "0";
+  area.style.left = "-9999px";
+  area.style.opacity = "0";
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.body.appendChild(area);
+  try {
+    area.select();
+    return document.execCommand("copy");
   } catch {
     return false;
+  } finally {
+    document.body.removeChild(area);
+    previous?.focus?.();
   }
 }
 

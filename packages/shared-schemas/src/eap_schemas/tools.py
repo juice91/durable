@@ -698,6 +698,10 @@ ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
     "architect.restore_workflow_version",
     "architect.archive_workflow",
     "architect.set_workflow_schedule",
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
 )
 
 # Tools that never run without a person's recorded approval: the API refuses a spec that lists one

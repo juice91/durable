@@ -17,6 +17,21 @@ export function branchTaken(output: unknown): BranchTaken | null {
   return { case: typeof o.case === "number" ? o.case : null, next: o.next };
 }
 
+function clauseLines(nodes: ConditionNode[], indent: string): string[] {
+  return nodes.flatMap((c) => (c.kind === "leaf" ? [`${indent}${c.text}`] : [`${indent}${c.kind}(`, ...clauseLines(c.clauses, `${indent}  `)]));
+}
+
+/** A branch's cases as plain text, one per line (`1  condition  →  target`), for copying. */
+export function branchCasesText(step: BranchStep): string {
+  const lines = step.cases.flatMap((c, i) => {
+    const tree = conditionTree(c.when);
+    const head = `${i + 1}  `;
+    if (tree.kind === "leaf") return [`${head}${tree.text}  →  ${c.next}`];
+    return [`${head}${tree.kind}(`, ...clauseLines(tree.clauses, "    "), `    →  ${c.next}`];
+  });
+  return [...lines, `default  →  ${step.default}`].join("\n");
+}
+
 function Clauses({ nodes, depth }: { nodes: ConditionNode[]; depth: number }) {
   return (
     <span className="mt-0.5 block space-y-0.5 border-l border-border pl-2" style={{ marginLeft: depth * 4 }}>

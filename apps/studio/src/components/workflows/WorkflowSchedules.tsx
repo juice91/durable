@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -109,8 +110,8 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
         </span>
       ),
     },
-    { id: "id", header: "Schedule ID", cell: (row) => <span className="font-mono text-label">{row.id}</span> },
-    { id: "cron", header: "Cron", cell: (row) => <span className="font-mono text-label">{row.cron}</span> },
+    { id: "id", header: "Schedule ID", cell: (row) => <span className="flex min-w-0 items-center gap-1"><span className="select-text font-mono text-label">{row.id}</span><CopyButton text={row.id} label="schedule id" /></span> },
+    { id: "cron", header: "Cron", cell: (row) => <span className="flex min-w-0 items-center gap-1"><span className="select-text font-mono text-label">{row.cron}</span><CopyButton text={row.cron} label="cron" /></span> },
     { id: "next", header: "Next run", sortable: true, sortValue: (row) => row.next_fire_at ?? "", cell: (row) => (row.active ? formatDateTime(row.next_fire_at) : "—") },
     {
       id: "state", header: "State",

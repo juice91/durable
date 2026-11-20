@@ -112,6 +112,7 @@ def _phrase(key: str, value: Any) -> str:
     return f"{key} {value!r}" if value is not None else ""
 
 
+# TODO(summary-dedup): this overlaps architect_tools.approval_summary_text for the eval tools; fold them into one follow-up.
 def control_approval_summary(name: str, description: str | None, args: dict[str, Any]) -> str:
     """The approval card's one-paragraph summary of a gated control call, in the person's words: what the tool
     does (its description's first sentence) and the arguments it was called with (strings quoted, lists

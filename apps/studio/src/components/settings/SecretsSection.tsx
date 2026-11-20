@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -133,7 +134,10 @@ export function SecretsSection() {
           {secrets.map((secret) => (
             <li key={secret.name} data-secret={secret.name} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
               <span className="min-w-0 flex-1">
-                <span className="break-all font-mono text-label text-foreground">{secret.name}</span>
+                <span className="flex min-w-0 items-center gap-1">
+                  <span className="select-text break-all font-mono text-label text-foreground">{secret.name}</span>
+                  <CopyButton text={secret.name} label="secret name" />
+                </span>
                 {(secret.used_by ?? []).length > 0 ? (
                   <span data-testid={`secret-used-by-${secret.name}`} className="block text-caption text-muted-foreground">
                     Used by{" "}

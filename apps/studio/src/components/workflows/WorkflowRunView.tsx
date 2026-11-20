@@ -14,6 +14,7 @@ import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { Badge } from "@/components/ui/Badge";
 import { IconButton } from "@/components/ui/IconButton";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
 import { toast } from "@/components/ui/Toaster";
 import type { LinkTab } from "@/components/ui/Tabs";
@@ -468,8 +469,8 @@ export function WorkflowRunView({
                     <Link href={routes.workflowRun(effectiveWorkflowId, rerunId)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{rerunId.slice(0, 8)}</Link>
                   </p>
                 ) : null}
-                {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{loadError}</p> : null}
-                {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">Graph unavailable: {specError}</p> : null}
+                {loadError ? <CopyableText label="error" copyText={loadError}><p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 pr-8 text-label text-destructive-text">{loadError}</p></CopyableText> : null}
+                {specError ? <CopyableText label="error" copyText={`Graph unavailable: ${specError}`}><p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 pr-8 text-label text-destructive-text">Graph unavailable: {specError}</p></CopyableText> : null}
                 {view.status === "needs_attention" ? (
                   <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-warning bg-warning/10 p-2 text-label text-foreground">
                     <p className="font-semibold">Needs attention: a step may have had side effects whose outcome is unknown.</p>
@@ -490,9 +491,15 @@ export function WorkflowRunView({
                 ) : null}
                 {view.status === "failed" && !view.cancelled ? (
                   <div role="alert" data-testid="workflow-run-failed" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">
-                    <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
-                    {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
-                    {view.runError?.errorCode ? <p className="mt-1 text-caption">Error code: <code data-testid="workflow-run-error-code" className="font-mono">{view.runError.errorCode}</code></p> : null}
+                    <CopyableText
+                      label="error"
+                      className="pr-8"
+                      copyText={[`Failed${view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}`, view.runError?.error ?? run?.error, view.runError?.errorCode ? `Error code: ${view.runError.errorCode}` : null].filter(Boolean).join("\n")}
+                    >
+                      <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
+                      {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
+                      {view.runError?.errorCode ? <p className="mt-1 text-caption">Error code: <code data-testid="workflow-run-error-code" className="font-mono">{view.runError.errorCode}</code></p> : null}
+                    </CopyableText>
                   </div>
                 ) : null}
                 {isTerminal(view.status) && stepEventCount === 0 ? (

@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyableText } from "@/components/ui/CopyableText";
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
@@ -109,7 +110,6 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
   const secretRequest = approval.kind === "tool" ? parseSecretRequest(approval.toolName, approval.args) : null;
   const [secretValue, setSecretValue] = useState("");
   const [dialogError, setDialogError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const tooLong = comment.length > maxComment;
   const commentId = `approval-comment-${key}`;
   const now = useNow(15_000);
@@ -121,18 +121,6 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       mounted.current = false;
     };
   }, []);
-
-  // A gated control__* call (the Architect operating the platform) is easier to review elsewhere:
-  // the arguments are one copyable block. A blocked clipboard leaves the text selectable as before.
-  const copyArguments = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => mounted.current && setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  };
 
   const decide = async (decision: "approve" | "deny") => {
     if (busy || tooLong) return;
@@ -262,33 +250,28 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       ) : tool ? (
         <div>
           {approval.summary ? (
-            <p data-testid={`approval-summary-${key}`} className="mb-2 whitespace-pre-wrap text-sm font-medium text-foreground">
-              {approval.summary}
-            </p>
+            <CopyableText label="summary" copyText={approval.summary} className="mb-2">
+              <p data-testid={`approval-summary-${key}`} className="whitespace-pre-wrap pr-8 text-sm font-medium text-foreground">
+                {approval.summary}
+              </p>
+            </CopyableText>
           ) : null}
-          <div className="mb-1 flex items-center justify-between">
-            <p className="text-caption font-medium text-muted-foreground">Arguments</p>
-            <button
-              type="button"
-              data-testid={`approval-args-copy-${key}`}
-              aria-label="Copy arguments"
-              onClick={() => void copyArguments(prettyJson(approval.args))}
-              className="rounded-sm px-1.5 py-0.5 text-caption text-muted-foreground hover:bg-fill-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
+          <CopyableText label="arguments" copyText={prettyJson(approval.args)}>
+            <pre
+              data-testid={`approval-args-${key}`}
+              className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 pr-9 font-mono text-caption text-foreground"
             >
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
-          <pre
-            data-testid={`approval-args-${key}`}
-            className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 font-mono text-caption text-foreground"
-          >
-            {prettyJson(approval.args)}
-          </pre>
+              {prettyJson(approval.args)}
+            </pre>
+          </CopyableText>
         </div>
       ) : (
-        <p data-testid={`approval-prompt-${key}`} className="whitespace-pre-wrap text-sm text-foreground">
-          {approval.prompt ?? "(no prompt)"}
-        </p>
+        <CopyableText label="prompt" copyText={approval.prompt ?? ""}>
+          <p data-testid={`approval-prompt-${key}`} className="whitespace-pre-wrap pr-8 text-sm text-foreground">
+            {approval.prompt ?? "(no prompt)"}
+          </p>
+        </CopyableText>
       )}
       {resumeSchema ? (
         <JsonSchemaForm schema={resumeSchema} value={formValue} onChange={setFormValue} errors={fieldErrors} idPrefix={`resume-${key}`} />
