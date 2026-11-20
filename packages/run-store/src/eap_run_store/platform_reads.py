@@ -259,7 +259,8 @@ def _render_condition(cond: Any) -> str:
         if op == "exists":
             return f"{left} exists"
         right = _render_operand(cond.get("right"))
-        return f"{left} {op} {right}"
+        symbol = {"eq": "==", "ne": "!=", "gt": ">", "lt": "<", "contains": "contains"}.get(op, op)
+        return f"{left} {symbol} {right}"
     if "all" in cond:
         parts = [_render_condition(c) for c in cond.get("all", [])[:4]]
         return " and ".join(parts[:3]) + ("…" if len(parts) > 3 else "")
@@ -278,8 +279,7 @@ def _render_operand(value: Any) -> str:
         if "$ref" in value:
             ref = value["$ref"]
             if isinstance(ref, str):
-                # Convert $ref to the visual form
-                return f"${ref.replace('steps.', '').replace('.output', '')}".replace(".", "/")
+                return f"${ref}"  # $steps.feed.output.ok, $input.dry
         if "$template" in value:
             return "template(...)"
     # Literal value
@@ -290,7 +290,8 @@ def _render_operand(value: Any) -> str:
 
 def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
     """Build a `does` object describing what a step does, bounded to 600 graphemes."""
-    kind = step.get("kind")
+    # Published specs say type/input/tool_id/agent_id; the Architect's compact form says kind/params/tool/agent.
+    kind = step.get("type") or step.get("kind")
     if not isinstance(kind, str):
         return None
 
@@ -308,32 +309,25 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
             method = params.get("method", "GET")
             url = params.get("url", "")
             summary = f"{method} {url}"
-            # Add reducer details
-            reducer = params.get("reducer", {})
-            if isinstance(reducer, dict):
-                reducer_type = reducer.get("type", "")
-                if reducer_type:
-                    summary += f" → {reducer_type}"
-                    # Add any additional reducer details like links, limit, etc.
-                    extra = []
-                    if "links" in reducer:
-                        links = reducer["links"]
-                        if isinstance(links, dict):
-                            limit = links.get("limit")
-                            if limit:
-                                extra.append(f"limit {limit}")
-                            exclude = links.get("exclude_urls") or links.get("exclude_terms")
-                            if exclude:
-                                if isinstance(exclude, list):
-                                    extra.append(f"exclude {', '.join(str(x) for x in exclude[:3])}")
-                                else:
-                                    extra.append(f"exclude {str(exclude)[:40]}")
-                    if "max_response_bytes" in reducer:
-                        extra.append(f"max {reducer['max_response_bytes']}B")
-                    if extra:
-                        summary += f" ({', '.join(extra)})"
-            elif isinstance(reducer, str):
-                summary += f" → {reducer}"
+            # Reducers are top-level keys of the http.request input: extract_html, parse_feed, response_query, body_from_url.
+            extra = []
+            html = params.get("extract_html")
+            if isinstance(html, dict):
+                piece = f"extract_html {html.get('mode', '')}".strip()
+                details = [f"limit {html['limit']}" for _ in [0] if html.get("limit")]
+                for key in ("exclude_urls", "exclude_terms"):
+                    if html.get(key):
+                        details.append(f"{len(html[key])} {key}")
+                extra.append(piece + (f" ({', '.join(details)})" if details else ""))
+            if isinstance(params.get("parse_feed"), dict):
+                extra.append("parse_feed")
+            rq = params.get("response_query")
+            if isinstance(rq, dict) and rq.get("expression"):
+                extra.append(f"response_query {str(rq['expression'])[:80]}")
+            if isinstance(params.get("body_from_url"), dict):
+                extra.append("body_from_url")
+            if extra:
+                summary += " → " + " · ".join(extra)
             return summary[:200]
         # json.query: the expression cut to 120 graphemes
         if tool == "json.query":
@@ -367,10 +361,10 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
 
     # Step-specific summaries
     if kind == "tool":
-        tool_id = step.get("tool")
+        tool_id = step.get("tool_id") or step.get("tool")
         if not tool_id:
             return None
-        params = step.get("params", {})
+        params = step.get("input") if step.get("input") is not None else step.get("params", {})
         input_summary = _summarize_tool_input(tool_id, params)
         does: dict[str, Any] = {"tool": clip_text(str(tool_id), 120)}
         if input_summary:
@@ -381,7 +375,7 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
         return does
 
     if kind == "agent":
-        agent_id = step.get("agent")
+        agent_id = step.get("agent_id") or step.get("agent")
         agent_name = step.get("name")
         if not agent_id:
             return None
@@ -393,15 +387,13 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
             does["version"] = str(version)
         else:
             does["version"] = "latest"
-        input_schema = step.get("input")
-        if isinstance(input_schema, dict):
-            # Try to get input keys from schema
-            props = (input_schema.get("properties") or {}).keys()
-            keys = list(props)[:10]
+        agent_input = step.get("input") if step.get("input") is not None else step.get("params")
+        if isinstance(agent_input, dict):
+            # The step's input mapping (published form) or, in the compact form, an input schema's properties
+            keys = list((agent_input.get("properties") or {}).keys()) if "properties" in agent_input and "type" in agent_input else list(agent_input.keys())
             if keys:
-                does["input_keys"] = keys
-        elif isinstance(input_schema, str):
-            # template string - just note it
+                does["input_keys"] = keys[:10]
+        elif isinstance(agent_input, str):
             does["input_keys"] = ["template"]
         return does
 
@@ -467,10 +459,10 @@ def _steps(steps: Any, depth: int = 0) -> list[dict[str, Any]]:
     for step in (steps if isinstance(steps, list) else [])[:60]:
         if not isinstance(step, dict):
             continue
-        item = {"id": clip_text(step.get("id"), 80), "type": step.get("kind")}
+        item = {"id": clip_text(step.get("id"), 80), "type": (step.get("type") or step.get("kind"))}
         # Keep kind for backwards compatibility, but drop it if null
-        if step.get("kind") is not None:
-            item["kind"] = step.get("kind")
+        if (step.get("type") or step.get("kind")) is not None:
+            item["kind"] = (step.get("type") or step.get("kind"))
         for key in ("tool", "agent"):
             if step.get(key):
                 item[key] = clip_text(step[key], 120)
