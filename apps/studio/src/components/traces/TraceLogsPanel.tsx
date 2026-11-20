@@ -40,7 +40,7 @@ export function TraceLogsPanel({
   const limit = MAX_LOG_LIMIT;
 
   const items = useMemo(() => [...search.items].reverse(), [search.items]);
-  const spanName = selectedSpan ? spanLabel(selectedSpan) : null;
+  const spanName = selectedSpan ? spanLabel(selectedSpan, {}, undefined) : null;
   const scope = narrow ? `during ${spanName}` : "for the whole run";
   const truncated = search.items.length >= limit;
 

@@ -183,7 +183,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
   return (
     <>
       <SheetHeader
-        title={root ? spanLabel(root, names) : "Trace"}
+        title={root ? spanLabel(root, names, run?.source_name) : "Trace"}
         description={<span className="font-mono" data-testid="trace-sheet-run-id">{`Run ${runId}`}</span>}
         actions={
           <>

@@ -205,7 +205,7 @@ export function SpanDetail({ span, names, runId }: SpanDetailProps) {
     <aside aria-label="Span detail" data-testid="span-detail" className="space-y-4 rounded-md border border-border bg-card p-4">
       <header>
         <p className="text-xs uppercase tracking-wide text-muted-foreground">{KIND_LABELS[span.kind]}</p>
-        <h3 className="mt-0.5 break-words text-base font-semibold text-card-foreground">{spanLabel(span, names)}</h3>
+        <h3 className="mt-0.5 break-words text-base font-semibold text-card-foreground">{spanLabel(span, names, undefined)}</h3>
         <p className={`mt-1 text-sm font-medium ${STATUS_TEXT[span.status]}`} data-testid="span-status">
           {STATUS_LABELS[span.status]}
           {typeof a.run_status === "string" && a.run_status !== span.status ? ` (run ${a.run_status.replace("_", " ")})` : ""}
