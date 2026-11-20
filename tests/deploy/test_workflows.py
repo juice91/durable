@@ -190,7 +190,9 @@ def test_hosted_jobs_cache_the_uv_and_pnpm_stores_on_their_lockfiles():
     jobs = _load("ci.yml")["jobs"]
     for name in ("python", "deploy-checks"):
         uv_step = next(s for s in jobs[name]["steps"] if str(s.get("uses", "")).startswith("astral-sh/setup-uv@"))
-        assert uv_step["with"]["enable-cache"] == "true", name
+        # Hosted runners cache the uv store on the lockfile; self-hosted ones skip the archive round
+        # trip (uv's own cache persists there), so the setting is an expression on runner.environment.
+        assert uv_step["with"]["enable-cache"] == "${{ runner.environment == 'github-hosted' }}", name
         assert uv_step["with"]["cache-dependency-glob"] == "uv.lock", name
     for name in ("studio", "studio-test"):
         node = next(s for s in jobs[name]["steps"] if str(s.get("uses", "")).startswith("actions/setup-node@"))
