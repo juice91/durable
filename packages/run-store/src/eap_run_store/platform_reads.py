@@ -336,11 +336,13 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
         # workflow.return: the value's keys and outcome
         if tool == "workflow.return":
             value = params.get("value", {})
-            if isinstance(value, dict):
-                keys = list(value.keys())
-                if keys:
-                    return f"return {', '.join(keys[:5])}{'…' if len(keys) > 5 else ''}"
-            return "return value"
+            if isinstance(value, dict) and "$template" in value and isinstance(value["$template"], dict):
+                value = value["$template"]
+            keys = list(value.keys()) if isinstance(value, dict) else []
+            text = f"returns {{{', '.join(keys[:5])}{'…' if len(keys) > 5 else ''}}}" if keys else "returns a value"
+            if params.get("outcome"):
+                text += f" · outcome {params['outcome']}"
+            return text
         # text.check: rule names
         if tool == "text.check":
             rules = params.get("rules", [])
@@ -384,7 +386,7 @@ def _step_does(step: dict[str, Any]) -> dict[str, Any] | None:
             does["agent_name"] = clip_text(str(agent_name), 120)
         version = step.get("version")
         if version is not None:
-            does["version"] = str(version)
+            does["version"] = version if isinstance(version, int) else str(version)
         else:
             does["version"] = "latest"
         agent_input = step.get("input") if step.get("input") is not None else step.get("params")
