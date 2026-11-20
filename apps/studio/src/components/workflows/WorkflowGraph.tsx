@@ -28,6 +28,9 @@ import { readStorage, writeStorage } from "@/lib/safeStorage";
 import { NOT_REACHED_OPEN_KEY } from "@/lib/notReached";
 import { BranchCases, branchCasesText, branchTaken } from "./BranchCases";
 import { CopyButton } from "@/components/ui/CopyButton";
+import Link from "next/link";
+import { routes } from "@/lib/routes";
+import { stepSummary, type StepSummary } from "@/lib/workflowStepSummary";
 import { isLoopStep, type LoopKindStep, type WorkflowSpec, type WorkflowStep } from "@/lib/workflows";
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {
@@ -75,12 +78,11 @@ export function notReachedHint(reason: StepDetail["skipReason"] | undefined): st
   return "This branch arm was not taken.";
 }
 
-function stepSubtitle(step: WorkflowStep): string {
+/** The canvas node's one-line subtitle: the step's "does" summary for a tool or agent. */
+export function stepSubtitle(step: WorkflowStep, agentNames?: Readonly<Record<string, string>>): string {
+  const summary = stepSummary(step, agentNames);
+  if (summary) return summary.text;
   switch (step.type) {
-    case "agent":
-      return `agent ${step.agent_id.slice(0, 8)}${step.version ? ` v${step.version}` : ""}`;
-    case "tool":
-      return step.tool_id;
     case "approval":
     case "input":
       return `timeout ${step.timeout_hours}h`;
@@ -111,6 +113,7 @@ type StepNodeData = {
   collapsed: boolean;
   badge: string | null;
   skipReason?: StepDetail["skipReason"];
+  agentNames?: Readonly<Record<string, string>>;
 };
 
 /** Marks the loop toggle inside a node: a click on it collapses or expands instead of selecting. */
@@ -140,7 +143,8 @@ function LoopToggle({ collapsed }: { collapsed: boolean }) {
 }
 
 function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
-  const { step, state, selected, width, height, collapsed, badge, skipReason } = data;
+  const { step, state, selected, width, height, collapsed, badge, skipReason, agentNames } = data;
+  const subtitle = stepSubtitle(step, agentNames);
   const tone = NODE_STATE_CLASSES[state ?? "pending"];
   const loop = isLoopStep(step) ? step : null;
   return (
@@ -165,7 +169,7 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
         </span>
       </div>
       <div className="flex items-center justify-between gap-2 text-caption">
-        <span className="truncate opacity-80">{stepSubtitle(step)}</span>
+        <span data-testid={`workflow-node-subtitle-${step.id}`} title={subtitle} className="truncate opacity-80">{subtitle}</span>
         {state ? <span className="shrink-0 font-medium">{NODE_STATE_LABELS[state]}</span> : null}
       </div>
       <Handle type="source" position={Position.Bottom} isConnectable={false} />
@@ -355,6 +359,8 @@ export interface WorkflowCanvasProps {
   onCollapsedLoopsChange?: (next: Set<string>) => void;
   /** A loop's badge text by step id (the run view's "×7"); a loop without one shows its bound ("×50"). */
   loopBadges?: Record<string, string>;
+  /** Agent names by agent id, for a step's subtitle; an agent not listed shows its id. */
+  agentNames?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -438,6 +444,7 @@ function CanvasInner({
   collapsedLoops,
   onCollapsedLoopsChange,
   loopBadges,
+  agentNames,
 }: WorkflowCanvasProps) {
   const [collapsed, setCollapsed] = useCollapsedSet(collapsedLoops, onCollapsedLoopsChange);
   useRefitOnCollapse(collapsed);
@@ -470,13 +477,14 @@ function CanvasInner({
         collapsed: n.collapsed,
         badge: badgeFor(n, loopBadges),
         skipReason: details?.[n.id]?.skipReason,
+        agentNames,
       },
       draggable: false,
       connectable: false,
       width: n.width,
       height: n.height,
     })),
-    [graph, states, details, selectedStepId, loopBadges],
+    [graph, states, details, selectedStepId, loopBadges, agentNames],
   );
   const edges: Edge[] = useMemo(
     () => graph.edges.map((e) => ({
@@ -542,6 +550,26 @@ export function useNotReachedOpen(): [boolean, (open: boolean) => void] {
   return [open, update];
 }
 
+/** One line saying what a tool or agent step does: the tool id (monospace) or the agent's name (a link), then its input summary. */
+export function StepSummaryLine({ step, agentNames }: { step: WorkflowStep; agentNames?: Readonly<Record<string, string>> }) {
+  const summary: StepSummary | null = stepSummary(step, agentNames);
+  const onError = step.type === "tool" && step.on_error === "continue";
+  if (!summary && !onError) return null;
+  return (
+    <span data-testid={`step-summary-${step.id}`} className="mt-0.5 flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-caption text-foreground">
+      {summary ? (
+        <>
+          {summary.kind === "agent" && summary.agentId ? (
+            <Link href={routes.agentIndex(summary.agentId)} data-testid={`step-agent-link-${step.id}`} className="rounded-sm font-medium text-info-text underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring" onClick={(e) => e.stopPropagation()}>{summary.lead}</Link>
+          ) : <span className="font-mono">{summary.lead}</span>}
+          {summary.detail ? <span className="min-w-0 break-all text-muted-foreground">{summary.detail}</span> : null}
+        </>
+      ) : null}
+      {onError ? <span data-testid={`step-on-error-${step.id}`} className="shrink-0 rounded-sm border border-border bg-muted px-1 text-badge text-muted-foreground">on_error: continue</span> : null}
+    </span>
+  );
+}
+
 export interface WorkflowStepListProps {
   spec: WorkflowSpec;
   states?: Record<string, NodeState>;
@@ -559,6 +587,8 @@ export interface WorkflowStepListProps {
    * closed at first (remembered in this browser). A selected step in the group opens it.
    */
   foldNotReached?: boolean;
+  /** Agent names by agent id, for an agent step's summary. */
+  agentNames?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -577,6 +607,7 @@ export function WorkflowStepList({
   onCollapsedLoopsChange,
   details,
   foldNotReached = false,
+  agentNames,
 }: WorkflowStepListProps) {
   const [collapsed, setCollapsed] = useCollapsedSet(collapsedLoops, onCollapsedLoopsChange);
   const [notReachedOpen, setNotReachedOpen] = useNotReachedOpen();
@@ -601,6 +632,7 @@ export function WorkflowStepList({
     const desc = (
       <>
         {loop ? <span className="mt-0.5 block break-words font-mono text-caption text-muted-foreground">{loopSummary(loop).join(" · ")}</span> : null}
+        <StepSummaryLine step={n.step} agentNames={agentNames} />
         {branch ? (
           <BranchCases step={branch} taken={branchTaken(details?.[n.id]?.output)} warnings={details?.[n.id]?.warnings} />
         ) : targets.length > 0 ? (
@@ -629,6 +661,7 @@ export function WorkflowStepList({
     );
     const copyBody = [
       `${n.id} (${label})`,
+      stepSummary(n.step, agentNames)?.text ?? "",
       branch ? branchCasesText(branch) : loop ? loopSummary(loop).join(" · ") : targets.map((e) => `→ ${e.target}${e.label ? ` (${e.label})` : ""}`).join(", "),
     ].filter(Boolean).join("\n");
     // The row is a div, not one big button: the description is selectable text with a copy button, and a
