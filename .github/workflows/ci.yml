@@ -80,7 +80,9 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && needs.changes.outputs.python == 'true'
     runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    # 25, not 15: four self-hosted runners share one Mac; a full main run exceeded 15 minutes
+    # under contention (run 44681356522 was cancelled after its tests had passed).
+    timeout-minutes: 25
     # The selection step reads the pull request's labels (ci:full forces a full run).
     permissions:
       contents: read
@@ -132,7 +134,9 @@ jobs:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - run: uv run lint-imports
@@ -235,7 +239,8 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
       && needs.changes.outputs.deploy == 'true'
     runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
-    timeout-minutes: 15
+    # 25, not 15: see the python job.
+    timeout-minutes: 25
     env:
       KUBECONFORM_VERSION: v0.7.0
       ACTIONLINT_VERSION: v1.7.7
@@ -251,7 +256,9 @@ jobs:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - name: Install manifest and workflow linters
