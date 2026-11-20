@@ -94,7 +94,8 @@ What changes while it is set:
 
 - Pull request jobs run only for branches of this repository (the same guard as CI Heavy); a pull
   request from a fork gets no CI jobs rather than running its code on the Studio.
-- The five Studio shards queue behind each other on the two runners instead of running in parallel.
+- The five Studio shards queue behind each other on the four runners instead of running in parallel,
+  and the four share one Mac, so they also compete for CPU (`deploy/runner/README.md`).
   Each job has a `timeout-minutes` so a stuck job cannot hold a runner.
 - Nothing else differs: the token stays `contents: read`, and the job names the deploy gate reads are the same.
 
