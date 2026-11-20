@@ -73,6 +73,9 @@ export interface Run {
   knowledge_base_id?: string | null;
   status: string;
   display_status: RunStatus;
+  /** How often DBOS resumed the run's workflow after a worker crash or a deploy (0 when never); `recovered` is `> 0`. */
+  recovery_attempts?: number;
+  recovered?: boolean;
   input: string;
   output: string | null;
   error: string | null;

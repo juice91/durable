@@ -80,3 +80,17 @@ describe("WorkflowRunView re-run back-links", () => {
     expect(screen.queryByTestId("workflow-run-rerun-as")).toBeNull();
   });
 });
+
+describe("WorkflowRunView recovered badge", () => {
+  it("shows Recovered ×2 in the header for a run DBOS resumed twice", async () => {
+    runsMock.getRun.mockResolvedValue(run({ recovered: true, recovery_attempts: 3 }));  // attempts=3 means 2 restarts
+    await renderView();
+    expect(await screen.findByTestId("run-recovered-badge")).toHaveTextContent("Recovered ×2");
+  });
+
+  it("shows no badge for a run that was never resumed", async () => {
+    runsMock.getRun.mockResolvedValue(run({ recovered: false, recovery_attempts: 1 }));  // attempts=1 means never recovered
+    await renderView();
+    expect(screen.queryByTestId("run-recovered-badge")).toBeNull();
+  });
+});

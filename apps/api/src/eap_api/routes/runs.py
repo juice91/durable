@@ -74,7 +74,9 @@ router = APIRouter(
 )
 
 
-def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[str, Any]:
+def _run_json(
+    run: dict[str, Any], chat: dict[str, Any] | None = None, recovery_attempts: int = 0
+) -> dict[str, Any]:
     """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings.
 
     `kind` is 'agent', 'tool', 'workflow' or 'kb_ingest' (a knowledge base ingest or reindex run:
@@ -89,8 +91,16 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
 
     `chat` is the run's entry of RunStore.chat_usage (the agent's chat model only, as the trace's
     `chat_*` split); without one, `chat_input_tokens`, `chat_output_tokens` and `chat_cost_usd`
-    are null (no usage recorded)."""
+    are null (no usage recorded).
+
+    `recovery_attempts` is DBOS's count of how often the run's workflow was resumed after a worker crash or
+    a deploy (0 when DBOS has no row yet; RunLauncher.recovery_attempts). DBOS increments this on the first
+    start, so a run that was never recovered shows `recovery_attempts == 1`.
+    `recovered` is `True` only when the run was actually resumed (`recovery_attempts > 1`).
+    `restarts` is the number of times the run was resumed (`max(recovery_attempts - 1, 0)`).
+    The callers that have a launcher pass it; the others show 0 for all three."""
     iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
+    restarts = max(recovery_attempts - 1, 0)
     return {
         "run_id": str(run["id"]),
         "kind": run.get("kind") or "agent",
@@ -107,6 +117,9 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         "rerun_of": run.get("rerun_of"),
         # A step-by-step run: the worker waits after every top-level step.
         "pause_after_each_step": bool(run.get("pause_after_each_step")),
+        "recovery_attempts": recovery_attempts,
+        "recovered": recovery_attempts > 1,
+        "restarts": restarts,
         "status": run["status"],
         "display_status": run["display_status"],
         "input": run["input"],
@@ -148,6 +161,12 @@ def _run_json(run: dict[str, Any], chat: dict[str, Any] | None = None) -> dict[s
         # W2.2: tags derived from what the run records (eap_run_store.store.run_tags).
         "tags": run_tags({**run, "kind": run.get("kind") or "agent"}),
     }
+
+
+def recovery_for(launcher: RunLauncher, run_ids: list[str]) -> dict[str, int]:
+    """`recovery_attempts` per run id (one DBOS query for all of them); {} when the launcher cannot say."""
+    lookup = getattr(launcher, "recovery_attempts", None)
+    return lookup(run_ids) if lookup is not None else {}
 
 
 def _output_json(run: dict[str, Any]) -> dict[str, Any]:
@@ -386,6 +405,7 @@ def _utc(value: datetime) -> datetime:
 def list_runs(
     principal: PrincipalDep,
     stores: StoresDep,
+    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[
         str | None,
@@ -456,8 +476,12 @@ def list_runs(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
     next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
     chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
+    recovery = recovery_for(launcher, [str(r["id"]) for r in runs])
     return JSONResponse(
-        content={"items": [_run_json(r, chat.get(str(r["id"]))) for r in runs], "next_before": next_before}
+        content={
+            "items": [_run_json(r, chat.get(str(r["id"])), recovery.get(str(r["id"]), 0)) for r in runs],
+            "next_before": next_before,
+        }
     )
 
 
@@ -544,11 +568,17 @@ def runs_histogram(
 
 
 @router.get("/runs/{run_id}")
-def get_run(run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep) -> JSONResponse:
+def get_run(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    stores: StoresDep,
+    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+) -> JSONResponse:
     run_store, _ = stores
     run = _get_run_or_404(run_store, principal.tenant_id, run_id)
     chat = run_store.chat_usage(principal.tenant_id, [run["id"]])
-    return JSONResponse(content=_run_json(run, chat.get(str(run["id"]))))
+    recovery = recovery_for(launcher, [str(run["id"])])
+    return JSONResponse(content=_run_json(run, chat.get(str(run["id"])), recovery.get(str(run["id"]), 0)))
 
 
 @router.get("/runs/{run_id}/events")

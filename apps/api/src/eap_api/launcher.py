@@ -9,9 +9,11 @@ existing workflow instead of starting a second one (DBOS's default
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -71,7 +73,14 @@ def approval_topic(step_id: str) -> str:
     """The DBOS message topic an approval step waits on (eap_worker.workflow_run.approval_topic)."""
     return f"approval:{step_id}"
 
+logger = logging.getLogger(__name__)
 
+
+# The Metrics range counts a run by its last event: look this far before the range start for workflows
+# that were created earlier and finished inside it.
+RECOVERED_LOOKBACK = timedelta(days=14)
+RECOVERED_PAGE = 1000
+RECOVERED_MAX_PAGES = 50
 _DEFAULT_DBOS_URL = "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
 
 
@@ -164,6 +173,10 @@ class RunLauncher(Protocol):
     ) -> None: ...
 
     def cancel_workflow_tree(self, *, workflow_id: str) -> None: ...
+
+    def recovery_attempts(self, run_ids: list[str]) -> dict[str, int]: ...
+
+    def recovered_run_ids(self, *, since: datetime, until: datetime) -> list[str]: ...
 
     def close(self) -> None: ...
 
@@ -309,6 +322,44 @@ class DBOSRunLauncher:
         DBOS fences a cancelled workflow at its next operation only, so the guarded terminal write
         (RunStore.cancel_run_tree) follows."""
         self._get_client().cancel_workflow(workflow_id, cancel_children=True)
+
+    def recovery_attempts(self, run_ids: list[str]) -> dict[str, int]:
+        """DBOS `recovery_attempts` of the given runs, one `list_workflows(workflow_ids=...)` call (one query
+        for a listing page). A run DBOS has no row for yet is absent (read it as 0). Best effort: when the
+        system database is unreachable the run pages still render, without the recovered marker."""
+        if not run_ids:
+            return {}
+        try:
+            rows = self._get_client().list_workflows(
+                workflow_ids=list(run_ids), load_input=False, load_output=False
+            )
+        except Exception:  # noqa: BLE001 - a display field must not fail the run page
+            logger.warning("recovery_attempts lookup failed", exc_info=True)
+            return {}
+        return {r.workflow_id: int(r.recovery_attempts or 0) for r in rows}
+
+    def recovered_run_ids(self, *, since: datetime, until: datetime) -> list[str]:
+        """Ids of the DBOS workflows created in `[since - RECOVERED_LOOKBACK, until)` that were resumed at least
+        once (`recovery_attempts > 1`). Child workflows (`{run_id}:seg:{n}` and other `:`-ids) are not runs and
+        are skipped. DBOS has no recovery filter, so this pages the light status rows (no input or output) and
+        keeps the few recovered ones; the caller intersects them with the tenant's runs."""
+        start = (since - RECOVERED_LOOKBACK).astimezone(UTC).isoformat()
+        end = until.astimezone(UTC).isoformat()
+        found: list[str] = []
+        try:
+            client = self._get_client()
+            for page in range(RECOVERED_MAX_PAGES):
+                rows = client.list_workflows(
+                    start_time=start, end_time=end, load_input=False, load_output=False,
+                    limit=RECOVERED_PAGE, offset=page * RECOVERED_PAGE,
+                )
+                found += [r.workflow_id for r in rows if (r.recovery_attempts or 0) > 1 and ":" not in r.workflow_id]
+                if len(rows) < RECOVERED_PAGE:
+                    break
+        except Exception:  # noqa: BLE001
+            logger.warning("recovered runs lookup failed", exc_info=True)
+            return []
+        return found
 
     def _options(
         self, workflow_name: str, run_id: UUID, traceparent: str | None, *, queue_name: str = QUEUE_NAME
