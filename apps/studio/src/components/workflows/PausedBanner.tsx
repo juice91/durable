@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Badge } from "@/components/ui/Badge";
 import { ApiError } from "@/lib/api";
-import { refreshPendingApprovals } from "@/lib/approvals";
+import { noteApprovalDecided, refreshPendingApprovals } from "@/lib/approvals";
 import { decideApproval } from "@/lib/workflows";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
 
@@ -47,6 +47,7 @@ export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided }: 
       await decideApproval(runId, stepId, decision);
       setConfirmStop(false);
       onDecided?.();
+      noteApprovalDecided();
       void refreshPendingApprovals().catch(() => undefined);
       await Promise.resolve(onRefresh()).catch(() => undefined);
     } catch (reason: unknown) {
