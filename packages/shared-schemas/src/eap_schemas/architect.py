@@ -93,6 +93,8 @@ ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
     "platform.list_agents",
     "platform.list_schedules",
     "platform.list_recent_runs",
+    "platform.get_run",
+    "platform.list_runs",
 )
 # Tool-id prefixes only a built-in agent row may list (the API refuses the spec, the worker the run).
 BUILTIN_ONLY_TOOL_PREFIXES: tuple[str, ...] = ("architect.", "platform.")
