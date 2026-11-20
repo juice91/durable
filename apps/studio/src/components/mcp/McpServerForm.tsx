@@ -37,6 +37,8 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
   const [name, setName] = useState(server?.name ?? "");
   const [url, setUrl] = useState(server?.url ?? "");
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
+  const isManaged = server?.runtime === "managed";
+  const [keepWarm, setKeepWarm] = useState(server?.keep_warm ?? false);
   const [rows, setRows] = useState<HeaderRow[]>(() => rowsFromServer(server?.header_names ?? []));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +83,8 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
       } else {
         const body: McpServerUpdate = {};
         if (name.trim() !== server.name) body.name = name.trim();
-        if (url.trim() !== server.url) body.url = url.trim();
+        if (!isManaged && url.trim() !== server.url) body.url = url.trim();
+        if (isManaged && keepWarm !== (server.keep_warm ?? false)) body.keep_warm = keepWarm;
         if (headers.kind === "set") body.headers = headers.headers;
         // Nothing changed: send nothing and hand back nothing, so the list keeps its current row
         // (which may have changed since this form opened: enabled, last test, or deleted).
@@ -110,8 +113,9 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
         onReload={(current) => {
           if (!current) return;
           setName(current.name);
-          setUrl(current.url);
+          setUrl(current.url ?? "");
           setEnabled(current.enabled);
+          setKeepWarm(current.keep_warm ?? false);
           setRows(rowsFromServer(current.header_names));
         }}
       />
@@ -127,12 +131,21 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
           <input id="mcp-name" required value={name} onChange={(e) => setName(e.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" className={inputClass} />
           <p className="text-xs text-muted-foreground">Letters, digits, <code>_ . -</code>. Agents reference tools by this name.</p>
         </div>
-        <div className="space-y-1">
+        {isManaged ? null : <div className="space-y-1">
           <label htmlFor="mcp-url" className="block text-sm font-medium text-foreground">URL</label>
           <input id="mcp-url" required type="url" placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} className={inputClass} />
           <p className="text-xs text-muted-foreground">Streamable HTTP endpoint. Private and loopback addresses are refused.</p>
-        </div>
+        </div>}
       </div>
+      {isManaged ? (
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm text-foreground">
+            <input type="checkbox" data-testid="mcp-keep-warm" checked={keepWarm} onChange={(e) => setKeepWarm(e.target.checked)} className="h-4 w-4 rounded border-input" />
+            Keep running (never stop when idle)
+          </label>
+          <p className="text-xs text-muted-foreground">Without this the platform stops the server after 30 idle minutes and the next test or agent run starts it again.</p>
+        </div>
+      ) : null}
       {isCreate ? (
         <label className="flex items-center gap-2 text-sm text-foreground">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="h-4 w-4 rounded border-input" />
@@ -140,7 +153,7 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
         </label>
       ) : null}
 
-      <fieldset className="space-y-2" data-testid="mcp-headers">
+      {isManaged ? null : <fieldset className="space-y-2" data-testid="mcp-headers">
         <legend className="text-sm font-medium text-foreground">Headers</legend>
         <p className="text-xs text-muted-foreground">Values are stored encrypted and are never shown again. A value of <code>secret:&lt;name&gt;</code> refers to a stored secret. Changing any header replaces the whole set.</p>
         {isCreate ? (
@@ -193,7 +206,7 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
           </div>
         ))}
         <button type="button" className={secondaryButton} onClick={addRow}>Add header</button>
-      </fieldset>
+      </fieldset>}
 
       <div className="flex gap-2 border-t border-border pt-4">
         <button type="submit" disabled={saving} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">{isCreate ? "Register" : "Save"}</button>

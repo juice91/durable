@@ -278,7 +278,7 @@ export default function McpServerDetailPage() {
                 {busy ? <p className="mt-3 text-caption text-muted-foreground" aria-live="polite">Working…</p> : null}
                 <ConflictNotice state={conflict} className="mt-3" onReload={(current) => current && setServer(current)} />
                 {actionError ? <p role="alert" data-testid="mcp-action-error" className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
-                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} /></div> : null}
+                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} onRetry={() => void testServer(server)} retrying={busy} /></div> : null}
               </div>
             </Section>
 

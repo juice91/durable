@@ -52,6 +52,15 @@ describe("McpServersPage", () => {
     vi.mocked(api.versions.get).mockRejectedValue(new Error("no version"));
   });
 
+  it("shows the runtime state as a pill so a stopped server is visible before Test", async () => {
+    const managed = (id: string, state: McpServer["runtime_state"]): McpServer => ({ ...server, id, name: `m-${id}`, url: "", runtime: "managed", runtime_state: state });
+    vi.mocked(mcpServers.list).mockResolvedValue([managed("a", "running"), managed("b", "stopped"), managed("c", "starting"), managed("d", "failed")]);
+    render(<McpServersPage />);
+    await screen.findAllByTestId("mcp-server-row");
+    const pills = screen.getAllByTestId("mcp-runtime-chip").map((el) => el.textContent);
+    expect(pills).toEqual(["Running", "Stopped (idle)", "Starting", "Failed"]);
+  });
+
   it("lists servers with URL, enabled state, set headers and the last test result", async () => {
     render(<McpServersPage />);
     const row = await screen.findByTestId("mcp-server-row");

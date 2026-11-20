@@ -24,6 +24,8 @@ export interface McpServer {
   runtime_error?: string | null;
   catalog_name?: string | null;
   env_names?: string[];
+  /** Managed servers: the idle sweep never stops the runtime. */
+  keep_warm?: boolean;
   /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
   revision?: number;
 }
@@ -55,9 +57,21 @@ export interface McpDiscoveredTool {
   input_schema: Record<string, unknown>;
 }
 
+/** What the Test button did to a managed server's runtime (absent for external servers). */
+export interface McpTestRuntime {
+  /** The runtime state before the test. */
+  state: McpRuntimeState;
+  /** The test had to bring the runtime up, and did. */
+  started: boolean;
+  waited_ms: number;
+  /** Minutes since the runtime was last used, when it was stopped. */
+  idle_minutes?: number | null;
+  last_error?: string | null;
+}
+
 export type McpTestResult =
-  | { status: "ok"; tools: McpDiscoveredTool[] }
-  | { status: "error"; error_code: string; tools: [] };
+  | { status: "ok"; tools: McpDiscoveredTool[]; runtime?: McpTestRuntime }
+  | { status: "error"; error_code: string; tools: []; runtime?: McpTestRuntime };
 
 export interface McpServerCreate {
   name: string;
@@ -70,6 +84,8 @@ export interface McpServerUpdate {
   name?: string;
   url?: string;
   enabled?: boolean;
+  /** Managed servers only: the idle sweep never stops the runtime. */
+  keep_warm?: boolean;
   headers?: Record<string, string>;
   /** Managed servers only: variable → `secret:<name>` (or a plain value). An env change restarts the server. */
   env?: Record<string, string>;
@@ -147,7 +163,16 @@ const ERROR_MESSAGES: Record<string, string> = {
   protocol_error: "The server did not speak the MCP protocol as expected.",
   secret_unreadable: "A stored header secret could not be decrypted; replace the headers.",
   connection_failed: "The connection test failed.",
+  runtime_starting: "The server is starting. Test again in a moment.",
+  runtime_not_running: "The server's runtime is not running. Open the Runtime tab to see why.",
 };
+
+/** The success line of a test that had to start the server first (an idle sweep had stopped it). */
+export function describeStartedTest(runtime: McpTestRuntime | undefined): string | null {
+  if (!runtime?.started) return null;
+  const idle = runtime.state === "stopped" && typeof runtime.idle_minutes === "number" ? ` (idle for ${runtime.idle_minutes} min)` : "";
+  return `Started the server${idle} and tested it: OK`;
+}
 
 /** A readable message for a connection-test `error_code` or an outbound-policy code. */
 export function describeMcpError(code: string | null | undefined): string {

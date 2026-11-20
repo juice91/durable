@@ -9,6 +9,7 @@ changed the row meanwhile wins):
   then starts it (eap_worker.mcp.ensure_managed_running). When `stop` raises, the row becomes `failed`
   with `last_error = stop_failed: <exception class>`; `stopping` for longer than 10 minutes becomes
   `failed` with `last_error = stop_timed_out`.
+  A runtime whose server has `keep_warm` set (mcp_servers.keep_warm) is never claimed here.
 - `starting` for longer than 10 minutes (`updated_at`)  ->  `failed` with `last_error = start_timed_out`
   (a worker that died while starting, or a pod that never became ready).
 
@@ -99,6 +100,7 @@ _FAIL_STOPPING = text(
 _CLAIM_IDLE = text(
     "UPDATE mcp_runtimes SET state = 'stopping', last_error = NULL, updated_at = :now "
     "WHERE state IN ('running', 'idle') AND COALESCE(last_used_at, updated_at) < :cutoff "
+    "AND NOT EXISTS (SELECT 1 FROM mcp_servers s WHERE s.id = mcp_runtimes.server_id AND s.keep_warm) "
     "RETURNING id, namespace, cr_name"
 )
 _STOP_FAILED = text(
