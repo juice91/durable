@@ -134,7 +134,9 @@ jobs:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - run: uv run lint-imports
@@ -254,7 +256,9 @@ jobs:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - name: Install manifest and workflow linters
