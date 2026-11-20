@@ -95,6 +95,7 @@ import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentLayout } from "./AgentLayout";
 import { ChatTab } from "./ChatTab";
 import { TracesTab } from "./TracesTab";
+import { findSelectOption, optionsOf } from "@/test/select";
 
 const spec = (instructions: string, extra: object = {}): AgentSpec =>
   ({ spec_version: 1, name: "Support bot", instructions, model: { provider: "openai", name: "gpt-4.1-mini" }, tools: [], ...extra }) as AgentSpec;
@@ -236,7 +237,7 @@ describe("scroll to bottom", () => {
 describe("chips and the URL (as RunOptionsBar did, P0.19)", () => {
   async function ready() {
     await renderChat();
-    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+    await findSelectOption("openai:gpt-4.1");
   }
 
   it("write version and model to the query with replaceState, keep other parameters, and drop defaults", async () => {
@@ -270,7 +271,7 @@ describe("chips and the URL (as RunOptionsBar did, P0.19)", () => {
 
   it("lists Draft first (as the first option value) when it differs, and last otherwise", async () => {
     await ready();
-    const values = () => Array.from((screen.getByRole("combobox", { name: "Version" }) as HTMLSelectElement).options).map((o) => o.value);
+    const values = () => optionsOf(screen.getByRole("combobox", { name: "Version" })).map((o) => o.value);
     expect(values()).toEqual(["draft", "latest", "v2", "v1"]);
     cleanup();
     vi.mocked(api.agents.get).mockResolvedValue({ ...AGENT, draft_spec: spec("v2") });

@@ -6,6 +6,7 @@ import TracesPage from "./page";
 import { listTraceRuns } from "@/lib/traces";
 import { getExternalTrace, listExternalTraces } from "@/lib/externalTraces";
 import { api } from "@/lib/api";
+import { optionsOf } from "@/test/select";
 
 const nav = vi.hoisted(() => ({ query: "", replace: vi.fn() }));
 
@@ -92,7 +93,7 @@ describe("Traces page: external traces", () => {
   it("the Source select writes the filter to the URL", async () => {
     render(<TracesPage />);
     const select = (await screen.findByTestId("source-filter")) as HTMLSelectElement;
-    expect([...select.options].map((o) => o.textContent)).toEqual(["All", "Platform", "External"]);
+    expect(optionsOf(select).map((o) => o.textContent)).toEqual(["All", "Platform", "External"]);
     expect(select.value).toBe("all");
     fireEvent.change(select, { target: { value: "external" } });
     await waitFor(() => expect(nav.replace.mock.calls.at(-1)?.[0]).toContain("source=external"));

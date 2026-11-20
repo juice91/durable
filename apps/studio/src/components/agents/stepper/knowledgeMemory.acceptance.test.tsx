@@ -55,6 +55,7 @@ import { ConfigPanel } from "@/components/agentPage/ConfigPanel";
 import { EditorTab } from "@/components/agentPage/EditorTab";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { EDITOR_STEPS, stepForError } from "./registry";
+import { findSelectOption, getSelectOption, optionsOf } from "@/test/select";
 
 const KB1 = "11111111-1111-4111-8111-111111111111";
 const KB2 = "22222222-2222-4222-8222-222222222222";
@@ -118,7 +119,7 @@ const click = (id: string) => fireEvent.click(byId(id));
 /** The shared ModelPicker: choose the provider in its select, then the model in its searchable combobox. */
 async function pickModel(modelId: string, provider: string, name: string, { hidden = false } = {}) {
   const providerId = modelId.replace(/-model$/, "-provider");
-  await waitFor(() => expect(within(byId(providerId)).getByRole("option", { name: new RegExp(`^${provider}\\b`), hidden })).toBeInTheDocument());
+  await findSelectOption(new RegExp(`^${provider}\\b`));
   set(providerId, provider);
   await waitFor(() => expect(byId(modelId)).toBeEnabled());
   fireEvent.click(byId(modelId));
@@ -167,7 +168,7 @@ async function buildFull() {
   click("memory-observational-enabled");
   await pickModel("memory-observational-model", "test", "echo");
   click("memory-recall-enabled");
-  await waitFor(() => expect(within(byId("memory-recall-embedding_model")).getAllByRole("option").length).toBeGreaterThan(1));
+  await waitFor(() => expect(optionsOf(byId("memory-recall-embedding_model")).length).toBeGreaterThan(1));
   set("memory-recall-embedding_model", "test:hash");
   set("memory-recall-min_score", "0.5");
   fireEvent.click(screen.getByRole("radio", { name: "Choose kinds" }));
@@ -377,7 +378,7 @@ describe("a stored model outside the allowlist", () => {
     expect(byId("memory-observational-provider")).toHaveValue("test");
     expect(byId("memory-observational-model")).toHaveTextContent("gone (not listed)");
     expect(select("memory-recall-embedding_model")).toHaveValue("other:gone");
-    expect(screen.getByRole("option", { name: "other:gone (not in the allowlist)" })).toBeInTheDocument();
+    expect(getSelectOption("other:gone (not in the allowlist)")).toBeTruthy();
     expect(navButton(/^Memory/)).toHaveTextContent("History 20 · Observational · Recall");
   });
 
@@ -611,14 +612,14 @@ describe("phone width (by classes)", () => {
     restoreWidth = setWindowWidth(PHONE);
     await renderEditor(step);
     await screen.findByRole("heading", { name: "Product docs", hidden: true });
-    await waitFor(() => expect(within(byId("memory-observational-provider")).getAllByRole("option", { hidden: true }).length).toBeGreaterThan(1));
+    await waitFor(() => expect(optionsOf(byId("memory-observational-provider")).length).toBeGreaterThan(1));
   }
 
   it("the step select lists steps 6 and 7 and there is no nav column", async () => {
     await atPhone("memory");
     expect(screen.getByTestId("agent-stepper")).toHaveAttribute("data-layout", "compact");
     expect(screen.queryByRole("navigation", { name: "Editor steps" })).toBeNull();
-    const options = Array.from((screen.getByTestId("stepper-select") as HTMLSelectElement).options).map((o) => o.textContent);
+    const options = optionsOf(screen.getByTestId("stepper-select")).map((o) => o.textContent);
     // AC.13 added step 8 (Output) after Memory.
     expect(options.slice(-3, -1)).toEqual(["6. Knowledge — 2 knowledge bases", "7. Memory — History 12 · Working · Observational · Recall"]);
     fireEvent.change(screen.getByTestId("stepper-select"), { target: { value: "knowledge" } });
@@ -638,7 +639,8 @@ describe("phone width (by classes)", () => {
           // The shared Button is nowrap by design (short labels, in wrapping rows).
           if ((name === "whitespace-nowrap" && element.tagName !== "BUTTON") || name === "overflow-x-scroll") offenders.push(`${element.tagName}.${name}`);
         }
-        if (["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) && !["checkbox", "radio"].includes((element as HTMLInputElement).type)) {
+        // Radix keeps an aria-hidden native <select> beside a themed Select inside a form; it is never shown.
+        if (["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) && element.getAttribute("aria-hidden") !== "true" && !["checkbox", "radio"].includes((element as HTMLInputElement).type)) {
           if (!classes.includes("w-full") || !classes.includes("min-w-0")) offenders.push(`${element.tagName}#${element.id} is not w-full min-w-0`);
         }
       }
@@ -699,7 +701,7 @@ describe("accessibility", () => {
     await screen.findByRole("heading", { name: "Product docs" });
     await expectNoAxeViolations(document.body);
     goTo(/^Memory/);
-    await waitFor(() => expect(within(byId("memory-observational-provider")).getAllByRole("option").length).toBeGreaterThan(1));
+    await waitFor(() => expect(optionsOf(byId("memory-observational-provider")).length).toBeGreaterThan(1));
     await expectNoAxeViolations(document.body);
     expect(levels().filter((l) => l === 1)).toHaveLength(1);
     expect(levels().every((l, i, all) => l <= (all[i - 1] ?? 0) + 1)).toBe(true);

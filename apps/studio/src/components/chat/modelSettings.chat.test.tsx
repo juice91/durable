@@ -11,6 +11,7 @@ import { fetchModels, type ModelOption } from "@/lib/metrics";
 import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { findSelectOption } from "@/test/select";
 
 vi.mock("@/lib/api", () => ({
   BASE_URL: "http://api.test",
@@ -71,7 +72,7 @@ const composer = () => screen.getByRole("textbox", { name: "Message" }) as HTMLT
 async function renderReady() {
   render(<ChatTab agentId="agent-1" conversationId={null} />);
   await screen.findByRole("combobox", { name: "Version" });
-  await screen.findByRole("option", { name: "openai:gpt-4.1" });
+  await findSelectOption("openai:gpt-4.1");
   await waitFor(() => expect(api.agents.get).toHaveBeenCalledWith("agent-1"));
 }
 

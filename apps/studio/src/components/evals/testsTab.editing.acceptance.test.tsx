@@ -11,6 +11,7 @@ import { routes } from "@/lib/routes";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { TestsTab } from "./TestsTab";
 import { AGENT, SUITE, callsTo, installFakeApi, suiteOf, type FakeApi } from "./evalsFakeApi";
+import { getSelectOption, optionsOf } from "@/test/select";
 
 vi.mock("next/navigation", async () => (await import("@/test/nextRouterMock")).navigationModule);
 
@@ -215,7 +216,7 @@ describe("the judge model picker", () => {
     const sheet = await openSuiteSheet();
     const judge = await addEvaluator(sheet, "llm_judge");
     const provider = await within(judge).findByTestId("model-picker-provider");
-    expect(within(provider).getAllByRole("option").map((o) => o.getAttribute("value"))).toEqual(["", "test", "openai"]);
+    expect(optionsOf(provider).map((o) => o.getAttribute("value"))).toEqual(["", "test", "openai"]);
     expect(provider).toHaveValue("test");
     expect(within(judge).getByTestId("model-picker-model")).toHaveTextContent("judge");
   });
@@ -232,7 +233,7 @@ describe("the judge model picker", () => {
     const row = within(sheet).getByTestId("evaluator-row");
     const provider = await within(row).findByTestId("model-picker-provider");
     expect(provider).toHaveValue("anthropic");
-    expect(within(provider).getByRole("option", { name: "anthropic (not in the allowlist)" })).toBeInTheDocument();
+    expect(getSelectOption("anthropic (not in the allowlist)", provider)).toBeTruthy();
     set(provider, "openai");
     set(await within(row).findByLabelText("Judge model"), "gpt-4.1");
     fireEvent.click(within(sheet).getByTestId("eval-suite-save"));

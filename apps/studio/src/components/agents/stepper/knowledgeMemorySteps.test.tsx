@@ -30,6 +30,7 @@ import { modelsFixture, processorCatalogFixture } from "@/components/agents/spec
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
 import type { EditorLayout } from "./editorFit";
+import { optionsOf } from "@/test/select";
 
 const KB1 = "11111111-1111-4111-8111-111111111111";
 const KB2 = "22222222-2222-4222-8222-222222222222";
@@ -321,9 +322,9 @@ describe("Memory step", () => {
   it("the observer and embedding pickers list allowlisted models only", async () => {
     setup(FULL, { start: "memory" });
     // The shared model picker: a provider select, then a searchable list of that provider's models.
-    await waitFor(() => expect(within(screen.getByLabelText("Observer provider")).getAllByRole("option").length).toBeGreaterThan(1));
+    await waitFor(() => expect(optionsOf(screen.getByLabelText("Observer provider")).length).toBeGreaterThan(1));
     const providerSelect = screen.getByLabelText("Observer provider");
-    const providers = within(providerSelect).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
+    const providers = optionsOf(providerSelect).map((o) => (o as HTMLOptionElement).value).filter(Boolean);
     expect(providers).toEqual(Array.from(new Set(modelsFixture.map((m) => m.provider))));
     fireEvent.click(screen.getByLabelText("Observer model"));
     const listed = within(await screen.findByRole("listbox")).getAllByRole("option").map((o) => o.textContent ?? "");
@@ -332,7 +333,7 @@ describe("Memory step", () => {
     concrete.forEach((m, i) => expect(listed[i]).toContain(m.name));
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     const embedding = screen.getByLabelText("Embedding model");
-    const embeddingOptions = within(embedding).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
+    const embeddingOptions = optionsOf(embedding).map((o) => (o as HTMLOptionElement).value).filter(Boolean);
     expect(embeddingOptions).toEqual(["test:hash", "litellm:*"]);
     // A wildcard entry asks for the name.
     fireEvent.change(embedding, { target: { value: "litellm:*" } });
@@ -400,7 +401,7 @@ describe("phone width and accessibility", () => {
     await act(async () => undefined);
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
     // AC.13 added step 8 (Output) after Memory.
-    expect(Array.from(select.options).slice(-3, -1).map((o) => o.textContent)).toEqual([
+    expect(optionsOf(select).slice(-3, -1).map((o) => o.textContent)).toEqual([
       "6. Knowledge — 1 knowledge base",
       "7. Memory — History 12 · Working · Observational · Recall",
     ]);

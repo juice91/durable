@@ -46,6 +46,7 @@ import { rememberCaseCount } from "./useEvalRun";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
 import { alertClass, cardClass, fieldClass, hintClass, labelClass, sectionTitleClass } from "./evalsUi";
+import { Select } from "@/components/ui/Select";
 
 /** The editor Sheet's query parameter: `suite` (the suite), `new` (a new case) or a case id. */
 export const EDIT_PARAM = "edit";
@@ -345,21 +346,21 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
           <div className="flex min-w-0 flex-wrap items-end gap-2" data-testid="eval-history-compare">
             <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
               <label htmlFor="eval-compare-base" className={labelClass}>Base</label>
-              <select id="eval-compare-base" className={fieldClass} value={base} onChange={(e) => setBase(e.target.value)} data-testid="eval-compare-base">
+              <Select id="eval-compare-base" className={fieldClass} value={base} onValueChange={(v) => setBase(v)} data-testid="eval-compare-base">
                 <option value="">Choose a run</option>
                 {suiteRuns.map((r) => (
                   <option key={r.run_id} value={r.run_id}>{runTargetLabel(r)} · {new Date(r.created_at).toLocaleString()}</option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
               <label htmlFor="eval-compare-target" className={labelClass}>Target</label>
-              <select id="eval-compare-target" className={fieldClass} value={compareTarget} onChange={(e) => setTarget(e.target.value)} data-testid="eval-compare-target">
+              <Select id="eval-compare-target" className={fieldClass} value={compareTarget} onValueChange={(v) => setTarget(v)} data-testid="eval-compare-target">
                 <option value="">Choose a run</option>
                 {suiteRuns.map((r) => (
                   <option key={r.run_id} value={r.run_id}>{runTargetLabel(r)} · {new Date(r.created_at).toLocaleString()}</option>
                 ))}
-              </select>
+              </Select>
             </div>
             <Button
               disabled={!base || !compareTarget || base === compareTarget}

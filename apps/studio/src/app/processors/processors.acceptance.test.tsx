@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProcessorsPage from "./page";
 import { ProcessorDetail } from "@/components/processors/ProcessorDetail";
 import { routes } from "@/lib/routes";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
@@ -86,15 +87,15 @@ describe("Processors page acceptance", () => {
   it("the test console refuses moderation: the option is disabled and the API 422 is mapped", async () => {
     handlers["/processors/test"] = () => ({ status: 422, body: { detail: "moderation calls a model and cannot run in the test console; test it in the playground" } });
     render(<Detail />);
-    const option = await screen.findByRole("option", { name: "Moderation (test in the chat)" });
-    expect(option).toBeDisabled();
+    await findSelectOption("Moderation (test in the chat)");
+    expect(getSelectOption("Moderation (test in the chat)")?.disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
     expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in an agent's chat");
   });
 
   it("outcome filters reach the API, always narrowed to the page's type, and Reset keeps the type", async () => {
     render(<Detail />);
-    await screen.findByRole("option", { name: "Agent 1" });
+    await findSelectOption("Agent 1");
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
     fireEvent.change(filters.getByLabelText("Action"), { target: { value: "redact" } });
     fireEvent.click(filters.getByRole("button", { name: "Apply" }));
@@ -111,7 +112,7 @@ describe("Processors page acceptance", () => {
 
   it("refuses From after To without calling the API", async () => {
     render(<Detail />);
-    await screen.findByRole("option", { name: "Agent 1" });
+    await findSelectOption("Agent 1");
     const before = calls.length;
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
     fireEvent.change(filters.getByLabelText("From"), { target: { value: "2026-11-13T10:00" } });
@@ -148,7 +149,7 @@ describe("Processors page acceptance", () => {
       return { status: 200, body: { items: [row({ action: "block" })], next_before: null } };
     };
     render(<Detail />);
-    await screen.findByRole("option", { name: "Agent 1" });
+    await findSelectOption("Agent 1");
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
     fireEvent.change(filters.getByLabelText("Action"), { target: { value: "block" } });
     fireEvent.click(filters.getByRole("button", { name: "Apply" }));

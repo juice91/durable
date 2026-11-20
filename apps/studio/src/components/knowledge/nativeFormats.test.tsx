@@ -16,6 +16,7 @@ import { DocumentSheet } from "./DocumentSheet";
 import { KnowledgeBaseDialog } from "./KnowledgeBaseDialog";
 import { ReextractDialog, reextractRequest, reextractStartedText } from "./ReextractDialog";
 import { UploadSheet } from "./UploadSheet";
+import { optionsOf } from "@/test/select";
 
 const T0 = "2026-11-15T10:00:00Z";
 
@@ -118,7 +119,7 @@ describe("UploadSheet", () => {
   it("the paste form offers reStructuredText, YAML and JSON", () => {
     const { sheet } = renderUpload();
     fireEvent.mouseDown(within(sheet).getByTestId("knowledge-upload-tab-paste"));
-    const options = Array.from(within(sheet).getByTestId("knowledge-paste-format").querySelectorAll("option")).map((o) => o.getAttribute("value"));
+    const options = optionsOf(within(sheet).getByTestId("knowledge-paste-format")).map((o) => o.getAttribute("value"));
     expect(options).toEqual(["text/markdown", "text/plain", "text/html", "text/x-rst", "application/yaml", "application/json"]);
   });
 });

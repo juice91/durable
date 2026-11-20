@@ -4,6 +4,7 @@ import React, { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { listEmbeddingModels, type EmbeddingModel } from "@/lib/knowledge";
 import { fieldClass, hintClass, labelClass } from "./knowledgeUi";
+import { Select } from "@/components/ui/Select";
 
 /** The allowlisted embedding models (GET /embedding-models), loaded once per mount. */
 export function useEmbeddingModels(): { models: EmbeddingModel[]; status: "loading" | "ready" | "error"; error: string | null; reload: () => void } {
@@ -91,12 +92,12 @@ export function EmbeddingModelPicker({
           <Button size="sm" onClick={onRetry}>Retry</Button>
         </div>
       ) : null}
-      <select
+      <Select
         id={id}
         data-testid={testId}
         value={choice}
         disabled={disabled || status !== "ready" || models.length === 0}
-        onChange={(event) => onChoiceChange(event.target.value)}
+        onValueChange={(v) => onChoiceChange(v)}
         className={fieldClass}
         required
       >
@@ -106,7 +107,7 @@ export function EmbeddingModelPicker({
             {model.wildcard ? `${model.provider}: any model (${model.dimensions} dims)` : `${model.id} (${model.dimensions} dims)`}
           </option>
         ))}
-      </select>
+      </Select>
       {chosen?.wildcard ? (
         <div className="space-y-1 pt-1">
           <label htmlFor={`${id}-name`} className={labelClass}>Model name on {chosen.provider}</label>

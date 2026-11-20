@@ -3,6 +3,7 @@
 import React, { useId, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { putSecret } from "@/lib/secrets";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 export const NEW_SECRET = "__new__";
@@ -47,15 +48,15 @@ export function SecretPicker({ label, names, value, onChange, onCreated }: { lab
         <label htmlFor={`${id}-select`} className="block text-sm font-medium text-foreground">
           {label}
         </label>
-        <select
+        <Select
           id={`${id}-select`}
           value={creating ? NEW_SECRET : value}
-          onChange={(event) => {
-            if (event.target.value === NEW_SECRET) {
+          onValueChange={(v) => {
+            if (v === NEW_SECRET) {
               setCreating(true);
             } else {
               setCreating(false);
-              onChange(event.target.value);
+              onChange(v);
             }
           }}
           className={`${inputClass} font-mono`}
@@ -67,7 +68,7 @@ export function SecretPicker({ label, names, value, onChange, onCreated }: { lab
             </option>
           ))}
           <option value={NEW_SECRET}>Create new secret…</option>
-        </select>
+        </Select>
       </div>
       {creating ? (
         <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border p-3">

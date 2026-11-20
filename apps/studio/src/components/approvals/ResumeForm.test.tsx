@@ -64,7 +64,7 @@ describe("resume data form on a suspended input step", () => {
     );
     expect(screen.getByRole("heading", { name: /Waiting for input/ })).toBeTruthy();
     expect(screen.getByLabelText(/Email/)).toBeTruthy();
-    expect(screen.getByLabelText(/Tier/).tagName).toBe("SELECT");
+    expect(screen.getByLabelText(/Tier/)).toHaveAttribute("data-select-trigger");
     expect(screen.getByRole("group", { name: /Address/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reject" })).toBeTruthy();

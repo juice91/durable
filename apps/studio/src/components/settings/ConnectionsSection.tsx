@@ -31,6 +31,7 @@ import { listSecrets } from "@/lib/secrets";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
 import { SecretPicker } from "./SecretPicker";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -144,11 +145,11 @@ function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Con
             </div>
             <div className="space-y-1">
               <label htmlFor="connection-provider" className="block text-sm font-medium text-foreground">Provider</label>
-              <select id="connection-provider" value={form.provider} onChange={(e) => chooseProvider(e.target.value)} disabled={!!editing} className={inputClass}>
+              <Select id="connection-provider" value={form.provider} onValueChange={(v) => chooseProvider(v)} disabled={!!editing} className={inputClass}>
                 {providerOptions(adapters, form.provider).map((provider) => (
                   <option key={provider.provider} value={provider.provider}>{provider.display_name}</option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="space-y-1">
               <label htmlFor="connection-base-url" className="block text-sm font-medium text-foreground">Base URL</label>

@@ -8,6 +8,7 @@ import { BreakdownTable } from "./BreakdownTable";
 import { MetricsFilterBar } from "./MetricsFilterBar";
 import { DEFAULT_PAGE_STATE } from "@/lib/metrics";
 import { RANGE, breakdownFixture, metricValues, summaryFixture, timeseriesFixture } from "./metricsFixtures";
+import { getSelectOption } from "@/test/select";
 
 const FILTERS = { from: RANGE.from, to: RANGE.to, agent_id: "agent-1", model: null, provider: null, kind: null };
 
@@ -388,7 +389,7 @@ describe("MetricsFilterBar", () => {
     );
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "a-1" } });
     expect(onChange).toHaveBeenLastCalledWith({ ...state, agent_id: "a-1" });
-    expect(within(screen.getByLabelText("Model")).getByRole("option", { name: "x:legacy" })).toBeInTheDocument();
+    expect(getSelectOption("x:legacy", screen.getByLabelText("Model"))).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "30d" } });
     expect(onChange).toHaveBeenLastCalledWith({ ...state, range: "30d", from: null, to: null });
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
@@ -399,7 +400,7 @@ describe("MetricsFilterBar", () => {
     const onChange = vi.fn();
     const state = { ...DEFAULT_PAGE_STATE, range: "custom" as const, from: "2026-11-01T00:00:00.000Z", to: "2026-11-30T00:00:00.000Z" };
     render(<MetricsFilterBar state={state} onChange={onChange} range={{ from: state.from, to: state.to }} />);
-    expect(within(screen.getByLabelText("Interval")).getByRole("option", { name: /Hourly/ })).toBeDisabled();
+    expect(getSelectOption(/Hourly/, screen.getByLabelText("Interval"))?.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-12-01T00:00" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByRole("alert")).toHaveTextContent("from must be before to");

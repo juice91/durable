@@ -10,6 +10,7 @@ import { api, ApiError, type Agent } from "@/lib/api";
 import { loadAgentProcessorSpecs, processors, type ProcessorCatalog, type ProcessorResultItem } from "@/lib/processors";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 vi.mock("@/lib/processors", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/processors")>();
@@ -147,7 +148,7 @@ describe("Processors list and detail", () => {
   it("applies filters and validates the run id", async () => {
     render(<Detail />);
     await screen.findByTestId("result-row");
-    await screen.findByRole("option", { name: "Support bot" });
+    await findSelectOption("Support bot");
     const filters = within(screen.getByRole("form", { name: "Filter outcomes" }));
     expect(filters.queryByLabelText("Processor")).not.toBeInTheDocument();
 
@@ -225,8 +226,8 @@ describe("Processors list and detail", () => {
   it("offers moderation only as 'test in the chat' and maps the API refusal", async () => {
     vi.mocked(processors.test).mockRejectedValue(new ApiError(422, "moderation calls a model and cannot run in the test console; test it in the playground"));
     render(<Detail />);
-    const option = await screen.findByRole("option", { name: "Moderation (test in the chat)" });
-    expect(option).toBeDisabled();
+    await findSelectOption("Moderation (test in the chat)");
+    expect(getSelectOption("Moderation (test in the chat)")?.disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
     expect(await screen.findByTestId("console-error")).toHaveTextContent("Test it in an agent's chat");
   });

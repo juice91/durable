@@ -24,6 +24,7 @@ import { routes } from "@/lib/routes";
 import type { TraceTab } from "@/lib/routes/observability";
 import type { UsageValues } from "@/lib/metrics";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { optionsOf } from "@/test/select";
 
 const replace = vi.fn();
 const push = vi.fn();
@@ -366,7 +367,7 @@ describe("Metrics page: the Operation filter lives in the URL", () => {
     await waitFor(() => expect(metricCalls()).toHaveLength(4));
     for (const u of calls) expect(u.searchParams.has("operation")).toBe(false);
     await screen.findByTestId("metrics-operation-kpis");
-    await waitFor(() => expect(screen.getByLabelText("Model").querySelector('option[value="gpt-4o"]')).not.toBeNull());
+    await waitFor(() => expect(optionsOf(screen.getByLabelText("Model")).some((o) => o.value === "gpt-4o")).toBe(true));
     fireEvent.change(screen.getByLabelText("Model"), { target: { value: "gpt-4o" } });
     const href = hrefOf(replace);
     expect(Object.fromEntries(href.searchParams)).toEqual({ range: "30d", agent_id: "a-1", kind: "agent", model: "gpt-4o" });
@@ -510,7 +511,7 @@ describe("the kb_ingest kind", () => {
     const { rerender } = render(<MetricsPage />);
     await screen.findByTestId("metrics-operation-kpis");
     const kind = screen.getByLabelText("Kind") as HTMLSelectElement;
-    expect(Array.from(kind.options).find((o) => o.value === "kb_ingest")).toHaveTextContent("Knowledge ingest");
+    expect(optionsOf(kind).find((o) => o.value === "kb_ingest")?.textContent).toBe("Knowledge ingest");
     fireEvent.change(kind, { target: { value: "kb_ingest" } });
     expect(hrefOf(replace).searchParams.get("kind")).toBe("kb_ingest");
     search = hrefOf(replace).search.slice(1);

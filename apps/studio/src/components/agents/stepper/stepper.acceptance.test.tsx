@@ -48,6 +48,7 @@ import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
 import { EDITOR_STEPS } from "./registry";
 import type { EditorStepDefinition, StepProps } from "./types";
+import { optionsOf } from "@/test/select";
 
 const DRAFT = {
   spec_version: 1,
@@ -207,12 +208,12 @@ describe("step navigation", () => {
     const instructions = () => navButton(/^Instructions/);
     expect(identity()).toHaveTextContent("test:echo");
     expect(instructions()).toHaveTextContent("2 words");
-    fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "" } });
-    expect(identity()).toHaveTextContent("Required");
-    expect(identity()).toHaveAccessibleName(/needs attention/);
     // The picker clears the model when the provider changes; a wildcard provider takes a typed name.
+    // (The "Select a provider…" placeholder is disabled in the themed Select, so the provider is
+    // changed to another one, which clears the model, rather than to the empty value.)
     fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "litellm" } });
     expect(identity()).toHaveTextContent("Required");
+    expect(identity()).toHaveAccessibleName(/needs attention/);
     fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "echo" } });
     expect(identity()).toHaveTextContent("litellm:echo");
     expect(identity()).toHaveAccessibleName(/complete/);
@@ -235,10 +236,10 @@ describe("step navigation", () => {
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
     expect(select.value).toBe("tools");
     expect(screen.getByText("Step 3 of 8")).toBeInTheDocument();
-    expect(Array.from(select.options).map((option) => option.value)).toEqual(EDITOR_STEPS.map((step) => step.id));
-    expect(select.options[0].textContent).toContain("test:echo");
+    expect(optionsOf(select).map((option) => option.value)).toEqual(EDITOR_STEPS.map((step) => step.id));
+    expect(optionsOf(select)[0].textContent).toContain("test:echo");
     fireEvent.change(screen.getByRole("textbox", { name: "Instructions", hidden: true }), { target: { value: "" } });
-    expect(select.options[1].textContent).toContain("Required");
+    expect(optionsOf(select)[1].textContent).toContain("Required");
     fireEvent.change(select, { target: { value: "processors" } });
     expect(region("Processors")).toBeVisible();
     expect(lastReplace().params.get("step")).toBe("processors");
@@ -292,7 +293,6 @@ describe("saving", () => {
 
   it.each([
     ["name", "Name", "Identity and model"],
-    ["provider", "Model provider", "Identity and model"],
     ["modelName", "Model name", "Identity and model"],
     ["instructions", "Instructions", "Instructions"],
   ])("Save with %s empty opens its step, focuses the field and sends nothing", async (_id, fieldLabel, stepLabel) => {
@@ -302,12 +302,10 @@ describe("saving", () => {
     await renderEditor();
     fireEvent.click(navButton(/^Identity and model/));
     if (fieldLabel === "Model name") {
-      await waitFor(() => expect(within(screen.getByLabelText("Model provider")).getAllByRole("option").length).toBeGreaterThan(1));
+      await waitFor(() => expect(optionsOf(screen.getByLabelText("Model provider")).length).toBeGreaterThan(1));
       // Changing the provider clears the model; the picker has no way to type a blank into it.
       fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "other" } });
       expect(screen.getByLabelText("Model name")).toHaveTextContent("Select a model…");
-    } else if (fieldLabel === "Model provider") {
-      fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "" } });
     } else if (fieldLabel === "Instructions") {
       fireEvent.click(navButton(/^Instructions/));
       fireEvent.change(screen.getByRole("textbox", { name: "Instructions" }), { target: { value: " " } });

@@ -19,6 +19,7 @@ import {
 } from "@/lib/evals";
 import { knowledgeBasesOf } from "@/components/agents/knowledgeMemory";
 import { KnowledgeNote, MemoryNote, WarningIcon, alertClass, fieldClass, hintClass, labelClass, warningClass } from "./evalsUi";
+import { Select } from "@/components/ui/Select";
 
 /** A published version to run against: an agent's (with its spec) or a workflow's. */
 export type RunVersion = Pick<AgentVersion, "version"> & Partial<Pick<AgentVersion, "spec">>;
@@ -126,7 +127,7 @@ export function RunDialog({ target: subject, agent = null, versions, suite, hasM
           {noCases ? <p className={alertClass} data-testid="eval-run-no-cases">The suite has no cases yet.</p> : null}
           <div className="space-y-1">
             <label htmlFor={`${id}-target`} className={labelClass}>Run against</label>
-            <select id={`${id}-target`} className={fieldClass} value={targetValue(target)} onChange={(e) => setTarget(parseTarget(e.target.value))} disabled={starting} data-testid="eval-run-target">
+            <Select id={`${id}-target`} className={fieldClass} value={targetValue(target)} onValueChange={(v) => setTarget(parseTarget(v))} disabled={starting} data-testid="eval-run-target">
               {published.map((v, i) => (
                 <option key={v.version} value={String(v.version)}>
                   v{v.version}
@@ -134,7 +135,7 @@ export function RunDialog({ target: subject, agent = null, versions, suite, hasM
                 </option>
               ))}
               {isWorkflow ? null : <option value="draft">Draft</option>}
-            </select>
+            </Select>
             <p className={hintClass}>
               {target === "draft"
                 ? "The unpublished draft, frozen when the run starts."
@@ -145,11 +146,11 @@ export function RunDialog({ target: subject, agent = null, versions, suite, hasM
           </div>
           <div className="space-y-1">
             <label htmlFor={`${id}-concurrency`} className={labelClass}>Cases at a time</label>
-            <select id={`${id}-concurrency`} className={fieldClass} value={String(concurrency)} onChange={(e) => setConcurrency(Number(e.target.value))} disabled={starting} data-testid="eval-run-concurrency">
+            <Select id={`${id}-concurrency`} className={fieldClass} value={String(concurrency)} onValueChange={(v) => setConcurrency(Number(v))} disabled={starting} data-testid="eval-run-concurrency">
               {Array.from({ length: MAX_MAX_CONCURRENCY }, (_, i) => i + 1).map((n) => (
                 <option key={n} value={String(n)}>{n}</option>
               ))}
-            </select>
+            </Select>
           </div>
           {hasMemory ? <MemoryNote /> : null}
           {hasKnowledge ? <KnowledgeNote /> : null}

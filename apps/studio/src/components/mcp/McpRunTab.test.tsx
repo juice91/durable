@@ -9,6 +9,7 @@ import { getRun, subscribeRun, type Run } from "@/lib/runs";
 import { toolRunLedger } from "@/lib/toolRunLedger";
 import type { McpDiscoveredTool, McpServer } from "@/lib/mcpServers";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { optionsOf } from "@/test/select";
 
 vi.mock("@/lib/mcpToolRuns", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpToolRuns")>();
@@ -78,7 +79,7 @@ describe("MCP run tab", () => {
     vi.mocked(listMcpToolRuns).mockResolvedValueOnce([run("run-0", { display_status: "failed", status: "failed" })]);
     renderTab();
     const select = screen.getByLabelText("Tool");
-    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["Select a tool", "add", "ping"]);
+    expect(optionsOf(select).map((o) => o.textContent)).toEqual(["Select a tool", "add", "ping"]);
 
     fireEvent.change(select, { target: { value: "add" } });
     expect(await screen.findByTestId("tool-runner")).toBeInTheDocument();

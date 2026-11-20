@@ -5,6 +5,7 @@ import { fetchModels, type ModelOption } from "@/components/agents/specSections"
 import { Badge } from "@/components/ui/Badge";
 import { Combobox, type ComboboxOption } from "@/components/ui/Combobox";
 import { fetchProviders, PROVIDER_STATE_LABELS, PROVIDER_STATE_VARIANTS, type ProviderStatus } from "@/lib/providers";
+import { Select } from "@/components/ui/Select";
 
 const labelClass = "mb-1 block text-label font-medium text-foreground";
 const fieldClass =
@@ -193,13 +194,13 @@ export function ModelPicker({
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="min-w-0">
           <label htmlFor={providerId} className={labelClass}>{providerLabel}</label>
-          <select
+          <Select
             id={providerId}
             data-testid="model-picker-provider"
             value={provider}
             disabled={disabled}
             required={required}
-            onChange={(e) => changeProvider(e.target.value)}
+            onValueChange={(v) => changeProvider(v)}
             className={fieldClass}
           >
             <option value="" disabled>Select a provider…</option>
@@ -207,7 +208,7 @@ export function ModelPicker({
             {providerIds.map((id) => (
               <option key={id} value={id}>{providerOptionText(id, statusOf(id))}</option>
             ))}
-          </select>
+          </Select>
           {status ? (
             <p className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-caption text-muted-foreground" data-testid="model-picker-status">
               <Badge variant={PROVIDER_STATE_VARIANTS[status.status]}>{PROVIDER_STATE_LABELS[status.status]}</Badge>

@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import type { ProcessorConfigSchema } from "@/lib/processors";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -84,9 +85,9 @@ export function ProcessorConfigForm({ schema, value, onChange, idPrefix }: {
 
         if (property.enum) {
           control = (
-            <select id={id} className={inputClass} value={current == null ? "" : String(current)} onChange={(event) => set(name, event.target.value)}>
+            <Select id={id} className={inputClass} value={current == null ? "" : String(current)} onValueChange={(v) => set(name, v)}>
               {property.enum.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}
-            </select>
+            </Select>
           );
         } else if (property.type === "array") {
           control = <LinesField id={id} value={current} onChange={(next) => set(name, next)} />;

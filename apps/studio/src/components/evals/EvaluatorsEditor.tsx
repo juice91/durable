@@ -16,6 +16,7 @@ import {
   type EvaluatorKind,
 } from "@/lib/evals";
 import { alertClass, cardClass, fieldClass, hintClass, labelClass, monoFieldClass } from "./evalsUi";
+import { Select } from "@/components/ui/Select";
 
 /** The judge models offered (allowlisted concrete models from `GET /models`), loaded once per editor. */
 export function useJudgeModels(): { models: string[]; options: ModelOption[] | null; loaded: boolean; error: string | null } {
@@ -119,11 +120,11 @@ function EvaluatorRow({ draft, index, judgeModels, judgeOptions, judgeModelsErro
       <div className="flex min-w-0 flex-wrap items-end gap-2">
         <div className="min-w-0 flex-1 space-y-1">
           <label htmlFor={field("kind")} className={labelClass}>Evaluator {index + 1}</label>
-          <select id={field("kind")} className={fieldClass} value={draft.kind} onChange={(e) => setKind(e.target.value as EvaluatorKind)} data-testid="evaluator-kind">
+          <Select id={field("kind")} className={fieldClass} value={draft.kind} onValueChange={(v) => setKind(v as EvaluatorKind)} data-testid="evaluator-kind">
             {EVALUATOR_KINDS.map((kind) => (
               <option key={kind} value={kind}>{EVALUATOR_LABELS[kind]}</option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="min-w-0 flex-1 space-y-1">
           <label htmlFor={field("name")} className={labelClass}>Name <span className="font-normal text-muted-foreground">(optional)</span></label>

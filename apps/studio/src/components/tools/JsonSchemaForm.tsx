@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import type { JsonSchema } from "@/lib/tools";
+import { Select } from "@/components/ui/Select";
 
 type JsonObject = Record<string, unknown>;
 
@@ -77,10 +78,10 @@ function Field({ name, schema, value, required, onChange, path, fieldPath, error
   let control;
   if (schema.enum) {
     control = (
-      <select id={id} aria-invalid={Boolean(error)} className={inputClass} value={value == null ? "" : String(value)} onBlur={() => setTouched(true)} onChange={(event) => onChange(event.target.value)}>
+      <Select id={id} aria-invalid={Boolean(error)} className={inputClass} value={value == null ? "" : String(value)} onBlur={() => setTouched(true)} onValueChange={(v) => onChange(v)}>
         <option value="">Select…</option>
         {schema.enum.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}
-      </select>
+      </Select>
     );
   } else if (schema.type === "boolean") {
     control = <input id={id} type="checkbox" aria-invalid={Boolean(error)} checked={Boolean(value)} onBlur={() => setTouched(true)} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 rounded border-input" />;

@@ -47,7 +47,7 @@ export function ComposerVersionChip({ versions, latestVersion, versionRef, onCha
       errorId={VERSION_ERROR_ID}
       value={versionSelectValue(versionRef)}
       disabled={disabled}
-      onChange={(event) => onChange(versionFromSelectValue(event.target.value))}
+      onValueChange={(v) => onChange(versionFromSelectValue(v))}
     >
       {draftDiffers && latestVersion !== null ? draft : null}
       {latestVersion !== null ? <option value="latest">Latest (v{latestVersion})</option> : null}

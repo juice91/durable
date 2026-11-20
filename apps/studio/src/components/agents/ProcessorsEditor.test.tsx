@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProcessorsEditor } from "./ProcessorsEditor";
 import { modelsFixture, processorCatalogFixture } from "./specSections.fixtures";
 import type { EditableProcessor } from "./specSections";
+import { optionsOf } from "@/test/select";
 
 const pii = (clientId: string): EditableProcessor => ({ type: "pii_redact", config: { kinds: ["email"], action: "redact" }, clientId });
 
@@ -43,7 +44,7 @@ describe("ProcessorsEditor phases", () => {
 
   it("offers moderation under Input and Output only", () => {
     renderEditor();
-    const options = (label: string) => within(screen.getByLabelText(label)).getAllByRole("option").map((o) => o.textContent);
+    const options = (label: string) => optionsOf(screen.getByLabelText(label)).map((o) => o.textContent);
     expect(options("Input processor type")).toContain("Moderation");
     expect(options("Output processor type")).toContain("Moderation");
     expect(options("Step processor type")).not.toContain("Moderation");

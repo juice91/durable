@@ -4,6 +4,7 @@ import "@testing-library/jest-dom";
 import { describe, expect, it } from "vitest";
 import { ProcessorTestConsole } from "./ProcessorTestConsole";
 import type { ProcessorCatalog } from "@/lib/processors";
+import { optionsOf } from "@/test/select";
 
 const catalog: ProcessorCatalog = {
   items: [
@@ -17,7 +18,7 @@ const catalog: ProcessorCatalog = {
 describe("ProcessorTestConsole phase select", () => {
   it("lists the four phases, input first", () => {
     render(<ProcessorTestConsole catalog={catalog} />);
-    const options = within(screen.getByLabelText("Phase")).getAllByRole("option").map((o) => o.textContent);
+    const options = optionsOf(screen.getByLabelText("Phase")).map((o) => o.textContent);
     expect(options).toEqual(["Input", "Step", "Stream", "Output"]);
   });
 
@@ -28,7 +29,7 @@ describe("ProcessorTestConsole phase select", () => {
 
   it("offers only the types that run in the chosen phase", () => {
     render(<ProcessorTestConsole catalog={catalog} />);
-    const types = () => within(screen.getByLabelText("Processor 1")).getAllByRole("option").map((o) => o.textContent);
+    const types = () => optionsOf(screen.getByLabelText("Processor 1")).map((o) => o.textContent);
     expect(types()).toEqual(["PII redaction", "Maximum length"]);
     fireEvent.change(screen.getByLabelText("Phase"), { target: { value: "stream" } });
     expect(types()).toEqual(["PII redaction"]);

@@ -16,6 +16,7 @@ import {
   type ProcessorDeclaration,
   type ProcessorPhase,
 } from "./specSections";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const smallButton = "rounded-md border border-border px-2 py-1 text-xs text-card-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -280,10 +281,10 @@ function PhaseList({ phase, value, onChange, catalog, models, modelsError, error
         })}
       </ol>
       <div className="flex gap-2">
-        <select aria-label={`${label} processor type`} className={inputClass} value={adding} onChange={(e) => setAdding(e.target.value)} disabled={!catalog || value.length >= max}>
+        <Select aria-label={`${label} processor type`} className={inputClass} value={adding} onValueChange={(v) => setAdding(v)} disabled={!catalog || value.length >= max}>
           <option value="">Choose a processor type…</option>
           {available.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-        </select>
+        </Select>
         <button type="button" className={smallButton} aria-label={`Add ${phase} processor`} onClick={add} disabled={!adding || value.length >= max}>Add</button>
       </div>
     </section>

@@ -5,6 +5,7 @@ import { isoToLocalInput, localInputToIso } from "@/lib/datetimeLocal";
 import { RUN_KIND_LABELS, type RunKind } from "@/lib/runs";
 import { TRACE_SOURCES, TRACE_SOURCE_LABELS, hasActiveFilters, type TraceFilters, type TraceSource } from "@/lib/traces";
 import { Button } from "@/components/ui/Button";
+import { Select } from "@/components/ui/Select";
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "completed", label: "Completed" },
@@ -78,10 +79,10 @@ export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, on
         <label htmlFor="status-filter" className={labelClass}>
           Filter by status:
         </label>
-        <select
+        <Select
           id="status-filter"
           value={statusValue}
-          onChange={(e) => setFilters({ status: e.target.value === "all" ? [] : e.target.value.split(",") })}
+          onValueChange={(v) => setFilters({ status: v === "all" ? [] : v.split(",") })}
           className={inputClass}
         >
           <option value="all">All</option>
@@ -89,43 +90,43 @@ export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, on
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
           {customStatus ? <option value={statusValue}>{filters.status.join(", ").replace(/_/g, " ")}</option> : null}
-        </select>
+        </Select>
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="source-filter" className={labelClass}>Source</label>
-        <select
+        <Select
           id="source-filter"
           data-testid="source-filter"
           value={filters.source}
-          onChange={(e) => setFilters({ source: e.target.value as TraceSource })}
+          onValueChange={(v) => setFilters({ source: v as TraceSource })}
           className={inputClass}
         >
           {TRACE_SOURCES.map((source) => (
             <option key={source} value={source}>{TRACE_SOURCE_LABELS[source]}</option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="kind-filter" className={labelClass}>Kind</label>
-        <select
+        <Select
           id="kind-filter"
           value={filters.kind ?? "all"}
-          onChange={(e) => setFilters({ kind: e.target.value === "all" ? null : (e.target.value as TraceFilters["kind"]) })}
+          onValueChange={(v) => setFilters({ kind: v === "all" ? null : (v as TraceFilters["kind"]) })}
           className={inputClass}
         >
           <option value="all">All</option>
           {(Object.keys(RUN_KIND_LABELS) as RunKind[]).map((kind) => (
             <option key={kind} value={kind}>{RUN_KIND_LABELS[kind]}</option>
           ))}
-        </select>
+        </Select>
       </div>
       {extra}
       <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="agent-filter" className={labelClass}>Agent</label>
-        <select
+        <Select
           id="agent-filter"
           value={filters.agent_id ?? ""}
-          onChange={(e) => setFilters({ agent_id: e.target.value || null })}
+          onValueChange={(v) => setFilters({ agent_id: v || null })}
           className={`${inputClass} max-w-48`}
         >
           <option value="">All agents</option>
@@ -135,7 +136,7 @@ export function TraceFilterBar<F extends TraceFilters>({ filters, setFilters, on
           {filters.agent_id && !agentNames[filters.agent_id] ? (
             <option value={filters.agent_id}>{filters.agent_id.slice(0, 8)}...</option>
           ) : null}
-        </select>
+        </Select>
       </div>
       <TextFilter id="model-filter" label="Model" value={filters.model} placeholder="provider:name" onCommit={(model) => setFilters({ model })} />
       <TextFilter id="provider-filter" label="Provider" value={filters.provider} placeholder="e.g. openai" onCommit={(provider) => setFilters({ provider })} />

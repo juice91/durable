@@ -10,6 +10,7 @@ import type { StepStatus } from "../specSections";
 import type { EditorLayout } from "./editorFit";
 import { neighbourSteps } from "./registry";
 import type { EditorStepDefinition } from "./types";
+import { Select } from "@/components/ui/Select";
 
 export const VERSIONS_TITLE = "Versions";
 
@@ -107,11 +108,11 @@ export function AgentStepper({ steps, statuses, errorSteps, activeStep, onStepCh
         <label htmlFor="editor-step-select" className="mb-1 block text-caption text-muted-foreground">
           Step {activeIndex + 1} of {steps.length}
         </label>
-        <select
+        <Select
           id="editor-step-select"
           data-testid="stepper-select"
           value={activeStep}
-          onChange={(event) => onStepChange(event.target.value)}
+          onValueChange={(v) => onStepChange(v)}
           className={cn("w-full min-w-0 rounded-md border border-input bg-surface px-3 py-2 text-body text-foreground", focusRing)}
         >
           {steps.map((step, index) => {
@@ -123,7 +124,7 @@ export function AgentStepper({ steps, statuses, errorSteps, activeStep, onStepCh
               </option>
             );
           })}
-        </select>
+        </Select>
       </div>
     ) : null;
 
