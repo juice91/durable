@@ -228,7 +228,10 @@ describe("WorkflowRunView acceptance", () => {
     expectState("route", "completed");
     expectState("approve", "skipped");
     expectState("summarize", "pending");
-    expect(screen.getByRole("button", { name: "Step approve, Approval, Skipped" })).toBeInTheDocument();
+    // Steps the run never executed fold into one row; opening it lists them as "Not reached".
+    expect(screen.getByTestId("workflow-step-not-reached-toggle")).toHaveTextContent("1 step not reached");
+    fireEvent.click(screen.getByTestId("workflow-step-not-reached-toggle"));
+    expect(screen.getByRole("button", { name: "Step approve, Approval, Not reached" })).toBeInTheDocument();
     expect(screen.getByTestId("workflow-run-view")).toHaveAttribute("data-status", "running");
 
     emit(

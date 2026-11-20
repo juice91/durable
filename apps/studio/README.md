@@ -132,6 +132,7 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agents system rows | `studio.agents.show-system` | Whether the Agents list also shows the Architect's system helpers (the drafters). | Layout |
 | Architect list | `studio.architect.show-archived` | Whether the Architect page's created list shows archived agents and workflows. | Layout |
 | Skipped runs | `studio.runs.show-skipped` | Whether the Traces list and a workflow's run history also list skipped runs (a "nothing to do" exit); hidden when unset. | Layout |
+| Steps not reached | `studio.workflow.not-reached-open` | Whether a workflow run's step list shows the steps the run never reached (folded into one row unless opened). | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
 | Trace list columns | `studio.traces.hiddenColumns` | Which columns the Traces list shows. | Layout |
 | Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |

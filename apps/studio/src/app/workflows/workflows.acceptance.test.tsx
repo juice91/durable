@@ -225,9 +225,10 @@ describe("Workflow graph acceptance", () => {
     }
 
     const route = screen.getByTestId("workflow-step-route");
-    expect(route).toHaveTextContent("1: input.urgent eq true");
+    expect(route).toHaveTextContent("input.urgent eq true");
     expect(route).toHaveTextContent("default");
-    expect(route).toHaveTextContent("→ approve (1: input.urgent eq true), → summarize (default)");
+    expect(route).toHaveTextContent("→ approve");
+    expect(route).toHaveTextContent("→ summarize");
     expect(screen.getByTestId("workflow-step-classify")).toHaveTextContent("→ lookup");
     expect(screen.getByTestId("workflow-step-lookup")).toHaveTextContent("→ route");
     expect(screen.getByTestId("workflow-step-approve")).toHaveTextContent("→ summarize");
