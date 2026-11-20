@@ -13,6 +13,11 @@ data:
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
   EAP_ALLOWED_TOOLS: "clock.now,secrets.request,http.request,workflow.return,feed.parse,json.query,text.check,html.extract,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
   EAP_LOKI_URL: http://lgtm:3100
+  # Cloudflare Workers AI provider (optional; model ids cloudflare:@cf/...). The account id is not a secret; the API token
+  # comes from the Secret (CLOUDFLARE_API_TOKEN). Leave both empty to keep the provider off. A gateway id routes every request
+  # through Cloudflare AI Gateway (logging, caching, rate limits); empty calls Workers AI directly.
+  EAP_CLOUDFLARE_ACCOUNT_ID: ""
+  EAP_CLOUDFLARE_GATEWAY_ID: ""
   # Chat attachment bytes live in Cloudflare R2 (S3 API), reached over HTTPS 443. The endpoint holds the account id, which
   # is not a secret; the access key and secret come from the Secret (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY). The bucket is created by the operator.
   EAP_BLOB_BACKEND: s3
