@@ -51,6 +51,7 @@ def test_dry_run_prints_the_commands_and_the_block_headings_and_needs_no_token()
     out = proc.stdout
     assert "kubectl --context colima-pydanticos -n pydanticos delete pod worker-0" in out
     assert "logs worker-0" in out and "psql -U eap_admin" in out and "chaos-db" in out
+    assert "/usr/local/bin" in out
     for heading in ("== 1. EVENTS", "== 2. WORKER LOG", "== 3. DBOS"):
         assert heading in out
 

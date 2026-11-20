@@ -39,14 +39,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXAMPLE_FILE="${EXAMPLE_FILE:-$HERE/../examples/workflows/kb-source-sync.json}"
 
 # shellcheck disable=SC2016  # $HOME and $PATH expand on the remote host
-KUBECTL_PATH='export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"'
+KUBECTL_PATH='export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
 KUBECTL="kubectl --context colima-pydanticos -n pydanticos"
 DEFAULT_KILL_CMD="ssh deploy-host '${KUBECTL_PATH}; ${KUBECTL} delete pod worker-0'"
 DEFAULT_LOG_CMD="ssh deploy-host '${KUBECTL_PATH}; ${KUBECTL} logs worker-0 --tail=400'"
 # Databases are eap_app (application tables) and eap_dbos (DBOS tables, schema dbos): deploy/k8s/configmap.yaml. The
 # admin role reads both over the pod's local socket. $1 is the database; the SQL arrives on stdin.
 # shellcheck disable=SC2016  # $1 and \$HOME are meant literally: bash -c expands $1, the remote shell expands $HOME
-DEFAULT_DB_CMD='ssh deploy-host "export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:\$PATH\"; kubectl --context colima-pydanticos -n pydanticos exec -i postgres-0 -- psql -U eap_admin -d $1 -X -q -A -F \"|\" -P footer=off -v ON_ERROR_STOP=1"'
+DEFAULT_DB_CMD='ssh deploy-host "export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH\"; kubectl --context colima-pydanticos -n pydanticos exec -i postgres-0 -- psql -U eap_admin -d $1 -X -q -A -F \"|\" -P footer=off -v ON_ERROR_STOP=1"'
 CHAOS_KILL_CMD="${CHAOS_KILL_CMD:-$DEFAULT_KILL_CMD}"
 CHAOS_LOG_CMD="${CHAOS_LOG_CMD:-$DEFAULT_LOG_CMD}"
 CHAOS_DB_CMD="${CHAOS_DB_CMD:-$DEFAULT_DB_CMD}"
