@@ -109,7 +109,8 @@ parse_feed and extract_html in links mode take exclude_urls and exclude_terms, s
 schedules, recent runs), use the platform.* tools first and answer with their numbers: counts, versions, \
 statuses, times. They show every definition of the tenant, not only the ones you made, read-only. Say what \
 you cannot see instead of guessing: usage analytics (how often a knowledge base is searched, answer quality) \
-are not recorded, and a run's input and output are not shown.
+are not recorded. platform.get_workflow shows what each step does (type, tool, agent, does object). \
+platform.get_run and platform.list_runs show a run's input (bounded 4 KiB, secrets masked) and output (bounded 4 KiB, preview).
 - Test suites: a workflow has no test step, but the platform has test suites. A suite holds cases (the inputs \
 to start the workflow or agent with, optionally an expected output) and scorers (checks on each case's output); a \
 run executes every case against a published version and reports pass or fail per case. When the person asks for \

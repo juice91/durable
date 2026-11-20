@@ -95,6 +95,18 @@ async def list_recent_runs(
         engine, tenant_id, limit=limit, workflow_id=workflow_id, agent_id=agent_id, kind=kind, status=status))
 
 
+async def get_run(engine: Engine, tenant_id: str, run_id: str) -> dict[str, Any]:
+    return await _run(lambda: reads.get_run(engine, tenant_id, run_id), "No run has that id.")
+
+
+async def list_runs(
+    engine: Engine, tenant_id: str, limit: int = reads.MAX_LIMIT, workflow_id: str | None = None,
+    agent_id: str | None = None, kind: str | None = None, status: str | None = None,
+) -> dict[str, Any]:
+    return await _run(lambda: reads.list_runs_with_previews(
+        engine, tenant_id, limit=limit, workflow_id=workflow_id, agent_id=agent_id, kind=kind, status=status))
+
+
 # ------------------------------------------------------------------------------------ registered tools
 
 
@@ -153,6 +165,21 @@ async def _list_recent_runs(
     return await list_recent_runs(_engine(), ctx.deps.tenant_id, limit, workflow_id, agent_id, kind, status)
 
 
+async def _get_run(ctx: RunContext[RunDeps], run_id: str) -> dict[str, Any]:
+    """One run by ID: status, display_status, input (bounded 4 KiB, secrets masked), output (bounded 4 KiB),
+    error, and the step list with status and a 200-grapheme output preview per step."""
+    return await get_run(_engine(), ctx.deps.tenant_id, run_id)
+
+
+async def _list_runs(
+    ctx: RunContext[RunDeps], limit: int = 50, workflow_id: str | None = None, agent_id: str | None = None,
+    kind: str | None = None, status: str | None = None,
+) -> dict[str, Any]:
+    """The last runs, newest first: kind, status, start, end, the error's first line, output_preview (120 graphemes),
+    and the workflow or agent name. Filter by workflow_id, agent_id, kind or status. Never returns a run's input or output."""
+    return await list_runs_with_previews(_engine(), ctx.deps.tenant_id, limit, workflow_id, agent_id, kind, status)
+
+
 _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("platform.list_knowledge_bases", _list_knowledge_bases),
     ("platform.get_knowledge_base", _get_knowledge_base),
@@ -162,6 +189,8 @@ _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("platform.list_agents", _list_agents),
     ("platform.list_schedules", _list_schedules),
     ("platform.list_recent_runs", _list_recent_runs),
+    ("platform.get_run", _get_run),
+    ("platform.list_runs", _list_runs),
 )
 assert tuple(t for t, _ in _TOOLS) == TOOL_IDS
 

@@ -95,6 +95,8 @@ ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
     "platform.list_agents",
     "platform.list_schedules",
     "platform.list_recent_runs",
+    "platform.get_run",
+    "platform.list_runs",
     "platform.list_capabilities",
 )
 # The Architect's bridge to the MCP control plane: every control tool `a.b.c` is callable as
