@@ -884,18 +884,20 @@ class RunToolset(AbstractToolset[Any]):
         mcp: McpToolset | None = None,
         platform: Any | None = None,  # eap_worker.platform_tools.PlatformToolset (imported lazily)
         client: Any | None = None,  # eap_worker.client_tools.ClientToolset (AGUI.7; imported lazily)
+        control: Any | None = None,  # eap_worker.control_bridge.ControlToolset (the Architect's `control__*` tools)
     ) -> None:
         self.builtin = builtin
         self.mcp = mcp
         self.platform = platform
         self.client = client
+        self.control = control
 
     @property
     def id(self) -> str | None:
         return None
 
     def _members(self) -> list[AbstractToolset[Any]]:
-        return [t for t in (self.builtin, self.mcp, self.platform, self.client) if t is not None]
+        return [t for t in (self.builtin, self.mcp, self.platform, self.client, self.control) if t is not None]
 
     async def __aenter__(self) -> RunToolset:
         await self.builtin.__aenter__()
@@ -921,6 +923,8 @@ class RunToolset(AbstractToolset[Any]):
             return await self.platform.get_tool_for_tool_def(tool_def, ctx)
         if self.client is not None and tool_def.name in self.client.names:
             return await self.client.get_tool_for_tool_def(tool_def, ctx)
+        if self.control is not None and self.control.owns(tool_def.name):
+            return await self.control.get_tool_for_tool_def(tool_def, ctx)
         return await self.builtin.get_tool_for_tool_def(tool_def, ctx)
 
     async def call_tool(

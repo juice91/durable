@@ -109,6 +109,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
   const secretRequest = approval.kind === "tool" ? parseSecretRequest(approval.toolName, approval.args) : null;
   const [secretValue, setSecretValue] = useState("");
   const [dialogError, setDialogError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const tooLong = comment.length > maxComment;
   const commentId = `approval-comment-${key}`;
   const now = useNow(15_000);
@@ -120,6 +121,18 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       mounted.current = false;
     };
   }, []);
+
+  // A gated control__* call (the Architect operating the platform) is easier to review elsewhere:
+  // the arguments are one copyable block. A blocked clipboard leaves the text selectable as before.
+  const copyArguments = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => mounted.current && setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   const decide = async (decision: "approve" | "deny") => {
     if (busy || tooLong) return;
@@ -253,7 +266,18 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
               {approval.summary}
             </p>
           ) : null}
-          <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
+          <div className="mb-1 flex items-center justify-between">
+            <p className="text-caption font-medium text-muted-foreground">Arguments</p>
+            <button
+              type="button"
+              data-testid={`approval-args-copy-${key}`}
+              aria-label="Copy arguments"
+              onClick={() => void copyArguments(prettyJson(approval.args))}
+              className="rounded-sm px-1.5 py-0.5 text-caption text-muted-foreground hover:bg-fill-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
           <pre
             data-testid={`approval-args-${key}`}
             className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 font-mono text-caption text-foreground"
