@@ -1,6 +1,7 @@
 # 本方案 架構設計文件
 
 > 版本：2026-11-18
+> English: [architecture.md](./architecture.md)
 
 ## 設計目標與原則
 

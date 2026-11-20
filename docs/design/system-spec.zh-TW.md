@@ -1,6 +1,7 @@
 # 本方案 系統規格文件
 
 > 版本：2026-11-18
+> English: [system-spec.md](./system-spec.md)
 
 ## 目的、範圍與讀者
 

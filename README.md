@@ -12,8 +12,8 @@ We welcome contributions! Please see the following documents:
 
 ## Design documents
 
-The design documents are written in Traditional Chinese (zh-TW); see the [index](./docs/design/README.md).
+Traditional Chinese versions are linked from the [index](./docs/design/README.md).
 
-- [System specification](./docs/design/system-spec.zh-TW.md) - Functional and non-functional requirements, interfaces, and acceptance criteria
-- [Architecture design](./docs/design/architecture.zh-TW.md) - Components, run lifecycle, durable-execution contract, and security boundaries
-- [AI-assisted development method](./docs/design/ai-assisted-development.zh-TW.md) - The workflow, quality gates, and agent harness used to build this project
+- [System specification](./docs/design/system-spec.md) - Functional and non-functional requirements, interfaces, and acceptance criteria
+- [Architecture design](./docs/design/architecture.md) - Components, run lifecycle, durable-execution contract, and security boundaries
+- [AI-assisted development method](./docs/design/ai-assisted-development.md) - The workflow, quality gates, and agent harness used to build this project

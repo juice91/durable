@@ -1,6 +1,7 @@
 # AI 輔助開發流程方法
 
 > 版本：2026-11-18
+> English: [ai-assisted-development.md](./ai-assisted-development.md)
 
 ## 目的與適用範圍
 
