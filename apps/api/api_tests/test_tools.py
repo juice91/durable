@@ -1,5 +1,6 @@
-from eap_schemas.tools import TOOL_DECLARATIONS
 """Authenticated tool catalog API tests."""
+
+from eap_schemas.tools import TOOL_DECLARATIONS
 
 
 def test_tool_catalog_requires_authentication(client) -> None:
