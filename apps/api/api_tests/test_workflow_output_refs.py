@@ -237,7 +237,7 @@ def test_optional_input_ref_warnings(client):
     assert pub.status_code == 201, pub.text
     # First publish should warn about optional input without default
     warnings = pub.json().get("warnings", [])
-    assert any(w["code"] == "optional_input_ref_without_default" for w in warnings), warnings
+    assert any(w["code"] == "optional_input_ref_unguarded" for w in warnings), warnings
     assert "optional_field" in warnings[0]["message"]
 
 
@@ -263,20 +263,32 @@ def test_required_input_has_no_warning(client):
 
 
 @requires_pg
-def test_input_with_default_has_no_warning(client):
-    """An optional input with a default does not produce a warning."""
-    spec = {
-        "name": "Input with default test",
-        "input_schema": {"type": "object", "properties": {"default_field": {"type": "string", "default": "yes"}}},
-        "start": "read",
+def test_input_guarded_by_an_exists_branch_has_no_warning_but_a_default_does_not_help(client):
+    """The designed pattern for an optional input: a branch tests `exists input.x` and leads to the step
+    that reads it, so no warning. A schema default alone does not count (the engine applies none)."""
+    guarded = {
+        "name": "Guarded optional input",
+        "input_schema": {"type": "object", "properties": {"part_numbers": {"type": "array", "default": []}}},
+        "start": "route",
         "steps": [
-            {"id": "read", "type": "tool", "tool_id": "workflow.return",
-             "input": {"value": {"$ref": "input.default_field"}}},
+            {"id": "route", "type": "branch", "cases": [{"when": {"op": "exists", "left": {"$ref": "input.part_numbers"}}, "next": "targeted"}], "default": "all"},
+            {"id": "targeted", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"$ref": "input.part_numbers"}}},
+            {"id": "all", "type": "tool", "tool_id": "workflow.return", "input": {"value": "all"}},
         ],
     }
-    resp = client.post(BASE, json={"spec": spec}, headers=_auth())
+    resp = client.post(BASE, json={"spec": guarded}, headers=_auth())
     assert resp.status_code == 201, resp.text
     pub = client.post(f"{BASE}/{resp.json()['id']}/versions", headers=_auth())
     assert pub.status_code == 201, pub.text
-    # No warnings about inputs with defaults
-    assert not any("optional_input_ref" in w["code"] for w in pub.json().get("warnings", []))
+    assert not any("optional_input_ref" in w["code"] for w in pub.json().get("warnings", [])), pub.json()
+    unguarded = {
+        "name": "Default does not help",
+        "input_schema": {"type": "object", "properties": {"default_field": {"type": "string", "default": "yes"}}},
+        "start": "read",
+        "steps": [{"id": "read", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"$ref": "input.default_field"}}}],
+    }
+    resp = client.post(BASE, json={"spec": unguarded}, headers=_auth())
+    pub = client.post(f"{BASE}/{resp.json()['id']}/versions", headers=_auth())
+    assert pub.status_code == 201, pub.text
+    messages = [w["message"] for w in pub.json()["warnings"] if w["code"] == "optional_input_ref_unguarded"]
+    assert messages and "input.default_field" in messages[0] and "exists" in messages[0]
