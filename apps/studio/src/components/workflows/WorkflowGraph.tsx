@@ -23,7 +23,10 @@ import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { matchesNow } from "@/components/frame/useMediaQuery";
 import { buildWorkflowGraph, loopBadge, loopStepIds, loopSummary, type GraphEdge, type GraphNode } from "@/lib/workflowGraph";
-import { NODE_STATES, type NodeState } from "@/lib/workflowRunState";
+import { NODE_STATES, type NodeState, type StepDetail } from "@/lib/workflowRunState";
+import { readStorage, writeStorage } from "@/lib/safeStorage";
+import { NOT_REACHED_OPEN_KEY } from "@/lib/notReached";
+import { BranchCases, branchTaken } from "./BranchCases";
 import { isLoopStep, type LoopKindStep, type WorkflowSpec, type WorkflowStep } from "@/lib/workflows";
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {
@@ -32,7 +35,8 @@ export const NODE_STATE_LABELS: Record<NodeState, string> = {
   waiting: "Waiting",
   completed: "Completed",
   failed: "Failed",
-  skipped: "Skipped",
+  // A step the run never executed. "Skipped" is the run status of a "nothing to do" exit, a different thing.
+  skipped: "Not reached",
   needs_attention: "Needs attention",
 };
 
@@ -42,7 +46,7 @@ export const NODE_STATE_CLASSES: Record<NodeState, string> = {
   waiting: "border-warning bg-warning/10 text-warning-text",
   completed: "border-success bg-success/10 text-success-text",
   failed: "border-destructive bg-destructive/10 text-destructive-text",
-  skipped: "border-dashed border-border bg-muted text-muted-foreground opacity-60",
+  skipped: "border-dashed border-border bg-muted text-muted-foreground opacity-40",
   needs_attention: "border-2 border-warning bg-warning/15 text-warning-text",
 };
 
@@ -61,6 +65,13 @@ export const STEP_TYPE_LABELS: Record<WorkflowStep["type"], string> = {
 /** A step kind's label; an unknown kind (a newer spec) shows its raw type. */
 export function stepTypeLabel(type: string): string {
   return (STEP_TYPE_LABELS as Record<string, string | undefined>)[type] ?? type;
+}
+
+/** Why a step was not reached, as a tooltip. */
+export function notReachedHint(reason: StepDetail["skipReason"] | undefined): string {
+  if (reason === "run_ended") return "The run ended before this step.";
+  if (reason === "iteration_ended") return "This step did not run in this iteration.";
+  return "This branch arm was not taken.";
 }
 
 function stepSubtitle(step: WorkflowStep): string {
@@ -98,6 +109,7 @@ type StepNodeData = {
   /** Loop steps only: whether the body is hidden, and the badge ("×50", or the run view's count). */
   collapsed: boolean;
   badge: string | null;
+  skipReason?: StepDetail["skipReason"];
 };
 
 /** Marks the loop toggle inside a node: a click on it collapses or expands instead of selecting. */
@@ -127,7 +139,7 @@ function LoopToggle({ collapsed }: { collapsed: boolean }) {
 }
 
 function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
-  const { step, state, selected, width, height, collapsed, badge } = data;
+  const { step, state, selected, width, height, collapsed, badge, skipReason } = data;
   const tone = NODE_STATE_CLASSES[state ?? "pending"];
   const loop = isLoopStep(step) ? step : null;
   return (
@@ -137,6 +149,7 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
       data-step-type={step.type}
       {...(loop ? { "data-collapsed": String(collapsed) } : {})}
       style={{ width, height }}
+      title={state === "skipped" ? notReachedHint(skipReason) : undefined}
       className={cn("flex flex-col justify-center rounded-md border-2 px-3 py-1 text-left shadow-raised", tone, selected && "outline outline-2 outline-offset-2 outline-ring")}
     >
       <Handle type="target" position={Position.Top} isConnectable={false} />
@@ -210,14 +223,14 @@ function edgeStyle(edge: GraphEdge, dead: boolean): Partial<Edge> {
     label: edge.label,
     labelBgPadding: [4, 2],
     labelBgBorderRadius: 4,
-    labelStyle: { fontSize: 11, fill: "hsl(var(--foreground))" },
+    labelStyle: { fontSize: 11, fill: "hsl(var(--foreground))", opacity: dead ? 0.4 : 1 },
     labelBgStyle: { fill: "var(--viz-surface-color)" },
     markerEnd: { type: MarkerType.ArrowClosed, color: "var(--viz-axis-color)" },
     animated: false,
     style: {
       stroke: "var(--viz-axis-color)",
       strokeDasharray: dashed ? "6 4" : undefined,
-      opacity: dead ? 0.3 : 1,
+      opacity: dead ? 0.2 : 1,
     },
   };
 }
@@ -323,6 +336,8 @@ export interface WorkflowCanvasProps {
   /** Live states per step id; omitted for a plain definition view. */
   states?: Record<string, NodeState>;
   deadEdges?: Set<string>;
+  /** Step details (the run view): the node tooltip says why a step was not reached. */
+  details?: Record<string, StepDetail>;
   selectedStepId?: string | null;
   onSelectStep?: (stepId: string) => void;
   className?: string;
@@ -413,6 +428,7 @@ function CanvasInner({
   spec,
   states,
   deadEdges,
+  details,
   selectedStepId = null,
   onSelectStep,
   className,
@@ -452,13 +468,14 @@ function CanvasInner({
         height: n.height,
         collapsed: n.collapsed,
         badge: badgeFor(n, loopBadges),
+        skipReason: details?.[n.id]?.skipReason,
       },
       draggable: false,
       connectable: false,
       width: n.width,
       height: n.height,
     })),
-    [graph, states, selectedStepId, loopBadges],
+    [graph, states, details, selectedStepId, loopBadges],
   );
   const edges: Edge[] = useMemo(
     () => graph.edges.map((e) => ({
@@ -466,9 +483,10 @@ function CanvasInner({
       source: e.source,
       target: e.target,
       data: { kind: e.kind },
-      ...edgeStyle(e, Boolean(deadEdges?.has(e.id))),
+      // An untaken arm, or a hand-off to a step the run never reached, is dimmed; the taken path keeps full contrast.
+      ...edgeStyle(e, Boolean(deadEdges?.has(e.id)) || states?.[e.target] === "skipped"),
     })),
-    [graph, deadEdges],
+    [graph, deadEdges, states],
   );
 
   return (
@@ -512,6 +530,17 @@ function CanvasInner({
   );
 }
 
+/** Whether the run view's "steps not reached" group is open, remembered in this browser (read after mount). */
+export function useNotReachedOpen(): [boolean, (open: boolean) => void] {
+  const [open, setOpen] = useState(false);
+  useEffect(() => setOpen(readStorage(NOT_REACHED_OPEN_KEY) === "true"), []);
+  const update = useCallback((next: boolean) => {
+    setOpen(next);
+    writeStorage(NOT_REACHED_OPEN_KEY, String(next));
+  }, []);
+  return [open, update];
+}
+
 export interface WorkflowStepListProps {
   spec: WorkflowSpec;
   states?: Record<string, NodeState>;
@@ -522,6 +551,13 @@ export interface WorkflowStepListProps {
   /** The collapsed loops, shared with the canvas (pass the same set and setter to both). */
   collapsedLoops?: ReadonlySet<string>;
   onCollapsedLoopsChange?: (next: Set<string>) => void;
+  /** Step details (the run view): a branch's taken case and warnings, and why a step was not reached. */
+  details?: Record<string, StepDetail>;
+  /**
+   * The run view: top-level steps the run never reached fold into one "N steps not reached" row,
+   * closed at first (remembered in this browser). A selected step in the group opens it.
+   */
+  foldNotReached?: boolean;
 }
 
 /**
@@ -538,8 +574,11 @@ export function WorkflowStepList({
   legend = false,
   collapsedLoops,
   onCollapsedLoopsChange,
+  details,
+  foldNotReached = false,
 }: WorkflowStepListProps) {
   const [collapsed, setCollapsed] = useCollapsedSet(collapsedLoops, onCollapsedLoopsChange);
+  const [notReachedOpen, setNotReachedOpen] = useNotReachedOpen();
   const baseId = useId();
   const graph = useMemo(() => buildWorkflowGraph(spec), [spec]);
   const outgoing = (stepId: string) => graph.edges.filter((e) => e.source === stepId);
@@ -557,16 +596,20 @@ export function WorkflowStepList({
     const targets = outgoing(n.id);
     const loop = isLoopStep(n.step) ? n.step : null;
     const label = stepTypeLabel(n.step.type);
+    const branch = n.step.type === "branch" ? n.step : null;
     const body = (
       <>
         <span className="flex min-w-0 items-center justify-between gap-2">
           <span className="truncate font-mono text-label font-medium text-foreground">{n.id}</span>
           <span className="shrink-0 text-caption text-muted-foreground">
-            {loop ? `${label} ${loopBadge(loop)}` : label}{state ? ` · ${NODE_STATE_LABELS[state]}` : ""}
+            {loop ? `${label} ${loopBadge(loop)}` : label}{state ? " · " : ""}
+            {state ? <span title={state === "skipped" ? notReachedHint(details?.[n.id]?.skipReason) : undefined}>{NODE_STATE_LABELS[state]}</span> : null}
           </span>
         </span>
         {loop ? <span className="mt-0.5 block break-words font-mono text-caption text-muted-foreground">{loopSummary(loop).join(" · ")}</span> : null}
-        {targets.length > 0 ? (
+        {branch ? (
+          <BranchCases step={branch} taken={branchTaken(details?.[n.id]?.output)} warnings={details?.[n.id]?.warnings} />
+        ) : targets.length > 0 ? (
           <span className="mt-0.5 block break-words text-caption text-muted-foreground">
             {targets.map((e) => `→ ${e.target}${e.label ? ` (${e.label})` : ""}`).join(", ")}
           </span>
@@ -624,6 +667,12 @@ export function WorkflowStepList({
     );
   };
 
+  const all = children.get(null) ?? [];
+  const isUnreached = (n: GraphNode) => foldNotReached && states?.[n.id] === "skipped";
+  const top = all.filter((n) => !isUnreached(n));
+  const unreached = all.filter(isUnreached);
+  const groupOpen = notReachedOpen || (selectedStepId !== null && unreached.some((n) => n.id === selectedStepId));
+
   return (
     <div className="min-w-0 space-y-3">
       {legend && states ? (
@@ -634,7 +683,25 @@ export function WorkflowStepList({
         </ul>
       ) : null}
       <ol aria-label="Workflow steps" data-testid="workflow-step-list" className="space-y-1.5">
-        {(children.get(null) ?? []).map(renderItem)}
+        {top.map(renderItem)}
+        {unreached.length > 0 ? (
+          <li data-testid="workflow-step-not-reached-group" data-open={String(groupOpen)}>
+            <button
+              type="button"
+              aria-expanded={groupOpen}
+              aria-controls={`${baseId}-not-reached`}
+              data-testid="workflow-step-not-reached-toggle"
+              onClick={() => setNotReachedOpen(!notReachedOpen)}
+              className="flex w-full items-center gap-1 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-caption text-muted-foreground outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {groupOpen ? <ChevronDown className="size-3.5" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" /> : <ChevronRight className="size-3.5" strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />}
+              {unreached.length} step{unreached.length === 1 ? "" : "s"} not reached
+            </button>
+            <ol id={`${baseId}-not-reached`} hidden={!groupOpen} aria-label="Steps not reached" className="mt-1.5 space-y-1.5">
+              {unreached.map(renderItem)}
+            </ol>
+          </li>
+        ) : null}
       </ol>
     </div>
   );

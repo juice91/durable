@@ -33,7 +33,7 @@ afterEach(() => cleanup());
 describe("StepIoPanel", () => {
   it("labels an untaken branch arm", () => {
     render(<StepIoPanel step={null} detail={detail({ state: "skipped", skipReason: "branch_not_taken" })} onClose={() => undefined} />);
-    expect(screen.getByTestId("step-io-skip-reason")).toHaveTextContent("Skipped: this branch arm was not taken.");
+    expect(screen.getByTestId("step-io-skip-reason")).toHaveTextContent("Not reached: this branch arm was not taken.");
   });
 
   it("labels a step the run ended before reaching, distinctly from an untaken arm", () => {

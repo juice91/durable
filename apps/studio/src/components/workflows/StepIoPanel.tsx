@@ -8,6 +8,7 @@ import type { IterationDetail, StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { formatScore } from "@/lib/format";
+import { BranchCases, branchTaken } from "./BranchCases";
 import { evaluationView, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
 
 function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
@@ -186,6 +187,12 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
           ) : detail.state === "waiting" ? <p className="text-xs text-muted-foreground">Decide in the approval card (Needs input).</p> : null}
         </div>
       ) : null}
+      {step?.type === "branch" ? (
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cases</h4>
+          <BranchCases step={step} taken={branchTaken(detail.output)} warnings={detail.warnings} />
+        </div>
+      ) : null}
       {detail.input !== undefined ? <Block label="Input" value={detail.input} testId="step-io-input" /> : null}
       {detail.hasOutput ? (
         type === "parallel" && detail.output === null ? (
@@ -235,7 +242,7 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
             ? "Not reached: the run ended before this step."
             : detail.skipReason === "iteration_ended"
               ? "Not run in this iteration."
-              : "Skipped: this branch arm was not taken."}
+              : "Not reached: this branch arm was not taken."}
         </p>
       ) : null}
       {attempts.length > 0 && judgedBy ? <RefineAttempts attempts={attempts} evaluateStepId={judgedBy.id} /> : null}

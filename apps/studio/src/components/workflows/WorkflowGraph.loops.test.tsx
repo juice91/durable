@@ -98,7 +98,10 @@ describe("WorkflowStepList loops (LP.6)", () => {
     expect(screen.getByTestId("workflow-step-outer")).toHaveTextContent("Foreach ×20");
     expect(screen.getByTestId("workflow-step-outer")).toHaveTextContent("each of steps.fetch.output.tickets · max 20 · one at a time · collect errors");
     expect(screen.getByTestId("workflow-step-leaf")).toHaveTextContent("ends the iteration");
-    expect(screen.getByTestId("workflow-step-route")).toHaveTextContent("→ done (1: any(input.a eq 1, input.b exists))");
+    const route = screen.getByTestId("workflow-step-route");
+    expect(route).toHaveTextContent("any(");
+    expect(within(route).getAllByTestId("branch-clause").map((c) => c.textContent)).toEqual(["input.a eq 1", "input.b exists"]);
+    expect(route).toHaveTextContent("→ done");
   });
 
   it("labels evaluate and unknown kinds, and names loop buttons with their bound", async () => {

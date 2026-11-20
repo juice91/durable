@@ -523,7 +523,7 @@ export function WorkflowRunView({
             {spec ? (
               <PanelCard title="Steps" titleId="workflow-run-steps-heading">
                 <p className="mb-2 text-caption text-muted-foreground">Select a step to see its input and output.</p>
-                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend details={resolved.details} foldNotReached collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
               </PanelCard>
             ) : null}
 
@@ -535,7 +535,7 @@ export function WorkflowRunView({
             </PanelCard>
           </WorkflowFloatingPanel>
           {spec ? (
-            <WorkflowCanvas spec={spec} states={states} deadEdges={resolved.deadEdges} loopBadges={resolved.badges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+            <WorkflowCanvas spec={spec} states={states} deadEdges={resolved.deadEdges} details={resolved.details} loopBadges={resolved.badges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
               {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}
