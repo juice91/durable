@@ -1,20 +1,20 @@
 # Third-Party Notices
 
-This document lists the licenses of dependencies used by PydanticOS.
+This document lists the licenses of dependencies used by this project.
 
 ## Generated
 
 To regenerate this file, run:
 
 ```sh
-# Python dependencies (runtime only)
-uv run pip-licenses --format=markdown --with-urls
+# Python dependencies (runtime only, excluding first-party packages)
+uv run pip-licenses --format=markdown --with-urls | grep -v "^| eap-" | grep -v "^| eap-"
 
 # JavaScript dependencies (production only)
 pnpm -C apps/studio licenses list --prod --json > /tmp/js_licenses.json
 ```
 
-Generated on 2026-11-20 19:33:45 UTC.
+Generated on 2026-11-20 19:43:24 UTC.
 
 ## Python Dependencies
 
@@ -51,21 +51,6 @@ Generated on 2026-11-20 19:33:45 UTC.
 | dnspython | 2.9.2 | ISC | https://www.dnspython.org |
 | docstring_parser | 0.18.0 | MIT License | https://github.com/rr-/docstring_parser |
 | docutils | 0.23 | BSD License; GNU General Public License (GPL); Public Domain | https://docutils.sourceforge.io |
-| eap-agent-runtime | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-api | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-blob-store | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-db | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-kb-sources | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-kb-sources-acme | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-knowledge | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-mcp-runtime | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-observability | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-pricing | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-processors | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-run-store | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-schemas | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-secrets | 0.1.0 | UNKNOWN | UNKNOWN |
-| eap-worker | 0.1.0 | UNKNOWN | UNKNOWN |
 | email-validator | 2.3.0 | The Unlicense (Unlicense) | https://github.com/JoshData/python-email-validator |
 | exceptiongroup | 1.3.1 | MIT License | https://github.com/agronholm/exceptiongroup/blob/main/CHANGES.rst |
 | execnet | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
@@ -470,4 +455,15 @@ Generated on 2026-11-20 19:33:45 UTC.
 | zod | 3.25.76 | MIT | https://zod.dev |
 | zustand | 4.5.7 | MIT | https://github.com/pmndrs/zustand |
 | zwitch | 2.0.4 | MIT | https://github.com/wooorm/zwitch#readme |
+
+## Notes on non-permissive entries
+
+- **@bufbuild/protobuf** ((Apache-2.0 AND BSD-3-Clause)): Dual Apache-2.0/BSD-3-Clause; the Apache-2.0 component is compatible with this project's license.
+- **@fontsource-variable/inter** (OFL-1.1): OFL-1.1 font files, not source code; the OFL permits bundling in applications.
+- **@fontsource-variable/jetbrains-mono** (OFL-1.1): OFL-1.1 font files, not source code; the OFL permits bundling in applications.
+- **@img/sharp-libvips-darwin-arm64** (LGPL-3.0-or-later): LGPL-3.0-or-later build-time image processing library used unmodified; this is a native binary dependency bundled at build time.
+- **caniuse-lite** (CC-BY-4.0): CC-BY-4.0 data file providing browser support information; this table serves as proper attribution.
+- **email-validator** (The Unlicense (Unlicense)): Uses the Unlicense, a permissive public domain dedication that is compatible with Apache-2.0.
+- **psycopg** (LGPL-3.0-only): LGPL-3.0-only library used as a dynamically linked dependency; the LGPL permits this use with Apache-2.0 code provided the library is not modified and users can relink.
+- **psycopg-binary** (LGPL-3.0-only): LGPL-3.0-only library used as a dynamically linked dependency; the LGPL permits this use with Apache-2.0 code provided the library is not modified and users can relink.
 
