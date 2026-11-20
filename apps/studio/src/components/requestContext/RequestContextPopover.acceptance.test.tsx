@@ -11,6 +11,7 @@ import { listConversations } from "@/lib/conversations";
 import { fetchModels } from "@/lib/metrics";
 import { credentialScope, listPresets, presetsKey, savePreset } from "@/lib/requestContext";
 import { routes } from "@/lib/routes";
+import { getSelectOption } from "@/test/select";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => null,
@@ -178,7 +179,7 @@ describe("Request context popover acceptance (P0.16 page acceptance, SL.10)", ()
     const dialog = await openContext();
     expect(await screen.findByLabelText(/Tier/)).toHaveValue("");
     expect(within(dialog).getByRole("combobox", { name: "Preset" })).toBeDisabled();
-    expect(within(dialog).getByRole("option", { name: "No presets yet" })).toBeInTheDocument();
+    expect(getSelectOption("No presets yet", dialog)).toBeTruthy();
   });
 
   it("a storage that throws on save is reported, and nothing is claimed saved", async () => {
@@ -190,7 +191,7 @@ describe("Request context popover acceptance (P0.16 page acceptance, SL.10)", ()
     });
     await saveAs("Gold");
     expect(screen.getByTestId("context-save-notice")).toHaveTextContent("Browser storage is unavailable");
-    expect(screen.getByRole("option", { name: "No presets yet" })).toBeInTheDocument();
+    expect(getSelectOption("No presets yet")).toBeTruthy();
   });
 
   it("a storage that throws on read still renders the form", async () => {
@@ -215,7 +216,7 @@ describe("Request context popover acceptance (P0.16 page acceptance, SL.10)", ()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(screen.getByTestId("context-save-notice")).toHaveTextContent("Deleted preset “Gold”.");
     expect(listPresets("agent-1")).toEqual([]);
-    expect(screen.getByRole("option", { name: "No presets yet" })).toBeInTheDocument();
+    expect(getSelectOption("No presets yet")).toBeTruthy();
   });
 
   it("an undeclared preset key is listed in form mode and Remove drops it from what is validated", async () => {

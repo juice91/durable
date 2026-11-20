@@ -36,6 +36,7 @@ import { modelsFixture, processorCatalogFixture } from "@/components/agents/spec
 import { setWindowWidth, TEST_WIDE_WIDTH } from "@/components/frame/frameTesting";
 import { EditorTab } from "@/components/agentPage/EditorTab";
 import { EDITOR_STEPS, stepForError } from "./registry";
+import { optionsOf } from "@/test/select";
 
 const TOOLS: ToolDefinition[] = [
   { id: "clock.now", title: "Clock", description: "", side_effect: false, external_idempotent: true, input_schema: {}, allowed: true },
@@ -220,9 +221,9 @@ describe("phone width (375 px)", () => {
     );
     await renderEditor();
     const select = screen.getByTestId("stepper-select") as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.value).at(-1)).toBe("output");
+    expect(optionsOf(select).map((option) => option.value).at(-1)).toBe("output");
     expect(screen.getByText("Step 1 of 8")).toBeInTheDocument();
-    expect(select.options[7].textContent).toContain("Tool mode");
+    expect(optionsOf(select)[7].textContent).toContain("Tool mode");
     fireEvent.change(select, { target: { value: "output" } });
     expect(screen.getByText("Step 8 of 8")).toBeInTheDocument();
     const surfaces = document.querySelectorAll('[data-testid="limits-fallback-group"] *, [data-testid="approval-toggle"] *, [data-testid="approval-settings"] *, section[data-step="output"] *');

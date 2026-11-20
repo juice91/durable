@@ -6,6 +6,7 @@ import { McpServerForm } from "./McpServerForm";
 import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { ApiError } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { findSelectOption } from "@/test/select";
 
 vi.mock("@/lib/mcpServers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpServers")>();
@@ -137,7 +138,7 @@ describe("McpServerForm secret refs", () => {
     render(<McpServerForm onSaved={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Add header" }));
     const picker = await screen.findByLabelText("Header 1 secret");
-    await waitFor(() => expect(within(picker).getByRole("option", { name: "slack-token" })).toBeInTheDocument());
+    await findSelectOption("slack-token");
     fireEvent.change(picker, { target: { value: "slack-token" } });
     expect(screen.getByLabelText("Header 1 value")).toHaveValue("secret:slack-token");
     spy.mockRestore();

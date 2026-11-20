@@ -10,6 +10,7 @@ import { addTraceFeedback, listTraceFeedback, type TraceRun, type TraceSpan } fr
 import { addCase } from "@/lib/evals";
 import { listAllSuites } from "@/lib/evalOverview";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
+import { findSelectOption } from "@/test/select";
 
 vi.mock("@/lib/traces", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/traces")>()),
@@ -117,7 +118,7 @@ describe("AddToDataset", () => {
     render(<AddToDataset run={RUN} />);
     fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
-    await within(dialog).findByRole("option", { name: "Tutor / Math" });
+    await findSelectOption("Tutor / Math");
     expect(within(dialog).getByLabelText("Input (from the trace)")).toHaveValue("What is 2+2?");
     expect(within(dialog).getByLabelText("Input (from the trace)")).toHaveAttribute("readonly");
     expect(within(dialog).getByLabelText("Expected output")).toHaveValue("4");
@@ -144,7 +145,7 @@ describe("AddToDataset", () => {
     render(<AddToDataset run={RUN} />);
     fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
-    await within(dialog).findByRole("option", { name: "Tutor / Math" });
+    await findSelectOption("Tutor / Math");
     fireEvent.change(within(dialog).getByLabelText("Test suite"), { target: { value: "s1" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add case" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("already exists");
@@ -155,7 +156,7 @@ describe("AddToDataset", () => {
     render(<AddToDataset run={RUN} />);
     fireEvent.click(screen.getByRole("button", { name: "Add to test suite" }));
     const dialog = await screen.findByRole("dialog");
-    await within(dialog).findByRole("option", { name: "Tutor / Math" });
+    await findSelectOption("Tutor / Math");
     await expectNoAxeViolations(document.body);
   }, AXE_TIMEOUT_MS);
 });

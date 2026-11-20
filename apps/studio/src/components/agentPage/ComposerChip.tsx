@@ -4,8 +4,10 @@ import React from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
+import { Select, type SelectProps } from "@/components/ui/Select";
 
-export interface ComposerChipSelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "children"> {
+export interface ComposerChipSelectProps extends Omit<SelectProps, "children" | "size" | "leading" | "className" | "id" | "aria-label" | "aria-invalid" | "aria-describedby"> {
+  className?: string;
   id: string;
   /** The chip's test id. */
   testId: string;
@@ -21,8 +23,8 @@ export interface ComposerChipSelectProps extends Omit<React.SelectHTMLAttributes
 }
 
 /**
- * A composer chip that opens a menu: a compact pill showing the current choice, over a native
- * `<select>` that takes the clicks and the keyboard (on a phone it opens the system picker). The
+ * A composer chip that opens a menu: a compact pill showing the current choice, over a transparent
+ * themed `<Select>` trigger that takes the clicks and the keyboard. The
  * select is the control (its label and value are what assistive technology reads); the pill is drawn
  * for it. The chip truncates its text so the chips row fits a 375 px screen.
  */
@@ -45,17 +47,17 @@ export function ComposerChipSelect({ id, testId, label, display, icon, invalid =
         {display}
       </span>
       <ChevronDown aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-3.5 shrink-0 text-muted-foreground" />
-      <select
+      <Select
         id={id}
         aria-label={label}
         aria-invalid={invalid}
         aria-describedby={invalid && errorId ? errorId : undefined}
         disabled={disabled}
-        className="absolute inset-0 h-full w-full cursor-pointer appearance-none rounded-full opacity-0 outline-none disabled:cursor-not-allowed"
+        className="absolute inset-0 h-full w-full min-w-0 cursor-pointer rounded-full border-0 bg-transparent p-0 opacity-0 outline-none hover:bg-transparent disabled:cursor-not-allowed"
         {...props}
       >
         {children}
-      </select>
+      </Select>
     </span>
   );
 }

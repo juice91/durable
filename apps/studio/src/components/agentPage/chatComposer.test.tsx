@@ -17,6 +17,7 @@ import { footerMessageIds, turnStartMessageIds } from "./ChatPane";
 import { modelChipLabel } from "./ComposerModelChip";
 import { versionChipLabel } from "./ComposerVersionChip";
 import { CONTEXT_SHEET_QUERY, contextSummary } from "@/components/requestContext/RequestContextPopover";
+import { findSelectOption, optionsOf } from "@/test/select";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => null,
@@ -209,9 +210,9 @@ describe("composer chips", () => {
     await renderChat();
     // Nothing pinned: the chip says it follows the latest (SL.10 review: a pinned v2 reads "v2").
     expect(chipLabel("version")).toHaveTextContent(/^Latest · v2$/);
-    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+    await findSelectOption("openai:gpt-4.1");
     expect(screen.getByTestId("composer-chip-model")).toHaveTextContent("gpt-4.1-mini");
-    const options = Array.from((screen.getByRole("combobox", { name: "Version" }) as HTMLSelectElement).options).map((o) => o.textContent);
+    const options = optionsOf(screen.getByRole("combobox", { name: "Version" })).map((o) => o.textContent);
     expect(options).toEqual(["Draft (unpublished)", "Latest (v2)", "v2", "v1"]);
     fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "openai:gpt-4.1" } });
     expect(screen.getByTestId("composer-chip-model")).toHaveTextContent("gpt-4.1");
@@ -227,7 +228,7 @@ describe("composer chips", () => {
     vi.mocked(api.agents.get).mockResolvedValue({ ...AGENT, draft_spec: V2 });
     await renderChat();
     await waitFor(() => {
-      const options = Array.from((screen.getByRole("combobox", { name: "Version" }) as HTMLSelectElement).options).map((o) => o.textContent);
+      const options = optionsOf(screen.getByRole("combobox", { name: "Version" })).map((o) => o.textContent);
       expect(options).toEqual(["Latest (v2)", "v2", "v1", "Draft (unpublished)"]);
     });
   });
@@ -444,7 +445,7 @@ describe("a refused send keeps the message (browser check, IMPORTANT)", () => {
     });
     vi.mocked(startTurnWithOptions).mockRejectedValueOnce(new TurnStartError(422, "model 'openai:gpt-4.1' is not allowed on this platform"));
     await renderChat();
-    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+    await findSelectOption("openai:gpt-4.1");
     fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "openai:gpt-4.1" } });
     const before = window.location.pathname;
     send("Keep me");

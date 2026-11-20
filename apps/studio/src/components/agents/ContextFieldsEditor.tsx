@@ -7,6 +7,7 @@ import {
   type ContextField,
   type ContextFieldType,
 } from "./specSections";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const smallButton = "rounded-md border border-border px-2 py-1 text-xs text-card-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -61,12 +62,12 @@ export function ContextFieldsEditor({ value, onChange, usedNames, onInsertPlaceh
                 </div>
                 <div className="space-y-1">
                   <label htmlFor={`${prefix}-type`} className="block text-sm font-medium text-foreground">Type</label>
-                  <select
+                  <Select
                     id={`${prefix}-type`}
                     className={inputClass}
                     value={field.type}
-                    onChange={(e) => {
-                      const type = e.target.value as ContextFieldType;
+                    onValueChange={(v) => {
+                      const type = v as ContextFieldType;
                       update(index, {
                         type,
                         max_length: type === "string" ? field.max_length ?? null : null,
@@ -75,7 +76,7 @@ export function ContextFieldsEditor({ value, onChange, usedNames, onInsertPlaceh
                     }}
                   >
                     {FIELD_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
+                  </Select>
                 </div>
                 <label className="inline-flex items-center gap-2 self-end pb-2 text-sm text-card-foreground">
                   <input id={`${prefix}-required`} type="checkbox" checked={Boolean(field.required)} onChange={(e) => update(index, { required: e.target.checked })} />

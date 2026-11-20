@@ -8,6 +8,7 @@ import { getRun } from "@/lib/runs";
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import LogsPage from "./page";
 import { routes } from "@/lib/routes";
+import { getSelectOption } from "@/test/select";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const OTHER_RUN = "99999999-2222-3333-4444-555555555555";
@@ -232,7 +233,7 @@ describe("Logs page", () => {
     expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({
       limit: 100, run_id: RUN, from: "2026-11-05T09:59:00.000000Z", to: "2026-11-05T10:00:07.000000Z",
     });
-    expect(screen.getByRole("option", { name: "Run lifetime" })).toBeInTheDocument();
+    expect(getSelectOption("Run lifetime")).toBeTruthy();
   });
 
   it("leaves the window to the API when the run cannot be loaded, and says so", async () => {

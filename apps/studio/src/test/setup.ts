@@ -3,10 +3,13 @@ import "@testing-library/jest-dom/vitest";
 import { resetWorkingMemoryCache } from "@/lib/workingMemoryCache";
 import { setChatProtocolDefaultForTests } from "@/components/chat/chatProtocol";
 import { configure } from "@testing-library/react";
+import { installSelectChange } from "./select";
 
 // The hosted runner is several times slower than a laptop: findBy/waitFor default to 1 s, which a
 // loading state can outlast there. Assertions still pass as soon as the element appears.
 configure({ asyncUtilTimeout: 5000 });
+
+installSelectChange();
 
 // The chat suites written before AGUI.12 mock the native run routes: with nothing stored, the Chat
 // tab uses the native protocol in tests. AG-UI suites store "agui" (a stored value wins).

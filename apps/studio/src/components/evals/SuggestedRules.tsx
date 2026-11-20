@@ -17,6 +17,7 @@ import {
   type ScorerSuggestions,
 } from "@/lib/scorerSuggestions";
 import { alertClass, cardClass, fieldClass, hintClass, sectionTitleClass } from "./evalsUi";
+import { Select } from "@/components/ui/Select";
 
 const NEW_SUITE = "__new__";
 const SCOPE_LABELS = { scorer: "Scorer", evaluator: "Suite evaluator", both: "Scorer or suite" } as const;
@@ -165,10 +166,10 @@ function SuggestionCard({ target, suggestion, suites, added, onAdded, onDismiss 
         <div className="flex flex-wrap items-end gap-2" role="group" aria-label={`Add “${suggestion.title}” to a suite`}>
           <div className="min-w-0 flex-1 space-y-1">
             <label htmlFor={`${id}-suite`} className="block text-caption text-muted-foreground">Suite</label>
-            <select id={`${id}-suite`} className={fieldClass} value={suiteId} onChange={(e) => setSuiteId(e.target.value)} data-testid="suggested-rule-suite">
+            <Select id={`${id}-suite`} className={fieldClass} value={suiteId} onValueChange={(v) => setSuiteId(v)} data-testid="suggested-rule-suite">
               {suites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               {suites.some((s) => s.name === defaultName) ? null : <option value={NEW_SUITE}>New suite “{defaultName}”</option>}
-            </select>
+            </Select>
           </div>
           <Button size="sm" variant="primary" disabled={busy} onClick={() => void run(() => addToSuite(target, suggestion, suiteId === NEW_SUITE ? null : suites.find((s) => s.id === suiteId) ?? null), (name) => `to suite “${name}”`)} data-testid="suggested-rule-confirm">
             {busy ? "Adding…" : "Add"}

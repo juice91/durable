@@ -32,6 +32,7 @@ import { fetchModels, type ModelOption } from "@/lib/metrics";
 import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 // The agent page's switcher navigates with the router. The pathname stays null (as outside the app
 // router) unless a test sets it.
@@ -526,7 +527,7 @@ describe("PlaygroundPage", () => {
     expect(api.agents.get).toHaveBeenLastCalledWith("agent-3");
     await waitFor(() => expect(listConversations).toHaveBeenLastCalledWith(expect.objectContaining({ agentId: "agent-3" })));
     expect(urlConversation()).toBeNull();
-    expect(screen.getByRole("option", { name: "Latest (v2)" })).toBeInTheDocument();
+    expect(getSelectOption("Latest (v2)")).toBeTruthy();
     expect(screen.queryByText("Please create a ticket")).not.toBeInTheDocument();
 
     await sendMessage("Fresh start");
@@ -815,7 +816,7 @@ describe("PlaygroundPage run options (P0.19)", () => {
   const lastOptions = () => vi.mocked(startTurn).mock.calls.at(-1)?.[3];
 
   async function modelsReady() {
-    await screen.findByRole("option", { name: "openai:gpt-4.1" });
+    await findSelectOption("openai:gpt-4.1");
   }
 
   function choose(name: string, value: string) {
@@ -885,9 +886,9 @@ describe("PlaygroundPage run options (P0.19)", () => {
     await modelsReady();
     const model = screen.getByRole("combobox", { name: "Model" });
     expect(model).toHaveValue("");
-    expect(screen.getByRole("option", { name: "Use version's model (openai:gpt-4.1-mini)" })).toBeInTheDocument();
+    expect(getSelectOption("Use version's model (openai:gpt-4.1-mini)")).toBeTruthy();
     expect(screen.queryByRole("option", { name: "openai:gpt-4.1-mini" })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "anthropic: other model…" })).toBeInTheDocument();
+    expect(getSelectOption("anthropic: other model…")).toBeTruthy();
     await sendMessage("Hi");
     expect(lastOptions()).toEqual({ version: null, model: null, request_context: null });
   });

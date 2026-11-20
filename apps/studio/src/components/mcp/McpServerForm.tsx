@@ -17,6 +17,7 @@ import { listSecrets, secretRef } from "@/lib/secrets";
 import { routes } from "@/lib/routes";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const secondaryButton = "rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50";
@@ -159,10 +160,10 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
                     {secretNames.length > 0 ? (
                       <>
                         <label htmlFor={`header-secret-${row.key}`} className="sr-only">New value for {row.name} secret</label>
-                        <select id={`header-secret-${row.key}`} value="" onChange={(e) => e.target.value && updateRow(row.key, { value: secretRef(e.target.value) })} className={`${inputClass} max-w-40`}>
+                        <Select id={`header-secret-${row.key}`} value="" onValueChange={(v) => v && updateRow(row.key, { value: secretRef(v) })} className={`${inputClass} max-w-40`}>
                           <option value="">Use secret…</option>
                           {secretNames.map((secretName) => <option key={secretName} value={secretName}>{secretName}</option>)}
-                        </select>
+                        </Select>
                       </>
                     ) : null}
                   </>
@@ -181,10 +182,10 @@ export function McpServerForm({ server, onSaved, onCancel, embedded = false }: M
                 {secretNames.length > 0 ? (
                       <>
                         <label htmlFor={`header-secret-${row.key}`} className="sr-only">Header {index + 1} secret</label>
-                        <select id={`header-secret-${row.key}`} value="" onChange={(e) => e.target.value && updateRow(row.key, { value: secretRef(e.target.value) })} className={`${inputClass} max-w-40`}>
+                        <Select id={`header-secret-${row.key}`} value="" onValueChange={(v) => v && updateRow(row.key, { value: secretRef(v) })} className={`${inputClass} max-w-40`}>
                           <option value="">Use secret…</option>
                           {secretNames.map((secretName) => <option key={secretName} value={secretName}>{secretName}</option>)}
-                        </select>
+                        </Select>
                       </>
                     ) : null}
                 <button type="button" aria-label={`Remove header ${index + 1}`} className={secondaryButton} onClick={() => setRows((current) => current.filter((item) => item.key !== row.key))}>Remove</button>

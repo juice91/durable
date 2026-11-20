@@ -19,6 +19,7 @@ import { RUN_KIND_LABELS } from "@/lib/runs";
 import type { TraceTab } from "@/lib/routes/observability";
 import type { MetricValues, UsageValues } from "@/lib/metrics";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { optionsOf } from "@/test/select";
 
 const replace = vi.fn();
 let search = "";
@@ -263,7 +264,7 @@ describe("Metrics page with the AC.17 data", () => {
     render(<MetricsPage />);
     await screen.findByTestId("kpi-runs-value");
     const kind = screen.getByLabelText("Kind") as HTMLSelectElement;
-    expect([...kind.options].map((o) => o.textContent)).toContain("Eval");
+    expect(optionsOf(kind).map((o) => o.textContent)).toContain("Eval");
     fireEvent.change(kind, { target: { value: "eval" } });
     expect(new URL(replace.mock.calls[0][0] as string, "http://x").searchParams.get("kind")).toBe("eval");
   });

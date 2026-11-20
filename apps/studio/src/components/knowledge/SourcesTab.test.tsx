@@ -19,6 +19,7 @@ vi.mock("@/lib/kbSources", async (importOriginal) => ({ ...(await importOriginal
 import { SourcesTab } from "./SourcesTab";
 import { KbSourceError } from "@/lib/kbSources";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 const ADAPTERS = [
   { kind: "product_catalog", provider: "acme", distribution: "eap-kb-sources-acme", display_name: "Acme Parts", connection_kind: "oauth2_client_credentials", base_url: "https://api.acme.test", token_url: "https://auth.acme.test/token", config_schema: null },
@@ -85,7 +86,7 @@ describe("SourcesTab", () => {
     await screen.findByText("TI parts");
     fireEvent.click(screen.getByRole("button", { name: "Add source" }));
     const sheet = await screen.findByRole("dialog");
-    await waitFor(() => expect(within(sheet).getByLabelText("Connection")).toHaveTextContent("ti-prod"));
+    await findSelectOption("ti-prod");
     fireEvent.change(within(sheet).getByLabelText("Connection"), { target: { value: "c1" } });
     fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "New" } });
     fireEvent.change(within(sheet).getByLabelText("Page size"), { target: { value: "50" } });
@@ -115,7 +116,7 @@ describe("SourcesTab", () => {
       await screen.findByText("TI parts");
       fireEvent.click(screen.getByRole("button", { name: "Add source" }));
       const sheet = await screen.findByRole("dialog");
-      await waitFor(() => expect(within(sheet).getByLabelText("Connection")).toHaveTextContent("repos"));
+      await findSelectOption("repos");
       fireEvent.change(within(sheet).getByLabelText("Connection"), { target: { value: "c2" } });
       fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "TI docs" } });
       return sheet;
@@ -184,7 +185,7 @@ describe("SourcesTab", () => {
       expect(within(row).getByText("GitHub")).toBeInTheDocument();
       fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI docs" }));
       const sheet = await screen.findByRole("dialog");
-      expect(within(sheet).getByRole("option", { name: "Full repository" })).toBeInTheDocument();
+      expect(getSelectOption("Full repository", sheet)).toBeTruthy();
       fireEvent.change(within(sheet).getByLabelText("File paths"), { target: { value: "docs/a.md\ndocs/b.rst" } });
       expect(within(sheet).getByText("2 of 100 file paths")).toBeInTheDocument();
       fireEvent.click(within(sheet).getByRole("button", { name: "Start sync" }));

@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import MetricsPage from "./page";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
 import { routes } from "@/lib/routes";
+import { optionsOf } from "@/test/select";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -80,11 +81,11 @@ describe("MetricsPage", () => {
     render(<MetricsPage />);
     const model = screen.getByLabelText("Model");
     await waitFor(() =>
-      expect(within(model).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      expect(optionsOf(model).map((o) => o.textContent)).toEqual([
         "All models", "anthropic:legacy", "openai:gpt-4o", "test:echo",
       ]),
     );
-    expect(within(screen.getByLabelText("Provider")).getAllByRole("option").map((o) => o.textContent)).toEqual([
+    expect(optionsOf(screen.getByLabelText("Provider")).map((o) => o.textContent)).toEqual([
       "All providers", "anthropic", "litellm", "openai", "test",
     ]);
   });

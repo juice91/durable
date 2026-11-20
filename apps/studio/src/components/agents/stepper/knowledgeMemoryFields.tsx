@@ -4,6 +4,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { typedNumber } from "../knowledgeMemory";
 import { fieldClass, labelClass } from "./fieldStyles";
+import { Select } from "@/components/ui/Select";
 
 export const problemClass = "mt-1 text-caption text-destructive-text";
 export const hintClass = "mt-1 text-caption text-muted-foreground";
@@ -258,11 +259,11 @@ export function AllowlistSelect({
       <label htmlFor={id} className={labelClass}>
         {label}
       </label>
-      <select
+      <Select
         id={id}
         value={selected}
-        onChange={(e) => {
-          const option = options?.find((o) => o.id === e.target.value);
+        onValueChange={(v) => {
+          const option = options?.find((o) => o.id === v);
           if (option) onChange(option.provider, option.wildcard ? "" : option.name);
         }}
         aria-invalid={problem || outside ? true : undefined}
@@ -278,7 +279,7 @@ export function AllowlistSelect({
             {option.label}
           </option>
         ))}
-      </select>
+      </Select>
       {wildcard ? (
         <input
           id={`${id}-name`}

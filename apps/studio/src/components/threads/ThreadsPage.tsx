@@ -24,6 +24,7 @@ import {
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
+import { Select } from "@/components/ui/Select";
 
 const TITLE_MAX_LENGTH = 200;
 
@@ -197,10 +198,10 @@ function ThreadsList({
         toolbar={
           <div className="flex min-w-0 items-center gap-2">
             <label htmlFor="threads-agent-filter" className={labelClass}>Agent</label>
-            <select
+            <Select
               id="threads-agent-filter"
               value={agentId}
-              onChange={(e) => setParam({ agent_id: e.target.value })}
+              onValueChange={(v) => setParam({ agent_id: v })}
               className={`${fieldClass} max-w-48`}
             >
               <option value="">All agents</option>
@@ -208,7 +209,7 @@ function ThreadsList({
                 <option key={id} value={id}>{name}</option>
               ))}
               {agentId && !names[agentId] ? <option value={agentId}>{agentId.slice(0, 8)}…</option> : null}
-            </select>
+            </Select>
           </div>
         }
         noMatchText="No threads match the search."

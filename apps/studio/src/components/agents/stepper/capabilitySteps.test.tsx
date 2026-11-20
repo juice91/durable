@@ -30,6 +30,7 @@ import { modelsFixture, processorCatalogFixture } from "@/components/agents/spec
 import { ConfigPanel } from "@/components/agentPage/ConfigPanel";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
+import { optionsOf } from "@/test/select";
 
 const TOOLS: ToolDefinition[] = [
   { id: "clock.now", title: "Clock", description: "", side_effect: false, external_idempotent: true, input_schema: {}, allowed: true },
@@ -209,12 +210,12 @@ describe("Identity step: limits and fallback models", () => {
     await act(async () => undefined);
     fireEvent.click(screen.getByRole("button", { name: "Add fallback model" }));
     const first = screen.getByLabelText("Fallback 1") as HTMLSelectElement;
-    const values = () => Array.from(first.options).map((o) => o.value).filter(Boolean);
+    const values = () => optionsOf(first).map((o) => o.value).filter(Boolean);
     expect(values()).toEqual(["litellm:*", "test:moderation", "test:other"]);
     fireEvent.change(first, { target: { value: "test:other" } });
     fireEvent.click(screen.getByRole("button", { name: "Add fallback model" }));
     const second = screen.getByLabelText("Fallback 2") as HTMLSelectElement;
-    expect(Array.from(second.options).map((o) => o.value).filter(Boolean)).toEqual(["litellm:*", "test:moderation"]);
+    expect(optionsOf(second).map((o) => o.value).filter(Boolean)).toEqual(["litellm:*", "test:moderation"]);
     fireEvent.change(second, { target: { value: "test:moderation" } });
     await save();
     expect(saved[0].fallback_models).toEqual([{ provider: "test", name: "other" }, { provider: "test", name: "moderation" }]);
@@ -373,7 +374,7 @@ describe("review fixes (AC.13)", () => {
     await setup(spec, "identity");
     await act(async () => undefined);
     const select = screen.getByLabelText("Fallback 1") as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain("test:echo (not in the allowlist)");
+    expect(optionsOf(select).map((o) => o.textContent)).not.toContain("test:echo (not in the allowlist)");
     expect(select.value).toBe("test:echo");
     expect(document.getElementById("fallback-0-problem")).toHaveTextContent("cannot be the agent's own model");
   });

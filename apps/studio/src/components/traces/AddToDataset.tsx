@@ -7,6 +7,7 @@ import { toast } from "@/components/ui/Toaster";
 import { addCase } from "@/lib/evals";
 import { listAllSuites, type OverviewSuite } from "@/lib/evalOverview";
 import type { TraceRun } from "@/lib/traces";
+import { Select } from "@/components/ui/Select";
 
 const field =
   "rounded-md border border-input bg-surface px-2 text-label text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -92,12 +93,12 @@ export function AddToDataset({ run }: { run: TraceRun }) {
         </DialogHeader>
         <form onSubmit={save} className="flex min-w-0 flex-col gap-3">
           <label htmlFor={`${id}-suite`} className="text-caption font-medium text-muted-foreground">Test suite</label>
-          <select id={`${id}-suite`} value={suiteId} onChange={(e) => setSuiteId(e.target.value)} className={`${field} h-8`} disabled={suites === null}>
+          <Select id={`${id}-suite`} value={suiteId} onValueChange={(v) => setSuiteId(v)} className={`${field} h-8`} disabled={suites === null}>
             <option value="">{suites === null ? "Loading..." : suites.length === 0 ? "No test suites" : "Choose a test suite"}</option>
             {(suites ?? []).map((s) => (
               <option key={s.id} value={s.id}>{s.agent_name ? `${s.agent_name} / ${s.name}` : s.name}</option>
             ))}
-          </select>
+          </Select>
           {loadError ? <p role="alert" className="text-label text-destructive-text">{loadError}</p> : null}
           <label htmlFor={`${id}-name`} className="text-caption font-medium text-muted-foreground">Case name</label>
           <input id={`${id}-name`} value={name} maxLength={100} onChange={(e) => setName(e.target.value)} className={`${field} h-8`} />

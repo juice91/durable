@@ -49,7 +49,7 @@ export function ComposerModelChip({ defaultModelId, models, choice, onChange, er
         errorId={MODEL_ERROR_ID}
         value={choice.choice}
         disabled={disabled}
-        onChange={(event) => onChange({ choice: event.target.value, customName: "" })}
+        onValueChange={(v) => onChange({ choice: v, customName: "" })}
       >
         <option value="">{defaultModelId ? `Use version's model (${defaultModelId})` : "Use version's model"}</option>
         {pickerOptions.map((option) => (
