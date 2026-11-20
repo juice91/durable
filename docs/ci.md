@@ -78,6 +78,29 @@ a manual run with `full=true`. A manual run says so in its title (`run-name` in 
 `ci-heavy.yml`: "... (manual, full=true)"), which the gate reads from the runs API; a pull request
 run is selective, so it is ignored even when green.
 
+## Running the hosted CI on the Mac Studio
+
+When GitHub-hosted runners are unavailable (a billing or spending-limit stop), `ci.yml` can run on the
+self-hosted Mac Studio runners. Set a repository variable holding a JSON label array:
+
+```sh
+gh variable set CI_RUNNER --body '["self-hosted","self-hosted-runner"]'
+```
+
+Every job in `ci.yml` reads `runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}`,
+so with the variable set they land on the Studio runners and without it on `ubuntu-latest`.
+
+What changes while it is set:
+
+- Pull request jobs run only for branches of this repository (the same guard as CI Heavy); a pull
+  request from a fork gets no CI jobs rather than running its code on the Studio.
+- The five Studio shards queue behind each other on the two runners instead of running in parallel.
+  Each job has a `timeout-minutes` so a stuck job cannot hold a runner.
+- Nothing else differs: the token stays `contents: read`, and the job names the deploy gate reads are the same.
+
+To go back to hosted runners, delete the variable: `gh variable delete CI_RUNNER`. The public export
+has no such variable and always uses `ubuntu-latest`.
+
 ## Running the selection locally
 
 ```sh

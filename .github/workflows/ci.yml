@@ -23,9 +23,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# runs-on reads the repository variable CI_RUNNER (a JSON label array, e.g. ["self-hosted","self-hosted-runner"]);
+# without it every job runs on GitHub-hosted ubuntu-latest. See docs/ci.md.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    # Pull requests from forks never run on a self-hosted runner (CI_RUNNER); same guard as ci-heavy.yml.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 10
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     # paths-filter lists the PR's files through the API; the workflow default stays contents: read.
     permissions:
       contents: read
@@ -71,8 +76,10 @@ jobs:
 
   python:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.python == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 15
     # The selection step reads the pull request's labels (ci:full forces a full run).
     permissions:
@@ -139,8 +146,10 @@ jobs:
 
   studio:
     needs: changes
-    if: needs.changes.outputs.studio == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.studio == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -159,8 +168,10 @@ jobs:
 
   studio-test:
     needs: changes
-    if: needs.changes.outputs.studio == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.studio == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -213,8 +224,10 @@ jobs:
 
   deploy-checks:
     needs: changes
-    if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.deploy == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
       KUBECONFORM_VERSION: v0.7.0
