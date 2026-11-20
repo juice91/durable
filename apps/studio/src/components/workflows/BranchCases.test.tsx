@@ -113,3 +113,44 @@ describe("not reached steps", () => {
     expect(screen.queryByTestId("workflow-step-not-reached-toggle")).toBeNull();
   });
 });
+
+describe("a step row's text is copyable", () => {
+  const spec: WorkflowSpec = { name: "w", steps: [step, { id: "ltn", type: "tool", tool: "t", input: {} } as never, { id: "r_feed_failed", type: "tool", tool: "t", input: {} } as never, { id: "r_slot_done", type: "tool", tool: "t", input: {} } as never] } as WorkflowSpec;
+
+  it("a click on the description does not select the row; a click on the head and Enter do", () => {
+    const onSelect = vi.fn();
+    render(<WorkflowStepList spec={spec} states={{}} onSelectStep={onSelect} />);
+    const text = screen.getByTestId("step-row-text-feed_gate");
+    fireEvent.mouseDown(text);
+    fireEvent.click(text);
+    fireEvent.click(within(text).getAllByTestId("branch-case")[0]);
+    expect(onSelect).not.toHaveBeenCalled();
+    const head = screen.getByRole("button", { name: /^Step feed_gate/ });
+    fireEvent.click(head);
+    expect(onSelect).toHaveBeenCalledWith("feed_gate");
+  });
+
+  it("keeps the description selectable and a drag that ends in a selection does not select the row", () => {
+    const onSelect = vi.fn();
+    render(<WorkflowStepList spec={spec} onSelectStep={onSelect} />);
+    const text = screen.getByTestId("step-row-text-feed_gate");
+    expect(text.className).toContain("select-text");
+    expect(text.className).not.toContain("select-none");
+    const row = text.closest("[data-copy-text]") as HTMLElement;
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.click(row);
+    expect(onSelect).not.toHaveBeenCalled();
+    window.getSelection()?.removeAllRanges();
+  });
+
+  it("carries the row's text for Ctrl+C and a copy button", () => {
+    render(<WorkflowStepList spec={spec} onSelectStep={() => undefined} />);
+    const row = screen.getByTestId("step-row-text-feed_gate").closest("[data-copy-text]") as HTMLElement;
+    expect(row.getAttribute("data-copy-text")).toContain("feed_gate");
+    expect(row.getAttribute("data-copy-text")).toContain("1  steps.feed.output.ok eq false  →  r_feed_failed");
+    expect(within(row).getByRole("button", { name: "Copy step feed_gate" })).toBeInTheDocument();
+  });
+});

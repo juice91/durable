@@ -77,7 +77,7 @@ describe("WorkflowRunView", () => {
     expect(stepState("lookup")).toBe("running");
     expect(screen.getByTestId("workflow-run-stream")).toHaveAttribute("data-state", "live");
 
-    fireEvent.click(within(screen.getByTestId("workflow-step-classify")).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("workflow-step-classify")).getByRole("button", { name: /^Step / }));
     const panel = screen.getByTestId("step-io-panel");
     expect(within(panel).getByTestId("step-io-input")).toHaveTextContent('"text": "hi"');
     expect(within(panel).getByTestId("step-io-output")).toHaveTextContent("billing");
@@ -99,7 +99,7 @@ describe("WorkflowRunView", () => {
     fireEvent.click(within(card).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(wfMock.decideApproval).toHaveBeenCalledWith("run-1", "approve", "approve", "ok"));
     await waitFor(() => expect(screen.queryByTestId("approval-approve")).toBeNull());
-    fireEvent.click(within(screen.getByTestId("workflow-step-approve")).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("workflow-step-approve")).getByRole("button", { name: /^Step / }));
     expect(screen.getByTestId("step-decided-by")).toHaveTextContent("dev");
     expect(screen.getByTestId("step-decision-comment")).toHaveTextContent("ok");
   });
@@ -185,7 +185,7 @@ describe("WorkflowRunView", () => {
       handlers.onEvent?.(ev("step_started", { step_id: "fork", step_type: "parallel" }));
       handlers.onEvent?.(ev("step_completed", { step_id: "fork", output: null }));
     });
-    fireEvent.click(within(screen.getByTestId("workflow-step-fork")).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("workflow-step-fork")).getByRole("button", { name: /^Step / }));
     const output = within(screen.getByTestId("step-io-panel")).getByTestId("step-io-output");
     expect(output).toHaveTextContent("No output (parallel step).");
     expect(output).not.toHaveTextContent(/^null$/);

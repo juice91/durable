@@ -5,6 +5,7 @@ import { getExternalTrace, externalSpanRows, RUN_ID_ATTRIBUTE, type ExternalTrac
 import { formatDuration } from "@/lib/traces";
 import { Badge } from "@/components/ui/Badge";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { TraceLink } from "./TraceLink";
 
 const dim = "text-muted-foreground";
@@ -17,6 +18,7 @@ function Attributes({ title, attributes, testId }: { title: string; attributes: 
       {entries.length === 0 ? (
         <p className={`text-label ${dim}`}>None.</p>
       ) : (
+        <CopyableText label={title.toLowerCase()} copyText={entries.map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n")}>
         <dl className="grid min-w-0 grid-cols-[minmax(8rem,auto)_1fr] gap-x-3 gap-y-1 text-caption">
           {entries.map(([key, value]) => (
             <React.Fragment key={key}>
@@ -25,6 +27,7 @@ function Attributes({ title, attributes, testId }: { title: string; attributes: 
             </React.Fragment>
           ))}
         </dl>
+        </CopyableText>
       )}
     </section>
   );

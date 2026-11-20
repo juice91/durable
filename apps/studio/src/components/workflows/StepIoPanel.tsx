@@ -8,14 +8,28 @@ import type { IterationDetail, StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { formatScore } from "@/lib/format";
-import { BranchCases, branchTaken } from "./BranchCases";
+import { CopyableText } from "@/components/ui/CopyableText";
+import { CopyButton } from "@/components/ui/CopyButton";
+import { BranchCases, branchCasesText, branchTaken } from "./BranchCases";
 import { evaluationView, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
+
+/** What a copy of a value gives: a string as it is, anything else as raw (indented) JSON. */
+function rawText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
   return (
     <div>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h4>
-      <pre data-testid={testId} data-output-format={format} className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+      <CopyableText label={label.toLowerCase()} copyText={rawText(value)} className="mt-1">
+        <pre data-testid={testId} data-output-format={format} className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 pr-9 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+      </CopyableText>
     </div>
   );
 }
@@ -151,7 +165,8 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
     <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className={className ?? "min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4"}>
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-semibold text-card-foreground">
-          <span className="font-mono">{detail.stepId}</span>
+          <span data-testid="step-io-step-id" className="select-text font-mono">{detail.stepId}</span>
+          <CopyButton text={detail.stepId} label="step id" className="ml-1 align-middle" />
           {type ? <span className="ml-2 text-xs font-normal uppercase text-muted-foreground">{type}</span> : null}
         </h3>
         <button type="button" onClick={onClose} aria-label="Close step details" className="rounded-sm text-caption text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Close</button>
@@ -190,7 +205,9 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
       {step?.type === "branch" ? (
         <div>
           <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cases</h4>
-          <BranchCases step={step} taken={branchTaken(detail.output)} warnings={detail.warnings} />
+          <CopyableText label="cases" copyText={branchCasesText(step)} data-testid="step-io-cases" className="mt-1">
+            <BranchCases step={step} taken={branchTaken(detail.output)} warnings={detail.warnings} />
+          </CopyableText>
         </div>
       ) : null}
       {detail.input !== undefined ? <Block label="Input" value={detail.input} testId="step-io-input" /> : null}
@@ -231,8 +248,10 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
       ) : null}
       {detail.error || detail.errorCode ? (
         <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">
-          {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
-          {detail.errorCode ? <p className="mt-1 text-xs">Error code: <code className="font-mono">{detail.errorCode}</code></p> : null}
+          <CopyableText label="error" copyText={[detail.error, detail.errorCode ? `Error code: ${detail.errorCode}` : null].filter(Boolean).join("\n")} className="pr-8">
+            {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
+            {detail.errorCode ? <p className="mt-1 text-xs">Error code: <code className="font-mono">{detail.errorCode}</code></p> : null}
+          </CopyableText>
         </div>
       ) : null}
       {!detail.started && detail.state === "pending" ? <p className="text-sm text-muted-foreground">This step has not started.</p> : null}
