@@ -160,6 +160,8 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
+          # Per-job install dir: two Mac Studio runners share one HOME, and the default ~/setup-pnpm races.
+          dest: ${{ runner.temp }}/setup-pnpm
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -197,6 +199,8 @@ jobs:
           fetch-depth: 0
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
+          # Per-job install dir: two Mac Studio runners share one HOME, and the default ~/setup-pnpm races.
+          dest: ${{ runner.temp }}/setup-pnpm
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
