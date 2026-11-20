@@ -348,7 +348,10 @@ def is_thinking_model(name: str) -> bool:
     return "thinking" in lowered or "reason" in lowered
 
 
-_PROVIDER_RANK = {"anthropic": 0, "openai": 1}
+# litellm and cloudflare tie behind anthropic and openai (Workers AI never outranks the gateway's equally
+# suited models; the later keys decide), and both rank ahead of any other provider.
+_PROVIDER_RANK = {"anthropic": 0, "openai": 1, "litellm": 2, "cloudflare": 2}
+_UNKNOWN_PROVIDER_RANK = 3
 _STRUCTURED_FAMILIES = re.compile(
     r"^(claude|gpt-4|gpt-5|o3|o4|qwen3|deepseek-v3|gemini-2|mistral-large|llama-3\.3|llama-4)"
 )
@@ -407,7 +410,7 @@ def pick_seed_model(provider_models: Sequence[tuple[str, Sequence[str]]], fallba
        (vision-language) markers; this comes before the provider so a direct provider's embedding model
        never beats the gateway's chat model;
     2. quantised names (4bit, 8bit, 2bit, q4, q8 and kin, gguf, mlx) below unquantised siblings;
-    3. provider: anthropic, then openai, then litellm and the rest (a direct provider's models are known
+    3. provider: anthropic, then openai, then litellm and cloudflare (tied), then any other provider (a direct provider's models are known
        to follow tool schemas);
     4. families known to do structured output well (claude*, gpt-4*, gpt-5*, o3*, o4*, qwen3*,
        deepseek-v3*, gemini-2*, mistral-large*, llama-3.3*, llama-4*) before other names;
@@ -429,7 +432,7 @@ def _ranked(provider_models: Sequence[tuple[str, Sequence[str]]]) -> list[str]:
     for provider, names in provider_models:
         for name in names:
             rank = _seed_rank(name, index)
-            keyed.append(((rank[0], rank[1], _PROVIDER_RANK.get(provider, 2), *rank[2:]), f"{provider}:{name}"))
+            keyed.append(((rank[0], rank[1], _PROVIDER_RANK.get(provider, _UNKNOWN_PROVIDER_RANK), *rank[2:]), f"{provider}:{name}"))
             index += 1
     return [model_id for _, model_id in sorted(keyed, key=lambda item: item[0])]
 

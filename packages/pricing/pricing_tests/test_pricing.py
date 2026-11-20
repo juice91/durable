@@ -211,3 +211,18 @@ def test_price_known_agrees_with_price_request(prices_file):
         expected = "unpriced" if cost is None else ("zero" if cost == 0 else "priced")
         assert eap_pricing.price_known(model, at) == expected, model
         assert (cost is None) == (source is None)
+
+
+def test_repo_prices_cloudflare_deepseek_with_cached_input(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.delenv(eap_pricing.PRICES_FILE_ENV, raising=False)
+    repo = load_overrides()
+    model = "cloudflare:@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+    period = override_period(repo, model, DAY)
+    assert period is not None
+    assert (period.input_per_mtok, period.output_per_mtok, period.cache_read_per_mtok) == (
+        Decimal("0.30"), Decimal("1.20"), Decimal("0.006"))
+    usage = Usage(input_tokens=2_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    assert override_cost(period, usage) == Decimal("0.30") + Decimal("0.006") + Decimal("1.20")
+    assert eap_pricing.price_known(model, datetime(2026, 11, 20, tzinfo=timezone.utc), repo) == "priced"
