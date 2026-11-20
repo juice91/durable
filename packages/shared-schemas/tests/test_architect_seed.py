@@ -202,6 +202,11 @@ def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_
         assert provider_specific not in text
 
 
+def test_the_architect_is_told_links_mode_has_the_same_exclusions_as_parse_feed():
+    text = ARCHITECT_INSTRUCTIONS
+    assert "extract_html in links mode take exclude_urls and exclude_terms" in text and "not with json.query" in text
+
+
 def test_the_picker_prefers_a_general_chat_model_over_tunes_code_embedding_and_medical_names():
     from eap_schemas.architect_seed import rank_model_ids
 

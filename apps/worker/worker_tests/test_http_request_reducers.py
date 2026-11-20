@@ -81,6 +81,23 @@ async def test_extract_html_base_url_defaults_to_the_request_url_and_errors_are_
 
 
 @sync
+async def test_extract_html_links_pass_exclude_urls_and_exclude_terms_through(wire):
+    page = ('<html><body><main><a href="/story/1?utm_source=x">One</a><a href="/story/2">Two 新聞稿</a>'
+            '<a href="/story/3">Three</a><a href="/story/4">Four</a></main></body></html>')
+    answer(wire, content=page, headers={"content-type": "text/html"})
+    out = await call(extract_html={
+        "mode": "links", "include_patterns": [r"/story/\d+"], "limit": 2,
+        "exclude_urls": ["https://api.example.com/story/1/"], "exclude_terms": ["新聞稿"],
+    })
+    assert [i["title"] for i in out["text"]["items"]] == ["Three", "Four"]
+    assert out["text"]["dropped"]["excluded_url"] == 1 and out["text"]["dropped"]["excluded_term"] == 1
+    with pytest.raises(ValidationError):
+        HttpRequestInput(method="GET", url="https://api.example.com/", extract_html={"mode": "links", "exclude_urls": ["u"] * 201})
+    with pytest.raises(ValidationError):
+        HttpRequestInput(method="GET", url="https://api.example.com/", extract_html={"mode": "links", "exclude_terms": ["t"] * 51})
+
+
+@sync
 async def test_parse_feed_replaces_text_with_exclude_urls(wire):
     answer(wire, content=RSS, headers={"content-type": "application/rss+xml"})
     out = await call(parse_feed={"exclude_urls": ["https://example.com/1"], "label": "Src"})

@@ -128,6 +128,8 @@ class HttpExtractHtml(BaseModel):
     exclude_patterns: list[str] | None = None
     allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
     limit: Annotated[int, Field(ge=1, le=60)] = 20
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=50)] | None = None
 
 
 class HttpParseFeed(BaseModel):
@@ -291,6 +293,8 @@ class HtmlExtractInput(BaseModel):
     exclude_patterns: list[str] | None = None
     allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
     limit: Annotated[int, Field(ge=1, le=HTML_EXTRACT_MAX_LINKS)] = 20
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=50)] | None = None
 
 
 class KbSourceGetInput(BaseModel):
@@ -461,7 +465,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "response_query {expression} runs a JMESPath expression (as json.query) over the JSON body and returns "
             "it as json, e.g. a getAuthorFeed without reposts: {expression: \"feed[?!reason].post.{uri: uri, text: record.text}\"}; "
             "extract_html {mode article|links, base_url (default the request url), max_graphemes, root_selector, "
-            "include_patterns, exclude_patterns, allowed_hosts, limit} runs html.extract over the text and returns it "
+            "include_patterns, exclude_patterns, allowed_hosts, limit, exclude_urls, exclude_terms} runs html.extract over the text and returns it "
             "as text, e.g. {mode: \"article\", max_graphemes: 3000}; "
             "parse_feed {max_items, max_age_hours, include_terms, exclude_terms, exclude_urls, label} runs feed.parse "
             "over the text, e.g. {max_items: 10, exclude_urls: [\"https://example.com/already-posted\"]}. "
@@ -542,7 +546,12 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "order}]}: the anchors (under root_selector, a CSS selector, if given) whose absolute URL matches one of "
             "include_patterns (RE2 regular expressions: at most 10 of 200 characters, no look-around or back-references; "
             "at least one) and none of exclude_patterns, de-duplicated "
-            "(fragment, utm_* and fbclid dropped), the first limit (default 20, at most 60) in page order. Only https "
+            "(fragment, utm_* and fbclid dropped), the first limit (default 20, at most 60) in page order, and a "
+            "dropped {scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term} count. "
+            "exclude_urls (links mode, at most 200, compared by the normalised URL) drops the links already handled, "
+            "e.g. the post links from a getAuthorFeed, so limit counts only new links. "
+            "exclude_terms (links mode, at most 50, case-insensitive) drops a link whose title contains one, "
+            "e.g. 新聞稿 or 美通社 for press releases. Only https "
             "links are returned (javascript:, data: and http: are dropped), and a link to "
             "another host than base_url's is dropped unless the host is in allowed_hosts; og_image likewise needs "
             "its host to be base_url's or in allowed_hosts, else null. The output is plain text (all markup, "
@@ -559,6 +568,7 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "canonical_url": {"type": ["string", "null"]}, "og_image": {"type": ["string", "null"]},
             "description": {"type": "string"}, "lang": {"type": ["string", "null"]}, "graphemes": {"type": "integer"},
             "items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "url": {"type": "string"}, "title": {"type": "string"}, "order": {"type": "integer"}}}},
+            "dropped": {"type": "object", "additionalProperties": {"type": "integer"}},
             "error": {"type": "object", "properties": {"code": {"type": "string"}}},
         }},
         example={

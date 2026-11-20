@@ -259,6 +259,78 @@ def test_include_and_exclude_patterns_see_the_normalised_url():
     assert [i["url"].rsplit("/", 1)[-1] for i in out["items"]] == ["1"]
 
 
+# ---------------------------------------------------------------------------- exclude_urls / exclude_terms
+
+LISTING = (
+    "<a href='/n/1'>Alpha</a><a href='/n/2/'>Beta</a><a href='/n/3'>美通社：某公司發布</a>"
+    "<a href='/n/4'>Delta 新聞稿</a><a href='/n/5'>PR Newswire release</a><a href='/n/6'>Zeta</a>"
+    "<a href='http://www.mirrormedia.example/n/7'>plain http</a><a href='https://other.example/n/8'>other host</a>"
+    "<a href='/x/9'>off pattern</a><a href='/n/1#top'>Alpha again</a><a href='/n/10'> </a>"
+)
+INC = {"include_patterns": [r"/n/"]}
+
+
+def test_exclude_urls_compare_by_the_normalised_url():
+    out = links(LISTING, exclude_urls=[
+        "https://WWW.mirrormedia.example/n/1/?utm_source=x&fbclid=y#frag",  # utm, fbclid, fragment, case, slash
+        "https://www.mirrormedia.example/n/2",  # the page links /n/2/ with a slash
+    ], **INC)
+    urls = [i["url"].rsplit("/", 1)[-1] for i in out["items"]]
+    assert "1" not in urls and "2" not in urls and urls[:2] == ["3", "4"]
+    assert out["dropped"]["excluded_url"] == 2
+    assert out["dropped"]["duplicate"] == 1  # /n/1#top after /n/1
+
+
+def test_exclude_urls_that_are_blank_or_not_urls_are_ignored():
+    out = links(LISTING, exclude_urls=["", "  ", "not a url", "http://[bad"], **INC)
+    assert out["dropped"]["excluded_url"] == 0 and len(out["items"]) == 6
+
+
+def test_exclude_terms_are_case_insensitive_substrings_of_the_title_and_work_on_cjk():
+    out = links(LISTING, exclude_terms=["美通社", "新聞稿", "pr newswire"], **INC)
+    assert [i["title"] for i in out["items"]] == ["Alpha", "Beta", "Zeta"]
+    assert out["dropped"]["excluded_term"] == 3
+    out = links("<a href='/n/1'>Breaking NEWS</a><a href='/n/2'>Other</a>", exclude_terms=["news"], **INC)
+    assert [i["title"] for i in out["items"]] == ["Other"]
+
+
+def test_empty_terms_match_nothing_and_the_term_is_not_searched_in_the_url():
+    out = links("<a href='/n/secret'>Title</a>", exclude_terms=["", "secret"], **INC)
+    assert [i["title"] for i in out["items"]] == ["Title"]
+
+
+def test_limit_counts_the_kept_links_not_the_excluded_ones():
+    html = "".join(f"<a href='/n/{i}'>item {i}</a>" for i in range(10))
+    out = links(html, limit=3, exclude_urls=["https://www.mirrormedia.example/n/0", "https://www.mirrormedia.example/n/1"], exclude_terms=["item 3"], **INC)
+    assert [i["title"] for i in out["items"]] == ["item 2", "item 4", "item 5"]
+    assert [i["order"] for i in out["items"]] == [1, 2, 3] and [i["id"] for i in out["items"]] == ["l1", "l2", "l3"]
+    assert out["dropped"]["excluded_url"] == 2 and out["dropped"]["excluded_term"] == 1
+
+
+def test_dropped_counters_cover_every_reason():
+    out = links(LISTING, exclude_urls=["https://www.mirrormedia.example/n/6"], exclude_terms=["新聞稿"], **INC)
+    assert out["dropped"] == {"scheme": 1, "host": 1, "duplicate": 1, "pattern": 1, "no_title": 1, "excluded_url": 1, "excluded_term": 1}
+    assert [i["title"] for i in out["items"]] == ["Alpha", "Beta", "美通社：某公司發布", "PR Newswire release"]
+    assert links("<a href='/n/1'>a</a>", **INC)["dropped"] == dict.fromkeys(out["dropped"], 0)
+
+
+def test_exclusions_do_not_change_article_mode():
+    out = article(ARTICLE, exclude_urls=["https://x.example/"], exclude_terms=["政策"])
+    assert "dropped" not in out and out["title"] == "市府宣布新政策"
+
+
+def test_the_list_size_caps_are_in_the_input_model_and_the_declaration():
+    base = {"html": "x", "base_url": "https://a.example", "mode": "links"}
+    HtmlExtractInput(**base, exclude_urls=["u"] * 200, exclude_terms=["t"] * 50)
+    with pytest.raises(ValidationError):
+        HtmlExtractInput(**base, exclude_urls=["u"] * 201)
+    with pytest.raises(ValidationError):
+        HtmlExtractInput(**base, exclude_terms=["t"] * 51)
+    text = TOOL_DECLARATIONS["html.extract"].description
+    assert "exclude_urls" in text and "exclude_terms" in text and "getAuthorFeed" in text and "excluded_term" in text
+    assert "exclude_urls" in TOOL_DECLARATIONS["http.request"].description.split("extract_html")[1].split("parse_feed")[0]
+
+
 # ---------------------------------------------------------------------------- errors
 
 
