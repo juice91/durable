@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Deterministic input and output processors (guardrails) for EAP agents, on RE2"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "eap-schemas",
     # RE2 bindings (linear-time matching, no backtracking): every regex here, user patterns

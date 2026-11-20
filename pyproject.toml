@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "PydanticOS - Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "eap-schemas",
     "eap-mcp-runtime",
@@ -14,6 +15,7 @@ dev = [
     "pytest>=7",
     "import-linter>=2.0",
     "pytest-xdist>=3.8.0",
+    "pip-licenses>=5.5.5",
 ]
 
 [tool.uv.workspace]
