@@ -87,7 +87,7 @@ def test_publish_without_approval_is_impossible_from_the_tool_path():
     registry = ToolRegistry()
     register_architect_tools(registry)
     assert set(TOOL_IDS) == registry.tool_ids()
-    assert GATED_TOOL_IDS == ARCHITECT_GATED_TOOL_IDS and len(GATED_TOOL_IDS) == 7
+    assert GATED_TOOL_IDS == ARCHITECT_GATED_TOOL_IDS and len(GATED_TOOL_IDS) == 11
     for tool_id in GATED_TOOL_IDS:
         assert registry.summary_for(tool_id, {"id": "x", "version": 1, "workflow_id": "x", "action": "pause"})
         assert registry.get_metadata(tool_id)["side_effect"] is True
