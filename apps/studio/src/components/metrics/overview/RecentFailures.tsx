@@ -3,7 +3,7 @@
 import React from "react";
 import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
-import { runKind } from "@/components/runs/RunSubject";
+import { RUN_KIND_LABELS, runKind } from "@/components/runs/RunSubject";
 import { formatCount } from "@/lib/metrics";
 import type { TraceRun } from "@/lib/traces";
 import type { Run } from "@/lib/runs";
@@ -14,9 +14,10 @@ function short(id: string): string {
 }
 
 /** A plain-text run label (the row is one link, so no nested links): "Support bot",
- * "Workflow: Intake", "Tool: http.get", "Agent 1a2b3c4d...", or "Test run: <target>" for evals. */
+ * "Workflow: Intake", "Tool: http.get", "Agent 1a2b3c4d...", "Test run: <target>" for evals,
+ * or "KB source sync: <kb name>" for source sync runs. */
 export function runLabel(
-  run: Pick<Run, "kind" | "agent_id" | "tool_id" | "workflow_id" | "suite_name">,
+  run: Pick<Run, "kind" | "agent_id" | "tool_id" | "workflow_id" | "suite_name" | "knowledge_base_id" | "source_name" | "run_id">,
   agentNames: Record<string, string> = {},
   workflowNames: Record<string, string> = {},
 ): string {
@@ -40,6 +41,15 @@ export function runLabel(
     // Base label is "Test run: <target>"; append " · <suite name>" if available.
     const baseLabel = `Test run: ${target}`;
     return run.suite_name ? `${baseLabel} · ${run.suite_name}` : baseLabel;
+  }
+  if (kind === "kb_source_sync") {
+    // A knowledge-base source sync run (0029_kb_sources): show source name if available.
+    // The source_name comes from the run's input JSON (parsed by the client).
+    if (run.source_name) {
+      return `${RUN_KIND_LABELS.kb_source_sync} (${run.source_name})`;
+    }
+    // Fallback to short run id when source_name is missing.
+    return `${RUN_KIND_LABELS.kb_source_sync} ${short(run.run_id)}`;
   }
   if (!run.agent_id) return "Agent: unknown";
   return agentNames[run.agent_id] ?? `Agent ${short(run.agent_id)}`;
