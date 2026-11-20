@@ -45,7 +45,7 @@ def test_drafter_schema_is_inside_the_output_subset_and_has_no_pattern():
 def test_the_seeded_specs():
     spec = architect_agent_spec("test:echo")
     assert spec.tools == (*ARCHITECT_TOOL_IDS, *ARCHITECT_PLATFORM_TOOL_IDS)
-    assert len(ARCHITECT_TOOL_IDS) == 15 and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8 and len(spec.tools) == 23
+    assert len(ARCHITECT_TOOL_IDS) == 21 and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8 and len(spec.tools) == 29
     assert spec.approvals is not None and spec.approvals.tools == ARCHITECT_GATED_TOOL_IDS
     assert spec.memory.history.last_turns == 30 and spec.model_settings.max_steps == 12
     drafter = drafter_agent_spec("litellm:qwen")

@@ -78,6 +78,8 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.list_eval_suites",
+    "architect.get_eval_run",
     *ARCHITECT_GATED_TOOL_IDS,
 )
 
