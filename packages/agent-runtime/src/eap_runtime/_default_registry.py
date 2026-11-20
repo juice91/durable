@@ -1,7 +1,9 @@
 """Default tool registry with demo tools."""
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 from pydantic_ai import RunContext
 
@@ -14,7 +16,7 @@ from eap_runtime._types import RunDeps
 
 def _clock_now(
     ctx: RunContext[RunDeps],
-    offset_minutes: int = 0,
+    offset_minutes: Annotated[int, Field(ge=-10080, le=10080)] = 0,
     parts: bool = False,
 ) -> str | dict[str, Any]:
     """Return current UTC ISO time, or structured parts when requested."""

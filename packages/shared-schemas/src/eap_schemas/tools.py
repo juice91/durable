@@ -373,12 +373,22 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
     "clock.now": ToolDeclaration(
         id="clock.now",
         title="Current time",
-        description="Returns current UTC ISO time",
+        description=(
+            "Returns the current UTC time as an ISO string. offset_minutes (-10080..10080) shifts it; parts: true "
+            "returns {iso, date, hour, minute, hour_prefix, weekday, epoch_s} instead, e.g. hour_prefix "
+            "2026-11-20T06: to test whether a timestamp falls in the current clock hour"
+        ),
         side_effect=False,
         external_idempotent=False,
         input_model=ClockNowInput,
         result_example="2026-11-18T09:30:00+00:00",
-        result_schema={"type": "string", "format": "date-time"},
+        result_schema={"oneOf": [
+            {"type": "string", "format": "date-time"},
+            {"type": "object", "properties": {
+                "iso": {"type": "string", "format": "date-time"}, "date": {"type": "string"}, "hour": {"type": "string"},
+                "minute": {"type": "string"}, "hour_prefix": {"type": "string"}, "weekday": {"type": "string"},
+                "epoch_s": {"type": "integer"}}, "required": ["iso", "date", "hour", "minute", "hour_prefix", "weekday", "epoch_s"]},
+        ]},
     ),
     "tickets.create": ToolDeclaration(
         id="tickets.create",
