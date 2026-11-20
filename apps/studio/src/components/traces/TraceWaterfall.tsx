@@ -244,7 +244,7 @@ export function TraceWaterfall({
               spanId={span.id}
               kind={span.kind}
               status={span.status}
-              label={spanLabel(span, names)}
+              label={spanLabel(span, names, undefined)}
               depth={depth}
               expandable={row.children > 0}
               isCollapsed={collapsed.has(span.id)}

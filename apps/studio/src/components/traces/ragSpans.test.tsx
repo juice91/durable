@@ -92,6 +92,16 @@ describe("span kinds (lib/traces, spanStyles)", () => {
     expect(spanLabel(run)).toBe("Knowledge ingest");
     expect(spanLabel(run, { knowledgeBaseNames: { kb1: "Product docs" } })).toBe("Knowledge ingest: Product docs");
   });
+
+  it("labels kb_source_sync runs with source_name when available", () => {
+    const run = span("run", { run_kind: "kb_source_sync", knowledge_base_id: "kb1", run_id: "fe7b6ff3-1234" });
+    // Without source_name, falls back to short run id
+    expect(spanLabel(run, {}, undefined)).toBe("KB source sync fe7b6ff3...");
+    // With source_name
+    expect(spanLabel(run, {}, "ti-catalogue")).toBe("KB source sync (ti-catalogue)");
+    // With source_name and kb name (kb name not used for kb_source_sync)
+    expect(spanLabel(run, { knowledgeBaseNames: { kb1: "Product docs" } }, "ti-catalogue")).toBe("KB source sync (ti-catalogue)");
+  });
 });
 
 describe("SpanDetail for RAG and memory spans", () => {

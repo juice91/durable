@@ -1,7 +1,7 @@
 // Built-in trace view (P0.13): the GET /runs/{id}/trace client, span tree and waterfall geometry,
 // span labels, number formatting, and the Traces list URL filters (the Metrics drill-down contract).
 import { BASE_URL, apiErrorFromResponse, apiHeaders } from "./api";
-import type { Run, RunKind } from "./runs";
+import { RUN_KIND_LABELS, type Run, type RunKind } from "./runs";
 
 export type SpanKind =
   | "run"
@@ -307,7 +307,7 @@ export function filterSpanRows(rows: SpanRow[], query: string, names: NameMaps =
   if (!needle) return rows;
   const keep = new Set<number>();
   rows.forEach((row, index) => {
-    const label = spanLabel(row.span, names).toLowerCase();
+    const label = spanLabel(row.span, names, undefined).toLowerCase();
     if (!label.includes(needle) && !row.span.kind.toLowerCase().includes(needle)) return;
     keep.add(index);
     let depth = row.depth;
@@ -405,6 +405,7 @@ function num(value: unknown): number | null {
 export function spanLabel(
   span: TraceSpan,
   { agentNames = {}, workflowNames = {}, knowledgeBaseNames = {} }: NameMaps = {},
+  sourceName?: string | null,
 ): string {
   const a = span.attributes ?? {};
   if (span.kind === "run" || span.kind === "child_run") {
@@ -419,6 +420,16 @@ export function spanLabel(
       const id = str(a.workflow_id);
       const name = id ? (workflowNames[id] ?? short(id)) : "unknown";
       return `Workflow: ${name}${a.workflow_version != null ? ` v${a.workflow_version}` : ""}`;
+    }
+    if (kind === "kb_source_sync") {
+      // A knowledge-base source sync run: show source name if available.
+      if (sourceName) {
+        return `${RUN_KIND_LABELS.kb_source_sync} (${sourceName})`;
+      }
+      // Fallback to short run id when source_name is missing.
+      // Use run_id from attributes if available, otherwise extract from span.id.
+      const runId = str(a.run_id) ?? span.id.split(":")[1] ?? span.id;
+      return `${RUN_KIND_LABELS.kb_source_sync} ${short(runId)}`;
     }
     const id = str(a.agent_id);
     const name = id ? (agentNames[id] ?? short(id)) : "unknown";
