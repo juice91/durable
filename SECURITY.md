@@ -2,9 +2,11 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities through GitHub's private vulnerability reporting system for this repository. Navigate to the repository's **Security** tab and select **Report a vulnerability** to open a security advisory.
+Please do not open a public issue for security problems.
 
-Alternatively, you may use GitHub's security advisories feature to submit a private report.
+Report it privately through GitHub: [Report a vulnerability](https://github.com/juice91/durable/security/advisories/new) (Security tab → Advisories → Report a vulnerability). Only the maintainer can see the report.
+
+If you cannot use GitHub, say so in a minimal public issue without details and the maintainer will contact you.
 
 ## Scope
 
