@@ -36,7 +36,11 @@ the page, the patterns and the allowed hosts are all arguments.
   `include_patterns` or any of `exclude_patterns` (patterns see the normalised URL), an anchor without a title.
   Normalised: fragment, `utm_*` and `fbclid` query keys and a trailing slash dropped, scheme and host lower
   case. Duplicates (by normalised URL) keep the first. `limit` (default 20, at most 60) in page order; `order`
-  is the 1-based position in the result. Title: the anchor's text, else its `title`, `aria-label`, or an
+  is the 1-based position in the result. `exclude_urls` (at most 200, compared by the same normalised URL, so
+  utm, fragment and trailing-slash variants match) and `exclude_terms` (at most 50, case-insensitive substring of
+  the title) drop links after the patterns and before `limit`, so `limit` counts kept links. The result also
+  carries `dropped: {scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term}` (counts of the
+  anchors examined; scanning stops once `limit` links are kept). Title: the anchor's text, else its `title`, `aria-label`, or an
   image's `alt`; whitespace collapsed, at most 200 graphemes.
 """
 
@@ -357,6 +361,13 @@ def _normalise(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))
 
 
+def _safe_normalise(url: str) -> str | None:
+    try:
+        return _normalise(url.strip()) if url.strip() else None
+    except ValueError:
+        return None
+
+
 def _anchor_title(anchor: LexborNode) -> str:
     candidates = [anchor.text(), anchor.attributes.get("title"), anchor.attributes.get("aria-label")]
     img = anchor.css_first("img[alt]")
@@ -389,6 +400,7 @@ def _hosts(base_url: str, allowed_hosts: list[str] | None) -> set[str]:
 def _links(
     parser: LexborHTMLParser, base_url: str, root_selector: str | None, include: list[str] | None,
     exclude: list[str] | None, allowed_hosts: list[str] | None, limit: int,
+    exclude_urls: list[str] | None = None, exclude_terms: list[str] | None = None,
 ) -> dict[str, Any]:
     if not include:
         return _error("no_patterns", "include_patterns needs at least one pattern")
@@ -400,6 +412,9 @@ def _links(
     except SelectolaxError:
         return _error("selector_invalid", "root_selector is not a valid CSS selector")
     hosts = _hosts(base_url, allowed_hosts)
+    blocked = {u for raw in exclude_urls or [] if (u := _safe_normalise(raw))}
+    terms = [t.casefold() for t in exclude_terms or [] if t.strip()]
+    dropped = {"scheme": 0, "host": 0, "duplicate": 0, "pattern": 0, "no_title": 0, "excluded_url": 0, "excluded_term": 0}
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for root in roots:
@@ -413,19 +428,34 @@ def _links(
                 host = (parts.hostname or "").lower()
             except ValueError:
                 continue
-            if parts.scheme != "https" or host not in hosts:
+            if parts.scheme != "https":
+                dropped["scheme"] += 1
+                continue
+            if host not in hosts:
+                dropped["host"] += 1
                 continue
             url = _normalise(absolute)
-            if url in seen or not any(p.search(url) for p in inc) or any(p.search(url) for p in exc):
+            if url in seen:
+                dropped["duplicate"] += 1
+                continue
+            if not any(p.search(url) for p in inc) or any(p.search(url) for p in exc):
+                dropped["pattern"] += 1
                 continue
             title = _anchor_title(anchor)
             if not title:
+                dropped["no_title"] += 1
                 continue
             seen.add(url)
+            if url in blocked:
+                dropped["excluded_url"] += 1
+                continue
+            if any(t in title.casefold() for t in terms):
+                dropped["excluded_term"] += 1
+                continue
             items.append({"id": f"l{len(items) + 1}", "url": url, "title": title, "order": len(items) + 1})
             if len(items) >= limit:
-                return {"items": items}
-    return {"items": items}
+                return {"items": items, "dropped": dropped}
+    return {"items": items, "dropped": dropped}
 
 
 # ------------------------------------------------------------------------------------- the tool
@@ -442,6 +472,8 @@ def html_extract(
     exclude_patterns: list[str] | None = None,
     allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None,
     limit: Annotated[int, Field(ge=1, le=60)] = 20,
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None,
+    exclude_terms: Annotated[list[str], Field(max_length=50)] | None = None,
 ) -> dict[str, Any]:
     """Extract the article or the links of an HTML page (see the module docstring)."""
     if len(html) > HTML_EXTRACT_MAX_CHARS or len(html.encode("utf-8", errors="replace")) > HTML_EXTRACT_MAX_CHARS:
@@ -459,7 +491,7 @@ def html_extract(
     if len(parser.css("*")) > MAX_NODES:
         return _error("html_too_complex", f"the page has more than {MAX_NODES} elements")
     if mode == "links":
-        return _links(parser, base_url, root_selector, include_patterns, exclude_patterns, allowed_hosts, limit)
+        return _links(parser, base_url, root_selector, include_patterns, exclude_patterns, allowed_hosts, limit, exclude_urls, exclude_terms)
     try:
         return _article(parser, base_url, max_graphemes, _hosts(base_url, allowed_hosts))
     except (_TooComplex, RecursionError):

@@ -72,7 +72,7 @@ sent). With a reducer `max_response_bytes` may go up to 1048576 (1 MiB); without
 | reducer | runs | the result goes to |
 | --- | --- | --- |
 | `response_query: {expression}` | the JMESPath engine of [`json.query`](json-query.md) over the JSON body (expression at most 500 characters) | `json` (`text` is absent) |
-| `extract_html: {mode, base_url?, max_graphemes?, root_selector?, include_patterns?, exclude_patterns?, allowed_hosts?, limit?}` | [`html.extract`](html-extract.md) over the text body; `base_url` defaults to the request URL | `text` (`json` is absent) |
+| `extract_html: {mode, base_url?, max_graphemes?, root_selector?, include_patterns?, exclude_patterns?, allowed_hosts?, limit?, exclude_urls?, exclude_terms?}` | [`html.extract`](html-extract.md) over the text body; `base_url` defaults to the request URL | `text` (`json` is absent) |
 | `parse_feed: {max_items?, max_age_hours?, include_terms?, exclude_terms?, exclude_urls?, label?}` | [`feed.parse`](feed-parse.md) over the text body | `text` |
 
 The output keeps `status`, `ok`, `headers` and `elapsed_ms` and adds `reduced: {kind, input_bytes}` (`kind` is the

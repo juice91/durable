@@ -18,6 +18,8 @@ hosts are all arguments.
 | `exclude_patterns` | array of regular expressions | `links`: a link matching one is dropped |
 | `allowed_hosts` | array of hostnames, at most 20 | hosts besides `base_url`'s that links and `og_image` may use |
 | `limit` | integer 1 to 60 | `links`: default 20 |
+| `exclude_urls` | array of URLs, at most 200 | `links`: a link whose normalised URL equals one (normalised the same way) is dropped |
+| `exclude_terms` | array of strings, at most 50 | `links`: a link whose title contains one (case-insensitive) is dropped |
 
 Patterns are RE2 expressions (linear time, no look-around, no back-references), at most 10 per list and 200
 characters each; anything else answers `invalid_pattern`. They see the normalised URL (below).
@@ -41,13 +43,18 @@ characters each; anything else answers `invalid_pattern`. They see the normalise
 
 ## Result: `links`
 
-`{items: [{id, url, title, order}]}` with ids `l1`, `l2`, ... in page order.
+`{items: [{id, url, title, order}], dropped: {...}}` with ids `l1`, `l2`, ... in page order.
 
 - Only **https** links are returned: `javascript:`, `data:`, `mailto:` and `http:` are dropped.
 - **Same host**: a link whose host is neither `base_url`'s nor in `allowed_hosts` is dropped. The page controls its
   HTML, so this is the guard against a listing that points a workflow at an arbitrary site.
 - The URL is normalised: scheme and host lower case, fragment, `utm_*` and `fbclid` query keys and a trailing slash
   dropped. Duplicates keep the first.
+- `exclude_urls` and `exclude_terms` apply after the patterns and before `limit`, so `limit` counts the links kept.
+  Typical use: `exclude_urls` is the links an account already posted (from Bluesky `getAuthorFeed`), `exclude_terms`
+  is `["美通社", "新聞稿", "PR Newswire"]` to skip press releases. `feed.parse` has the same two filters.
+- `dropped` counts what was left out: `{scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term}`
+  (anchors examined; scanning stops once `limit` links are kept).
 - The title is the anchor's text, else its `title` or `aria-label`, else an image's `alt`; whitespace collapsed, at
   most 200 characters. An anchor without a title is skipped.
 

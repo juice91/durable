@@ -388,7 +388,7 @@ def _reducer(ctx: RunContext[RunDeps], url: str, response_query: Any, extract_ht
         e = extract_html if isinstance(extract_html, HttpExtractHtml) else HttpExtractHtml.model_validate(extract_html)
         return "extract_html", lambda text: html_extract(
             ctx, text, e.base_url or url, e.mode, e.max_graphemes, e.root_selector, e.include_patterns,
-            e.exclude_patterns, e.allowed_hosts, e.limit,
+            e.exclude_patterns, e.allowed_hosts, e.limit, e.exclude_urls, e.exclude_terms,
         )
     if parse_feed is not None:
         f = parse_feed if isinstance(parse_feed, HttpParseFeed) else HttpParseFeed.model_validate(parse_feed)
