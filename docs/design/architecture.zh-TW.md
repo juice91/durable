@@ -205,7 +205,7 @@ Studio（`apps/studio`）是獨立的 pnpm 工作區，只透過 HTTP 與 SSE �
 
 **開發棧**：`scripts/dev-up.sh` 依序啟動 Postgres（compose，含 pgvector）、`grafana/otel-lgtm`（OTLP :4318，Grafana :3002，Loki :3100）、Worker（`dev-worker.sh` 監督迴圈，executor id 固定）、API（:8000）、Studio（:3000），每個等健康檢查。兩個資料庫 `eap_app`、`eap_dbos` 由 `dev-db.sh` 建立。
 
-**生產**：k3s（studio\_cf），`deploy/k8s` kustomize；`deploy.yml` 手動觸發，在自架 runner 上部署後對 API 與 Studio 跑回路 smoke test。模型與嵌入經自架 LiteLLM。
+**生產**：k3s，`deploy/k8s` kustomize；`deploy.yml` 手動觸發，在自架 runner 上部署後對 API 與 Studio 跑回路 smoke test。模型與嵌入經自架 LiteLLM。
 
 **啟動檢查**：API 與 Worker 在 Alembic 不在 head 時拒絕啟動；`EAP_SECRETS_KEY` 格式錯誤拒絕啟動。先跑遷移，再起行程。
 
