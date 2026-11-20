@@ -281,7 +281,7 @@ async def score_run(
     run_store, _ = stores
     tenant_id = principal.tenant_id
     run = await run_in_threadpool(_get_run_or_404, run_store, tenant_id, run_id)
-    if run["status"] != "completed":  # scoring reads the answer: a failed or cancelled run has none
+    if run["status"] not in ("completed", "skipped"):  # scoring reads the answer: a failed or cancelled run has none
         raise _http(status.HTTP_409_CONFLICT, RUN_NOT_FINISHED)
     requested = list(dict.fromkeys(str(s) for s in body.scorer_ids))
     for scorer_id in requested:

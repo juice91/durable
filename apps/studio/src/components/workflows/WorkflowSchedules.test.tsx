@@ -35,6 +35,21 @@ describe("WorkflowSchedules", () => {
     expect(screen.getByRole("button", { name: "Resume Nightly" })).toBeInTheDocument();
   });
 
+  it("shows the last run: skipped with its reason, completed without one, nothing before the first run", async () => {
+    sched.listSchedules.mockResolvedValue({
+      items: [
+        { ...base, last_run_status: "skipped", last_run_detail: "outside_slot" },
+        { ...stopped, last_run_status: "completed", last_run_detail: null },
+        paused,
+      ],
+      next_before: null,
+    });
+    render(<WorkflowSchedules workflowId="w1" target="Triage" />);
+    expect(await screen.findByTestId("schedule-last-run-s1")).toHaveTextContent("last run: skipped (outside_slot)");
+    expect(screen.getByTestId("schedule-last-run-s2")).toHaveTextContent(/^last run: completed$/);
+    expect(screen.queryByTestId("schedule-last-run-s3")).toBeNull();
+  });
+
   it("the global page lists every workflow's schedules", async () => {
     render(<WorkflowSchedules />);
     await screen.findByText("s1");

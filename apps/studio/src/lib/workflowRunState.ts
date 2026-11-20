@@ -118,7 +118,7 @@ export interface WorkflowRunView {
   output: unknown;
 }
 
-const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL: ReadonlySet<string> = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 /** The error code a cancelled run ends with (loops D12). */
 export const RUN_CANCELLED = "run_cancelled";
@@ -176,7 +176,7 @@ function emptyDetail(stepId: string, stepType: StepType | null): StepDetail {
 /** The status carried by a terminal event, if any. */
 function terminalStatus(event: RunEvent | null): RunStatus | null {
   if (!event) return null;
-  if (event.type === "run_completed") return "completed";
+  if (event.type === "run_completed") return event.data?.outcome === "skipped" ? "skipped" : "completed";
   const s = str(event.data?.status);
   return s === "needs_attention" ? "needs_attention" : "failed";
 }

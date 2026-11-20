@@ -39,7 +39,7 @@ export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: 
       label: "Runs",
       value: formatCount(cur.runs),
       delta: has(prev) ? computeDelta(cur.runs, prev!.runs, "neutral", formatCount) : null,
-      hint: `${formatCount(cur.completed)} completed · ${formatCount(cur.in_progress)} in progress`,
+      hint: `${formatCount(cur.completed)} completed${cur.skipped ? ` · ${formatCount(cur.skipped)} skipped` : ""} · ${formatCount(cur.in_progress)} in progress`,
       href: tracesHref(filters),
     },
     error_rate: {

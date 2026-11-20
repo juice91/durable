@@ -578,7 +578,7 @@ def _child_sync_runs(run_store: Any, tenant_id: str, parent_id: uuid.UUID) -> li
         rows = session.execute(
             text(
                 "SELECT s.run_id FROM kb_source_syncs s JOIN runs r ON r.tenant_id = s.tenant_id AND r.id::text = s.run_id"
-                " WHERE s.tenant_id = :t AND s.parent_run_id = :p AND r.status NOT IN ('completed', 'failed', 'needs_attention')"
+                " WHERE s.tenant_id = :t AND s.parent_run_id = :p AND r.status NOT IN ('completed', 'failed', 'needs_attention', 'skipped')"
                 " ORDER BY s.started_at, s.id"
             ),
             {"t": tenant_id, "p": str(parent_id)},

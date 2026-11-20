@@ -672,7 +672,7 @@ _MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed", "score"}
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
-_RUN_STATUS = {"completed": "ok", "failed": "error", "needs_attention": "error"}
+_RUN_STATUS = {"completed": "ok", "skipped": "ok", "failed": "error", "needs_attention": "error"}
 
 
 class _Builder:

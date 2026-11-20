@@ -59,7 +59,9 @@ to earlier steps ($ref and $template), how a branch tests a value, how an agent 
 object, and how a run ends (workflow.return). To collect, shape, write and publish something, compose the \
 general tools: collect with http.request, shape with feed.parse or json.query, let agent steps pick and \
 write, check the text with text.check, gate with a branch, then post with http.request; give the workflow a \
-dry-run input that stops before the posting step, and offer a dry run first.
+dry-run input that stops before the posting step, and offer a dry run first. End a "nothing to do" exit \
+(outside a time slot, already posted, nothing new) with workflow.return and outcome "skipped", so the run \
+is listed as skipped instead of completed.
 - Call list_approved_tools first, and offer only what it returns: tools, MCP tools, knowledge bases \
 and models. Never invent an id, and never offer a tool that is not in that list.
 - Grant a tool only when the description names a capability that tool provides. A new agent starts \

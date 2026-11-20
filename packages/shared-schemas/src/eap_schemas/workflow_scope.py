@@ -240,10 +240,12 @@ def parse_instance_token(token: str) -> tuple[Scope, str]:
 
 
 def status_for_end(event_type: str, data: Mapping[str, Any] | None = None) -> str:
-    """The run status an `end` event fixes (D12): `run_completed` → `completed`; `run_failed` →
-    the event's `status` (`failed` or `needs_attention`), `failed` when absent or anything else."""
+    """The run status an `end` event fixes (D12): `run_completed` → `completed`, or `skipped` when its
+    data has `outcome: "skipped"` (a workflow.return that ended the run as a "nothing to do" exit);
+    `run_failed` → the event's `status` (`failed` or `needs_attention`), `failed` when absent or
+    anything else."""
     if event_type == "run_completed":
-        return "completed"
+        return "skipped" if (data or {}).get("outcome") == "skipped" else "completed"
     if event_type == "run_failed":
         status = (data or {}).get("status")
         return status if status in ("failed", "needs_attention") else "failed"

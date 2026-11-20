@@ -89,7 +89,7 @@ OPERATION_FILTERS = (*OPERATIONS, "memory")
 BreakdownSort = Literal["runs", "failed", "requests", "tokens", "cost"]
 
 RUN_METRICS = (
-    "runs", "completed", "failed", "needs_attention", "in_progress", "blocked", "error_rate",
+    "runs", "completed", "skipped", "failed", "needs_attention", "in_progress", "blocked", "error_rate",
     "latency_p50_ms", "latency_p95_ms", "latency_p99_ms",
 )
 USAGE_METRICS = (
@@ -297,12 +297,13 @@ def _run_columns(q: MetricsQuery, r: Any) -> list[Any]:
     return [
         func.count().label("runs"),
         func.count().filter(r.status == "completed").label("completed"),
+        func.count().filter(r.status == "skipped").label("skipped"),
         func.count().filter(r.status == "failed").label("failed"),
         func.count().filter(r.status == "needs_attention").label("needs_attention"),
         func.count().filter(and_(r.status == "failed", blocked)).label("blocked"),
-        func.percentile_cont(0.5).within_group(latency_ms).label("latency_p50_ms"),
-        func.percentile_cont(0.95).within_group(latency_ms).label("latency_p95_ms"),
-        func.percentile_cont(0.99).within_group(latency_ms).label("latency_p99_ms"),
+        func.percentile_cont(0.5).within_group(latency_ms).filter(r.status != "skipped").label("latency_p50_ms"),
+        func.percentile_cont(0.95).within_group(latency_ms).filter(r.status != "skipped").label("latency_p95_ms"),
+        func.percentile_cont(0.99).within_group(latency_ms).filter(r.status != "skipped").label("latency_p99_ms"),
     ]
 
 
@@ -336,7 +337,7 @@ def _error_rate(failed: int, terminal: int) -> float | None:
 
 def _empty_runs() -> dict[str, Any]:
     return {
-        "runs": 0, "completed": 0, "failed": 0, "needs_attention": 0, "in_progress": 0, "blocked": 0,
+        "runs": 0, "completed": 0, "skipped": 0, "failed": 0, "needs_attention": 0, "in_progress": 0, "blocked": 0,
         "error_rate": None, "latency_p50_ms": None, "latency_p95_ms": None, "latency_p99_ms": None,
     }
 
@@ -352,15 +353,17 @@ def _runs_dict(row: Any) -> dict[str, Any]:
     if row is None:
         return _empty_runs()
     m = row._mapping
-    terminal = m["completed"] + m["failed"] + m["needs_attention"]
+    finished = m["completed"] + m["failed"] + m["needs_attention"]  # skipped runs are neither successes nor failures
+    terminal = finished + m["skipped"]
     return {
         "runs": m["runs"],
         "completed": m["completed"],
+        "skipped": m["skipped"],
         "failed": m["failed"],
         "needs_attention": m["needs_attention"],
         "in_progress": m["runs"] - terminal,
         "blocked": m["blocked"],
-        "error_rate": _error_rate(m["failed"], terminal),
+        "error_rate": _error_rate(m["failed"], finished),
         "latency_p50_ms": _float(m["latency_p50_ms"]),
         "latency_p95_ms": _float(m["latency_p95_ms"]),
         "latency_p99_ms": _float(m["latency_p99_ms"]),
@@ -627,6 +630,7 @@ class MetricsStore:
             *_usage_columns(req),
             distinct_runs.label("runs"),
             func.count(func.distinct(top_id)).filter(top.status == "completed").label("completed"),
+            func.count(func.distinct(top_id)).filter(top.status == "skipped").label("skipped"),
             func.count(func.distinct(top_id)).filter(top.status == "failed").label("failed"),
             func.count(func.distinct(top_id)).filter(top.status == "needs_attention").label("needs_attention"),
         ]
@@ -658,17 +662,19 @@ class MetricsStore:
         items = []
         for row in rows:
             m = row._mapping
-            terminal = m["completed"] + m["failed"] + m["needs_attention"]
+            finished = m["completed"] + m["failed"] + m["needs_attention"]
+            terminal = finished + m["skipped"]
             items.append({
                 "key": m["key"],
                 **_empty_runs(),
                 "runs": m["runs"],
                 "completed": m["completed"],
+                "skipped": m["skipped"],
                 "failed": m["failed"],
                 "needs_attention": m["needs_attention"],
                 "in_progress": m["runs"] - terminal,
                 "blocked": None,
-                "error_rate": _error_rate(m["failed"], terminal),
+                "error_rate": _error_rate(m["failed"], finished),
                 **_usage_dict(row),
             })
         return items

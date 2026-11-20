@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "completed", label: "Completed" },
+  { value: "skipped", label: "Skipped" },
   { value: "failed", label: "Failed" },
   { value: "running", label: "Running" },
   { value: "queued", label: "Queued" },

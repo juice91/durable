@@ -182,6 +182,21 @@ def test_filters_by_agent_and_status(pg, tenant_of):
     assert _list(client, h, agent_id=str(uuid.uuid4()))["items"] == []
 
 
+def test_skipped_runs_have_their_own_status_filter(pg, tenant_of):
+    client, app = pg
+    tenant, h = tenant_of()
+    agent = make_agent(client, h)
+    ids = _start_runs(client, app, h, agent, 3)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE runs SET status = 'completed' WHERE id = :r"), {"r": ids[0]})
+        conn.execute(text("UPDATE runs SET status = 'skipped' WHERE id = :r"), {"r": ids[1]})
+    assert [i["run_id"] for i in _list(client, h, status="skipped")["items"]] == [ids[1]]
+    assert [i["status"] for i in _list(client, h, status="skipped")["items"]] == ["skipped"]
+    assert [i["run_id"] for i in _list(client, h, status="completed")["items"]] == [ids[0]]  # not the skipped one
+    both = _list(client, h, status="completed,skipped")["items"]
+    assert {i["run_id"] for i in both} == {ids[0], ids[1]}
+
+
 def test_other_tenants_runs_never_appear(pg, tenant_of):
     client, app = pg
     _, h1 = tenant_of()

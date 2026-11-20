@@ -37,12 +37,14 @@ import { TracesTabs } from "@/components/traces/TracesTabs";
 import { RunsHistogram } from "@/components/traces/RunsHistogram";
 import { ExternalTraceSheet } from "@/components/traces/ExternalTraceSheet";
 import { Badge } from "@/components/ui/Badge";
+import { ShowSkippedToggle } from "@/components/runs/ShowSkippedToggle";
+import { splitSkipped, useShowSkipped } from "@/lib/showSkipped";
 import { externalDurationMs, listExternalTraces, type ExternalTrace } from "@/lib/externalTraces";
 
 /** The list row's test id (kept from P0.13), as a `testId` key so the test-id inventory sees it rendered. */
 const TRACE_ROW = { testId: "trace-row" } as const;
 
-const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL: ReadonlySet<string> = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 /** Per-viewer column choice (hidden ids) for the list; tags are off until asked for. */
 const DEFAULT_HIDDEN_COLUMNS = ["tags"] as const;
@@ -57,6 +59,10 @@ function TracesList() {
   const filters = useMemo(() => parseTraceFilters(new URLSearchParams(filterKey)), [filterKey]);
 
   const [runs, setRuns] = useState<TraceRun[]>([]);
+  // Skipped runs are hidden unless asked for, or unless the status filter names them.
+  const [showSkippedChoice, setShowSkipped] = useShowSkipped();
+  const showSkipped = showSkippedChoice || filters.status.includes("skipped");
+  const { visible: listedRuns, skippedCount } = useMemo(() => splitSkipped(runs, showSkipped), [runs, showSkipped]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // A first-page load is in flight (the rows shown, if any, are for the previous filters).
@@ -330,7 +336,7 @@ function TracesList() {
     <>
       <PageHeader crumbs={[navCrumb("traces", { current: true })]} />
       <TracesTabs active="traces" />
-      <TraceSheetHost runIds={visibleIds ?? runs.map((run) => run.run_id)} baseParams={pendingParams}>
+      <TraceSheetHost runIds={visibleIds ?? listedRuns.map((run) => run.run_id)} baseParams={pendingParams}>
         {(sheet) => (
           <div className="flex min-w-0 flex-col gap-4 p-4">
             <p className="text-label text-muted-foreground">Runs with their span tree, tokens and cost</p>
@@ -364,7 +370,7 @@ function TracesList() {
                 >
                   <DataList<TraceRun>
                     label="Runs"
-                    rows={runs}
+                    rows={listedRuns}
                     columns={columns}
                     getRowId={(run) => run.run_id}
                     onRowOpen={(run) => sheet.open(run.run_id)}
@@ -372,7 +378,8 @@ function TracesList() {
                     getRowTestId={() => TRACE_ROW.testId}
                     selectedRowId={sheet.runId}
                     onVisibleRowIdsChange={setVisibleIds}
-                    empty={{ title: hasActiveFilters(filters) ? "No runs match these filters." : "No runs yet." }}
+                    toolbar={filters.status.includes("skipped") ? undefined : <ShowSkippedToggle show={showSkippedChoice} onChange={setShowSkipped} count={skippedCount} />}
+                    empty={{ title: hasActiveFilters(filters) ? "No runs match these filters." : skippedCount > 0 ? `No runs to show: ${skippedCount} skipped.` : "No runs yet." }}
                     testId="traces-list"
                   />
                 </div>

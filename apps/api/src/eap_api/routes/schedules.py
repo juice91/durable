@@ -54,13 +54,18 @@ def _utc(value: datetime | None) -> str | None:
     return None if value is None else value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _json(row: dict[str, Any], workflow_name: str | None) -> dict[str, Any]:
+def _json(row: dict[str, Any], workflow_name: str | None, last_run: dict[str, Any] | None = None) -> dict[str, Any]:
+    last_run = last_run or {}
     return {
         "id": row["id"], "workflow_id": row["workflow_id"], "workflow_name": workflow_name, "name": row["name"],
         "cron": row["cron"], "timezone": row["timezone"], "input": row["input"], "active": row["active"],
         "last_error": row["last_error"], "last_fired_at": _utc(row["last_fired_at"]),
         "next_fire_at": _utc(row["next_fire_at"]), "created_at": _utc(row["created_at"]),
         "updated_at": _utc(row["updated_at"]), "revision": row["revision"],
+        # The newest run a tick of this schedule created (null before the first): its status, and for a
+        # finished run the `status` of its JSON output (`outside_slot`), which the schedule row shows.
+        "last_run_id": last_run.get("run_id"), "last_run_status": last_run.get("status"),
+        "last_run_detail": last_run.get("detail"),
     }
 
 
@@ -121,7 +126,8 @@ def _page(db: Session, store: ScheduleStore, tenant_id: str, workflow_id: str | 
                                 "before is not a valid cursor; pass the previous page's next_before verbatim")
     items, next_before = store.list(tenant_id, workflow_id, limit, cursor)
     names = _workflow_names(db, tenant_id, {i["workflow_id"] for i in items})
-    return {"items": [_json(i, names.get(i["workflow_id"])) for i in items], "next_before": next_before}
+    last = store.last_runs(tenant_id, [i["id"] for i in items])
+    return {"items": [_json(i, names.get(i["workflow_id"]), last.get(i["id"])) for i in items], "next_before": next_before}
 
 
 LimitQ = Annotated[int, Query(ge=1, le=200)]
@@ -141,7 +147,8 @@ def get_schedule(schedule_id: str, principal: PrincipalDep, db: SessionDep, stor
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
     names = _workflow_names(db, principal.tenant_id, {row["workflow_id"]})
-    return read_response(_json(row, names.get(row["workflow_id"])), row["revision"])
+    last = store.last_runs(principal.tenant_id, [row["id"]]).get(row["id"])
+    return read_response(_json(row, names.get(row["workflow_id"]), last), row["revision"])
 
 
 @router.patch("/schedules/{schedule_id}", responses={**etag_responses()})

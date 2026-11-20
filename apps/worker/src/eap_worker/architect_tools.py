@@ -206,7 +206,9 @@ RESULTS_AND_ERRORS = {
     "http_timeout, feed_invalid, expression_invalid)",
     "workflow.return": "workflow.return {value} returns its value unchanged and, as the last step of a path, ends the run "
     "with it as the run's output; give it a value {error: {code: \"my_code\", message: ...}} to end the run failed "
-    "with that stable code, or a shaped result such as {ended: \"nothing new\"} to end it normally",
+    "with that stable code, or a shaped result such as {ended: \"nothing new\"} to end it normally. End a "
+    "\"nothing to do\" exit (outside a time slot, already posted, nothing new) with outcome \"skipped\": "
+    "workflow.return {value: {status: \"outside_slot\"}, outcome: \"skipped\"} ends the run `skipped`, not completed",
     "output_schema": "the workflow's optional output_schema describes the shapes the run may end with",
 }
 PATTERN = (

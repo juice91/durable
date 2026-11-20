@@ -493,7 +493,7 @@ export function isDecidable(approval: Approval): boolean {
 }
 
 /** Run statuses after which nothing waits any more (eap_run_store TERMINAL_RUN_STATUSES). */
-export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
+export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 export interface ApprovalLinks {
   /** The agent conversation the waiting turn belongs to (a tool call outside a workflow). */

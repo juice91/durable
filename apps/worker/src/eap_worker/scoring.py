@@ -93,7 +93,7 @@ async def score_run_step(
     """Score the finished run with `scorers` (the link's records); returns the events written."""
     rt = get_runtime()
     run = await asyncio.to_thread(rt.run_store.get_run, tenant_id, UUID(run_id)) or {}
-    if run.get("status") != "completed" or run.get("output") is None:
+    if run.get("status") not in ("completed", "skipped") or run.get("output") is None:
         return 0
     output = _output_of(run)
     cost: str | None = None

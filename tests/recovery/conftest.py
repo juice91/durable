@@ -541,7 +541,7 @@ class Harness:
 
     def wait_terminal(self, run_id: str, timeout: float = 90) -> dict[str, Any]:
         """The runs row once it is completed, failed or needs_attention (any of them)."""
-        terminal = {"completed", "failed", "needs_attention"}
+        terminal = {"completed", "skipped", "failed", "needs_attention"}
 
         def done() -> dict[str, Any] | None:
             run = self.run_row(run_id)
@@ -562,7 +562,7 @@ class Harness:
             raise AssertionError(f"{exc}\n{self.worker_logs()}") from None
 
     def wait_completed(self, run_id: str, timeout: float = 90) -> dict[str, Any]:
-        terminal = {"completed", "failed", "needs_attention"}
+        terminal = {"completed", "skipped", "failed", "needs_attention"}
 
         def done() -> dict[str, Any] | None:
             run = self.run_row(run_id)
