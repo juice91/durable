@@ -23,3 +23,4 @@ Describe how you tested this change:
 - [ ] No secrets or credentials in code or logs
 - [ ] CI checks pass locally
 - [ ] Conventional commit message used (e.g., `feat:`, `fix:`)
+- [ ] I have signed the [CLA](../CLA.md) (the CLA bot will ask on your first pull request)

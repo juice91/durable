@@ -6,6 +6,7 @@ Thank you for your interest in contributing to Durable! This document covers how
 
 - [Setup](#setup)
 - [Running Tests and Checks](#running-tests-and-checks)
+- [Contributor License Agreement](#contributor-license-agreement)
 - [Branch and Commit Conventions](#branch-and-commit-conventions)
 - [Pull Request Process](#pull-request-process)
 
@@ -95,6 +96,16 @@ uv run python scripts/ci/affected.py
 # Studio affected tests
 bash scripts/ci/select-tests.sh studio
 ```
+
+## Contributor License Agreement
+
+Every contributor must sign the [CLA](CLA.md) before a pull request can be merged.
+
+1. Open your first pull request. The CLA bot comments on it with a link to the agreement.
+2. Reply on the pull request with exactly this sentence: `I have read the CLA Document and I hereby sign the CLA`
+3. The CLA check turns green. (Comment `recheck` to re-run it if it does not update.)
+
+One signature covers all of your future pull requests.
 
 ## Branch and Commit Conventions
 
