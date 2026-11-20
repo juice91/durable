@@ -344,7 +344,8 @@ def test_foreach_items_must_be_a_ref():
 # --- helpers ---------------------------------------------------------------------------------
 
 def test_parse_ref():
-    assert parse_ref("input.a") == ("input", None, None)
+    assert parse_ref("input.a") == ("input", "a", None)
+    assert parse_ref("input") == ("input", None, None)
     assert parse_ref("steps.x.output.y") == ("steps", "x", None)
     assert parse_ref("loop.l.state.k") == ("loop", "l", "state")
 
