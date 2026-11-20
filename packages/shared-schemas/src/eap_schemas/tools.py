@@ -60,14 +60,33 @@ class ToolDeclaration(BaseModel):
 
     def matches_implementation_schema(self, implementation_schema: dict[str, Any]) -> bool:
         """True when a function's parameter schema is this declaration's input schema (presentation titles, which
-        Pydantic AI keeps on nested models, do not count)."""
-        return _without_titles(implementation_schema) == self.input_json_schema()
+        Pydantic AI keeps on nested models, do not count). Field constraints (minimum, maximum, etc.) are ignored
+        because Pydantic AI's Tool class doesn't include them when deriving schemas."""
+        decl_schema = self.input_json_schema()
+        impl_schema = _without_titles(implementation_schema)
+        return _without_constraints(decl_schema) == _without_constraints(impl_schema)
+
+
+def _without_constraints(value: Any) -> Any:
+    """Remove Field constraints (minimum, maximum, exclusiveMinimum, etc.) from a JSON Schema tree."""
+    if isinstance(value, dict):
+        return {
+            key: _without_constraints(item)
+            for key, item in value.items()
+            if key not in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "pattern", "const", "enum")
+        }
+    if isinstance(value, list):
+        return [_without_constraints(item) for item in value]
+    return value
 
 
 class ClockNowInput(BaseModel):
     """Input for ``clock.now``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    offset_minutes: Annotated[int, Field(ge=-10080, le=10080, default=0)] = 0
+    parts: bool = False
 
 
 class TicketsCreateInput(BaseModel):
@@ -355,12 +374,22 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
     "clock.now": ToolDeclaration(
         id="clock.now",
         title="Current time",
-        description="Returns current UTC ISO time",
+        description=(
+            "Returns the current UTC time as an ISO string. offset_minutes (-10080..10080) shifts it; parts: true "
+            "returns {iso, date, hour, minute, hour_prefix, weekday, epoch_s} instead, e.g. hour_prefix "
+            "2026-11-20T06: to test whether a timestamp falls in the current clock hour"
+        ),
         side_effect=False,
         external_idempotent=False,
         input_model=ClockNowInput,
         result_example="2026-11-18T09:30:00+00:00",
-        result_schema={"type": "string", "format": "date-time"},
+        result_schema={"oneOf": [
+            {"type": "string", "format": "date-time"},
+            {"type": "object", "properties": {
+                "iso": {"type": "string", "format": "date-time"}, "date": {"type": "string"}, "hour": {"type": "string"},
+                "minute": {"type": "string"}, "hour_prefix": {"type": "string"}, "weekday": {"type": "string"},
+                "epoch_s": {"type": "integer"}}, "required": ["iso", "date", "hour", "minute", "hour_prefix", "weekday", "epoch_s"]},
+        ]},
     ),
     "tickets.create": ToolDeclaration(
         id="tickets.create",

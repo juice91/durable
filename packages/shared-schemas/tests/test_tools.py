@@ -15,7 +15,10 @@ def test_builtin_tool_declarations_expose_stable_input_schemas() -> None:
     ]
     assert TOOL_DECLARATIONS["clock.now"].input_json_schema() == {
         "additionalProperties": False,
-        "properties": {},
+        "properties": {
+            "offset_minutes": {"default": 0, "maximum": 10080, "minimum": -10080, "type": "integer"},
+            "parts": {"default": False, "type": "boolean"},
+        },
         "type": "object",
     }
     assert TOOL_DECLARATIONS["tickets.create"].input_json_schema() == {
@@ -34,12 +37,8 @@ def test_builtin_tool_declarations_expose_catalog_metadata() -> None:
     clock = TOOL_DECLARATIONS["clock.now"]
     tickets = TOOL_DECLARATIONS["tickets.create"]
 
-    assert (clock.title, clock.description, clock.side_effect, clock.external_idempotent) == (
-        "Current time",
-        "Returns current UTC ISO time",
-        False,
-        False,
-    )
+    assert (clock.title, clock.side_effect, clock.external_idempotent) == ("Current time", False, False)
+    assert clock.description.startswith("Returns the current UTC time as an ISO string") and "hour_prefix" in clock.description
     assert (tickets.title, tickets.description, tickets.side_effect, tickets.external_idempotent) == (
         "Create ticket",
         "Create a new ticket",

@@ -203,7 +203,8 @@ CONDITIONS = {
 STEP_OUTPUT = {
     "tool": "a tool step's output is the tool's result, exactly as list_approved_tools shows in result_example: "
     "reference it as steps.<id>.output, or a path into it such as steps.<id>.output.ok or steps.<id>.output.items.0.title; "
-    "clock.now returns a bare string, so its output is steps.<id>.output with no field",
+    "clock.now returns a bare string unless `parts: true`, which returns {iso, date, hour, minute, hour_prefix, weekday, epoch_s}; "
+    "`offset_minutes` shifts the time, e.g. -60 for one hour ago",
     "agent": "an agent step's output is its answer (text), or an object when the agent has an output_schema",
     "approvals": "approvals gate agent-initiated calls only: an agent granted http.request waits for a person on each "
     "call, but a workflow tool step runs as published, with no approval each run (the person reviewed the workflow "
