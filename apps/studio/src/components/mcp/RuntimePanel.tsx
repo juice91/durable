@@ -13,7 +13,7 @@ export const RUNTIME_STATE_LABEL: Record<McpRuntimeState, string> = {
   running: "Running",
   idle: "Idle",
   stopping: "Stopping",
-  stopped: "Stopped",
+  stopped: "Stopped (idle)",
   failed: "Failed",
 };
 

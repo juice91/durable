@@ -21,7 +21,7 @@ import { ApiError } from "@/lib/api";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
-import { describeMcpApiMessage, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
+import { describeMcpApiMessage, describeStartedTest, mcpServers, type McpServer, type McpTestResult as TestResult } from "@/lib/mcpServers";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 
@@ -113,6 +113,9 @@ export default function McpServersPage() {
   const testServer = (server: McpServer) => withBusy(server.id, async () => {
     const result = await mcpServers.test(server.id);
     setTests((current) => ({ ...current, [server.id]: result }));
+    const started = result.status === "ok" ? describeStartedTest(result.runtime) : null;
+    if (started) setNotice(`${server.name}: ${started}`);
+    else if (result.status === "error" && result.error_code === "runtime_starting") setNotice(`${server.name}: Server is starting, test again in a moment`);
     // The test records last_status; reload the row so the list shows it.
     replaceServer(await mcpServers.get(server.id));
   });
