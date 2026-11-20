@@ -174,6 +174,10 @@ export function ProcessorResultsTable({ agents, types, fixedType, defaultWindowM
     onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
       setForm((current) => ({ ...current, [name]: event.target.value })),
   });
+  const selectField = <K extends keyof FilterForm>(name: K) => ({
+    value: form[name],
+    onValueChange: (value: string) => setForm((current) => ({ ...current, [name]: value })),
+  });
 
   const filtered = Object.entries(applied).some(([key, value]) =>
     value !== undefined && value !== "" && !(fixedType && key === "type") && !(key === "from" && value === defaultFrom));
@@ -184,7 +188,7 @@ export function ProcessorResultsTable({ agents, types, fixedType, defaultWindowM
       <form onSubmit={apply} aria-label="Filter outcomes" className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-2 lg:grid-cols-4">
         <div>
           <label htmlFor="filter-agent" className="block text-xs font-medium text-muted-foreground">Agent</label>
-          <Select id="filter-agent" className={inputClass} {...field("agent_id")}>
+          <Select id="filter-agent" className={inputClass} {...selectField("agent_id")}>
             <option value="">All agents</option>
             {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
           </Select>
@@ -192,7 +196,7 @@ export function ProcessorResultsTable({ agents, types, fixedType, defaultWindowM
         {fixedType ? null : (
           <div>
             <label htmlFor="filter-type" className="block text-xs font-medium text-muted-foreground">Processor</label>
-            <Select id="filter-type" className={inputClass} {...field("type")}>
+            <Select id="filter-type" className={inputClass} {...selectField("type")}>
               <option value="">All types</option>
               {types.map((type) => <option key={type.id} value={type.id}>{type.title}</option>)}
             </Select>
@@ -200,14 +204,14 @@ export function ProcessorResultsTable({ agents, types, fixedType, defaultWindowM
         )}
         <div>
           <label htmlFor="filter-action" className="block text-xs font-medium text-muted-foreground">Action</label>
-          <Select id="filter-action" className={inputClass} {...field("action")}>
+          <Select id="filter-action" className={inputClass} {...selectField("action")}>
             <option value="">All actions</option>
             {PROCESSOR_ACTIONS.map((action) => <option key={action} value={action}>{action}</option>)}
           </Select>
         </div>
         <div>
           <label htmlFor="filter-phase" className="block text-xs font-medium text-muted-foreground">Phase</label>
-          <Select id="filter-phase" className={inputClass} {...field("phase")}>
+          <Select id="filter-phase" className={inputClass} {...selectField("phase")}>
             <option value="">Input and output</option>
             {PROCESSOR_PHASES.map((phase) => <option key={phase} value={phase}>{phase}</option>)}
           </Select>

@@ -16,6 +16,7 @@ import { computeDelta, parsePageState, pageStateToFilters } from "@/lib/metrics"
 import { parseTraceFilters } from "@/lib/traces";
 import { legacyTarget, routes } from "@/lib/routes";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { optionsOf } from "@/test/select";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -183,7 +184,7 @@ describe("Filters re-fetch every section with one consistent window", () => {
       mockFetch(okResponder);
       const { rerender } = render(<MetricsPage />);
       await waitFor(() => expect(screen.getByTestId("kpi-runs-value")).toHaveTextContent("12"));
-      await waitFor(() => expect(screen.getByLabelText(label).querySelector(`option[value="${value}"]`)).not.toBeNull());
+      await waitFor(() => expect(optionsOf(screen.getByLabelText(label)).some((o) => o.value === value)).toBe(true));
       const before = Object.fromEntries(SECTIONS.map((s) => [s, forSection(s).length]));
       fireEvent.change(screen.getByLabelText(label), { target: { value } });
       expect(replace).toHaveBeenCalledTimes(1);

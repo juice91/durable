@@ -5,6 +5,7 @@ import MetricsPage from "./page";
 import { breakdownFixture, summaryFixture, timeseriesFixture } from "@/components/metrics/metricsFixtures";
 import { routes } from "@/lib/routes";
 import { optionsOf } from "@/test/select";
+import { findSelectOption } from "@/test/select";
 
 const push = vi.fn();
 const replace = vi.fn();
@@ -172,7 +173,7 @@ describe("MetricsPage", () => {
   it("choosing an agent writes the filter to the URL", async () => {
     mockFetch(okResponder);
     render(<MetricsPage />);
-    await screen.findByRole("option", { name: "Support bot" });
+    await findSelectOption("Support bot");
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "a-1" } });
     expect(replace).toHaveBeenCalledWith(routes.metrics({ agent_id: "a-1" }), { scroll: false });
   });
