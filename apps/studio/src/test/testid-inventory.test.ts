@@ -43,6 +43,7 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "workflow-row-": "Workflows list row per workflow id",
   "schedule-last-run-": "WorkflowSchedules last-run cell per schedule id (PR 73)",
   "workflow-step-": "WorkflowGraph node per step id",
+  "workflow-step-ai-note-": "WorkflowStepList AI note (the cached explanation) per step id",
   "workflow-node-": "WorkflowRunView graph node per step id",
   "workflow-loop-badge-": "WorkflowGraph loop node's ×n badge per loop step id (LP.6)",
   "workflow-iteration-pager-": "LoopIterations pager and its parts per loop step id (LP.12)",

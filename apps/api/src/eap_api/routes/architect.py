@@ -86,6 +86,7 @@ from eap_schemas.architect_seed import (
 )
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.scorer_suggestions import SUGGESTER_SLUG
+from eap_schemas.workflow_explanations import EXPLAINER_NAME, EXPLAINER_SLUG, explainer_agent_spec
 from eap_schemas.tools import TOOL_DECLARATIONS
 from eap_schemas.workflows import WorkflowSpec, canonical_workflow_hash
 
@@ -239,6 +240,7 @@ _SEEDED = (
     (ARCHITECT_SLUG, architect_agent_spec),
     (DRAFTER_SLUG, drafter_agent_spec),
     (WORKFLOW_DRAFTER_SLUG, workflow_drafter_agent_spec),
+    (EXPLAINER_SLUG, explainer_agent_spec),
 )
 
 
@@ -296,6 +298,8 @@ def reconcile_all_seeds(engine: Engine) -> int:
     for tenant in tenants:
         try:
             ensure_seed(engine, tenant, "system:seed")
+            with engine.begin() as conn:  # the workflow explainer: a tenant seeded before it existed gets it here
+                _seed_one(conn, tenant, "system:seed", EXPLAINER_SLUG, EXPLAINER_NAME, explainer_agent_spec, [])
             done += 1
         except Exception:
             log.warning("architect seed: startup reconcile failed tenant=%s", tenant, exc_info=True)
@@ -347,8 +351,8 @@ def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> 
         rows = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in BUILTIN_SLUGS]
         if any(r is None for r in rows):
             raise refuse(404, "The Architect is not set up yet.", code="not_seeded")
-        suggester = conn.execute(_BY_SLUG, {"t": tenant_id, "s": SUGGESTER_SLUG}).first()  # seeded on first use
-        for row in [*rows, *([suggester] if suggester is not None else [])]:
+        helpers = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in (SUGGESTER_SLUG, EXPLAINER_SLUG)]
+        for row in [*rows, *(h for h in helpers if h is not None)]:  # the helpers are seeded on first use
             locked = definitions.lock_agent(conn, tenant_id, str(row.id))
             spec = dict(locked.draft_spec or {})
             spec["model"] = {**(spec.get("model") or {}), "provider": provider, "name": name}
@@ -547,8 +551,8 @@ def drafter_input(description: str, current: ArchitectAgentSpec | None, allowlis
     return "\n".join(lines)
 
 
-def _wait_for_run(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
-    deadline = time.monotonic() + DRAFT_TIMEOUT_S
+def _wait_for_run(run_store: Any, tenant_id: str, run_id: uuid.UUID, timeout: float | None = None) -> dict[str, Any]:
+    deadline = time.monotonic() + (DRAFT_TIMEOUT_S if timeout is None else timeout)
     while True:
         run = run_store.get_run(tenant_id, run_id)
         if run is not None and run["status"] in TERMINAL_RUN_STATUSES:
@@ -569,7 +573,7 @@ def _invalid(raw: str, problems: list[str], what: str = "agent") -> DefinitionEr
 
 def _run_drafter(
     drafter_agent_id: str, prompt: str, principal: Principal, db: Session, stores: Any, launcher: RunLauncher,
-    what: str,
+    what: str, timeout: float | None = None,
 ) -> tuple[dict[str, Any], list[str], str, str, str | None]:
     """One run of a built-in drafter and its answer: `(parsed object, assumptions, raw, run_id, model)`.
     The parsed object has `assumptions` removed; 502, 504 and 422 `draft_invalid` for the failures."""
@@ -579,7 +583,7 @@ def _run_drafter(
         raise refuse(422, "The description is too long.", code="description_too_long") from None
     started = start_run(uuid.UUID(drafter_agent_id), run, principal, db, stores, launcher)
     run_id = json.loads(started.body)["run_id"]
-    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id))
+    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id), timeout)
     if finished["status"] != "completed":
         raise DraftFailed("The drafter run did not finish.", code="draft_failed", run_id=run_id,
                           error=str(finished.get("error") or finished["status"])[:300])
