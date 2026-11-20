@@ -85,7 +85,7 @@ export function ScheduleDialog({ workflowId, spec, open, onOpenChange, onSaved }
           {spec && Object.keys(spec.input_schema?.properties ?? {}).length > 0 ? (
             <JsonSchemaForm schema={spec.input_schema} value={input} onChange={setInput} idPrefix="schedule-input" />
           ) : null}
-          {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{error}</p> : null}
+          {error ? <p data-testid="schedule-input-error" role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{error}</p> : null}
           <DialogFooter>
             <Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="submit" disabled={busy || !name.trim() || !cron.trim()}>{busy ? "Creating…" : "Create schedule"}</Button>

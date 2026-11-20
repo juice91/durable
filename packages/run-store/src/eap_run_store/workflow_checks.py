@@ -39,6 +39,7 @@ from eap_schemas.workflows import (
     WorkflowSpec,
     iter_refs,
     loop_exit_refs,
+    parse_ref,
     run_concurrency,
     static_execution_bound,
     walk_steps,
@@ -366,6 +367,60 @@ def _ref_segments(path: str) -> tuple[str | None, str | None, str | None, list[s
         return None, None, None, []
     rest = [seg for seg in (match.group("rest") or "").split(".") if seg]
     return match.group("step"), match.group("loop"), match.group("loop_root"), rest
+
+
+def optional_input_ref_warnings(spec: WorkflowSpec) -> list[dict[str, str]]:
+    """One warning per `input.<name>` ref or template placeholder in a step's input where `<name>` is
+    not in the input schema's `required` list and the step is not guarded: a run that lacks the value
+    fails with `input_ref_missing` when the step evaluates. Warnings, never a refusal; the Architect's
+    publish card prints them.
+
+    Only step `input` templates are checked (branch conditions tolerate unknown refs). A step is
+    guarded, and not reported, when a branch case whose condition tests `exists input.<name>` (alone
+    or inside `all`) leads straight to it (`next`) - the designed pattern for optional inputs. Schema
+    `default`s do not count: the engine does not apply them at run time."""
+    if not spec.input_schema:
+        return []
+    required = set(spec.input_schema.get("required", []))
+    properties = spec.input_schema.get("properties", {})
+
+    def exists_names(cond: Any) -> set[str]:
+        op = getattr(cond, "op", None)
+        if op == "exists":
+            root, name, _ = parse_ref(cond.refs()[0]) if cond.refs() else (None, None, None)
+            return {name} if root == "input" and name else set()
+        names: set[str] = set()
+        for part in getattr(cond, "all", None) or []:
+            names |= exists_names(part)
+        return names
+
+    guarded: set[tuple[str, str]] = set()
+    for _, _, step in _walk_with_paths(spec.steps):
+        if step.type == "branch":
+            for case in step.cases:
+                for name in exists_names(case.when):
+                    guarded.add((case.next, name))
+
+    warnings: list[dict[str, str]] = []
+    for where, _, step in _walk_with_paths(spec.steps):
+        if step.type == "branch":
+            continue
+        seen: set[str] = set()
+        for path in iter_refs(step):
+            root, name, _ = parse_ref(path)
+            if root != "input" or name is None or name in required or name in seen:
+                continue
+            if not isinstance(properties.get(name), dict) or (step.id, name) in guarded:
+                continue
+            seen.add(name)
+            warnings.append({
+                "code": "optional_input_ref_unguarded",
+                "path": where,
+                "message": f"step '{step.id}': reads input.{name}, which is optional; a run without it fails with "
+                f"input_ref_missing. Make it required, or branch on `exists input.{name}` before this step "
+                "(schema defaults are not applied at run time)",
+            })
+    return warnings
 
 
 def output_ref_checks(
