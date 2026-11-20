@@ -55,6 +55,16 @@ export interface StepDetail {
   endedAt: string | null;
   /** AC.9: structured-field refs (paths, never values) that resolved to nothing in this step. */
   unresolvedRefs?: string[];
+  /** `on_error: continue`: the tool's error code, from a step_completed with `outcome: "error_kept"`; null otherwise. */
+  errorKept?: string | null;
+  /** Warnings on the step's `step_completed` (`condition_unknown`: a condition's input was not given). */
+  warnings?: StepWarning[];
+}
+
+export interface StepWarning {
+  code: string;
+  /** `cases.<i>` for a branch case, `while` / `until` for a loop. */
+  condition: string | null;
 }
 
 /** One frame of a loop scope (loops D4): the loop step's id and the 0-based iteration index. */
@@ -116,7 +126,7 @@ export interface WorkflowRunView {
   output: unknown;
 }
 
-const TERMINAL: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL: ReadonlySet<string> = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 /** The error code a cancelled run ends with (loops D12). */
 export const RUN_CANCELLED = "run_cancelled";
@@ -174,7 +184,7 @@ function emptyDetail(stepId: string, stepType: StepType | null): StepDetail {
 /** The status carried by a terminal event, if any. */
 function terminalStatus(event: RunEvent | null): RunStatus | null {
   if (!event) return null;
-  if (event.type === "run_completed") return "completed";
+  if (event.type === "run_completed") return event.data?.outcome === "skipped" ? "skipped" : "completed";
   const s = str(event.data?.status);
   return s === "needs_attention" ? "needs_attention" : "failed";
 }
@@ -267,8 +277,14 @@ function applyStepEvent(d: StepDetail, event: RunEvent, chosen: Map<string, stri
         d.output = data.output;
       }
       d.endedAt = event.ts ?? d.endedAt;
+      if (data.outcome === "error_kept") d.errorKept = str(data.error_code) ?? "error";
       if (Array.isArray(data.unresolved_refs)) {
         d.unresolvedRefs = data.unresolved_refs.filter((ref): ref is string => typeof ref === "string");
+      }
+      if (Array.isArray(data.warnings)) {
+        d.warnings = data.warnings
+          .filter((w): w is Record<string, unknown> => Boolean(w) && typeof w === "object")
+          .map((w) => ({ code: String(w.code ?? ""), condition: typeof w.condition === "string" ? w.condition : null }));
       }
       const out = data.output as Record<string, unknown> | null | undefined;
       if (d.stepType === "branch" && out && typeof out === "object" && typeof out.next === "string") {

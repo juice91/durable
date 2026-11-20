@@ -12,6 +12,7 @@ from eap_run_store.kb_sources import (
     SyncStore,
 )
 from eap_run_store.secrets import SecretStore
+from eap_run_store.revisions import RevisionMismatch
 from eap_run_store.schedules import ScheduleNameConflict, ScheduleStore
 from eap_run_store.cursor import ConversationCursor, InvalidRunCursor, RunCursor
 from eap_run_store.store import (
@@ -221,6 +222,7 @@ __all__ = [
     "EvalCaseResultModel",
     "EvalRunNotFound",
     "EvalStore",
+    "RevisionMismatch",
     "ScheduleNameConflict",
     "CatalogStore",
     "ConnectionInUse",

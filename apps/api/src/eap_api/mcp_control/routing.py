@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import AgUiPrincipal, Principal
+from eap_api.concurrency import ConcurrencyError, Precondition
 from eap_api.launcher import get_run_launcher
 from eap_run_store.definition_errors import DefinitionError
 
@@ -72,7 +73,7 @@ def refusal(status: int, body: Any) -> McpToolError:
     if isinstance(body, dict):
         detail = body.get("detail", body.get("message", ""))
         code = body.get("code") if isinstance(body.get("code"), str) else STATUS_CODES.get(status, "error")
-        extra = {k: v for k, v in body.items() if k in ("workflows", "decision", "decided_by", "decided_at")}
+        extra = {k: v for k, v in body.items() if k in ("workflows", "decision", "decided_by", "decided_at", "current_revision")}
     else:
         detail, code, extra = body, STATUS_CODES.get(status, "error"), {}
     return McpToolError(code, _detail_text(detail) or code.replace("_", " "), **extra)
@@ -98,6 +99,8 @@ def translate(exc: BaseException) -> McpToolError:
         return refusal(exc.status_code, {"detail": exc.detail} if not isinstance(exc.detail, dict) else exc.detail)
     if isinstance(exc, DefinitionError):
         return refusal(exc.status_code, exc.body)
+    if isinstance(exc, ConcurrencyError):  # 412 revision_mismatch (and 428/400): no `current` body, the revision only
+        return refusal(exc.status_code, {k: v for k, v in exc.body.items() if k != "current"})
     if isinstance(exc, ValidationError):
         parts = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors(include_input=False, include_url=False)]
         return McpToolError("invalid", "; ".join(parts[:10]) or "invalid input")
@@ -179,3 +182,49 @@ async def call(ctx: Ctx, fn: Callable[..., Any], **kwargs: Any) -> Any:
         raise
     except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
         raise translate(exc) from None
+
+
+REVISION_MISMATCH = "revision_mismatch"
+
+
+async def call_with_revision(
+    ctx: Ctx, read_revision: Callable[[], int | None], attempt: Callable[[Precondition], Any], what: str,
+) -> Any:
+    """Optimistic concurrency for a write tool (eap_api.concurrency): read the resource's revision, run
+    `attempt(Precondition)` with it as `If-Match`, and on a conflict (somebody saved in between) read again
+    and re-apply the same change on the fresh base, once. A second conflict is the tool error
+    `{error: {code: "revision_mismatch", message, current_revision}}`: the model reads the resource again
+    instead of overwriting what it has not seen."""
+    last: McpToolError | None = None
+    for _ in (1, 2):
+        revision = await run_in_threadpool(read_revision)
+        pre = Precondition(revision, None if revision is None else f'"{revision}"')
+        try:
+            return await attempt(pre)
+        except McpToolError as exc:
+            if exc.code != REVISION_MISMATCH:
+                raise
+            last = exc
+    assert last is not None
+    raise McpToolError(
+        REVISION_MISMATCH,
+        f"The {what} was changed by someone else while this call ran, and again on the retry. Read it again "
+        "before saving, so their change is not lost.",
+        current_revision=last.extra.get("current_revision"),
+    )
+
+
+def revision_reader(ctx: Ctx, table: str, row_id: str) -> Callable[[], int | None]:
+    """`read_revision` for call_with_revision: the tenant's row revision (None when there is no such row, so
+    the route's own 404 answers). `table` is a literal of ours (agents, workflows)."""
+    from sqlalchemy import text
+
+    def read() -> int | None:
+        with ctx.engine.connect() as conn:
+            value = conn.execute(
+                text(f"SELECT revision FROM {table} WHERE id = :i AND tenant_id = :t"),
+                {"i": str(row_id), "t": ctx.tenant_id},
+            ).scalar_one_or_none()
+        return None if value is None else int(value)
+
+    return read

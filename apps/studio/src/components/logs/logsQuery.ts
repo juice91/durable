@@ -344,7 +344,7 @@ export interface RunTimes {
 export const RUN_LOOKBACK_MS = 60 * 1000;
 /** The worker still logs after it records a run's finish, so the window runs this long past it. */
 export const RUN_TRAILING_MS = 5 * 1000;
-const TERMINAL_STATUSES = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL_STATUSES = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 /** Margin below the API's 7-day cap when an open-ended window's start is set from the browser's
  * clock (which may be ahead of the server's). */

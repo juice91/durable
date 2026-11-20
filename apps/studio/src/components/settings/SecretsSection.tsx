@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -31,6 +32,7 @@ export function SecretsSection() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -57,8 +59,11 @@ export function SecretsSection() {
     setFormError(null);
     try {
       const { restarted } = await putSecret(trimmed, value);
+      // Clear the typed pair and reset the DOM form as well: a browser password manager may have
+      // autofilled the inputs behind React, and the value must never linger on screen.
       setName("");
       setValue("");
+      formRef.current?.reset();
       const restart = restarted.length > 0 ? ` Restarted ${restarted.length} ${restarted.length === 1 ? "server" : "servers"} to pick it up.` : "";
       setStatus(`Secret ${trimmed} saved. Use it as ${secretRef(trimmed)}.${restart}`);
       toast.success("Secret saved");
@@ -66,6 +71,7 @@ export function SecretsSection() {
     } catch (reason: unknown) {
       // The message is built from the response, never from what was typed.
       setFormError(errorText(reason, "The secret could not be saved"));
+      setValue("");
     } finally {
       setSaving(false);
     }
@@ -128,7 +134,10 @@ export function SecretsSection() {
           {secrets.map((secret) => (
             <li key={secret.name} data-secret={secret.name} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
               <span className="min-w-0 flex-1">
-                <span className="break-all font-mono text-label text-foreground">{secret.name}</span>
+                <span className="flex min-w-0 items-center gap-1">
+                  <span className="select-text break-all font-mono text-label text-foreground">{secret.name}</span>
+                  <CopyButton text={secret.name} label="secret name" />
+                </span>
                 {(secret.used_by ?? []).length > 0 ? (
                   <span data-testid={`secret-used-by-${secret.name}`} className="block text-caption text-muted-foreground">
                     Used by{" "}
@@ -160,19 +169,19 @@ export function SecretsSection() {
           ))}
         </ul>
       )}
-      <form onSubmit={add} aria-label="Add secret" data-testid="secrets-form" className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
+      <form ref={formRef} onSubmit={add} aria-label="Add secret" data-testid="secrets-form" className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
         <div className="grid min-w-0 gap-3 md:grid-cols-2">
           <div className="space-y-1">
             <label htmlFor="secret-name" className="block text-sm font-medium text-foreground">
               Secret name
             </label>
-            <input id="secret-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" spellCheck={false} placeholder="slack-token" className={`${inputClass} font-mono`} />
+            <input id="secret-name" name="secret-ref-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} placeholder="slack-token" className={`${inputClass} font-mono`} />
           </div>
           <div className="space-y-1">
             <label htmlFor="secret-value" className="block text-sm font-medium text-foreground">
               Secret value
             </label>
-            <input id="secret-value" type="password" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="off" spellCheck={false} className={`${inputClass} font-mono`} />
+            <input id="secret-value" name="secret-ref-value" type="password" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="new-password" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} className={`${inputClass} font-mono`} />
           </div>
         </div>
         {formError ? (

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Worker runtime for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "eap-schemas",
     "eap-agent-runtime",
@@ -47,6 +48,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "jmespath>=1.1.0",
     "regex>=2026.11.9",
+    "selectolax>=0.4",
 ]
 
 [dependency-groups]

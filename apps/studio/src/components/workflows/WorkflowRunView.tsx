@@ -13,7 +13,9 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { Badge } from "@/components/ui/Badge";
+import { RecoveredBadge } from "@/components/runs/RecoveredBadge";
 import { IconButton } from "@/components/ui/IconButton";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
 import { toast } from "@/components/ui/Toaster";
 import type { LinkTab } from "@/components/ui/Tabs";
@@ -21,6 +23,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
+import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
 import { listWorkflowRuns } from "@/lib/workflows";
@@ -117,6 +120,8 @@ export function WorkflowRunView({
   const setCollapsed = onCollapsedLoopsChange ?? setOwnCollapsed;
   const [run, setRun] = useState<Run | null>(null);
   const [spec, setSpec] = useState<WorkflowSpec | null>(null);
+  // The cached AI explanation of the run's workflow version: each step's note shows in its panel (never generated here).
+  const aiNotes = useWorkflowExplanation(run?.workflow_id ?? "", run?.workflow_version ?? null).notes;
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [status, setStatus] = useState<RunStatus>("queued");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -352,6 +357,7 @@ export function WorkflowRunView({
               </span>
             )}
           </span>
+          <RecoveredBadge run={run} />
           {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
           {run && onRerunStarted && isTerminal(view.status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
         </>
@@ -411,7 +417,7 @@ export function WorkflowRunView({
     </section>
   ) : null;
   const floatingDetail = selectedDetail && layout.stepDetail === "floating" ? (
-    <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
+    <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
   ) : null;
   const rightLeft = layout.leftOccupied > 0 ? layout.leftOccupied + 2 * CANVAS_INSET_PX : CANVAS_INSET_PX;
 
@@ -468,8 +474,8 @@ export function WorkflowRunView({
                     <Link href={routes.workflowRun(effectiveWorkflowId, rerunId)} className="rounded-sm font-mono text-info-text underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">{rerunId.slice(0, 8)}</Link>
                   </p>
                 ) : null}
-                {loadError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{loadError}</p> : null}
-                {specError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">Graph unavailable: {specError}</p> : null}
+                {loadError ? <CopyableText label="error" copyText={loadError}><p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 pr-8 text-label text-destructive-text">{loadError}</p></CopyableText> : null}
+                {specError ? <CopyableText label="error" copyText={`Graph unavailable: ${specError}`}><p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 pr-8 text-label text-destructive-text">Graph unavailable: {specError}</p></CopyableText> : null}
                 {view.status === "needs_attention" ? (
                   <div role="alert" data-testid="workflow-run-needs-attention" className="rounded-md border-2 border-warning bg-warning/10 p-2 text-label text-foreground">
                     <p className="font-semibold">Needs attention: a step may have had side effects whose outcome is unknown.</p>
@@ -490,9 +496,15 @@ export function WorkflowRunView({
                 ) : null}
                 {view.status === "failed" && !view.cancelled ? (
                   <div role="alert" data-testid="workflow-run-failed" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">
-                    <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
-                    {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
-                    {view.runError?.errorCode ? <p className="mt-1 text-caption">Error code: <code data-testid="workflow-run-error-code" className="font-mono">{view.runError.errorCode}</code></p> : null}
+                    <CopyableText
+                      label="error"
+                      className="pr-8"
+                      copyText={[`Failed${view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}`, view.runError?.error ?? run?.error, view.runError?.errorCode ? `Error code: ${view.runError.errorCode}` : null].filter(Boolean).join("\n")}
+                    >
+                      <p className="font-semibold">Failed{view.runError?.stepId ? ` at step ${view.runError.stepId}` : ""}</p>
+                      {view.runError?.error ?? run?.error ? <p className="mt-1 whitespace-pre-wrap">{view.runError?.error ?? run?.error}</p> : null}
+                      {view.runError?.errorCode ? <p className="mt-1 text-caption">Error code: <code data-testid="workflow-run-error-code" className="font-mono">{view.runError.errorCode}</code></p> : null}
+                    </CopyableText>
                   </div>
                 ) : null}
                 {isTerminal(view.status) && stepEventCount === 0 ? (
@@ -523,7 +535,7 @@ export function WorkflowRunView({
             {spec ? (
               <PanelCard title="Steps" titleId="workflow-run-steps-heading">
                 <p className="mb-2 text-caption text-muted-foreground">Select a step to see its input and output.</p>
-                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+                <WorkflowStepList spec={spec} states={states} selectedStepId={selected} onSelectStep={toggleStep} legend details={resolved.details} foldNotReached collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
               </PanelCard>
             ) : null}
 
@@ -535,7 +547,7 @@ export function WorkflowRunView({
             </PanelCard>
           </WorkflowFloatingPanel>
           {spec ? (
-            <WorkflowCanvas spec={spec} states={states} deadEdges={resolved.deadEdges} loopBadges={resolved.badges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+            <WorkflowCanvas spec={spec} states={states} deadEdges={resolved.deadEdges} details={resolved.details} loopBadges={resolved.badges} selectedStepId={selected} onSelectStep={toggleStep} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-background p-4">
               {!specError && !loadError ? <p className="text-label text-muted-foreground">Loading the workflow graph…</p> : null}
@@ -596,7 +608,7 @@ export function WorkflowRunView({
           <SheetContent size="md" aria-describedby={undefined} data-testid="workflow-step-sheet">
             <SheetHeader title={`Step ${selectedDetail.stepId}`} />
             <SheetBody>
-              <StepIoPanel step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
+              <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
             </SheetBody>
           </SheetContent>
         </Sheet>

@@ -87,7 +87,7 @@ def test_publish_without_approval_is_impossible_from_the_tool_path():
     registry = ToolRegistry()
     register_architect_tools(registry)
     assert set(TOOL_IDS) == registry.tool_ids()
-    assert GATED_TOOL_IDS == ARCHITECT_GATED_TOOL_IDS and len(GATED_TOOL_IDS) == 7
+    assert GATED_TOOL_IDS == ARCHITECT_GATED_TOOL_IDS and len(GATED_TOOL_IDS) == 11
     for tool_id in GATED_TOOL_IDS:
         assert registry.summary_for(tool_id, {"id": "x", "version": 1, "workflow_id": "x", "action": "pause"})
         assert registry.get_metadata(tool_id)["side_effect"] is True
@@ -263,7 +263,7 @@ def test_schedule_create_is_gated_and_names_the_cron_in_words(engine, tenant):
     assert bad["error"]["code"] == "invalid_timezone"
 
     wrong = run(set_workflow_schedule(engine, tenant, "daily", "create", name="Morning", cron="0 9 * * *"))
-    assert wrong["error"]["code"] == "input_schema_errors"  # workflows made by the Architect take {"input": text}
+    assert wrong["error"]["code"] == "schedule_input_invalid"  # workflows made by the Architect take {"input": text}
     made = run(set_workflow_schedule(
         engine, tenant, "daily", "create", name="Morning", cron="30 9 * * *", timezone="Asia/Taipei",
         input={"input": "go"}))

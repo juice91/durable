@@ -8,10 +8,15 @@ bearer works in EAP_AUTH_MODE=dev only. A key keeps its `agent_ids` / `workflow_
 
 from __future__ import annotations
 
+import os
+import uuid
 from typing import Any
 
 from eap_observability import bind_log_context
 from eap_run_store import ApiKeyStore, looks_like_api_key
+from eap_run_store.run_tokens import looks_like_run_token, signing_key, verify_run_token
+from eap_run_store.store import TERMINAL_RUN_STATUSES
+from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import (
@@ -28,6 +33,7 @@ MANAGE_SCOPE = "manage"
 MCP_SCOPE = "mcp"
 MISSING_MCP_SCOPE = "API key lacks the mcp scope"
 PRINCIPAL_SCOPE_KEY = "eap.mcp_principal"
+ARCHITECT_RUN_PREFIX = "architect-run:"
 
 
 class McpAuthError(Exception):
@@ -43,12 +49,55 @@ def has_manage(principal: AgUiPrincipal) -> bool:
     return principal.kind == "dev" or MANAGE_SCOPE in principal.scopes
 
 
+def actor_id(principal: AgUiPrincipal) -> str:
+    """Who the audit record names: the key id, `architect-run:<run id>` or `dev:<user>`."""
+    if principal.kind == "architect_run":
+        return str(principal.user_id)
+    return principal.key_id or f"dev:{principal.user_id}"
+
+
+async def _authenticate_run_token(app: Any, credential: str) -> AgUiPrincipal:
+    """A live run of the built-in Architect: a signed, unexpired token AND a run row that still exists in
+    the tenant, belongs to the built-in `architect` agent and has not ended. Anything else is a plain 401."""
+    secret = os.environ.get("EAP_SECRETS_KEY")
+    token = verify_run_token(signing_key(secret), credential) if secret else None
+    if token is None:
+        raise McpAuthError(401, INVALID_API_KEY_DETAIL)
+    try:
+        uuid.UUID(token.run_id)
+    except ValueError:
+        raise McpAuthError(401, INVALID_API_KEY_DETAIL) from None
+
+    def lookup() -> Any:
+        with app.state.database_engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT r.status, a.slug, a.builtin FROM runs r JOIN agents a ON a.id = r.agent_id "
+                    "WHERE r.id = :r AND r.tenant_id = :t"
+                ),
+                {"r": token.run_id, "t": token.tenant_id},
+            ).first()
+
+    row = await run_in_threadpool(lookup)
+    if row is None or row[0] in TERMINAL_RUN_STATUSES or not row[2] or row[1] != "architect":
+        raise McpAuthError(401, INVALID_API_KEY_DETAIL)
+    bind_log_context(tenant_id=token.tenant_id)
+    return AgUiPrincipal(
+        tenant_id=token.tenant_id,
+        kind="architect_run",
+        user_id=f"{ARCHITECT_RUN_PREFIX}{token.run_id}",
+        scopes=(MCP_SCOPE, MANAGE_SCOPE),
+    )
+
+
 async def authenticate(app: Any, authorization: str | None, origin: str | None) -> AgUiPrincipal:
     """The principal of one request, or McpAuthError (401, or 403 for a disallowed origin)."""
     if not authorization:
         raise McpAuthError(401, "Missing Authorization header")
     scheme, _, credential = authorization.partition(" ")
     credential = credential.strip()
+    if scheme.lower() == "bearer" and looks_like_run_token(credential):
+        return await _authenticate_run_token(app, credential)
     if scheme.lower() == "bearer" and looks_like_api_key(credential):
         store = getattr(app.state, "api_key_store", None)
         if store is None:

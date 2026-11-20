@@ -8,7 +8,9 @@ Read tools (no approval): `architect.list_approved_tools`, `list_created_agents`
 `list_workflow_step_kinds`. Draft tools (no approval, a draft is inert): `architect.save_agent`,
 `architect.save_workflow`. Gated tools (listed in the Architect's `approvals.tools`, so every call
 waits for a person): `architect.publish_agent`, `restore_agent_version`, `archive_agent`,
-`publish_workflow`, `restore_workflow_version`, `archive_workflow`, `set_workflow_schedule`.
+`publish_workflow`, `restore_workflow_version`, `archive_workflow`, `set_workflow_schedule`, and the test-suite
+tools `create_eval_suite`, `add_eval_case`, `attach_scorer`, `start_eval_run` (logic in `eap_worker.architect_evals`;
+`list_eval_suites` and `get_eval_run` are their ungated reads).
 
 The gated tools hold no logic of their own: publish, restore and archive are the functions of
 `eap_run_store.definitions`, the same ones the API routes call, run in one transaction with the
@@ -52,7 +54,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from eap_run_store import ScheduleNameConflict, ScheduleStore, definitions
+from eap_run_store import RevisionMismatch, ScheduleNameConflict, ScheduleStore, definitions
 from eap_run_store.definition_errors import DefinitionError
 from eap_runtime import RunDeps, ToolRegistry, run_side_effect
 from eap_schemas import reserved_tool_name_conflicts
@@ -69,6 +71,7 @@ from eap_schemas.architect import (
     slugify,
 )
 
+from eap_worker import architect_evals
 from eap_worker.architect_allowlist import approved_for_tenant
 
 log = logging.getLogger("eap_worker.architect_tools")
@@ -83,6 +86,8 @@ TOOL_IDS = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.list_eval_suites",
+    "architect.get_eval_run",
     "architect.publish_agent",
     "architect.restore_agent_version",
     "architect.archive_agent",
@@ -90,12 +95,22 @@ TOOL_IDS = (
     "architect.restore_workflow_version",
     "architect.archive_workflow",
     "architect.set_workflow_schedule",
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
 )
 # The tools that go live: the seed lists them in the Architect's approvals.tools.
 GATED_TOOL_IDS = ARCHITECT_GATED_TOOL_IDS
-assert TOOL_IDS[8:] == GATED_TOOL_IDS
+assert TOOL_IDS[-len(GATED_TOOL_IDS):] == GATED_TOOL_IDS
 # `created_by` of a version made through a tool (the person who approved is in the approval record).
 ARCHITECT_ACTOR = "architect"
+EVAL_GATED_TOOL_IDS = (
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
+)
 SCHEDULE_ACTIONS = ("create", "pause", "resume", "delete")
 
 STEP_KINDS: list[dict[str, Any]] = [
@@ -125,6 +140,8 @@ STEP_KINDS: list[dict[str, Any]] = [
             "id": "step id", "tool": "id of a tool from list_approved_tools.tools",
             "params": "object of the tool's arguments; values as in input_values",
             "next": "optional: a step id, or \"end\"; absent means the following step (workflow.return ends)",
+            "on_error": "optional: \"fail\" (default: a tool error result fails the run) or \"continue\" (the error "
+            "result is kept as the output and the run goes on; test it with a branch: exists steps.<id>.output.error)",
         },
         "description": "Call one approved tool (its arguments and an example are in list_approved_tools). The step's "
         "output is the tool's result: steps.<id>.output.<field>.",
@@ -186,7 +203,8 @@ CONDITIONS = {
 STEP_OUTPUT = {
     "tool": "a tool step's output is the tool's result, exactly as list_approved_tools shows in result_example: "
     "reference it as steps.<id>.output, or a path into it such as steps.<id>.output.ok or steps.<id>.output.items.0.title; "
-    "clock.now returns a bare string, so its output is steps.<id>.output with no field",
+    "clock.now returns a bare string unless `parts: true`, which returns {iso, date, hour, minute, hour_prefix, weekday, epoch_s}; "
+    "`offset_minutes` shifts the time, e.g. -60 for one hour ago",
     "agent": "an agent step's output is its answer (text), or an object when the agent has an output_schema",
     "approvals": "approvals gate agent-initiated calls only: an agent granted http.request waits for a person on each "
     "call, but a workflow tool step runs as published, with no approval each run (the person reviewed the workflow "
@@ -204,11 +222,13 @@ RESULTS_AND_ERRORS = {
     "http_timeout, feed_invalid, expression_invalid)",
     "workflow.return": "workflow.return {value} returns its value unchanged and, as the last step of a path, ends the run "
     "with it as the run's output; give it a value {error: {code: \"my_code\", message: ...}} to end the run failed "
-    "with that stable code, or a shaped result such as {ended: \"nothing new\"} to end it normally",
+    "with that stable code, or a shaped result such as {ended: \"nothing new\"} to end it normally. End a "
+    "\"nothing to do\" exit (outside a time slot, already posted, nothing new) with outcome \"skipped\": "
+    "workflow.return {value: {status: \"outside_slot\"}, outcome: \"skipped\"} ends the run `skipped`, not completed",
     "output_schema": "the workflow's optional output_schema describes the shapes the run may end with",
 }
 PATTERN = (
-    "A common shape: collect with http.request (gate on .ok) -> shape with feed.parse / json.query -> agent steps that "
+    "A common shape: collect with http.request (gate on .ok) -> shape with feed.parse / json.query / html.extract -> agent steps that "
     "pick and write -> text.check -> gate with branch -> post with http.request. Give the workflow a boolean input such "
     "as dry that stops before the posting step (a branch to a workflow.return step), and offer a dry run first."
 )
@@ -265,7 +285,7 @@ class _Kind:
 
     def __init__(self, table: str, versions: str, fk: str) -> None:
         self.table, self.versions, self.fk = table, versions, fk
-        columns = f"id, slug, name, draft_spec, archived, {'builtin' if table == 'agents' else 'false AS builtin'}"
+        columns = f"id, slug, name, draft_spec, archived, revision, {'builtin' if table == 'agents' else 'false AS builtin'}"
         self.by_slug = text(f"SELECT {columns} FROM {table} WHERE tenant_id = :t AND slug = :s")
         # A reference may also be the row's UUID (`uuid` in the listings): only a definition with a slug is the
         # Architect's, the same rule as by slug.
@@ -288,8 +308,8 @@ class _Kind:
             f":s, :now, :now{', false' if table == 'agents' else ''})"
         )
         self.update = text(
-            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = :now "
-            "WHERE id = :id AND tenant_id = :t"
+            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = :now, "
+            "revision = revision + 1 WHERE id = :id AND tenant_id = :t AND revision = :expected RETURNING revision"
         )
 
 
@@ -346,9 +366,38 @@ def _list_versions(engine: Engine, tenant_id: str, kind: _Kind, slug: str) -> di
 
 def _save(
     engine: Engine, tenant_id: str, kind: _Kind, *, slug: str | None, derived_from: str, name: str,
-    spec_json: dict[str, Any], confirm: bool,
+    spec_json: dict[str, Any], confirm: bool, before_write: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
-    """Write the draft of one definition (blocking). `slug` None derives one from the name."""
+    """Write the draft of one definition (blocking). `slug` None derives one from the name.
+
+    Optimistic concurrency (eap_run_store.revisions): the write is guarded by the revision this call read, so
+    a person or another run that saved the same draft in between is never silently overwritten. On a
+    conflict the whole call runs once more against the fresh row (every check is re-made, then the same
+    change is applied on it); a second conflict is the tool error `revision_mismatch` with the current
+    revision, which the model reads and decides on. `before_write(attempt)` is a test seam."""
+    mismatch: RevisionMismatch | None = None
+    for attempt in (1, 2):
+        try:
+            return _save_once(
+                engine, tenant_id, kind, slug=slug, derived_from=derived_from, name=name, spec_json=spec_json,
+                confirm=confirm, before_write=(lambda: before_write(attempt)) if before_write else None,
+            )
+        except RevisionMismatch as exc:
+            mismatch = exc
+    assert mismatch is not None
+    label = "agent" if kind is AGENTS else "workflow"
+    return error(
+        "revision_mismatch",
+        f"The {label} was changed by someone else while this save ran (now at revision {mismatch.current_revision}) "
+        "and again on the retry. Read it again before saving, so their change is not lost.",
+        current_revision=mismatch.current_revision,
+    )
+
+
+def _save_once(
+    engine: Engine, tenant_id: str, kind: _Kind, *, slug: str | None, derived_from: str, name: str,
+    spec_json: dict[str, Any], confirm: bool, before_write: Callable[[], None] | None,
+) -> dict[str, Any]:
     label = "agent" if kind is AGENTS else "workflow"
     spec_text = json.dumps(spec_json)
     with engine.begin() as conn:
@@ -364,7 +413,7 @@ def _save(
                 return error("reserved_id", f"{slug!r} is a built-in {label} id; choose another id.")
             row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
         else:
-            base = slugify(derived_from)
+            base = slugify(derived_from, "agent" if kind.table == "agents" else "workflow")
             for n in range(1, 50):
                 candidate = base if n == 1 else f"{base[:44]}-{n}"
                 if candidate in RESERVED_AGENT_IDS:
@@ -392,7 +441,21 @@ def _save(
                     "message": f"The latest version of {slug!r} (v{latest['version']}) was made or edited by hand. "
                     "Tell the person, and call this tool again with confirm: true only after they say yes.",
                 }
-            conn.execute(kind.update, {"id": row["id"], "t": tenant_id, "name": name, "spec": spec_text, "now": _now()})
+            if before_write is not None:
+                before_write()
+            written = conn.execute(kind.update, {
+                "id": row["id"], "t": tenant_id, "name": name, "spec": spec_text, "now": _now(),
+                "expected": row["revision"],
+            }).scalar_one_or_none()
+            if written is None:  # the row moved on since this call read it (or is gone)
+                current = conn.execute(
+                    text(f"SELECT revision FROM {kind.table} WHERE id = :id AND tenant_id = :t"),
+                    {"id": row["id"], "t": tenant_id},
+                ).scalar_one_or_none()
+                if current is None:
+                    return error("not_found", f"The {label} {slug!r} was deleted while this save ran.")
+                raise RevisionMismatch(int(current), int(row["revision"]))
+            revision = int(written)
         else:
             try:
                 with conn.begin_nested():
@@ -402,7 +465,8 @@ def _save(
                     })
             except IntegrityError:
                 return error("id_conflict", f"The id {slug!r} was taken a moment ago; call again.")
-    return {"id": slug, "version": None, "status": "draft"}
+            revision = 1
+    return {"id": slug, "version": None, "status": "draft", "revision": revision}
 
 
 async def list_approved_tools(engine: Engine, tenant_id: str) -> dict[str, Any]:
@@ -655,6 +719,7 @@ def _schedule_json(row: dict[str, Any]) -> dict[str, Any]:
         "timezone": row["timezone"],
         "active": row["active"],
         "next_fire_at": row["next_fire_at"].isoformat(),
+        "revision": row["revision"],
     }
 
 
@@ -704,7 +769,7 @@ def set_workflow_schedule_sync(
             return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
         value = {} if input is None else input
         if problems := input_problems(latest.spec.get("input_schema"), value):
-            return error("input_schema_errors", "The input does not fit the workflow's input schema.", errors=problems)
+            return error("schedule_input_invalid", f"The input does not fit the workflow's input schema. {'; '.join(problems)}")
         try:
             created = store.create(
                 tenant_id, wf_row_id, name=name, cron=cron, timezone=timezone, input=value,
@@ -715,27 +780,50 @@ def set_workflow_schedule_sync(
         log.info("architect.set_workflow_schedule tenant=%s run=%s create=%s", tenant_id, run_id, created["id"])
         return {"id": workflow_id, "status": "created", **_schedule_json(created)}
 
-    current = find()
-    if current is None:
-        return error("not_found", "No schedule of this workflow has that schedule_id or name.")
-    if action == "delete":
-        store.delete(tenant_id, current["id"])
-        return {"id": workflow_id, "status": "deleted", "schedule_id": current["id"], "name": current["name"]}
-    if action == "pause":
-        updated = store.update(tenant_id, current["id"], active=False, last_error=None)
-        return {"id": workflow_id, "status": "paused", **_schedule_json(updated)}
-    # resume: re-checked like the API's PATCH (the stored cron and input may no longer fit)
-    if (problem := _cron_problem(current["cron"], current["timezone"])) is not None:
-        return problem
-    if latest is None:
-        return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
-    if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
-        return error("input_schema_errors", "The stored input no longer fits the workflow's input schema.", errors=problems)
-    updated = store.update(
-        tenant_id, current["id"], active=True, last_error=None,
-        next_fire_at=next_fire(current["cron"], current["timezone"], _now()),
+    def act() -> dict[str, Any]:
+        """One attempt on the schedule as it is now; the write is guarded by the revision this attempt read."""
+        current = find()
+        if current is None:
+            return error("not_found", "No schedule of this workflow has that schedule_id or name.")
+        if action == "delete":
+            store.delete(tenant_id, current["id"])
+            return {"id": workflow_id, "status": "deleted", "schedule_id": current["id"], "name": current["name"]}
+        if action == "pause":
+            updated = store.update(
+                tenant_id, current["id"], expected_revision=current["revision"], active=False, last_error=None)
+            if updated is None:
+                return error("not_found", "The schedule was deleted while this call ran.")
+            return {"id": workflow_id, "status": "paused", **_schedule_json(updated)}
+        # resume: re-checked like the API's PATCH (the stored cron and input may no longer fit)
+        if (problem := _cron_problem(current["cron"], current["timezone"])) is not None:
+            return problem
+        if latest is None:
+            return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
+        if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
+            return error("schedule_input_invalid", f"The stored input no longer fits the workflow's input schema. {'; '.join(problems)}")
+        updated = store.update(
+            tenant_id, current["id"], expected_revision=current["revision"], active=True, last_error=None,
+            next_fire_at=next_fire(current["cron"], current["timezone"], _now()),
+        )
+        if updated is None:
+            return error("not_found", "The schedule was deleted while this call ran.")
+        return {"id": workflow_id, "status": "resumed", **_schedule_json(updated)}
+
+    # Optimistic concurrency: a person who edited the schedule in between makes the guarded write fail; the
+    # call then runs once more on the fresh schedule (every check re-made), and a second conflict is a tool error.
+    mismatch: RevisionMismatch | None = None
+    for _attempt in (1, 2):
+        try:
+            return act()
+        except RevisionMismatch as exc:
+            mismatch = exc
+    assert mismatch is not None
+    return error(
+        "revision_mismatch",
+        "The schedule was changed by someone else while this call ran, and again on the retry. Look at it again "
+        "before changing it, so their change is not lost.",
+        current_revision=mismatch.current_revision,
     )
-    return {"id": workflow_id, "status": "resumed", **_schedule_json(updated)}
 
 
 # ---- async entry points (what the tests and the registered tools call)
@@ -793,6 +881,8 @@ def _pure_summary(tool_id: str, args: dict[str, Any]) -> str:
         return f"Restore workflow {ident!r} to version {version}: published again as a new version."
     if tool_id == "architect.archive_workflow":
         return f"Archive workflow {ident!r}: it takes no new runs and its schedules are paused."
+    if tool_id in EVAL_GATED_TOOL_IDS:
+        return architect_evals.pure_summary(tool_id, args)
     if tool_id == "architect.set_workflow_schedule":
         action = args.get("action")
         target = f"workflow {args.get('workflow_id')!r}"
@@ -831,6 +921,8 @@ def approval_summary_text(engine: Engine, tenant_id: str, tool_id: str, args: di
     that is not gated here."""
     if tool_id not in GATED_TOOL_IDS:
         return None
+    if tool_id in EVAL_GATED_TOOL_IDS:
+        return architect_evals.approval_summary(engine, tenant_id, tool_id, args)
     base = _pure_summary(tool_id, args)
     slug = args.get("id")
     version = args.get("version")
@@ -1019,6 +1111,52 @@ async def _set_workflow_schedule(
     )
 
 
+async def _list_eval_suites(ctx: RunContext[RunDeps], target: str, id: str) -> dict[str, Any]:
+    """The test suites of a workflow or agent (target: "workflow" | "agent"; id: its slug or uuid): suite id,
+    name, scorers (the checks on every case's output) and case_count."""
+    return await asyncio.to_thread(architect_evals.list_eval_suites_sync, _engine(), ctx.deps.tenant_id, target, id)
+
+
+async def _get_eval_run(ctx: RunContext[RunDeps], run_id: str, results_limit: int = 20) -> dict[str, Any]:
+    """A test run: status and aggregates (cases, passed, failed, errors, pass_rate), and the first
+    `results_limit` (<= 50) per-case results with their failed assertions."""
+    return await asyncio.to_thread(
+        architect_evals.get_eval_run_sync, _engine(), ctx.deps.tenant_id, run_id, results_limit)
+
+
+async def _create_eval_suite(
+    ctx: RunContext[RunDeps], target: str, id: str, name: str, description: str | None = None
+) -> dict[str, Any]:
+    """Create an empty test suite for a workflow or agent (target: "workflow" | "agent"; id: its slug or uuid).
+    Then add cases (add_eval_case) and scorers (attach_scorer). A person approves each call."""
+    return await _gated(ctx, architect_evals.create_eval_suite_sync, target, id, name, description)
+
+
+async def _add_eval_case(
+    ctx: RunContext[RunDeps], suite_id: str, name: str | None = None, inputs: dict[str, Any] | None = None,
+    expected: Any = None, metadata: dict[str, Any] | None = None, cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Add test cases to a suite: one (name, inputs, expected?, metadata?) or several in one call as
+    cases: [{name, inputs, expected?, metadata?}] (at most 20, one approval). `inputs` is an object that fits the
+    workflow's input_schema (for a workflow without one, and for an agent, {"input": "<text>"}); `expected` is
+    what an equals_expected scorer compares with. A person approves each call."""
+    return await _gated(ctx, architect_evals.add_eval_case_sync, suite_id, name, inputs, expected, metadata, cases)
+
+
+async def _attach_scorer(ctx: RunContext[RunDeps], suite_id: str, scorer: dict[str, Any]) -> dict[str, Any]:
+    """Add a scorer (a check on every case's output) to a suite. scorer.kind: regex {pattern (RE2), negate?,
+    field?} | contains {value, case_sensitive?} | equals_expected | field_equals {path, value} |
+    schema_valid {json_schema?} | max_duration {seconds} | max_cost {usd} | llm_judge {rubric, model:
+    {provider, name}}; every scorer may have a name. A person approves each call."""
+    return await _gated(ctx, architect_evals.attach_scorer_sync, suite_id, scorer)
+
+
+async def _start_eval_run(ctx: RunContext[RunDeps], suite_id: str, version: int | None = None) -> dict[str, Any]:
+    """Run every case of a suite against a published version (latest when `version` is left out); it uses
+    model calls. Returns the run id: read the result with get_eval_run. A person approves each call."""
+    return await _gated(ctx, architect_evals.start_eval_run_sync, suite_id, version)
+
+
 _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_approved_tools", _list_approved_tools),
     ("architect.list_created_agents", _list_created_agents),
@@ -1028,6 +1166,8 @@ _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_workflow_step_kinds", _list_workflow_step_kinds),
     ("architect.save_agent", _save_agent),
     ("architect.save_workflow", _save_workflow),
+    ("architect.list_eval_suites", _list_eval_suites),
+    ("architect.get_eval_run", _get_eval_run),
 )
 _GATED: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.publish_agent", _publish_agent),
@@ -1037,6 +1177,10 @@ _GATED: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.restore_workflow_version", _restore_workflow_version),
     ("architect.archive_workflow", _archive_workflow),
     ("architect.set_workflow_schedule", _set_workflow_schedule),
+    ("architect.create_eval_suite", _create_eval_suite),
+    ("architect.add_eval_case", _add_eval_case),
+    ("architect.attach_scorer", _attach_scorer),
+    ("architect.start_eval_run", _start_eval_run),
 )
 
 

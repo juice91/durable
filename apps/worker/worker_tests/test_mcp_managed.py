@@ -30,7 +30,8 @@ NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 
 DDL = [
     "CREATE TABLE mcp_servers (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, url TEXT,"
-    " enabled BOOLEAN NOT NULL DEFAULT 1, runtime TEXT NOT NULL DEFAULT 'external')",
+    " enabled BOOLEAN NOT NULL DEFAULT 1, runtime TEXT NOT NULL DEFAULT 'external',"
+    " keep_warm BOOLEAN NOT NULL DEFAULT 0)",
     "CREATE TABLE mcp_server_secrets (tenant_id TEXT NOT NULL, server_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'header',"
     " header_name TEXT NOT NULL, ciphertext BLOB NOT NULL, key_id TEXT NOT NULL,"
     " PRIMARY KEY (tenant_id, server_id, kind, header_name))",
@@ -289,6 +290,17 @@ def test_idle_sweep_stops_and_next_call_restarts(engine):
     asyncio.run(ensure_managed_running(engine, "t1", load_servers(engine, "t1", refs("idle", "x"), runtime=fake)["idle"],
                                        "x", runtime=fake))
     assert fake.kinds()[0] == "start" and state_of(engine, idle).state == "running"
+
+
+def test_idle_sweep_skips_a_keep_warm_server(engine):
+    fake = FakeRuntime()
+    _, warm = add_managed(engine, "t1", "warm", state="running", used_ago=timedelta(hours=5))
+    _, cold = add_managed(engine, "t1", "cold", state="running", used_ago=timedelta(hours=5))
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_servers SET keep_warm = 1 WHERE name = 'warm'"))
+    result = asyncio.run(sweep.sweep_runtimes(engine, fake, now=NOW, idle_minutes=30))
+    assert result["stopped"] == 1 and fake.kinds() == ["stop"]
+    assert state_of(engine, warm).state == "running" and state_of(engine, cold).state == "stopped"
 
 
 def test_sweep_fails_starting_rows_older_than_ten_minutes(engine):

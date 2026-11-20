@@ -1,16 +1,22 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { ApiError } from "@/lib/api";
-import { getWorkflow, listWorkflowVersions, type Workflow, type WorkflowVersion } from "@/lib/workflows";
+import { api, ApiError, type Agent } from "@/lib/api";
+import { listTools, type ToolDefinition } from "@/lib/tools";
+import { StepDefinitionPanel, type StepAgentInfo } from "@/components/workflows/StepDefinitionPanel";
+import { buildWorkflowGraph } from "@/lib/workflowGraph";
+import { getWorkflow, listWorkflowVersions, type Workflow, type WorkflowStep, type WorkflowVersion } from "@/lib/workflows";
 import { WorkflowCanvas, WorkflowStepList } from "@/components/workflows/WorkflowGraph";
 import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
+import { Button } from "@/components/ui/Button";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
 import { WorkflowArchivedBanner, WorkflowArchiveMenu } from "@/components/workflows/WorkflowArchiveMenu";
+import { WorkflowExplainPanel } from "@/components/workflows/WorkflowExplainPanel";
+import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
 import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
@@ -22,6 +28,13 @@ const RECENT_RUNS = 5;
 
 const selectClass =
   "h-7 rounded-md border border-input bg-surface px-2 text-label text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+
+/** The step with this id, anywhere in the spec (a loop's body included). */
+function findStepById(spec: { steps: WorkflowStep[] } | null, id: string | null): WorkflowStep | null {
+  if (!spec || !id) return null;
+  const node = buildWorkflowGraph(spec as Parameters<typeof buildWorkflowGraph>[0]).nodes.find((n) => n.id === id);
+  return node?.step ?? null;
+}
 
 /**
  * `/workflows/:id` (SL.14): tabs Graph (default) and Runs (`?tab=runs`); Traces is its own path.
@@ -39,6 +52,7 @@ function WorkflowDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const control = useWorkflowLayout();
+  const [explainOpen, setExplainOpen] = useState(false);
   // The graph's collapsed loops are URL state (`?collapsed=`), kept across a version switch and
   // carried to the run view.
   const { collapsed, setCollapsed } = useCollapsedLoops();
@@ -63,9 +77,43 @@ function WorkflowDetail() {
     };
   }, [id]);
 
+  const [tools, setTools] = useState<ToolDefinition[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const clearStep = useCallback(() => setSelectedStepId(null), []);
+  // Tool declarations and agent names say what a step does; each is best effort (a step still shows its ids without them).
+  useEffect(() => {
+    let cancelled = false;
+    listTools().then((t) => { if (!cancelled) setTools(t); }).catch(() => undefined);
+    api.agents.list().then((a) => { if (!cancelled) setAgents(a); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+  const agentNames = useMemo(() => Object.fromEntries(agents.map((a) => [a.id, a.name])), [agents]);
+
   const current = versions.find((v) => v.version === selectedVersion) ?? null;
   const spec = current?.spec ?? null;
   const graphSpec = spec ?? workflow?.draft_spec ?? null;
+  // The cached AI explanation of the shown published version (a draft has none); loading it never generates.
+  const explanation = useWorkflowExplanation(id, current?.version ?? null);
+
+  const selectedStep = findStepById(graphSpec, selectedStepId);
+  const stepAgent: StepAgentInfo | null = (() => {
+    if (selectedStep?.type !== "agent") return null;
+    const found = agents.find((a) => a.id === selectedStep.agent_id);
+    const model = found?.latest_spec_summary?.model;
+    return {
+      id: selectedStep.agent_id,
+      name: found?.name ?? selectedStep.agent_id,
+      version: selectedStep.version ?? found?.latest_version ?? null,
+      pinned: Boolean(selectedStep.version),
+      model: model?.name ? [model.provider, model.name].filter(Boolean).join("/") : null,
+    };
+  })();
+  const stepTool = selectedStep?.type === "tool" ? tools.find((t) => t.id === selectedStep.tool_id) ?? null : null;
+  const stepNext = selectedStep && selectedStep.type !== "branch" && graphSpec
+    ? buildWorkflowGraph(graphSpec).edges.filter((e) => e.source === selectedStep.id).map((e) => e.target)
+    : [];
+  const toggleStep = (stepId: string) => setSelectedStepId((prev) => (prev === stepId ? null : stepId));
 
   const versionSelect = workflow ? (
     <div className="flex items-center gap-2">
@@ -75,7 +123,7 @@ function WorkflowDetail() {
         data-testid="workflow-version-select"
         value={selectedVersion ?? ""}
         disabled={versions.length === 0}
-        onChange={(event) => setSelectedVersion(Number(event.target.value))}
+        onChange={(event) => { setSelectedVersion(Number(event.target.value)); setSelectedStepId(null); }}
         className={selectClass}
       >
         {versions.length === 0 ? <option value="">No published version</option> : null}
@@ -92,6 +140,11 @@ function WorkflowDetail() {
         <WorkflowHeader workflowId={id} name={workflow?.name ?? null} tab={tab} actions={
           <>
             {versionSelect}
+            {workflow && tab === "graph" ? (
+              <Button size="sm" data-testid="workflow-explain-button" aria-pressed={explainOpen} onClick={() => setExplainOpen((open) => !open)}>
+                AI 說明
+              </Button>
+            ) : null}
             {workflow ? <WorkflowArchiveMenu workflow={workflow} onChanged={setWorkflow} /> : null}
           </>
         } />
@@ -133,14 +186,27 @@ function WorkflowDetail() {
                   </Link>
                 }
               />
+              {graphSpec && selectedStep ? (
+                <PanelCard title="Step details" titleId="workflow-step-details-heading" testId="workflow-step-details">
+                  <StepDefinitionPanel
+                    step={selectedStep}
+                    tool={stepTool}
+                    agent={stepAgent}
+                    next={stepNext}
+                    explanation={explanation.notes?.get(selectedStep.id) ?? null}
+                    onClose={clearStep}
+                  />
+                </PanelCard>
+              ) : null}
               {graphSpec ? (
                 <PanelCard title="Steps" titleId="workflow-steps-heading">
-                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} notes={explanation.notes} />
                 </PanelCard>
               ) : null}
             </WorkflowFloatingPanel>
+            {explainOpen ? <WorkflowExplainPanel control={explanation} published={current !== null} onClose={() => setExplainOpen(false)} /> : null}
             {graphSpec ? (
-              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} />
+              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} />
             ) : (
               <div className="absolute inset-0 flex items-center justify-center bg-background">
                 <p className="text-label text-muted-foreground">No definition to show.</p>

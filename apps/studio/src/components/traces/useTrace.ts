@@ -5,7 +5,7 @@ import { ApiError, api } from "@/lib/api";
 import { listWorkflows } from "@/lib/workflows";
 import { getTrace, type NameMaps, type Trace } from "@/lib/traces";
 
-const TERMINAL = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL = new Set(["completed", "skipped", "failed", "needs_attention"]);
 export const TRACE_POLL_MS = 3000;
 
 /** What a poll can change: the run's status and update time, the totals, and each span's id,

@@ -55,7 +55,7 @@ log = logging.getLogger("eap_api")
 
 MAX_REASON_CHARS = 500
 CANCELLED_COMMENT = "Cancelled by user."
-TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention", "skipped"})
 
 EDITED_ARGS_UNSUPPORTED = "edited_args_unsupported"
 RESUME_PAYLOAD_INVALID = "resume_payload_invalid"

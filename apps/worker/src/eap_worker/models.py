@@ -129,6 +129,9 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  answer is `schema_instance(<output schema>, text=<answer>)`. `No client tool
                  offered.` without client tools.
 - `test:<other>` scripted model that streams a short text answer echoing the prompt, no tools.
+- `cloudflare:<name>` Workers AI (OpenAI-compatible) with CLOUDFLARE_API_TOKEN (fallback EAP_CLOUDFLARE_API_TOKEN),
+                 EAP_CLOUDFLARE_ACCOUNT_ID, optional EAP_CLOUDFLARE_GATEWAY_ID (header `cf-aig-gateway-id`, routes
+                 through AI Gateway) and EAP_CLOUDFLARE_BASE_URL, e.g. `cloudflare:@cf/deepseek-ai/deepseek-v4.1-flash-1017`
 - `litellm:<name>` OpenAI-compatible chat model against EAP_LITELLM_BASE_URL (fallback OPENAI_BASE_URL)
                  and EAP_LITELLM_API_KEY (fallback LITELLM_API_KEY), e.g. `litellm:qwen3.8-thinking`,
                  with SDK (transport) retries off; DBOS's model step retry policy owns retrying.
@@ -1251,6 +1254,32 @@ def litellm_model(name: str, settings: WorkerSettings) -> Model:
     return OpenAIChatModel(name, provider=OpenAIProvider(openai_client=client))
 
 
+CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+
+
+def cloudflare_model(name: str, settings: WorkerSettings) -> Model:
+    """Workers AI through its OpenAI-compatible API; AI Gateway when EAP_CLOUDFLARE_GATEWAY_ID is set."""
+    from openai import AsyncOpenAI
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    if not settings.cloudflare_api_token:
+        raise RuntimeError("CLOUDFLARE_API_TOKEN (or EAP_CLOUDFLARE_API_TOKEN) is not set; cannot build a cloudflare model")
+    base_url = settings.cloudflare_base_url
+    if not base_url:
+        if not settings.cloudflare_account_id:
+            raise RuntimeError("EAP_CLOUDFLARE_ACCOUNT_ID is not set; cannot build a cloudflare model")
+        base_url = CLOUDFLARE_API_BASE.format(account_id=settings.cloudflare_account_id)
+    headers = {"cf-aig-gateway-id": settings.cloudflare_gateway_id} if settings.cloudflare_gateway_id else None
+    client = AsyncOpenAI(
+        base_url=base_url,
+        api_key=settings.cloudflare_api_token,
+        default_headers=headers,
+        max_retries=0,  # transport retries off: the DBOS model step owns retrying
+    )
+    return OpenAIChatModel(name, provider=OpenAIProvider(openai_client=client))
+
+
 # ----------------------------------------------------------------------------- scripted embedders
 
 # name -> (native dimensions, reports usage)
@@ -1412,6 +1441,8 @@ def make_resolver(settings_getter: Any, *, fallback: bool = False):
             return scripted_echo_model()
         if provider == "litellm":
             return litellm_model(name, settings_getter())
+        if provider == "cloudflare":
+            return cloudflare_model(name, settings_getter())
         return None  # defer to infer_model
 
     return resolve_model

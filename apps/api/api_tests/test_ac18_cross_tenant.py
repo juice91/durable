@@ -77,6 +77,7 @@ NEW_ROUTES = {
     ("GET", "/api/v1/workflows/schedules"),
     ("GET", "/api/v1/workflows/{workflow_id}/schedules"),
     ("POST", "/api/v1/workflows/{workflow_id}/schedules"),
+    ("GET", "/api/v1/workflows/schedules/{schedule_id}"),
     ("PATCH", "/api/v1/workflows/schedules/{schedule_id}"),
     ("DELETE", "/api/v1/workflows/schedules/{schedule_id}"),
     # Architect milestone: workflow archive, unarchive and restore (shared with the Architect's tools).
@@ -248,6 +249,7 @@ def cross_tenant_calls(w: dict[str, Any]) -> list[tuple[tuple[str, str], str, st
         (("GET", "/api/v1/workflows/{workflow_id}/schedules"), "GET", f"/workflows/{w['workflow']}/schedules", None, 404),
         (("POST", "/api/v1/workflows/{workflow_id}/schedules"), "POST", f"/workflows/{w['workflow']}/schedules",
          {"name": "x", "cron": "* * * * *", "input": {"priority": "low"}}, 404),
+        (("GET", "/api/v1/workflows/schedules/{schedule_id}"), "GET", f"/workflows/schedules/{w['schedule']}", None, 404),
         (("PATCH", "/api/v1/workflows/schedules/{schedule_id}"), "PATCH", f"/workflows/schedules/{w['schedule']}",
          {"active": False}, 404),
         (("DELETE", "/api/v1/workflows/schedules/{schedule_id}"), "DELETE", f"/workflows/schedules/{w['schedule']}",

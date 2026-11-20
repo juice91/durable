@@ -36,13 +36,31 @@ describe("SecretsSection", () => {
     fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "github-token" } });
     const value = screen.getByLabelText("Secret value");
     expect(value).toHaveAttribute("type", "password");
-    expect(value).toHaveAttribute("autocomplete", "off");
+    expect(value).toHaveAttribute("autocomplete", "new-password");
     fireEvent.change(value, { target: { value: FAKE } });
     fireEvent.click(screen.getByRole("button", { name: "Add secret" }));
     await waitFor(() => expect(mocks.putSecret).toHaveBeenCalledWith("github-token", FAKE));
     await waitFor(() => expect(screen.getByLabelText("Secret value")).toHaveValue(""));
     expect(mocks.listSecrets).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(FAKE);
+  });
+
+  it("keeps password managers out of the form and leaves nothing typed after a save", async () => {
+    mocks.listSecrets.mockResolvedValue([]);
+    render(<SecretsSection />);
+    await screen.findByText("No secrets yet.");
+    const nameInput = screen.getByLabelText("Secret name") as HTMLInputElement;
+    const valueInput = screen.getByLabelText("Secret value") as HTMLInputElement;
+    expect(valueInput.getAttribute("autocomplete")).toBe("new-password");
+    expect(valueInput.getAttribute("data-1p-ignore")).not.toBeNull();
+    expect(nameInput.getAttribute("autocomplete")).toBe("off");
+    fireEvent.change(nameInput, { target: { value: "pwd-x" } });
+    fireEvent.change(valueInput, { target: { value: "hunter2" } });
+    fireEvent.submit(screen.getByTestId("secrets-form"));
+    await waitFor(() => expect(mocks.putSecret).toHaveBeenCalledWith("pwd-x", "hunter2"));
+    await waitFor(() => expect(nameInput.value).toBe(""));
+    expect(valueInput.value).toBe("");
+    expect(document.body.textContent).not.toContain("hunter2");
   });
 
   it("disables Add until name and value are given", async () => {

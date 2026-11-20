@@ -73,6 +73,10 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY}
+            # Cloudflare Workers AI (optional): the provider stays off while the key is absent from the Secret.
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: CLOUDFLARE_API_TOKEN, optional: true}
           resources:
             requests: {cpu: "250m", memory: 512Mi}
             limits: {cpu: "2", memory: 4Gi}

@@ -55,6 +55,13 @@ def http_request_summary(args: dict[str, Any]) -> str:
         path = parts.path or "/"
     except ValueError:
         host, path = "?", ""
+    source = args.get("body_from_url")
+    if isinstance(source, dict):
+        try:
+            source_host = urlsplit(str(source.get("url") or "")).hostname or "?"
+        except ValueError:
+            source_host = "?"
+        path += f" with a body from {source_host}"
     names = http_request_secret_names(args)
     used = f" using secret {', '.join(names)}" if len(names) == 1 else f" using secrets {', '.join(names)}"
     return f"{method} {host}{path}{used if names else ''}"

@@ -18,6 +18,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { ApiError } from "@/lib/api";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import {
   describeMcpApiMessage,
   mcpServers,
@@ -122,8 +124,11 @@ export default function McpServerDetailPage() {
     setServer(await mcpServers.get(current.id));
   });
 
+  // 412: the server changed elsewhere; 重新載入 shows their version, 覆寫 resends the toggle on top of it.
+  const conflict = useConflict<McpServer>({ onSaved: (saved) => setServer(saved as McpServer) });
   const toggleEnabled = (current: McpServer) => withBusy(async () => {
-    setServer(await mcpServers.setEnabled(current.id, !current.enabled));
+    const saved = await conflict.guard(() => mcpServers.setEnabled(current.id, !current.enabled));
+    if (saved !== undefined) setServer(saved);
   });
 
   const onSaved = (saved: McpServer | null) => {
@@ -271,8 +276,9 @@ export default function McpServerDetailPage() {
                   <dd className="min-w-0" data-testid="mcp-last-test"><McpLastTest server={server} /></dd>
                 </dl>
                 {busy ? <p className="mt-3 text-caption text-muted-foreground" aria-live="polite">Working…</p> : null}
+                <ConflictNotice state={conflict} className="mt-3" onReload={(current) => current && setServer(current)} />
                 {actionError ? <p role="alert" data-testid="mcp-action-error" className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
-                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} /></div> : null}
+                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} onRetry={() => void testServer(server)} retrying={busy} /></div> : null}
               </div>
             </Section>
 

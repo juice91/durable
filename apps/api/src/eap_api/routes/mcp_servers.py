@@ -23,7 +23,9 @@ bodies are validated here rather than by FastAPI so a validation error never ech
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -52,10 +54,12 @@ from eap_secrets import (
 from eap_mcp_runtime import McpRuntime, RuntimeHandle, handle_for
 from eap_mcp_runtime.images import UnsupportedPackage
 from eap_run_store.mcp_catalog import CatalogStore
+from eap_run_store.revisions import bump_row
 from eap_run_store.secrets import SecretStore
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
 from eap_api.mcp_servers import managed
@@ -114,6 +118,7 @@ class McpServerUpdate(BaseModel):
     name: Annotated[str, Field(pattern=NAME_PATTERN)] | None = None
     url: str | None = None
     enabled: bool | None = None
+    keep_warm: bool | None = None  # managed servers: the idle sweep never stops the runtime
     headers: Any = None
     env: Any = None  # managed servers: {VARIABLE: value | "secret:<name>"}, validated by managed.check_env
 
@@ -268,12 +273,14 @@ def _server_json(
         "url": server.url,
         "transport": server.transport,
         "enabled": server.enabled,
+        "keep_warm": server.keep_warm,
         "header_names": header_names,
         "created_at": _iso(server.created_at),
         "updated_at": _iso(server.updated_at),
         "last_checked_at": _iso(server.last_checked_at),
         "last_status": server.last_status,
         "last_error_code": server.last_error_code,
+        "revision": server.revision,
     }
 
 
@@ -321,7 +328,10 @@ def create_mcp_server(
     if ring is not None:
         db.add_all(_seal(ring, tenant_id, server.id, headers))
     _commit_or_409(db)
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_server_json(server, sorted(headers)))
+    return stamp(
+        JSONResponse(status_code=status.HTTP_201_CREATED, content=_server_json(server, sorted(headers))),
+        server.revision,
+    )
 
 
 @router.get("/mcp-servers")
@@ -344,13 +354,13 @@ def list_mcp_servers(principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     ])
 
 
-@router.get("/mcp-servers/{server_id}")
+@router.get("/mcp-servers/{server_id}", responses={**etag_responses(write=False)})
 def get_mcp_server(server_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
     server = _get_or_404(db, principal.tenant_id, server_id)
-    return JSONResponse(content=_json_of(db, principal.tenant_id, server))
+    return read_response(_json_of(db, principal.tenant_id, server), server.revision)
 
 
-@router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}})
+@router.patch("/mcp-servers/{server_id}", responses={409: {"model": ErrorDetail}, **etag_responses()})
 def update_mcp_server(
     request: Request,
     server_id: uuid.UUID,
@@ -358,9 +368,11 @@ def update_mcp_server(
     db: SessionDep,
     policy: PolicyDep,
     runtime: RuntimeDep,
+    pre: IfMatch,
     payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
-    """Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing
+    """Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch` with the current
+    server (see eap_api.concurrency). Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing
     the url or headers clears the last test result, which no longer describes the server. A managed
     server takes `env` (`{VARIABLE: value | "secret:<name>"}`, only the variables it changes): the
     server's pod is restarted so the new values are projected (the response carries the resulting
@@ -370,20 +382,32 @@ def update_mcp_server(
     assert isinstance(body, McpServerUpdate)
     tenant_id = principal.tenant_id
     server = _get_or_404(db, tenant_id, server_id)
+
+    def current() -> tuple[dict[str, Any], int]:
+        db.refresh(server)
+        return _json_of(db, tenant_id, server), server.revision
+
+    pre.check(server.revision, current)
     if server.runtime == "managed" and (body.url is not None or body.headers is not None):
         raise _unprocessable("a managed server has no url or headers; its endpoint is the platform's")
     if body.env is not None and server.runtime != "managed":
         raise _unprocessable("env: only a managed server takes environment variables")
+    if body.keep_warm is not None and server.runtime != "managed":
+        raise _unprocessable("keep_warm: only a managed server has a runtime to keep running")
     env_change = _plan_env_change(request, db, tenant_id, server, body.env) if body.env is not None else None
     headers = _validate_headers(body.headers) if body.headers is not None else None
     if body.url is not None:
         _check_url_sync(policy, body.url)
     ring = _keyring() if headers else None
 
+    with pre.guard(current, db):
+        bump_row(db, server, pre.expected)
     if body.name is not None:
         server.name = body.name
     if body.enabled is not None:
         server.enabled = body.enabled
+    if body.keep_warm is not None:
+        server.keep_warm = body.keep_warm
     if body.url is not None and body.url != server.url:
         server.url = body.url
         server.last_status = server.last_error_code = server.last_checked_at = None
@@ -404,7 +428,7 @@ def update_mcp_server(
         row = _runtime_of(db, tenant_id, server.id)
         if row is not None and row.state in managed.RESTARTABLE:
             restart_runtime(db, server, row, runtime)
-    return JSONResponse(content=_json_of(db, tenant_id, server))
+    return pre.respond(_json_of(db, tenant_id, server), server.revision)
 
 
 @router.delete(
@@ -671,6 +695,81 @@ async def _resolve_target(
         return None, policy, "managed_endpoint_invalid"
 
 
+START_TIMEOUT_ENV = "EAP_MCP_TEST_START_TIMEOUT_SECONDS"
+DEFAULT_START_TIMEOUT_S = 60.0
+MAX_START_TIMEOUT_S = 300.0
+START_POLL_S = 0.5  # module constant so tests can shorten it
+
+
+def start_timeout_s() -> float:
+    """EAP_MCP_TEST_START_TIMEOUT_SECONDS, clamped to [0, 300]; 60 when unset or unreadable."""
+    try:
+        value = float(os.environ.get(START_TIMEOUT_ENV, DEFAULT_START_TIMEOUT_S))
+    except ValueError:
+        value = DEFAULT_START_TIMEOUT_S
+    return min(max(value, 0.0), MAX_START_TIMEOUT_S)
+
+
+async def _start_and_wait(
+    request: Request, tenant_id: str, server_id: str, runtime: McpRuntime, info: dict[str, Any]
+) -> str | None:
+    """The test button's start path for a managed server: a `stopped`, `pending` or `stopping` runtime is
+    started (the same `_start_runtime` as POST .../runtime/start; a `stopping` one is waited out first),
+    then polled until `running`, for up to EAP_MCP_TEST_START_TIMEOUT_SECONDS. Returns None when it is
+    running, else the error code: `runtime_starting` (not ready in time), `runtime_not_running` (`failed`,
+    disabled), `runtime_missing`. Fills `info` with `state` (before), `started`, `waited_ms`, `idle_minutes`."""
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    deadline = began + start_timeout_s()
+    first = True
+
+    def step() -> tuple[str, str, str | None, int | None]:
+        with Session(request.app.state.database_engine) as db:
+            row = _runtime_of(db, tenant_id, server_id)
+            server = db.scalar(select(McpServerModel).where(
+                McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id))
+            if row is None or server is None:
+                return "missing", "missing", None, None
+            before = row.state
+            idle = None
+            if first:
+                since = row.last_used_at
+                if since is not None:
+                    idle = max(int((datetime.now(timezone.utc) - since).total_seconds() // 60), 0)
+            if row.state in ("starting", "running", "idle"):
+                _reconcile(db, row, runtime)
+            elif row.state in ("pending", "stopped") and server.enabled:
+                _start_runtime(db, server, row, runtime)
+            if row.state in ("running", "idle"):
+                managed.touch(db, row)
+            return before, row.state, row.last_error, idle
+
+    def enabled() -> bool:
+        with Session(request.app.state.database_engine) as db:
+            return bool(db.scalar(select(McpServerModel.enabled).where(
+                McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id)))
+
+    while True:
+        before, state, last_error, idle = await run_in_threadpool(step)
+        if first:
+            info.update(state=before, started=False, waited_ms=0, idle_minutes=idle)
+            first = False
+        if state == "missing":
+            return "runtime_missing"
+        if state in ("running", "idle"):
+            waited = int((loop.time() - began) * 1000)
+            info.update(waited_ms=waited, started=info["state"] not in ("running", "idle"))
+            return None
+        if state == "failed" or (state in ("pending", "stopped") and not await run_in_threadpool(enabled)):
+            info["last_error"] = last_error
+            info["waited_ms"] = int((loop.time() - began) * 1000)
+            return "runtime_not_running"
+        if loop.time() >= deadline:
+            info["waited_ms"] = int((loop.time() - began) * 1000)
+            return "runtime_starting"
+        await asyncio.sleep(min(START_POLL_S, max(deadline - loop.time(), 0.001)))
+
+
 # --- the catalog: install a registry entry ---------------------------------------------------------
 
 
@@ -895,7 +994,13 @@ async def run_mcp_server_test(
     """Connect over Streamable HTTP, initialize and list tools, within a bounded time
     (EAP_MCP_TEST_TIMEOUT_SECONDS, default 10, at most 30). Answers 200 with
     {status: "ok", tools: [{name, description, input_schema}]} or
-    {status: "error", error_code, tools: []}; the outcome is stored as last_status/last_error_code."""
+    {status: "error", error_code, tools: []}; the outcome is stored as last_status/last_error_code.
+
+    A managed server whose runtime is stopped (the idle sweep) is started first and waited for, up to
+    EAP_MCP_TEST_START_TIMEOUT_SECONDS (default 60). The answer then carries
+    `runtime: {state (before), started, waited_ms, idle_minutes}`; a start still going when the time is up
+    answers `error_code: "runtime_starting"` (not stored), a `failed` runtime `runtime_not_running` with
+    `runtime.last_error`."""
     tenant_id = principal.tenant_id
     target, secrets = await run_in_threadpool(_load_for_test, request, tenant_id, server_id)
 
@@ -912,9 +1017,27 @@ async def run_mcp_server_test(
                         tenant_id=tenant_id, server_id=str(server_id))
 
     url: str | None = None
-    if code is None:
-        # A managed server is reached at its runtime's endpoint and must be running (see _resolve_target).
+    info: dict[str, Any] = {}
+    if code is None and target.managed and target.runtime_id:
+        # A stopped managed server (the idle sweep scaled it down) is started and waited for.
+        code = await _start_and_wait(request, tenant_id, str(server_id), runtime, info)
+        if code is None:
+            handle = RuntimeHandle(target.namespace or "", target.cr_name or "")
+            url = runtime.endpoint(handle)
+            try:
+                policy = policy.for_managed_runtime(target.runtime_id, url)
+            except OutboundBlocked:
+                code = "managed_endpoint_invalid"
+    elif code is None:
         url, policy, code = await _resolve_target(request, tenant_id, str(server_id), target, runtime, policy)
+    runtime_info = (
+        {"state": info.get("state"), "started": bool(info.get("started")), "waited_ms": info.get("waited_ms", 0),
+         "idle_minutes": info.get("idle_minutes"), **({"last_error": info["last_error"]} if "last_error" in info else {})}
+        if info else None
+    )
+
+    def body(**extra: Any) -> dict[str, Any]:
+        return {**extra, **({"runtime": runtime_info} if runtime_info is not None else {})}
 
     if code is None:
         assert url is not None
@@ -922,14 +1045,15 @@ async def run_mcp_server_test(
         headers.clear()
         if result.status == "ok":
             await run_in_threadpool(_record_result, request, tenant_id, server_id, "ok", None)
-            return JSONResponse(content={"status": "ok", "tools": result.tools})
+            return JSONResponse(content=body(status="ok", tools=result.tools))
         code = result.error_code or "connection_failed"
         assert result.error is not None
         log_failure(log, "mcp server connection test failed", result.error, code=code,
                     tenant_id=tenant_id, server_id=str(server_id))
 
-    await run_in_threadpool(_record_result, request, tenant_id, server_id, "error", code)
-    return JSONResponse(content={"status": "error", "error_code": code, "tools": []})
+    if code != "runtime_starting":  # transient: the stored last result stays what the last real test said
+        await run_in_threadpool(_record_result, request, tenant_id, server_id, "error", code)
+    return JSONResponse(content=body(status="error", error_code=code, tools=[]))
 
 
 # --- running one tool of a server ------------------------------------------------------------------

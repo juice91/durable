@@ -310,3 +310,280 @@ def test_drop_response_paths_is_capped_at_16_and_must_be_pointers():
     for bad in (["/a"] * 17, ["a"], [""], [1]):
         with pytest.raises(ValidationError):
             HttpRequestInput.model_validate({**base, "drop_response_paths": bad})
+
+
+# ------------------------------------------------------------------------------- body_from_url
+
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
+UPLOAD = "https://bsky.example/xrpc/com.atproto.repo.uploadBlob"
+IMAGE = "https://cdn.example.com/thumb.png"
+
+
+def source(**kw: Any) -> dict[str, Any]:
+    return {"url": IMAGE, "allowed_hosts": ["cdn.example.com"], **kw}
+
+
+def upstream(wire: Wire, image=lambda r: httpx2.Response(200, content=PNG, headers={"content-type": "image/png"})):
+    """cdn.example.com serves `image`; any other host is the upload endpoint, which echoes the blob."""
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "cdn.example.com":
+            return image(request)
+        return httpx2.Response(200, json={"blob": {"size": len(request.content), "type": request.headers.get("content-type")}})
+
+    wire.answer = answer
+
+
+@sync
+async def test_body_from_url_sends_the_fetched_bytes_with_its_content_type(wire):
+    upstream(wire)
+    result = await call(method="POST", url=UPLOAD, body_from_url=source())
+    assert result["json"] == {"blob": {"size": len(PNG), "type": "image/png"}} and result["status"] == 200
+    fetch, send = wire.requests
+    assert fetch.method == "GET" and str(fetch.url) == IMAGE and send.content == PNG
+    assert set(result) == {"status", "ok", "headers", "json", "elapsed_ms"}  # the result keeps its shape
+
+
+@sync
+async def test_a_caller_content_type_wins_and_secret_refs_still_resolve_in_headers(wire):
+    upstream(wire)
+    await call(method="POST", url=UPLOAD, headers={"Authorization": "Bearer secret:api-key", "content-type": "image/jpeg"},
+               body_from_url=source())
+    fetch, send = wire.requests
+    assert send.headers["content-type"] == "image/jpeg" and send.headers["authorization"] == f"Bearer {SECRETS['api-key']}"
+    assert "authorization" not in fetch.headers  # the credential never goes to the image host
+    assert "secret:" not in str(fetch.url)
+
+
+@pytest.mark.parametrize("answer, why", [
+    (lambda r: httpx2.Response(200, content=b"<html>", headers={"content-type": "text/html"}), "not an image"),
+    (lambda r: httpx2.Response(200, content=b"x", headers={}), "not an image"),
+    (lambda r: httpx2.Response(302, headers={"location": "https://cdn.example.com/other.png"}), "redirect"),
+    (lambda r: httpx2.Response(404, headers={"content-type": "image/png"}), "status 404"),
+    (lambda r: httpx2.Response(200, content=PNG, headers={"content-type": "image/png", "content-length": "9999999"}), "larger"),
+])
+@sync
+async def test_a_bad_source_answer_is_body_source_rejected_and_nothing_is_sent(wire, answer, why):
+    upstream(wire, image=answer)
+    result = await call(method="POST", url=UPLOAD, body_from_url=source(max_bytes=1000))
+    assert result["error"]["code"] == "body_source_rejected" and why in result["error"]["detail"]
+    assert len(wire.requests) == 1 and wire.requests[0].url.host == "cdn.example.com"
+    assert IMAGE not in json.dumps(result)
+
+
+@sync
+async def test_an_oversize_body_without_a_content_length_is_cut_and_rejected(wire):
+    upstream(wire, image=lambda r: httpx2.Response(200, content=b"A" * 5000, headers={"content-type": "image/png"}))
+    result = await call(method="POST", url=UPLOAD, body_from_url=source(max_bytes=1000))
+    assert result["error"]["code"] == "body_source_rejected" and "max_bytes" in result["error"]["detail"]
+    exact = await call(method="POST", url=UPLOAD, body_from_url=source(max_bytes=5000))
+    assert exact["status"] == 200  # exactly max_bytes is allowed
+
+
+@sync
+async def test_the_source_host_must_be_allowed_and_https_and_nothing_is_fetched_otherwise(wire):
+    upstream(wire)
+    for bad in (source(allowed_hosts=["other.example.com"]), source(url="http://cdn.example.com/a.png"),
+                source(url="https://CDN.example.com.evil.example/a.png")):
+        result = await call(method="POST", url=UPLOAD, body_from_url=bad)
+        assert result["error"]["code"] == "body_source_rejected"
+    assert wire.requests == []
+    assert (await call(method="POST", url=UPLOAD, body_from_url=source(url="https://CDN.Example.com/a.png")))["status"] == 200
+
+
+@sync
+async def test_body_from_url_excludes_json_and_body(wire):
+    upstream(wire)
+    for extra in ({"json": {"a": 1}}, {"body": "x"}):
+        assert (await call(method="POST", url=UPLOAD, body_from_url=source(), **extra))["error"]["code"] == "body_conflict"
+    assert wire.requests == []
+
+
+@sync
+async def test_a_private_source_address_is_rejected_by_the_guard(monkeypatch):
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["10.1.2.3"]
+
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    result = await call(method="POST", url=UPLOAD, body_from_url=source())
+    assert result["error"]["code"] == "body_source_rejected" and "outbound policy" in result["error"]["detail"]
+
+
+def test_body_from_url_limits_and_the_card_names_the_source_host():
+    for bad in ({"max_bytes": 5_000_001}, {"max_bytes": 0}, {"allowed_hosts": []}, {"extra": 1}):
+        with pytest.raises(ValidationError):
+            HttpRequestInput.model_validate({"method": "POST", "url": UPLOAD, "body_from_url": source(**bad)})
+    parsed = HttpRequestInput.model_validate({"method": "POST", "url": UPLOAD, "body_from_url": source()})
+    assert parsed.body_from_url.max_bytes == 1_000_000
+    assert http_request_summary({"method": "POST", "url": UPLOAD, "body_from_url": source()}) == \
+        "POST bsky.example/xrpc/com.atproto.repo.uploadBlob with a body from cdn.example.com"
+
+
+# ------------------------------------------------------------------------------- redirect following
+
+
+@sync
+async def test_default_max_redirects_0_keeps_existing_behavior(wire):
+    """Without max_redirects, redirects are returned as-is (not followed)."""
+    wire.answer = lambda r: httpx2.Response(301, headers={"location": "https://api.example.com/v1/y"})
+    result = await call()
+    assert result["status"] == 301 and result["headers"]["location"] == "https://api.example.com/v1/y"
+    assert "redirected_from" not in result
+    assert len(wire.requests) == 1  # Only the original request
+
+
+@sync
+async def test_same_host_301_followed_once_with_max_redirects(wire, monkeypatch):
+    """A same-host 301 redirect followed once with max_redirects=1."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]  # Public IP for testing
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(301, headers={"location": "/v1/y"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["status"] == 200 and result["ok"] is True and result["json"] == {"ok": True}
+    assert result["redirected_from"] == ["https://api.example.com/v1/x", "https://api.example.com/v1/y"]
+    assert len(wire.requests) == 2
+
+
+@sync
+async def test_limit_reached_returns_3xx_with_error(wire, monkeypatch):
+    """When max_redirects is reached, the last 3xx is returned with redirect_refused error."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        return httpx2.Response(301, headers={"location": "/next"})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["status"] == 301
+    assert result["ok"] is False
+    assert result["headers"]["location"] == "/next"
+    assert result["error"]["code"] == "redirect_refused"
+    assert "maximum redirects exceeded" in result["error"]["message"]
+    assert "redirected_from" in result
+
+
+@sync
+async def test_cross_host_hop_refused_without_allowed_hosts(wire, monkeypatch):
+    """A cross-host redirect is refused unless the host is in allowed_hosts."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(301, headers={"location": "https://other.example.com/y"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["error"]["code"] == "redirect_refused"
+    assert "redirect host not allowed" in result["error"]["message"]
+
+
+@sync
+async def test_303_after_POST_becomes_GET_without_body(wire, monkeypatch):
+    """303 redirects always use GET without a body."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(303, headers={"location": "/new"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(method="POST", json={"data": "test"}, max_redirects=1)
+    assert result["status"] == 200
+    # The second request should be GET without body
+    assert wire.requests[1].method == "GET"
+    # GET requests can have empty content
+    assert wire.requests[1].content == b""
+
+
+@sync
+async def test_307_keeps_POST_and_body(wire, monkeypatch):
+    """307 redirects keep the method and body."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(307, headers={"location": "/new"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(method="POST", json={"data": "test"}, max_redirects=1)
+    assert result["status"] == 200
+    # The second request should still be POST with body
+    assert wire.requests[1].method == "POST"
+    assert wire.requests[1].content is not None
+
+
+@sync
+async def test_redirected_from_absent_when_no_hop(wire):
+    """redirected_from is absent when no redirect was followed."""
+    wire.answer = lambda r: httpx2.Response(200, json={"ok": True})
+    result = await call(max_redirects=1)  # max_redirects > 0 but no redirect
+    assert result["status"] == 200
+    assert "redirected_from" not in result
+
+
+def test_max_redirects_validation():
+    """max_redirects must be 0-5."""
+    for bad in (6, -1, 10):
+        with pytest.raises(ValidationError):
+            HttpRequestInput.model_validate({"method": "GET", "url": "https://a.example/", "max_redirects": bad})
+    
+    for ok in (0, 1, 5):
+        parsed = HttpRequestInput.model_validate({"method": "GET", "url": "https://a.example/", "max_redirects": ok})
+        assert parsed.max_redirects == ok

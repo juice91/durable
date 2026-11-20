@@ -88,6 +88,7 @@ from pydantic_core import to_jsonable_python
 from eap_run_store.approvals import decision_event_key, tool_approval_topic
 from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas.approvals import DEFAULT_APPROVAL_TIMEOUT_HOURS, EVAL_DENIED_MESSAGE, TIMED_OUT_MESSAGE, denial_message
+from eap_schemas.architect import CONTROL_TOOL_PREFIX
 from eap_schemas.http_request import http_request_secret_names
 from eap_schemas.tools import HTTP_REQUEST_TOOL_ID, builtin_tool_name
 from eap_schemas.output import MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_ERRORS, OUTPUT_TOOL_NAME
@@ -410,6 +411,10 @@ def _approval_summary(call: ToolCallPart) -> str | None:
     registry = get_runtime().registry
     tool_id = registry.tool_id_for_name(call.tool_name)
     if tool_id is None:
+        if call.tool_name.startswith(CONTROL_TOOL_PREFIX):  # the Architect's control-plane bridge
+            from eap_worker.control_bridge import control_summary_for_call
+
+            return control_summary_for_call(call.tool_name, _call_args(call))
         return None
     try:
         return registry.summary_for(tool_id, _call_args(call))
@@ -684,7 +689,9 @@ class SpecCapability(AbstractCapability[Any]):
         if not requests.approvals:
             return None  # external calls (`requests.calls`) are never produced by our specs
         gated = approval_required_tool_names(spec) if getattr(spec, "approvals", None) is not None else set()
-        calls = [c for c in requests.approvals if c.tool_name in gated or _http_call_with_secret(c)]
+        # `control__*` manage tools are declared unapproved by the bridge itself (read ones never defer)
+        calls = [c for c in requests.approvals
+                 if c.tool_name in gated or c.tool_name.startswith(CONTROL_TOOL_PREFIX) or _http_call_with_secret(c)]
         if not calls:
             return None
         approvals = getattr(spec, "approvals", None)

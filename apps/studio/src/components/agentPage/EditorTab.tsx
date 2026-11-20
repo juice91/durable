@@ -24,6 +24,8 @@ import { useRouter } from "next/navigation";
 import { useAgentPage } from "./AgentPageContext";
 import { SuggestedRules } from "@/components/evals/SuggestedRules";
 import { AttachedScorers } from "./AttachedScorers";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 
 const notice = "rounded-md border p-3 text-label";
 
@@ -61,6 +63,28 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const layout = useEditorLayout();
   const guardDialog = useUnsavedChangesGuard(isDirty);
   const router = useRouter();
+  // A save refused with 412 (someone else changed the draft) is held as a notice, not an error.
+  const conflict = useConflict<Agent>({ onSaved: (saved) => applySaved(saved as Agent) });
+
+  function applySaved(updated: Agent) {
+    // The editor re-reports dirty against the saved spec (edits typed during the save stay dirty).
+    setAgent(updated);
+    setSaveError(null);
+    void refreshPage?.();
+  }
+
+  /** 重新載入: the current draft replaces the editor's content, local edits are discarded. */
+  const reloadCurrent = (current: Agent | undefined) => {
+    if (current) {
+      setAgent(current);
+      setEditorKey((key) => key + 1);
+      setIsDirty(false);
+      setSaveError(null);
+      void refreshPage?.();
+    } else {
+      void api.agents.get(agentId).then((fresh) => reloadCurrent(fresh));
+    }
+  };
 
   useEffect(() => {
     const loadAgent = async () => {
@@ -90,11 +114,8 @@ export function EditorTab({ agentId }: { agentId: string }) {
     setSaveError(null);
     setSaveErrorLocations([]);
     try {
-      const updated = await api.agents.update(agent.id, spec);
-      // The editor re-reports dirty against the saved spec (edits typed during the save stay dirty).
-      setAgent(updated);
-      setSaveError(null);
-      void refreshPage?.();
+      const updated = await conflict.guard(() => api.agents.update(agent.id, spec));
+      if (updated !== undefined) applySaved(updated);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setSaveErrorLocations((err.details ?? []).map((detail) => detail.loc));
@@ -214,6 +235,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
         ID: <span className="font-mono">{agent.id}</span>
       </p>
       {/* Errors a step owns show in that step instead (inline, or at the top of the step). */}
+      <ConflictNotice state={conflict} onReload={reloadCurrent} />
       {saveError && !errorTarget(saveError) && !stepForError(saveError) ? (
         <div role="alert" data-testid="agent-save-error" className={`${notice} border-destructive/40 bg-destructive/10 text-destructive-text`}>
           {readableError(saveError)}

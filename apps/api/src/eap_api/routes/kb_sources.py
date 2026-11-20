@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.connections import parse_body, parse_uuid, problem
@@ -202,7 +203,7 @@ async def create_source(
         )
     except SourceNameConflict:
         return problem("source_name_conflict", "a source with this name exists", status.HTTP_409_CONFLICT)
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=source_view(made))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=source_view(made)), made.revision)
 
 
 @router.get(BASE)
@@ -214,18 +215,21 @@ async def list_sources(kb_id: str, request: Request, principal: PrincipalDep) ->
     return JSONResponse(content={"items": [source_view(s) for s in rows]})
 
 
-@router.get(BASE + "/{source_id}")
+@router.get(BASE + "/{source_id}", responses={**etag_responses(write=False)})
 async def get_source(kb_id: str, source_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
     source = await run_in_threadpool(_source_in_kb, request, principal.tenant_id, kb_id, source_id)
     if source is None:
         return _404("source_not_found", "source not found")
-    return JSONResponse(content=source_view(source))
+    return read_response(source_view(source), source.revision)
 
 
-@router.patch(BASE + "/{source_id}")
+@router.patch(BASE + "/{source_id}", responses={**etag_responses()})
 async def update_source(
-    kb_id: str, source_id: str, request: Request, principal: PrincipalDep, payload: Annotated[Any, Body()] = None
+    kb_id: str, source_id: str, request: Request, principal: PrincipalDep, pre: IfMatch,
+    payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
+    """Change a source. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
+    with the current source (see eap_api.concurrency)."""
     body = parse_body(payload, SourcePatch)
     if isinstance(body, JSONResponse):
         return body
@@ -237,17 +241,24 @@ async def update_source(
         refused = _validate_config(source.kind, source.provider, body.config)
         if refused is not None:
             return refused
+    def current() -> tuple[dict[str, Any], int]:
+        found = SourceStore(_engine(request)).get(tenant_id, source.id) or source
+        return source_view(found), found.revision
+
+    pre.check(source.revision, current)
     try:
-        changed = await run_in_threadpool(
-            lambda: SourceStore(_engine(request)).update(
-                tenant_id, source.id, name=body.name, config=body.config, enabled=body.enabled
+        with pre.guard(current):
+            changed = await run_in_threadpool(
+                lambda: SourceStore(_engine(request)).update(
+                    tenant_id, source.id, name=body.name, config=body.config, enabled=body.enabled,
+                    expected_revision=pre.expected,
+                )
             )
-        )
     except SourceNameConflict:
         return problem("source_name_conflict", "a source with this name exists", status.HTTP_409_CONFLICT)
     if changed is None:
         return _404("source_not_found", "source not found")
-    return JSONResponse(content=source_view(changed))
+    return pre.respond(source_view(changed), changed.revision)
 
 
 @router.post(BASE + "/{source_id}/sync", status_code=status.HTTP_202_ACCEPTED)

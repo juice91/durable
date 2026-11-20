@@ -26,7 +26,7 @@ components never write paths by hand. Query parameters below are part of the URL
 
 | URL | Page |
 |---|---|
-| `/agents` | Agents list (List or Compact view). |
+| `/agents` | Agents list (List or Compact view). Model and Tools show the latest published version (a draft-only agent shows its draft model, tagged "draft"); 「草稿未發佈」 marks a draft that differs from it. |
 | `/agents/new` | Create an agent. |
 | `/agents/:id` | Redirects to the agent's Chat tab. |
 | `/agents/:id/chat` | Agent page, Chat tab, new conversation. |
@@ -130,6 +130,9 @@ the theme is changed under Appearance). The list is `BROWSER_DATA` in
 | Agent page layout | `studio.agent-layout.v1.<agentId>…`, `studio.agent-config.v1.<agentId>` | Pane widths on each agent's page, and whether its Config panel was left open or closed. | Layout |
 | Agents list view | `studio.agents.view` | List or Compact. | Layout |
 | Agents system rows | `studio.agents.show-system` | Whether the Agents list also shows the Architect's system helpers (the drafters). | Layout |
+| Architect list | `studio.architect.show-archived` | Whether the Architect page's created list shows archived agents and workflows. | Layout |
+| Skipped runs | `studio.runs.show-skipped` | Whether the Traces list and a workflow's run history also list skipped runs (a "nothing to do" exit); hidden when unset. | Layout |
+| Steps not reached | `studio.workflow.not-reached-open` | Whether a workflow run's step list shows the steps the run never reached (folded into one row unless opened). | Layout |
 | Workflow page layout | `studio.workflow-layout.v1` | The workflow panel's width and whether it is collapsed, and whether the run Timeline is open and its height. | Layout |
 | Trace list columns | `studio.traces.hiddenColumns` | Which columns the Traces list shows. | Layout |
 | Memory card | `studio.memory-card.v1` | Whether the chat's memory card is expanded into the memory inspector. | Layout |

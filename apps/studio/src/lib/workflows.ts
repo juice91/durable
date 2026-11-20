@@ -6,6 +6,7 @@
 // /api/v1/workflows/runs/{run_id}/steps/{step_id}/approve|reject with {"comment"?}.
 // Cancel (loops D12, LP.12): POST /api/v1/runs/{run_id}/cancel, no body.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 import type { Run, RunStatus } from "./runs";
 import type { JsonSchema } from "./tools";
 import { mapToolRunError } from "./toolRuns";
@@ -47,6 +48,7 @@ export interface AgentStep extends StepBase {
 export interface ToolStep extends StepBase {
   type: "tool";
   tool_id: string;
+  on_error?: "fail" | "continue";
   input?: Record<string, unknown>;
   next?: string | null;
 }
@@ -172,6 +174,8 @@ export interface Workflow {
   /** Archived workflows leave the list and refuse new runs and schedules (409 `workflow_archived`). */
   archived?: boolean;
   archived_at?: string | null;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface WorkflowVersion {
@@ -214,7 +218,8 @@ const enc = encodeURIComponent;
 
 /** The active workflows, or with `archived: true` the archived ones only (`?archived=true`). */
 export function listWorkflows({ archived = false }: { archived?: boolean } = {}): Promise<Workflow[]> {
-  return getJson<Workflow[]>(archived ? "/api/v1/workflows?archived=true" : "/api/v1/workflows");
+  return getJson<Workflow[]>(archived ? "/api/v1/workflows?archived=true" : "/api/v1/workflows").then((items) =>
+    trackAll(items, (workflow) => revisionKey.workflow(workflow.id)));
 }
 
 /** Archive refused (409 `runs_active`): the workflow has queued or running runs; `force` archives anyway. */
@@ -243,7 +248,7 @@ async function postArchive(id: string, body: { archived: boolean; force?: boolea
     }
   }
   if (!response.ok) throw await apiErrorFromResponse(response);
-  return response.json();
+  return track(revisionKey.workflow(id), (await response.json()) as Workflow);
 }
 
 /** Idempotent; answers the workflow with its new `archived` flag. Throws WorkflowArchiveBlocked
@@ -258,7 +263,23 @@ export function unarchiveWorkflow(id: string): Promise<Workflow> {
 }
 
 export function getWorkflow(id: string): Promise<Workflow> {
-  return getJson<Workflow>(`/api/v1/workflows/${enc(id)}`);
+  return getJson<Workflow>(`/api/v1/workflows/${enc(id)}`).then((workflow) => track(revisionKey.workflow(id), workflow));
+}
+
+/**
+ * Replace the workflow's draft (`PATCH /workflows/{id}`). Sends the revision this tab last read as
+ * `If-Match`; a stale one throws ConflictError (412) carrying the current workflow.
+ */
+export function updateWorkflowDraft(id: string, spec: WorkflowSpec): Promise<Workflow> {
+  return writeResource(revisionKey.workflow(id), async (headers) => {
+    const response = await fetch(`${BASE_URL}/api/v1/workflows/${enc(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...apiHeaders(), ...headers },
+      body: JSON.stringify({ spec }),
+    });
+    if (!response.ok) throw await apiErrorFromResponse(response);
+    return response.json();
+  });
 }
 
 /** Published versions, newest first. */

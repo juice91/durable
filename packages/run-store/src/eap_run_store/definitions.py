@@ -51,6 +51,7 @@ from eap_run_store.workflow_checks import (
     agent_step_cost_cap_warnings,
     judge_cost_cap_warnings,
     loop_agent_approval_warnings,
+    optional_input_ref_warnings,
     output_ref_checks,
     reference_problems,
     unpublished_agents,
@@ -70,6 +71,7 @@ class Published:
 
     version: dict[str, Any]
     warnings: list[dict[str, str]]
+    revision: int = 0  # the definition row's revision after the write (the ETag the API answers with)
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ class ArchiveResult:
     builtin: bool
     changed: bool
     paused_schedules: tuple[str, ...] = ()
+    revision: int = 0  # the row's revision after the call (unchanged for an idempotent repeat)
 
 
 def _now() -> datetime:
@@ -93,15 +96,24 @@ def _dump(spec: Any) -> str:
     return json.dumps(spec if isinstance(spec, dict) else spec.model_dump(mode="json"))
 
 
+def _bump(conn: Connection, table: str, tenant_id: str, row_id: str) -> int:
+    """+1 on a definition row's revision (publish changes what GET shows: `latest_version`). The caller
+    holds the row lock, so there is no precondition to check; `table` is `agents` or `workflows`."""
+    return int(conn.execute(
+        text(f"UPDATE {table} SET revision = revision + 1 WHERE id = :id AND tenant_id = :t RETURNING revision"),
+        {"id": str(row_id), "t": tenant_id},
+    ).scalar_one())
+
+
 # ---------------------------------------------------------------------------------------- agents
 
 
 def lock_agent(conn: Connection, tenant_id: str, agent_id: str) -> Row:
-    """The tenant's agent row (id, name, draft_spec, archived, builtin, slug) locked FOR NO KEY
+    """The tenant's agent row (id, name, draft_spec, archived, builtin, slug, revision) locked FOR NO KEY
     UPDATE, or DefinitionNotFound."""
     row = conn.execute(
         text(
-            "SELECT id, name, draft_spec, archived, builtin, slug FROM agents"
+            "SELECT id, name, draft_spec, archived, builtin, slug, revision FROM agents"
             " WHERE id = :id AND tenant_id = :t FOR NO KEY UPDATE"
         ),
         {"id": str(agent_id), "t": tenant_id},
@@ -179,7 +191,7 @@ def publish_agent(
         conn, tenant_id, agent_id, (latest or 0) + 1, spec.model_dump(mode="json"), new_hash, created_by, None,
         created_via,
     )
-    return Published(version, warnings)
+    return Published(version, warnings, _bump(conn, "agents", tenant_id, agent_id))
 
 
 def restore_agent_version(
@@ -234,14 +246,14 @@ def restore_agent_version(
         conn, tenant_id, agent_id, latest.version + 1, dict(source.spec), source.spec_hash, created_by,
         source.version, created_via,
     )
-    conn.execute(
+    revision = conn.execute(
         text(
-            "UPDATE agents SET draft_spec = CAST(:spec AS jsonb), name = :name, updated_at = :now"
-            " WHERE id = :id AND tenant_id = :t"
+            "UPDATE agents SET draft_spec = CAST(:spec AS jsonb), name = :name, updated_at = :now,"
+            " revision = revision + 1 WHERE id = :id AND tenant_id = :t RETURNING revision"
         ),
         {"spec": _dump(dict(source.spec)), "name": spec.name, "now": _now(), "id": str(agent_id), "t": tenant_id},
-    )
-    return Published(restored, publish_warnings(spec))
+    ).scalar_one()
+    return Published(restored, publish_warnings(spec), int(revision))
 
 
 def referencing_workflows(conn: Connection, tenant_id: str, agent_id: uuid.UUID | str) -> list[dict[str, Any]]:
@@ -289,23 +301,27 @@ def set_agent_archived(
                 workflows=workflows,
             )
     changed = bool(agent.archived) != archived
+    revision = agent.revision
     if changed:
-        conn.execute(
-            text("UPDATE agents SET archived = :a, updated_at = :now WHERE id = :id AND tenant_id = :t"),
+        revision = conn.execute(
+            text(
+                "UPDATE agents SET archived = :a, updated_at = :now, revision = revision + 1"
+                " WHERE id = :id AND tenant_id = :t RETURNING revision"
+            ),
             {"a": archived, "now": _now(), "id": str(agent_id), "t": tenant_id},
-        )
-    return ArchiveResult(str(agent.id), agent.name, archived, bool(agent.builtin), changed)
+        ).scalar_one()
+    return ArchiveResult(str(agent.id), agent.name, archived, bool(agent.builtin), changed, revision=int(revision))
 
 
 # ------------------------------------------------------------------------------------- workflows
 
 
 def lock_workflow(conn: Connection, tenant_id: str, workflow_id: str) -> Row:
-    """The tenant's workflow row (id, name, draft_spec, archived, slug) locked FOR NO KEY UPDATE, or
+    """The tenant's workflow row (id, name, draft_spec, archived, slug, revision) locked FOR NO KEY UPDATE, or
     DefinitionNotFound."""
     row = conn.execute(
         text(
-            "SELECT id, name, draft_spec, archived, slug FROM workflows"
+            "SELECT id, name, draft_spec, archived, slug, revision FROM workflows"
             " WHERE id = :id AND tenant_id = :t FOR NO KEY UPDATE"
         ),
         {"id": str(workflow_id), "t": tenant_id},
@@ -359,6 +375,7 @@ def _workflow_problems_and_warnings(
     warnings += loop_agent_approval_warnings(conn, spec, tenant_id)
     warnings += judge_cost_cap_warnings(spec)
     warnings += agent_step_cost_cap_warnings(conn, spec, tenant_id)
+    warnings += optional_input_ref_warnings(spec)
     if problems:
         unpublished = unpublished_agents(conn, spec, tenant_id)
         if unpublished:
@@ -399,7 +416,7 @@ def publish_workflow(
         conn, tenant_id, workflow_id, (latest.version if latest else 0) + 1, spec.model_dump(mode="json"),
         spec_hash, created_by, created_via,
     )
-    return Published(version, warnings)
+    return Published(version, warnings, _bump(conn, "workflows", tenant_id, workflow_id))
 
 
 def _workflow_draft_hash(draft_spec: dict | None) -> str | None:
@@ -460,14 +477,14 @@ def restore_workflow_version(
         conn, tenant_id, workflow_id, latest.version + 1, dict(source.spec), source.spec_hash, created_by,
         created_via,
     )
-    conn.execute(
+    revision = conn.execute(
         text(
-            "UPDATE workflows SET draft_spec = CAST(:spec AS jsonb), name = :name, updated_at = :now"
-            " WHERE id = :id AND tenant_id = :t"
+            "UPDATE workflows SET draft_spec = CAST(:spec AS jsonb), name = :name, updated_at = :now,"
+            " revision = revision + 1 WHERE id = :id AND tenant_id = :t RETURNING revision"
         ),
         {"spec": _dump(dict(source.spec)), "name": spec.name, "now": _now(), "id": str(workflow_id), "t": tenant_id},
-    )
-    return Published(restored, warnings)
+    ).scalar_one()
+    return Published(restored, warnings, int(revision))
 
 
 def pause_workflow_schedules(conn: Connection, tenant_id: str, workflow_id: str) -> list[str]:
@@ -477,7 +494,7 @@ def pause_workflow_schedules(conn: Connection, tenant_id: str, workflow_id: str)
     rows = conn.execute(
         update(table)
         .where(table.c.tenant_id == tenant_id, table.c.workflow_id == str(workflow_id), table.c.active.is_(True))
-        .values(active=False, updated_at=_now())
+        .values(active=False, updated_at=_now(), revision=table.c.revision + 1)
         .returning(table.c.id)
     ).all()
     return sorted(str(r.id) for r in rows)
@@ -509,17 +526,18 @@ def set_workflow_archived(
                 code=RUNS_ACTIVE,
                 active_runs=int(active),
             )
+    revision = workflow.revision
     if changed:
-        conn.execute(
+        revision = conn.execute(
             text(
-                "UPDATE workflows SET archived = :a, archived_at = :at, updated_at = :now"
-                " WHERE id = :id AND tenant_id = :t"
+                "UPDATE workflows SET archived = :a, archived_at = :at, updated_at = :now, revision = revision + 1"
+                " WHERE id = :id AND tenant_id = :t RETURNING revision"
             ),
             {"a": archived, "at": _now() if archived else None, "now": _now(), "id": str(workflow_id), "t": tenant_id},
-        )
+        ).scalar_one()
     if archived:
         paused = pause_workflow_schedules(conn, tenant_id, workflow_id)
-    return ArchiveResult(str(workflow.id), workflow.name, archived, False, changed, tuple(paused))
+    return ArchiveResult(str(workflow.id), workflow.name, archived, False, changed, tuple(paused), int(revision))
 
 
 __all__ = [

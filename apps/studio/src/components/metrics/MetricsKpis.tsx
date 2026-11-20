@@ -18,11 +18,14 @@ import {
   type PeriodDelta,
 } from "@/lib/metrics";
 
-export type KpiId = "runs" | "error_rate" | "latency_p50" | "latency_p95" | "tokens" | "cost";
+export type KpiId = "runs" | "error_rate" | "latency_p50" | "latency_p95" | "tokens" | "cost" | "recovered";
 
-export const ALL_KPIS: KpiId[] = ["runs", "error_rate", "latency_p50", "latency_p95", "tokens", "cost"];
+export const ALL_KPIS: KpiId[] = ["runs", "error_rate", "latency_p50", "latency_p95", "tokens", "cost", "recovered"];
 
 type CardSpec = Omit<KpiCardProps, "loading"> & { id: KpiId };
+
+/** `recovered_runs` is absent from an API before the recovered-runs milestone. */
+const recovered = (v: MetricValues) => v.recovered_runs ?? 0;
 
 /** The KPI cards for a summary (pure; `ids` picks and orders a subset). */
 export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: readonly KpiId[] = ALL_KPIS): CardSpec[] {
@@ -39,7 +42,7 @@ export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: 
       label: "Runs",
       value: formatCount(cur.runs),
       delta: has(prev) ? computeDelta(cur.runs, prev!.runs, "neutral", formatCount) : null,
-      hint: `${formatCount(cur.completed)} completed · ${formatCount(cur.in_progress)} in progress`,
+      hint: `${formatCount(cur.completed)} completed${cur.skipped ? ` · ${formatCount(cur.skipped)} skipped` : ""} · ${formatCount(cur.in_progress)} in progress`,
       href: tracesHref(filters),
     },
     error_rate: {
@@ -83,6 +86,14 @@ export function kpiCards(summary: MetricsSummary, filters: MetricsFilters, ids: 
         cur.unpriced_requests > 0
           ? `${formatCount(cur.unpriced_requests)} of ${formatCount(cur.requests)} requests have no price and are not included`
           : `${formatCount(cur.requests)} model requests`,
+    },
+    recovered: {
+      id: "recovered",
+      label: "Recovered runs",
+      value: formatCount(recovered(cur)),
+      delta: has(prev) ? computeDelta(recovered(cur), recovered(prev!), "neutral", formatCount) : null,
+      hint: "Runs DBOS resumed after a worker restart, by last event in the range",
+      href: tracesHref(filters),
     },
   };
   return ids.map((id) => ({ ...cards[id], deltaLabel }));
@@ -149,4 +160,5 @@ const LABELS: Record<KpiId, string> = {
   latency_p95: "Latency p95",
   tokens: "Tokens",
   cost: "Cost (USD)",
+  recovered: "Recovered runs",
 };

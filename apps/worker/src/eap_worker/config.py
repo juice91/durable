@@ -104,6 +104,11 @@ class WorkerSettings:
     # each falls back to the chat value (litellm_base_url / litellm_api_key) when unset.
     litellm_embedding_base_url: str | None = None
     litellm_embedding_api_key: str | None = field(default=None, repr=False)  # secret
+    # `cloudflare:*`: Workers AI, optionally through AI Gateway. The token is a secret.
+    cloudflare_api_token: str | None = field(default=None, repr=False)
+    cloudflare_account_id: str | None = None
+    cloudflare_gateway_id: str | None = None
+    cloudflare_base_url: str | None = None
     embedding_max_batch_inputs: int = DEFAULT_EMBEDDING_MAX_BATCH_INPUTS
     embedding_max_batch_tokens: int = DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
     embedding_timeout_s: float = DEFAULT_EMBEDDING_TIMEOUT_S
@@ -131,6 +136,10 @@ class WorkerSettings:
             allowed_embedding_models=EmbeddingModelPolicy.from_env(),
             litellm_embedding_base_url=os.environ.get("EAP_LITELLM_EMBEDDING_BASE_URL") or None,
             litellm_embedding_api_key=os.environ.get("EAP_LITELLM_EMBEDDING_API_KEY") or None,
+            cloudflare_api_token=os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("EAP_CLOUDFLARE_API_TOKEN") or None,
+            cloudflare_account_id=(os.environ.get("EAP_CLOUDFLARE_ACCOUNT_ID") or "").strip() or None,
+            cloudflare_gateway_id=(os.environ.get("EAP_CLOUDFLARE_GATEWAY_ID") or "").strip() or None,
+            cloudflare_base_url=(os.environ.get("EAP_CLOUDFLARE_BASE_URL") or "").strip() or None,
             embedding_max_batch_inputs=_positive_int(
                 "EAP_EMBEDDING_MAX_BATCH_INPUTS", DEFAULT_EMBEDDING_MAX_BATCH_INPUTS
             ),

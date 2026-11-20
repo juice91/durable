@@ -212,3 +212,83 @@ def test_agent_output_schema_helper(client):
     text_id = _agent(client, None)
     text = client.get(f"{BASE}/agent-output-schema", params={"agent_id": text_id}, headers=_auth()).json()
     assert text["structured"] is False and text["json_schema"] is None and text["fields"] == []
+
+
+@requires_pg
+def test_optional_input_ref_warnings(client):
+    """A spec with an optional input read by a tool step warns; the same input with a default does not;
+    a required input does not."""
+    # Create a workflow
+    spec = {
+        "name": "Optional input test",
+        "input_schema": {"type": "object", "properties": {"optional_field": {"type": "string"}}},
+        "start": "read",
+        "steps": [
+            {"id": "read", "type": "tool", "tool_id": "workflow.return",
+             "input": {"value": {"$ref": "input.optional_field"}}},
+        ],
+    }
+    resp = client.post(BASE, json={"spec": spec}, headers=_auth())
+    assert resp.status_code == 201, resp.text
+    wf_id = resp.json()["id"]
+    
+    # Publish creates version 1
+    pub = client.post(f"{BASE}/{wf_id}/versions", headers=_auth())
+    assert pub.status_code == 201, pub.text
+    # First publish should warn about optional input without default
+    warnings = pub.json().get("warnings", [])
+    assert any(w["code"] == "optional_input_ref_unguarded" for w in warnings), warnings
+    assert "optional_field" in warnings[0]["message"]
+
+
+@requires_pg
+def test_required_input_has_no_warning(client):
+    """A required input does not produce a warning."""
+    spec = {
+        "name": "Required input test",
+        "input_schema": {"type": "object", "properties": {"required_field": {"type": "string"}},
+                        "required": ["required_field"]},
+        "start": "read",
+        "steps": [
+            {"id": "read", "type": "tool", "tool_id": "workflow.return",
+             "input": {"value": {"$ref": "input.required_field"}}},
+        ],
+    }
+    resp = client.post(BASE, json={"spec": spec}, headers=_auth())
+    assert resp.status_code == 201, resp.text
+    pub = client.post(f"{BASE}/{resp.json()['id']}/versions", headers=_auth())
+    assert pub.status_code == 201, pub.text
+    # No warnings about required inputs
+    assert not any("optional_input_ref" in w["code"] for w in pub.json().get("warnings", []))
+
+
+@requires_pg
+def test_input_guarded_by_an_exists_branch_has_no_warning_but_a_default_does_not_help(client):
+    """The designed pattern for an optional input: a branch tests `exists input.x` and leads to the step
+    that reads it, so no warning. A schema default alone does not count (the engine applies none)."""
+    guarded = {
+        "name": "Guarded optional input",
+        "input_schema": {"type": "object", "properties": {"part_numbers": {"type": "array", "default": []}}},
+        "start": "route",
+        "steps": [
+            {"id": "route", "type": "branch", "cases": [{"when": {"op": "exists", "left": {"$ref": "input.part_numbers"}}, "next": "targeted"}], "default": "all"},
+            {"id": "targeted", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"$ref": "input.part_numbers"}}},
+            {"id": "all", "type": "tool", "tool_id": "workflow.return", "input": {"value": "all"}},
+        ],
+    }
+    resp = client.post(BASE, json={"spec": guarded}, headers=_auth())
+    assert resp.status_code == 201, resp.text
+    pub = client.post(f"{BASE}/{resp.json()['id']}/versions", headers=_auth())
+    assert pub.status_code == 201, pub.text
+    assert not any("optional_input_ref" in w["code"] for w in pub.json().get("warnings", [])), pub.json()
+    unguarded = {
+        "name": "Default does not help",
+        "input_schema": {"type": "object", "properties": {"default_field": {"type": "string", "default": "yes"}}},
+        "start": "read",
+        "steps": [{"id": "read", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"$ref": "input.default_field"}}}],
+    }
+    resp = client.post(BASE, json={"spec": unguarded}, headers=_auth())
+    pub = client.post(f"{BASE}/{resp.json()['id']}/versions", headers=_auth())
+    assert pub.status_code == 201, pub.text
+    messages = [w["message"] for w in pub.json()["warnings"] if w["code"] == "optional_input_ref_unguarded"]
+    assert messages and "input.default_field" in messages[0] and "exists" in messages[0]

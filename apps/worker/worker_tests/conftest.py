@@ -199,7 +199,7 @@ def enqueue_run(client, run_store, *, tenant_id: str, spec: dict[str, Any], inpu
 
 
 def wait_terminal(run_store, tenant_id: str, run_id, timeout: float = 60.0) -> dict[str, Any]:
-    terminal = {"completed", "failed", "needs_attention"}
+    terminal = {"completed", "skipped", "failed", "needs_attention"}
 
     def done():
         run = run_store.get_run(tenant_id, run_id)

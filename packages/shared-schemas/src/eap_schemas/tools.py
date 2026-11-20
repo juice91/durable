@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Iterable
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _TOOL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
@@ -60,14 +60,41 @@ class ToolDeclaration(BaseModel):
 
     def matches_implementation_schema(self, implementation_schema: dict[str, Any]) -> bool:
         """True when a function's parameter schema is this declaration's input schema (presentation titles, which
-        Pydantic AI keeps on nested models, do not count)."""
-        return _without_titles(implementation_schema) == self.input_json_schema()
+        Pydantic AI keeps on nested models, do not count). Field constraints (minimum, maximum, etc.) are ignored
+        because Pydantic AI's Tool class doesn't include them when deriving schemas."""
+        decl_schema = self.input_json_schema()
+        impl_schema = _without_titles(implementation_schema)
+        return _without_constraints(decl_schema) == _without_constraints(impl_schema)
+
+
+def _without_constraints(value: Any) -> Any:
+    """Remove Field constraints (minimum, maximum, exclusiveMinimum, etc.) from a JSON Schema tree."""
+    if isinstance(value, dict):
+        return {
+            key: _without_constraints(item)
+            for key, item in value.items()
+            if key not in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "pattern", "const", "enum")
+        }
+    if isinstance(value, list):
+        return [_without_constraints(item) for item in value]
+    return value
 
 
 class ClockNowInput(BaseModel):
     """Input for ``clock.now``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    offset_minutes: Annotated[int, Field(ge=-10080, le=10080, default=0)] = 0
+    parts: bool = False
+
+
+class ClockSleepInput(BaseModel):
+    """Input for ``clock.sleep``: how long to wait, 1 to 120 whole seconds."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seconds: Annotated[int, Field(ge=1, le=120)]
 
 
 class TicketsCreateInput(BaseModel):
@@ -90,6 +117,60 @@ class SecretsRequestInput(BaseModel):
 
 HTTP_REQUEST_TOOL_ID = "http.request"
 HTTP_MAX_RESPONSE_BYTES_CAP = 262144
+HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP = 1_048_576
+HTTP_BODY_SOURCE_DEFAULT_BYTES = 1_000_000
+HTTP_BODY_SOURCE_MAX_BYTES = 5_000_000
+
+
+class HttpBodySource(BaseModel):
+    """``http.request``'s ``body_from_url``: the bytes to send are fetched first from an https image URL whose
+    host is in ``allowed_hosts`` (at most ``max_bytes``)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    max_bytes: int = Field(default=HTTP_BODY_SOURCE_DEFAULT_BYTES, ge=1, le=HTTP_BODY_SOURCE_MAX_BYTES)
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(min_length=1, max_length=20)]
+
+
+class HttpResponseQuery(BaseModel):
+    """``http.request``'s ``response_query``: a JMESPath expression (as ``json.query``) over the JSON body."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expression: Annotated[str, Field(max_length=500)]
+
+
+class HttpExtractHtml(BaseModel):
+    """``http.request``'s ``extract_html``: ``html.extract`` over the text body (``base_url`` defaults to the
+    request URL)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["article", "links"]
+    base_url: str | None = None
+    max_graphemes: Annotated[int, Field(ge=1, le=20000)] = 4000
+    root_selector: Annotated[str, Field(max_length=300)] | None = None
+    include_patterns: list[str] | None = None
+    exclude_patterns: list[str] | None = None
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
+    limit: Annotated[int, Field(ge=1, le=60)] = 20
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=50)] | None = None
+
+
+class HttpParseFeed(BaseModel):
+    """``http.request``'s ``parse_feed``: ``feed.parse`` over the text body (one document); ``label`` names its
+    source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_items: Annotated[int, Field(ge=1, le=50)] = 20
+    max_age_hours: Annotated[float, Field(gt=0)] | None = None
+    include_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    label: Annotated[str, Field(min_length=1, max_length=100)] | None = None
 
 
 with warnings.catch_warnings():
@@ -111,16 +192,31 @@ with warnings.catch_warnings():
         json: Any = None
         body: str | None = None
         timeout_s: int = Field(default=20, ge=1, le=30)
-        max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_RESPONSE_BYTES_CAP)
+        max_response_bytes: int = Field(default=65536, ge=1, le=HTTP_MAX_REDUCED_RESPONSE_BYTES_CAP)
         drop_response_paths: list[Annotated[str, Field(pattern=r"^/")]] | None = Field(default=None, max_length=16)
+        body_from_url: HttpBodySource | None = None
+        response_query: HttpResponseQuery | None = None
+        extract_html: HttpExtractHtml | None = None
+        parse_feed: HttpParseFeed | None = None
+        max_redirects: Annotated[int, Field(ge=0, le=5)] = Field(default=0)
+
+        @model_validator(mode="after")
+        def _cap_needs_a_reducer(self) -> "HttpRequestInput":
+            if self.max_response_bytes > HTTP_MAX_RESPONSE_BYTES_CAP and not (self.response_query or self.extract_html or self.parse_feed):
+                raise ValueError("max_response_bytes above 262144 needs a reducer")
+            return self
 
 
 class WorkflowReturnInput(BaseModel):
-    """Input for ``workflow.return``: any JSON value."""
+    """Input for ``workflow.return``: any JSON value, and optionally how the run it ends is classed.
+
+    ``outcome: "skipped"`` ends the run `skipped` (a "nothing to do" exit: outside a time slot, already
+    posted, nothing new); the value is still the run's output. Absent, the run is `completed`."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     value: Any
+    outcome: Literal["completed", "skipped"] = "completed"
 
 
 FEED_PARSE_TOOL_ID = "feed.parse"
@@ -207,6 +303,32 @@ class TextCheckInput(BaseModel):
     rules: TextCheckRules
 
 
+HTML_EXTRACT_TOOL_ID = "html.extract"
+HTML_EXTRACT_MAX_CHARS = 2 * 1024 * 1024
+HTML_EXTRACT_MAX_LINKS = 60
+
+
+class HtmlExtractInput(BaseModel):
+    """Input for ``html.extract``: an HTML page (at most 2 MiB), the https URL it was fetched from (relative links
+    are resolved against it) and a mode: ``article`` (one article's readable text and metadata) or ``links`` (the
+    anchors of a listing page that match ``include_patterns``). Pure: no I/O. The size cap is the tool's own
+    result (``html_too_large``), not a validation error."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    html: str
+    base_url: str
+    mode: Literal["article", "links"]
+    max_graphemes: Annotated[int, Field(ge=1, le=20000)] = 4000
+    root_selector: Annotated[str, Field(max_length=300)] | None = None
+    include_patterns: list[str] | None = None  # at most 10 of 200 characters: the tool answers invalid_pattern
+    exclude_patterns: list[str] | None = None
+    allowed_hosts: Annotated[list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=20)] | None = None
+    limit: Annotated[int, Field(ge=1, le=HTML_EXTRACT_MAX_LINKS)] = 20
+    exclude_urls: Annotated[list[str], Field(max_length=200)] | None = None
+    exclude_terms: Annotated[list[str], Field(max_length=50)] | None = None
+
+
 class KbSourceGetInput(BaseModel):
     """Input for ``kb.source.get``."""
 
@@ -260,12 +382,22 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
     "clock.now": ToolDeclaration(
         id="clock.now",
         title="Current time",
-        description="Returns current UTC ISO time",
+        description=(
+            "Returns the current UTC time as an ISO string. offset_minutes (-10080..10080) shifts it; parts: true "
+            "returns {iso, date, hour, minute, hour_prefix, weekday, epoch_s} instead, e.g. hour_prefix "
+            "2026-11-20T06: to test whether a timestamp falls in the current clock hour"
+        ),
         side_effect=False,
         external_idempotent=False,
         input_model=ClockNowInput,
         result_example="2026-11-18T09:30:00+00:00",
-        result_schema={"type": "string", "format": "date-time"},
+        result_schema={"oneOf": [
+            {"type": "string", "format": "date-time"},
+            {"type": "object", "properties": {
+                "iso": {"type": "string", "format": "date-time"}, "date": {"type": "string"}, "hour": {"type": "string"},
+                "minute": {"type": "string"}, "hour_prefix": {"type": "string"}, "weekday": {"type": "string"},
+                "epoch_s": {"type": "integer"}}, "required": ["iso", "date", "hour", "minute", "hour_prefix", "weekday", "epoch_s"]},
+        ]},
     ),
     "tickets.create": ToolDeclaration(
         id="tickets.create",
@@ -363,7 +495,31 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "A JSON answer is returned as json, anything else (RSS, HTML) as text. A transport failure is {error: {code}} "
             "(http_timeout, http_connect_failed, outbound_blocked, secret_not_found). drop_response_paths removes "
             "JSON pointers from the answer before it is recorded. query is an object of strings. "
-            "Private and metadata addresses are refused and redirects are not followed"
+            "Private and metadata addresses are refused. "
+            "REDIRECTS: redirects are not followed unless `max_redirects` is set; when > 0, each hop (301/302/303/307/308) "
+            "is checked like a new request and must stay on the same host as the original URL or in `allowed_hosts` "
+            "(when provided). Cross-host hops drop `Authorization` and `Cookie` headers; 303 and 301/302 on POST switch "
+            "to GET without a body; 307/308 keep the method and body. The result gains `redirected_from` (the chain "
+            "of URLs) only when at least one hop was followed. "
+            "body_from_url "
+            "{url, max_bytes (default 1000000, at most 5000000), allowed_hosts} sends bytes fetched from another "
+            "https URL as the body (for a link-card thumbnail: the og_image of html.extract to "
+            "com.atproto.repo.uploadBlob): that URL's host must be in allowed_hosts, it must answer an image/* type "
+            "within max_bytes, else {error: {code: body_source_rejected, detail}}; Content-Type is the fetched one "
+            "unless you set it; do not combine with json or body. "
+            "REDUCERS: a workflow step's output is capped at 32 KiB, and a Bluesky feed or a web page is larger, "
+            "so give at most one reducer and only its result is recorded (the raw body never is; max_response_bytes "
+            "may then go up to 1048576, else 262144): "
+            "response_query {expression} runs a JMESPath expression (as json.query) over the JSON body and returns "
+            "it as json, e.g. a getAuthorFeed without reposts: {expression: \"feed[?!reason].post.{uri: uri, text: record.text}\"}; "
+            "extract_html {mode article|links, base_url (default the request url), max_graphemes, root_selector, "
+            "include_patterns, exclude_patterns, allowed_hosts, limit, exclude_urls, exclude_terms} runs html.extract over the text and returns it "
+            "as text, e.g. {mode: \"article\", max_graphemes: 3000}; "
+            "parse_feed {max_items, max_age_hours, include_terms, exclude_terms, exclude_urls, label} runs feed.parse "
+            "over the text, e.g. {max_items: 10, exclude_urls: [\"https://example.com/already-posted\"]}. "
+            "The result keeps status, ok, headers and elapsed_ms and adds reduced {kind, input_bytes}. A failed "
+            "reduction is that tool's own {error: {code}} with request {status} alongside; two reducers are "
+            "{error: {code: reducer_conflict}}"
         ),
         side_effect=True,
         external_idempotent=False,
@@ -380,7 +536,8 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         title="Return a value",
         description=(
             "Return the given value unchanged. As a workflow's last step it shapes the run's output; with a value "
-            "{error: {code, message}} it ends the run with that stable error code"
+            "{error: {code, message}} it ends the run with that stable error code; with outcome \"skipped\" "
+            "(default \"completed\") the run ends `skipped`, for a \"nothing to do\" exit"
         ),
         side_effect=False,
         external_idempotent=False,
@@ -426,6 +583,50 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         result_schema={"type": "object", "properties": {"result": {}}, "required": ["result"]},
         example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
     ),
+    "html.extract": ToolDeclaration(
+        id="html.extract",
+        title="Extract from HTML",
+        description=(
+            "Read an HTML page (http.request's text, up to 2 MiB) without a browser. base_url is the https URL it came "
+            "from. mode article returns {title, text, published_at, canonical_url, og_image, description, lang, "
+            "graphemes}: text is the main readable content with navigation, ads, scripts and styles removed, cut at "
+            "max_graphemes (default 4000); published_at is ISO or null; og_image is an absolute https URL or null "
+            "(a link-card thumbnail for http.request body_from_url). mode links returns {items: [{id l1.., url, title, "
+            "order}]}, where title is the link text, its title/aria-label, the image alt, or, for an image-only link, the "
+            "headline of the enclosing card: the anchors (under root_selector, a CSS selector, if given) whose absolute URL matches one of "
+            "include_patterns (RE2 regular expressions: at most 10 of 200 characters, no look-around or back-references; "
+            "at least one) and none of exclude_patterns, de-duplicated "
+            "(fragment, utm_* and fbclid dropped), the first limit (default 20, at most 60) in page order, and a "
+            "dropped {scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term} count. "
+            "exclude_urls (links mode, at most 200, compared by the normalised URL) drops the links already handled, "
+            "e.g. the post links from a getAuthorFeed, so limit counts only new links. "
+            "exclude_terms (links mode, at most 50, case-insensitive) drops a link whose title contains one, "
+            "e.g. 新聞稿 or 美通社 for press releases. Only https "
+            "links are returned (javascript:, data: and http: are dropped), and a link to "
+            "another host than base_url's is dropped unless the host is in allowed_hosts; og_image likewise needs "
+            "its host to be base_url's or in allowed_hosts, else null. The output is plain text (all markup, "
+            "scripts, styles and frames removed). Pure: it fetches nothing; a page of over 50,000 elements or 150 "
+            "nesting levels is refused. Errors are results: {error: {code}} with html_too_large, html_unparseable, "
+            "html_too_complex, no_patterns, invalid_pattern, selector_invalid, base_url_invalid"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=HtmlExtractInput,
+        result_example={"title": "…", "text": "the article text", "published_at": "2026-11-18T08:00:00+00:00", "canonical_url": "https://news.example.com/a/1", "og_image": "https://news.example.com/a/1.jpg", "description": "…", "lang": "zh-Hant", "graphemes": 16},
+        result_schema={"type": "object", "properties": {
+            "title": {"type": "string"}, "text": {"type": "string"}, "published_at": {"type": ["string", "null"]},
+            "canonical_url": {"type": ["string", "null"]}, "og_image": {"type": ["string", "null"]},
+            "description": {"type": "string"}, "lang": {"type": ["string", "null"]}, "graphemes": {"type": "integer"},
+            "items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "url": {"type": "string"}, "title": {"type": "string"}, "order": {"type": "integer"}}}},
+            "dropped": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "error": {"type": "object", "properties": {"code": {"type": "string"}}},
+        }},
+        example={
+            "html": "<the text of an http.request GET>", "base_url": "https://news.example.com/section/politics",
+            "mode": "links", "root_selector": "main", "include_patterns": ["^https://news\\.example\\.com/story/\\d+"],
+            "exclude_patterns": ["/video/"], "limit": 10,
+        },
+    ),
     "text.check": ToolDeclaration(
         id="text.check",
         title="Check a text",
@@ -451,6 +652,25 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
                 "rumour_terms": ["allegedly"], "attribution_terms": ["according to reports"],
                 "min_han_ratio": 0.5, "max_verbatim_run": 15,
             },
+        },
+    ),
+    "clock.sleep": ToolDeclaration(
+        id="clock.sleep",
+        title="Sleep",
+        description=(
+            "Waits 1 to 120 whole seconds, then returns {slept_seconds, finished_at} (UTC ISO). For pacing and demos "
+            "(for example a durability demo), not for polling: use workflow.run.wait to wait for a run. Pure. The whole "
+            "sleep happens inside one durable step, so a worker crash during it repeats only this step."
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=ClockSleepInput,
+        example={"seconds": 15},
+        result_example={"slept_seconds": 15, "finished_at": "2026-11-20T09:30:15+00:00"},
+        result_schema={
+            "type": "object",
+            "properties": {"slept_seconds": {"type": "integer"}, "finished_at": {"type": "string", "format": "date-time"}},
+            "required": ["slept_seconds", "finished_at"],
         },
     ),
 }
@@ -541,6 +761,10 @@ ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
     "architect.restore_workflow_version",
     "architect.archive_workflow",
     "architect.set_workflow_schedule",
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
 )
 
 # Tools that never run without a person's recorded approval: the API refuses a spec that lists one

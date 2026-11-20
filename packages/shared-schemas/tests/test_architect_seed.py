@@ -45,7 +45,8 @@ def test_drafter_schema_is_inside_the_output_subset_and_has_no_pattern():
 def test_the_seeded_specs():
     spec = architect_agent_spec("test:echo")
     assert spec.tools == (*ARCHITECT_TOOL_IDS, *ARCHITECT_PLATFORM_TOOL_IDS)
-    assert len(ARCHITECT_TOOL_IDS) == 15 and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8 and len(spec.tools) == 23
+    assert len(spec.tools) == len(ARCHITECT_TOOL_IDS) + len(ARCHITECT_PLATFORM_TOOL_IDS)
+    assert "platform.list_capabilities" in ARCHITECT_PLATFORM_TOOL_IDS
     assert spec.approvals is not None and spec.approvals.tools == ARCHITECT_GATED_TOOL_IDS
     assert spec.memory.history.last_turns == 30 and spec.model_settings.max_steps == 12
     drafter = drafter_agent_spec("litellm:qwen")
@@ -151,6 +152,11 @@ def test_generic_ids_are_one_list_and_slugify_falls_back_for_names_without_latin
     assert re.fullmatch(r"agent-[0-9a-f]{4}", cjk) and cjk == slugify("球棒（棒球角色帳號）")
     assert cjk != slugify("另一個名字") and not is_generic_id(cjk)
     assert slugify("Baseball 球棒") == "baseball"
+    assert slugify("球棒 v2 writer") == "v2-writer"
+    wf = slugify("球棒棒球貼文", "workflow")
+    assert re.fullmatch(r"workflow-[0-9a-f]{4}", wf) and wf == slugify("球棒棒球貼文", "workflow")
+    assert slugify("球棒棒球貼文", "agent").startswith("agent-") and slugify("球棒棒球貼文") .startswith("agent-")
+    assert slugify("Weekly Report", "workflow") == "weekly-report"
 
 
 def test_rank_model_ids_matches_the_seed_pick_and_compile_agent_takes_the_ranked_model():
@@ -178,6 +184,7 @@ def test_the_architect_is_told_to_use_descriptive_ids():
     from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
 
     assert "slug of its name" in ARCHITECT_INSTRUCTIONS and '"definition"' in ARCHITECT_INSTRUCTIONS
+    assert "without Latin letters" in ARCHITECT_INSTRUCTIONS and "qiubang-baseball-post" in ARCHITECT_INSTRUCTIONS
 
 
 def test_the_architect_knows_http_request_and_when_to_pick_it():
@@ -189,11 +196,16 @@ def test_the_architect_knows_http_request_and_when_to_pick_it():
 
 def test_the_architect_names_the_general_tools_and_the_collect_shape_check_post_pattern():
     text = ARCHITECT_INSTRUCTIONS
-    for tool in ("feed.parse", "json.query", "text.check", "http.request", "list_workflow_step_kinds", "$template", "branch"):
+    for tool in ("feed.parse", "json.query", "text.check", "html.extract", "body_from_url", "http.request", "list_workflow_step_kinds", "$template", "branch"):
         assert tool in text, tool
     assert "collect with http.request" in text and "dry-run" in text
     for provider_specific in ("Bluesky", "LTN", "Yahoo", "MLB"):
         assert provider_specific not in text
+
+
+def test_the_architect_is_told_links_mode_has_the_same_exclusions_as_parse_feed():
+    text = ARCHITECT_INSTRUCTIONS
+    assert "extract_html in links mode take exclude_urls and exclude_terms" in text and "not with json.query" in text
 
 
 def test_the_picker_prefers_a_general_chat_model_over_tunes_code_embedding_and_medical_names():
@@ -219,6 +231,7 @@ def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rul
     flat = " ".join(ARCHITECT_INSTRUCTIONS.split())
     assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
     assert "1 to 8" not in flat and "8 steps" not in flat
+    assert "must use an http.request reducer" in flat and "response_query" in flat
     assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
 
 
@@ -250,3 +263,13 @@ def test_the_default_prefers_claude_sonnet_5_5_over_fable_and_the_gateway():
     assert ids.index("anthropic:claude-fable-5-2") < ids.index("litellm:qwen3.8")  # provider still outranks the gateway
     assert ids[-1].startswith("litellm:") and any(m in ids[-1] for m in ("embedding", "reranker", "coder", "medgemma"))
     assert rank_model_ids(["anthropic:claude-sonnet-5-5-20261001", "anthropic:claude-opus-5-5"])[0] == "anthropic:claude-sonnet-5-5-20261001"
+
+
+def test_the_architect_is_told_to_discover_the_control_plane_before_saying_it_cannot():
+    from eap_schemas.architect import CONTROL_LIST_TOOL_ID, control_tool_name
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+
+    assert CONTROL_LIST_TOOL_ID in ARCHITECT_PLATFORM_TOOL_IDS
+    assert "platform__list_capabilities" in ARCHITECT_INSTRUCTIONS and "control__eval_suite_create" in ARCHITECT_INSTRUCTIONS
+    assert "needs an engineer and name the missing capability" in ARCHITECT_INSTRUCTIONS
+    assert control_tool_name("eval.suite.create") == "control__eval_suite_create"

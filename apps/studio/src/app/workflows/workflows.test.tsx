@@ -27,6 +27,8 @@ const V2 = { workflow_id: "wf-1", version: 2, spec: demoSpec, spec_hash: "h2", c
 const V1 = { ...V2, version: 1, spec: { ...demoSpec, steps: demoSpec.steps.slice(0, 1).map((s) => ({ ...s, next: null })) }, spec_hash: "h1" };
 
 let runResponses: Array<() => Promise<Response>> = [];
+let explanation: (() => Promise<Response>) | null = null;
+const EXPLAIN = { workflow_id: "wf-1", version: 2, locale: "zh-TW", model: "test:echo", created_at: "2026-11-20T10:00:00Z", summary: "先判斷是否緊急，再決定要不要通知。", inputs: [], outcomes: [], steps: [{ id: "route", note: "判斷這次是否緊急。" }] };
 
 function route(url: string, init?: RequestInit): Promise<Response> {
   const u = new URL(url);
@@ -35,6 +37,10 @@ function route(url: string, init?: RequestInit): Promise<Response> {
   if (u.pathname === "/api/v1/workflows/wf-1/versions") return json(200, [V2, V1]);
   if (u.pathname === "/api/v1/workflows/wf-1/versions/2") return json(200, V2);
   if (u.pathname === "/api/v1/runs") return json(200, { items: [{ run_id: "aaaaaaaa-1", kind: "workflow", workflow_id: "wf-1", workflow_version: 2, display_status: "completed", status: "completed", created_at: "2026-11-13T10:00:00Z", updated_at: "2026-11-13T10:00:02.500Z" }], next_before: null });
+  if (u.pathname === "/api/v1/workflows/wf-1/explanation") {
+    if (init?.method === "POST") return json(200, EXPLAIN);
+    return explanation ? explanation() : json(404, { detail: "none", code: "explanation_missing" });
+  }
   if (u.pathname === "/api/v1/workflows/wf-1/runs" && init?.method === "POST") return runResponses.shift()!();
   return json(404, { detail: "not mocked" });
 }
@@ -53,6 +59,8 @@ beforeEach(() => {
   push.mockReset();
   workflowRunLedger.reset();
   runResponses = [];
+  explanation = null;
+  vi.stubGlobal("navigator", { ...navigator, language: "zh-TW" });
 });
 
 afterEach(() => {
@@ -80,13 +88,35 @@ describe("/workflows/[id]", () => {
 
   it("renders the published graph, switches versions and shows run history", async () => {
     await renderDetail();
-    expect(screen.getByTestId("workflow-step-route")).toHaveTextContent("1: input.urgent eq true");
+    expect(screen.getByTestId("workflow-step-route")).toHaveTextContent("input.urgent eq true");
     expect(screen.getByTestId("workflow-node-route")).toHaveAttribute("data-step-type", "branch");
     fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
     await waitFor(() => expect(screen.queryByTestId("workflow-step-route")).toBeNull());
     const row = await screen.findByTestId("workflow-run-row-aaaaaaaa-1");
     expect(within(row).getByRole("link")).toHaveAttribute("href", routes.workflowRun("wf-1", "aaaaaaaa-1"));
     expect(row).toHaveTextContent("2.50 s");
+  });
+
+  it("opens the AI 說明 panel from the header, generates for the shown version and notes the steps", async () => {
+    await renderDetail();
+    expect(screen.queryByTestId("workflow-explain-panel")).toBeNull();
+    fireEvent.click(screen.getByTestId("workflow-explain-button"));
+    fireEvent.click(await screen.findByTestId("workflow-explain-generate"));
+    expect(await screen.findByTestId("workflow-explain-summary")).toHaveTextContent("先判斷是否緊急");
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST" && String(init?.body).includes("refresh"));
+    expect(JSON.parse(post![1].body)).toEqual({ version: 2, locale: "zh-TW", refresh: false });
+    expect(screen.getByTestId("workflow-step-ai-note-route")).toHaveTextContent("判斷這次是否緊急。");
+    fireEvent.click(screen.getByTestId("workflow-explain-close"));
+    expect(screen.queryByTestId("workflow-explain-panel")).toBeNull();
+  });
+
+  it("shows a cached explanation's notes without the panel open, and none after switching to a version without one", async () => {
+    explanation = () => json(200, EXPLAIN);
+    await renderDetail();
+    expect(await screen.findByTestId("workflow-step-ai-note-route")).toHaveTextContent("AI 註解");
+    explanation = null;
+    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
+    await waitFor(() => expect(screen.queryByTestId("workflow-step-ai-note-route")).toBeNull());
   });
 
   it("maps 422 field errors onto the form", async () => {

@@ -1,5 +1,6 @@
 "use client";
 
+import { PendingApprovalToasts } from "@/components/approvals/PendingApprovalToasts";
 import React, { useCallback } from "react";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { Toaster } from "@/components/ui/Toaster";
@@ -8,6 +9,7 @@ import { FrameProvider } from "./FrameContext";
 import { MobileNavDrawer, MobileTopBar } from "./MobileNav";
 import { SidePanelProvider, SidePanelSlot } from "./SidePanel";
 import { Sidebar } from "./Sidebar";
+import { useCopyShortcut } from "@/lib/useCopyShortcut";
 
 export { MAIN_ID };
 
@@ -42,6 +44,7 @@ export function SkipLink() {
  * Mounts the app-wide TooltipProvider and Toaster once.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
+  useCopyShortcut();
   return (
     <TooltipProvider>
       <FrameProvider>
@@ -64,6 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <MobileNavDrawer />
           <Toaster />
+          <PendingApprovalToasts />
         </SidePanelProvider>
       </FrameProvider>
     </TooltipProvider>

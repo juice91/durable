@@ -1,5 +1,7 @@
 """Authenticated tool catalog API tests."""
 
+from eap_schemas.tools import TOOL_DECLARATIONS
+
 
 def test_tool_catalog_requires_authentication(client) -> None:
     """The platform catalog is not exposed to anonymous callers."""
@@ -20,20 +22,26 @@ def test_tool_catalog_defaults_to_all_tools_allowed(client, auth_header, monkeyp
     # `http.request` and `workflow.return` come last.
     assert [t["id"] for t in body[3:]] == [
         "kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait", "workflow.run.result",
-        "http.request", "workflow.return", "feed.parse", "json.query", "text.check",
+        "http.request", "workflow.return", "feed.parse", "json.query", "html.extract", "text.check", "clock.sleep",
     ]
+    sleep = next(t for t in body if t["id"] == "clock.sleep")
+    assert (sleep["side_effect"], sleep["input_schema"]["properties"]) == (
+        False, {"seconds": {"maximum": 120, "minimum": 1, "type": "integer"}})
     assert all(t["allowed"] for t in body[3:])
     assert {t["id"]: t["side_effect"] for t in body[3:]}["kb.source.sync"] is True
     assert body[:3] == [
         {
             "id": "clock.now",
             "title": "Current time",
-            "description": "Returns current UTC ISO time",
+            "description": TOOL_DECLARATIONS["clock.now"].description,
             "side_effect": False,
             "external_idempotent": False,
             "input_schema": {
                 "additionalProperties": False,
-                "properties": {},
+                "properties": {
+                    "offset_minutes": {"default": 0, "maximum": 10080, "minimum": -10080, "type": "integer"},
+                    "parts": {"default": False, "type": "boolean"},
+                },
                 "type": "object",
             },
             "allowed": True,

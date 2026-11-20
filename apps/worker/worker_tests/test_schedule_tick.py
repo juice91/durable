@@ -485,3 +485,21 @@ def test_tick_starts_an_orphan_but_not_a_known_queued_run(worker, tenant, make_s
     assert result is not None
     wait_for(lambda: (worker.run_store.get_run(tenant, uuid.UUID(orphan)) or {}).get("status") in ("completed", "failed"),
              timeout=30, what="the orphan run to start and end")
+
+
+def test_scheduled_run_that_returns_skipped_ends_skipped(worker, tenant, make_schedule, monkeypatch):
+    monkeypatch.setitem(worker.__dict__, "allowed_tools", frozenset(worker.registry.tool_ids()))
+    spec = _spec("Skip tick")
+    spec["steps"] = [{"id": "now", "type": "tool", "tool_id": "workflow.return",
+                      "input": {"value": {"status": "outside_slot"}, "outcome": "skipped"}}]
+    schedule, _ = make_schedule(next_fire_at=datetime.now(timezone.utc) - timedelta(minutes=1), spec=spec)
+    run_tick()
+    (run,) = _runs(worker, schedule["id"])
+    ended = wait_for(
+        lambda: (r if (r := worker.run_store.get_run(tenant, uuid.UUID(run["id"])))
+                 and r["status"] in ("completed", "skipped", "failed") else None),
+        timeout=60, what="scheduled run end",
+    )
+    assert ended["status"] == "skipped" and "outside_slot" in ended["output"]
+    last = _schedules(worker).last_runs(tenant, [schedule["id"]])[schedule["id"]]
+    assert last["status"] == "skipped" and last["detail"] == "outside_slot"

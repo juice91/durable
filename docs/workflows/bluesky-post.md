@@ -116,6 +116,13 @@ stable code `bluesky_auth_failed`. `workflow.return` returns its input unchanged
 `kb-source-sync`). Network failures end the run with the tool's own codes: `http_timeout`,
 `http_connect_failed`, `outbound_blocked`, `secret_not_found` (the secret is not stored; nothing is sent).
 
+`workflow.return` also takes an optional `outcome`, `"completed"` (the default) or `"skipped"`. A run that ends
+through a `workflow.return` with `"outcome": "skipped"` has the terminal status `skipped` instead of `completed`:
+use it for a "nothing to do" exit (outside a time slot, the slot already posted, nothing new in the feed), for
+example `{"value": {"status": "outside_slot"}, "outcome": "skipped"}`. The `value` is still the run's output, and a
+skipped run is a success, never a failure. Studio hides skipped runs by default (a "Show skipped" toggle lists
+them), `GET /runs?status=skipped` lists them, and Metrics counts them apart from completed and failed runs.
+
 <!-- example: bluesky-post.json /spec/steps/4 -->
 ```json
 {

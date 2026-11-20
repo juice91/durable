@@ -370,11 +370,11 @@ def set_run_outcome(span: Span, status: str, error_code: str | None = None) -> N
     """Record the run's terminal status on its span; anything but `completed` marks it an error.
 
     `error_code` is a stable code (never exception text); it becomes `eap.error_code` and the status
-    description."""
+    description. A `skipped` run (a "nothing to do" exit) is a success too."""
     span.set_attribute("eap.run_status", status)
     if error_code:
         span.set_attribute("eap.error_code", error_code)
-    if status == "completed":
+    if status in ("completed", "skipped"):
         span.set_status(Status(StatusCode.OK))
     else:
         span.set_status(Status(StatusCode.ERROR, error_code or status))

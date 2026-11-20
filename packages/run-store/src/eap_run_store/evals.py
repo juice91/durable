@@ -72,6 +72,7 @@ from eap_schemas.evals import (
     EvaluatorSpec,
 )
 from eap_run_store.cursor import RunCursor
+from eap_run_store.revisions import bump_row
 from eap_run_store.store import (
     Base,
     RunModel,
@@ -138,6 +139,8 @@ class EvalSuiteModel(Base):
         "updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
     archived_at: Mapped[datetime | None] = mapped_column("archived_at", DateTime(timezone=True), nullable=True)
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_eval_suites_tenant_id_id"),
@@ -168,6 +171,8 @@ class EvalCaseModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         "updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         UniqueConstraint("suite_id", "name", name="uq_eval_cases_suite_name"),
@@ -327,6 +332,7 @@ class EvalSuiteRecord:
     archived_at: datetime | None
     case_count: int
     workflow_id: str | None = None
+    revision: int = 1
 
     @property
     def archived(self) -> bool:
@@ -354,6 +360,7 @@ class EvalCaseRecord:
     position: int
     created_at: datetime
     updated_at: datetime
+    revision: int = 1
 
     def to_case(self) -> EvalCase:
         return EvalCase(
@@ -524,6 +531,7 @@ def _suite_record(row: EvalSuiteModel, case_count: int) -> EvalSuiteRecord:
         updated_at=row.updated_at,
         archived_at=row.archived_at,
         case_count=case_count,
+        revision=row.revision,
     )
 
 
@@ -540,6 +548,7 @@ def _case_record(row: EvalCaseModel) -> EvalCaseRecord:
         position=row.position,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        revision=row.revision,
     )
 
 
@@ -834,13 +843,17 @@ class EvalStore:
         description: str | None = _UNSET,
         evaluators: Sequence[Any] = _UNSET,
         archived: bool | None = None,
+        expected_revision: int | None = None,
     ) -> EvalSuiteRecord:
         """Change the given fields. `archived=True` archives, `False` restores. An archived suite
         accepts only `archived=False` (EvalSuiteArchived otherwise). New suite evaluators are
-        checked for name clashes with every case's (EvalSuiteInvalid)."""
+        checked for name clashes with every case's (EvalSuiteInvalid). RevisionMismatch when
+        `expected_revision` is given and the suite has moved on (its case edits do not count: a case
+        has its own revision)."""
         with self.Session() as session:
             row = self._suite(session, tenant_id, suite_id, agent_id, lock=True)
             sid = str(row.id)
+            bump_row(session, row, expected_revision)
             edits = name is not _UNSET or description is not _UNSET or evaluators is not _UNSET
             if row.archived_at is not None and archived is not False and (edits or archived is None):
                 raise EvalSuiteArchived(str(row.id))
@@ -953,14 +966,17 @@ class EvalStore:
         metadata: Mapping[str, Any] = _UNSET,
         evaluators: Sequence[Any] = _UNSET,
         position: int = _UNSET,
+        expected_revision: int | None = None,
     ) -> EvalCaseRecord:
         """Change the given fields; the merged case is re-validated. Same errors as add_case, plus
-        EvalCaseNotFound (also when the case is deleted concurrently). Locks the suite, then the case
+        EvalCaseNotFound (also when the case is deleted concurrently) and RevisionMismatch when
+        `expected_revision` is given and the case has moved on. Locks the suite, then the case
         (the same order as every case write, so no deadlock)."""
         with self.Session() as session:
             existing = self._case(session, tenant_id, case_id, suite_id, agent_id)
             suite = self._writable_suite(session, tenant_id, existing.suite_id, None)
             row = self._lock_case(session, tenant_id, existing.id)
+            bump_row(session, row, expected_revision)
             merged = {
                 "name": row.name if name is _UNSET else name,
                 "input": row.input if input is _UNSET else input,
@@ -1047,11 +1063,13 @@ class EvalStore:
             position = self._next_position(session, tenant_id, suite.id)
             for case in valid:
                 if case.name in existing:
+                    bump_row(session, existing[case.name])  # an import is a write: open editors turn stale
                     self._apply_case(existing[case.name], case, keep_evaluators=keep_case_evaluators)
                 else:
                     session.add(self._new_case_row(tenant_id, suite.id, case, position, None))
                     position += 1
             if evaluators is not _UNSET:
+                bump_row(session, suite)
                 suite.evaluators = _dump_evaluators(suite_specs)
             self._flush_case(session, suite.id, "")
             self._touch_suite(session, tenant_id, suite.id)

@@ -311,7 +311,7 @@ def test_nothing_of_another_tenant_is_visible(engine, tenant, other):
 def test_registered_for_the_architect_only():
     registry = ToolRegistry()
     register_platform_tools(registry)
-    assert set(ARCHITECT_PLATFORM_TOOL_IDS) <= registry.tool_ids() and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8
+    assert set(ARCHITECT_PLATFORM_TOOL_IDS) <= registry.tool_ids() and {"platform.list_capabilities", "platform.get_run", "platform.list_runs"} <= set(ARCHITECT_PLATFORM_TOOL_IDS)
     for tool_id in ARCHITECT_PLATFORM_TOOL_IDS:
         meta = registry.get_metadata(tool_id)
         assert not meta.get("side_effect")  # read-only: no approval
@@ -330,3 +330,40 @@ def test_only_a_builtin_run_may_use_them(worker):
     rt = worker
     assert set(ARCHITECT_PLATFORM_TOOL_IDS) <= rt.allowed_tools_for(builtin=True)
     assert not set(ARCHITECT_PLATFORM_TOOL_IDS) & rt.allowed_tools_for(builtin=False)
+
+
+# ----------------------------------------------------------------------------------- new step does field
+
+
+
+# ----------------------------------------------------------------- the step "does" summary and run masking (pure)
+
+
+def test_step_does_describes_tool_agent_branch_and_return_steps():
+    does = platform_reads._step_does
+    http = does({"id": "list", "type": "tool", "tool_id": "http.request", "input": {"method": "GET", "url": "https://www.taiwannews.com.tw/zh", "extract_html": {"mode": "links", "limit": 8}}})
+    assert http["tool"] == "http.request"
+    assert "GET https://www.taiwannews.com.tw/zh" in http["input_summary"] and "extract_html" in http["input_summary"]
+    query = does({"id": "cands", "type": "tool", "tool_id": "json.query", "input": {"data": {"$ref": "steps.list.output.text"}, "expression": "items[:3].url"}})
+    assert "items[:3].url" in query["input_summary"]
+    ret = does({"id": "skip", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"status": "nothing_new"}, "outcome": "skipped"}})
+    assert "status" in ret["input_summary"] and "skipped" in ret["input_summary"]
+    agent = does({"id": "writer", "type": "agent", "agent_id": "0d1beeb5", "version": 3, "input": {"article": {"$ref": "steps.a0.output.text"}}})
+    assert agent["agent_id"] == "0d1beeb5" and agent["version"] == 3 and agent["input_keys"] == ["article"]
+    branch = does({"id": "gate", "type": "branch", "cases": [{"when": {"op": "eq", "left": {"$ref": "steps.feed.output.ok"}, "right": False}, "next": "failed"}], "default": "ltn"})
+    assert branch["cases"][0]["to"] == "failed" and branch["cases"][0]["when"] == "$steps.feed.output.ok == false"
+    assert branch["default"] == "ltn"
+
+
+def test_step_does_is_bounded():
+    does = platform_reads._step_does
+    long = does({"id": "q", "type": "tool", "tool_id": "json.query", "input": {"data": {}, "expression": "x" * 2000}})
+    assert len(long["input_summary"]) <= 600
+
+
+def test_run_data_masks_credentials_at_any_depth():
+    masked = platform_reads._mask_run_data({"json": {"accessJwt": "eyJ…", "did": "did:plc:x", "nested": [{"refreshJwt": "r", "api_key": "k", "fine": 1}]}, "headers": {"Authorization": "Bearer t", "content-type": "json"}})
+    assert masked["json"]["accessJwt"] == "<REDACTED>" and masked["json"]["did"] == "did:plc:x"
+    assert masked["json"]["nested"][0]["refreshJwt"] == "<REDACTED>" and masked["json"]["nested"][0]["api_key"] == "<REDACTED>"
+    assert masked["json"]["nested"][0]["fine"] == 1
+    assert masked["headers"]["Authorization"] == "<REDACTED>" and masked["headers"]["content-type"] == "json"

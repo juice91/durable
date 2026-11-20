@@ -3,6 +3,7 @@
   "private": true,
   "description": "AG-UI smoke test (AGUI.14): @ag-ui/client 1.0.3 against a running PydanticOS API and worker.",
   "type": "module",
+  "license": "Apache-2.0",
   "scripts": {
     "smoke": "tsx smoke.ts",
     "typecheck": "tsc --noEmit"
