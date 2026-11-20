@@ -86,7 +86,7 @@ def test_create_rejects_bad_cron_timezone_input_name_and_unpublished(api):
     r = make(client, h, wf, timezone="Mars/Base")
     assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_timezone"
     r = make(client, h, wf, input={"wrong": 1})
-    assert r.status_code == 422 and r.json()["detail"]["code"] == "input_schema_errors"
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "schedule_input_invalid"
     assert make(client, h, wf).status_code == 201
     r = make(client, h, wf)
     assert r.status_code == 409 and r.json()["detail"]["code"] == "schedule_name_taken"
@@ -131,7 +131,7 @@ def test_patch_active_false_then_true_clears_last_error(api):
     nxt = datetime.fromisoformat(r.json()["next_fire_at"].replace("Z", "+00:00"))
     assert (nxt.hour, nxt.minute) == (0, 0)
     for bad, code in (({"cron": "nope"}, "invalid_cron"), ({"timezone": "Nope/Zone"}, "invalid_timezone"),
-                      ({"input": {"wrong": 1}}, "input_schema_errors")):
+                      ({"input": {"wrong": 1}}, "schedule_input_invalid")):
         r = client.patch(f"{API}/workflows/schedules/{s['id']}", json=bad, headers=h)
         assert r.status_code == 422 and r.json()["detail"]["code"] == code, (bad, r.text)
     assert client.patch(f"{API}/workflows/schedules/{s['id']}", json={"input": {"q": "new"}, "name": "renamed"},

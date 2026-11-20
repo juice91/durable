@@ -142,6 +142,8 @@ POST /api/v1/workflows/{id}/schedules
 {"name": "nightly", "cron": "0 3 * * *", "timezone": "UTC", "input": {"source_id": "<source>", "mode": "incremental"}}
 ```
 
+The schedule's `input` is validated against the workflow's **latest published version** input schema at creation and update time; a mismatch returns a 422 `schedule_input_invalid` error. Publishing a new workflow version while schedules exist checks each enabled schedule's input and returns warnings if any no longer match the new schema.
+
 Each fire starts a run of the published workflow, which starts one incremental sync (a run id derived from
 the fire time makes a repeated tick harmless).
 

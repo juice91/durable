@@ -112,7 +112,7 @@ def _check_cron_zone(cron: str, zone: str) -> None:
 def _check_input(spec: WorkflowSpec, value: Any) -> None:
     problems = validate_schedule_input(spec, value)
     if problems:
-        raise _fail(422, "input_schema_errors", errors=problems)
+        raise _fail(422, "schedule_input_invalid", message=" ".join(problems))
 
 
 def _page(db: Session, store: ScheduleStore, tenant_id: str, workflow_id: str | None, limit: int,

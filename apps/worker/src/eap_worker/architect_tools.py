@@ -753,7 +753,7 @@ def set_workflow_schedule_sync(
             return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
         value = {} if input is None else input
         if problems := input_problems(latest.spec.get("input_schema"), value):
-            return error("input_schema_errors", "The input does not fit the workflow's input schema.", errors=problems)
+            return error("schedule_input_invalid", f"The input does not fit the workflow's input schema. {'; '.join(problems)}")
         try:
             created = store.create(
                 tenant_id, wf_row_id, name=name, cron=cron, timezone=timezone, input=value,
@@ -784,7 +784,7 @@ def set_workflow_schedule_sync(
         if latest is None:
             return error("not_published", "Publish the workflow first: a schedule runs its latest published version.")
         if problems := input_problems(latest.spec.get("input_schema"), current["input"]):
-            return error("input_schema_errors", "The stored input no longer fits the workflow's input schema.", errors=problems)
+            return error("schedule_input_invalid", f"The stored input no longer fits the workflow's input schema. {'; '.join(problems)}")
         updated = store.update(
             tenant_id, current["id"], expected_revision=current["revision"], active=True, last_error=None,
             next_fire_at=next_fire(current["cron"], current["timezone"], _now()),

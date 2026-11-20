@@ -263,7 +263,7 @@ def test_schedule_create_is_gated_and_names_the_cron_in_words(engine, tenant):
     assert bad["error"]["code"] == "invalid_timezone"
 
     wrong = run(set_workflow_schedule(engine, tenant, "daily", "create", name="Morning", cron="0 9 * * *"))
-    assert wrong["error"]["code"] == "input_schema_errors"  # workflows made by the Architect take {"input": text}
+    assert wrong["error"]["code"] == "schedule_input_invalid"  # workflows made by the Architect take {"input": text}
     made = run(set_workflow_schedule(
         engine, tenant, "daily", "create", name="Morning", cron="30 9 * * *", timezone="Asia/Taipei",
         input={"input": "go"}))

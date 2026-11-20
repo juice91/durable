@@ -111,6 +111,8 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
       }));
     } else if (typeof data.detail === "string") {
       message = data.detail;
+    } else if (data.detail && typeof data.detail === "object" && typeof data.detail.message === "string") {
+      message = data.detail.message;
     }
   } catch {
     // Keep the HTTP status fallback when the response is not JSON.
