@@ -13,6 +13,12 @@ Providers (the same environment the worker reads; see eap_worker.models / config
   pages via `after_id`); when that listing fails a small fallback set (ANTHROPIC_FALLBACK) is offered,
   marked source "fallback", and the status keeps its error.
 - `openai`: OPENAI_API_KEY, https://api.openai.com/v1/models.
+- `cloudflare`: Workers AI (optionally through AI Gateway). Token CLOUDFLARE_API_TOKEN (fallback
+  EAP_CLOUDFLARE_API_TOKEN) and EAP_CLOUDFLARE_ACCOUNT_ID are both required; EAP_CLOUDFLARE_GATEWAY_ID adds the
+  `cf-aig-gateway-id` header on every request and EAP_CLOUDFLARE_BASE_URL overrides the OpenAI-compatible base
+  (default `https://api.cloudflare.com/client/v4/accounts/<account>/ai/v1`). Models come from the account's
+  catalogue (`/ai/models/search?task=Text Generation`, up to CLOUDFLARE_MAX_PAGES pages), ids as returned
+  (`@cf/...`), with function-calling and context size read from each model's `properties`.
 
 Each discovered model carries `Capabilities` (image and PDF input, and where that came from):
 `gateway` (LiteLLM `GET <root>/model/info`: `supports_vision`, `supports_pdf_input`, fetched with the
@@ -90,6 +96,16 @@ PROVIDERS: tuple[ProviderDef, ...] = (
     ProviderDef("anthropic", "Anthropic", ("ANTHROPIC_API_KEY",), (), "https://api.anthropic.com", "anthropic"),
     ProviderDef("openai", "OpenAI", ("OPENAI_API_KEY",), (), "https://api.openai.com", "bearer"),
 )
+CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+CLOUDFLARE_TOKEN_ENVS = ("CLOUDFLARE_API_TOKEN", "EAP_CLOUDFLARE_API_TOKEN")
+CLOUDFLARE_ACCOUNT_ENV = "EAP_CLOUDFLARE_ACCOUNT_ID"
+CLOUDFLARE_GATEWAY_ENV = "EAP_CLOUDFLARE_GATEWAY_ID"
+CLOUDFLARE_BASE_URL_ENV = "EAP_CLOUDFLARE_BASE_URL"
+CLOUDFLARE_PAGE_SIZE = 100
+CLOUDFLARE_MAX_PAGES = 5
+PROVIDERS = PROVIDERS + (
+    ProviderDef("cloudflare", "Cloudflare Workers AI", CLOUDFLARE_TOKEN_ENVS, (CLOUDFLARE_BASE_URL_ENV,), None, "bearer"),
+)
 PROVIDER_BY_ID: dict[str, ProviderDef] = {p.id: p for p in PROVIDERS}
 
 
@@ -111,6 +127,10 @@ class ModelEntry:
     capabilities: Capabilities
     # "discovered" (the provider listed it) or "fallback" (the small static set used when its listing failed)
     source: str = "discovered"
+    # Reported by providers that publish them (Cloudflare's catalogue); None = unknown.
+    function_calling: bool | None = None
+    structured_output: bool | None = None
+    context_window: int | None = None
 
 
 # Families known to take images (and PDFs), per provider; (pattern, image, pdf), first match wins.
@@ -276,6 +296,105 @@ def _anthropic_names(url: str, headers: Mapping[str, str]) -> list[str]:
     return sorted(names)
 
 
+# Workers AI text models whose catalogue `properties` may be missing; facts from Cloudflare's model page.
+CLOUDFLARE_STATIC: dict[str, dict[str, Any]] = {
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017": {
+        "function_calling": True, "structured_output": True, "context_window": 1_048_576,
+    },
+}
+# Text-only unless the catalogue says otherwise: the generic "assumed" rule would offer images to every model.
+_CLOUDFLARE_TEXT_ONLY = Capabilities(image=False, pdf=False, source="static")
+
+
+def _property_map(properties: Any) -> dict[str, Any]:
+    """Cloudflare's `properties` is a list of `{property_id, value}` (values are strings); a plain dict is accepted too."""
+    if isinstance(properties, dict):
+        return dict(properties)
+    out: dict[str, Any] = {}
+    if isinstance(properties, list):
+        for row in properties:
+            if isinstance(row, dict) and isinstance(row.get("property_id"), str):
+                out[row["property_id"]] = row.get("value")
+    return out
+
+
+def _truthy(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+def _cloudflare_entry(row: dict[str, Any]) -> ModelEntry:
+    name = row["name"]
+    props = _property_map(row.get("properties"))
+    static = CLOUDFLARE_STATIC.get(name, {})
+    function_calling = _truthy(props.get("function_calling"))
+    context = props.get("context_window", props.get("max_total_tokens"))
+    try:
+        context_window = int(str(context).replace(",", "")) if context is not None else None
+    except ValueError:
+        context_window = None
+    vision = _truthy(props.get("vision"))
+    caps = Capabilities(True, False, "gateway") if vision else _CLOUDFLARE_TEXT_ONLY
+    return ModelEntry(
+        name, caps,
+        function_calling=function_calling if function_calling is not None else static.get("function_calling"),
+        structured_output=static.get("structured_output"),
+        context_window=context_window or static.get("context_window"),
+    )
+
+
+def _cloudflare_models(account: str, headers: Mapping[str, str]) -> tuple[ModelEntry, ...]:
+    """Text-generation models of the account: `GET /accounts/<id>/ai/models/search`, up to CLOUDFLARE_MAX_PAGES pages."""
+    rows: dict[str, dict[str, Any]] = {}
+    for page in range(1, CLOUDFLARE_MAX_PAGES + 1):
+        url = (f"{CLOUDFLARE_API}/accounts/{quote(account, safe='')}/ai/models/search"
+               f"?task=Text%20Generation&per_page={CLOUDFLARE_PAGE_SIZE}&page={page}")
+        body = http_get(url, headers, REQUEST_TIMEOUT_S)
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, list):
+            raise ValueError("unexpected response")
+        for row in result:
+            if isinstance(row, dict) and isinstance(row.get("name"), str) and row["name"]:
+                rows.setdefault(row["name"], row)
+        info = body.get("result_info") if isinstance(body.get("result_info"), dict) else {}
+        total = info.get("total_count")
+        if len(result) < CLOUDFLARE_PAGE_SIZE or (isinstance(total, int) and page * CLOUDFLARE_PAGE_SIZE >= total):
+            break
+    return tuple(_cloudflare_entry(rows[n]) for n in sorted(rows))
+
+
+def _check_cloudflare(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
+    key_env = _first_set(provider.key_envs, environ)
+    account = (environ.get(CLOUDFLARE_ACCOUNT_ENV) or "").strip()
+    base = (environ.get(CLOUDFLARE_BASE_URL_ENV) or "").strip() or (
+        f"{CLOUDFLARE_API}/accounts/{quote(account, safe='')}/ai/v1" if account else None)
+    common = {"id": provider.id, "label": provider.label, "env_var": key_env or provider.key_envs[0],
+              "base_url_host": _host(base or CLOUDFLARE_API)}
+    if not key_env or not account:
+        missing = provider.key_envs[0] if not key_env else CLOUDFLARE_ACCOUNT_ENV
+        return ProviderStatus(**common, configured=False, status=NOT_CONFIGURED, models=(), checked_at=None,
+                              error=f"{missing} is not set on the server")
+    headers = {"Authorization": f"Bearer {environ[key_env].strip()}"}
+    gateway = (environ.get(CLOUDFLARE_GATEWAY_ENV) or "").strip()
+    if gateway:
+        headers["cf-aig-gateway-id"] = gateway
+    try:
+        models = _cloudflare_models(account, headers)
+    except HttpStatusError as exc:
+        error = "the provider rejected the server's key" if exc.status in (401, 403) else f"the provider answered HTTP {exc.status}"
+        return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=(), checked_at=_now(), error=error)
+    except ValueError:
+        return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=(), checked_at=_now(),
+                              error="the provider answered with an unexpected model list")
+    except Exception as exc:  # noqa: BLE001 - never echo the exception text (may carry URLs)
+        error = "the provider did not answer in time" if "timeout" in type(exc).__name__.lower() else "could not connect to the provider"
+        return ProviderStatus(**common, configured=True, status=UNREACHABLE, models=(), checked_at=_now(), error=error)
+    return ProviderStatus(**common, configured=True, status=OK, models=models, checked_at=_now(), error=None)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -293,6 +412,8 @@ def _fetch_gateway_info(provider: ProviderDef, base: str, headers: Mapping[str, 
 
 
 def _check(provider: ProviderDef, environ: Mapping[str, str]) -> ProviderStatus:
+    if provider.id == "cloudflare":
+        return _check_cloudflare(provider, environ)
     key_env = _first_set(provider.key_envs, environ)
     base_env = _first_set(provider.base_url_envs, environ)
     base = environ[base_env].strip() if base_env else provider.default_base_url

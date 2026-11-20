@@ -15,6 +15,8 @@ const statusStyles: Record<RunStatus, string> = {
   // AC.14: a running turn that waits for a person to approve a tool call.
   waiting_approval: "bg-warning/15 text-warning-text ring-1 ring-inset ring-warning",
   completed: "bg-success/10 text-success-text",
+  // A "nothing to do" exit (workflow.return outcome "skipped"): a success, shown quietly in grey.
+  skipped: "bg-muted text-muted-foreground",
   failed: "bg-destructive/10 text-destructive-text",
   needs_attention: "bg-warning/15 text-warning-text ring-1 ring-inset ring-warning",
 };

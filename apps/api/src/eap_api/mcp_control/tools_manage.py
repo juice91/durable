@@ -18,7 +18,7 @@ from eap_api.mcp_control.helpers import (
     MAX_WAIT_SECONDS, clip, guard_json, require_agent, require_unrestricted, require_workflow, tenant_run, uid,
     wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, McpToolError, call, translate
+from eap_api.mcp_control.routing import DB, McpToolError, call, call_with_revision, revision_reader, translate
 from eap_api.mcp_control.server import current_ctx
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 
@@ -51,7 +51,10 @@ def register_tools(tool: Any) -> None:
             return await call(ctx, create_agent, request=body, principal=ctx.actor, db=DB)
         require_agent(ctx, agent_id)
         body = _model(AgentUpdate, spec=spec)
-        return await call(ctx, patch_agent, agent_id=uid(agent_id, "agent_id"), request=body, principal=ctx.actor, db=DB)
+        aid = uid(agent_id, "agent_id")
+        return await call_with_revision(
+            ctx, revision_reader(ctx, "agents", str(aid)),
+            lambda pre: call(ctx, patch_agent, agent_id=aid, request=body, principal=ctx.actor, db=DB, pre=pre), "agent")
 
     @tool("agent.publish", manage=True)
     async def agent_publish(agent_id: str) -> dict[str, Any]:
@@ -76,7 +79,7 @@ def register_tools(tool: Any) -> None:
             return await call(ctx, archive_agent, agent_id=aid, principal=ctx.actor, db=DB, force=force)
         return await call(ctx, unarchive_agent, agent_id=aid, principal=ctx.actor, db=DB)
 
-    @tool("agent.chat", manage=True)
+    @tool("agent.chat", manage=True, human_only=True)
     async def agent_chat(agent_id: str, message: str, conversation_id: str | None = None,
                          wait_seconds: float = CHAT_DEFAULT_WAIT_SECONDS) -> dict[str, Any]:
         """One turn with an agent (its latest published version, for example the built-in Architect). Starts a
@@ -138,8 +141,12 @@ def register_tools(tool: Any) -> None:
             require_unrestricted(ctx, "create workflows")
             return await call(ctx, create_workflow, request=_model(WorkflowCreate, spec=spec), principal=ctx.actor, db=DB)
         require_workflow(ctx, workflow_id)
-        return await call(ctx, patch_workflow, workflow_id=uid(workflow_id, "workflow_id"),
-                          request=_model(WorkflowUpdate, spec=spec), principal=ctx.actor, db=DB)
+        wid = uid(workflow_id, "workflow_id")
+        update = _model(WorkflowUpdate, spec=spec)
+        return await call_with_revision(
+            ctx, revision_reader(ctx, "workflows", str(wid)),
+            lambda pre: call(ctx, patch_workflow, workflow_id=wid, request=update, principal=ctx.actor, db=DB, pre=pre),
+            "workflow")
 
     @tool("workflow.publish", manage=True)
     async def workflow_publish(workflow_id: str) -> dict[str, Any]:
@@ -214,8 +221,18 @@ def register_tools(tool: Any) -> None:
         existing = store.get(ctx.tenant_id, str(uid(schedule_id, "schedule_id")))
         if existing is None or existing["workflow_id"] != str(uid(workflow_id, "workflow_id")):
             raise McpToolError("not_found", "Schedule not found")
-        return await call(ctx, update_schedule, schedule_id=str(uid(schedule_id, "schedule_id")),
-                          body=_model(WorkflowScheduleUpdate, **given), principal=ctx.actor, db=DB, store=store)
+        sid = str(uid(schedule_id, "schedule_id"))
+        update = _model(WorkflowScheduleUpdate, **given)
+
+        def read_schedule_revision() -> int | None:
+            row = store.get(ctx.tenant_id, sid)
+            return None if row is None else row["revision"]
+
+        return await call_with_revision(
+            ctx, read_schedule_revision,
+            lambda pre: call(ctx, update_schedule, schedule_id=sid, body=update, principal=ctx.actor, db=DB,
+                             store=store, pre=pre),
+            "schedule")
 
     # ------------------------------------------------------------------------------- knowledge
 
@@ -332,7 +349,7 @@ def register_tools(tool: Any) -> None:
 
     # ------------------------------------------------------------------------------- approvals
 
-    @tool("approvals.decide", manage=True)
+    @tool("approvals.decide", manage=True, human_only=True)
     async def approvals_decide(run_id: str, kind: Literal["tool", "step"], key: str,
                                decision: Literal["approve", "deny"], comment: str | None = None,
                                resume_data: dict[str, Any] | None = None) -> dict[str, Any]:

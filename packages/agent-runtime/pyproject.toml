@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Agent runtime for PydanticOS"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "eap-schemas",
     "pydantic-ai-slim>=2.67.0",

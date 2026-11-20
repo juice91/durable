@@ -268,7 +268,25 @@ export interface PendingCount {
   more: boolean;
 }
 
+/** After a decision the poll runs this often ... */
+export const PENDING_FAST_POLL_MS = 3_000;
+/** ... for this long (a follow-up card of the same conversation arrives within seconds). */
+export const PENDING_FAST_WINDOW_MS = 90_000;
+
+/** What a poll answer changed: the first page's items now, and those not seen in an earlier answer. */
+export interface PendingChange {
+  items: Approval[];
+  added: Approval[];
+  more: boolean;
+}
+
 let pending: PendingCount | null = null;
+/** The ids of the first page as last answered: the change token the diff runs on. */
+let knownIds: Set<string> | null = null;
+/** Cards already announced: each new card is announced once, even if it leaves and returns. */
+const announcedIds = new Set<string>();
+let fastUntil = 0;
+const changeListeners = new Set<(change: PendingChange) => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight: Promise<void> | null = null;
 /** A refresh asked for while a fetch was in flight: one follow-up fetch for all such requests. */
@@ -289,11 +307,18 @@ function fetchPendingCount(): Promise<void> {
   const request: Promise<void> = listApprovals(EMPTY_APPROVAL_FILTERS, { limit: PENDING_COUNT_LIMIT })
     .then((page) => {
       if (mine !== seq) return; // a newer refresh was asked for: this answer is stale
+      const ids = new Set(page.items.map(approvalId));
+      const first = knownIds === null;
+      const changed = first || ids.size !== knownIds!.size || [...ids].some((id) => !knownIds!.has(id));
+      const added = first ? [] : page.items.filter((item) => !announcedIds.has(approvalId(item)) && !knownIds!.has(approvalId(item)));
+      page.items.forEach((item) => announcedIds.add(approvalId(item)));
+      knownIds = ids;
       const next = { count: page.items.length, more: page.next_cursor !== null };
       if (!pending || pending.count !== next.count || pending.more !== next.more) {
         pending = next;
         emitPending();
       }
+      if (changed) changeListeners.forEach((listener) => listener({ items: page.items, added, more: page.next_cursor !== null }));
     })
     .catch(() => {
       // Keep the last known count: a failed poll must not flash the badge away.
@@ -328,8 +353,51 @@ function pageHidden(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
 
+function fastPolling(): boolean {
+  return Date.now() < fastUntil;
+}
+
+function pollTick() {
+  // The fast window is over: back to the normal interval.
+  if (timer !== null && fastInterval && !fastPolling()) {
+    stopPolling();
+    startPolling();
+  }
+  void refreshPendingApprovals();
+}
+
+let fastInterval = false;
+
 function startPolling() {
-  if (timer === null) timer = setInterval(() => void refreshPendingApprovals(), PENDING_POLL_MS);
+  if (timer !== null) return;
+  fastInterval = fastPolling();
+  timer = setInterval(pollTick, fastInterval ? PENDING_FAST_POLL_MS : PENDING_POLL_MS);
+}
+
+/**
+ * A decision was just made: for PENDING_FAST_WINDOW_MS poll every PENDING_FAST_POLL_MS, since the
+ * run it resumed usually asks for the next approval within seconds. A hidden tab still pauses.
+ */
+export function noteApprovalDecided(): void {
+  fastUntil = Date.now() + PENDING_FAST_WINDOW_MS;
+  if (timer !== null && !fastInterval) {
+    stopPolling();
+    startPolling();
+  }
+}
+
+/**
+ * Calls `listener` whenever the first page of pending approvals changes (not for the first answer),
+ * with the cards not announced before. Reads share the one poll; the unsubscribe stops it when
+ * nothing else reads.
+ */
+export function onPendingChange(listener: (change: PendingChange) => void): () => void {
+  changeListeners.add(listener);
+  const release = subscribePending(() => undefined);
+  return () => {
+    changeListeners.delete(listener);
+    release();
+  };
 }
 
 function stopPolling() {
@@ -392,6 +460,10 @@ export function isPendingPollingForTests(): boolean {
 export function resetPendingApprovalsForTests(): void {
   seq += 1;
   pending = null;
+  knownIds = null;
+  announcedIds.clear();
+  fastUntil = 0;
+  changeListeners.clear();
   inFlight = null;
   rerun = null;
   stopPolling();
@@ -421,7 +493,7 @@ export function isDecidable(approval: Approval): boolean {
 }
 
 /** Run statuses after which nothing waits any more (eap_run_store TERMINAL_RUN_STATUSES). */
-export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "needs_attention"]);
+export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 export interface ApprovalLinks {
   /** The agent conversation the waiting turn belongs to (a tool call outside a workflow). */

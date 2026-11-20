@@ -160,8 +160,10 @@ def test_test_route_uses_the_managed_endpoint_and_needs_a_running_pod(runtime_wo
         return ProbeResult(status="ok", tools=[{"name": "t", "description": None, "input_schema": {}}])
 
     monkeypatch.setattr(routes, "list_server_tools", fake_list)
+    monkeypatch.setenv("EAP_MCP_TEST_START_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setattr(routes, "START_POLL_S", 0.05)
     r = client.post(f"{BASE}/{sid}/test", headers=h)
-    assert r.json() == {"status": "error", "error_code": "runtime_not_running", "tools": []}
+    assert r.json()["error_code"] == "runtime_starting" and r.json()["status"] == "error"
     fake.make_ready()
     client.get(f"{BASE}/{sid}/runtime", headers=h)
     r = client.post(f"{BASE}/{sid}/test", headers=h)
@@ -320,3 +322,85 @@ def test_runtime_logs_mask_the_other_assignment_shapes(runtime_world):
         assert leaked not in out, (leaked, out)
     assert "token: [redacted]" in out and "--verbose" in out and '"user":"u"' in out and "plain line" in out
     assert "Authorization: Bearer [redacted]" in out and "--api-key [redacted]" in out
+
+
+# --- the test button starts a runtime the idle sweep stopped ---------------------------------------
+
+
+def _stopped_world(runtime_world, monkeypatch, *, ready_on_start: bool, timeout: str = "5"):
+    from eap_api.mcp_servers.connection import ProbeResult
+    from eap_api.routes import mcp_servers as routes
+
+    client, app, fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    fake.make_ready()
+    client.get(f"{BASE}/{sid}/runtime", headers=h)  # running
+    assert client.post(f"{BASE}/{sid}/runtime/stop", headers=h).json()["state"] == "stopped"
+    if ready_on_start:
+        real_start = fake.start
+
+        async def start_ready(spec):
+            handle = await real_start(spec)
+            fake.make_ready()
+            return handle
+
+        monkeypatch.setattr(fake, "start", start_ready)
+
+    async def fake_list(url, headers, policy, timeout):
+        return ProbeResult(status="ok", tools=[{"name": "t", "description": None, "input_schema": {}}])
+
+    monkeypatch.setattr(routes, "list_server_tools", fake_list)
+    monkeypatch.setenv("EAP_MCP_TEST_START_TIMEOUT_SECONDS", timeout)
+    monkeypatch.setattr(routes, "START_POLL_S", 0.05)
+    return client, app, fake, sid, h
+
+
+def test_test_route_starts_a_stopped_runtime_and_reports_it(runtime_world, monkeypatch):
+    client, app, fake, sid, h = _stopped_world(runtime_world, monkeypatch, ready_on_start=True)
+    starts = len(fake.specs)
+    body = client.post(f"{BASE}/{sid}/test", headers=h).json()
+    assert body["status"] == "ok" and len(fake.specs) == starts + 1
+    assert body["runtime"]["state"] == "stopped" and body["runtime"]["started"] is True
+    assert isinstance(body["runtime"]["waited_ms"], int)
+    assert state(app, sid).state == "running"
+    again = client.post(f"{BASE}/{sid}/test", headers=h).json()  # already running: nothing started
+    assert again["status"] == "ok" and again["runtime"]["state"] == "running" and again["runtime"]["started"] is False
+    assert len(fake.specs) == starts + 1
+
+
+def test_test_route_answers_runtime_starting_when_the_pod_is_not_ready_in_time(runtime_world, monkeypatch):
+    client, app, fake, sid, h = _stopped_world(runtime_world, monkeypatch, ready_on_start=False, timeout="0.3")
+    body = client.post(f"{BASE}/{sid}/test", headers=h).json()
+    assert body["status"] == "error" and body["error_code"] == "runtime_starting" and body["tools"] == []
+    assert body["runtime"]["state"] == "stopped" and body["runtime"]["started"] is False
+    assert state(app, sid).state == "starting"
+    with app.state.database_engine.connect() as conn:  # a transient answer is not stored as the last test
+        assert conn.execute(text("SELECT last_status FROM mcp_servers WHERE id = :s"), {"s": sid}).scalar() is None
+
+
+def test_test_route_keeps_runtime_not_running_for_a_failed_runtime(runtime_world, monkeypatch):
+    client, app, fake, sid, h = _stopped_world(runtime_world, monkeypatch, ready_on_start=False)
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE mcp_runtimes SET state = 'failed', last_error = 'start_failed: X' WHERE server_id = :s"),
+                     {"s": sid})
+    starts = len(fake.specs)
+    body = client.post(f"{BASE}/{sid}/test", headers=h).json()
+    assert body["error_code"] == "runtime_not_running"
+    assert body["runtime"]["state"] == "failed" and body["runtime"]["last_error"] == "start_failed: X"
+    assert len(fake.specs) == starts
+
+
+def test_keep_warm_is_patched_and_listed(runtime_world):
+    client, app, _fake, tenant_of = runtime_world
+    _t, h = tenant_of()
+    sid = install(client, app, h)
+    got = client.get(f"{BASE}/{sid}", headers=h)
+    assert got.json()["keep_warm"] is False
+    r = client.patch(f"{BASE}/{sid}", headers={**h, "If-Match": got.headers["ETag"]}, json={"keep_warm": True})
+    assert r.status_code == 200 and r.json()["keep_warm"] is True
+    assert client.get(f"{BASE}", headers=h).json()[0]["keep_warm"] is True
+    ext = client.post(BASE, headers=h, json={"name": "ext", "url": "https://mcp.example.com/mcp"}).json()
+    r = client.patch(f"{BASE}/{ext['id']}", headers={**h, "If-Match": client.get(f"{BASE}/{ext['id']}", headers=h).headers["ETag"]},
+                     json={"keep_warm": True})
+    assert r.status_code == 422

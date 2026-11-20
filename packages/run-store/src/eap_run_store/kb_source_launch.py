@@ -215,4 +215,5 @@ def source_view(source: Any) -> dict[str, Any]:
         "last_source_revision": source.last_source_revision,
         "created_at": source.created_at.isoformat(),
         "updated_at": source.updated_at.isoformat(),
+        "revision": source.revision,
     }

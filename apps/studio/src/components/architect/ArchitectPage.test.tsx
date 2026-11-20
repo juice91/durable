@@ -56,13 +56,21 @@ async function fillFromDescription() {
 }
 
 describe("Architect page", () => {
-  test("a seeded tenant lists created agents and workflows as id · vN with draft and archived markers", async () => {
+  test("a seeded tenant lists created agents and workflows by name with id · vN beneath, archived behind a toggle", async () => {
+    window.localStorage.clear();
     const api = mount({ "GET /architect": SEEDED_STATE });
     const list = await screen.findByTestId("architect-created");
+    expect(within(list).getByText("FAQ bot")).toBeInTheDocument();
     expect(within(list).getByText("faq-bot · v2")).toBeInTheDocument();
+    expect(within(list).getByText("Triage")).toBeInTheDocument();
     expect(within(list).getByText("triage · v1")).toBeInTheDocument();
     expect(within(list).getAllByTestId("architect-draft-marker")).toHaveLength(1);
+    expect(within(list).queryByText("Old bot")).not.toBeInTheDocument();
+    expect(within(list).queryByText("Archived")).not.toBeInTheDocument();
+    await user.click(within(list).getByRole("button", { name: "Show archived (1)" }));
+    expect(within(list).getByText("Old bot")).toBeInTheDocument();
     expect(within(list).getByText("Archived")).toBeInTheDocument();
+    expect(window.localStorage.getItem("studio.architect.show-archived")).toBe("true");
     expect(api.calls.some((c) => c.key === "POST /architect")).toBe(false);
   });
 
@@ -193,7 +201,7 @@ describe("Architect page", () => {
       "GET /agents/row-1": { id: "row-1", name: "FAQ bot", latest_version: 3, draft_spec: { spec_version: 1, name: "FAQ bot", instructions: "Answer FAQs.", model: { provider: "litellm", name: "qwen3.8" }, tools: [] } },
       "POST /architect/agents": () => ({ status: 409, body: { detail: "version mismatch", code: "version_mismatch", latest_version: 3 } }),
     });
-    await user.click(await screen.findByRole("button", { name: /faq-bot · v2/ }));
+    await user.click(await screen.findByRole("button", { name: /FAQ bot/ }));
     await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("FAQ bot"));
     await user.click(screen.getByRole("button", { name: "Save draft" }));
     const alert = await screen.findByTestId("architect-version-mismatch");

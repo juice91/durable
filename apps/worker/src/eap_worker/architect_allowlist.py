@@ -17,7 +17,8 @@ list did not offer.
 - knowledge_bases: the tenant's knowledge bases.
 - models: the worker's model policy (`EAP_ALLOWED_MODELS`) read worker-side, no snapshot table: the
   concrete `provider:name` entries, `test:*` as the scripted test models, `litellm:*` as what the
-  gateway's `/models` lists and `anthropic:*` as what Anthropic's `GET /v1/models` lists for the key (when ANTHROPIC_API_KEY is set; a small fallback set when that fails). Capabilities are left empty here (discovery metadata lives in the API).
+  gateway's `/models` lists, `cloudflare:*` as the Workers AI text-generation catalogue (when a token and
+  EAP_CLOUDFLARE_ACCOUNT_ID are set) and `anthropic:*` as what Anthropic's `GET /v1/models` lists for the key (when ANTHROPIC_API_KEY is set; a small fallback set when that fails). Capabilities are left empty here (discovery metadata lives in the API).
 - agents: Architect-made agents of the tenant (draft or published, not archived), which a created workflow's
   agent steps may name (their row ids stay out of every dump). A workflow draft may name a draft agent;
   publishing the workflow needs every agent it names to have a published version (`agent_not_published`).
@@ -103,6 +104,33 @@ def _gateway_models(base_url: str, api_key: str | None) -> list[str]:
 
 
 AnthropicLister = Callable[[str], list[str]]
+CloudflareLister = Callable[[str, str, str | None], list[str]]
+
+
+def _cloudflare_models(token: str, account_id: str, gateway_id: str | None) -> list[str]:
+    """Text-generation model names of the Workers AI catalogue (up to 5 pages; blocking; [] on any failure)."""
+    from urllib.parse import quote
+
+    headers = {"Authorization": f"Bearer {token}"}
+    if gateway_id:
+        headers["cf-aig-gateway-id"] = gateway_id
+    names: set[str] = set()
+    try:
+        for page in range(1, 6):
+            url = (f"https://api.cloudflare.com/client/v4/accounts/{quote(account_id, safe='')}/ai/models/search"
+                   f"?task=Text%20Generation&per_page=100&page={page}")
+            with urllib.request.urlopen(  # noqa: S310 - fixed https URL
+                urllib.request.Request(url, headers=headers), timeout=GATEWAY_TIMEOUT_S
+            ) as response:
+                body = json.loads(response.read(2_000_000))
+            rows = [r for r in body.get("result", []) if isinstance(r, dict) and r.get("name")]
+            names.update(str(r["name"]) for r in rows)
+            if len(rows) < 100:
+                break
+    except Exception as exc:  # noqa: BLE001 - discovery is best effort
+        log.warning("architect allowlist: cloudflare model list failed: %s", type(exc).__name__)
+        return sorted(names)
+    return sorted(names)
 
 
 def _anthropic_models(api_key: str) -> list[str]:
@@ -130,7 +158,7 @@ def _anthropic_models(api_key: str) -> list[str]:
 
 def models_from_settings(
     settings: Any, gateway: GatewayLister = _gateway_models, environ: Mapping[str, str] | None = None,
-    anthropic: AnthropicLister = _anthropic_models,
+    anthropic: AnthropicLister = _anthropic_models, cloudflare: CloudflareLister = _cloudflare_models,
 ) -> tuple[AllowlistModel, ...]:
     """The worker's model policy as allowlist models (see the module docstring). `anthropic:*` lists what
     Anthropic offers the key (its fallback set when the listing fails) when ANTHROPIC_API_KEY is set."""
@@ -153,6 +181,14 @@ def models_from_settings(
             for listed in anthropic(env["ANTHROPIC_API_KEY"].strip()):
                 if policy.allows("anthropic", listed):
                     add("anthropic", listed)
+        elif provider == "cloudflare" and getattr(settings, "cloudflare_api_token", None) and getattr(
+            settings, "cloudflare_account_id", None
+        ):
+            for listed in cloudflare(
+                settings.cloudflare_api_token, settings.cloudflare_account_id, getattr(settings, "cloudflare_gateway_id", None)
+            ):
+                if policy.allows("cloudflare", listed):
+                    add("cloudflare", listed)
         elif provider == "litellm" and getattr(settings, "litellm_base_url", None):
             for listed in gateway(settings.litellm_base_url, getattr(settings, "litellm_api_key", None)):
                 if policy.allows("litellm", listed):

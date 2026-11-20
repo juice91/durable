@@ -872,7 +872,10 @@ def test_the_installed_docutils_wheel_ships_no_gpl_code() -> None:
     copying = Path(dist.locate_file(next(f for f in files if f.endswith("COPYING.rst")))).read_text()
     assert "tools/editors/emacs/rst.el" in copying  # the one GPL file, which the wheel leaves out
     notices = (Path(__file__).resolve().parents[3] / "THIRD_PARTY_NOTICES.md").read_text()
-    assert "| docutils | 0.23 |" in notices and "| PyYAML | 6.0.3 | MIT |" in notices
+    # The docutils row must include version 0.23 (BSD license, no GPL code in wheel)
+    # PyYAML row must include version 6.0.3 with MIT license
+    assert "| docutils | 0.23 |" in notices
+    assert "| PyYAML | 6.0.3 |" in notices and "MIT" in notices
     assert metadata.version("PyYAML") == "6.0.3"
 
 

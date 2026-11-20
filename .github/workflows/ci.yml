@@ -23,9 +23,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# runs-on reads the repository variable CI_RUNNER (a JSON label array, e.g. ["self-hosted","self-hosted-runner"]);
+# without it every job runs on GitHub-hosted ubuntu-latest. See docs/ci.md.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    # Pull requests from forks never run on a self-hosted runner (CI_RUNNER); same guard as ci-heavy.yml.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 10
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     # paths-filter lists the PR's files through the API; the workflow default stays contents: read.
     permissions:
       contents: read
@@ -71,9 +76,13 @@ jobs:
 
   python:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.python == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    # 25, not 15: four self-hosted runners share one Mac; a full main run exceeded 15 minutes
+    # under contention (run 44681356522 was cancelled after its tests had passed).
+    timeout-minutes: 25
     # The selection step reads the pull request's labels (ci:full forces a full run).
     permissions:
       contents: read
@@ -117,11 +126,16 @@ jobs:
           packages/processors/processors_tests
           packages/secrets/secrets_tests"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        # Hosted runners only: on the self-hosted macOS runners the toolcache build wants /Users/runner, and
+        # uv provisions the interpreter from pyproject's requires-python, as ci-heavy.yml does.
+        if: runner.os != 'macOS'
         with:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - run: uv run lint-imports
@@ -138,8 +152,10 @@ jobs:
 
   studio:
     needs: changes
-    if: needs.changes.outputs.studio == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.studio == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,6 +163,8 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
+          # Per-job install dir: two Mac Studio runners share one HOME, and the default ~/setup-pnpm races.
+          dest: ${{ runner.temp }}/setup-pnpm
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -158,8 +176,10 @@ jobs:
 
   studio-test:
     needs: changes
-    if: needs.changes.outputs.studio == 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.studio == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -182,6 +202,8 @@ jobs:
           fetch-depth: 0
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
+          # Per-job install dir: two Mac Studio runners share one HOME, and the default ~/setup-pnpm races.
+          dest: ${{ runner.temp }}/setup-pnpm
           version: 9.15.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -212,9 +234,12 @@ jobs:
 
   deploy-checks:
     needs: changes
-    if: needs.changes.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.deploy == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    # 25, not 15: see the python job.
+    timeout-minutes: 25
     env:
       KUBECONFORM_VERSION: v0.7.0
       ACTIONLINT_VERSION: v1.7.7
@@ -223,11 +248,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        # Hosted runners only: on the self-hosted macOS runners the toolcache build wants /Users/runner, and
+        # uv provisions the interpreter from pyproject's requires-python, as ci-heavy.yml does.
+        if: runner.os != 'macOS'
         with:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          enable-cache: true
+          # The Actions cache only pays off on hosted runners; a self-hosted Mac keeps uv's own
+          # cache between jobs, and restoring/saving the archive there took 4 to 10 minutes.
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - name: Install manifest and workflow linters

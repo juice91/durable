@@ -21,6 +21,7 @@ import { RunEventsPanel } from "@/components/runs/RunEventsPanel";
 import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
 import { runKind } from "@/components/runs/RunSubject";
 import type { RunKind } from "@/lib/runs";
+import { RecoveredBadge } from "@/components/runs/RecoveredBadge";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
@@ -36,7 +37,7 @@ import { useNames, useTrace } from "./useTrace";
 import { copyText } from "@/lib/clipboard";
 
 const TAB_LABELS: Record<TraceTab, string> = { spans: "Spans", events: "Events", scores: "Scores", logs: "Logs" };
-const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run", eval: "Eval run" };
+const KIND_LABELS: Record<RunKind, string> = { agent: "Agent run", tool: "Tool run", workflow: "Workflow run", kb_ingest: "Knowledge ingest run", eval: "Eval run", kb_source_sync: "KB source sync run" };
 const icon = (Icon: typeof Copy) => <Icon strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />;
 
 export interface TraceSheetNavigation {
@@ -182,7 +183,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
   return (
     <>
       <SheetHeader
-        title={root ? spanLabel(root, names) : "Trace"}
+        title={root ? spanLabel(root, names, run?.source_name) : "Trace"}
         description={<span className="font-mono" data-testid="trace-sheet-run-id">{`Run ${runId}`}</span>}
         actions={
           <>
@@ -252,6 +253,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
         {run ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2" data-testid="trace-sheet-meta">
             <StatusPill status={run.display_status} />
+            <RecoveredBadge run={run} />
             <Badge variant="outline">{KIND_LABELS[runKind(run)]}</Badge>
             {link ? (
               <Link href={link.href} title={link.label} className="min-w-0 max-w-full truncate text-label text-info-text underline-offset-4 hover:underline" data-testid="trace-sheet-subject-link">

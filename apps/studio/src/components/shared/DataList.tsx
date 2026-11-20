@@ -53,6 +53,8 @@ export interface DataListProps<Row> {
   /** Accessible name of a row's link or button; defaults to the first cell's text. */
   getRowLabel?: (row: Row) => string;
   getRowTestId?: (row: Row) => string | undefined;
+  /** Extra classes for a row (a highlight, say). */
+  getRowClassName?: (row: Row) => string | undefined;
   /** The row whose Sheet is open, highlighted. */
   selectedRowId?: string | null;
   /**
@@ -250,6 +252,7 @@ export function DataList<Row>({
   onRowOpen,
   getRowLabel,
   getRowTestId,
+  getRowClassName,
   selectedRowId = null,
   onVisibleRowIdsChange,
   searchPlaceholder,
@@ -527,6 +530,7 @@ export function DataList<Row>({
                         "border-b border-border last:border-b-0 focus-within:bg-fill-hover",
                         rowClickable && "cursor-pointer hover:bg-fill-hover",
                         selected && "bg-fill-selected hover:bg-fill-selected",
+                        getRowClassName?.(row),
                       )}
                     >
                       {columns.map((column, index) => {

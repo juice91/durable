@@ -78,6 +78,8 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.list_eval_suites",
+    "architect.get_eval_run",
     *ARCHITECT_GATED_TOOL_IDS,
 )
 
@@ -93,7 +95,20 @@ ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
     "platform.list_agents",
     "platform.list_schedules",
     "platform.list_recent_runs",
+    "platform.get_run",
+    "platform.list_runs",
+    "platform.list_capabilities",
 )
+# The Architect's bridge to the MCP control plane: every control tool `a.b.c` is callable as
+# `control__a_b_c` (a run's tool names are discovered at run time with `platform.list_capabilities`, never
+# listed in the spec). The bridge belongs to the built-in Architect only.
+CONTROL_TOOL_PREFIX = "control__"
+CONTROL_LIST_TOOL_ID = "platform.list_capabilities"
+
+
+def control_tool_name(control_name: str) -> str:
+    """The Architect's tool name for a control-plane tool: `eval.suite.create` -> `control__eval_suite_create`."""
+    return CONTROL_TOOL_PREFIX + control_name.replace(".", "_")
 # Tool-id prefixes only a built-in agent row may list (the API refuses the spec, the worker the run).
 BUILTIN_ONLY_TOOL_PREFIXES: tuple[str, ...] = ("architect.", "platform.")
 
@@ -116,16 +131,17 @@ _VALID_PLACEHOLDER = re.compile(r"^(?:input|previous|steps\.[a-z][a-z0-9_]{0,63}
 GENERIC_IDS = ("definition", "id", "agent", "workflow", "<id>", "spec", "draft", "new", "untitled", "test")
 
 
-def slugify(name: str) -> str:
+def slugify(name: str, kind: Literal["agent", "workflow"] = "agent") -> str:
     """A slug (`AGENT_ID_PATTERN`) from a name: lowercase words joined by dashes, at most 48 characters.
-    A name with no Latin letters or digits (CJK, say) gets `agent-` and four hex digits of its hash, so
-    the same name always maps to the same id."""
+    A name with no Latin letters or digits (CJK, say) gets `<kind>-` and four hex digits of its hash, so
+    the same name always maps to the same id. (No transliteration library is a dependency, so CJK is not romanised.)"""
+    fallback = f"{kind}-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48].strip("-")
     if not slug:
-        return f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+        return fallback
     if not slug[0].isalpha():
         slug = f"a-{slug}".strip("-")[:48].strip("-")
-    return slug if AGENT_ID_PATTERN.fullmatch(slug) else f"agent-{hashlib.sha1(name.strip().encode()).hexdigest()[:4]}"
+    return slug if AGENT_ID_PATTERN.fullmatch(slug) else fallback
 
 
 def is_generic_id(value: str | None) -> bool:
@@ -452,6 +468,7 @@ class ArchitectToolStep(_Step):
     tool: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = Field(default_factory=dict)
     next: str | None = None
+    on_error: Literal["fail", "continue"] = "fail"
 
 
 class ArchitectBranchStep(_Step):
@@ -601,7 +618,7 @@ def compile_workflow(spec: ArchitectWorkflowSpec, allowlist: Allowlist) -> Workf
                 raise ValueError(f"tool_not_allowed: {step.tool}")
             steps.append(ToolStep(
                 id=step.id, tool_id=step.tool, next=target(step.next, following, default_end=step.tool == RETURN_TOOL_ID),
-                input=_params_input(step.params, previous, known),
+                input=_params_input(step.params, previous, known), on_error=step.on_error,
             ))
             known.add(step.id)
             previous = step.id
@@ -650,6 +667,9 @@ __all__ = [
     "as_uuid",
     "ARCHITECT_DENIED_TOOL_PREFIXES",
     "ARCHITECT_PLATFORM_TOOL_IDS",
+    "CONTROL_LIST_TOOL_ID",
+    "CONTROL_TOOL_PREFIX",
+    "control_tool_name",
     "BUILTIN_ONLY_TOOL_PREFIXES",
     "Allowlist",
     "AllowlistAgent",

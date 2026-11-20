@@ -29,6 +29,8 @@ import {
   type ExpectedMode,
 } from "@/lib/evals";
 import { EvaluatorsEditor } from "./EvaluatorsEditor";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 import { alertClass, fieldClass, hintClass, labelClass, monoFieldClass, sectionTitleClass } from "./evalsUi";
 
 export const EVAL_EDIT_GUARD_COPY: UnsavedChangesCopy = {
@@ -130,8 +132,11 @@ function formKey(form: CaseForm): string {
  * metadata and the case's own evaluators. */
 export function CaseSheet({ suite, record, onSaved, onDeleted, onClose }: CaseSheetProps) {
   const id = useId();
-  const initial = useMemo(() => caseForm(record), [record]);
+  // `base` is what "unsaved" is measured against; 重新載入 after a 412 moves it to the current version.
+  const [base, setBase] = useState(record);
+  const initial = useMemo(() => caseForm(base), [base]);
   const [form, setForm] = useState<CaseForm>(initial);
+  const conflict = useConflict<EvalCase>({ onSaved: (saved) => onSaved(saved as EvalCase) });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evaluatorError, setEvaluatorError] = useState<{ index: number; error: string } | null>(null);
@@ -175,7 +180,8 @@ export function CaseSheet({ suite, record, onSaved, onDeleted, onClose }: CaseSh
     const body = { name, input: form.input, expected_output: expected.value, metadata: metadata.value, evaluators: evaluators.evaluators };
     setSaving(true);
     try {
-      const saved = record ? await updateCase(suite.id, record.id, body) : await addCase(suite.id, body);
+      const saved = record ? await conflict.guard(() => updateCase(suite.id, record.id, body)) : await addCase(suite.id, body);
+      if (saved === undefined) return setSaving(false); // held as a conflict notice
       onSaved(saved);
     } catch (reason: unknown) {
       showSaveError(reason, "The case could not be saved", setError, setEvaluatorError);
@@ -202,6 +208,15 @@ export function CaseSheet({ suite, record, onSaved, onDeleted, onClose }: CaseSh
         <form onSubmit={(e) => void save(e)} className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label={record ? "Edit case" : "New case"}>
           <SheetBody className="space-y-4">
             {readOnly ? <p className={hintClass}>The suite is archived: restore it to edit its cases.</p> : null}
+            <ConflictNotice
+              state={conflict}
+              onReload={(current) => {
+                if (!current) return;
+                setBase(current);
+                setForm(caseForm(current));
+                setError(null);
+              }}
+            />
             {error ? <p role="alert" className={alertClass} data-testid="eval-case-error">{error}</p> : null}
             <fieldset disabled={readOnly || saving} className="min-w-0 space-y-4">
               <div className="space-y-1">
@@ -312,8 +327,11 @@ function suiteKey(form: SuiteForm): string {
 /** The suite editor (`?edit=suite`): name, description and the evaluators every case runs. */
 export function SuiteSheet({ suite, onSaved, onClose }: SuiteSheetProps) {
   const id = useId();
-  const initial = useMemo(() => suiteForm(suite), [suite]);
+  // `base` is what "unsaved" is measured against; 重新載入 after a 412 moves it to the current version.
+  const [base, setBase] = useState(suite);
+  const initial = useMemo(() => suiteForm(base), [base]);
   const [form, setForm] = useState<SuiteForm>(initial);
+  const conflict = useConflict<EvalSuite>({ onSaved: (saved) => onSaved(saved as EvalSuite) });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evaluatorError, setEvaluatorError] = useState<{ index: number; error: string } | null>(null);
@@ -333,7 +351,8 @@ export function SuiteSheet({ suite, onSaved, onClose }: SuiteSheetProps) {
     if ("error" in evaluators) return setEvaluatorError({ index: evaluators.index, error: evaluators.error });
     setSaving(true);
     try {
-      const saved = await updateSuite(suite.id, { name, description: form.description.trim() || null, evaluators: evaluators.evaluators });
+      const saved = await conflict.guard(() => updateSuite(suite.id, { name, description: form.description.trim() || null, evaluators: evaluators.evaluators }));
+      if (saved === undefined) return setSaving(false); // held as a conflict notice
       onSaved(saved);
     } catch (reason: unknown) {
       showSaveError(reason, "The suite could not be saved", setError, setEvaluatorError);
@@ -348,6 +367,15 @@ export function SuiteSheet({ suite, onSaved, onClose }: SuiteSheetProps) {
         <form onSubmit={(e) => void save(e)} className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Edit suite">
           <SheetBody className="space-y-4">
             {readOnly ? <p className={hintClass}>The suite is archived: restore it to edit it.</p> : null}
+            <ConflictNotice
+              state={conflict}
+              onReload={(current) => {
+                if (!current) return;
+                setBase(current);
+                setForm(suiteForm(current));
+                setError(null);
+              }}
+            />
             {error ? <p role="alert" className={alertClass} data-testid="eval-suite-error">{error}</p> : null}
             <fieldset disabled={readOnly || saving} className="min-w-0 space-y-4">
               <div className="space-y-1">

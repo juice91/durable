@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Shared Pydantic schemas for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "pydantic>=2",
     # Client tool schemas (eap_schemas.client_tools): Draft 2020-12 meta-schema check.

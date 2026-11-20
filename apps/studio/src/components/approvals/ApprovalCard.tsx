@@ -1,9 +1,10 @@
 "use client";
 
+import { CopyableText } from "@/components/ui/CopyableText";
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { ApiError } from "@/lib/api";
-import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, parseSecretRequest, refreshPendingApprovals } from "@/lib/approvals";
+import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, parseSecretRequest, noteApprovalDecided, refreshPendingApprovals } from "@/lib/approvals";
 import { putSecret } from "@/lib/secrets";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
@@ -159,6 +160,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       onDecided?.(decision === "approve" ? "approved" : "denied");
       if (tool) announceToolDecided(decision === "approve" ? "approved" : "denied");
       // The sidebar's pending count (AC.15) drops by one.
+      noteApprovalDecided();
       void refreshPendingApprovals().catch(() => undefined);
       // Stay busy until the view has reloaded: the approval is no longer waiting, and a second
       // click before the card disappears would only earn a 409.
@@ -248,22 +250,28 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
       ) : tool ? (
         <div>
           {approval.summary ? (
-            <p data-testid={`approval-summary-${key}`} className="mb-2 whitespace-pre-wrap text-sm font-medium text-foreground">
-              {approval.summary}
-            </p>
+            <CopyableText label="summary" copyText={approval.summary} className="mb-2">
+              <p data-testid={`approval-summary-${key}`} className="whitespace-pre-wrap pr-8 text-sm font-medium text-foreground">
+                {approval.summary}
+              </p>
+            </CopyableText>
           ) : null}
           <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
-          <pre
-            data-testid={`approval-args-${key}`}
-            className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 font-mono text-caption text-foreground"
-          >
-            {prettyJson(approval.args)}
-          </pre>
+          <CopyableText label="arguments" copyText={prettyJson(approval.args)}>
+            <pre
+              data-testid={`approval-args-${key}`}
+              className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-fill-hover p-2 pr-9 font-mono text-caption text-foreground"
+            >
+              {prettyJson(approval.args)}
+            </pre>
+          </CopyableText>
         </div>
       ) : (
-        <p data-testid={`approval-prompt-${key}`} className="whitespace-pre-wrap text-sm text-foreground">
-          {approval.prompt ?? "(no prompt)"}
-        </p>
+        <CopyableText label="prompt" copyText={approval.prompt ?? ""}>
+          <p data-testid={`approval-prompt-${key}`} className="whitespace-pre-wrap pr-8 text-sm text-foreground">
+            {approval.prompt ?? "(no prompt)"}
+          </p>
+        </CopyableText>
       )}
       {resumeSchema ? (
         <JsonSchemaForm schema={resumeSchema} value={formValue} onChange={setFormValue} errors={fieldErrors} idPrefix={`resume-${key}`} />

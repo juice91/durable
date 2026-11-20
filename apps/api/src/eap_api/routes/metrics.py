@@ -14,7 +14,7 @@ the semantic recall and index embeddings). Bounds: `from < to`, a range of at mo
 buckets, at most 50 breakdown groups; all 422 with a fixed message. A query that exceeds the 5 s
 statement timeout answers 503. `cost_usd` is a decimal string (same form as the run API); latency
 is in milliseconds (float, null when no run in the period has finished); `error_rate` is
-`failed / (completed + failed + needs_attention)`, null when no run has finished.
+`failed / (completed + failed + needs_attention)` (skipped runs are counted apart and left out), null when no run has finished.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from eap_api.auth import Principal, current_principal
 from eap_api.database import get_session
+from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
@@ -152,9 +153,18 @@ def _call(fn: Any, *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=TIMEOUT_DETAIL)
 
 
+def _recovered_runs(store: MetricsStore, launcher: RunLauncher, q: MetricsQuery) -> int:
+    lookup = getattr(launcher, "recovered_run_ids", None)
+    ids = lookup(since=q.start, until=q.end) if lookup is not None else []
+    return _call(store.count_recovered_runs, q, ids) if ids else 0
+
+
 @router.get("/summary")
 def metrics_summary(
-    q: QueryDep, store: StoreDep, compare: Literal["previous"] | None = None
+    q: QueryDep,
+    store: StoreDep,
+    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    compare: Literal["previous"] | None = None,
 ) -> JSONResponse:
     """Totals for `[from, to)` and, with `compare=previous`, for the period of equal length just
     before it (`previous_from`, `previous_to`; `previous` is null without `compare`). Each period
@@ -163,9 +173,14 @@ def metrics_summary(
     `embedding`, `judge`; they sum to the totals) and of `memory`. AC.17 (review 2026-11-15): `fallback`
     is `{chat_requests, fell_back, billed_failed_attempts, exhausted_runs, fallback_rate}`, the share
     of agent chat requests not answered by the primary model, exhausted runs counted (see
-    eap_run_store.metrics; `fallback_rate` null without agent chat requests or exhausted runs)."""
+    eap_run_store.metrics; `fallback_rate` null without agent chat requests or exhausted runs).
+    Each period also has `recovered_runs`: the tenant's top-level runs that DBOS resumed at least once
+    (`recovery_attempts > 1`, read from the DBOS system database) whose last update falls in the period."""
     result = _call(store.summary, q, compare_previous=compare == "previous")
     prev = q.previous()
+    result["current"]["recovered_runs"] = _recovered_runs(store, launcher, q)
+    if result["previous"] is not None:
+        result["previous"]["recovered_runs"] = _recovered_runs(store, launcher, prev)
     return JSONResponse(content={
         "from": _iso(q.start),
         "to": _iso(q.end),

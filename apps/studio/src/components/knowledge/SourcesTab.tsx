@@ -38,6 +38,8 @@ import {
 } from "@/lib/kbSources";
 import { routes } from "@/lib/routes";
 import { formatWhen } from "./knowledgeUi";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const TERMINAL = new Set(["completed", "failed", "needs_attention", "cancelled"]);
@@ -390,9 +392,12 @@ export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
     }
   };
 
+  // 412: the source changed elsewhere; 重新載入 shows their version, 覆寫 resends the toggle on top of it.
+  const conflict = useConflict<Source>({ onSaved: () => void load() });
   const toggle = async (source: Source) => {
     try {
-      await updateSource(kbId, source.id, { enabled: !source.enabled });
+      const saved = await conflict.guard(() => updateSource(kbId, source.id, { enabled: !source.enabled }));
+      if (saved === undefined) return; // held: the notice offers reload or overwrite
       setStatus(`Source ${source.name} ${source.enabled ? "disabled" : "enabled"}.`);
       void load();
     } catch (reason: unknown) {
@@ -467,6 +472,7 @@ export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
           })}
         </ul>
       )}
+      <ConflictNotice state={conflict} onReload={() => void load()} />
       <p role="status" data-testid="sources-status" className="min-h-5 text-label text-muted-foreground">{status}</p>
       {adding ? <AddSourceSheet kbId={kbId} onClose={() => setAdding(false)} onAdded={() => void load()} /> : null}
       {running ? (

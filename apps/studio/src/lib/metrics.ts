@@ -50,12 +50,14 @@ export type BreakdownSort = "runs" | "failed" | "requests" | "tokens" | "cost";
 export interface MetricValues {
   runs: number;
   completed: number;
+  /** "Nothing to do" exits (a workflow.return with outcome skipped): neither completed nor failed. */
+  skipped: number;
   failed: number;
   needs_attention: number;
   in_progress: number;
   /** Failed runs blocked by a processor. Null in breakdown items (not computed per group). */
   blocked: number | null;
-  /** failed / (completed + failed + needs_attention); null when no run has finished. */
+  /** failed / (completed + failed + needs_attention), skipped runs left out; null when no run has finished. */
   error_rate: number | null;
   latency_p50_ms: number | null;
   latency_p95_ms: number | null;
@@ -74,6 +76,8 @@ export interface MetricValues {
   operations?: Partial<Record<MetricsOperation, UsageValues>>;
   /** Summary periods only (AC.17; absent from older APIs): requests not answered by the primary model. */
   fallback?: FallbackValues;
+  /** Summary periods only: runs DBOS resumed after a restart (`recovery_attempts > 1`) whose last event is in the period. */
+  recovered_runs?: number;
 }
 
 /**

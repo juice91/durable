@@ -142,4 +142,21 @@ describe("McpServerForm secret refs", () => {
     expect(screen.getByLabelText("Header 1 value")).toHaveValue("secret:slack-token");
     spy.mockRestore();
   });
+
+  it("a managed server shows Keep running, no URL or headers, and saves keep_warm only", async () => {
+    const managed = { ...server, url: null as unknown as string, header_names: [], runtime: "managed" as const, keep_warm: false };
+    const onSaved = vi.fn();
+    render(<McpServerForm server={managed} onSaved={onSaved} onCancel={vi.fn()} />);
+    expect(screen.queryByLabelText("URL")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("mcp-headers")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Keep running (never stop when idle)"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(mcpServers.update).toHaveBeenCalledWith("srv-1", { keep_warm: true });
+  });
+
+  it("an external server has no Keep running checkbox", () => {
+    render(<McpServerForm server={server} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.queryByTestId("mcp-keep-warm")).not.toBeInTheDocument();
+  });
 });

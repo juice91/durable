@@ -43,7 +43,7 @@ Step layout of a run (DBOS steps and child workflows; `{id}` is a workflow step 
       eap.append_event   step_completed `step:{id}:completed` {step_id, output, unresolved_refs?, warnings?}
                      or  step_failed    `step:{id}:failed`    {step_id, status, error, error_code}
     eap.append_event   end              run_completed {output, result} | run_failed {...}
-    eap.finish_run                      completed | failed | needs_attention
+    eap.finish_run                      completed | skipped | failed | needs_attention
 
     eap.start_workflow_run alone when the run is already terminal (cancelled before it started):
     RunStore.mark_running refuses to revive it and the workflow returns without an event.
@@ -212,6 +212,7 @@ from eap_observability import (
     set_run_outcome,
 )
 from eap_run_store import CANCEL_EVENT_KEY, END_EVENT_KEY, ParentRunStopped, RunNotFound, insert_usage_in_session
+from eap_schemas.architect import RETURN_TOOL_ID
 from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.workflow_scope import (
     CHILD_RUN_NAMESPACE,
@@ -820,6 +821,7 @@ class _Interpreter:
         # branch builds its own interpreter, which never gets the flag).
         self.pause_after_each_step = pause_after_each_step
         self._warnings: list[dict[str, Any]] = []
+        self.skipped_return: str | None = None  # the `workflow.return {outcome: "skipped"}` step that ran last
         # The cost cap (D11): the spec's `limits`, empty or absent for every spec published before
         # LP.11, so their runs never tick outside loops.
         self.limited = spec.limits is not None and not spec.limits.is_empty()
@@ -871,6 +873,7 @@ class _Interpreter:
     async def run_step(self, step: Any) -> Any:
         step_id = step.id
         self._warnings = []
+        self._kept_error = None
         data: dict[str, Any] = {"step_id": step_id, "step_type": step.type}
         problem: WorkflowStepError | None = None
         if step_id in self.executed or len(self.executed) >= MAX_STEPS:
@@ -949,6 +952,10 @@ class _Interpreter:
                 "workflow branch read missing structured fields",
                 extra={"run_id": self.run_id, "step_id": step_id, "paths": unresolved},
             )
+        if self._kept_error is not None:
+            # `on_error: continue`: the tool's error result is the output; the marker is on the existing event.
+            completed["outcome"] = "error_kept"
+            completed["error_code"] = self._kept_error
         if self._warnings:
             # LP.7: `condition_unknown` (D9), on the existing event (no new durable step).
             completed["warnings"] = list(self._warnings)
@@ -1124,7 +1131,14 @@ class _Interpreter:
             self.run_id, self.tenant_id, step.id, step.tool_id, check["args"], bool(check["side_effect"]),
             *((self.scope_text,) if self.scope else ()),
         )
-        _raise_tool_error(result, step.id)
+        if step.tool_id == RETURN_TOOL_ID and not self.scope and check["args"].get("outcome") == "skipped":
+            self.skipped_return = step.id  # a `workflow.return` with outcome "skipped": a "nothing to do" exit
+        try:
+            _raise_tool_error(result, step.id)
+        except WorkflowStepError as failure:
+            if step.on_error != "continue":
+                raise
+            self._kept_error = failure.code  # the result stays the output (an exception still fails)
         return result
 
     # ------------------------------------------------------------------ loop (while / until)
@@ -1738,9 +1752,12 @@ async def _workflow_body(
             workflow_version_id=workflow_version_id,
             pause_after_each_step=bool(link.get("pause_after_each_step")),
         )
-        _last_step, last_output = await interp.run_path(spec.start, None)
+        last_step, last_output = await interp.run_path(spec.start, None)
         output = final_output(spec, last_output)
         output_text = canonical_json(output)
+        # Skipped only when the path ENDS at a workflow.return that asked for it (a skipped return in
+        # a branch that continues, or inside a loop, does not end the run).
+        skipped = last_step is not None and last_step == interp.skipped_return
     except StepFailed as exc:
         failure, failed_step = exc.failure, exc.step_id
     except Exception as exc:  # noqa: BLE001 - every failure ends the run with a durable run_failed
@@ -1753,10 +1770,14 @@ async def _workflow_body(
     else:
         heartbeat.cancel()
         # End event before the terminal status, as in agent and tool runs.
-        await append_event_step(run_id, tenant_id, "end", "run_completed", {"output": output_text, "result": output})
-        await finish_run_step(run_id, tenant_id, "completed", output_text, None)
+        ended = "skipped" if skipped else "completed"
+        await append_event_step(
+            run_id, tenant_id, "end", "run_completed",
+            {"output": output_text, "result": output, **({"outcome": "skipped"} if skipped else {})},
+        )
+        await finish_run_step(run_id, tenant_id, ended, output_text, None)
         await record_spans(run_id, tenant_id)
-        return {"status": "completed", "output": output_text}
+        return {"status": ended, "output": output_text}
     finally:
         heartbeat.cancel()
     await append_event_step(

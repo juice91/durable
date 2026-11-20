@@ -205,7 +205,7 @@ _DB_NOW_MINUS = text("SELECT now() - make_interval(secs => :s)")
 _MISSING_SPANS = text(
     "SELECT r.tenant_id, r.id, r.updated_at FROM runs r"
     " WHERE r.parent_run_id IS NULL AND r.kind IN ('agent', 'tool', 'workflow')"
-    " AND r.status IN ('completed', 'failed', 'needs_attention')"
+    " AND r.status IN ('completed', 'failed', 'needs_attention', 'skipped')"
     " AND (r.updated_at, r.id) >= (:since, :after_id)"
     " AND NOT EXISTS (SELECT 1 FROM spans s WHERE s.run_id = CAST(r.id AS uuid))"
     " ORDER BY r.updated_at ASC, r.id ASC LIMIT :n"
@@ -234,7 +234,7 @@ def _write_synthetic_span(engine: Any, tenant_id: str, run_id: str) -> int:
     span = {
         "span_id": f"run:{row['id']}", "parent_id": None, "kind": "run", "name": str(row["kind"]),
         "start": row["created_at"], "end": row["updated_at"],
-        "status": "ok" if row["status"] == "completed" else "error",
+        "status": "ok" if row["status"] in ("completed", "skipped") else "error",
         "agent_id": row["agent_id"], "workflow_id": row["workflow_id"], "model": None,
     }
     return SpanStore(engine).replace_for_run(tenant_id, run_id, [span])

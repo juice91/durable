@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Knowledge-base source adapters: the provider-neutral adapter protocol, budgets and a fake adapter"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "eap-schemas",
     "eap-run-store",

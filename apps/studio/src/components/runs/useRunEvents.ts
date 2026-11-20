@@ -105,10 +105,11 @@ export function useRunEvents(runId: string): RunEventsState {
           setRun((prev) => {
             if (!prev) return null;
             if (event.type === "run_completed") {
+              const ended = event.data.outcome === "skipped" ? "skipped" : "completed";
               return {
                 ...prev,
-                status: "completed",
-                display_status: "completed",
+                status: ended,
+                display_status: ended,
                 output: typeof event.data.output === "string" ? event.data.output : prev.output,
                 error: null,
               };

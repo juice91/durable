@@ -90,6 +90,25 @@ def test_terminal_status_must_match_end(run_store, event_log, tenant):
     assert (run["status"], run["error"], run["finished_at"]) == ("needs_attention", "E: x", finished)
 
 
+def test_skipped_is_a_terminal_status_fixed_by_the_end_outcome(run_store, event_log, tenant):
+    run_id = _workflow(run_store, tenant)
+    event_log.append(tenant, run_id, "end", "run_completed", {"output": "{}", "outcome": "skipped"})
+    assert run_store.set_status(tenant, run_id, "completed", "{}") is False  # the end fixes `skipped`
+    assert run_store.set_status(tenant, run_id, "skipped", "{}") is True
+    run = run_store.get_run(tenant, run_id)
+    assert run["status"] == "skipped" and run["finished_at"] is not None
+    assert run_store.set_status(tenant, run_id, "running") is False  # terminal: never revived
+    assert run_store.mark_running(tenant, run_id) is False
+
+
+def test_finish_with_end_skipped_writes_a_completed_event_with_the_outcome(run_store, event_log, tenant):
+    run_id = _workflow(run_store, tenant)
+    assert run_store.finish_with_end(tenant, run_id, "skipped", output='{"status":"outside_slot"}')
+    end = event_log.get_event(tenant, run_id, "end")
+    assert (end.type, end.data) == ("run_completed", {"output": '{"status":"outside_slot"}', "outcome": "skipped"})
+    assert run_store.get_run(tenant, run_id)["status"] == "skipped"
+
+
 def test_terminal_status_needs_an_end(run_store, event_log, tenant):
     run_id = uuid4()
     run_store.create_run(tenant, uuid4(), 1, "hi", run_id)

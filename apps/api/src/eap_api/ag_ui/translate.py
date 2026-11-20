@@ -958,8 +958,9 @@ class AgUiFormatter:
             }[status_label]
             return events + self._state_ops(self._bump(step_id, counter))
         if kind == "run_completed":
-            self._state["status"] = "completed"
-            events = self._state_ops([{"op": "replace", "path": "/status", "value": "completed"}])
+            ended = "skipped" if data.get("outcome") == "skipped" else "completed"  # a skip is a success finish
+            self._state["status"] = ended
+            events = self._state_ops([{"op": "replace", "path": "/status", "value": ended}])
             events += self._close_open()
             events.append(self._finished(RunFinishedSuccessOutcome(), data.get("result")))
             self.closed = True

@@ -15,7 +15,7 @@ import { parseTraceFilters } from "@/lib/traces";
 import { legacyTarget, routes } from "@/lib/routes";
 
 /** The KPI cards with a Traces drill-down (one link each); the others are plain cards. */
-const LINKED_KPIS = ["runs", "error_rate"] as const;
+const LINKED_KPIS = ["runs", "error_rate", "recovered"] as const;
 
 const push = vi.fn();
 const replace = vi.fn();

@@ -1,3 +1,5 @@
+import { rememberRevision, revisionFromEtag, revisionKey, track, trackAll, writeResource } from "./revisions";
+
 /** An MCP tool an agent may call: `server` is the tenant MCP server's NAME, `tool` the tool's name on it. */
 export interface McpToolRef {
   server: string;
@@ -29,17 +31,30 @@ export interface AgentSpec {
   };
 }
 
+export interface AgentSpecSummary {
+  version: number;
+  model: { provider: string | null; name: string | null };
+  tool_count: number;
+  spec_hash: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
   draft_spec: AgentSpec;
   latest_version: number | null;
+  /** What the latest published version runs; null for a draft-only agent. */
+  latest_spec_summary?: AgentSpecSummary | null;
+  /** True when a published version exists and the draft differs from it. */
+  draft_dirty?: boolean;
   /** Archived agents are hidden from `list`, and refuse new runs, conversations and publishes (409). */
   archived?: boolean;
   /** A built-in agent (the Architect and its helpers). */
   builtin?: boolean;
   /** "architect" for the Architect, "drafter" for its system helpers, null for every other agent. */
   builtin_role?: "architect" | "drafter" | null;
+  /** The optimistic-concurrency token (`ETag`): a save sends it as `If-Match` (see revisions.ts). */
+  revision?: number;
 }
 
 export interface AgentVersion {
@@ -85,6 +100,9 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
   let details: ApiErrorDetail[] = [];
   try {
     const data = await response.json();
+    if (response.status === 412 && data?.code === "revision_mismatch" && typeof data.current_revision === "number") {
+      return new ConflictError(typeof data.detail === "string" ? data.detail : "This content was changed by someone else", data.current_revision, data.current);
+    }
     if (response.status === 422 && Array.isArray(data.detail)) {
       message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
       details = data.detail.map((e: { loc?: unknown; msg?: unknown }) => ({
@@ -93,11 +111,27 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
       }));
     } else if (typeof data.detail === "string") {
       message = data.detail;
+    } else if (data.detail && typeof data.detail === "object" && typeof data.detail.message === "string") {
+      message = data.detail.message;
     }
   } catch {
     // Keep the HTTP status fallback when the response is not JSON.
   }
   return new ApiError(response.status, message, details);
+}
+
+/**
+ * 412 `revision_mismatch`: the resource changed since this client read it. Carries the current resource
+ * (as GET returns it) and revision, so the page can offer to reload it or overwrite it. `key` names the
+ * remembered revision (revisions.ts) the write used; the conflict hook needs it to overwrite.
+ */
+export class ConflictError extends ApiError {
+  public key = "";
+
+  constructor(message: string, public currentRevision: number, public current: unknown) {
+    super(412, message);
+    this.name = "ConflictError";
+  }
 }
 
 /** A published workflow that runs an agent as a step (POST /agents/{id}/archive's 409). */
@@ -128,7 +162,7 @@ async function archiveAgent(id: string, force: boolean): Promise<Agent> {
     }
   }
   if (!response.ok) throw await apiErrorFromResponse(response);
-  return response.json();
+  return track(revisionKey.agent(id), (await response.json()) as Agent);
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -143,6 +177,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw await apiErrorFromResponse(response);
   }
+  // Publish, restore and archive answer the agent's new ETag: this tab's next save must send it.
+  const agentPath = /^\/api\/v1\/agents\/([^/?]+)\//.exec(path);
+  if (agentPath && options?.method && options.method !== "GET") {
+    rememberRevision(revisionKey.agent(decodeURIComponent(agentPath[1])), revisionFromEtag(response.headers?.get?.("ETag")));
+  }
 
   return response.json();
 }
@@ -152,12 +191,18 @@ export const api = {
     /** `init` passes a `signal` (say, a timeout) through to fetch; `includeSystem` also lists the
      * Architect's drafter helpers (`?include_system=true`). */
     list: (init?: RequestInit, options: { includeSystem?: boolean } = {}) =>
-      request<Agent[]>(options.includeSystem ? "/api/v1/agents?include_system=true" : "/api/v1/agents", init),
-    create: (spec: AgentSpec) => request<Agent>("/api/v1/agents", { method: "POST", body: JSON.stringify({ spec }) }),
-    get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
-    update: (id: string, spec: AgentSpec) => request<Agent>(`/api/v1/agents/${id}`, { method: "PATCH", body: JSON.stringify({ spec }) }),
+      request<Agent[]>(options.includeSystem ? "/api/v1/agents?include_system=true" : "/api/v1/agents", init).then((items) =>
+        trackAll(items, (agent) => revisionKey.agent(agent.id))),
+    create: (spec: AgentSpec) =>
+      request<Agent>("/api/v1/agents", { method: "POST", body: JSON.stringify({ spec }) }).then((agent) => track(revisionKey.agent(agent.id), agent)),
+    get: (id: string) => request<Agent>(`/api/v1/agents/${id}`).then((agent) => track(revisionKey.agent(id), agent)),
+    /** Saves the draft with the revision this tab last read (`If-Match`); a stale one throws ConflictError (412). */
+    update: (id: string, spec: AgentSpec) =>
+      writeResource(revisionKey.agent(id), (headers) =>
+        request<Agent>(`/api/v1/agents/${id}`, { method: "PATCH", headers, body: JSON.stringify({ spec }) })),
     /** The archived agents only (`GET /agents?archived=true`). */
-    listArchived: (init?: RequestInit) => request<Agent[]>("/api/v1/agents?archived=true", init),
+    listArchived: (init?: RequestInit) =>
+      request<Agent[]>("/api/v1/agents?archived=true", init).then((items) => trackAll(items, (agent) => revisionKey.agent(agent.id))),
     /** Idempotent; answers the agent with its new `archived` flag. Throws AgentArchiveBlocked
      * (409, with the workflows) when published workflows run it, unless `force`. */
     archive: (id: string, options: { force?: boolean } = {}) => archiveAgent(id, options.force === true),

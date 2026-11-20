@@ -97,6 +97,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
         return JSONResponse(status_code=exc.status_code, content=exc.body)
 
+    from eap_api import concurrency
+
+    concurrency.register(app)  # 412 / 428 / 400 of ETag + If-Match (eap_api.concurrency)
+
     # Import and register routes
     from eap_api.routes import router as agents_router
     
@@ -159,6 +163,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(scorers_router, prefix="/api/v1")
     app.include_router(scorer_suggestions_router, prefix="/api/v1")  # AI-suggested rules for an agent or workflow
+    from eap_api.routes.workflow_explanations import router as workflow_explanations_router
+
+    app.include_router(workflow_explanations_router, prefix="/api/v1")  # AI explanation of a published workflow version
     # Log search over Loki (EAP_LOKI_URL), tenant-scoped: GET /logs.
     from eap_api.routes.logs import router as logs_router
 

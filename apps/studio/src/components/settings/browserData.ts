@@ -1,4 +1,5 @@
 import { SIDE_PANEL_STORAGE_KEY } from "@/components/frame/frameStorage";
+import { ARCHITECT_SHOW_ARCHIVED_KEY } from "@/components/architect/CreatedList";
 import { PRESETS_PREFIX, SAVED_CONTEXT_PREFIX } from "@/lib/requestContext";
 import { SIDEBAR_STORAGE_KEY } from "@/lib/sidebarPref";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
@@ -11,6 +12,8 @@ import {
   LAST_AGENT_KEY,
 } from "@/components/agentPage/agentPageModel";
 import { WORKFLOW_LAYOUT_STORAGE_KEY } from "@/components/workflows/workflowLayout";
+import { NOT_REACHED_OPEN_KEY } from "@/lib/notReached";
+import { RUNS_SHOW_SKIPPED_KEY } from "@/lib/showSkipped";
 import { MEMORY_CARD_KEY } from "@/components/memory/memoryModel";
 import { TRACE_COLUMNS_STORAGE_KEY } from "@/lib/traces";
 import { CHAT_PROTOCOL_EVENT, CHAT_PROTOCOL_STORAGE_KEY } from "@/components/chat/chatProtocol";
@@ -77,6 +80,30 @@ export const BROWSER_DATA: readonly BrowserDataEntry[] = [
     label: "Agents list view",
     description: "List or Compact, and whether system agents are shown.",
     keys: [AGENTS_VIEW_KEY, AGENTS_SHOW_SYSTEM_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "architect-archived",
+    label: "Architect list",
+    description: "Whether the Architect page's created list shows archived agents and workflows.",
+    keys: [ARCHITECT_SHOW_ARCHIVED_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "runs-show-skipped",
+    label: "Skipped runs",
+    description: "Whether the Traces list and a workflow's run history also list skipped runs (nothing to do).",
+    keys: [RUNS_SHOW_SKIPPED_KEY],
+    prefixes: [],
+    clearGroup: "layout",
+  },
+  {
+    id: "run-not-reached",
+    label: "Steps not reached",
+    description: "Whether a workflow run's step list shows the steps the run never reached (folded away unless opened).",
+    keys: [NOT_REACHED_OPEN_KEY],
     prefixes: [],
     clearGroup: "layout",
   },

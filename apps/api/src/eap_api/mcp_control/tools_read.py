@@ -32,7 +32,7 @@ async def run_report(run_id: str, *, kind: str | None = None) -> dict[str, Any]:
 
     ctx = current_ctx()
     await tenant_run(ctx, run_id, kind=kind)  # not_found for another tenant's run or a disallowed one
-    full = await call(ctx, get_run, run_id=uid(run_id, "run_id"), principal=ctx.actor, stores=ctx.stores)
+    full = await call(ctx, get_run, run_id=uid(run_id, "run_id"), principal=ctx.actor, stores=ctx.stores, launcher=ctx.launcher)
     report = {k: full.get(k) for k in RUN_FIELDS}
     report["input"], report["input_truncated"] = clip(full.get("input"))
     report["output"], report["output_truncated"] = clip(full.get("output"))

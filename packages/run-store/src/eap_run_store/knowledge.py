@@ -1378,7 +1378,7 @@ class KnowledgeStore:
                     " AND NOT (d.status IN ('pending', 'ingesting')"
                     "   AND (d.active_version IS NULL OR d.latest_version > d.active_version)"
                     "   AND (EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id"
-                    "       AND r.status NOT IN ('completed', 'failed', 'needs_attention'))"
+                    "       AND r.status NOT IN ('completed', 'failed', 'needs_attention', 'skipped'))"
                     "     OR (NOT EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = d.tenant_id AND r.id = d.last_run_id)"
                     "       AND d.updated_at > now() - make_interval(secs => :orphan))))"
                     " AND CASE WHEN ev.data IS NOT NULL THEN (CASE WHEN cur.extractor IS NULL"

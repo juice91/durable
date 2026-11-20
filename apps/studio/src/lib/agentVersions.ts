@@ -1,4 +1,5 @@
 // Version compare and restore (GET /agents/{id}/versions/compare, POST /agents/{id}/versions/{v}/restore).
+import { rememberRevision, revisionFromEtag, revisionKey } from "./revisions";
 import { BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 
@@ -66,6 +67,8 @@ export async function restoreVersion(agentId: string, version: number, options: 
     },
   );
   if (!response.ok) throw await apiErrorFromResponse(response);
+  // A restore rewrites the draft and moves the agent's revision: the next save must send the new ETag.
+  rememberRevision(revisionKey.agent(agentId), revisionFromEtag(response.headers?.get?.("ETag")));
   return response.json();
 }
 

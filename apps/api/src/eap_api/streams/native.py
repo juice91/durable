@@ -38,7 +38,7 @@ from eap_schemas import RunEvent
 log = logging.getLogger("eap_api")
 
 TERMINAL_EVENT_TYPES = frozenset({"run_completed", "run_failed"})
-TERMINAL_STATUSES = frozenset({"completed", "failed", "needs_attention"})
+TERMINAL_STATUSES = frozenset({"completed", "failed", "needs_attention", "skipped"})
 MAX_PENDING_DELTAS = 1000
 
 # A delta source opens a subscription for one run: entering it must start listening (so nothing

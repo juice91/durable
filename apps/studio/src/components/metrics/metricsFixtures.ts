@@ -3,7 +3,7 @@ import type { BreakdownItem, MetricValues, MetricsBreakdown, MetricsSummary, Met
 
 export function metricValues(overrides: Partial<MetricValues> = {}): MetricValues {
   return {
-    runs: 0, completed: 0, failed: 0, needs_attention: 0, in_progress: 0, blocked: 0, error_rate: null,
+    runs: 0, completed: 0, skipped: 0, failed: 0, needs_attention: 0, in_progress: 0, blocked: 0, error_rate: null,
     latency_p50_ms: null, latency_p95_ms: null, latency_p99_ms: null, requests: 0, input_tokens: 0, output_tokens: 0,
     cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: "0E-10", unpriced_requests: 0, unmeasured_requests: 0,
     ...overrides,

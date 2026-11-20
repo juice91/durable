@@ -121,10 +121,38 @@ class TestAgents:
         data = response.json()
         assert data["name"] == "Test Agent"
         # Response follows contract: {id, name, draft_spec, latest_version}
-        assert set(data.keys()) == {"id", "name", "draft_spec", "latest_version", "archived", "builtin", "builtin_role"}
+        assert set(data.keys()) == {"id", "name", "draft_spec", "latest_version", "latest_spec_summary", "draft_dirty", "archived", "builtin", "builtin_role", "revision"}
         assert data["draft_spec"] is not None
         assert data["latest_version"] is None
+        assert data["latest_spec_summary"] is None
+        assert data["draft_dirty"] is False
         assert UUID4(data["id"])
+
+    def test_list_and_get_report_the_published_model_and_dirty_draft(self, client, tenant):
+        """The list and GET carry the published version's summary; draft_dirty flags unpublished edits."""
+        headers = get_auth_header(tenant, "user1")
+        spec = AgentSpec(name="Pub", instructions="Help.", model=ModelRef(provider="openai", name="gpt-4"))
+        agent = client.post("/api/v1/agents", json={"spec": spec.model_dump(mode="json")}, headers=headers).json()
+        aid = agent["id"]
+        pub = client.post(f"/api/v1/agents/{aid}/versions", headers=headers)
+        assert pub.status_code == 201, pub.text
+        edited = AgentSpec(name="Pub", instructions="Help.", model=ModelRef(provider="openai", name="gpt-4.1"))
+
+        def both():
+            listed = next(a for a in client.get("/api/v1/agents", headers=headers).json() if a["id"] == aid)
+            return listed, client.get(f"/api/v1/agents/{aid}", headers=headers).json()
+
+        for body in both():
+            assert body["latest_spec_summary"]["version"] == 1
+            assert body["latest_spec_summary"]["model"] == {"provider": "openai", "name": "gpt-4"}
+            assert body["latest_spec_summary"]["tool_count"] == 0
+            assert body["draft_dirty"] is False
+        patched = client.patch(f"/api/v1/agents/{aid}", json={"spec": edited.model_dump(mode="json")}, headers=headers)
+        assert patched.status_code == 200, patched.text
+        for body in both():
+            assert body["draft_dirty"] is True
+            assert body["latest_spec_summary"]["model"]["name"] == "gpt-4"  # still what runs
+            assert body["draft_spec"]["model"]["name"] == "gpt-4.1"
     def test_create_agent_invalid_spec(self, client, tenant):
         """Create with invalid spec returns 422."""
         response = client.post(
@@ -177,4 +205,4 @@ class TestAgents:
         agent = response.json()[0]
         assert agent["name"] == "Agent 1"
         # Response follows contract: {id, name, draft_spec, latest_version}
-        assert set(agent.keys()) == {"id", "name", "draft_spec", "latest_version", "archived", "builtin", "builtin_role"}
+        assert set(agent.keys()) == {"id", "name", "draft_spec", "latest_version", "latest_spec_summary", "draft_dirty", "archived", "builtin", "builtin_role", "revision"}

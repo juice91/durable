@@ -1,6 +1,7 @@
 // Reusable scorers (W2.3): `/scorers` CRUD, an agent's attachments (`/agents/{id}/scorers`), and the
 // `score` events the worker records on a run (read through the run's events).
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 import { listEvents } from "./runs";
 
 export const SCORER_KINDS = ["contains", "regex", "schema_valid", "field_equals", "max_cost"] as const;
@@ -30,6 +31,8 @@ export interface ReusableScorer {
   agent_ids: string[];
   created_at: string;
   updated_at: string;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface AttachedScorer {
@@ -60,11 +63,21 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export async function listReusableScorers(signal?: AbortSignal): Promise<ReusableScorer[]> {
-  return (await call<{ items: ReusableScorer[] }>("/api/v1/scorers", { signal })).items;
+  return trackAll((await call<{ items: ReusableScorer[] }>("/api/v1/scorers", { signal })).items, (s) => revisionKey.scorer(s.id));
 }
 
 export function createScorer(body: { name: string; description?: string | null; evaluator: ScorerEvaluator }): Promise<ReusableScorer> {
   return call("/api/v1/scorers", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function getScorer(id: string): Promise<ReusableScorer> {
+  return call<ReusableScorer>(`/api/v1/scorers/${encodeURIComponent(id)}`).then((scorer) => track(revisionKey.scorer(id), scorer));
+}
+
+/** Change a scorer. Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412). */
+export function updateScorer(id: string, body: { name?: string; description?: string | null; evaluator?: ScorerEvaluator }): Promise<ReusableScorer> {
+  return writeResource(revisionKey.scorer(id), (headers) =>
+    call<ReusableScorer>(`/api/v1/scorers/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify(body) }));
 }
 
 export function deleteScorer(id: string): Promise<void> {

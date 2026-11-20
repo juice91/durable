@@ -1,11 +1,14 @@
 "use client";
 
+import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
-import { deleteSchedule, listSchedules, scheduleState, updateSchedule, type WorkflowSchedule } from "@/lib/schedules";
+import { ConflictNotice } from "@/components/shared/ConflictNotice";
+import { useConflict } from "@/lib/useConflict";
+import { deleteSchedule, lastRunText, listSchedules, scheduleState, updateSchedule, type WorkflowSchedule } from "@/lib/schedules";
 import type { WorkflowSpec } from "@/lib/workflows";
 import { ScheduleDialog } from "./ScheduleDialog";
 
@@ -64,12 +67,16 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
     return () => controller.abort();
   }, [load]);
 
+  // 412: someone else changed the schedule; 重新載入 shows their version, 覆寫 resends on top of it.
+  const conflict = useConflict<WorkflowSchedule>({ onSaved: (saved) => replaceRow(saved as WorkflowSchedule) });
+  const replaceRow = (saved: WorkflowSchedule) => apply((rows ?? []).map((r) => (r.id === saved.id ? saved : r)));
+
   const setActive = async (row: WorkflowSchedule, active: boolean) => {
     setBusyId(row.id);
     setActionError(null);
     try {
-      const saved = await updateSchedule(row.id, { active });
-      apply((rows ?? []).map((r) => (r.id === row.id ? saved : r)));
+      const saved = await conflict.guard(() => updateSchedule(row.id, { active }));
+      if (saved !== undefined) replaceRow(saved);
     } catch (reason) {
       setActionError(`${row.name}: ${reason instanceof Error ? reason.message : "Failed to update the schedule"}`);
     } finally {
@@ -103,14 +110,20 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
         </span>
       ),
     },
-    { id: "id", header: "Schedule ID", cell: (row) => <span className="font-mono text-label">{row.id}</span> },
-    { id: "cron", header: "Cron", cell: (row) => <span className="font-mono text-label">{row.cron}</span> },
+    { id: "id", header: "Schedule ID", cell: (row) => <span className="flex min-w-0 items-center gap-1"><span className="select-text font-mono text-label">{row.id}</span><CopyButton text={row.id} label="schedule id" /></span> },
+    { id: "cron", header: "Cron", cell: (row) => <span className="flex min-w-0 items-center gap-1"><span className="select-text font-mono text-label">{row.cron}</span><CopyButton text={row.cron} label="cron" /></span> },
     { id: "next", header: "Next run", sortable: true, sortValue: (row) => row.next_fire_at ?? "", cell: (row) => (row.active ? formatDateTime(row.next_fire_at) : "—") },
     {
       id: "state", header: "State",
       cell: (row) => {
         const text = scheduleState(row);
-        return <span data-state={row.active ? "active" : row.last_error ? "stopped" : "paused"} className={row.last_error && !row.active ? "text-destructive-text" : undefined}>{text}</span>;
+        const lastRun = lastRunText(row);
+        return (
+          <span className="flex min-w-0 flex-col">
+            <span data-state={row.active ? "active" : row.last_error ? "stopped" : "paused"} className={row.last_error && !row.active ? "text-destructive-text" : undefined}>{text}</span>
+            {lastRun ? <span data-testid={`schedule-last-run-${row.id}`} data-status={row.last_run_status} className="text-caption text-muted-foreground">{lastRun}</span> : null}
+          </span>
+        );
       },
     },
     {
@@ -130,6 +143,7 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
+      <ConflictNotice state={conflict} onReload={(current) => (current ? replaceRow(current) : void load())} />
       {actionError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-label text-destructive-text">{actionError}</p> : null}
       <DataList<WorkflowSchedule>
         label="Schedules"

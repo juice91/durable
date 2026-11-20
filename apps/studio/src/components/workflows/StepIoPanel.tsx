@@ -8,13 +8,28 @@ import type { IterationDetail, StepDetail } from "@/lib/workflowRunState";
 import type { WorkflowStep } from "@/lib/workflows";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { formatScore } from "@/lib/format";
+import { CopyableText } from "@/components/ui/CopyableText";
+import { CopyButton } from "@/components/ui/CopyButton";
+import { BranchCases, branchCasesText, branchTaken } from "./BranchCases";
 import { evaluationView, refineAttempts, refineEvaluateStep, type EvaluationView, type RefineAttempt } from "./refineAttempts";
+
+/** What a copy of a value gives: a string as it is, anything else as raw (indented) JSON. */
+function rawText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
 
 function Block({ label, value, testId, format }: { label: string; value: unknown; testId: string; format?: "json" | "text" }) {
   return (
     <div>
       <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h4>
-      <pre data-testid={testId} data-output-format={format} className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+      <CopyableText label={label.toLowerCase()} copyText={rawText(value)} className="mt-1">
+        <pre data-testid={testId} data-output-format={format} className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 pr-9 font-mono text-xs text-foreground">{formatValue(value)}</pre>
+      </CopyableText>
     </div>
   );
 }
@@ -138,10 +153,12 @@ export interface StepIoPanelProps {
   children?: React.ReactNode;
   /** A loop step's iterations (its pager's): a refine loop lists its attempts from them (LP.15). */
   iterations?: readonly IterationDetail[] | null;
+  /** The step's AI note (the cached explanation of the run's workflow version), labelled 「AI 註解」. */
+  aiNote?: string | null;
 }
 
 /** Input, output or error of one step, from its step_* events (a body step: of one iteration). */
-export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children, iterations }: StepIoPanelProps) {
+export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children, iterations, aiNote }: StepIoPanelProps) {
   const type = step?.type ?? detail.stepType;
   const evaluation = type === "evaluate" && detail.hasOutput ? evaluationView(detail.output) : null;
   const attempts = refineAttempts(step, iterations);
@@ -150,15 +167,27 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
     <section data-testid="step-io-panel" data-step-id={detail.stepId} aria-label={`Step ${detail.stepId} input and output`} className={className ?? "min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4"}>
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-semibold text-card-foreground">
-          <span className="font-mono">{detail.stepId}</span>
+          <span data-testid="step-io-step-id" className="select-text font-mono">{detail.stepId}</span>
+          <CopyButton text={detail.stepId} label="step id" className="ml-1 align-middle" />
           {type ? <span className="ml-2 text-xs font-normal uppercase text-muted-foreground">{type}</span> : null}
         </h3>
         <button type="button" onClick={onClose} aria-label="Close step details" className="rounded-sm text-caption text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">Close</button>
       </div>
       <p>
         <span data-testid="step-io-state" className={`inline-block rounded border px-2 py-0.5 text-xs ${NODE_STATE_CLASSES[detail.state]}`}>{NODE_STATE_LABELS[detail.state]}</span>
+        {detail.errorKept ? (
+          <span data-testid="step-io-error-kept" title="The tool reported an error; the step kept it as its output and the run went on." className="ml-2 inline-block rounded border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs text-warning-text">
+            error kept: <code className="font-mono">{detail.errorKept}</code>
+          </span>
+        ) : null}
         {detail.startedAt ? <span className="ml-2 text-xs text-muted-foreground">started {formatDateTime(detail.startedAt)}</span> : null}
       </p>
+      {aiNote ? (
+        <p data-testid="step-io-ai-note" className="select-text break-words rounded-sm bg-muted/40 px-2 py-1 text-caption text-foreground">
+          <span className="mr-1 font-semibold text-muted-foreground">AI 註解</span>
+          {aiNote}
+        </p>
+      ) : null}
       {iterationLabel ? <p data-testid="step-io-iteration" className="text-caption text-muted-foreground">{iterationLabel}</p> : null}
       {detail.childRunId ? (
         <p className="text-sm">
@@ -179,6 +208,14 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
               {detail.decision.comment ? <p data-testid="step-decision-comment" className="mt-1 whitespace-pre-wrap text-muted-foreground">{detail.decision.comment}</p> : null}
             </div>
           ) : detail.state === "waiting" ? <p className="text-xs text-muted-foreground">Decide in the approval card (Needs input).</p> : null}
+        </div>
+      ) : null}
+      {step?.type === "branch" ? (
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cases</h4>
+          <CopyableText label="cases" copyText={branchCasesText(step)} data-testid="step-io-cases" className="mt-1">
+            <BranchCases step={step} taken={branchTaken(detail.output)} warnings={detail.warnings} />
+          </CopyableText>
         </div>
       ) : null}
       {detail.input !== undefined ? <Block label="Input" value={detail.input} testId="step-io-input" /> : null}
@@ -219,8 +256,10 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
       ) : null}
       {detail.error || detail.errorCode ? (
         <div role="alert" data-testid="step-io-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">
-          {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
-          {detail.errorCode ? <p className="mt-1 text-xs">Error code: <code className="font-mono">{detail.errorCode}</code></p> : null}
+          <CopyableText label="error" copyText={[detail.error, detail.errorCode ? `Error code: ${detail.errorCode}` : null].filter(Boolean).join("\n")} className="pr-8">
+            {detail.error ? <p className="whitespace-pre-wrap">{detail.error}</p> : null}
+            {detail.errorCode ? <p className="mt-1 text-xs">Error code: <code className="font-mono">{detail.errorCode}</code></p> : null}
+          </CopyableText>
         </div>
       ) : null}
       {!detail.started && detail.state === "pending" ? <p className="text-sm text-muted-foreground">This step has not started.</p> : null}
@@ -230,7 +269,7 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
             ? "Not reached: the run ended before this step."
             : detail.skipReason === "iteration_ended"
               ? "Not run in this iteration."
-              : "Skipped: this branch arm was not taken."}
+              : "Not reached: this branch arm was not taken."}
         </p>
       ) : null}
       {attempts.length > 0 && judgedBy ? <RefineAttempts attempts={attempts} evaluateStepId={judgedBy.id} /> : null}

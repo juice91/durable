@@ -32,13 +32,15 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
 }
 
 /** `waiting_approval` (AC.6) is a display status only: a running run with an open tool approval. */
-export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval" | "completed" | "failed" | "needs_attention";
+export type RunStatus = "queued" | "running" | "recovering" | "waiting_approval" | "completed" | "skipped" | "failed" | "needs_attention";
 
 /**
  * What a run executed. `kb_ingest` is a knowledge-base ingestion run (the RAG branch's
  * `eap.kb_ingest` workflow): shown as "Knowledge ingest", linking to its knowledge base (RM.16).
+ * `kb_source_sync` is a knowledge-base source sync run: shown as "KB source sync", linking to the
+ * knowledge base and the source (RM.29).
  */
-export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest" | "eval";
+export type RunKind = "agent" | "tool" | "workflow" | "kb_ingest" | "eval" | "kb_source_sync";
 
 /** Run kinds for labels and the Traces kind filter, in filter order. */
 export const RUN_KIND_LABELS: Record<RunKind, string> = {
@@ -46,8 +48,9 @@ export const RUN_KIND_LABELS: Record<RunKind, string> = {
   workflow: "Workflow",
   tool: "Tool",
   kb_ingest: "Knowledge ingest",
-  // AC.17: an agent's test suite run (its case runs are child runs).
   eval: "Eval",
+  // RM.29: a knowledge-base source sync run (0029_kb_sources).
+  kb_source_sync: "KB source sync",
 };
 
 export interface Run {
@@ -73,6 +76,9 @@ export interface Run {
   knowledge_base_id?: string | null;
   status: string;
   display_status: RunStatus;
+  /** How often DBOS resumed the run's workflow after a worker crash or a deploy (0 when never); `recovered` is `> 0`. */
+  recovery_attempts?: number;
+  recovered?: boolean;
   input: string;
   output: string | null;
   error: string | null;
@@ -82,13 +88,21 @@ export interface Run {
   trace_id: string | null;
   conversation_id: string | null;
   turn: number | null;
-}
+  /** An eval run's suite id (from the API's eval runs endpoint). */
+  suite_id?: string | null;
+  /** An eval run's suite name (from the API's eval runs endpoint). */
+  suite_name?: string | null;
+  /** The name of the knowledge-base source for a kb_source_sync run (from the run's input JSON). */
+  source_name?: string | null;
+};
 
 export interface RunEventData {
   /** Text for an agent run; the tool's JSON arguments (an object) for a tool run. */
   input?: string | Record<string, unknown>;
   /** Tool runs: the tool id (run_started, tool_call, tool_result) and the result (run_completed). */
   tool_id?: string;
+  /** The name of the knowledge-base source for a kb_source_sync run. */
+  source_name?: string;
   result?: unknown;
   version?: number;
   agent_id?: string;
@@ -176,7 +190,7 @@ export interface SubscribeOptions {
 }
 
 const TERMINAL_EVENT_TYPES = new Set(["run_completed", "run_failed"]);
-const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "needs_attention"]);
+const TERMINAL_RUN_STATUSES = new Set(["completed", "skipped", "failed", "needs_attention"]);
 
 export async function startRun(
   agentId: string,

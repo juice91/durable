@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import Principal, current_principal
+from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.database import get_session
 from eap_api.launcher import RunLauncher, get_run_launcher
 from eap_api.models import AgentModel
@@ -110,6 +111,7 @@ def _json(record: ScorerRecord) -> dict[str, Any]:
         "agent_ids": list(record.agent_ids),
         "created_at": _iso(record.created_at),
         "updated_at": _iso(record.updated_at),
+        "revision": record.revision,
     }
 
 
@@ -140,7 +142,7 @@ async def create_scorer(body: ScorerCreate, principal: PrincipalDep, store: Scor
         record = await run_in_threadpool(store.create, principal.tenant_id, body.name, spec, body.description)
     except ScorerNameConflict:
         raise _http(status.HTTP_409_CONFLICT, NAME_IN_USE) from None
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_json(record))
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=_json(record)), record.revision)
 
 
 @router.get("/scorers")
@@ -149,32 +151,43 @@ async def list_scorers(principal: PrincipalDep, store: ScorerStoreDep) -> JSONRe
     return JSONResponse(content={"items": [_json(r) for r in records]})
 
 
-@router.get("/scorers/{scorer_id}")
+@router.get("/scorers/{scorer_id}", responses={**etag_responses(write=False)})
 async def get_scorer(scorer_id: uuid.UUID, principal: PrincipalDep, store: ScorerStoreDep) -> JSONResponse:
     try:
         record = await run_in_threadpool(store.get, principal.tenant_id, scorer_id)
     except ScorerNotFound:
         raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
-    return JSONResponse(content=_json(record))
+    return read_response(_json(record), record.revision)
 
 
-@router.patch("/scorers/{scorer_id}")
+@router.patch("/scorers/{scorer_id}", responses={**etag_responses()})
 async def update_scorer(
-    scorer_id: uuid.UUID, body: ScorerUpdate, principal: PrincipalDep, store: ScorerStoreDep
+    scorer_id: uuid.UUID, body: ScorerUpdate, principal: PrincipalDep, store: ScorerStoreDep, pre: IfMatch
 ) -> JSONResponse:
+    """Change a scorer. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
+    with the current scorer (see eap_api.concurrency)."""
     spec = _check(body.evaluator) if body.evaluator is not None else None
+
+    def current() -> tuple[dict[str, Any], int]:
+        found = store.get(principal.tenant_id, scorer_id)
+        return _json(found), found.revision
+
     try:
-        record = await run_in_threadpool(
-            lambda: store.update(
-                principal.tenant_id, scorer_id, name=body.name, description=body.description,
-                set_description="description" in body.model_fields_set, evaluator=spec,
+        if pre.expected is not None:
+            pre.check((await run_in_threadpool(current))[1], lambda: current())
+        with pre.guard(current):
+            record = await run_in_threadpool(
+                lambda: store.update(
+                    principal.tenant_id, scorer_id, name=body.name, description=body.description,
+                    set_description="description" in body.model_fields_set, evaluator=spec,
+                    expected_revision=pre.expected,
+                )
             )
-        )
     except ScorerNotFound:
         raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
     except ScorerNameConflict:
         raise _http(status.HTTP_409_CONFLICT, NAME_IN_USE) from None
-    return JSONResponse(content=_json(record))
+    return pre.respond(_json(record), record.revision)
 
 
 @router.delete("/scorers/{scorer_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -268,7 +281,7 @@ async def score_run(
     run_store, _ = stores
     tenant_id = principal.tenant_id
     run = await run_in_threadpool(_get_run_or_404, run_store, tenant_id, run_id)
-    if run["status"] != "completed":  # scoring reads the answer: a failed or cancelled run has none
+    if run["status"] not in ("completed", "skipped"):  # scoring reads the answer: a failed or cancelled run has none
         raise _http(status.HTTP_409_CONFLICT, RUN_NOT_FINISHED)
     requested = list(dict.fromkeys(str(s) for s in body.scorer_ids))
     for scorer_id in requested:

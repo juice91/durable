@@ -1,5 +1,6 @@
 "use client";
 
+import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { ApiError } from "@/lib/api";
@@ -52,8 +53,11 @@ function KeyRow({ apiKey, onRevoke }: { apiKey: ApiKey; onRevoke: (key: ApiKey) 
             </Badge>
           ) : null}
         </div>
-        <span className="min-w-0 break-all font-mono text-caption text-muted-foreground" data-testid="api-key-prefix">
+        <span className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 break-all font-mono text-caption text-muted-foreground" data-testid="api-key-prefix">
           {apiKey.prefix}…
+        </span>
+          <CopyButton text={apiKey.prefix} label="key prefix" />
         </span>
         <dl className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-caption">
           <dt className="text-muted-foreground">Access</dt>

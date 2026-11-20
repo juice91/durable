@@ -69,7 +69,7 @@ class Base(DeclarativeBase):
     """Base class for all database models. Alembic (packages/db) creates and migrates these tables."""
 
 
-TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention"})
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "needs_attention", "skipped"})
 RUN_KINDS = ("agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync")
 
 # runs.error of a run whose hand-off to the orchestrator failed (the API could not enqueue it).
@@ -1066,11 +1066,12 @@ def _cancel_one_in_session(session, tenant_id: str, run_id: str) -> tuple[str | 
         # Terminal without `end`: a failed hand-off (mark_enqueue_failed), or a row written before
         # the guards. Finalise it with an `end` matching its status, so it can never be revived
         # (mark_running, requeue_after_enqueue_failure) and the reconciler stops listing it.
-        if current.status == "completed":
+        if current.status in ("completed", "skipped"):
             output = session.execute(
                 select(RunModel.output).where(RunModel.id == run_id, RunModel.tenant_id == tenant_id)
             ).scalar_one()
-            append_event_in_session(session, tenant_id, run_id, END_EVENT_KEY, "run_completed", {"output": output})
+            end_data = {"output": output, **({"outcome": "skipped"} if current.status == "skipped" else {})}
+            append_event_in_session(session, tenant_id, run_id, END_EVENT_KEY, "run_completed", end_data)
             return current.status, True
         append_event_in_session(
             session, tenant_id, run_id, END_EVENT_KEY, "run_failed",
@@ -1569,7 +1570,7 @@ class RunStore:
 
         `messages` is written once: a repeated call (a re-executed finish step) keeps the first value,
         so the history later turns read never changes after it was first recorded.
-        A terminal status (completed, failed, needs_attention) also sets `finished_at` and the usage
+        A terminal status (completed, skipped, failed, needs_attention) also sets `finished_at` and the usage
         totals in the same statement (see _finish_values).
 
         Terminal guards (loops D12), checked under the run-row lock (the lock event appends and
@@ -1619,8 +1620,8 @@ class RunStore:
                 session.rollback()
                 raise RunNotFound(tenant_id, run_id)
             if _end_event(session, tenant_id, run_id) is None:
-                if status == "completed":
-                    data: dict[str, Any] = {"output": output}
+                if status in ("completed", "skipped"):
+                    data: dict[str, Any] = {"output": output, **({"outcome": "skipped"} if status == "skipped" else {})}
                     end_type = "run_completed"
                 else:
                     data = {"status": status, "error": error}

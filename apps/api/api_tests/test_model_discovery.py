@@ -222,7 +222,7 @@ def test_providers_shape_and_no_key_leak(client, tenant, litellm_env, monkeypatc
     listed = client.get("/api/v1/providers", headers=h)
     tested = client.post("/api/v1/providers/litellm/test", headers=h)
     items = {i["id"]: i for i in listed.json()["items"]}
-    assert list(items) == ["litellm", "anthropic", "openai"]
+    assert list(items) == ["litellm", "anthropic", "openai", "cloudflare"]
     assert items["litellm"] == {
         "id": "litellm", "label": "LiteLLM gateway", "configured": True, "env_var": "EAP_LITELLM_API_KEY",
         "base_url_host": "gateway.example.test:4000", "status": "ok", "model_count": 2,
@@ -372,3 +372,104 @@ def test_get_models_items_carry_capabilities(client, tenant, litellm_env, monkey
     assert items["test:echo"]["capabilities"]["image"] is True  # a scripted item
     assert items["litellm:a"]["capabilities"]["source"] == "assumed"  # the gateway lists no info for it
     assert items["anthropic:claude-sonnet-4-5"]["capabilities"] == {"image": True, "pdf": True, "source": "static"}
+
+
+# ---- cloudflare (Workers AI) -----------------------------------------------------------------
+
+CF_TOKEN = "cf-token-SECRET-321"
+DEEPSEEK = "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+
+
+def cf_page(names, *, total=None, props=None):
+    return {"result": [{"name": n, "properties": (props or {}).get(n, [])} for n in names],
+            "result_info": {"total_count": total if total is not None else len(names)}, "success": True}
+
+
+@pytest.fixture
+def cf_env(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", CF_TOKEN)
+    monkeypatch.setenv("EAP_CLOUDFLARE_ACCOUNT_ID", "acct123")
+    monkeypatch.delenv("EAP_CLOUDFLARE_GATEWAY_ID", raising=False)
+    monkeypatch.delenv("EAP_CLOUDFLARE_BASE_URL", raising=False)
+    monkeypatch.delenv("EAP_CLOUDFLARE_API_TOKEN", raising=False)
+    monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:echo,cloudflare:*")
+
+
+def cf_status(monkeypatch, stub, environ=None):
+    install(monkeypatch, stub)
+    return model_discovery.provider_status("cloudflare", environ=environ)
+
+
+def test_cloudflare_unconfigured_without_token_or_account(monkeypatch):
+    stub = install(monkeypatch, Stub())
+    for env in ({}, {"CLOUDFLARE_API_TOKEN": CF_TOKEN}, {"EAP_CLOUDFLARE_ACCOUNT_ID": "a"}):
+        status = model_discovery.provider_status("cloudflare", environ=env, refresh=False)
+        model_discovery.clear_cache()
+        assert (status.configured, status.status) == (False, "not_configured")
+    assert stub.calls == []
+
+
+def test_cloudflare_lists_catalogue_with_properties_and_static_entry(monkeypatch):
+    props = {"@cf/meta/llama-x": [{"property_id": "function_calling", "value": "true"},
+                                  {"property_id": "context_window", "value": "131072"}]}
+    stub = Stub({"/ai/models/search": cf_page(["@cf/meta/llama-x", DEEPSEEK], props=props)})
+    env = {"CLOUDFLARE_API_TOKEN": CF_TOKEN, "EAP_CLOUDFLARE_ACCOUNT_ID": "acct123"}
+    model_discovery.clear_cache()
+    status = cf_status(monkeypatch, stub, env)
+    assert status.status == "ok" and status.env_var == "CLOUDFLARE_API_TOKEN"
+    assert status.base_url_host == "api.cloudflare.com"
+    by_name = {m.name: m for m in status.models}
+    assert by_name["@cf/meta/llama-x"].function_calling is True and by_name["@cf/meta/llama-x"].context_window == 131072
+    ds = by_name[DEEPSEEK]
+    assert (ds.function_calling, ds.structured_output, ds.context_window) == (True, True, 1_048_576)
+    assert ds.capabilities.image is False
+    url, headers = stub.calls[0]
+    assert url.startswith("https://api.cloudflare.com/client/v4/accounts/acct123/ai/models/search?task=Text%20Generation")
+    assert headers == {"Authorization": f"Bearer {CF_TOKEN}"}
+    model_discovery.clear_cache()
+
+
+def test_cloudflare_follows_pages_up_to_five(monkeypatch):
+    model_discovery.clear_cache()
+    pages = []
+
+    def stub(url, headers, timeout_s):
+        pages.append(url)
+        n = int(url.rsplit("page=", 1)[1])
+        return cf_page([f"@cf/m/p{n}-{i}" for i in range(100)], total=10_000)
+
+    status = cf_status(monkeypatch, stub, {"CLOUDFLARE_API_TOKEN": CF_TOKEN, "EAP_CLOUDFLARE_ACCOUNT_ID": "a"})
+    assert len(pages) == 5 and len(status.models) == 500
+    model_discovery.clear_cache()
+
+
+def test_cloudflare_gateway_header_and_token_fallback(monkeypatch):
+    model_discovery.clear_cache()
+    stub = Stub({"/ai/models/search": cf_page([DEEPSEEK])})
+    env = {"EAP_CLOUDFLARE_API_TOKEN": CF_TOKEN, "EAP_CLOUDFLARE_ACCOUNT_ID": "a", "EAP_CLOUDFLARE_GATEWAY_ID": "gw1"}
+    status = cf_status(monkeypatch, stub, env)
+    assert status.status == "ok" and status.env_var == "EAP_CLOUDFLARE_API_TOKEN"
+    assert stub.calls[0][1] == {"Authorization": f"Bearer {CF_TOKEN}", "cf-aig-gateway-id": "gw1"}
+    model_discovery.clear_cache()
+
+
+@pytest.mark.parametrize("failure,fragment", [
+    (model_discovery.HttpStatusError(401), "rejected"), (model_discovery.HttpStatusError(500), "HTTP 500"),
+    (TimeoutError("x"), "in time"), (OSError("x"), "could not connect")])
+def test_cloudflare_failures_are_unreachable_without_leaks(monkeypatch, failure, fragment):
+    model_discovery.clear_cache()
+    status = cf_status(monkeypatch, Stub(failures={"/ai/models/search": failure}),
+                       {"CLOUDFLARE_API_TOKEN": CF_TOKEN, "EAP_CLOUDFLARE_ACCOUNT_ID": "a"})
+    assert status.status == "unreachable" and fragment in status.error and CF_TOKEN not in str(status.public())
+    model_discovery.clear_cache()
+
+
+def test_cloudflare_in_providers_endpoint_and_models_expansion(client, tenant, cf_env, monkeypatch):
+    model_discovery.clear_cache()
+    install(monkeypatch, Stub({"/ai/models/search": cf_page([DEEPSEEK])}))
+    ids = [i["id"] for i in get_models(client, tenant)]
+    assert f"cloudflare:{DEEPSEEK}" in ids
+    rows = client.get("/api/v1/providers", headers=get_auth_header(tenant, "alice")).json()["items"]
+    row = next(r for r in rows if r["id"] == "cloudflare")
+    assert row["label"] == "Cloudflare Workers AI" and row["status"] == "ok" and CF_TOKEN not in json.dumps(rows)
+    model_discovery.clear_cache()

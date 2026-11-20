@@ -2,6 +2,7 @@
 // (suites, cases, import and export, eval runs, results, compare, side-effect warnings), their
 // shapes, and the pure rules the tab uses (evaluator forms, expected output, labels, deltas).
 import { apiErrorFromResponse, apiHeaders, BASE_URL, ApiError } from "./api";
+import { revisionKey, track, trackAll, writeResource } from "./revisions";
 
 // ---------------------------------------------------------------------------- shapes
 
@@ -64,6 +65,8 @@ export interface EvalSuite {
   archived_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  /** The optimistic-concurrency token (`ETag`); see revisions.ts. */
+  revision?: number;
 }
 
 export interface EvalCase {
@@ -77,6 +80,8 @@ export interface EvalCase {
   position: number;
   created_at: string | null;
   updated_at: string | null;
+  /** The optimistic-concurrency token (`ETag`); a case has its own, separate from its suite's. */
+  revision?: number;
 }
 
 export interface EvalSuiteWithCases extends EvalSuite {
@@ -297,7 +302,8 @@ const seg = encodeURIComponent;
 
 export function listSuites(agentId: string, opts: { includeArchived?: boolean; signal?: AbortSignal } = {}): Promise<EvalSuite[]> {
   const query = opts.includeArchived ? "?include_archived=true" : "";
-  return call<{ items: EvalSuite[] }>(`/api/v1/agents/${seg(agentId)}/eval-suites${query}`, { signal: opts.signal }).then((d) => d.items);
+  return call<{ items: EvalSuite[] }>(`/api/v1/agents/${seg(agentId)}/eval-suites${query}`, { signal: opts.signal }).then((d) =>
+    trackAll(d.items, (suite) => revisionKey.suite(suite.id)));
 }
 
 export function createSuite(agentId: string, body: EvalSuiteBody & { suite_id?: string }): Promise<EvalSuite> {
@@ -305,11 +311,16 @@ export function createSuite(agentId: string, body: EvalSuiteBody & { suite_id?: 
 }
 
 export function getSuite(suiteId: string, signal?: AbortSignal): Promise<EvalSuiteWithCases> {
-  return call<EvalSuiteWithCases>(`/api/v1/eval-suites/${seg(suiteId)}`, { signal });
+  return call<EvalSuiteWithCases>(`/api/v1/eval-suites/${seg(suiteId)}`, { signal }).then((suite) => {
+    trackAll(suite.cases ?? [], (c) => revisionKey.evalCase(suiteId, c.id));
+    return track(revisionKey.suite(suiteId), suite);
+  });
 }
 
+/** Sends the revision this tab last read as `If-Match`; a stale one throws ConflictError (412). */
 export function updateSuite(suiteId: string, body: Partial<EvalSuiteBody> & { archived?: boolean }): Promise<EvalSuite> {
-  return call<EvalSuite>(`/api/v1/eval-suites/${seg(suiteId)}`, { method: "PATCH", body: JSON.stringify(body) });
+  return writeResource(revisionKey.suite(suiteId), (headers) =>
+    call<EvalSuite>(`/api/v1/eval-suites/${seg(suiteId)}`, { method: "PATCH", headers, body: JSON.stringify(body) }));
 }
 
 export function deleteSuite(suiteId: string): Promise<void> {
@@ -320,8 +331,10 @@ export function addCase(suiteId: string, body: EvalCaseBody): Promise<EvalCase> 
   return call<EvalCase>(`/api/v1/eval-suites/${seg(suiteId)}/cases`, { method: "POST", body: JSON.stringify(body) });
 }
 
+/** Sends the case's revision as `If-Match`; a stale one throws ConflictError (412). */
 export function updateCase(suiteId: string, caseId: string, body: Partial<EvalCaseBody>): Promise<EvalCase> {
-  return call<EvalCase>(`/api/v1/eval-suites/${seg(suiteId)}/cases/${seg(caseId)}`, { method: "PATCH", body: JSON.stringify(body) });
+  return writeResource(revisionKey.evalCase(suiteId, caseId), (headers) =>
+    call<EvalCase>(`/api/v1/eval-suites/${seg(suiteId)}/cases/${seg(caseId)}`, { method: "PATCH", headers, body: JSON.stringify(body) }));
 }
 
 export function deleteCase(suiteId: string, caseId: string): Promise<void> {
@@ -619,7 +632,7 @@ export function failureReason(result: EvalCaseResult): string | null {
 
 /** A run that will not produce more results. */
 export function isFinishedStatus(status: string | null | undefined): boolean {
-  return status === "completed" || status === "failed" || status === "needs_attention";
+  return status === "completed" || status === "skipped" || status === "failed" || status === "needs_attention";
 }
 
 // ---------------------------------------------------------------------------- expected output

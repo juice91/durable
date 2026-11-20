@@ -327,6 +327,14 @@ describe("KPI cards", () => {
     expect(cards.error_rate.hint).toBe("2 failed of 3 finished · 1 blocked");
   });
 
+  it("counts skipped runs apart: named on the Runs card, never in the failed or finished counts", () => {
+    const cards = Object.fromEntries(kpiCards(summaryFixture({ runs: 6, completed: 1, skipped: 4, failed: 1, in_progress: 0 }), FILTERS).map((c) => [c.id, c]));
+    expect(cards.runs.hint).toBe("1 completed · 4 skipped · 0 in progress");
+    expect(cards.error_rate.hint).toBe("1 failed of 2 finished");
+    const none = Object.fromEntries(kpiCards(summaryFixture({ runs: 1, completed: 1 }), FILTERS).map((c) => [c.id, c]));
+    expect(none.runs.hint).toBe("1 completed · 0 in progress");
+  });
+
   it("renders cards as links and a loading row without a summary", () => {
     const { rerender } = render(<MetricsKpis summary={summaryFixture({ runs: 3, completed: 3 }, null)} filters={FILTERS} />);
     expect(screen.getByTestId("kpi-runs")).toHaveAttribute("href", expect.stringMatching(/^\/traces\?/));

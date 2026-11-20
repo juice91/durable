@@ -86,6 +86,7 @@ from eap_schemas.architect_seed import (
 )
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.scorer_suggestions import SUGGESTER_SLUG
+from eap_schemas.workflow_explanations import EXPLAINER_NAME, EXPLAINER_SLUG, explainer_agent_spec
 from eap_schemas.tools import TOOL_DECLARATIONS
 from eap_schemas.workflows import WorkflowSpec, canonical_workflow_hash
 
@@ -198,7 +199,8 @@ def _seed_one(conn: Connection, tenant_id: str, user_id: str, slug: str, name: s
             approvals["tools"] = [*(approvals.get("tools") or []), *missing]
             spec["approvals"] = approvals
         conn.execute(
-            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
+            text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+                " WHERE id = :i AND tenant_id = :t"),
             {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
         )
         if clean:
@@ -234,19 +236,81 @@ def ensure_seed(engine: Engine, tenant_id: str, user_id: str) -> tuple[dict[str,
     }, made_a or made_d or made_w
 
 
+_SEEDED = (
+    (ARCHITECT_SLUG, architect_agent_spec),
+    (DRAFTER_SLUG, drafter_agent_spec),
+    (WORKFLOW_DRAFTER_SLUG, workflow_drafter_agent_spec),
+    (EXPLAINER_SLUG, explainer_agent_spec),
+)
+
+
+def _republish_seed(conn: Connection, tenant_id: str, slug: str, build: Any) -> bool:
+    """Bring one seeded agent's published text up to the current seed. The target is the seed spec with
+    the agent's own model, plus any tools (and approvals entries) the tenant added. Skipped when the draft
+    has unpublished edits (a human or the Architect changed it) or the latest version already equals the
+    target. Returns True when a new version was published (created_via "seed")."""
+    row = conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first()
+    if row is None or row.archived:
+        return False
+    locked = definitions.lock_agent(conn, tenant_id, str(row.id))
+    latest = definitions.latest_agent_version(conn, str(row.id))
+    draft = dict(locked.draft_spec or {})
+    model = _spec_model(draft)
+    if latest is None or model is None:
+        return False
+    if draft_hash(draft) != latest.spec_hash:
+        log.info("architect seed: draft has unpublished edits, seed text not republished tenant=%s slug=%s", tenant_id, slug)
+        return False
+    target = build(model).model_dump(mode="json")
+    extra = [t for t in (draft.get("tools") or []) if t not in target["tools"]]
+    target["tools"] = [*target["tools"], *extra]
+    approvals = dict(target.get("approvals") or {})
+    seeded = list(approvals.get("tools") or [])
+    extra_approved = [t for t in ((draft.get("approvals") or {}).get("tools") or []) if t not in seeded]
+    if extra_approved:
+        target["approvals"] = {**approvals, "tools": [*seeded, *extra_approved]}
+    if draft_hash(target) == latest.spec_hash:
+        return False
+    conn.execute(
+        text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+             " WHERE id = :i AND tenant_id = :t"),
+        {"s": json.dumps(target), "i": str(row.id), "t": tenant_id},
+    )
+    try:
+        with conn.begin_nested():
+            definitions.publish_agent(conn, tenant_id, str(row.id), created_by="system:seed", created_via="seed")
+    except DefinitionError:
+        log.warning("architect seed: seed text could not be published tenant=%s slug=%s", tenant_id, slug, exc_info=True)
+        raise
+    return True
+
+
 def reconcile_all_seeds(engine: Engine) -> int:
-    """At startup: run `ensure_seed` for every tenant that already has an Architect row, so a deploy that
-    adds built-in tool ids reaches existing tenants without a hand repair. Never raises (a tenant that
-    fails is logged and skipped). Returns the number of tenants reconciled."""
+    """At startup: run `ensure_seed` for every tenant that already has an Architect row (new built-in tool
+    ids reach existing tenants), then republish each seeded agent whose latest version differs from the
+    current seed text (model and tenant-added tools kept; agents with unpublished draft edits skipped).
+    Never raises (a tenant that fails is logged and skipped). Returns the number of tenants reconciled;
+    the log line also counts the republished agents."""
     with engine.connect() as conn:
         tenants = [r.tenant_id for r in conn.execute(text("SELECT DISTINCT tenant_id FROM agents WHERE slug = :s AND builtin"), {"s": ARCHITECT_SLUG})]
     done = 0
+    republished = 0
     for tenant in tenants:
         try:
             ensure_seed(engine, tenant, "system:seed")
+            with engine.begin() as conn:  # the workflow explainer: a tenant seeded before it existed gets it here
+                _seed_one(conn, tenant, "system:seed", EXPLAINER_SLUG, EXPLAINER_NAME, explainer_agent_spec, [])
             done += 1
         except Exception:
             log.warning("architect seed: startup reconcile failed tenant=%s", tenant, exc_info=True)
+            continue
+        for slug, build in _SEEDED:
+            try:
+                with engine.begin() as conn:
+                    republished += _republish_seed(conn, tenant, slug, build)
+            except Exception:
+                log.warning("architect seed: republish failed tenant=%s slug=%s", tenant, slug, exc_info=True)
+    log.info("architect seed: reconciled %d tenants, republished %d seeded agents", done, republished)
     return done
 
 
@@ -287,13 +351,14 @@ def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> 
         rows = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in BUILTIN_SLUGS]
         if any(r is None for r in rows):
             raise refuse(404, "The Architect is not set up yet.", code="not_seeded")
-        suggester = conn.execute(_BY_SLUG, {"t": tenant_id, "s": SUGGESTER_SLUG}).first()  # seeded on first use
-        for row in [*rows, *([suggester] if suggester is not None else [])]:
+        helpers = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in (SUGGESTER_SLUG, EXPLAINER_SLUG)]
+        for row in [*rows, *(h for h in helpers if h is not None)]:  # the helpers are seeded on first use
             locked = definitions.lock_agent(conn, tenant_id, str(row.id))
             spec = dict(locked.draft_spec or {})
             spec["model"] = {**(spec.get("model") or {}), "provider": provider, "name": name}
             conn.execute(
-                text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now() WHERE id = :i AND tenant_id = :t"),
+                text("UPDATE agents SET draft_spec = CAST(:s AS jsonb), updated_at = now(), revision = revision + 1"
+                " WHERE id = :i AND tenant_id = :t"),
                 {"s": json.dumps(spec), "i": str(row.id), "t": tenant_id},
             )
             latest = definitions.latest_agent_version(conn, str(row.id))
@@ -486,8 +551,8 @@ def drafter_input(description: str, current: ArchitectAgentSpec | None, allowlis
     return "\n".join(lines)
 
 
-def _wait_for_run(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
-    deadline = time.monotonic() + DRAFT_TIMEOUT_S
+def _wait_for_run(run_store: Any, tenant_id: str, run_id: uuid.UUID, timeout: float | None = None) -> dict[str, Any]:
+    deadline = time.monotonic() + (DRAFT_TIMEOUT_S if timeout is None else timeout)
     while True:
         run = run_store.get_run(tenant_id, run_id)
         if run is not None and run["status"] in TERMINAL_RUN_STATUSES:
@@ -508,7 +573,7 @@ def _invalid(raw: str, problems: list[str], what: str = "agent") -> DefinitionEr
 
 def _run_drafter(
     drafter_agent_id: str, prompt: str, principal: Principal, db: Session, stores: Any, launcher: RunLauncher,
-    what: str,
+    what: str, timeout: float | None = None,
 ) -> tuple[dict[str, Any], list[str], str, str, str | None]:
     """One run of a built-in drafter and its answer: `(parsed object, assumptions, raw, run_id, model)`.
     The parsed object has `assumptions` removed; 502, 504 and 422 `draft_invalid` for the failures."""
@@ -518,7 +583,7 @@ def _run_drafter(
         raise refuse(422, "The description is too long.", code="description_too_long") from None
     started = start_run(uuid.UUID(drafter_agent_id), run, principal, db, stores, launcher)
     run_id = json.loads(started.body)["run_id"]
-    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id))
+    finished = _wait_for_run(stores[0], principal.tenant_id, uuid.UUID(run_id), timeout)
     if finished["status"] != "completed":
         raise DraftFailed("The drafter run did not finish.", code="draft_failed", run_id=run_id,
                           error=str(finished.get("error") or finished["status"])[:300])
@@ -683,7 +748,8 @@ class _Kind:
             f"SELECT max(version) FROM {versions} WHERE {fk} = :d AND tenant_id = :t"
         )
         self.update = text(
-            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = now()"
+            f"UPDATE {table} SET name = :name, draft_spec = CAST(:spec AS jsonb), updated_at = now(),"
+            " revision = revision + 1"
             " WHERE id = :id AND tenant_id = :t"
         )
         self.insert = text(
@@ -699,7 +765,7 @@ WORKFLOWS = _Kind("workflows", "workflow_versions", "workflow_id", "false")
 
 
 def _free_slug(conn: Connection, kind: _Kind, tenant_id: str, name: str) -> str:
-    base = slugify(name)
+    base = slugify(name, kind.label)  # type: ignore[arg-type]
     for n in range(1, 100):
         candidate = base if n == 1 else f"{base[: 47 - len(str(n))].rstrip('-')}-{n}"
         if candidate not in RESERVED_AGENT_IDS and conn.execute(kind.taken, {"t": tenant_id, "s": candidate}).first() is None:

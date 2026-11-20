@@ -21,6 +21,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Float,
+    Integer,
     ForeignKeyConstraint,
     Index,
     PrimaryKeyConstraint,
@@ -37,6 +38,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from eap_schemas.secrets import is_secret_ref
 
+from eap_run_store.revisions import REVISION_SET, explain_empty_update, guard_sql
 from eap_run_store.store import Base
 
 CONNECTION_KINDS = ("oauth2_client_credentials", "api_token")
@@ -97,6 +99,8 @@ class SettingsConnectionModel(Base):
     last_error_code: Mapped[str | None] = mapped_column("last_error_code", String, nullable=True)
     created_at: Mapped[datetime] = _ts("created_at")
     updated_at: Mapped[datetime] = _ts("updated_at")
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "id", name="settings_connections_pkey"),
@@ -127,6 +131,8 @@ class KbSourceModel(Base):
     last_source_revision: Mapped[str | None] = mapped_column("last_source_revision", Text, nullable=True)
     created_at: Mapped[datetime] = _ts("created_at")
     updated_at: Mapped[datetime] = _ts("updated_at")
+    # 0033: the optimistic-concurrency token (eap_run_store.revisions): +1 on every write.
+    revision: Mapped[int] = mapped_column("revision", Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "id", name="kb_sources_pkey"),
@@ -344,6 +350,7 @@ class Connection:
     last_error_code: str | None
     created_at: datetime
     updated_at: datetime
+    revision: int = 1
 
 
 @dataclass(frozen=True)
@@ -362,6 +369,7 @@ class Source:
     last_source_revision: str | None
     created_at: datetime
     updated_at: datetime
+    revision: int = 1
 
 
 @dataclass(frozen=True)
@@ -548,11 +556,13 @@ class ConnectionStore:
         config: dict[str, Any] | None = None,
         credential_refs: dict[str, str] | None = None,
         enabled: bool | None = None,
+        expected_revision: int | None = None,
     ) -> Connection | None:
-        """Change the given fields (None = keep); the row, or None when it is not this tenant's."""
+        """Change the given fields (None = keep); the row, or None when it is not this tenant's.
+        RevisionMismatch when `expected_revision` is given and the row has moved on."""
         if credential_refs is not None:
             _check_refs(credential_refs)
-        sets, params = ["updated_at = now()"], {"t": tenant_id, "id": connection_id}
+        sets, params = ["updated_at = now()", REVISION_SET], {"t": tenant_id, "id": connection_id}
         for column, value in (("name", name), ("base_url", base_url), ("enabled", enabled)):
             if value is not None:
                 sets.append(f"{column} = :{column}")
@@ -568,10 +578,12 @@ class ConnectionStore:
                 row = conn.execute(
                     text(
                         f"UPDATE settings_connections SET {', '.join(sets)} WHERE tenant_id = :t AND id = :id"
-                        f" RETURNING {_cols(Connection)}"
+                        f"{guard_sql(expected_revision, params)} RETURNING {_cols(Connection)}"
                     ),
                     params,
                 ).first()
+                if row is None:
+                    explain_empty_update(conn, "settings_connections", tenant_id, connection_id, expected_revision)
         except IntegrityError as exc:
             if _constraint(exc) == "uq_settings_connections_tenant_name":
                 raise ConnectionNameConflict(name) from exc
@@ -680,8 +692,10 @@ class SourceStore:
         name: str | None = None,
         config: dict[str, Any] | None = None,
         enabled: bool | None = None,
+        expected_revision: int | None = None,
     ) -> Source | None:
-        sets, params = ["updated_at = now()"], {"t": tenant_id, "id": source_id}
+        """RevisionMismatch when `expected_revision` is given and the source has moved on."""
+        sets, params = ["updated_at = now()", REVISION_SET], {"t": tenant_id, "id": source_id}
         if name is not None:
             sets.append("name = :name")
             params["name"] = name
@@ -696,10 +710,12 @@ class SourceStore:
                 row = conn.execute(
                     text(
                         f"UPDATE kb_sources SET {', '.join(sets)} WHERE tenant_id = :t AND id = :id"
-                        f" RETURNING {_cols(Source)}"
+                        f"{guard_sql(expected_revision, params)} RETURNING {_cols(Source)}"
                     ),
                     params,
                 ).first()
+                if row is None:
+                    explain_empty_update(conn, "kb_sources", tenant_id, source_id, expected_revision)
         except IntegrityError as exc:
             if _constraint(exc) == "uq_kb_sources_tenant_kb_name":
                 raise SourceNameConflict(name) from exc

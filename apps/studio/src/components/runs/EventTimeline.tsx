@@ -1,4 +1,5 @@
 import React from "react";
+import { CopyableText } from "@/components/ui/CopyableText";
 import { SafeMarkdown } from "@/components/markdown/SafeMarkdown";
 import { formatMatchCounts } from "@/lib/processors";
 import { type RunEvent, type RunDelta, type PartialTextMap, type RunStatus } from "@/lib/runs";
@@ -24,7 +25,7 @@ interface EventTimelineProps {
   status?: RunStatus;
 }
 
-const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["completed", "failed", "needs_attention"]);
+const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["completed", "skipped", "failed", "needs_attention"]);
 
 /** Event payload values are JSON: text stays as is, anything else is shown as pretty JSON (a tool
  * run's input and result are objects, which React cannot render as children). */
@@ -35,9 +36,11 @@ export function formatValue(value: unknown): string {
 
 function JsonBlock({ value, label }: { value: unknown; label?: string }) {
   return (
-    <pre aria-label={label} className="mt-1 text-xs text-muted-foreground bg-muted p-2 rounded whitespace-pre-wrap break-words">
-      {formatValue(value)}
-    </pre>
+    <CopyableText label={label?.toLowerCase() ?? "payload"} copyText={formatValue(value)} className="mt-1">
+      <pre aria-label={label} className="text-xs text-muted-foreground bg-muted p-2 pr-9 rounded whitespace-pre-wrap break-words">
+        {formatValue(value)}
+      </pre>
+    </CopyableText>
   );
 }
 
@@ -471,7 +474,11 @@ function EventItem({ event }: EventItemProps) {
         }
         return (
           <div className="text-sm">
-            <span className="text-success font-semibold">Run completed successfully</span>
+            {event.data.outcome === "skipped" ? (
+              <span className="font-semibold text-muted-foreground">Run skipped (nothing to do)</span>
+            ) : (
+              <span className="text-success font-semibold">Run completed successfully</span>
+            )}
             {/* A tool run's end event carries the tool result (any JSON value) */}
             {event.data.result !== undefined && <JsonBlock value={event.data.result} label="Run result" />}
             {/* AC.4: a structured agent's validated object. */}
