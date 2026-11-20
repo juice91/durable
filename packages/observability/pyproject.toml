@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "OpenTelemetry observability for EAP"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",

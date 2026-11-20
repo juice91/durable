@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Object storage for attachment bytes: a filesystem backend (dev, tests) and an S3-compatible one (Cloudflare R2)"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "aiobotocore==3.10.0",
 ]

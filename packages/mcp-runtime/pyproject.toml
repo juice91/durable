@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Operator adapter that runs managed MCP servers as isolated pods per tenant"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "Apache-2.0"
 dependencies = [
     "lightkube==1.0.2",
 ]
