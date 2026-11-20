@@ -40,3 +40,11 @@ Listed in `config/model-prices.json`, USD per million tokens: `@cf/deepseek-ai/d
 
 When configured and allowed, the Architect may pick `cloudflare:` models. They rank behind Anthropic and OpenAI and never become
 the built-in agents' default on their own.
+
+## Reasoning budget
+
+`deepseek-v4.1-flash-1017` reasons before it answers and its default `reasoning_effort` is `high`: with a small
+`max_tokens` the budget is spent on reasoning and the answer comes back empty (a 20-token test returned an empty
+`content` with 20 completion tokens used). Give agents on this model a `max_tokens` of at least 1024, and pass
+`reasoning_effort: "low"` or `"none"` for short structured answers (picker and summary steps) once model settings
+carry it; JSON mode (`response_format: {"type": "json_object"}`) works through the gateway.
