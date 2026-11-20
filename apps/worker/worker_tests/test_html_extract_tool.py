@@ -427,3 +427,86 @@ def test_pattern_limits():
         {"id": "l1", "url": "https://www.mirrormedia.example/a", "title": "a", "order": 1}
     ]
     assert links("<a href='/a'>a</a>", include_patterns=["."], exclude_patterns=["(?=x)"])["error"]["code"] == "invalid_pattern"  # RE2: no look-around
+
+
+# ---------------------------------------------------------------------------- card headline fallback
+
+CARD = (
+    '<div class="card"><a href="/zh/news/6478963"><div class="thumb" style="background-image:url(x.jpg)"></div></a>'
+    '<div class="body"><a class="cat" href="/zh/category/Business">商業</a>'
+    '<p class="headline">美股Anthropic 11/19掛牌大漲、難解AI憂慮 日韓股市20日開盤重挫</p><p class="excerpt">內文摘要</p></div></div>'
+)
+CARD_INC = {"include_patterns": [r"/zh/news/\d+"]}
+
+
+def test_an_image_only_anchor_takes_the_card_headline():
+    out = links(CARD, **CARD_INC)
+    assert [i["title"] for i in out["items"]] == ["美股Anthropic 11/19掛牌大漲、難解AI憂慮 日韓股市20日開盤重挫"]
+    assert out["items"][0]["url"] == "https://www.mirrormedia.example/zh/news/6478963"
+    assert out["dropped"]["no_title"] == 0
+
+
+def test_the_card_heading_beats_the_paragraph():
+    html = '<div><a href="/zh/news/1"><i></i></a><p>摘要</p><h3>標題</h3></div>'
+    assert [i["title"] for i in links(html, **CARD_INC)["items"]] == ["標題"]
+
+
+def test_anchor_text_in_the_card_is_never_a_title():
+    html = '<div><a href="/zh/news/1"><i></i></a><p><a href="/zh/category/x">商業</a></p><h3><a href="/zh/category/y">分類</a></h3></div>'
+    out = links(html, **CARD_INC)
+    assert out["items"] == [] and out["dropped"]["no_title"] == 1
+
+
+def test_a_headline_in_nav_aside_footer_or_button_does_not_count():
+    for tag in ("nav", "aside", "footer", "button"):
+        html = f'<div><a href="/zh/news/1"><i></i></a><{tag}><p>不是標題</p></{tag}></div>'
+        assert links(html, **CARD_INC)["items"] == []
+
+
+def test_two_article_links_in_a_container_steal_no_headline():
+    html = '<div><a href="/zh/news/1"><i></i></a><a href="/zh/news/2"><i></i></a><p>只有一個標題</p></div>'
+    out = links(html, **CARD_INC)
+    assert out["items"] == [] and out["dropped"]["no_title"] == 2
+
+
+def test_the_same_url_twice_in_a_card_is_not_ambiguous():
+    html = '<div><a href="/zh/news/1"><i></i></a><p>標題</p><a href="/zh/news/1/">更多</a></div>'
+    assert [i["title"] for i in links(html, **CARD_INC)["items"]] == ["標題"]
+
+
+def test_the_headline_is_searched_three_levels_up_not_four():
+    three = '<div class="l3"><p>標題</p><div class="l2"><div class="l1"><a href="/zh/news/1"><i></i></a></div></div></div>'
+    assert [i["title"] for i in links(three, **CARD_INC)["items"]] == ["標題"]
+    four = '<div class="l4"><p>標題</p><div class="l3"><div class="l2"><div class="l1"><a href="/zh/news/1"><i></i></a></div></div></div></div>'
+    assert links(four, **CARD_INC)["items"] == []
+
+
+TAIWANNEWS = """<body>
+<nav><a href="/zh">首頁</a></nav>
+<div class="swiper"><div class="card"><a href="/zh/news/6478963"><div class="thumb" style="background-image:url(a.jpg)"></div></a>
+  <div class="body"><a class="cat" href="/zh/category/Business">商業</a>
+  <p class="headline">美股Anthropic 11/19掛牌大漲、難解AI憂慮 日韓股市20日開盤重挫</p><p class="excerpt">摘要一</p></div></div>
+<div class="card"><a href="/zh/news/6478900"><div class="thumb" style="background-image:url(b.jpg)"></div></a>
+  <div class="body"><a class="cat" href="/zh/category/Politics">政治</a>
+  <h3 class="headline">總統府：維持現行兩岸政策</h3><p class="excerpt">摘要二</p></div></div>
+<div class="card"><a href="/zh/news/6478850"><img src="c.jpg"></a>
+  <div class="body"><a class="cat" href="/zh/category/Society">社會</a>
+  <p class="headline">颱風外圍環流 北部沿海防大浪</p></div></div></div>
+<aside><a href="/zh/news/6470001">美通社：某公司發布新品</a></aside>
+</body>"""
+
+
+def test_a_taiwan_news_home_page_excerpt_gives_the_real_headlines_in_order():
+    out = html_extract(None, html=TAIWANNEWS, base_url="https://www.taiwannews.com.tw/zh", mode="links", include_patterns=[r"/zh/news/\d+"])
+    assert [i["title"] for i in out["items"]] == [
+        "美股Anthropic 11/19掛牌大漲、難解AI憂慮 日韓股市20日開盤重挫",
+        "總統府：維持現行兩岸政策",
+        "颱風外圍環流 北部沿海防大浪",
+        "美通社：某公司發布新品",
+    ]
+    assert out["dropped"]["no_title"] == 0
+
+
+def test_inline_markup_in_a_headline_keeps_its_order_and_nested_anchors_are_skipped():
+    html = '<div><a href="/zh/news/1"><i></i></a><h3>前<b>中</b><a href="/zh/category/x">分類</a>後</h3></div>'
+    assert [i["title"] for i in links(html, **CARD_INC)["items"]] == ["前中後"]

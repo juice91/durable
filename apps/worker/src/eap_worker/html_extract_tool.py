@@ -41,7 +41,8 @@ the page, the patterns and the allowed hosts are all arguments.
   the title) drop links after the patterns and before `limit`, so `limit` counts kept links. The result also
   carries `dropped: {scheme, host, duplicate, pattern, no_title, excluded_url, excluded_term}` (counts of the
   anchors examined; scanning stops once `limit` links are kept). Title: the anchor's text, else its `title`, `aria-label`, or an
-  image's `alt`; whitespace collapsed, at most 200 graphemes.
+  image's `alt`; for an image-only link, the headline (first heading, else first paragraph) of the enclosing card, up to
+  three levels up and only if the card holds no other article link; whitespace collapsed, at most 200 graphemes.
 """
 
 from __future__ import annotations
@@ -397,6 +398,74 @@ def _hosts(base_url: str, allowed_hosts: list[str] | None) -> set[str]:
     return {(urlsplit(base_url).hostname or "").lower(), *(h.strip().lower() for h in allowed_hosts or [])}
 
 
+_CARD_LEVELS = 3
+_CARD_BARRED = {"nav", "aside", "footer", "button"}
+
+
+def _article_url(anchor: LexborNode, base_url: str, hosts: set[str], inc: list[Any], exc: list[Any]) -> str | None:
+    """The normalised https article URL of an anchor: same host and pattern checks as the links loop."""
+    href = (anchor.attributes.get("href") or "").strip()
+    try:
+        absolute = urljoin(base_url, href)
+        parts = urlsplit(absolute)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme != "https" or host not in hosts:
+        return None
+    url = _normalise(absolute)
+    if not any(p.search(url) for p in inc) or any(p.search(url) for p in exc):
+        return None
+    return url
+
+
+def _own_text(node: LexborNode) -> str:
+    """Text of a node in document order, without anything inside a nested anchor (depth is capped upstream)."""
+    parts: list[str] = []
+    for child in node.iter(include_text=True):
+        if child.tag == "-text":
+            parts.append(child.text_content or "")
+        elif child.tag != "a":
+            parts.append(_own_text(child))
+    return "".join(parts)
+
+
+def _barred(node: LexborNode) -> bool:
+    parent: LexborNode | None = node
+    while parent is not None:
+        if parent.tag in _CARD_BARRED or parent.tag == "a":
+            return True
+        parent = parent.parent
+    return False
+
+
+def _one_article_url(container: LexborNode, own: str, base_url: str, hosts: set[str], inc: list[Any], exc: list[Any]) -> bool:
+    for node in container.iter():
+        if node.tag == "a" and (url := _article_url(node, base_url, hosts, inc, exc)) not in (None, own):
+            return False
+    return True
+
+
+def _card_title(anchor: LexborNode, own: str, inc: list[Any], exc: list[Any], hosts: set[str], base_url: str) -> str:
+    """Headline of the card an image-only anchor sits in: the first heading, else the first paragraph, of the nearest
+    enclosing container (at most three levels up) that holds no other article URL."""
+    container = anchor.parent
+    for _ in range(_CARD_LEVELS):
+        if container is None or container.tag in ("body", "html", "-undef"):
+            return ""
+        if not _one_article_url(container, own, base_url, hosts, inc, exc):
+            return ""
+        for selector in ("h1,h2,h3,h4,h5,h6", "p"):
+            for candidate in container.css(selector):
+                if _barred(candidate):
+                    continue
+                title = _oneline(_own_text(candidate))
+                if title:
+                    return _cut(_clean(title), TITLE_MAX_GRAPHEMES)
+        container = container.parent
+    return ""
+
+
 def _links(
     parser: LexborHTMLParser, base_url: str, root_selector: str | None, include: list[str] | None,
     exclude: list[str] | None, allowed_hosts: list[str] | None, limit: int,
@@ -441,7 +510,7 @@ def _links(
             if not any(p.search(url) for p in inc) or any(p.search(url) for p in exc):
                 dropped["pattern"] += 1
                 continue
-            title = _anchor_title(anchor)
+            title = _anchor_title(anchor) or _card_title(anchor, url, inc, exc, hosts, base_url)
             if not title:
                 dropped["no_title"] += 1
                 continue
