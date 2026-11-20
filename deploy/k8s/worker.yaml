@@ -67,6 +67,10 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY}
+            # Cloudflare Workers AI (optional): the provider stays off while the key is absent from the Secret.
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: CLOUDFLARE_API_TOKEN, optional: true}
             - name: EAP_AUDIT_HASH_SALT
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_AUDIT_HASH_SALT}
