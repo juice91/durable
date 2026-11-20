@@ -16,13 +16,15 @@ from sqlalchemy import text
 from eap_api.app import create_app
 from eap_api.launcher import get_run_launcher
 from eap_run_store import RunStore
-from eap_schemas.architect import ARCHITECT_GATED_TOOL_IDS
+from eap_schemas.architect import ARCHITECT_GATED_TOOL_IDS, ARCHITECT_PLATFORM_TOOL_IDS, ARCHITECT_TOOL_IDS
 
 from .conftest import get_auth_header
 from .run_helpers import PG_URL, cleanup_tenant, hard_timeout, requires_pg
 
 pytestmark = requires_pg
 API = "/api/v1"
+# every tool the seed lists (derived, so a branch that adds tools does not collide on a magic number)
+N_ARCHITECT_TOOLS = len(ARCHITECT_TOOL_IDS) + len(ARCHITECT_PLATFORM_TOOL_IDS)
 
 
 class ScriptedLauncher:
@@ -120,7 +122,7 @@ def test_seed_is_idempotent_and_builtin(api):
     assert "{{steps." in wspec["instructions"] and "never instructions" in wspec["instructions"]
 
     spec = architect["draft_spec"]
-    assert spec["tools"] == [t for t in spec["tools"] if t.startswith(("architect.", "platform."))] and len(spec["tools"]) == 23
+    assert spec["tools"] == [t for t in spec["tools"] if t.startswith(("architect.", "platform."))] and len(spec["tools"]) == N_ARCHITECT_TOOLS
     assert spec["approvals"]["tools"] == list(ARCHITECT_GATED_TOOL_IDS)
     assert spec["memory"]["history"]["last_turns"] == 30
     assert spec["model_settings"]["max_steps"] == 12
@@ -168,13 +170,13 @@ def test_seed_adds_missing_gated_approvals(api):
 
 
 def _age_architect(app, tenant: str, agent_id: str, *, extra_tool: str | None = None, edit: bool = False):
-    """Make the stored Architect look like one seeded before PR 45 (only the 15 architect.* tools), published;
+    """Make the stored Architect look like one seeded before PR 45 (only the 21 architect.* tools), published;
     then optionally leave unpublished edits on the draft."""
     from eap_run_store import definitions
 
     spec = agent_row(app, tenant, "architect")["draft_spec"]
     spec["tools"] = [t for t in spec["tools"] if not t.startswith("platform.")]
-    assert len(spec["tools"]) == 15
+    assert len(spec["tools"]) == 21
 
     def put(conn, value):
         conn.execute(
@@ -202,7 +204,7 @@ def test_seed_adds_new_builtin_tools_to_a_clean_draft_and_publishes(api):
     before = len(_versions(app, tenant, "architect"))
     seed(client, h)
     spec = agent_row(app, tenant, "architect")["draft_spec"]
-    assert len(spec["tools"]) == 23 and set(ARCHITECT_PLATFORM_TOOL_IDS) <= set(spec["tools"])
+    assert len(spec["tools"]) == N_ARCHITECT_TOOLS and set(ARCHITECT_PLATFORM_TOOL_IDS) <= set(spec["tools"])
     assert len(_versions(app, tenant, "architect")) == before + 1
     seed(client, h)  # idempotent: nothing changes
     assert agent_row(app, tenant, "architect")["draft_spec"] == spec
@@ -217,7 +219,7 @@ def test_seed_with_unpublished_edits_repairs_the_draft_only(api):
     before = len(_versions(app, tenant, "architect"))
     seed(client, h)
     spec = agent_row(app, tenant, "architect")["draft_spec"]
-    assert len(spec["tools"]) == 23 and spec["instructions"] == "My own rules."
+    assert len(spec["tools"]) == N_ARCHITECT_TOOLS and spec["instructions"] == "My own rules."
     assert len(_versions(app, tenant, "architect")) == before
 
 
@@ -228,7 +230,7 @@ def test_seed_keeps_a_hand_added_tool_and_never_removes(api):
     _age_architect(app, tenant, body["architect_agent_id"], extra_tool="clock.now")
     seed(client, h)
     tools = agent_row(app, tenant, "architect")["draft_spec"]["tools"]
-    assert "clock.now" in tools and len(tools) == 24
+    assert "clock.now" in tools and len(tools) == N_ARCHITECT_TOOLS + 1
 
 
 def test_seed_leaves_the_drafters_alone(api):
@@ -250,7 +252,7 @@ def test_startup_reconcile_reaches_existing_architects(api):
     from eap_api.routes.architect import reconcile_all_seeds
 
     assert reconcile_all_seeds(app.state.database_engine) >= 1
-    assert len(agent_row(app, tenant, "architect")["draft_spec"]["tools"]) == 23
+    assert len(agent_row(app, tenant, "architect")["draft_spec"]["tools"]) == N_ARCHITECT_TOOLS
 
 
 def test_seed_without_a_model_returns_choose_model(api, monkeypatch):
@@ -850,6 +852,35 @@ def test_reconcile_republishes_an_old_seed_text_once(api):
     assert len(_versions(app, tenant, "architect")) == before + 1
     reconcile_all_seeds(app.state.database_engine)  # idempotent
     assert len(_versions(app, tenant, "architect")) == before + 1
+
+
+def test_reconcile_adds_the_test_suite_tools_to_an_architect_published_before_them(api):
+    """The seed hash changed with the eval tools and the Test suites paragraph: an Architect published
+    without them is republished at startup with all six tools, the four writes in approvals.tools."""
+    from eap_api.routes.architect import reconcile_all_seeds
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+
+    client, app, _, tenant_of = api
+    tenant, h = tenant_of()
+    seed(client, h)
+    new_tools = ("architect.list_eval_suites", "architect.get_eval_run", "architect.create_eval_suite",
+                 "architect.add_eval_case", "architect.attach_scorer", "architect.start_eval_run")
+    row = agent_row(app, tenant, "architect")
+    old = {**row["draft_spec"], "instructions": "old text",
+           "tools": [t for t in row["draft_spec"]["tools"] if t not in new_tools],
+           "approvals": {**row["draft_spec"]["approvals"], "tools": [t for t in row["draft_spec"]["approvals"]["tools"] if t not in new_tools]}}
+    from eap_run_store import definitions
+
+    with app.state.database_engine.begin() as conn:
+        conn.execute(text("UPDATE agents SET draft_spec = CAST(:s AS jsonb) WHERE id = :i"), {"s": json.dumps(old), "i": str(row["id"])})
+        definitions.publish_agent(conn, tenant, str(row["id"]), created_by="alice")
+    reconcile_all_seeds(app.state.database_engine)
+    latest = _latest_via(app, tenant, "architect")
+    assert latest.created_via == "seed" and latest.spec["instructions"] == ARCHITECT_INSTRUCTIONS
+    assert "Test suites:" in latest.spec["instructions"]
+    assert set(new_tools) <= set(latest.spec["tools"])
+    assert set(new_tools[2:]) <= set(latest.spec["approvals"]["tools"])
+    assert not set(new_tools[:2]) & set(latest.spec["approvals"]["tools"])
 
 
 def test_reconcile_skips_an_agent_with_a_dirty_draft(api):

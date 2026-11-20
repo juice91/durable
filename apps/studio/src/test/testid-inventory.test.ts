@@ -43,6 +43,7 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "workflow-row-": "Workflows list row per workflow id",
   "schedule-last-run-": "WorkflowSchedules last-run cell per schedule id (PR 73)",
   "workflow-step-": "WorkflowGraph node per step id",
+  "workflow-step-ai-note-": "WorkflowStepList AI note (the cached explanation) per step id",
   "step-row-text-": "WorkflowStepList description text per step id",
   "step-summary-": "StepSummaryLine per step id: what a tool or agent step does and how (graph step list)",
   "step-agent-link-": "StepSummaryLine agent-name link per step id",

@@ -311,7 +311,7 @@ def test_nothing_of_another_tenant_is_visible(engine, tenant, other):
 def test_registered_for_the_architect_only():
     registry = ToolRegistry()
     register_platform_tools(registry)
-    assert set(ARCHITECT_PLATFORM_TOOL_IDS) <= registry.tool_ids() and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8
+    assert set(ARCHITECT_PLATFORM_TOOL_IDS) <= registry.tool_ids() and "platform.list_capabilities" in ARCHITECT_PLATFORM_TOOL_IDS
     for tool_id in ARCHITECT_PLATFORM_TOOL_IDS:
         meta = registry.get_metadata(tool_id)
         assert not meta.get("side_effect")  # read-only: no approval

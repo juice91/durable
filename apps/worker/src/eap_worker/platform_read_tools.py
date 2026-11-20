@@ -27,9 +27,10 @@ from sqlalchemy.engine import Engine
 from eap_observability import redact
 from eap_run_store import platform_reads as reads
 from eap_runtime import RunDeps, ToolRegistry
-from eap_schemas.architect import ARCHITECT_PLATFORM_TOOL_IDS
+from eap_schemas.architect import ARCHITECT_PLATFORM_TOOL_IDS, CONTROL_LIST_TOOL_ID
 
-TOOL_IDS = ARCHITECT_PLATFORM_TOOL_IDS
+# `platform.list_capabilities` is the control-plane bridge's (eap_worker.control_bridge); the rest are these.
+TOOL_IDS = tuple(t for t in ARCHITECT_PLATFORM_TOOL_IDS if t != CONTROL_LIST_TOOL_ID)
 MAX_STRING = 300
 
 
@@ -169,6 +170,9 @@ def register_platform_read_tools(registry: ToolRegistry) -> None:
     """Register the `platform.*` read tools (no side effect, so no approval)."""
     for tool_id, func in _TOOLS:
         registry.register(tool_id, func, description=(func.__doc__ or tool_id).strip(), side_effect=False)
+    from eap_worker.control_bridge import register_control_tools
+
+    register_control_tools(registry)
 
 
 __all__ = ["TOOL_IDS", "register_platform_read_tools"]

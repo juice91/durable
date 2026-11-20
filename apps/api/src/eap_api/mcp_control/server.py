@@ -26,7 +26,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from eap_api.mcp_control.audit import audit_call
-from eap_api.mcp_control.auth import PRINCIPAL_SCOPE_KEY, McpAuthError, authenticate, has_manage
+from eap_api.mcp_control.auth import PRINCIPAL_SCOPE_KEY, McpAuthError, actor_id, authenticate, has_manage
 from eap_api.mcp_control.routing import Ctx, McpToolError
 from eap_api.sse import StreamLimiter
 
@@ -70,15 +70,19 @@ def _bound(data: Any) -> Any:
 class _Guard:
     """The per-call envelope shared by tools and resources."""
 
-    def __init__(self, name: str, manage: bool) -> None:
-        self.name, self.manage = name, manage
+    def __init__(self, name: str, manage: bool, human_only: bool = False) -> None:
+        self.name, self.manage, self.human_only = name, manage, human_only
 
     def enter(self) -> tuple[Ctx, Any, str]:
         request = get_http_request()
         principal = request.scope[PRINCIPAL_SCOPE_KEY]
         app = request.scope["eap.app"]
         ctx = Ctx(app=app, principal=principal)
-        who = principal.key_id or f"dev:{principal.user_id}"
+        who = actor_id(principal)
+        if self.human_only and principal.kind == "architect_run":
+            # A tool that would let the Architect approve its own cards or drive itself.
+            audit_call(tool=self.name, tenant_id=ctx.tenant_id, principal_id=who, outcome="denied", code="human_only")
+            raise McpToolError("human_only", f"{self.name} is for a person or an external agent, not for the Architect")
         if self.manage and not has_manage(principal):
             audit_call(tool=self.name, tenant_id=ctx.tenant_id, principal_id=who, outcome="denied", code="scope_required")
             raise McpToolError("scope_required", f"{self.name} needs an API key with the manage scope")
@@ -92,9 +96,11 @@ class _Guard:
 def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Callable[..., Any]]]:
     """`tool(name, manage=False)` and `resource(uri)` decorators bound to `mcp`."""
 
-    def tool(name: str, *, manage: bool = False, description: str | None = None):
+    def tool(name: str, *, manage: bool = False, description: str | None = None, human_only: bool = False):
+        """`human_only` keeps the tool away from the Architect's own `control__*` bridge (tag `human_only`)."""
+
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-            guard = _Guard(name, manage)
+            guard = _Guard(name, manage, human_only)
 
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> ToolResult:
@@ -123,7 +129,7 @@ def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Calla
                     lease.release()
 
             mcp.tool(name=name, description=description or (fn.__doc__ or "").strip() or None, output_schema=None,
-                     tags={"manage"} if manage else {"read"})(wrapper)
+                     tags=({"manage"} if manage else {"read"}) | ({"human_only"} if human_only else set()))(wrapper)
             return wrapper
 
         return decorate

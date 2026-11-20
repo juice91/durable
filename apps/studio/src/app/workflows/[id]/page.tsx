@@ -12,8 +12,11 @@ import { WorkflowCanvas, WorkflowStepList } from "@/components/workflows/Workflo
 import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
+import { Button } from "@/components/ui/Button";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
 import { WorkflowArchivedBanner, WorkflowArchiveMenu } from "@/components/workflows/WorkflowArchiveMenu";
+import { WorkflowExplainPanel } from "@/components/workflows/WorkflowExplainPanel";
+import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
 import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
@@ -49,6 +52,7 @@ function WorkflowDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const control = useWorkflowLayout();
+  const [explainOpen, setExplainOpen] = useState(false);
   // The graph's collapsed loops are URL state (`?collapsed=`), kept across a version switch and
   // carried to the run view.
   const { collapsed, setCollapsed } = useCollapsedLoops();
@@ -89,6 +93,8 @@ function WorkflowDetail() {
   const current = versions.find((v) => v.version === selectedVersion) ?? null;
   const spec = current?.spec ?? null;
   const graphSpec = spec ?? workflow?.draft_spec ?? null;
+  // The cached AI explanation of the shown published version (a draft has none); loading it never generates.
+  const explanation = useWorkflowExplanation(id, current?.version ?? null);
 
   const selectedStep = findStepById(graphSpec, selectedStepId);
   const stepAgent: StepAgentInfo | null = (() => {
@@ -134,6 +140,11 @@ function WorkflowDetail() {
         <WorkflowHeader workflowId={id} name={workflow?.name ?? null} tab={tab} actions={
           <>
             {versionSelect}
+            {workflow && tab === "graph" ? (
+              <Button size="sm" data-testid="workflow-explain-button" aria-pressed={explainOpen} onClick={() => setExplainOpen((open) => !open)}>
+                AI 說明
+              </Button>
+            ) : null}
             {workflow ? <WorkflowArchiveMenu workflow={workflow} onChanged={setWorkflow} /> : null}
           </>
         } />
@@ -182,18 +193,18 @@ function WorkflowDetail() {
                     tool={stepTool}
                     agent={stepAgent}
                     next={stepNext}
-                    // Hook: the step's cached AI 註解 goes here once lib/workflowExplanations.ts is on main.
-                    explanation={null}
+                    explanation={explanation.notes?.get(selectedStep.id) ?? null}
                     onClose={clearStep}
                   />
                 </PanelCard>
               ) : null}
               {graphSpec ? (
                 <PanelCard title="Steps" titleId="workflow-steps-heading">
-                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} />
+                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} notes={explanation.notes} />
                 </PanelCard>
               ) : null}
             </WorkflowFloatingPanel>
+            {explainOpen ? <WorkflowExplainPanel control={explanation} published={current !== null} onClose={() => setExplainOpen(false)} /> : null}
             {graphSpec ? (
               <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} />
             ) : (

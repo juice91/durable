@@ -580,6 +580,8 @@ export interface WorkflowStepListProps {
   /** The collapsed loops, shared with the canvas (pass the same set and setter to both). */
   collapsedLoops?: ReadonlySet<string>;
   onCollapsedLoopsChange?: (next: Set<string>) => void;
+  /** AI notes by step id (the cached explanation): shown under the step, labelled 「AI 註解」. */
+  notes?: ReadonlyMap<string, string>;
   /** Step details (the run view): a branch's taken case and warnings, and why a step was not reached. */
   details?: Record<string, StepDetail>;
   /**
@@ -605,6 +607,7 @@ export function WorkflowStepList({
   legend = false,
   collapsedLoops,
   onCollapsedLoopsChange,
+  notes,
   details,
   foldNotReached = false,
   agentNames,
@@ -696,6 +699,13 @@ export function WorkflowStepList({
         </span>
       </div>
     );
+    const note = notes?.get(n.id);
+    const aiNote = note ? (
+      <p data-testid={`workflow-step-ai-note-${n.id}`} className="mt-1 min-w-0 select-text break-words rounded-sm bg-muted/40 px-2 py-1 text-caption text-foreground">
+        <span className="mr-1 font-semibold text-muted-foreground">AI 註解</span>
+        {note}
+      </p>
+    ) : null;
     return (
       <li key={n.id} data-testid={`workflow-step-${n.id}`} data-state={state ?? "definition"} data-step-type={n.step.type} data-depth={n.depth} {...(loop ? { "data-collapsed": String(shut) } : {})}>
         {loop && inner.length > 0 ? (
@@ -714,6 +724,7 @@ export function WorkflowStepList({
             />
           </div>
         ) : select}
+        {aiNote}
         {inner.length > 0 ? (
           <ol
             id={bodyId}
