@@ -80,3 +80,35 @@ describe("kb_ingest runs link to their knowledge base (RM.16)", () => {
     expect(screen.getByTestId("run-subject-knowledge-base")).toHaveTextContent(/^Knowledge ingest$/);
   });
 });
+
+describe("kb_source_sync runs (RM.29)", () => {
+  const sync: Run = { ...base, run_id: "srcsync-1", kind: "kb_source_sync", agent_id: null, version: null, knowledge_base_id: "kb-1" };
+
+  it("are their own kind, labelled KB source sync, with the run id when source_name not available", () => {
+    expect(runKind(sync)).toBe("kb_source_sync");
+    render(<RunSubject run={sync} />);
+    const subject = screen.getByTestId("run-subject");
+    expect(subject).toHaveAttribute("data-kind", "kb_source_sync");
+    // With knowledge_base_id set, it links to the KB page
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "/knowledge/kb-1?tab=runs");
+    expect(link).toHaveTextContent("KB source sync srcsync-...");
+  });
+
+  it("links to the knowledge base's Ingest runs tab, named with the knowledge base name", () => {
+    const { unmount } = render(<RunSubject run={sync} knowledgeBaseNames={{ "kb-1": "Product docs" }} />);
+    const link = screen.getByTestId("run-subject-knowledge-base");
+    expect(link).toHaveAttribute("href", "/knowledge/kb-1?tab=runs");
+    expect(link).toHaveTextContent("KB source sync: Product docs srcsync-...");
+    expect(link).toHaveAttribute("title", "Open knowledge base");
+    unmount();
+    render(<RunSubject run={sync} />);
+    expect(screen.getByTestId("run-subject-knowledge-base")).toHaveTextContent(/^KB source sync srcsync-...$/);
+  });
+
+  it("includes source_name if available in the run object", () => {
+    const syncWithSource: Run = { ...sync, source_name: "Salesforce" };
+    render(<RunSubject run={syncWithSource} knowledgeBaseNames={{ "kb-1": "Product docs" }} />);
+    expect(screen.getByTestId("run-subject-knowledge-base")).toHaveTextContent("KB source sync: Product docs (Salesforce)");
+  });
+});

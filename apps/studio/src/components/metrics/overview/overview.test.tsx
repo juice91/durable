@@ -203,6 +203,14 @@ describe("runLabel", () => {
     // Eval run without target (shouldn't happen in practice, but handle it)
     expect(runLabel(run({ kind: "eval", agent_id: null, workflow_id: null }))).toBe("Test run");
   });
+  it("labels kb_source_sync runs with source_name when available", () => {
+    // kb_source_sync with source_name: shows "KB source sync (<source_name>)"
+    const syncRunWithSource = run({ kind: "kb_source_sync", agent_id: null, run_id: "fe7b6ff3", source_name: "ti-catalogue" });
+    expect(runLabel(syncRunWithSource)).toBe("KB source sync (ti-catalogue)");
+    // kb_source_sync without source_name: shows short run id
+    const syncRunWithoutSource = run({ kind: "kb_source_sync", agent_id: null, knowledge_base_id: "kb-1", run_id: "srcsync-12345678" });
+    expect(runLabel(syncRunWithoutSource)).toBe("KB source sync srcsync-...");
+  });
 });
 
 describe("RecentFailures", () => {

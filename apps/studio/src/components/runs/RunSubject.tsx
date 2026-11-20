@@ -4,6 +4,7 @@ import { routes } from "@/lib/routes";
 import { TraceLink } from "@/components/traces/TraceLink";
 
 export type { RunKind };
+export { RUN_KIND_LABELS };
 
 /** The run's kind. Rows from before kinds existed are agent runs; a row without `kind` but with a
  * workflow or a tool (and no agent) is classified by those. */
@@ -31,7 +32,8 @@ interface RunSubjectProps {
 
 /** What a run executed: an agent (and, for a workflow's agent step, the workflow run it belongs
  * to), a tool, a workflow (linking to its execution view), a knowledge base ingest (linking to the
- * knowledge base), or an eval run (showing the target agent or workflow). */
+ * knowledge base), a knowledge base source sync (linking to the knowledge base and source), or an
+ * eval run (showing the target agent or workflow). */
 export function RunSubject({ run, agentNames = {}, workflowNames = {}, knowledgeBaseNames = {}, showVersion = false }: RunSubjectProps) {
   const kind = runKind(run);
   if (kind === "workflow") {
@@ -59,6 +61,37 @@ export function RunSubject({ run, agentNames = {}, workflowNames = {}, knowledge
     const label = name ? `${RUN_KIND_LABELS.kb_ingest}: ${name}` : RUN_KIND_LABELS.kb_ingest;
     return (
       <span data-testid="run-subject" data-kind="kb_ingest">
+        {kbId ? (
+          <a
+            href={routes.knowledgeBase(kbId, { tab: "runs" })}
+            data-testid="run-subject-knowledge-base"
+            title="Open knowledge base"
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            {label}
+          </a>
+        ) : label}
+      </span>
+    );
+  }
+  if (kind === "kb_source_sync") {
+    // A knowledge-base source sync run (0029_kb_sources): link to the knowledge base's Ingest runs tab.
+    // Uses source_name from the run's input JSON, or the short run id if not available.
+    const kbId = run.knowledge_base_id ?? null;
+    const name = kbId ? knowledgeBaseNames[kbId] : undefined;
+    // The source_name is in the run's input JSON (parsed by the client).
+    const sourceLabel = run.source_name ? ` (${run.source_name})` : ` ${short(run.run_id)}`;
+    // The label format depends on whether the knowledge base name is available:
+    // - With kb name: "KB source sync: <kb name> (<source_name> or <short_run_id>)"
+    // - Without kb name but with source_name: "KB source sync: (<source_name>)" → simplify to "KB source sync (<source_name>)"
+    // - Without kb name and without source_name: "KB source sync <short_run_id>"
+    const label = name
+      ? `${RUN_KIND_LABELS.kb_source_sync}: ${name}${sourceLabel}`
+      : run.source_name
+      ? `${RUN_KIND_LABELS.kb_source_sync} (${run.source_name})`
+      : `${RUN_KIND_LABELS.kb_source_sync} ${short(run.run_id)}`;
+    return (
+      <span data-testid="run-subject" data-kind="kb_source_sync">
         {kbId ? (
           <a
             href={routes.knowledgeBase(kbId, { tab: "runs" })}
