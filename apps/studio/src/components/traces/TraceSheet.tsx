@@ -21,6 +21,7 @@ import { RunEventsPanel } from "@/components/runs/RunEventsPanel";
 import { useKnowledgeBaseNames } from "@/components/knowledge/useKnowledgeBaseNames";
 import { runKind } from "@/components/runs/RunSubject";
 import type { RunKind } from "@/lib/runs";
+import { RecoveredBadge } from "@/components/runs/RecoveredBadge";
 import { StatusPill } from "@/components/runs/StatusPill";
 import { TraceLogsPanel } from "./TraceLogsPanel";
 import { TraceSheetFrameContext } from "./TraceLink";
@@ -252,6 +253,7 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
         {run ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2" data-testid="trace-sheet-meta">
             <StatusPill status={run.display_status} />
+            <RecoveredBadge run={run} />
             <Badge variant="outline">{KIND_LABELS[runKind(run)]}</Badge>
             {link ? (
               <Link href={link.href} title={link.label} className="min-w-0 max-w-full truncate text-label text-info-text underline-offset-4 hover:underline" data-testid="trace-sheet-subject-link">

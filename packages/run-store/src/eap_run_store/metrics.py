@@ -515,6 +515,28 @@ class MetricsStore:
         out["memory"] = _usage_dict(memory)
         return out
 
+    def count_recovered_runs(self, q: MetricsQuery, run_ids: list[str]) -> int:
+        """How many of `run_ids` (runs DBOS resumed after a restart) are the tenant's top-level runs whose last
+        update (`updated_at`, the last event) falls in `[start, end)`, under the query's agent and kind filters."""
+        r = aliased(RunModel)
+        conds = [
+            r.tenant_id == q.tenant_id,
+            r.parent_run_id.is_(None),
+            r.updated_at >= q.start,
+            r.updated_at < q.end,
+        ]
+        if q.agent_id is not None:
+            conds.append(r.agent_id == q.agent_id)
+        if q.kind is not None:
+            conds.append(r.kind == q.kind)
+        total = 0
+        with self._session() as session:
+            for i in range(0, len(run_ids), 500):
+                total += session.execute(
+                    select(func.count()).select_from(r).where(*conds, r.id.in_(run_ids[i : i + 500]))
+                ).scalar_one()
+        return total
+
     def summary(self, q: MetricsQuery, *, compare_previous: bool = False) -> dict[str, Any]:
         """`{"current": {...}, "previous": {...} | None}` with every metric in METRICS, plus
         `operations`: `{operation: usage metrics}` for OPERATIONS and `memory` (RM.19)."""

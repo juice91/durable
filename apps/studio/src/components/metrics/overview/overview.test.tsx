@@ -42,6 +42,23 @@ function overview(props: Partial<MetricsOverviewProps> = {}) {
   );
 }
 
+describe("MetricsOverview: recovered runs tile", () => {
+  it("shows the summary's recovered_runs and links to Traces with the page's range", () => {
+    const summary = summaryFixture({ runs: 10, recovered_runs: 3 }, { runs: 5, recovered_runs: 1 });
+    render(overview({ summary: { ...idle, data: summary } }));
+    const tile = screen.getByTestId("kpi-recovered");
+    expect(screen.getByTestId("kpi-recovered-value")).toHaveTextContent("3");
+    expect(tile).toHaveTextContent("Recovered runs");
+    expect(tile.getAttribute("href")).toMatch(/^\/traces\?/);
+    expect(tile.getAttribute("href")).toContain("from=");
+  });
+
+  it("reads 0 from an API that does not report it", () => {
+    render(overview());
+    expect(screen.getByTestId("kpi-recovered-value")).toHaveTextContent("0");
+  });
+});
+
 describe("MetricsOverview: the KPI row", () => {
   it("shows every Metrics KPI with the Metrics page's values and deltas", () => {
     render(overview());

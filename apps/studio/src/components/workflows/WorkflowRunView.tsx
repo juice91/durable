@@ -13,6 +13,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
 import { Badge } from "@/components/ui/Badge";
+import { RecoveredBadge } from "@/components/runs/RecoveredBadge";
 import { IconButton } from "@/components/ui/IconButton";
 import { CopyableText } from "@/components/ui/CopyableText";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
@@ -356,6 +357,7 @@ export function WorkflowRunView({
               </span>
             )}
           </span>
+          <RecoveredBadge run={run} />
           {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
           {run && onRerunStarted && isTerminal(view.status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
         </>
