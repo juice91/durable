@@ -184,7 +184,7 @@ describe("runLabel", () => {
       ),
     ).toBe("Test run: Triage · Q4 suite");
     // Eval run without target (shouldn't happen in practice, but handle it)
-    expect(runLabel(run({ kind: "eval", agent_id: null, workflow_id: null }))).toBe("Test run: unknown");
+    expect(runLabel(run({ kind: "eval", agent_id: null, workflow_id: null }))).toBe("Test run");
   });
 });
 
