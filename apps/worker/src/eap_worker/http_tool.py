@@ -12,11 +12,17 @@ The platform's general HTTP tool: a workflow can call a JSON API with a credenti
   redacted with `secret_variants` of the values used. An unknown reference is the result `secret_not_found`
   and nothing is sent. The run's SecretFunctionToolset leaves this tool alone (it resolves for itself).
 - Outbound: the tenant `OutboundPolicy` through its `GuardedTransport` (https only, public addresses only,
-  checked again at connect, no redirects followed: a 3xx is returned with its `location`).
-- Result: `{status, ok, headers, json | text, truncated?, elapsed_ms}`. A non-2xx status is a result. A
-  transport failure is `{error: {code, message}}` with `outbound_blocked`, `http_timeout`,
+  checked again at connect, redirects are followed when `max_redirects > 0`; each hop is checked like a new
+  request and must stay on the same host or an allowed one).
+- Result: `{status, ok, headers, json | text, truncated?, elapsed_ms, redirected_from?}`. A non-2xx status is
+  a result. A transport failure is `{error: {code, message}}` with `outbound_blocked`, `http_timeout`,
   `http_connect_failed`, `secret_not_found`, `secret_unreadable`, `response_too_large`. The messages are fixed
   texts: never the URL, a header or an exception text.
+- `max_redirects`: integer 0 to 5, default 0. When > 0, redirects (301/302/303/307/308) are followed up to the
+  limit. Each hop is checked like a new request and must stay on the same host as the original URL or in
+  `allowed_hosts` (when provided). Cross-host hops drop `Authorization` and `Cookie` headers. 303 and 301/302 on
+  POST switch to GET without a body; 307/308 keep the method and body. The result gains `redirected_from` (the
+  chain of URLs) only when at least one hop was followed.
 - `body_from_url` (`HttpBodySource`: `url`, `max_bytes` default 1,000,000 and at most 5,000,000, `allowed_hosts`): the
   request body is fetched first, by a GET through the same guarded client (https only, public addresses only,
   redirects not followed: a 3xx is refused), from a host in `allowed_hosts` only, and must answer `image/*`; at
@@ -36,6 +42,9 @@ The platform's general HTTP tool: a workflow can call a JSON API with a credenti
   result with `text` cut to 4 KiB. `drop_response_paths` applies before `response_query`.
 - Gating: an agent run's call that names a secret waits for an approval (`SpecCapability`,
   eap_worker.capabilities); a workflow tool step does not (the spec was published by a person).
+- Architect notes: article pages often answer 301 to a canonical URL (trailing slash, www); set `max_redirects: 3`
+  on page fetches to follow these redirects safely, with each hop checked like a new request and constrained to
+  the same host or hosts listed in `allowed_hosts`.
 """
 
 from __future__ import annotations
@@ -45,7 +54,7 @@ import json as jsonlib
 import logging
 import re
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -405,6 +414,191 @@ def _reducer(ctx: RunContext[RunDeps], url: str, response_query: Any, extract_ht
     return None
 
 
+# ------------------------------------------------------------------------------------- redirect following helper
+
+
+def _host_matches(base_url: str, allowed_hosts: list[str] | None) -> set[str]:
+    """Return the set of allowed hosts: base URL's host plus any in allowed_hosts."""
+    base_host = (urlsplit(base_url).hostname or "").lower()
+    return {base_host, *(h.strip().lower() for h in allowed_hosts or [])}
+
+
+def _strip_sensitive_headers(headers: dict[str, str] | None, original_host: str, target_host: str) -> dict[str, str] | None:
+    """Strip Authorization and Cookie headers on cross-host hops."""
+    if headers is None:
+        return None
+    if original_host == target_host:
+        return headers
+    return {k: v for k, v in headers.items() if k.lower() not in ("authorization", "cookie")}
+
+
+async def _follow_redirects(
+    client: httpx2.AsyncClient,
+    policy: OutboundPolicy,
+    method: str,
+    url: str,
+    headers: dict[str, str] | None,
+    query: dict[str, str] | None,
+    json: Any,
+    body: str | None,
+    timeout_s: int,
+    max_redirects: int,
+    original_host: str,
+    allowed_hosts: list[str] | None,
+    started: float,
+    max_response_bytes: int,
+    drop_response_paths: Sequence[str],
+    reducer: Reducer | None,
+) -> dict[str, Any]:
+    """Follow redirects up to max_redirects hops."""
+    redirect_chain: list[str] = [url]
+    current_url = url
+    current_method = method
+    current_headers = headers
+    current_query = query
+    current_json = json
+    current_body = body
+    current_host = original_host
+    
+    for hop in range(max_redirects + 1):
+        try:
+            async with asyncio.timeout(timeout_s):
+                # Prepare request
+                kwargs: dict[str, Any] = {"headers": current_headers, "params": current_query}
+                if current_json is not None:
+                    kwargs["json"] = current_json
+                elif current_body is not None:
+                    kwargs["content"] = current_body.encode("utf-8")
+                
+                async with client.stream(current_method, current_url, **kwargs) as response:
+                    # Check if redirect
+                    if response.status_code not in (301, 302, 303, 307, 308):
+                        # Non-redirect response - final result
+                        variants = list(secret_variants([]))  # empty variants since secrets already used
+                        result = await _answer(response, max_response_bytes, variants, started, drop_response_paths, reducer)
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Get location header
+                    location = response.headers.get("location")
+                    if not location:
+                        # Redirect without location - return the redirect response
+                        variants = list(secret_variants([]))
+                        result = to_jsonable_python(await _answer(response, max_response_bytes, variants, started, drop_response_paths, reducer))
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Resolve location URL
+                    try:
+                        target_url = urljoin(current_url, location)
+                        target_parts = urlsplit(target_url)
+                    except ValueError:
+                        variants = list(secret_variants([]))
+                        result = _error("redirect_refused", "the redirect location is not a valid URL")
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Check scheme
+                    if target_parts.scheme != "https":
+                        variants = list(secret_variants([]))
+                        result = _error("redirect_refused", "redirects must be to https only")
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Get target host
+                    target_host = (target_parts.hostname or "").lower()
+                    if not target_host:
+                        variants = list(secret_variants([]))
+                        result = _error("redirect_refused", "the redirect location has no valid host")
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Check if we've exceeded max redirects
+                    if hop >= max_redirects:
+                        variants = list(secret_variants([]))
+                        result = {
+                            "status": response.status_code,
+                            "ok": False,
+                            "headers": {"location": redact(location, variants)},
+                            "error": {"code": "redirect_refused", "message": "maximum redirects exceeded"},
+                        }
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Resolve and check addresses at connect time for every hop
+                    try:
+                        await policy.resolve_checked(target_host, target_parts.port or 443)
+                    except OutboundBlocked as exc:
+                        variants = list(secret_variants([]))
+                        result = {
+                            "status": response.status_code,
+                            "ok": False,
+                            "headers": {"location": redact(location, variants)},
+                            "error": {"code": "redirect_refused", "message": f"{exc.code}: {exc}"},
+                        }
+                        if len(redirect_chain) > 1:
+                            result["redirected_from"] = redirect_chain
+                        return result
+                    
+                    # Host must be same as original or in allowed_hosts
+                    if target_host != current_host:
+                        # Build allowed hosts set from original URL
+                        allowed_set = _host_matches(redirect_chain[0], allowed_hosts)
+                        if target_host not in allowed_set:
+                            variants = list(secret_variants([]))
+                            result = {
+                                "status": response.status_code,
+                                "ok": False,
+                                "headers": {"location": redact(location, variants)},
+                                "error": {"code": "redirect_refused", "message": "redirect host not allowed"},
+                            }
+                            if len(redirect_chain) > 1:
+                                result["redirected_from"] = redirect_chain
+                            return result
+                    
+                    # Strip sensitive headers on cross-host hop
+                    if current_host != target_host:
+                        current_headers = _strip_sensitive_headers(current_headers, current_host, target_host)
+                    
+                    # Prepare for next hop
+                    redirect_chain.append(target_url)
+                    
+                    # Method handling for redirects
+                    if response.status_code == 303:
+                        # 303 always uses GET without body
+                        current_method = "GET"
+                        current_json = None
+                        current_body = None
+                    elif response.status_code in (301, 302):
+                        # 301/302: POST -> GET without body
+                        if current_method == "POST":
+                            current_method = "GET"
+                            current_json = None
+                            current_body = None
+                    # 307/308: keep method and body (already set)
+                    
+                    current_url = target_url
+                    current_host = target_host
+        
+        except Exception as exc:  # noqa: BLE001
+            code = _failure_code(exc)
+            log.warning("http.request redirect hop failed code=%s error_type=%s", code, type(exc).__name__)
+            variants = list(secret_variants([]))
+            result = _error(code, _FAILURES[code])
+            if len(redirect_chain) > 1:
+                result["redirected_from"] = redirect_chain
+            return result
+    
+    # Should not reach here, but handle the case where max_redirects is 0
+    return _error("redirect_refused", "maximum redirects exceeded")
+
+
 # ------------------------------------------------------------------------------------- the tool
 
 
@@ -423,6 +617,7 @@ async def http_request(
     response_query: HttpResponseQuery | None = None,
     extract_html: HttpExtractHtml | None = None,
     parse_feed: HttpParseFeed | None = None,
+    max_redirects: Annotated[int, Field(ge=0, le=5)] = 0,
 ) -> dict[str, Any]:
     """Send one HTTPS request (see the module docstring)."""
     if not url.lower().startswith("https://"):
@@ -457,8 +652,23 @@ async def http_request(
             request["headers"] = {**(request["headers"] or {}), "Content-Type": media}
     started = time.monotonic()
     try:
-        async with new_client(outbound_policy(), float(timeout_s)) as client:
+        policy = outbound_policy()
+        async with new_client(policy, float(timeout_s)) as client:
             async with asyncio.timeout(timeout_s):
+                # Get original host
+                original_parts = urlsplit(url)
+                original_host = (original_parts.hostname or "").lower()
+                
+                # Check if redirects are enabled
+                if max_redirects > 0:
+                    return await _follow_redirects(
+                        client, policy, method, url, request["headers"], request["query"],
+                        request["json"], request["body"], timeout_s, max_redirects,
+                        original_host, extract_html.allowed_hosts if extract_html else None,
+                        started, max_response_bytes, drop_response_paths or (), reducer
+                    )
+                
+                # No redirects: single request as before
                 async with client.stream(
                     method, url, headers=request["headers"], params=request["query"], json=request["json"],
                     content=content,

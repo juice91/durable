@@ -45,7 +45,8 @@ def test_drafter_schema_is_inside_the_output_subset_and_has_no_pattern():
 def test_the_seeded_specs():
     spec = architect_agent_spec("test:echo")
     assert spec.tools == (*ARCHITECT_TOOL_IDS, *ARCHITECT_PLATFORM_TOOL_IDS)
-    assert len(ARCHITECT_TOOL_IDS) == 15 and len(ARCHITECT_PLATFORM_TOOL_IDS) == 8 and len(spec.tools) == 23
+    assert len(spec.tools) == len(ARCHITECT_TOOL_IDS) + len(ARCHITECT_PLATFORM_TOOL_IDS)
+    assert "platform.list_capabilities" in ARCHITECT_PLATFORM_TOOL_IDS
     assert spec.approvals is not None and spec.approvals.tools == ARCHITECT_GATED_TOOL_IDS
     assert spec.memory.history.last_turns == 30 and spec.model_settings.max_steps == 12
     drafter = drafter_agent_spec("litellm:qwen")
@@ -262,3 +263,13 @@ def test_the_default_prefers_claude_sonnet_5_5_over_fable_and_the_gateway():
     assert ids.index("anthropic:claude-fable-5-2") < ids.index("litellm:qwen3.8")  # provider still outranks the gateway
     assert ids[-1].startswith("litellm:") and any(m in ids[-1] for m in ("embedding", "reranker", "coder", "medgemma"))
     assert rank_model_ids(["anthropic:claude-sonnet-5-5-20261001", "anthropic:claude-opus-5-5"])[0] == "anthropic:claude-sonnet-5-5-20261001"
+
+
+def test_the_architect_is_told_to_discover_the_control_plane_before_saying_it_cannot():
+    from eap_schemas.architect import CONTROL_LIST_TOOL_ID, control_tool_name
+    from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS
+
+    assert CONTROL_LIST_TOOL_ID in ARCHITECT_PLATFORM_TOOL_IDS
+    assert "platform__list_capabilities" in ARCHITECT_INSTRUCTIONS and "control__eval_suite_create" in ARCHITECT_INSTRUCTIONS
+    assert "needs an engineer and name the missing capability" in ARCHITECT_INSTRUCTIONS
+    assert control_tool_name("eval.suite.create") == "control__eval_suite_create"

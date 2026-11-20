@@ -8,7 +8,9 @@ Read tools (no approval): `architect.list_approved_tools`, `list_created_agents`
 `list_workflow_step_kinds`. Draft tools (no approval, a draft is inert): `architect.save_agent`,
 `architect.save_workflow`. Gated tools (listed in the Architect's `approvals.tools`, so every call
 waits for a person): `architect.publish_agent`, `restore_agent_version`, `archive_agent`,
-`publish_workflow`, `restore_workflow_version`, `archive_workflow`, `set_workflow_schedule`.
+`publish_workflow`, `restore_workflow_version`, `archive_workflow`, `set_workflow_schedule`, and the test-suite
+tools `create_eval_suite`, `add_eval_case`, `attach_scorer`, `start_eval_run` (logic in `eap_worker.architect_evals`;
+`list_eval_suites` and `get_eval_run` are their ungated reads).
 
 The gated tools hold no logic of their own: publish, restore and archive are the functions of
 `eap_run_store.definitions`, the same ones the API routes call, run in one transaction with the
@@ -69,6 +71,7 @@ from eap_schemas.architect import (
     slugify,
 )
 
+from eap_worker import architect_evals
 from eap_worker.architect_allowlist import approved_for_tenant
 
 log = logging.getLogger("eap_worker.architect_tools")
@@ -83,6 +86,8 @@ TOOL_IDS = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.list_eval_suites",
+    "architect.get_eval_run",
     "architect.publish_agent",
     "architect.restore_agent_version",
     "architect.archive_agent",
@@ -90,12 +95,22 @@ TOOL_IDS = (
     "architect.restore_workflow_version",
     "architect.archive_workflow",
     "architect.set_workflow_schedule",
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
 )
 # The tools that go live: the seed lists them in the Architect's approvals.tools.
 GATED_TOOL_IDS = ARCHITECT_GATED_TOOL_IDS
-assert TOOL_IDS[8:] == GATED_TOOL_IDS
+assert TOOL_IDS[-len(GATED_TOOL_IDS):] == GATED_TOOL_IDS
 # `created_by` of a version made through a tool (the person who approved is in the approval record).
 ARCHITECT_ACTOR = "architect"
+EVAL_GATED_TOOL_IDS = (
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
+)
 SCHEDULE_ACTIONS = ("create", "pause", "resume", "delete")
 
 STEP_KINDS: list[dict[str, Any]] = [
@@ -865,6 +880,8 @@ def _pure_summary(tool_id: str, args: dict[str, Any]) -> str:
         return f"Restore workflow {ident!r} to version {version}: published again as a new version."
     if tool_id == "architect.archive_workflow":
         return f"Archive workflow {ident!r}: it takes no new runs and its schedules are paused."
+    if tool_id in EVAL_GATED_TOOL_IDS:
+        return architect_evals.pure_summary(tool_id, args)
     if tool_id == "architect.set_workflow_schedule":
         action = args.get("action")
         target = f"workflow {args.get('workflow_id')!r}"
@@ -903,6 +920,8 @@ def approval_summary_text(engine: Engine, tenant_id: str, tool_id: str, args: di
     that is not gated here."""
     if tool_id not in GATED_TOOL_IDS:
         return None
+    if tool_id in EVAL_GATED_TOOL_IDS:
+        return architect_evals.approval_summary(engine, tenant_id, tool_id, args)
     base = _pure_summary(tool_id, args)
     slug = args.get("id")
     version = args.get("version")
@@ -1091,6 +1110,52 @@ async def _set_workflow_schedule(
     )
 
 
+async def _list_eval_suites(ctx: RunContext[RunDeps], target: str, id: str) -> dict[str, Any]:
+    """The test suites of a workflow or agent (target: "workflow" | "agent"; id: its slug or uuid): suite id,
+    name, scorers (the checks on every case's output) and case_count."""
+    return await asyncio.to_thread(architect_evals.list_eval_suites_sync, _engine(), ctx.deps.tenant_id, target, id)
+
+
+async def _get_eval_run(ctx: RunContext[RunDeps], run_id: str, results_limit: int = 20) -> dict[str, Any]:
+    """A test run: status and aggregates (cases, passed, failed, errors, pass_rate), and the first
+    `results_limit` (<= 50) per-case results with their failed assertions."""
+    return await asyncio.to_thread(
+        architect_evals.get_eval_run_sync, _engine(), ctx.deps.tenant_id, run_id, results_limit)
+
+
+async def _create_eval_suite(
+    ctx: RunContext[RunDeps], target: str, id: str, name: str, description: str | None = None
+) -> dict[str, Any]:
+    """Create an empty test suite for a workflow or agent (target: "workflow" | "agent"; id: its slug or uuid).
+    Then add cases (add_eval_case) and scorers (attach_scorer). A person approves each call."""
+    return await _gated(ctx, architect_evals.create_eval_suite_sync, target, id, name, description)
+
+
+async def _add_eval_case(
+    ctx: RunContext[RunDeps], suite_id: str, name: str | None = None, inputs: dict[str, Any] | None = None,
+    expected: Any = None, metadata: dict[str, Any] | None = None, cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Add test cases to a suite: one (name, inputs, expected?, metadata?) or several in one call as
+    cases: [{name, inputs, expected?, metadata?}] (at most 20, one approval). `inputs` is an object that fits the
+    workflow's input_schema (for a workflow without one, and for an agent, {"input": "<text>"}); `expected` is
+    what an equals_expected scorer compares with. A person approves each call."""
+    return await _gated(ctx, architect_evals.add_eval_case_sync, suite_id, name, inputs, expected, metadata, cases)
+
+
+async def _attach_scorer(ctx: RunContext[RunDeps], suite_id: str, scorer: dict[str, Any]) -> dict[str, Any]:
+    """Add a scorer (a check on every case's output) to a suite. scorer.kind: regex {pattern (RE2), negate?,
+    field?} | contains {value, case_sensitive?} | equals_expected | field_equals {path, value} |
+    schema_valid {json_schema?} | max_duration {seconds} | max_cost {usd} | llm_judge {rubric, model:
+    {provider, name}}; every scorer may have a name. A person approves each call."""
+    return await _gated(ctx, architect_evals.attach_scorer_sync, suite_id, scorer)
+
+
+async def _start_eval_run(ctx: RunContext[RunDeps], suite_id: str, version: int | None = None) -> dict[str, Any]:
+    """Run every case of a suite against a published version (latest when `version` is left out); it uses
+    model calls. Returns the run id: read the result with get_eval_run. A person approves each call."""
+    return await _gated(ctx, architect_evals.start_eval_run_sync, suite_id, version)
+
+
 _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_approved_tools", _list_approved_tools),
     ("architect.list_created_agents", _list_created_agents),
@@ -1100,6 +1165,8 @@ _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_workflow_step_kinds", _list_workflow_step_kinds),
     ("architect.save_agent", _save_agent),
     ("architect.save_workflow", _save_workflow),
+    ("architect.list_eval_suites", _list_eval_suites),
+    ("architect.get_eval_run", _get_eval_run),
 )
 _GATED: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.publish_agent", _publish_agent),
@@ -1109,6 +1176,10 @@ _GATED: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.restore_workflow_version", _restore_workflow_version),
     ("architect.archive_workflow", _archive_workflow),
     ("architect.set_workflow_schedule", _set_workflow_schedule),
+    ("architect.create_eval_suite", _create_eval_suite),
+    ("architect.add_eval_case", _add_eval_case),
+    ("architect.attach_scorer", _attach_scorer),
+    ("architect.start_eval_run", _start_eval_run),
 )
 
 

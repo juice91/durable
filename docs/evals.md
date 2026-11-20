@@ -124,3 +124,40 @@ the agent page); an agent holds at most 10 scorers and a suite at most 10 evalua
 Over MCP: `scorer.suggest` (needs the `manage` scope, because it runs a model), then `scorer.create` and
 `scorer.attach`, or `eval.suite.create` with the suggestion's `spec` in `evaluators`; see
 [mcp-control.md](mcp-control.md).
+
+# Test suites from the Architect
+
+The Architect can build and run a test suite for a workflow or agent, so a person can ask 「create test
+suite for 小天娛樂新聞貼文」 in the chat. A **test suite** holds **cases** (the inputs to start the workflow
+with, optionally an expected output) and **scorers** (the checks above, applied to each case's output). A
+**run** executes every case against a published version and reports pass or fail per case. The Architect
+offers one after it publishes a workflow, or when the person asks for tests.
+
+Tools (the same suites, cases and runs as Studio and the [MCP tools](mcp-control.md); nothing new is stored):
+
+| Tool | Approval | What it does |
+| --- | --- | --- |
+| `architect.list_eval_suites {target, id}` | no | the suites of a workflow or agent, with scorers and case counts |
+| `architect.get_eval_run {run_id}` | no | a run's status, pass rate and per-case results |
+| `architect.create_eval_suite {target, id, name, description?}` | yes | an empty suite; `target` is `workflow` or `agent`, `id` its slug or uuid |
+| `architect.add_eval_case {suite_id, cases: [{name, inputs, expected?, metadata?}]}` | yes | up to 20 cases with one approval (`name`, `inputs` alone adds one); `inputs` must fit the workflow's input schema |
+| `architect.attach_scorer {suite_id, scorer}` | yes | one scorer: `regex`, `contains`, `equals_expected`, `field_equals`, `schema_valid`, `max_duration`, `max_cost` or `llm_judge`, validated as the API does |
+| `architect.start_eval_run {suite_id, version?}` | yes | queues a run of the latest (or the given) published version; it uses model calls |
+
+Each approval card says what will happen, for example "Create test suite 'Dry runs' for workflow 'Daily
+note'." A suite runs only a published version, so publish first.
+
+## The pattern for a posting workflow
+
+For a workflow that posts, test the path up to the post, not the post:
+
+1. **Cases** with `inputs` such as `{"dry": true, "ignore_posted": true}`, one per source or topic.
+   `dry: true` stops before the posting step; `ignore_posted: true` exercises the writer path whatever the
+   time slot or what was posted already.
+2. **`schema_valid`** on the returned value: its `status` is one of the allowed values and the `text` has the
+   expected length.
+3. **`regex`** scorers with `negate: true` and `field: "text"` that forbid what a post must not contain:
+   links (`https?://`), hashtags (`#\S`), Simplified Chinese characters and rumour words.
+4. **`max_duration`**, so a run that hangs fails the case.
+
+Then start a run and read it with `architect.get_eval_run`; each failing case lists the assertion that failed.

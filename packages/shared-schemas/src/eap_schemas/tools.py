@@ -171,6 +171,7 @@ with warnings.catch_warnings():
         response_query: HttpResponseQuery | None = None
         extract_html: HttpExtractHtml | None = None
         parse_feed: HttpParseFeed | None = None
+        max_redirects: Annotated[int, Field(ge=0, le=5)] = Field(default=0)
 
         @model_validator(mode="after")
         def _cap_needs_a_reducer(self) -> "HttpRequestInput":
@@ -457,7 +458,13 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "A JSON answer is returned as json, anything else (RSS, HTML) as text. A transport failure is {error: {code}} "
             "(http_timeout, http_connect_failed, outbound_blocked, secret_not_found). drop_response_paths removes "
             "JSON pointers from the answer before it is recorded. query is an object of strings. "
-            "Private and metadata addresses are refused and redirects are not followed. body_from_url "
+            "Private and metadata addresses are refused. "
+            "REDIRECTS: redirects are not followed unless `max_redirects` is set; when > 0, each hop (301/302/303/307/308) "
+            "is checked like a new request and must stay on the same host as the original URL or in `allowed_hosts` "
+            "(when provided). Cross-host hops drop `Authorization` and `Cookie` headers; 303 and 301/302 on POST switch "
+            "to GET without a body; 307/308 keep the method and body. The result gains `redirected_from` (the chain "
+            "of URLs) only when at least one hop was followed. "
+            "body_from_url "
             "{url, max_bytes (default 1000000, at most 5000000), allowed_hosts} sends bytes fetched from another "
             "https URL as the body (for a link-card thumbnail: the og_image of html.extract to "
             "com.atproto.repo.uploadBlob): that URL's host must be in allowed_hosts, it must answer an image/* type "
@@ -698,6 +705,10 @@ ARCHITECT_GATED_TOOL_IDS: tuple[str, ...] = (
     "architect.restore_workflow_version",
     "architect.archive_workflow",
     "architect.set_workflow_schedule",
+    "architect.create_eval_suite",
+    "architect.add_eval_case",
+    "architect.attach_scorer",
+    "architect.start_eval_run",
 )
 
 # Tools that never run without a person's recorded approval: the API refuses a spec that lists one

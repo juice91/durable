@@ -78,6 +78,8 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
     "architect.list_workflow_step_kinds",
     "architect.save_agent",
     "architect.save_workflow",
+    "architect.list_eval_suites",
+    "architect.get_eval_run",
     *ARCHITECT_GATED_TOOL_IDS,
 )
 
@@ -95,7 +97,18 @@ ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
     "platform.list_recent_runs",
     "platform.get_run",
     "platform.list_runs",
+    "platform.list_capabilities",
 )
+# The Architect's bridge to the MCP control plane: every control tool `a.b.c` is callable as
+# `control__a_b_c` (a run's tool names are discovered at run time with `platform.list_capabilities`, never
+# listed in the spec). The bridge belongs to the built-in Architect only.
+CONTROL_TOOL_PREFIX = "control__"
+CONTROL_LIST_TOOL_ID = "platform.list_capabilities"
+
+
+def control_tool_name(control_name: str) -> str:
+    """The Architect's tool name for a control-plane tool: `eval.suite.create` -> `control__eval_suite_create`."""
+    return CONTROL_TOOL_PREFIX + control_name.replace(".", "_")
 # Tool-id prefixes only a built-in agent row may list (the API refuses the spec, the worker the run).
 BUILTIN_ONLY_TOOL_PREFIXES: tuple[str, ...] = ("architect.", "platform.")
 
@@ -654,6 +667,9 @@ __all__ = [
     "as_uuid",
     "ARCHITECT_DENIED_TOOL_PREFIXES",
     "ARCHITECT_PLATFORM_TOOL_IDS",
+    "CONTROL_LIST_TOOL_ID",
+    "CONTROL_TOOL_PREFIX",
+    "control_tool_name",
     "BUILTIN_ONLY_TOOL_PREFIXES",
     "Allowlist",
     "AllowlistAgent",

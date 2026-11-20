@@ -417,3 +417,173 @@ def test_body_from_url_limits_and_the_card_names_the_source_host():
     assert parsed.body_from_url.max_bytes == 1_000_000
     assert http_request_summary({"method": "POST", "url": UPLOAD, "body_from_url": source()}) == \
         "POST bsky.example/xrpc/com.atproto.repo.uploadBlob with a body from cdn.example.com"
+
+
+# ------------------------------------------------------------------------------- redirect following
+
+
+@sync
+async def test_default_max_redirects_0_keeps_existing_behavior(wire):
+    """Without max_redirects, redirects are returned as-is (not followed)."""
+    wire.answer = lambda r: httpx2.Response(301, headers={"location": "https://api.example.com/v1/y"})
+    result = await call()
+    assert result["status"] == 301 and result["headers"]["location"] == "https://api.example.com/v1/y"
+    assert "redirected_from" not in result
+    assert len(wire.requests) == 1  # Only the original request
+
+
+@sync
+async def test_same_host_301_followed_once_with_max_redirects(wire, monkeypatch):
+    """A same-host 301 redirect followed once with max_redirects=1."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]  # Public IP for testing
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(301, headers={"location": "/v1/y"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["status"] == 200 and result["ok"] is True and result["json"] == {"ok": True}
+    assert result["redirected_from"] == ["https://api.example.com/v1/x", "https://api.example.com/v1/y"]
+    assert len(wire.requests) == 2
+
+
+@sync
+async def test_limit_reached_returns_3xx_with_error(wire, monkeypatch):
+    """When max_redirects is reached, the last 3xx is returned with redirect_refused error."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        return httpx2.Response(301, headers={"location": "/next"})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["status"] == 301
+    assert result["ok"] is False
+    assert result["headers"]["location"] == "/next"
+    assert result["error"]["code"] == "redirect_refused"
+    assert "maximum redirects exceeded" in result["error"]["message"]
+    assert "redirected_from" in result
+
+
+@sync
+async def test_cross_host_hop_refused_without_allowed_hosts(wire, monkeypatch):
+    """A cross-host redirect is refused unless the host is in allowed_hosts."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(301, headers={"location": "https://other.example.com/y"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(max_redirects=1)
+    assert result["error"]["code"] == "redirect_refused"
+    assert "redirect host not allowed" in result["error"]["message"]
+
+
+@sync
+async def test_303_after_POST_becomes_GET_without_body(wire, monkeypatch):
+    """303 redirects always use GET without a body."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(303, headers={"location": "/new"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(method="POST", json={"data": "test"}, max_redirects=1)
+    assert result["status"] == 200
+    # The second request should be GET without body
+    assert wire.requests[1].method == "GET"
+    # GET requests can have empty content
+    assert wire.requests[1].content == b""
+
+
+@sync
+async def test_307_keeps_POST_and_body(wire, monkeypatch):
+    """307 redirects keep the method and body."""
+    async def resolver(host: str, port: int) -> list[str]:
+        return ["1.2.3.4"]
+    
+    monkeypatch.setattr(http_tool, "outbound_policy", lambda: OutboundPolicy(resolver=resolver))
+    monkeypatch.setattr(
+        http_tool, "new_client",
+        lambda policy, timeout_s: httpx2.AsyncClient(transport=httpx2.MockTransport(wire.handler)),
+    )
+    
+    call_count = [0]
+    def answer(r: httpx2.Request) -> httpx2.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return httpx2.Response(307, headers={"location": "/new"})
+        else:
+            return httpx2.Response(200, json={"ok": True})
+    
+    wire.answer = answer
+    result = await call(method="POST", json={"data": "test"}, max_redirects=1)
+    assert result["status"] == 200
+    # The second request should still be POST with body
+    assert wire.requests[1].method == "POST"
+    assert wire.requests[1].content is not None
+
+
+@sync
+async def test_redirected_from_absent_when_no_hop(wire):
+    """redirected_from is absent when no redirect was followed."""
+    wire.answer = lambda r: httpx2.Response(200, json={"ok": True})
+    result = await call(max_redirects=1)  # max_redirects > 0 but no redirect
+    assert result["status"] == 200
+    assert "redirected_from" not in result
+
+
+def test_max_redirects_validation():
+    """max_redirects must be 0-5."""
+    for bad in (6, -1, 10):
+        with pytest.raises(ValidationError):
+            HttpRequestInput.model_validate({"method": "GET", "url": "https://a.example/", "max_redirects": bad})
+    
+    for ok in (0, 1, 5):
+        parsed = HttpRequestInput.model_validate({"method": "GET", "url": "https://a.example/", "max_redirects": ok})
+        assert parsed.max_redirects == ok

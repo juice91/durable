@@ -163,3 +163,10 @@ read the resource again before saving. See [concurrency.md](concurrency.md).
   `EAP_MCP_MAX_CONCURRENT_GLOBAL`, default 200); beyond that a call answers `rate_limited`.
 - Every call writes one audit record (`eap.audit=mcp_call`) with the tool, tenant, key id, outcome
   and error code; never arguments or results.
+
+## The Architect uses this catalog too
+
+The built-in Architect discovers these tools itself (`platform__list_capabilities`) and calls them as
+`control__<name with dots as underscores>`; the tools that change something ask the person for approval first, and
+`approvals.decide` and `agent.chat` are not available to it. Its audit actor is `architect-run:<run id>`. See
+[The Architect](architect.md#what-the-architect-can-operate).

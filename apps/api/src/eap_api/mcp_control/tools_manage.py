@@ -79,7 +79,7 @@ def register_tools(tool: Any) -> None:
             return await call(ctx, archive_agent, agent_id=aid, principal=ctx.actor, db=DB, force=force)
         return await call(ctx, unarchive_agent, agent_id=aid, principal=ctx.actor, db=DB)
 
-    @tool("agent.chat", manage=True)
+    @tool("agent.chat", manage=True, human_only=True)
     async def agent_chat(agent_id: str, message: str, conversation_id: str | None = None,
                          wait_seconds: float = CHAT_DEFAULT_WAIT_SECONDS) -> dict[str, Any]:
         """One turn with an agent (its latest published version, for example the built-in Architect). Starts a
@@ -349,7 +349,7 @@ def register_tools(tool: Any) -> None:
 
     # ------------------------------------------------------------------------------- approvals
 
-    @tool("approvals.decide", manage=True)
+    @tool("approvals.decide", manage=True, human_only=True)
     async def approvals_decide(run_id: str, kind: Literal["tool", "step"], key: str,
                                decision: Literal["approve", "deny"], comment: str | None = None,
                                resume_data: dict[str, Any] | None = None) -> dict[str, Any]:
