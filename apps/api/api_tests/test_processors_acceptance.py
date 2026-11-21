@@ -279,7 +279,7 @@ def test_publish_422_for_a_pattern_over_the_program_size_cap(client, tenant, use
 
 
 def test_console_budget_is_two_seconds_and_a_blown_budget_fails_closed(client, tenant, user, monkeypatch):
-    from eap_api.routes import processors as routes
+    from eap_api.services import processors as routes
 
     assert routes.TEST_CONSOLE_BUDGET_SECONDS == 2.0
     headers = get_auth_header(tenant, user)

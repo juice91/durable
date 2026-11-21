@@ -10,9 +10,14 @@ COPY apps/studio/package.json apps/studio/package.json
 RUN pnpm install --frozen-lockfile --filter @eap/studio...
 
 FROM base AS builder
-ARG NEXT_PUBLIC_EAP_API_URL=http://127.0.0.1:18000
+# Empty = same-origin: the browser calls /api/v1/... on the origin that served Studio (Cloudflare Tunnel, or the
+# Next.js /api rewrite over the SSH tunnel). Build with a URL only to point Studio at a different API origin.
+ARG NEXT_PUBLIC_EAP_API_URL=
+# Target of the /api/:path* rewrite in next.config.ts (baked at build time).
+ARG EAP_API_INTERNAL_URL=http://api.pydanticos.svc.cluster.local:8000
 ARG NEXT_PUBLIC_EAP_DEV_TOKEN="Bearer dev:studio:operator"
 ENV NEXT_PUBLIC_EAP_API_URL=$NEXT_PUBLIC_EAP_API_URL
+ENV EAP_API_INTERNAL_URL=$EAP_API_INTERNAL_URL
 ENV NEXT_PUBLIC_EAP_DEV_TOKEN=$NEXT_PUBLIC_EAP_DEV_TOKEN
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/studio/node_modules ./apps/studio/node_modules

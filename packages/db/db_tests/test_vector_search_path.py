@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from eap_db import current_revisions, head_revisions
-from eap_db.testing import SCHEMA_ENV, create_migrated_schema, drop_schema, schema_url
+from eap_db.testing import SCHEMA_ENV, create_migrated_schema, create_schema, drop_schema, schema_url
 
 URL = os.environ.get("EAP_TEST_DATABASE_URL", "")
 requires_schema = pytest.mark.skipif(
@@ -71,7 +71,7 @@ def test_an_empty_schema_does_not_see_the_public_version_table():
     schema = f"eap_test_vp_empty_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     try:
@@ -109,7 +109,7 @@ def _create_schemas(base: str, *names: str) -> None:
     try:
         with admin.begin() as conn:
             for name in names:
-                conn.execute(text(f'CREATE SCHEMA "{name}"'))
+                create_schema(conn, name)
     finally:
         admin.dispose()
 

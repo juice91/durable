@@ -26,7 +26,7 @@ resource_id is a 409 ("... different resource_id"), distinct from the other-tena
 
 DELETE keeps the turns' runs (the audit and cost record) with their text nulled and events
 scrubbed, and deletes the conversation's observations, conversation-scoped working memory and
-message embeddings in one transaction (eap_run_store.memory.MemoryStore.delete_conversation).
+message embeddings in one transaction (the memory store's delete_conversation).
 Resource-scoped working memory stays (DELETE /memory/resources/{rid} forgets it). 204; 404 for an
 unknown, another tenant's, malformed or already deleted id (a repeated delete changes nothing);
 409 with Retry-After while the latest turn is queued or running.
@@ -38,44 +38,30 @@ import uuid
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
 
-from eap_observability import current_trace_context
-
-from eap_api.deps import get_memory_store
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
-from eap_api.agent_archive import refuse_if_archived
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.runs import (
-    PrincipalDep,
-    SessionDep,
-    StoresDep,
-    _get_run_or_404,
-    _run_json,
-    launch_recorded_run,
-    lock_agent,
-    started_response,
-)
-from eap_api.run_options import RunOptions, resolve_run_options, same_options
+from eap_api.routes.runs import PrincipalDep, started_response
 from eap_api.schemas import ConversationCreate, ConversationRename, ErrorDetail, TurnCreate
-from eap_schemas import ModelRef, ModelSettings
-from eap_run_store import (
-    ConversationCursor,
-    ConversationIdConflict,
-    ConversationNotFound,
-    ConversationResourceConflict,
-    InvalidRunCursor,
-    MemoryStore,
-    RunIdConflict,
-    RunStore,
+from eap_api.service_deps.agents import ConversationServiceDep, build_conversation_service
+from eap_api.service_errors import to_http_exception
+from eap_api.services.conversations import (  # noqa: F401 - re-exported: the AG-UI and memory routes import them from here
+    CLONE_SUFFIX,
+    DIFFERENT_RUN_REQUEST,
+    TITLE_MAX_LENGTH,
+    MAX_CURSOR_LENGTH,
+    TurnBusyRefusal,
     TurnInProgress,
-    validate_resource_id,
+    canonical_uuid_or_404 as _canonical_uuid_or_404,
+    clone_title,
+    default_resource_id,
+    turn_in_progress_message,
 )
-from eap_run_store.cursor import MAX_CURSOR_LENGTH
+from eap_api.services.errors import ServiceError
+from eap_api.services.run_options import RunOptions
+from eap_schemas import ModelRef, ModelSettings
 
 # How long a client should wait before retrying a delete refused because a turn is still running.
 BUSY_RETRY_AFTER_SECONDS = 2
@@ -87,39 +73,12 @@ router = APIRouter(
 )
 
 
-def _conversation_json(conv: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": conv["id"],
-        "agent_id": conv["agent_id"],
-        "resource_id": conv.get("resource_id"),
-        "title": conv["title"],
-        "turn_count": conv["turn_count"],
-        "last_turn_run_id": conv["last_turn_run_id"],
-        "last_turn_status": conv["last_turn_status"],
-        "last_turn_display_status": conv["last_turn_display_status"],
-        "created_at": conv["created_at"].isoformat(),
-        "updated_at": conv["updated_at"].isoformat(),
-    }
-
-
-def default_resource_id(user_id: str) -> str | None:
-    """The principal's user id as the default resource id, or None when it does not fit
-    RESOURCE_ID_PATTERN (resource-scoped memory is then off for the conversation)."""
-    try:
-        return validate_resource_id(user_id)
-    except ValueError:
-        return None
-
-
-MemoryDep = Annotated[MemoryStore, Depends(get_memory_store)]
-
-
 def canonical_uuid_or_404(value: str, detail: str) -> str:
     """A path id as a canonical UUID string; a malformed one answers 404 like an unknown one."""
     try:
-        return str(uuid.UUID(value))
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        return _canonical_uuid_or_404(value, detail)
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
 def turn_busy_409(detail: str, busy: list[str] | None = None) -> JSONResponse:
@@ -134,25 +93,12 @@ def turn_busy_409(detail: str, busy: list[str] | None = None) -> JSONResponse:
     )
 
 
-def _conversation_or_404(run_store: RunStore, tenant_id: str, conversation_id: uuid.UUID) -> dict[str, Any]:
-    conv = run_store.get_conversation(tenant_id, conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    return conv
-
-
 def turn_in_progress_409(busy: TurnInProgress) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=f"The previous turn (run {busy.run_id}) is still {busy.status}; wait for it to finish",
-    )
-
-
-DIFFERENT_RUN_REQUEST = "run_id is already used by a different run request"
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=turn_in_progress_message(busy))
 
 
 def new_turn_options(
-    db: Session,
+    db: Any,
     tenant_id: str,
     agent: AgentModel,
     *,
@@ -162,19 +108,22 @@ def new_turn_options(
     input_text: str,
     model_settings: ModelSettings | None = None,
 ) -> RunOptions:
-    """A new turn's validated options: 409 AGENT_ARCHIVED for an archived agent (a recorded turn
-    is replayed, never refused; eap_api.agent_archive), then resolve_run_options (404/409/422/413)."""
-    refuse_if_archived(agent)
-    return resolve_run_options(
-        db, tenant_id, agent, version=version, request_context=request_context, model=model, input_text=input_text,
-        model_settings=model_settings,
-    )
+    """A new turn's validated options (ConversationService.new_turn_options) with the HTTP refusals:
+    409 AGENT_ARCHIVED for an archived agent, then 404/409/422/413."""
+    service = build_conversation_service(db, None, None)  # type: ignore[arg-type] - options need only the session
+    try:
+        return service.new_turn_options(
+            tenant_id, agent, version=version, request_context=request_context, model=model,
+            input_text=input_text, model_settings=model_settings,
+        )
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
 def record_and_launch_turn(
-    db: Session,
-    launcher: RunLauncher,
-    run_store: RunStore,
+    db: Any,
+    launcher: Any,
+    run_store: Any,
     tenant_id: str,
     conversation_id: uuid.UUID | str,
     *,
@@ -187,94 +136,39 @@ def record_and_launch_turn(
     client_tool_results: list[dict[str, Any]] | None = None,
     ag_ui_run: Any = None,
 ) -> tuple[dict[str, Any], bool]:
-    """The shared run-start path of a conversation turn (POST /conversations/{id}/runs and the
-    AG-UI agent route): record the turn idempotently on `run_id`, then hand it off.
-
-    - `run_id` already recorded for the tenant: no option is validated; `same_request(run)` must
-      hold (else 409 `conflict_detail`), and the recorded run is launched again, so a crash
-      between insert and enqueue heals on a retry (launch_recorded_run).
-    - New: `new_options` (a RunOptions, or a callable building it: new_turn_options, which refuses
-      an archived agent) validates the turn, then RunStore.create_turn inserts it with the trace
-      context and the extra columns (`client_tools`, `client_tool_results`, `ag_ui_run`: an
-      AgUiRunWrite recorded in the turn's transaction). A concurrent insert of the same run_id
-      (created False) is compared with `same_request` like a retry.
-
-    Returns (run as it stands after the hand-off, created). Raises 404 for an unknown
-    conversation, 409 for another tenant's run_id or a different request, 503 when the enqueue
-    fails, and **TurnInProgress** (not mapped: the caller decides; turn_in_progress_409) while the
-    latest turn is not terminal.
-    """
-    tenant_run = run_store.get_run(tenant_id, uuid.UUID(str(run_id)))
-    created = False
-    if tenant_run is None:
-        options = new_options() if callable(new_options) else new_options
-        # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
-        trace_id, traceparent = current_trace_context()
-        try:
-            recorded_id, created = run_store.create_turn(
-                tenant_id, conversation_id, options.target.version, input_text, uuid.UUID(str(run_id)),
-                trace_id=trace_id, traceparent=traceparent, **options.store_kwargs(),
-                client_tools=client_tools, client_tool_results=client_tool_results, ag_ui_run=ag_ui_run,
-            )
-        except ConversationNotFound:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-        except RunIdConflict:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-        tenant_run = _get_run_or_404(run_store, tenant_id, recorded_id)
-    if not created and not same_request(tenant_run):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=conflict_detail)
-    return launch_recorded_run(db, launcher, run_store, tenant_id, tenant_run, created), created
+    """ConversationService.record_and_launch_turn with the HTTP refusals (404, 409, 503); it still raises
+    **TurnInProgress** while the latest turn is not terminal (not mapped: the caller decides; turn_in_progress_409)."""
+    service = build_conversation_service(db, run_store, launcher)
+    try:
+        return service.record_and_launch_turn(
+            tenant_id, conversation_id, run_id=run_id, new_options=new_options, input_text=input_text,
+            same_request=same_request, conflict_detail=conflict_detail, client_tools=client_tools,
+            client_tool_results=client_tool_results, ag_ui_run=ag_ui_run,
+        )
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
 @router.post(
     "/agents/{agent_id}/conversations", status_code=status.HTTP_201_CREATED, responses={409: {"model": ErrorDetail}}
 )
 def create_conversation(
-    agent_id: uuid.UUID, body: ConversationCreate, principal: PrincipalDep, db: SessionDep, stores: StoresDep
+    agent_id: uuid.UUID, body: ConversationCreate, principal: PrincipalDep, service: ConversationServiceDep
 ) -> JSONResponse:
     """201 when created, 200 when the tenant already has this client-supplied conversation_id (with
     the same resource_id; 409 for a different one). `resource_id` defaults to the caller's user id
     and is immutable."""
-    run_store, _ = stores
-    tenant_id = principal.tenant_id
-    # FOR SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish)
-    # waits for this run to be recorded, or this request sees `archived` (eap_api.agent_archive).
-    agent = (
-        db.query(AgentModel)
-        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
-        .with_for_update(read=True)
-        .first()
+    conv, created = service.create(
+        principal.tenant_id, principal.user_id, agent_id,
+        title=body.title, conversation_id=body.conversation_id, resource_id=body.resource_id,
     )
-    if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    if agent.archived and (
-        body.conversation_id is None or run_store.get_conversation(tenant_id, body.conversation_id) is None
-    ):
-        # A new conversation only; a retry of an existing one still answers (eap_api.agent_archive).
-        refuse_if_archived(agent)
-    resource_id = body.resource_id if body.resource_id is not None else default_resource_id(principal.user_id)
-    try:
-        conv, created = run_store.create_conversation(
-            tenant_id, agent_id, body.title, body.conversation_id, resource_id=resource_id
-        )
-    except ConversationResourceConflict:  # a subclass of ConversationIdConflict: caught first
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="conversation_id already exists with a different resource_id; resource_id cannot change",
-        )
-    except ConversationIdConflict:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="conversation_id is already in use")
-    if conv["agent_id"] != str(agent_id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="conversation_id belongs to another agent")
-    return JSONResponse(
-        status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK, content=_conversation_json(conv)
-    )
+    return JSONResponse(status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK, content=conv)
 
 
 @router.get("/conversations")
 def list_conversations(
     principal: PrincipalDep,
-    stores: StoresDep,
+    service: ConversationServiceDep,
     agent_id: uuid.UUID | None = None,
     q: Annotated[
         str | None, Query(min_length=1, max_length=200, description="Case-insensitive title substring")
@@ -289,61 +183,25 @@ def list_conversations(
     a turn start moves its conversation to the top, a rename does not. `next_before` is an opaque
     cursor naming the last item's position when a full page came back (pass it back verbatim as
     `before`), else null. A cursor this API did not issue is a 422."""
-    run_store, _ = stores
-    cursor = None
-    if before is not None:
-        try:
-            cursor = ConversationCursor.decode(before)
-        except InvalidRunCursor:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="before is not a valid cursor; pass the previous page's next_before verbatim",
-            )
-    conversations = run_store.list_conversations(
-        principal.tenant_id, agent_id, limit=limit, before=cursor, title_contains=q
-    )
-    next_before = (
-        ConversationCursor.after(conversations[-1]).encode() if len(conversations) == limit else None
-    )
     return JSONResponse(
-        content={"items": [_conversation_json(c) for c in conversations], "next_before": next_before}
+        content=service.list(principal.tenant_id, agent_id=agent_id, q=q, limit=limit, before=before)
     )
 
 
 @router.get("/conversations/{conversation_id}")
-def get_conversation(conversation_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep) -> JSONResponse:
-    run_store, _ = stores
-    conv = _conversation_or_404(run_store, principal.tenant_id, conversation_id)
-    runs = run_store.list_turns(principal.tenant_id, conversation_id)
-    chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
-    return JSONResponse(
-        content={**_conversation_json(conv), "runs": [_run_json(r, chat.get(str(r["id"]))) for r in runs]}
-    )
+def get_conversation(
+    conversation_id: uuid.UUID, principal: PrincipalDep, service: ConversationServiceDep
+) -> JSONResponse:
+    return JSONResponse(content=service.get(principal.tenant_id, conversation_id))
 
 
 @router.patch("/conversations/{conversation_id}")
 def rename_conversation(
-    conversation_id: uuid.UUID, body: ConversationRename, principal: PrincipalDep, stores: StoresDep
+    conversation_id: uuid.UUID, body: ConversationRename, principal: PrincipalDep, service: ConversationServiceDep
 ) -> JSONResponse:
     """Rename: 200 with the conversation; 422 for an empty, over-long or multi-line title; 404 for
     another tenant's or an unknown conversation. The order of the list does not change."""
-    run_store, _ = stores
-    try:
-        conv = run_store.rename_conversation(principal.tenant_id, conversation_id, body.title)
-    except ConversationNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    return JSONResponse(content=_conversation_json(conv))
-
-
-CLONE_SUFFIX = " (copy)"
-TITLE_MAX_LENGTH = 200
-
-
-def clone_title(title: str | None) -> str:
-    """"<title> (copy)", within the 200-character title limit; an untitled thread reads
-    "Untitled conversation (copy)" (the Studio's label for it)."""
-    base = (title or "").strip() or "Untitled conversation"
-    return base[: TITLE_MAX_LENGTH - len(CLONE_SUFFIX)] + CLONE_SUFFIX
+    return JSONResponse(content=service.rename(principal.tenant_id, conversation_id, body.title))
 
 
 @router.post(
@@ -352,7 +210,7 @@ def clone_title(title: str | None) -> str:
     responses={409: {"model": ErrorDetail}},
 )
 def clone_conversation(
-    conversation_id: str, principal: PrincipalDep, db: SessionDep, stores: StoresDep
+    conversation_id: str, principal: PrincipalDep, service: ConversationServiceDep
 ) -> JSONResponse:
     """Clone the thread into a NEW conversation on the same agent and resource_id, titled
     "<title> (copy)". The terminal turns (completed, failed, needs_attention) are copied in order
@@ -361,16 +219,9 @@ def clone_conversation(
     derived memory (observations, conversation working memory, recall index) is not copied. 201
     with the new conversation (the create/get shape, `runs` excluded); 404 for an unknown, another
     tenant's, malformed or deleted conversation; 409 AGENT_ARCHIVED for an archived agent."""
-    run_store, _ = stores
-    tenant_id = principal.tenant_id
-    conv_id = canonical_uuid_or_404(conversation_id, "Conversation not found")
-    conv = _conversation_or_404(run_store, tenant_id, uuid.UUID(conv_id))
-    refuse_if_archived(lock_agent(db, tenant_id, conv["agent_id"]))
-    try:
-        cloned = run_store.clone_conversation(tenant_id, conv_id, clone_title(conv["title"]))
-    except ConversationNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content=_conversation_json(cloned))
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED, content=service.clone(principal.tenant_id, conversation_id)
+    )
 
 
 @router.post(
@@ -379,12 +230,7 @@ def clone_conversation(
     responses={409: {"model": ErrorDetail}, 413: {"model": ErrorDetail}},
 )
 def start_turn(
-    conversation_id: uuid.UUID,
-    body: TurnCreate,
-    principal: PrincipalDep,
-    db: SessionDep,
-    stores: StoresDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    conversation_id: uuid.UUID, body: TurnCreate, principal: PrincipalDep, service: ConversationServiceDep
 ) -> JSONResponse:
     """Start the next turn. 201 created, 200 for a retry of the same turn (same run_id, input and
     run options), 409 while the previous turn is not terminal or when run_id is used by a different
@@ -394,37 +240,10 @@ def start_turn(
     The request's trace id and traceparent are stored on the run; the worker's run span joins that
     trace, and the response carries `trace_id`.
     """
-    run_store, _ = stores
-    tenant_id = principal.tenant_id
-    conv = _conversation_or_404(run_store, tenant_id, conversation_id)
-    agent = lock_agent(db, tenant_id, conv["agent_id"])
-
-    # A retry of a recorded turn is compared with the row and relaunched as recorded; only a new
-    # turn validates its options (each turn has its own context, model and version or draft).
-    def same_request(run: dict[str, Any]) -> bool:
-        return (
-            run["conversation_id"] == conv["id"]
-            and run["input"] == body.input
-            and same_options(
-                db, run, version=body.version, request_context=body.request_context, model=body.model,
-                model_settings=body.model_settings,
-            )
-        )
-
-    try:
-        run, created = record_and_launch_turn(
-            db, launcher, run_store, tenant_id, conversation_id,
-            run_id=body.run_id,
-            new_options=lambda: new_turn_options(
-                db, tenant_id, agent,
-                version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
-                model_settings=body.model_settings,
-            ),
-            input_text=body.input,
-            same_request=same_request,
-        )
-    except TurnInProgress as busy:
-        raise turn_in_progress_409(busy)
+    run, created = service.start_turn(
+        principal.tenant_id, conversation_id, run_id=body.run_id, input_text=body.input, version=body.version,
+        request_context=body.request_context, model=body.model, model_settings=body.model_settings,
+    )
     return started_response(run, created, {"conversation_id": run["conversation_id"], "turn": run["turn"]})
 
 
@@ -433,20 +252,14 @@ def start_turn(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={409: {"model": ErrorDetail, "description": "A turn is still queued or running; retry after it ends"}},
 )
-def delete_conversation(conversation_id: str, principal: PrincipalDep, memory: MemoryDep) -> Response:
+def delete_conversation(conversation_id: str, principal: PrincipalDep, service: ConversationServiceDep) -> Response:
     """Delete the conversation: its runs stay with input, output, messages, request context and
     error nulled and every event scrubbed (usage and cost stay); its observations,
     conversation-scoped working memory and message embeddings are deleted; resource-scoped working
     memory stays. 204; 404 unknown, another tenant's, malformed or already deleted; 409 (with
     Retry-After) while its latest turn is queued or running, nothing deleted."""
-    conv_id = canonical_uuid_or_404(conversation_id, "Conversation not found")
     try:
-        deleted = memory.delete_conversation(principal.tenant_id, conv_id)
-    except TurnInProgress as busy:
-        return turn_busy_409(
-            f"The latest turn (run {busy.run_id}) is still {busy.status}; nothing was deleted. "
-            "Retry when it finishes"
-        )
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+        service.delete(principal.tenant_id, conversation_id)
+    except TurnBusyRefusal as busy:
+        return turn_busy_409(busy.message)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

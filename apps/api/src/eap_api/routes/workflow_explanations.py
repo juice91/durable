@@ -31,11 +31,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from eap_api.auth import Principal, current_principal
-from eap_api.deps import EngineDep, RunLauncherDep, SessionDep, StoresDep
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.architect import _run_drafter, _seed_one, _spec_model, seed_model
 from eap_api.schemas import ErrorDetail
+from eap_api.service_deps.architect import ArchitectServiceDep
 from eap_api.service_deps.workflow_explanations import WorkflowExplanationServiceDep
+from eap_api.services.architect import ArchitectService
 from eap_api.services.workflow_explanations import (  # noqa: F401 - re-exported: the API's users and tests import them from here
     LOCALE_NAMES,
     DefinitionError,
@@ -44,12 +44,7 @@ from eap_api.services.workflow_explanations import (  # noqa: F401 - re-exported
     MAX_TOOL_TEXT,
     WORKFLOW_NOT_FOUND,
 )
-from eap_schemas.workflow_explanations import (
-    EXPLAINER_NAME,
-    EXPLAINER_SLUG,
-    Locale,
-    explainer_agent_spec,
-)
+from eap_schemas.workflow_explanations import Locale
 
 router = APIRouter(
     tags=["workflow-explanations"],
@@ -70,30 +65,17 @@ class ExplainRequest(BaseModel):
 
 
 class ExplainerPorts:
-    """The explainer agent and one run of it, through the Architect's seeding and the runs route."""
+    """The explainer agent and one run of it, through the Architect service's seeding and drafter run."""
 
-    def __init__(self, engine: Any, principal: Principal, db: Any, stores: Any, launcher: Any) -> None:
-        self.engine, self.principal, self.db, self.stores, self.launcher = engine, principal, db, stores, launcher
+    def __init__(self, architect: ArchitectService, tenant_id: str) -> None:
+        self.architect, self.tenant_id = architect, tenant_id
 
     def ensure_explainer(self, tenant_id: str, user_id: str) -> str:
         """The tenant's explainer agent id (seeded when missing)."""
-        try:
-            # TODO(layering): call RunService / ArchitectService once those groups land
-            with self.engine.begin() as conn:
-                row, _ = _seed_one(conn, tenant_id, user_id, EXPLAINER_SLUG, EXPLAINER_NAME, explainer_agent_spec, [])
-        except DefinitionError as exc:
-            if exc.code == "choose_model":
-                raise refuse(409, "No model is available for the workflow explainer.", code="no_model", **exc.extra) from None
-            raise
-        if _spec_model(row.draft_spec) is None and seed_model() is None:
-            raise refuse(409, "No model is available for the workflow explainer.", code="no_model")
-        return str(row.id)
+        return self.architect.ensure_explainer(tenant_id, user_id)
 
     def run_drafter(self, explainer_id: str, prompt: str) -> tuple[dict[str, Any], list[str], str, str, str | None]:
-        # TODO(layering): call RunService / ArchitectService once those groups land
-        return _run_drafter(
-            explainer_id, prompt, self.principal, self.db, self.stores, self.launcher, "explanation", EXPLAIN_TIMEOUT_S,
-        )
+        return self.architect.run_drafter(self.tenant_id, explainer_id, prompt, "explanation", EXPLAIN_TIMEOUT_S)
 
 
 @router.get("/workflows/{workflow_id}/explanation")
@@ -107,12 +89,12 @@ def get_explanation(
 
 @router.post("/workflows/{workflow_id}/explanation", responses={409: {"description": "no_model"}})
 def explain(
-    workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowExplanationServiceDep, engine: EngineDep,
-    db: SessionDep, stores: StoresDep, launcher: RunLauncherDep, body: ExplainRequest | None = None,
+    workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowExplanationServiceDep,
+    architect: ArchitectServiceDep, body: ExplainRequest | None = None,
 ) -> JSONResponse:
     """Generate (or, with a stored one and `refresh` false, return) the explanation of a published version."""
     body = body or ExplainRequest()
     return JSONResponse(content=service.explain(
         principal.tenant_id, principal.user_id, workflow_id, version=body.version, locale=body.locale,
-        refresh=body.refresh, ports=ExplainerPorts(engine, principal, db, stores, launcher),
+        refresh=body.refresh, ports=ExplainerPorts(architect, principal.tenant_id),
     ))

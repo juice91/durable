@@ -8,18 +8,13 @@ bearer works in EAP_AUTH_MODE=dev only. A key keeps its `agent_ids` / `workflow_
 
 from __future__ import annotations
 
-import os
-import uuid
 from typing import Any
 
 from eap_observability import bind_log_context
-from eap_run_store import looks_like_api_key
-from eap_run_store.run_tokens import looks_like_run_token, signing_key, verify_run_token
-from eap_run_store.store import TERMINAL_RUN_STATUSES
-from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
-from eap_api.deps import api_key_store_of, database_engine_of
+from eap_api.service_deps.auth_lookup import auth_lookup_service_of
+from eap_api.services.auth_lookup import AuthLookupService
 from eap_api.auth import (
     DEV_AUTH_DISABLED_DETAIL,
     INVALID_API_KEY_DETAIL,
@@ -57,36 +52,17 @@ def actor_id(principal: AgUiPrincipal) -> str:
     return principal.key_id or f"dev:{principal.user_id}"
 
 
-async def _authenticate_run_token(app: Any, credential: str) -> AgUiPrincipal:
+async def _authenticate_run_token(lookup: AuthLookupService, credential: str) -> AgUiPrincipal:
     """A live run of the built-in Architect: a signed, unexpired token AND a run row that still exists in
     the tenant, belongs to the built-in `architect` agent and has not ended. Anything else is a plain 401."""
-    secret = os.environ.get("EAP_SECRETS_KEY")
-    token = verify_run_token(signing_key(secret), credential) if secret else None
-    if token is None:
+    run = await run_in_threadpool(lookup.architect_run, credential)
+    if run is None:
         raise McpAuthError(401, INVALID_API_KEY_DETAIL)
-    try:
-        uuid.UUID(token.run_id)
-    except ValueError:
-        raise McpAuthError(401, INVALID_API_KEY_DETAIL) from None
-
-    def lookup() -> Any:
-        with database_engine_of(app).connect() as conn:
-            return conn.execute(
-                text(
-                    "SELECT r.status, a.slug, a.builtin FROM runs r JOIN agents a ON a.id = r.agent_id "
-                    "WHERE r.id = :r AND r.tenant_id = :t"
-                ),
-                {"r": token.run_id, "t": token.tenant_id},
-            ).first()
-
-    row = await run_in_threadpool(lookup)
-    if row is None or row[0] in TERMINAL_RUN_STATUSES or not row[2] or row[1] != "architect":
-        raise McpAuthError(401, INVALID_API_KEY_DETAIL)
-    bind_log_context(tenant_id=token.tenant_id)
+    bind_log_context(tenant_id=run.tenant_id)
     return AgUiPrincipal(
-        tenant_id=token.tenant_id,
+        tenant_id=run.tenant_id,
         kind="architect_run",
-        user_id=f"{ARCHITECT_RUN_PREFIX}{token.run_id}",
+        user_id=f"{ARCHITECT_RUN_PREFIX}{run.run_id}",
         scopes=(MCP_SCOPE, MANAGE_SCOPE),
     )
 
@@ -97,11 +73,11 @@ async def authenticate(app: Any, authorization: str | None, origin: str | None) 
         raise McpAuthError(401, "Missing Authorization header")
     scheme, _, credential = authorization.partition(" ")
     credential = credential.strip()
-    if scheme.lower() == "bearer" and looks_like_run_token(credential):
-        return await _authenticate_run_token(app, credential)
-    if scheme.lower() == "bearer" and looks_like_api_key(credential):
-        store = api_key_store_of(app)
-        record = await run_in_threadpool(store.authenticate, credential, touch=False)
+    lookup = auth_lookup_service_of(app)
+    if scheme.lower() == "bearer" and lookup.is_run_token(credential):
+        return await _authenticate_run_token(lookup, credential)
+    if scheme.lower() == "bearer" and lookup.is_api_key(credential):
+        record = await run_in_threadpool(lookup.api_key, credential)
         if record is None:
             raise McpAuthError(401, INVALID_API_KEY_DETAIL)
         if MCP_SCOPE not in record.scopes and MANAGE_SCOPE not in record.scopes:
@@ -110,7 +86,7 @@ async def authenticate(app: Any, authorization: str | None, origin: str | None) 
             require_allowed_origin(record.allowed_origins, origin)
         except HTTPException as exc:
             raise McpAuthError(403, str(exc.detail)) from None
-        await run_in_threadpool(store.touch_last_used, record.id)
+        await run_in_threadpool(lookup.touch_api_key, record.id)
         bind_log_context(tenant_id=record.tenant_id)
         return AgUiPrincipal(
             tenant_id=record.tenant_id,

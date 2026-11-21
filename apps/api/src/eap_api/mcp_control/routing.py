@@ -1,33 +1,27 @@
-"""Calling the platform's route functions from an MCP tool.
+"""Calling the platform's services from an MCP tool.
 
-An MCP tool is argument validation plus one call into what the HTTP route already runs (the route
-function itself, or the shared service the route calls), so there is exactly one implementation of
-every operation. The route function is called with the dependencies FastAPI would inject (a
-tenant-scoped `Principal`, a session, the run stores, the launcher) and its answer is turned into
-the platform's stable error object `{error: {code, message}}` when it is a refusal.
+An MCP tool is argument validation plus one call into the service the HTTP route calls too, so there
+is exactly one implementation of every operation. The service is built with the collaborators
+FastAPI would inject (a session, the run stores, the launcher) and its refusal is turned into the
+platform's stable error object `{error: {code, message}}`.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
-from contextlib import contextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import Any, Callable, Iterator
+from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import AgUiPrincipal, Principal
 from eap_api.concurrency import ConcurrencyError, Precondition
-from eap_api.deps import database_engine_of, get_run_launcher, run_launcher_of, run_stores_of
+from eap_api.deps import database_engine_of, get_run_launcher, open_session, run_launcher_of, run_stores_of
 from eap_api.service_errors import service_error_response
 from eap_api.services.errors import ServiceError
-from eap_run_store.definition_errors import DefinitionError
+from eap_api.ports import DefinitionError
 
 # One word per HTTP status when a route gives no `code` of its own.
 STATUS_CODES = {
@@ -36,8 +30,6 @@ STATUS_CODES = {
     503: "unavailable", 504: "timeout",
 }
 MAX_MESSAGE_CHARS = 600
-
-DB = object()  # a keyword value replaced by a fresh Session inside the call's thread
 
 
 class McpToolError(Exception):
@@ -81,18 +73,6 @@ def refusal(status: int, body: Any) -> McpToolError:
     return McpToolError(code, _detail_text(detail) or code.replace("_", " "), **extra)
 
 
-def unwrap(result: Any) -> Any:
-    """A route's return value as data: JSONResponse bodies parsed, a refusal status raised."""
-    if isinstance(result, JSONResponse):
-        data = json.loads(result.body) if result.body else None
-        if result.status_code >= 400:
-            raise refusal(result.status_code, data)
-        return data
-    if hasattr(result, "model_dump"):
-        return result.model_dump(mode="json")
-    return result
-
-
 def service_error_to_tool_error(exc: ServiceError) -> McpToolError:
     """A service's refusal as a tool error: the code the refusal names (a class's default code is the status's
     word), the message, and for a stale revision `current_revision` (never the current resource)."""
@@ -107,7 +87,7 @@ def service_error_to_tool_error(exc: ServiceError) -> McpToolError:
 
 
 def translate(exc: BaseException) -> McpToolError:
-    """Any refusal a route or shared service raises, as a tool error."""
+    """Any refusal a service raises, as a tool error."""
     if isinstance(exc, McpToolError):
         return exc
     if isinstance(exc, ServiceError):
@@ -144,11 +124,6 @@ class Ctx:
         return Principal(tenant_id=self.principal.tenant_id, user_id=user)
 
     @property
-    def request(self) -> Any:
-        """Stands in for the `Request` of routes that only read the app's state."""
-        return SimpleNamespace(app=self.app)
-
-    @property
     def stores(self) -> Any:
         return run_stores_of(self.app)
 
@@ -169,33 +144,17 @@ class Ctx:
         return self.principal.allows_workflow(workflow_id)
 
 
-@contextmanager
-def _sessions(ctx: Ctx, kwargs: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    session: Session | None = None
-    out = dict(kwargs)
+async def call_service(ctx: Ctx, build: Callable[[Any], Any], fn: Callable[[Any], Any]) -> Any:
+    """Run `fn(service)` in a worker thread with `service = build(session)`, a fresh Session of this call
+    (the services take their collaborators through the constructor); return its data or raise McpToolError.
+    A `ServiceError` becomes the tool error a route's HTTP refusal gave (service_error_to_tool_error); any
+    other refusal (DefinitionError, ConcurrencyError, a validation error) is translated by `translate`."""
+
+    def run() -> Any:
+        with open_session(ctx.engine) as db:
+            return fn(build(db))
+
     try:
-        for key, value in kwargs.items():
-            if value is DB:
-                session = session or Session(ctx.engine)
-                out[key] = session
-        yield out
-    finally:
-        if session is not None:
-            session.close()
-
-
-async def call(ctx: Ctx, fn: Callable[..., Any], **kwargs: Any) -> Any:
-    """Run the route function `fn` (sync or async) with `kwargs`, `DB` values replaced by a session of
-    this call; return its data or raise McpToolError."""
-    try:
-        if inspect.iscoroutinefunction(fn):
-            with _sessions(ctx, kwargs) as kw:
-                return unwrap(await fn(**kw))
-
-        def run() -> Any:
-            with _sessions(ctx, kwargs) as kw:
-                return unwrap(fn(**kw))
-
         return await run_in_threadpool(run)
     except McpToolError:
         raise
@@ -203,22 +162,13 @@ async def call(ctx: Ctx, fn: Callable[..., Any], **kwargs: Any) -> Any:
         raise translate(exc) from None
 
 
-async def call_service(ctx: Ctx, build: Callable[[Session], Any], fn: Callable[[Any], Any]) -> Any:
-    """Run `fn(service)` in a worker thread with `service = build(session)`, a fresh Session of this call
-    (the services take their collaborators through the constructor); return its data or raise McpToolError.
-    A `ServiceError` becomes the tool error a route's HTTP refusal gave (service_error_to_tool_error); any
-    other refusal a route or shared function raises is translated as `call` does."""
-
-    def run() -> Any:
-        with Session(ctx.engine) as db:
-            return fn(build(db))
-
+async def call_service_async(ctx: Ctx, build: Callable[[Any], Any], fn: Callable[[Any], Awaitable[Any]]) -> Any:
+    """As `call_service` for a service method that is a coroutine: awaited on the event loop, with the same session."""
     try:
-        return await run_in_threadpool(run)
+        with open_session(ctx.engine) as db:
+            return await fn(build(db))
     except McpToolError:
         raise
-    except ServiceError as exc:
-        raise service_error_to_tool_error(exc) from None
     except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
         raise translate(exc) from None
 
@@ -254,16 +204,31 @@ async def call_with_revision(
 
 
 def revision_reader(ctx: Ctx, table: str, row_id: str) -> Callable[[], int | None]:
-    """`read_revision` for call_with_revision: the tenant's row revision (None when there is no such row, so
-    the route's own 404 answers). `table` is a literal of ours (agents, workflows)."""
-    from sqlalchemy import text
+    """`read_revision` for call_with_revision: the tenant's row revision as the service's `get` reports it (None
+    when there is no such row, so the write's own 404 answers). `table` is one of agents, workflows, schedules."""
+    import uuid
+
+    from eap_api.services.agents import AgentService
+    from eap_api.services.schedules import ScheduleService
+    from eap_api.services.workflows import WorkflowService
+    from eap_api.deps import schedule_store_of
 
     def read() -> int | None:
-        with ctx.engine.connect() as conn:
-            value = conn.execute(
-                text(f"SELECT revision FROM {table} WHERE id = :i AND tenant_id = :t"),
-                {"i": str(row_id), "t": ctx.tenant_id},
-            ).scalar_one_or_none()
-        return None if value is None else int(value)
+        with open_session(ctx.engine) as db:
+            try:
+                if table == "agents":
+                    _row, revision = AgentService(db).get(ctx.tenant_id, uuid.UUID(str(row_id)))
+                elif table == "workflows":
+                    _row, revision = WorkflowService(db).get(ctx.tenant_id, str(row_id))
+                elif table == "schedules":
+                    _row, revision = ScheduleService(db, schedule_store_of(ctx.app)).get(ctx.tenant_id, str(row_id))
+                else:
+                    raise ValueError(f"no revision reader for {table}")
+            except Exception as exc:  # noqa: BLE001 - only a refusal is translated; anything else re-raises
+                refused = translate(exc)
+                if refused.code == "not_found":
+                    return None
+                raise refused from None
+        return None if revision is None else int(revision)
 
     return read

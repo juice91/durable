@@ -116,6 +116,9 @@ class World:
         self.base_url = base_database_url()
         self.schema = f"eap_compat_{suffix}"
         self.dbos_schema = f"eap_compat_dbos_{suffix}"
+        from eap_db.testing import create_commented_schema
+
+        create_commented_schema(DBOS_DB_URL.replace("postgresql://", "postgresql+psycopg://", 1), self.dbos_schema)
         self.tenant = f"tcompat{suffix}"
         self.headers = {"Authorization": f"Bearer dev:{self.tenant}:alice"}
         self.procs: list[BuildProcess] = []

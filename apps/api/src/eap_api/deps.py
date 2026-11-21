@@ -51,6 +51,11 @@ def database_engine_of(app: Any) -> Engine:
     return app.state.database_engine
 
 
+def open_session(engine: Engine) -> Session:
+    """A new database session on `engine`; the caller closes it (for entry points that hold an app, not a request)."""
+    return Session(engine)
+
+
 def run_stores_of(app: Any) -> tuple[RunStore, EventLog]:
     return app.state.run_stores
 
@@ -155,17 +160,25 @@ StreamLimiterDep = Annotated[StreamLimiter, Depends(get_stream_limiter)]
 # --- stores built on the run stores' engine ---------------------------------------------------------
 
 
-def get_approval_store(request: Request) -> ApprovalStore:
+def approval_store_of(app: Any) -> ApprovalStore:
     """The ApprovalStore on the run stores' engine, made once per app."""
-    return _lazy(request.app, "approval_store", lambda: ApprovalStore(require_run_storage(request)[0].engine))
+    return _lazy(app, "approval_store", lambda: ApprovalStore(run_stores_of(app)[0].engine))
+
+
+def get_approval_store(request: Request) -> ApprovalStore:
+    return approval_store_of(request.app)
 
 
 ApprovalStoreDep = Annotated[ApprovalStore, Depends(get_approval_store)]
 
 
-def get_eval_store(request: Request) -> EvalStore:
+def eval_store_of(app: Any) -> EvalStore:
     """The EvalStore on the run stores' engine, made once per app."""
-    return _lazy(request.app, "eval_store", lambda: EvalStore(require_run_storage(request)[0].engine))
+    return _lazy(app, "eval_store", lambda: EvalStore(run_stores_of(app)[0].engine))
+
+
+def get_eval_store(request: Request) -> EvalStore:
+    return eval_store_of(request.app)
 
 
 EvalStoreDep = Annotated[EvalStore, Depends(get_eval_store)]
@@ -179,15 +192,23 @@ def get_span_store(request: Request) -> SpanStore:
 SpanStoreDep = Annotated[SpanStore, Depends(get_span_store)]
 
 
+def schedule_store_of(app: Any) -> ScheduleStore:
+    return _lazy(app, "schedule_store", lambda: ScheduleStore(run_stores_of(app)[0].engine))
+
+
 def get_schedule_store(request: Request) -> ScheduleStore:
-    return _lazy(request.app, "schedule_store", lambda: ScheduleStore(require_run_storage(request)[0].engine))
+    return schedule_store_of(request.app)
 
 
 ScheduleStoreDep = Annotated[ScheduleStore, Depends(get_schedule_store)]
 
 
+def scorer_store_of(app: Any) -> ScorerStore:
+    return _lazy(app, "scorer_store", lambda: ScorerStore(run_stores_of(app)[0].engine))
+
+
 def get_scorer_store(request: Request) -> ScorerStore:
-    return _lazy(request.app, "scorer_store", lambda: ScorerStore(require_run_storage(request)[0].engine))
+    return scorer_store_of(request.app)
 
 
 ScorerStoreDep = Annotated[ScorerStore, Depends(get_scorer_store)]
@@ -203,6 +224,10 @@ TraceFeedbackStoreDep = Annotated[TraceFeedbackStore, Depends(get_trace_feedback
 
 
 # --- stores built on the database engine ------------------------------------------------------------
+
+
+def knowledge_store_of(app: Any) -> KnowledgeStore:
+    return _lazy(app, "knowledge_store", lambda: KnowledgeStore(database_engine_of(app)))
 
 
 def get_knowledge_store(request: Request) -> KnowledgeStore:

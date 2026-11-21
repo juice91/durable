@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
-from eap_db.testing import SCHEMA_ENV, drop_schema, schema_url
+from eap_db.testing import SCHEMA_ENV, create_schema, drop_schema, schema_url
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get(SCHEMA_ENV), reason="needs the eap_db pytest plugin's migrated schema (dev Postgres)"
@@ -50,7 +50,7 @@ def test_upgrade_widens_the_kinds_and_downgrade_removes_the_new_rows():
     schema = f"eap_test_0030_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     engine = create_engine(schema_url(base, schema))
     try:
         with engine.begin() as conn:

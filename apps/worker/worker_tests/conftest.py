@@ -6,6 +6,7 @@ or recovers workflows from other sessions, the dev worker, or the API's default 
 
 from __future__ import annotations
 
+import atexit
 import os
 import time
 import uuid
@@ -40,7 +41,12 @@ def pytest_configure(config):
 
 
 def new_schema(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+    """A private DBOS system schema name; the schema is created here, commented, so the sweep can age it."""
+    from eap_db.testing import create_commented_schema
+
+    schema = f"{prefix}_{uuid.uuid4().hex[:10]}"
+    create_commented_schema(DBOS_DB_URL.replace("postgresql://", "postgresql+psycopg://", 1), schema)
+    return schema
 
 
 def drop_schema(schema: str) -> None:
@@ -62,6 +68,13 @@ def wait_for(predicate: Callable[[], Any], timeout: float = 60.0, interval: floa
     raise AssertionError(f"timed out after {timeout}s waiting for {what or predicate}")
 
 
+def _quiet_drop(schema: str) -> None:
+    try:
+        drop_schema(schema)
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="session")
 def worker_settings():
     from eap_worker.config import WorkerSettings
@@ -77,8 +90,12 @@ def worker_settings():
         litellm_base_url=None,
         litellm_api_key=None,
     )
-    yield settings
-    drop_schema(schema)
+    # The finalizer also runs when the session is interrupted; atexit covers a worker shutdown.
+    atexit.register(_quiet_drop, schema)
+    try:
+        yield settings
+    finally:
+        _quiet_drop(schema)
 
 
 @pytest.fixture(scope="session")

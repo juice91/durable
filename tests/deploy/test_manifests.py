@@ -19,6 +19,7 @@ WORKLOAD_UIDS = {
     ("Deployment", "api"): 10001,
     ("Deployment", "lgtm"): 1000,
     ("Deployment", "studio"): 10001,
+    ("Deployment", "cloudflared"): 65532,  # the upstream image's nonroot user
     ("StatefulSet", "postgres"): 999,
     ("StatefulSet", "worker"): 10001,
     ("CronJob", "postgres-backup"): 999,
@@ -359,3 +360,86 @@ def test_up_sh_replaces_the_kube_api_port_in_block_style_yaml(tmp_path) -> None:
     import subprocess
     out = subprocess.run(["sed", "-e", "s|port: 6443$|port: 55436|g"], input=sample, capture_output=True, text=True, check=True).stdout
     assert "port: 55436" in out and "6443" not in out
+
+
+# ---- Cloudflare Tunnel connector (deploy/k8s/cloudflared.yaml) ----------------------------------------------
+
+
+def _cloudflared() -> dict:
+    found = [d for d in kustomize_docs() if d["kind"] == "Deployment" and d["metadata"]["name"] == "cloudflared"]
+    assert len(found) == 1
+    return found[0]
+
+
+def test_cloudflared_image_is_pinned_by_version_and_digest():
+    import re
+
+    image = containers(_cloudflared())[0]["image"]
+    assert re.fullmatch(r"cloudflare/cloudflared:\d{4}\.\d+\.\d+@sha256:[0-9a-f]{64}", image), image
+
+
+def test_cloudflared_runs_the_tunnel_with_a_secret_token_and_is_off_by_default():
+    doc = _cloudflared()
+    assert doc["spec"]["replicas"] == 0  # up.sh scales to 1 only when the deploy secret has the token
+    c = containers(doc)[0]
+    assert c["args"] == ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
+    env = {e["name"]: e for e in c["env"]}
+    assert set(env) == {"TUNNEL_TOKEN"}
+    assert "value" not in env["TUNNEL_TOKEN"]
+    ref = env["TUNNEL_TOKEN"]["valueFrom"]["secretKeyRef"]
+    assert ref["name"] == "pydanticos-secrets" and ref["key"] == "CLOUDFLARE_TUNNEL_TOKEN"
+    assert ref.get("optional") is True
+    for probe in ("readinessProbe", "livenessProbe"):
+        assert c[probe]["httpGet"] == {"path": "/ready", "port": "metrics"}
+    assert {"name": "metrics", "containerPort": 2000} in c["ports"]
+
+
+def test_cloudflared_deploy_wiring_uses_the_one_secret_field_name():
+    root = K8S_DIR.parents[1]
+    refs = (root / "deploy/secrets.op.env").read_text()
+    assert "CLOUDFLARE_TUNNEL_TOKEN=op://<vault>/<item>/CLOUDFLARE_TUNNEL_TOKEN" in refs
+    up = (root / "deploy/scripts/up.sh").read_text()
+    assert 'dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN' in up
+    assert "scale deployment/cloudflared --replicas=1" in up and "scale deployment/cloudflared --replicas=0" in up
+
+
+def _peer_names(rules: list[dict], direction: str) -> set[tuple[str, tuple[int, ...]]]:
+    out = set()
+    for rule in rules:
+        for peer in rule[direction]:
+            out.add((peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"], tuple(p["port"] for p in rule["ports"])))
+    return out
+
+
+def test_cloudflared_egress_reaches_only_the_edge_studio_and_api():
+    edge = _policy("cloudflared-egress-edge")["spec"]
+    assert edge["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "cloudflared"}
+    assert edge["policyTypes"] == ["Egress"]
+    rule = edge["egress"][0]
+    assert rule["to"][0]["ipBlock"]["cidr"] == "0.0.0.0/0"
+    assert {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"} <= set(rule["to"][0]["ipBlock"]["except"])
+    assert {(p["protocol"], p["port"]) for p in rule["ports"]} == {("TCP", 7844), ("UDP", 7844), ("TCP", 443)}
+    origins = _policy("cloudflared-egress-origins")["spec"]
+    assert _peer_names(origins["egress"], "to") == {("studio", (3000,)), ("api", (8000,))}
+
+
+def test_studio_and_api_admit_cloudflared_and_every_older_ingress_stays():
+    for name, target, port in (("studio-ingress-cloudflared", "studio", 3000), ("api-ingress-cloudflared", "api", 8000)):
+        spec = _policy(name)["spec"]
+        assert spec["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": target}
+        assert spec["policyTypes"] == ["Ingress"]
+        assert _peer_names(spec["ingress"], "from") == {("cloudflared", (port,))}
+    # The API still admits Studio and the worker (separate policies), and Studio still reaches only the API.
+    assert _peer_names(_policy("api-ingress-studio")["spec"]["ingress"], "from") == {("studio", (8000,))}
+    assert _peer_names(_policy("api-ingress-worker")["spec"]["ingress"], "from") == {("worker", (8000,))}
+    assert _peer_names(_policy("studio-egress-api")["spec"]["egress"], "to") == {("api", (8000,))}
+
+
+def test_studio_image_builds_same_origin_with_the_in_cluster_api_rewrite_target():
+    dockerfile = (K8S_DIR.parents[1] / "deploy/docker/studio.Dockerfile").read_text()
+    assert "ARG NEXT_PUBLIC_EAP_API_URL=\n" in dockerfile  # empty: same-origin
+    assert "ARG EAP_API_INTERNAL_URL=http://api.pydanticos.svc.cluster.local:8000" in dockerfile
+    assert "ENV EAP_API_INTERNAL_URL=$EAP_API_INTERNAL_URL" in dockerfile
+    assert "18000" not in dockerfile
+    config = (K8S_DIR.parents[1] / "apps/studio/next.config.ts").read_text()
+    assert '"/api/:path*"' in config and "EAP_API_INTERNAL_URL" in config
