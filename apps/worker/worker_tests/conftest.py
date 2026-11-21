@@ -41,7 +41,12 @@ def pytest_configure(config):
 
 
 def new_schema(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+    """A private DBOS system schema name; the schema is created here, commented, so the sweep can age it."""
+    from eap_db.testing import create_commented_schema
+
+    schema = f"{prefix}_{uuid.uuid4().hex[:10]}"
+    create_commented_schema(DBOS_DB_URL.replace("postgresql://", "postgresql+psycopg://", 1), schema)
+    return schema
 
 
 def drop_schema(schema: str) -> None:

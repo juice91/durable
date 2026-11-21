@@ -39,6 +39,13 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://eap_app:eap_app_password@localhost:54329/eap_app"
+# DBOS system schemas (worker, recovery, compat suites) live in a second database.
+DEFAULT_TEST_DBOS_URL = "postgresql+psycopg://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos"
+
+
+def dbos_test_url() -> str:
+    url = os.environ.get("EAP_TEST_DBOS_URL") or DEFAULT_TEST_DBOS_URL
+    return url.replace("postgresql://", "postgresql+psycopg://", 1)
 SCHEMA_ENV = "EAP_TEST_SCHEMA"
 
 _state: dict[str, str] = {}
@@ -46,7 +53,7 @@ _state: dict[str, str] = {}
 # Leaked-schema hygiene: a killed or crashed run never reaches teardown, and ~100k leaked relations
 # make Postgres crash recovery take minutes. Every schema this module creates carries a creation
 # comment; the next session start sweeps stale ones.
-SWEEP_NAME_RE = re.compile(r"^eap_(test|compat)_[0-9a-f]+$")
+SWEEP_NAME_RE = re.compile(r"^eap_(test|compat|recovery|accept)_([a-z0-9]+_)*[0-9a-f]{8,}$")
 COMMENT_RE = re.compile(r"^eap-test created=(\S+) pid=\d+$")
 TTL_ENV = "EAP_TEST_SCHEMA_TTL_HOURS"
 DEFAULT_TTL_HOURS = 6.0
@@ -64,6 +71,17 @@ def create_schema(conn, schema: str) -> None:
     conn.execute(text(f'COMMENT ON SCHEMA "{schema}" IS \'{schema_comment()}\''))
 
 
+def create_commented_schema(base_url: str, schema: str) -> None:
+    """Create an empty, commented `schema` ahead of a library (DBOS) that fills it with its own tables."""
+    engine = create_engine(base_url, connect_args={"connect_timeout": 5})
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            conn.execute(text(f'COMMENT ON SCHEMA "{schema}" IS \'{schema_comment()}\''))
+    finally:
+        engine.dispose()
+
+
 def _ttl_hours() -> float:
     try:
         return float(os.environ.get(TTL_ENV, DEFAULT_TTL_HOURS))
@@ -72,7 +90,7 @@ def _ttl_hours() -> float:
 
 
 def is_stale(name: str, comment: str | None, locked: bool, now: datetime, ttl_hours: float) -> bool:
-    """Whether the sweep may drop `name`. Never true for a name outside `eap_(test|compat)_<hex>`."""
+    """Whether the sweep may drop `name`. Never true for a name outside `eap_(test|compat|recovery|accept)_[<label>_]<hex>`."""
     if not SWEEP_NAME_RE.match(name):
         return False
     match = COMMENT_RE.match(comment or "")
@@ -89,14 +107,14 @@ _LIST_SQL = """
 SELECT n.nspname, obj_description(n.oid, 'pg_namespace'),
        EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
                WHERE l.locktype = 'relation' AND c.relnamespace = n.oid)
-FROM pg_namespace n WHERE n.nspname ~ '^eap_(test|compat)_[0-9a-f]+$'
+FROM pg_namespace n WHERE n.nspname ~ '^eap_(test|compat|recovery|accept)_([a-z0-9]+_)*[0-9a-f]{8,}$'
 """
 
 
 def sweep_stale_schemas(
     base_url: str, *, keep: tuple[str, ...] = (), only: tuple[str, ...] | None = None, now: datetime | None = None
 ) -> int:
-    """Drop stale `eap_(test|compat)_<hex>` schemas (see `is_stale`); return how many were dropped.
+    """Drop stale `eap_(test|compat|recovery|accept)_[<label>_]<hex>` schemas (see `is_stale`); return how many were dropped.
 
     One `DROP SCHEMA ... CASCADE` per transaction with a 2s lock timeout; a schema that is busy is
     skipped. `keep` names schemas never to touch; `only` restricts the candidates (tests).
@@ -132,11 +150,12 @@ def sweep_once(base_url: str, *, keep: tuple[str, ...] = ()) -> int:
     if _swept or os.environ.get("PYTEST_XDIST_WORKER"):
         return 0
     _swept = True
-    try:
-        count = sweep_stale_schemas(base_url, keep=keep)
-    except Exception as exc:
-        warnings.warn(f"eap_db: stale test schema sweep failed: {exc}")
-        return 0
+    count = 0
+    for url in (base_url, dbos_test_url()):
+        try:
+            count += sweep_stale_schemas(url, keep=keep)
+        except Exception as exc:
+            warnings.warn(f"eap_db: stale test schema sweep failed on {make_url(url).database}: {exc}")
     if count:
         print(f"eap_db: swept {count} stale test schema(s)")
     return count

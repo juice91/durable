@@ -12,6 +12,7 @@ from eap_api.app import create_app
 from eap_db import SchemaNotAtHead
 
 from .run_helpers import PG_URL, requires_pg
+from eap_db.testing import create_schema
 
 UPGRADE = "database schema is not at the latest migration; run: uv run alembic -c packages/db/alembic.ini upgrade head"
 
@@ -34,7 +35,7 @@ def test_unmigrated_database_fails_fast_and_is_left_untouched():
     schema = f"eap_test_unmigrated_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     try:
         url = base.update_query_dict({"options": f"-csearch_path={schema}"}).render_as_string(hide_password=False)
         with pytest.raises(SchemaNotAtHead) as err:

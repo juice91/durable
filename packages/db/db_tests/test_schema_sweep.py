@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from eap_db.testing import (
+    SWEEP_NAME_RE,
     DEFAULT_TEST_DATABASE_URL,
     SCHEMA_ENV,
     create_schema,
@@ -26,26 +27,51 @@ def _comment(age_hours: float) -> str:
 
 
 def test_old_commented_schema_is_stale():
-    assert is_stale("eap_test_abc123", _comment(7), False, NOW, 6)
-    assert is_stale("eap_compat_abc123", _comment(7), True, NOW, 6)  # a stamp beyond the TTL wins over locks
+    assert is_stale("eap_test_abcdef12", _comment(7), False, NOW, 6)
+    assert is_stale("eap_compat_abcdef12", _comment(7), True, NOW, 6)  # a stamp beyond the TTL wins over locks
 
 
 def test_recent_commented_schema_survives():
-    assert not is_stale("eap_test_abc123", _comment(1), False, NOW, 6)
-    assert is_stale("eap_test_abc123", _comment(1), False, NOW, 0.5)  # the TTL is a parameter
+    assert not is_stale("eap_test_abcdef12", _comment(1), False, NOW, 6)
+    assert is_stale("eap_test_abcdef12", _comment(1), False, NOW, 0.5)  # the TTL is a parameter
 
 
 def test_uncommented_schema_goes_only_when_unlocked():
-    assert is_stale("eap_test_abc123", None, False, NOW, 6)
-    assert not is_stale("eap_test_abc123", None, True, NOW, 6)
-    assert not is_stale("eap_test_abc123", "someone else's note", True, NOW, 6)
+    assert is_stale("eap_test_abcdef12", None, False, NOW, 6)
+    assert not is_stale("eap_test_abcdef12", None, True, NOW, 6)
+    assert not is_stale("eap_test_abcdef12", "someone else's note", True, NOW, 6)
 
 
 @pytest.mark.parametrize(
     "name",
-    ["public", "eap_test_worker_abc123", "eap_test_0027_abcd", "eap_recovery_abc123", "eap_test_ABC", "eap_test_", "x_eap_test_abc"],
+    [
+        "eap_test_0123456789ab",  # plugin session schema
+        "eap_test_0027_deadbeef",  # migration test, numeric label
+        "eap_test_worker_0123456789",
+        "eap_test_kbplan_deadbeef",
+        "eap_test_vp_tg_deadbeef",  # two labels
+        "eap_test_mcp_crash_0123456789",
+        "eap_compat_0123456789",
+        "eap_compat_dbos_0123456789",
+        "eap_recovery_0123456789",
+        "eap_accept_0123456789",
+    ],
+)
+def test_every_test_schema_family_matches(name):
+    assert SWEEP_NAME_RE.match(name)
+    assert is_stale(name, None, False, NOW, 6)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "public", "eap_app", "eap_dbos", "dbos", "eap", "information_schema", "pg_catalog", "pg_temp_1",
+        "eap_test_", "eap_test_abc", "eap_test_ABCDEF12", "eap_test_worker", "eap_test_worker_xyz",
+        "x_eap_test_abcdef12", "eap_test_abcdef12_x", "eap_tests_abcdef12", "eap_prod_abcdef12", "eap_recovery_",
+    ],
 )
 def test_non_matching_names_are_never_stale(name):
+    assert not SWEEP_NAME_RE.match(name)
     assert not is_stale(name, None, False, NOW, 6)
     assert not is_stale(name, _comment(99), False, NOW, 6)
 

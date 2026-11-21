@@ -282,6 +282,9 @@ class Harness:
         suffix = uuid.uuid4().hex[:10]
         self.tmp_path = tmp_path
         self.schema = f"eap_recovery_{suffix}"
+        from eap_db.testing import create_commented_schema
+
+        create_commented_schema(DBOS_DB_URL.replace("postgresql://", "postgresql+psycopg://", 1), self.schema)
         self.app_version = f"m1-recovery-{suffix}"
         self.executor_id = f"recovery-{suffix}"
         self.tenant = f"trec{suffix}"

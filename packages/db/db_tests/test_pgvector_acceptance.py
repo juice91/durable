@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from eap_db import current_revisions, head_revisions
-from eap_db.testing import SCHEMA_ENV, create_migrated_schema, drop_schema, schema_url
+from eap_db.testing import SCHEMA_ENV, create_migrated_schema, create_schema, drop_schema, schema_url
 
 URL = os.environ.get("EAP_TEST_DATABASE_URL", "")
 # The repo convention: skip (with a reason) only when the plugin has no migrated schema, i.e. Postgres
@@ -125,10 +125,10 @@ def test_an_unmigrated_schema_does_not_see_another_schemas_alembic_version():
     schema, decoy = f"eap_test_um_{tag}", f"eap_test_um_decoy_{tag}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
         # A decoy version table at head, standing in for the dev database's public one (whether or
         # not public has one): the premise of running migrations on the schema alone.
-        conn.execute(text(f'CREATE SCHEMA "{decoy}"'))
+        create_schema(conn, decoy)
         conn.execute(text(f'CREATE TABLE "{decoy}".alembic_version (version_num varchar(32) PRIMARY KEY)'))
         conn.execute(text(f'INSERT INTO "{decoy}".alembic_version VALUES (:v)'), {"v": sorted(head_revisions())[0]})
     admin.dispose()

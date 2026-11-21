@@ -780,6 +780,13 @@ def test_accepted_enqueue_that_raised_is_superseded_by_the_next_turn(pg, tenant_
         assert _active(app, conversation_id) == [later]
 
         schema = f"eap_accept_{uuid.uuid4().hex[:10]}"
+        from eap_db.testing import create_commented_schema
+
+        create_commented_schema(
+            os.environ.get("EAP_TEST_DBOS_URL", "postgresql://eap_dbos:eap_dbos_password@localhost:54329/eap_dbos")
+            .replace("postgresql://", "postgresql+psycopg://", 1),
+            schema,
+        )
         worker: subprocess.Popen[str] | None = None
         dbos_client: Any = None
         stop = threading.Event()

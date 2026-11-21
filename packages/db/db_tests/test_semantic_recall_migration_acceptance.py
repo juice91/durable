@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from eap_db.metadata import schema_diff
-from eap_db.testing import drop_schema, schema_url
+from eap_db.testing import create_schema, drop_schema, schema_url
 
 HNSW = {f"ix_message_embeddings_embedding_{d}" for d in (768, 1024, 1536)}
 NEW_INDEXES = HNSW | {
@@ -113,7 +113,7 @@ def test_populated_0012_upgrade_downgrade_upgrade_and_alembic_check():
     schema = f"eap_test_0013a_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     try:
