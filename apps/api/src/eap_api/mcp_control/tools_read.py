@@ -1,7 +1,7 @@
 """Read tools: any API key of the tenant (or the dev bearer) may call them.
 
-Each body validates its arguments and calls the route function the HTTP API serves the same data with
-(`eap_api.routes.*`), so the shapes are the platform's own. Lists are paged at most 100 items; a run's
+Each body validates its arguments and calls the service the HTTP API serves the same data with, so the
+shapes are the platform's own. Lists are paged at most 100 items; a run's
 input and output are cut at 32 KiB; connections show `credential_refs` (references, never values).
 """
 
@@ -12,9 +12,9 @@ from typing import Any, Literal
 
 from eap_api.mcp_control.helpers import (
     DEFAULT_PAGE, MAX_REPORT_BYTES, MAX_WAIT_SECONDS, clip, not_found, page, require_agent, require_workflow,
-    tenant_run, uid, wait_for_run,
+    run_service, schedules, approvals, tenant_run, uid, wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, call, call_service
+from eap_api.mcp_control.routing import call_service, call_service_async
 from eap_api.mcp_control.server import current_ctx
 
 # Fields of a run kept in a bounded report (never the request context or model settings).
@@ -28,15 +28,10 @@ RUN_FIELDS = (
 async def run_report(run_id: str, *, kind: str | None = None) -> dict[str, Any]:
     """A run as a bounded report: its status and usage, and input/output cut at 32 KiB. Shared by the
     `workflow.run.result` tool and the `pydanticos://runs/{id}/report` resource."""
-    from eap_api.services.runs import RunService
-
     ctx = current_ctx()
     await tenant_run(ctx, run_id, kind=kind)  # not_found for another tenant's run or a disallowed one
-    stores = ctx.stores
     full = await call_service(
-        ctx, lambda db: RunService(db, stores[0], stores[1], ctx.launcher),
-        lambda s: s.read_run_json(ctx.tenant_id, uid(run_id, "run_id")),
-    )
+        ctx, run_service(ctx), lambda s: s.read_run_json(ctx.tenant_id, uid(run_id, "run_id")))
     report = {k: full.get(k) for k in RUN_FIELDS}
     report["input"], report["input_truncated"] = clip(full.get("input"))
     report["output"], report["output_truncated"] = clip(full.get("output"))
@@ -84,7 +79,7 @@ def register_tools(tool: Any) -> None:
         from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
-        rows = await call(ctx, lambda db: WorkflowService(db).list(ctx.tenant_id), db=DB)
+        rows = await call_service(ctx, WorkflowService, lambda s: s.list(ctx.tenant_id))
         return page([r for r in rows if ctx.workflow_allowed(r["id"])], limit, offset)
 
     @tool("workflow.get")
@@ -94,8 +89,9 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, lambda db, wid: WorkflowService(db).get(ctx.tenant_id, wid)[0], db=DB,
-                          wid=str(uid(workflow_id, "workflow_id")))
+        wid = str(uid(workflow_id, "workflow_id"))
+        workflow, _revision = await call_service(ctx, WorkflowService, lambda s: s.get(ctx.tenant_id, wid))
+        return workflow
 
     @tool("workflow.versions")
     async def workflow_versions(workflow_id: str, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -104,8 +100,8 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        rows = await call(ctx, lambda db, wid: WorkflowService(db).list_versions(ctx.tenant_id, wid), db=DB,
-                          wid=str(uid(workflow_id, "workflow_id")))
+        wid = str(uid(workflow_id, "workflow_id"))
+        rows = await call_service(ctx, WorkflowService, lambda s: s.list_versions(ctx.tenant_id, wid))
         return page(rows, limit, offset)
 
     @tool("workflow.run.get")
@@ -132,19 +128,13 @@ def register_tools(tool: Any) -> None:
     @tool("workflow.schedule.list")
     async def workflow_schedule_list(workflow_id: str | None = None, limit: int = 50) -> dict[str, Any]:
         """The tenant's schedules (of one workflow when given), newest first; `next_before` pages."""
-        from eap_api.deps import get_schedule_store
-        from eap_api.services.schedules import ScheduleService
-
         ctx = current_ctx()
-        store = get_schedule_store(ctx.request)
         limit = max(1, min(limit, 100))
         if workflow_id is not None:
             require_workflow(ctx, workflow_id)
-            return await call(
-                ctx, lambda db: ScheduleService(db, store).page(
-                    ctx.tenant_id, str(uid(workflow_id, "workflow_id")), limit, None),
-                db=DB)
-        out = await call(ctx, lambda db: ScheduleService(db, store).page(ctx.tenant_id, None, limit, None), db=DB)
+            wid = str(uid(workflow_id, "workflow_id"))
+            return await call_service(ctx, schedules(ctx), lambda s: s.page(ctx.tenant_id, wid, limit, None))
+        out = await call_service(ctx, schedules(ctx), lambda s: s.page(ctx.tenant_id, None, limit, None))
         out["items"] = [s for s in out["items"] if ctx.workflow_allowed(str(s.get("workflow_id")))]
         return out
 
@@ -155,7 +145,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         items = await call_service(
-            ctx, lambda _db: knowledge_service_of(ctx.request), lambda s: s.list_knowledge_bases(ctx.tenant_id))
+            ctx, lambda _db: knowledge_service_of(ctx.app, ctx.launcher), lambda s: s.list_knowledge_bases(ctx.tenant_id))
         return page(items, limit, offset)
 
     @tool("kb.get")
@@ -165,7 +155,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         return await call_service(
-            ctx, lambda _db: knowledge_service_of(ctx.request),
+            ctx, lambda _db: knowledge_service_of(ctx.app, ctx.launcher),
             lambda s: s.get_knowledge_base(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.list")
@@ -175,7 +165,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         return await call_service(
-            ctx, lambda _db: kb_source_service_of(ctx.request),
+            ctx, lambda _db: kb_source_service_of(ctx.app, ctx.launcher),
             lambda s: s.list_sources(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.get")
@@ -185,7 +175,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         view, _revision = await call_service(
-            ctx, lambda _db: kb_source_service_of(ctx.request),
+            ctx, lambda _db: kb_source_service_of(ctx.app, ctx.launcher),
             lambda s: s.get_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id"))))
         return view
 
@@ -196,7 +186,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         return await call_service(
-            ctx, lambda _db: kb_source_service_of(ctx.request),
+            ctx, lambda _db: kb_source_service_of(ctx.app, ctx.launcher),
             lambda s: s.list_syncs(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
                                    max(1, min(limit, 100))))
 
@@ -206,7 +196,8 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
-        return await call(ctx, build_connection_service(ctx.engine).list, tenant_id=ctx.tenant_id)
+        return await call_service(
+            ctx, lambda _db: build_connection_service(ctx.engine), lambda s: s.list(tenant_id=ctx.tenant_id))
 
     @tool("settings.connection.check")
     async def connection_check(connection_id: str) -> dict[str, Any]:
@@ -214,8 +205,10 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
-        return await call(ctx, build_connection_service(ctx.engine).check, tenant_id=ctx.tenant_id,
-                          connection_id=str(uid(connection_id, "connection_id")))
+        cid = str(uid(connection_id, "connection_id"))
+        return await call_service_async(
+            ctx, lambda _db: build_connection_service(ctx.engine),
+            lambda s: s.check(tenant_id=ctx.tenant_id, connection_id=cid))
 
     @tool("mcp.server.list")
     async def mcp_server_list(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
@@ -224,8 +217,9 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.connections import build_mcp_server_service, get_outbound_policy
 
         ctx = current_ctx()
-        rows = await call(ctx, lambda db: build_mcp_server_service(
-            db, ctx.engine, get_outbound_policy(), get_mcp_runtime()).list(ctx.tenant_id), db=DB)
+        rows = await call_service(
+            ctx, lambda db: build_mcp_server_service(db, ctx.engine, get_outbound_policy(), get_mcp_runtime()),
+            lambda s: s.list(ctx.tenant_id))
         return page(rows, limit, offset)
 
     @tool("mcp.catalog.search")
@@ -235,22 +229,19 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.connections import build_mcp_catalog_service
 
         ctx = current_ctx()
-        return await call(ctx, build_mcp_catalog_service(ctx.engine).search, q=query,
-                          limit=max(1, min(limit, 50)), after=after, source=source)
+        return await call_service(
+            ctx, lambda _db: build_mcp_catalog_service(ctx.engine),
+            lambda s: s.search(q=query, limit=max(1, min(limit, 50)), after=after, source=source))
 
     @tool("approvals.list")
     async def approvals_list(status: Literal["pending", "decided"] = "pending", kind: Literal["tool", "step"] | None = None,
                              agent_id: str | None = None, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
         """The tenant's approvals (gated tool calls and workflow approval steps): {items, next_cursor}."""
-        from eap_api.deps import get_approval_store
-        from eap_api.services.approvals import ApprovalService
-
         ctx = current_ctx()
         if agent_id is not None:
             require_agent(ctx, agent_id)
-        service = ApprovalService(get_approval_store(ctx.request), ctx.stores[1], ctx.launcher)
-        out = await call(
-            ctx, lambda: service.list(
+        out = await call_service(
+            ctx, approvals(ctx), lambda s: s.list(
                 ctx.tenant_id, status=status, kind=kind, agent_id=str(uid(agent_id, "agent_id")) if agent_id else None,
                 cursor=cursor, limit=max(1, min(limit, 100))),
         )

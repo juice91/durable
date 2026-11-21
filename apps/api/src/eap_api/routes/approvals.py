@@ -25,8 +25,8 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
 
+from eap_api.bodies import ToolApprovalDecision
 from eap_api.auth import Principal, current_principal
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.workflow_runs import _parse_body
@@ -45,7 +45,6 @@ from eap_api.services.approvals import (  # noqa: F401 - re-exported: the API's 
 )
 
 # The comment a person may add to a tool decision; a denial's comment reaches the model.
-MAX_TOOL_COMMENT_CHARS = 500
 # The body is {"comment"?}: 500 characters of at most 4 UTF-8 bytes each, plus slack.
 MAX_DECISION_BODY_BYTES = 8 * 1024
 MAX_DECISION_BODY_DEPTH = 8
@@ -59,14 +58,6 @@ ApprovalRoute = guarded_json_route(max_body_bytes=MAX_DECISION_BODY_BYTES, max_d
 router = APIRouter(tags=["approvals"], route_class=ApprovalRoute)
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-class ToolApprovalDecision(BaseModel):
-    """Body of .../tool-approvals/{tool_call_id}/approve|deny (optional; empty means no comment)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    comment: str | None = Field(default=None, max_length=MAX_TOOL_COMMENT_CHARS)
 
 
 async def _decision_body(request: Request) -> ToolApprovalDecision:

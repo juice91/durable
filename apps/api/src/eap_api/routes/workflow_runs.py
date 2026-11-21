@@ -41,15 +41,15 @@ A failure after step 1 answers 503 and leaves the durable request: the scheduled
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
+from eap_api.bodies import MAX_COMMENT_CHARS, ApprovalDecision, ResumeSubmission, WorkflowRunCreate  # noqa: F401
 from eap_api.auth import Principal, current_principal
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.workflows import reference_problems  # noqa: F401 - re-exported
@@ -73,7 +73,7 @@ log = logging.getLogger("eap_api")
 # The body is {"input": ..., "version"?, "run_id"?} or {"comment": ...}: the input plus slack.
 MAX_RUN_BODY_BYTES = 64 * 1024
 MAX_RUN_BODY_DEPTH = 64
-MAX_COMMENT_CHARS = 2000
+
 MAX_REPORTED_ERRORS = 20
 
 
@@ -86,27 +86,6 @@ WorkflowRunRoute = guarded_json_route(max_body_bytes=MAX_RUN_BODY_BYTES, max_dep
 router = APIRouter(prefix="/workflows", tags=["workflow runs"], route_class=WorkflowRunRoute)
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-class WorkflowRunCreate(BaseModel):
-    """Body of POST /workflows/{workflow_id}/runs. `version` (optional) pins a published version,
-    else the latest; `run_id` (optional, client-generated) makes a retry idempotent."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    input: dict[str, Any]
-    version: int | None = Field(default=None, ge=1)
-    run_id: uuid.UUID | None = None
-    rerun_of: uuid.UUID | None = None
-    pause_after_each_step: bool = False
-
-
-class ApprovalDecision(BaseModel):
-    """Body of .../approve and .../reject (optional; an empty body means no comment)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    comment: str | None = Field(default=None, max_length=MAX_COMMENT_CHARS)
 
 
 def _safe_errors(exc: ValidationError, prefix: list[Any]) -> list[dict[str, Any]]:
@@ -173,15 +152,6 @@ def start_workflow_run(
         rerun_of=body.rerun_of, pause_after_each_step=body.pause_after_each_step,
     )
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=started)
-
-
-class ResumeSubmission(BaseModel):
-    """Body of .../resume: the object the input step's `resume_schema` describes."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    data: dict[str, Any]
-    comment: str | None = Field(default=None, max_length=MAX_COMMENT_CHARS)
 
 
 async def _resume_body(request: Request) -> ResumeSubmission:
