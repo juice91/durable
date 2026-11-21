@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from eap_api.mcp_control.helpers import require_agent, require_workflow, uid
-from eap_api.mcp_control.routing import DB, call
+from eap_api.mcp_control.routing import DB, call, call_bound
 from eap_api.mcp_control.server import current_ctx
 
 
@@ -39,8 +39,8 @@ def register_resources(resource: Any) -> None:
     @resource("pydanticos://knowledge-bases/{kb_id}")
     async def kb_resource(kb_id: str) -> Any:
         """A knowledge base with its counts and ingest spend."""
-        from eap_api.routes.knowledge import get_knowledge_base, get_knowledge_store
+        from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        return await call(ctx, get_knowledge_base, kb_id=str(uid(kb_id, "kb_id")), principal=ctx.actor,
-                          store=get_knowledge_store(ctx.request))
+        return await call_bound(knowledge_service_of(ctx.request).get_knowledge_base, ctx.tenant_id,
+                                  str(uid(kb_id, "kb_id")))

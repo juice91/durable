@@ -18,7 +18,9 @@ from eap_api.mcp_control.helpers import (
     MAX_WAIT_SECONDS, clip, guard_json, require_agent, require_unrestricted, require_workflow, tenant_run, uid,
     wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, McpToolError, call, call_with_revision, revision_reader, translate
+from eap_api.mcp_control.routing import (
+    DB, McpToolError, call, call_bound, call_with_revision, revision_reader, translate,
+)
 from eap_api.mcp_control.server import current_ctx
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 
@@ -262,14 +264,15 @@ def register_tools(tool: Any) -> None:
                         chunking: dict[str, Any] | None = None) -> dict[str, Any]:
         """Create a knowledge base. `embedding_model` must be on the platform's allowlist (kb.list shows the
         models existing bases use)."""
-        from eap_api.routes.knowledge import create_knowledge_base, get_knowledge_store
         from eap_api.schemas import KnowledgeBaseCreate
+        from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
         body = _model(KnowledgeBaseCreate, name=name, embedding_model=embedding_model, description=description,
                       chunking=chunking)
-        return await call(ctx, create_knowledge_base, body=body, principal=ctx.actor,
-                          store=get_knowledge_store(ctx.request))
+        return await call_bound(
+            knowledge_service_of(ctx.request, ctx.launcher).create_knowledge_base, ctx.tenant_id, name=body.name,
+            description=body.description, embedding_model=body.embedding_model, chunking=body.chunking_config())
 
     @tool("kb.source.create", manage=True)
     async def kb_source_create(kb_id: str, connection_id: str, name: str, provider: str,
@@ -277,7 +280,8 @@ def register_tools(tool: Any) -> None:
                                enabled: bool = True) -> dict[str, Any]:
         """Add a data source to a knowledge base over a connection (provider = the adapter name, config as that
         adapter validates it)."""
-        from eap_api.routes.kb_sources import create_source
+        from eap_api.service_deps.knowledge import kb_source_service_of
+        from eap_api.services.kb_sources import SourceCreate, parse_payload
 
         ctx = current_ctx()
         guard_json(config or {}, "config", max_bytes=64 * 1024, max_depth=6)
@@ -285,8 +289,10 @@ def register_tools(tool: Any) -> None:
                                    "config": config or {}, "enabled": enabled}
         if kind is not None:
             payload["kind"] = kind
-        return await call(ctx, create_source, kb_id=str(uid(kb_id, "kb_id")), request=ctx.request,
-                          principal=ctx.actor, payload=payload)
+        service = kb_source_service_of(ctx.request, ctx.launcher)
+        view, _revision = await call_bound(
+            lambda: service.create_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), parse_payload(payload, SourceCreate)))
+        return view
 
     @tool("kb.source.sync", manage=True)
     async def kb_source_sync(kb_id: str, source_id: str, mode: Literal["targeted", "incremental", "full"],
@@ -294,14 +300,17 @@ def register_tools(tool: Any) -> None:
                              run_id: str | None = None) -> dict[str, Any]:
         """Start a sync of a data source (the shared launcher: eap_run_store.kb_source_launch.launch_sync).
         Read progress with kb.source.syncs."""
-        from eap_api.routes.kb_sources import start_sync
+        from eap_api.service_deps.knowledge import kb_source_service_of
+        from eap_api.services.kb_sources import SyncCreate, parse_payload
 
         ctx = current_ctx()
         payload: dict[str, Any] = {"mode": mode, "part_numbers": part_numbers or [], "restart": restart}
         if run_id:
             payload["run_id"] = run_id
-        return await call(ctx, start_sync, kb_id=str(uid(kb_id, "kb_id")), source_id=str(uid(source_id, "source_id")),
-                          request=ctx.request, principal=ctx.actor, launcher=ctx.launcher, payload=payload)
+        service = kb_source_service_of(ctx.request, ctx.launcher)
+        return await call_bound(
+            lambda: service.start_sync(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
+                                       parse_payload(payload, SyncCreate), ctx.actor.user_id))
 
     # ------------------------------------------------------------------------------- settings and MCP servers
 
