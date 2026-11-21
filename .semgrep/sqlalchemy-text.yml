@@ -1,0 +1,27 @@
+# Custom rules for this repository. Scanned by the sast job in .github/workflows/security.yml.
+rules:
+  - id: sqlalchemy-text-formatted-string
+    languages: [python]
+    severity: ERROR
+    message: >-
+      The SQL passed to sqlalchemy text() is built by string formatting or concatenation
+      (f-string, %, .format() or +), which allows SQL injection if any part is untrusted.
+      Use bound parameters instead: text("... WHERE id = :id") and pass the values separately,
+      e.g. conn.execute(stmt, {"id": value}). Identifiers cannot be bound; take them from a
+      fixed allow-list of constants.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    patterns:
+      - pattern-either:
+          - pattern: sqlalchemy.text(f"...{$X}...", ...)
+          - pattern: sqlalchemy.text("..." % $X, ...)
+          - pattern: sqlalchemy.text("...".format(...), ...)
+          - pattern: sqlalchemy.text($A + $B, ...)
+          - pattern: sqlalchemy.sql.text(f"...{$X}...", ...)
+          - pattern: sqlalchemy.sql.text("..." % $X, ...)
+          - pattern: sqlalchemy.sql.text("...".format(...), ...)
+          - pattern: sqlalchemy.sql.text($A + $B, ...)
+      # Concatenating only string literals is a constant, not an injection risk.
+      - pattern-not: sqlalchemy.text("..." + "...", ...)
+      - pattern-not: sqlalchemy.sql.text("..." + "...", ...)
