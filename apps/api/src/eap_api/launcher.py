@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from eap_observability import dbos_trace_attributes
 # The DBOS topic an agent run's gated tool calls wait on, `tool_approval:{run_id}`: defined in
 # eap_run_store.approvals so the API's wake-up and the worker's wait (AC.6) share one builder.
+from eap_api.ports import RunLauncher  # noqa: F401 - re-exported: the Protocol lives in eap_api.ports
 from eap_run_store.approvals import tool_approval_topic
 from eap_schemas.knowledge import kb_ingest_partition_key
 
@@ -311,10 +312,4 @@ def __getattr__(name: str):
         from eap_api.deps import get_run_launcher
 
         return get_run_launcher
-    if name == "RunLauncher":
-        # The Protocol lives in eap_api.services.ports (framework-free, for the services). It is re-exported
-        # here lazily: eap_api.deps imports this module and must not import eap_api.services (import contract).
-        import importlib
-
-        return importlib.import_module("eap_api.services.ports").RunLauncher
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

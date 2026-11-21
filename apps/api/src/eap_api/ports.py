@@ -1,4 +1,4 @@
-"""Ports: the interfaces services call that an outer layer implements (no web imports)."""
+"""Ports: interfaces shared by services and providers (no web or platform-entry imports)."""
 
 from __future__ import annotations
 

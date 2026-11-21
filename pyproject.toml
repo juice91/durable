@@ -213,6 +213,12 @@ source_modules = ["eap_api.deps"]
 forbidden_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui", "eap_api.services"]
 
 [[tool.importlinter.contracts]]
+name = "API ports have no web or platform-entry imports"
+type = "forbidden"
+source_modules = ["eap_api.ports"]
+forbidden_modules = ["fastapi", "starlette", "eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui", "eap_api.deps", "eap_api.service_deps", "eap_api.services"]
+
+[[tool.importlinter.contracts]]
 name = "Service providers do not import entry points"
 type = "forbidden"
 source_modules = ["eap_api.service_deps"]

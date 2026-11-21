@@ -14,6 +14,7 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
 
 ## Rules
 
+- `eap_api/ports.py` holds the interfaces shared by services and providers (e.g. the `RunLauncher` Protocol); it imports no web or entry-point code.
 - A service raises `ServiceError` subclasses, or the existing `DefinitionError` (`eap_run_store.definition_errors`)
   when an existing response body needs a list-valued `detail` or no `code` key (`ServiceError(detail_object=...)`
   also answers `{"detail": <object>}` exactly).
