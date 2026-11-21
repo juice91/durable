@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import text
 
-from eap_db.testing import SCHEMA_ENV
+from eap_db.testing import SCHEMA_ENV, create_schema
 from eap_run_store import (
     ConversationNotFound,
     MemoryEvent,
@@ -509,7 +509,7 @@ def test_exclusion_and_top_k_through_the_hnsw_index(tenant, agent):
     schema = f"eap_test_hnsw_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     with engine.begin() as conn:
