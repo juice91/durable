@@ -1,0 +1,55 @@
+# gitleaks configuration for the `secrets` job (.github/workflows/security.yml).
+#
+# Starts from the default ruleset and allowlists only findings that were checked by hand against the
+# full history (500 commits, 26 findings): every one is a test fixture, a placeholder or a variable
+# name, not a credential. Each entry is scoped to a rule AND to the files listed, so the same rule
+# still fires anywhere else. Do not add a path here without checking the value.
+
+title = "durable gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Planted sentinel strings in tests: the tests assert that these values are redacted or never leak (e.g. 'sk-SENTINEL...', 'zz-planted-secret-...', 'hunter2'). They are fake by construction."
+targetRules = ["generic-api-key"]
+paths = [
+  '''apps/api/api_tests/test_otlp_ingest\.py''',
+  '''apps/api/api_tests/test_scorer_suggestions_api\.py''',
+  '''apps/api/api_tests/test_agui15_security\.py''',
+  '''apps/worker/worker_tests/test_architect_platform_tools\.py''',
+  '''apps/worker/worker_tests/test_semantic_recall_acceptance\.py''',
+  '''apps/worker/worker_tests/test_embeddings_acceptance\.py''',
+  '''apps/worker/worker_tests/test_mcp_hardening_unit\.py''',
+  '''apps/worker/worker_tests/test_mcp_tools\.py''',
+  '''apps/worker/worker_tests/test_telemetry\.py''',
+  '''packages/observability/tests/test_observability\.py''',
+  '''packages/run-store/run_store_tests/test_semantic_recall_store_acceptance\.py''',
+  '''packages/run-store/run_store_tests/test_memory_store\.py''',
+  '''packages/shared-schemas/tests/test_agui1_contracts\.py''',
+]
+
+[[allowlists]]
+description = "Studio test fixtures: a made-up API key of the form 'pos_0123456789abcdef01234567_' plus a repeated filler character, used to test that key values are masked in the UI."
+targetRules = ["generic-api-key"]
+paths = [
+  '''apps/studio/src/components/apiKeys/apiKeys\.agui13\.acceptance\.test\.tsx''',
+  '''apps/studio/src/components/apiKeys/apiKeys\.test\.tsx''',
+]
+
+[[allowlists]]
+description = "Not credentials: document-key strings and an idempotency key in tests (test_kb_sources_store.py, test_side_effects.py)."
+targetRules = ["generic-api-key"]
+paths = [
+  '''packages/run-store/run_store_tests/test_kb_sources_store\.py''',
+  '''packages/agent-runtime/tests/test_side_effects\.py''',
+]
+
+[[allowlists]]
+description = "Names of environment variables (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY), not values: the example env file ships them empty, and the blob store reads them from the environment."
+targetRules = ["generic-api-key"]
+paths = [
+  '''deploy/k8s/secrets\.example\.env''',
+  '''packages/blob-store/src/eap_blob_store/__init__\.py''',
+  '''packages/blob-store/tests/test_contract\.py''',
+]

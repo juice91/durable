@@ -1,0 +1,253 @@
+name: Security
+
+# Secret, dependency, SAST and container scans. CodeQL has its own workflow (codeql.yml).
+# Scanner CLIs are pinned release binaries (sha256 verified) or a pinned pip version.
+# This file exists only in this repository; it is not part of the upstream export.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb # gitleaks_8.30.1_linux_x64.tar.gz
+  OSV_SCANNER_VERSION: 2.7.1
+  OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8 # osv-scanner_linux_amd64
+  SEMGREP_VERSION: 1.186.0
+  TRIVY_VERSION: 0.76.2
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf # trivy_0.76.2_Linux-64bit.tar.gz
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+      # Pull requests: only the PR's commits. Push, schedule and manual runs: the full history.
+      # Findings are printed redacted. Allowlist entries live in .gitleaks.toml, each with a reason.
+      - name: Scan for secrets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          args=(git --no-banner --redact=100 --verbose --config .gitleaks.toml)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            args+=(--log-opts="${BASE_SHA}..HEAD")
+          fi
+          "$RUNNER_TEMP/gitleaks/gitleaks" "${args[@]}" .
+
+  dependencies:
+    # Policy: osv-scanner reads uv.lock and pnpm-lock.yaml. Every finding goes to code scanning (SARIF).
+    # The job fails on any vulnerability rated HIGH or CRITICAL (CVSS >= 7.0) that has a fixed version;
+    # lower severities and unfixed ones are reported only. Fixes are made upstream and arrive with a sync.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+      # osv-scanner exits 1 when it finds vulnerabilities; the policy step below decides the result.
+      - name: Scan lockfiles
+        run: |
+          for fmt in sarif json; do
+            rc=0
+            "$RUNNER_TEMP/osv-scanner" scan source -L uv.lock -L pnpm-lock.yaml --all-vulns \
+              --format "$fmt" --output-file "$RUNNER_TEMP/osv.$fmt" || rc=$?
+            if [ "$rc" -gt 1 ]; then echo "osv-scanner failed (exit $rc)"; exit "$rc"; fi
+          done
+      - name: Upload SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: ${{ runner.temp }}/osv.sarif
+          category: osv-scanner
+      - name: Apply policy (fail on HIGH/CRITICAL with a fix)
+        run: |
+          python3 - "$RUNNER_TEMP/osv.json" <<'PY'
+          import json, sys
+
+          data = json.load(open(sys.argv[1]))
+          bad, other = [], 0
+          for res in data.get("results", []):
+              src = res["source"]["path"].rsplit("/", 1)[-1]
+              for pkg in res.get("packages", []):
+                  name, version = pkg["package"]["name"], pkg["package"]["version"]
+                  vulns = {v["id"]: v for v in pkg.get("vulnerabilities", [])}
+                  for group in pkg.get("groups", []):
+                      ids = group["ids"]
+                      try:
+                          score = float(group.get("max_severity") or 0)
+                      except ValueError:
+                          score = 0.0
+                      fixed = set()
+                      for vid in ids:
+                          for aff in vulns.get(vid, {}).get("affected", []):
+                              if aff.get("package", {}).get("name") != name:
+                                  continue
+                              for rng in aff.get("ranges", []):
+                                  fixed.update(e["fixed"] for e in rng.get("events", []) if "fixed" in e)
+                      if score >= 7.0 and fixed:
+                          bad.append((score, src, name, version, ids[0], sorted(fixed)))
+                      else:
+                          other += 1
+          for score, src, name, version, vid, fixed in sorted(bad, reverse=True):
+              print(f"::error title=osv-scanner {vid}::{name} {version} in {src}: CVSS {score}, fixed in {', '.join(fixed[:3])}")
+          print(f"HIGH/CRITICAL with a fix: {len(bad)}; all other findings (reported only): {other}")
+          sys.exit(1 if bad else 0)
+          PY
+
+  sast:
+    # Pull requests: --baseline-commit, so only findings new in the PR count, and an ERROR-severity one fails.
+    # Push, schedule and manual runs report everything and never fail on findings.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: python -m pip install --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
+      - name: Run Semgrep
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          args=(scan --metrics=off --quiet
+            --config p/python --config p/typescript --config p/dockerfile --config p/github-actions
+            --exclude node_modules --exclude .venv
+            --sarif-output "$RUNNER_TEMP/semgrep.sarif" --json-output "$RUNNER_TEMP/semgrep.json")
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            args+=(--baseline-commit "$BASE_SHA")
+          fi
+          semgrep "${args[@]}"
+      - name: Upload SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: ${{ runner.temp }}/semgrep.sarif
+          category: semgrep
+      - name: Summarize and gate
+        run: |
+          python3 - "$RUNNER_TEMP/semgrep.json" "${{ github.event_name }}" <<'PY'
+          import collections, json, sys
+
+          results = json.load(open(sys.argv[1]))["results"]
+          counts = collections.Counter(r["extra"]["severity"] for r in results)
+          print("Semgrep findings by severity:", dict(counts))
+          errors = [r for r in results if r["extra"]["severity"] == "ERROR"]
+          for r in errors:
+              rule = r["check_id"].rsplit(".", 1)[-1]
+              print(f"::error file={r['path']},line={r['start']['line']},title=semgrep {rule}::{r['extra']['message'][:200]}")
+          if sys.argv[2] == "pull_request" and errors:
+              sys.exit(1)
+          PY
+
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Trivy
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/trivy.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/trivy"
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP/trivy" trivy
+      # Fails on HIGH/CRITICAL misconfigurations that are not listed (with a reason) in .trivyignore.
+      - name: Scan Dockerfiles and Kubernetes manifests
+        run: |
+          for dir in deploy/docker deploy/k8s; do
+            "$RUNNER_TEMP/trivy/trivy" config --quiet --severity HIGH,CRITICAL --exit-code 1 \
+              --ignorefile .trivyignore "$dir"
+          done
+      # Images are built on push to main, schedule, manual runs, and pull requests that touch the
+      # Dockerfiles or a lockfile.
+      - name: Decide whether to scan images
+        id: images
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          scan=true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if git diff --name-only "${BASE_SHA}...HEAD" | grep -qE '^(deploy/docker/|uv\.lock$|pnpm-lock\.yaml$)'; then
+              scan=true
+            else
+              scan=false
+            fi
+          fi
+          echo "scan=$scan" >> "$GITHUB_OUTPUT"
+      - name: Build images (not pushed)
+        if: steps.images.outputs.scan == 'true'
+        run: |
+          docker build -f deploy/docker/python.Dockerfile -t durable-python:scan .
+          docker build -f deploy/docker/studio.Dockerfile -t durable-studio:scan .
+      - name: Generate SBOMs
+        if: steps.images.outputs.scan == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom"
+          for name in python studio; do
+            "$RUNNER_TEMP/trivy/trivy" image --quiet --format cyclonedx \
+              --output "$RUNNER_TEMP/sbom/sbom-${name}.cdx.json" "durable-${name}:scan"
+          done
+      - name: Upload SBOMs
+        if: ${{ !cancelled() && steps.images.outputs.scan == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sboms
+          path: ${{ runner.temp }}/sbom/*.cdx.json
+          if-no-files-found: error
+      # Everything HIGH/CRITICAL is listed; only CRITICAL vulnerabilities with a fix available fail the job.
+      - name: Scan images
+        if: steps.images.outputs.scan == 'true'
+        run: |
+          for name in python studio; do
+            echo "::group::${name}: HIGH and CRITICAL (report)"
+            "$RUNNER_TEMP/trivy/trivy" image --quiet --severity HIGH,CRITICAL --exit-code 0 "durable-${name}:scan"
+            echo "::endgroup::"
+          done
+          rc=0
+          for name in python studio; do
+            "$RUNNER_TEMP/trivy/trivy" image --quiet --severity CRITICAL --ignore-unfixed --exit-code 1 \
+              --ignorefile .trivyignore "durable-${name}:scan" || rc=1
+          done
+          exit "$rc"

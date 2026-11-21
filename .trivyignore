@@ -1,0 +1,22 @@
+# Trivy misconfiguration findings accepted for deploy/k8s (the `containers` job, trivy config).
+# Each entry was reviewed; add a new one only with the reason on the line above it.
+
+# KSV-0109 (HIGH) postgres.yaml, ConfigMap postgres-init: false positive. The init script reads the
+# role passwords from environment variables injected from a Secret; the ConfigMap holds no secret.
+KSV-0109
+
+# KSV-0014 (HIGH) postgres.yaml: the upstream PostgreSQL image's entrypoint writes to several system
+# paths, so the root filesystem stays writable. Documented in the manifest; the container is
+# otherwise restricted (non-root, seccomp RuntimeDefault).
+KSV-0014
+
+# KSV-0041 (CRITICAL) rbac-mcp.yaml, ClusterRole pydanticos-mcp-tenant: by design. The role is only
+# ever bound by RoleBindings inside one mcp-tenant-* namespace, so it grants Secret access in that
+# tenant's namespace only, by name (no list or watch). The MCP runtime needs it to store each
+# managed server's credentials.
+KSV-0041
+
+# KSV-0056 (HIGH) rbac-mcp.yaml, same role: by design. The role manages the NetworkPolicies of that
+# one tenant namespace (the per-tenant policies the adapter creates), again only via per-namespace
+# RoleBindings.
+KSV-0056
