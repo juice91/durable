@@ -26,7 +26,7 @@ resource_id is a 409 ("... different resource_id"), distinct from the other-tena
 
 DELETE keeps the turns' runs (the audit and cost record) with their text nulled and events
 scrubbed, and deletes the conversation's observations, conversation-scoped working memory and
-message embeddings in one transaction (eap_run_store.memory.MemoryStore.delete_conversation).
+message embeddings in one transaction (the memory store's delete_conversation).
 Resource-scoped working memory stays (DELETE /memory/resources/{rid} forgets it). 204; 404 for an
 unknown, another tenant's, malformed or already deleted id (a repeated delete changes nothing);
 409 with Retry-After while the latest turn is queued or running.

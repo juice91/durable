@@ -19,37 +19,36 @@ interval rather than the full success cache.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from eap_api import model_discovery
 from eap_api.auth import Principal, current_principal
+from eap_api.service_deps.agents import ModelServiceDep
 from eap_api.services.model_catalog import SCRIPTED_TEST_MODELS, model_items  # noqa: F401 - re-exported
-from eap_schemas.models_policy import ModelPolicy
 
 router = APIRouter(tags=["models"])
 
 
 @router.get("/models")
-def list_models(principal: Annotated[Principal, Depends(current_principal)]) -> JSONResponse:
+def list_models(principal: Annotated[Principal, Depends(current_principal)], service: ModelServiceDep) -> JSONResponse:
     """{"items": [{"id", "provider", "name", "wildcard", "source" ('allowlist' | 'scripted' | 'discovered'), "description", "capabilities" {"image", "pdf", "source" ('gateway' | 'static' | 'assumed')} (absent on a wildcard), "discovery_error"?}]}."""
-    return JSONResponse(content={"items": model_items(ModelPolicy.from_env())})
+    return JSONResponse(content=service.models())
 
 
 @router.get("/providers")
-def list_providers(principal: Annotated[Principal, Depends(current_principal)]) -> JSONResponse:
+def list_providers(principal: Annotated[Principal, Depends(current_principal)], service: ModelServiceDep) -> JSONResponse:
     """{"items": [{"id", "label", "configured", "env_var" (a name), "base_url_host", "status"
     ('ok' | 'unreachable' | 'not_configured'), "model_count", "checked_at", "error"}]}; a success is
     cached ~5 min, a failure or a missing key only briefly."""
-    return JSONResponse(content={"items": [s.public() for s in model_discovery.all_provider_statuses()]})
+    return JSONResponse(content=service.providers())
 
 
 @router.post("/providers/{provider_id}/test")
-def test_provider(provider_id: str, principal: Annotated[Principal, Depends(current_principal)]) -> JSONResponse:
+def test_provider(
+    provider_id: str, principal: Annotated[Principal, Depends(current_principal)], service: ModelServiceDep
+) -> JSONResponse:
     """One provider's status. Refreshes the cache unless this provider was checked within the last
     few seconds. 404 for an unknown provider."""
-    if provider_id not in model_discovery.PROVIDER_BY_ID:
-        raise HTTPException(status_code=404, detail="unknown provider")
-    return JSONResponse(content=model_discovery.provider_status(provider_id, refresh=True).public())
+    return JSONResponse(content=service.test_provider(provider_id))

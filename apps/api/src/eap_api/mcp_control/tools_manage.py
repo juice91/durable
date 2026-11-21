@@ -42,44 +42,51 @@ def register_tools(tool: Any) -> None:
     async def agent_save_draft(spec: dict[str, Any], agent_id: str | None = None) -> dict[str, Any]:
         """Create an agent from `spec` (an AgentSpec), or replace the draft of `agent_id`. Returns the agent.
         Publishing is a separate step (agent.publish)."""
-        from eap_api.routes import create_agent, patch_agent
         from eap_api.schemas import AgentCreate, AgentUpdate
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         guard_json(spec, "spec")
         if agent_id is None:
             require_unrestricted(ctx, "create agents")
             body = _model(AgentCreate, spec=spec)
-            return await call(ctx, create_agent, request=body, principal=ctx.actor, db=DB)
+            agent, _revision = await call_service(ctx, AgentService, lambda s: s.create(ctx.tenant_id, body.spec))
+            return agent
         require_agent(ctx, agent_id)
         body = _model(AgentUpdate, spec=spec)
         aid = uid(agent_id, "agent_id")
-        return await call_with_revision(
-            ctx, revision_reader(ctx, "agents", str(aid)),
-            lambda pre: call(ctx, patch_agent, agent_id=aid, request=body, principal=ctx.actor, db=DB, pre=pre), "agent")
+        async def patch(pre: Any) -> dict[str, Any]:
+            agent, _revision = await call_service(
+                ctx, AgentService, lambda s: s.patch(ctx.tenant_id, aid, body.spec, pre.expected))
+            return agent
+
+        return await call_with_revision(ctx, revision_reader(ctx, "agents", str(aid)), patch, "agent")
 
     @tool("agent.publish", manage=True)
     async def agent_publish(agent_id: str) -> dict[str, Any]:
         """Publish the agent's draft as the next immutable version, with the same checks as Studio. Returns
         the version and `warnings`."""
-        from eap_api.routes import publish_version
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
-        return await call(ctx, publish_version, agent_id=uid(agent_id, "agent_id"), principal=ctx.actor, db=DB)
+        aid = uid(agent_id, "agent_id")
+        version, _revision = await call_service(
+            ctx, AgentService, lambda s: s.publish(ctx.tenant_id, ctx.actor.user_id, aid))
+        return version
 
     @tool("agent.archive", manage=True)
     async def agent_archive(agent_id: str, archived: bool = True, force: bool = False) -> dict[str, Any]:
         """Archive (or, with archived=false, unarchive) an agent. Archiving is refused (409) while published
         workflows run the agent, unless force=true."""
-        from eap_api.routes import archive_agent, unarchive_agent
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
         aid = uid(agent_id, "agent_id")
-        if archived:
-            return await call(ctx, archive_agent, agent_id=aid, principal=ctx.actor, db=DB, force=force)
-        return await call(ctx, unarchive_agent, agent_id=aid, principal=ctx.actor, db=DB)
+        agent, _revision = await call_service(
+            ctx, AgentService, lambda s: s.set_archived(ctx.tenant_id, aid, archived, force if archived else False))
+        return agent
 
     @tool("agent.chat", manage=True, human_only=True)
     async def agent_chat(agent_id: str, message: str, conversation_id: str | None = None,

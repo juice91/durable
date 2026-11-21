@@ -49,29 +49,33 @@ def register_tools(tool: Any) -> None:
     @tool("agent.list")
     async def agent_list(archived: bool = False, include_system: bool = False, limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
         """List the tenant's agents (id, name, draft_spec, latest_version, archived). Paged: limit <= 100."""
-        from eap_api.routes import list_agents
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
-        rows = await call(ctx, list_agents, principal=ctx.actor, db=DB, archived=archived, include_system=include_system)
+        rows = await call_service(
+            ctx, AgentService, lambda s: s.list(ctx.tenant_id, archived=archived, include_system=include_system))
         return page([r for r in rows if ctx.agent_allowed(r["id"])], limit, offset)
 
     @tool("agent.get")
     async def agent_get(agent_id: str) -> dict[str, Any]:
         """One agent with its draft spec and latest published version number."""
-        from eap_api.routes import get_agent
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
-        return await call(ctx, get_agent, agent_id=uid(agent_id, "agent_id"), principal=ctx.actor, db=DB)
+        aid = uid(agent_id, "agent_id")
+        agent, _revision = await call_service(ctx, AgentService, lambda s: s.get(ctx.tenant_id, aid))
+        return agent
 
     @tool("agent.versions")
     async def agent_versions(agent_id: str, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         """Published versions of an agent, newest first (each with its full spec). Paged: limit <= 100."""
-        from eap_api.routes import list_versions
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
-        rows = await call(ctx, list_versions, agent_id=uid(agent_id, "agent_id"), principal=ctx.actor, db=DB)
+        aid = uid(agent_id, "agent_id")
+        rows = await call_service(ctx, AgentService, lambda s: s.list_versions(ctx.tenant_id, aid))
         return page(rows, limit, offset)
 
     @tool("workflow.list")
