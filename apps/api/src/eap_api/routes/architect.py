@@ -41,10 +41,11 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep, get_database_engine, get_knowledge_store
 from eap_api import model_discovery
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.models import model_items
 from eap_api.routes.runs import StoresDep, start_run
@@ -95,7 +96,6 @@ log = logging.getLogger("eap_api.architect")
 router = APIRouter(prefix="/architect", tags=["architect"], route_class=GuardedJsonRoute)
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
 
 # The drafter run is awaited at most this long (seconds); the run itself keeps its own limits.
 DRAFT_TIMEOUT_S = 60.0
@@ -319,7 +319,7 @@ def seed(request: Request, principal: PrincipalDep) -> JSONResponse:
     """Seed the tenant's Architect and its two drafters (idempotent). 201 `{architect_agent_id,
     drafter_agent_id, workflow_drafter_agent_id, model}` when a row was created, 200 with the same shape otherwise (the tenant's edits are kept).
     409 `{detail, code: "choose_model", providers}` when no model is available."""
-    body, created = ensure_seed(request.app.state.database_engine, principal.tenant_id, principal.user_id)
+    body, created = ensure_seed(get_database_engine(request), principal.tenant_id, principal.user_id)
     return JSONResponse(content=body, status_code=201 if created else 200)
 
 
@@ -345,7 +345,7 @@ def set_model(body: ModelRequest, request: Request, principal: PrincipalDep) -> 
         raise refuse(422, f"The model {model_id!r} is not available.", code="model_not_allowed")
     provider, _, name = model_id.partition(":")
     tenant_id = principal.tenant_id
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     ids: list[str] = []
     with engine.begin() as conn:
         rows = [conn.execute(_BY_SLUG, {"t": tenant_id, "s": slug}).first() for slug in BUILTIN_SLUGS]
@@ -421,7 +421,7 @@ def state(request: Request, principal: PrincipalDep) -> JSONResponse:
     definitions by id: `{id (slug), agent_id | workflow_id (the row id), name, versions,
     latest_created_via (null, "architect-page" or "architect:<run_id>"), draft (the draft differs from
     the latest version, or nothing is published), archived}`. The built-in agents are not listed."""
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     tenant_id = principal.tenant_id
     with engine.connect() as conn:
         built = {r.slug: r for r in conn.execute(
@@ -480,7 +480,7 @@ _CREATED_AGENTS = text(
 def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[str] | None = None) -> Allowlist:
     """The tenant's allowlist (see the module docstring). `mcp_servers` limits the live MCP discovery to
     those server names (a save only needs the servers its spec names); None discovers every enabled one."""
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     tenant_id = principal.tenant_id
     allowed = allowed_tool_ids()
     tools = tuple(
@@ -502,7 +502,7 @@ def build_allowlist(request: Request, principal: Principal, *, mcp_servers: set[
         )
     wanted = {n: i for n, i in servers.items() if mcp_servers is None or n in mcp_servers}
     found = anyio.from_thread.run(_mcp_tools, request, principal, wanted) if wanted else {}
-    kbs = request.app.state.knowledge_store.list_knowledge_bases(tenant_id)
+    kbs = get_knowledge_store(request).list_knowledge_bases(tenant_id)
     items = [i for i in model_items(ModelPolicy.from_env()) if not i["wildcard"]]
     models = tuple(AllowlistModel(id=i["id"], provider=i["provider"], capabilities=i.get("capabilities") or {}) for i in items)
     default = seed_model()
@@ -618,7 +618,7 @@ def draft(
     spec is cut down to what the allowlist offers (see /architect/options), `dropped` lists what was
     removed. 422 `{code: "draft_invalid", raw, problems}` when the answer is not a valid definition
     (`raw` is the text); 502 `draft_failed` when the run failed; 504 `draft_timeout`; 409 `choose_model`."""
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     ids, _ = ensure_seed(engine, principal.tenant_id, principal.user_id)
     allowlist = build_allowlist(request, principal)
     parsed, assumptions, raw, run_id, model = _run_drafter(
@@ -680,7 +680,7 @@ def draft_workflow(
     parallel step keeps its remaining branches), so `spec.steps` may come back empty. 422 `draft_invalid`
     with `raw` and `problems`; 502 `draft_failed`; 504 `draft_timeout`; 409 `choose_model`. The page
     saves the result through POST /architect/workflows, which validates it again."""
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     ids, _ = ensure_seed(engine, principal.tenant_id, principal.user_id)
     allowlist = build_allowlist(request, principal, mcp_servers=set())
     parsed, assumptions, raw, run_id, model = _run_drafter(
@@ -847,7 +847,7 @@ def save_agent(body: SaveAgentRequest, request: Request, principal: PrincipalDep
     except ValueError as exc:
         raise _compile_refusal(exc) from None
     result = _save(
-        request.app.state.database_engine, principal, AGENTS, slug=spec.id, name=compiled.name,
+        get_database_engine(request), principal, AGENTS, slug=spec.id, name=compiled.name,
         spec_json=compiled.model_dump(mode="json"), expected_version=body.expected_version, publish=body.publish,
     )
     return JSONResponse(content=result)
@@ -867,7 +867,7 @@ def save_workflow(body: SaveWorkflowRequest, request: Request, principal: Princi
     except ValueError as exc:
         raise _compile_refusal(exc) from None
     result = _save(
-        request.app.state.database_engine, principal, WORKFLOWS, slug=spec.id, name=compiled.name,
+        get_database_engine(request), principal, WORKFLOWS, slug=spec.id, name=compiled.name,
         spec_json=compiled.model_dump(mode="json"), expected_version=body.expected_version, publish=body.publish,
     )
     return JSONResponse(content=result)

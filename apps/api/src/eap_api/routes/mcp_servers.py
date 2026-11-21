@@ -52,15 +52,14 @@ from eap_secrets import (
     mcp_header_context,
 )
 from eap_mcp_runtime import McpRuntime, RuntimeHandle, handle_for
-from eap_mcp_runtime.images import UnsupportedPackage
 from eap_run_store.mcp_catalog import CatalogStore
 from eap_run_store.revisions import bump_row
 from eap_run_store.secrets import SecretStore
 from eap_secrets.outbound import OutboundBlocked, OutboundPolicy
 
+from eap_api.deps import SessionDep, get_database_engine
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.database import get_session
 from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
 from eap_api.mcp_servers import managed
 from eap_api.mcp_servers.managed import get_mcp_runtime
@@ -80,7 +79,6 @@ from eap_schemas import mcp_tool_name, status_for_end
 
 log = logging.getLogger("eap_api.mcp_servers")
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"  # no ':' or '/': agents reference mcp:<server>/<tool>
@@ -517,7 +515,7 @@ def _plan_env_change(request: Request, db: Session, tenant_id: str, server: McpS
     if not isinstance(env, dict):
         raise _unprocessable("env must be an object of variable name to string value")
     row = _runtime_of(db, tenant_id, server.id)
-    entry = CatalogStore(request.app.state.database_engine).get(row.catalog_name) if row is not None else None
+    entry = CatalogStore(get_database_engine(request)).get(row.catalog_name) if row is not None else None
     package = None
     if row is not None and entry is not None:
         doc = row.package if isinstance(row.package, dict) else {}
@@ -526,7 +524,7 @@ def _plan_env_change(request: Request, db: Session, tenant_id: str, server: McpS
         raise _unprocessable("env: this server's catalog entry is no longer available, so its variables cannot be checked")
     try:
         plain, secret, refs = managed.check_env(package, env, partial=True)
-        managed.require_refs(SecretStore(request.app.state.database_engine, None), tenant_id, refs)
+        managed.require_refs(SecretStore(get_database_engine(request), None), tenant_id, refs)
     except ValueError as exc:  # messages name a variable or a secret, never a value
         raise _unprocessable(str(exc)) from None
     return _EnvChange(plain=plain, secret=secret, refs=refs)
@@ -670,7 +668,7 @@ async def _resolve_target(
         return None, policy, "runtime_missing"
 
     def check() -> str | None:
-        with Session(request.app.state.database_engine) as db:
+        with Session(get_database_engine(request)) as db:
             row = _runtime_of(db, tenant_id, server_id)
             server = db.scalar(select(McpServerModel).where(
                 McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id))
@@ -724,7 +722,7 @@ async def _start_and_wait(
     first = True
 
     def step() -> tuple[str, str, str | None, int | None]:
-        with Session(request.app.state.database_engine) as db:
+        with Session(get_database_engine(request)) as db:
             row = _runtime_of(db, tenant_id, server_id)
             server = db.scalar(select(McpServerModel).where(
                 McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id))
@@ -745,7 +743,7 @@ async def _start_and_wait(
             return before, row.state, row.last_error, idle
 
     def enabled() -> bool:
-        with Session(request.app.state.database_engine) as db:
+        with Session(get_database_engine(request)) as db:
             return bool(db.scalar(select(McpServerModel.enabled).where(
                 McpServerModel.id == server_id, McpServerModel.tenant_id == tenant_id)))
 
@@ -810,7 +808,7 @@ def install_from_catalog(
     package that cannot be run safely, or a remote that is not Streamable HTTP."""
     body = _parse(FromCatalog, payload)
     assert isinstance(body, FromCatalog)
-    entry = CatalogStore(request.app.state.database_engine).get(body.catalog_name)
+    entry = CatalogStore(get_database_engine(request)).get(body.catalog_name)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="catalog entry not found")
     if entry.status != "active":
@@ -855,7 +853,7 @@ def install_from_catalog(
         raise _unprocessable("env must be an object of variable name to string value")
     try:
         plain, secret, refs = managed.check_env(package, env)
-        managed.require_refs(SecretStore(request.app.state.database_engine, None), tenant_id, refs)
+        managed.require_refs(SecretStore(get_database_engine(request), None), tenant_id, refs)
         image, document = managed.package_document(package, getattr(entry, "meta", None))
     except ValueError as exc:  # check_env messages and UnsupportedPackage (a ValueError) carry no values
         raise _unprocessable(str(exc)) from None
@@ -964,7 +962,7 @@ def _flush_or_409(db: Session) -> None:
 
 
 def _load_for_test(request: Request, tenant_id: str, server_id: uuid.UUID) -> tuple[_Target, list[tuple[str, bytes, str]]]:
-    with Session(request.app.state.database_engine) as db:
+    with Session(get_database_engine(request)) as db:
         server = _get_or_404(db, tenant_id, server_id)
         secrets = db.execute(
             select(McpServerSecretModel.header_name, McpServerSecretModel.ciphertext, McpServerSecretModel.key_id)
@@ -975,7 +973,7 @@ def _load_for_test(request: Request, tenant_id: str, server_id: uuid.UUID) -> tu
 
 
 def _record_result(request: Request, tenant_id: str, server_id: uuid.UUID, outcome: str, code: str | None) -> None:
-    with Session(request.app.state.database_engine) as db:
+    with Session(get_database_engine(request)) as db:
         server = db.scalar(
             select(McpServerModel).where(McpServerModel.tenant_id == tenant_id, McpServerModel.id == str(server_id))
         )
@@ -1144,7 +1142,7 @@ async def run_mcp_tool(
     tool_id = mcp_run_tool_id(sid, tool)
 
     def load() -> tuple[str, _Target, bool, list[tuple[str, bytes, str]]]:
-        with Session(request.app.state.database_engine) as db:
+        with Session(get_database_engine(request)) as db:
             server = _get_or_404(db, tenant_id, server_id)
             secrets = db.execute(
                 select(McpServerSecretModel.header_name, McpServerSecretModel.ciphertext, McpServerSecretModel.key_id)

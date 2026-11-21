@@ -114,7 +114,7 @@ def register_tools(tool: Any) -> None:
         terminal = run["status"] in TERMINAL_RUN_STATUSES
         pending: list[dict[str, Any]] = []
         if run.get("display_status") == "waiting_approval":
-            store = get_approval_store(ctx.request, ctx.stores)
+            store = get_approval_store(ctx.request)
             rows, _ = store.list(ctx.tenant_id, status="pending", kind=None, agent_id=str(agent_id), cursor=None, limit=100)
             for row in rows:
                 if str(row["run_id"]) == str(run_id):
@@ -206,7 +206,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        store = get_schedule_store(ctx.request, ctx.stores)
+        store = get_schedule_store(ctx.request)
         if input is not None:
             guard_json(input, "input", max_bytes=32 * 1024)
         if schedule_id is None:

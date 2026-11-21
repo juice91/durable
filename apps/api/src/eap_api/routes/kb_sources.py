@@ -28,9 +28,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from eap_api.deps import get_database_engine
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.connections import parse_body, parse_uuid, problem
 from eap_kb_sources.check import load_providers
@@ -89,7 +91,7 @@ class SyncCreate(BaseModel):
 
 
 def _engine(request: Request) -> Any:
-    return request.app.state.database_engine
+    return get_database_engine(request)
 
 
 def _404(code: str, detail: str) -> JSONResponse:

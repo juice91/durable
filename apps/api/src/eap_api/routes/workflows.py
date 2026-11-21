@@ -49,9 +49,9 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.database import get_session
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, schema_checks_storable
 from eap_api.routes import _run_definition_op
@@ -108,7 +108,6 @@ BoundedJsonRoute = guarded_json_route(
 
 router = APIRouter(prefix="/workflows", tags=["workflows"], route_class=BoundedJsonRoute)
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 

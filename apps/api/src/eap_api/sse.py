@@ -29,7 +29,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
-from fastapi import Request
+
 
 from eap_api.streams.formatter import format_stream
 # StreamSettings, DeltaSource and the terminal sets are re-exported: callers import them from here.
@@ -48,14 +48,9 @@ from eap_schemas import RunEvent
 log = logging.getLogger("eap_api")
 
 DELTA_CHANNEL = "eap_run_deltas"
-_LIMITER_INIT_LOCK = threading.Lock()
 
 def get_stream_settings() -> StreamSettings:
     return StreamSettings(max_lifetime=float(os.environ.get("EAP_SSE_MAX_LIFETIME_S", "3600")))
-
-
-def get_delta_source(request: Request) -> DeltaSource:
-    return request.app.state.delta_source
 
 
 class PostgresDeltaSource:
@@ -192,16 +187,6 @@ class StreamLimiter:
             return self._active
 
 
-def get_stream_limiter(request: Request) -> StreamLimiter:
-    limiter = getattr(request.app.state, "stream_limiter", None)
-    if limiter is None:
-        with _LIMITER_INIT_LOCK:
-            limiter = getattr(request.app.state, "stream_limiter", None)
-            if limiter is None:
-                limiter = request.app.state.stream_limiter = StreamLimiter.from_env()
-    return limiter
-
-
 async def release_stream_slot(stream: AsyncIterator[str], lease: StreamLease) -> AsyncIterator[str]:
     try:
         async for chunk in stream:
@@ -241,3 +226,13 @@ async def run_event_stream(
     )
     async for frame in format_stream(items, NativeSseFormatter()):
         yield frame
+
+
+def __getattr__(name: str):
+    # The providers live in eap_api.deps (the one module that reads app.state); importing them here
+    # eagerly would be a cycle, since deps imports DeltaSource and StreamLimiter from this module.
+    if name in ("get_delta_source", "get_stream_limiter"):
+        from eap_api import deps
+
+        return getattr(deps, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

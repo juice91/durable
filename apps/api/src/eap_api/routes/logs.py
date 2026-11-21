@@ -56,10 +56,9 @@ from fastapi.responses import JSONResponse
 
 from eap_observability import log_failure
 
-from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
 from eap_api.models import AgentModel
 from eap_api.routes.runs import require_run_storage
 from eap_api.schemas import ErrorDetail
@@ -295,7 +294,6 @@ PrincipalDep = Annotated[Principal, Depends(current_principal)]
 StoresDep = Annotated[tuple[RunStore, EventLog], Depends(require_run_storage)]
 LogSourceDep = Annotated[LogSource | None, Depends(get_log_source)]
 QuerySlotsDep = Annotated[QuerySlots, Depends(get_query_slots)]
-SessionDep = Annotated[Session, Depends(get_session)]
 
 router = APIRouter(
     tags=["logs"],

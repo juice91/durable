@@ -27,6 +27,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from eap_api.deps import get_database_engine
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.request_guard import guarded_json_route
@@ -135,7 +136,7 @@ def _provider_problem(config: dict[str, Any] | None) -> JSONResponse | None:
 
 
 def _store(request: Request) -> ConnectionStore:
-    return ConnectionStore(request.app.state.database_engine)
+    return ConnectionStore(get_database_engine(request))
 
 
 def _not_found() -> JSONResponse:
@@ -245,7 +246,7 @@ async def check(connection_id: str, request: Request, principal: PrincipalDep) -
         return _not_found()
     secrets = get_secret_store(request)
     try:
-        result = await check_connection(request.app.state.database_engine, principal.tenant_id, cid, secrets)
+        result = await check_connection(get_database_engine(request), principal.tenant_id, cid, secrets)
     except SourceError as exc:
         if exc.code == CONNECTION_NOT_FOUND:
             return _not_found()

@@ -70,6 +70,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import get_eval_store, get_database_engine
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
@@ -85,7 +86,8 @@ from eap_api.eval_format import (
     parse_file,
     read_dataset,
 )
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute, read_capped_body, unstorable_strings
 from eap_api.routes.runs import SessionDep, StoresDep, _run_json
@@ -154,15 +156,6 @@ _ERRORS = {404: {"model": ErrorDetail}, 409: {"model": ErrorDetail}, 422: {"mode
 _json_router = APIRouter(tags=["evals"], responses=_ERRORS, route_class=GuardedJsonRoute)
 # The import takes a raw YAML or JSON file (not a JSON body), with its own 1 MiB cap answered as a 422.
 _file_router = APIRouter(tags=["evals"], responses=_ERRORS, route_class=APIRoute)
-
-
-def get_eval_store(request: Request, stores: StoresDep) -> EvalStore:
-    """The EvalStore on the run stores' engine, made once per app."""
-    store = getattr(request.app.state, "eval_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.eval_store = EvalStore(run_store.engine)
-    return store
 
 
 EvalStoreDep = Annotated[EvalStore, Depends(get_eval_store)]
@@ -875,7 +868,7 @@ async def import_suite(
         content_type = request.headers.get("content-type", "").lower()
         fmt = "csv" if "csv" in content_type else "json" if "json" in content_type else "yaml"
     try:
-        content = await run_in_threadpool(_import_sync, store, request.app.state.database_engine, principal.tenant_id, suite_id, text, fmt)
+        content = await run_in_threadpool(_import_sync, store, get_database_engine(request), principal.tenant_id, suite_id, text, fmt)
     except _STORE_ERRORS as exc:
         raise _store_error(exc) from None
     return JSONResponse(content=content)

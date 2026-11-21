@@ -19,22 +19,22 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import SessionDep, get_scorer_store
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import StoresDep, _get_run_or_404
 from eap_api.schemas import ErrorDetail
 from eap_processors import Re2PatternError, compile_re2
-from eap_run_store import TERMINAL_RUN_STATUSES
 from eap_run_store.scorers import (
     SCORER_DESCRIPTION_MAX_CHARS,
     SCORER_NAME_MAX_CHARS,
@@ -58,15 +58,6 @@ router = APIRouter(
     route_class=GuardedJsonRoute,
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
-
-
-def get_scorer_store(request: Request, stores: StoresDep) -> ScorerStore:
-    store = getattr(request.app.state, "scorer_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.scorer_store = ScorerStore(run_store.engine)
-    return store
 
 
 ScorerStoreDep = Annotated[ScorerStore, Depends(get_scorer_store)]

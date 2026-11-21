@@ -26,10 +26,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
 from eap_processors import (
@@ -56,7 +55,6 @@ from eap_schemas.processors import (
 
 router = APIRouter(route_class=GuardedJsonRoute)
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 # The test console's sample cap (UTF-8 bytes).

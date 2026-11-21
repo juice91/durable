@@ -23,13 +23,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep, get_metrics_store
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
@@ -40,17 +40,7 @@ DEFAULT_RANGE = timedelta(days=7)
 TIMEOUT_DETAIL = "Metrics query timed out; narrow the time range or the filters"
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
 MetricName = Literal[METRICS]  # type: ignore[valid-type]
-
-
-def get_metrics_store(request: Request) -> MetricsStore:
-    """The app's MetricsStore (created on first use; tests may set `app.state.metrics_store`)."""
-    store = getattr(request.app.state, "metrics_store", None)
-    if store is None:
-        store = MetricsStore(request.app.state.database_engine)
-        request.app.state.metrics_store = store
-    return store
 
 
 StoreDep = Annotated[MetricsStore, Depends(get_metrics_store)]
