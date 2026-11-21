@@ -132,6 +132,7 @@ afterEach(() => {
   media.restore();
   restoreWidth();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks(); // vitest 4 keeps a spy across tests until it is restored
   observers.clear();
   group.onLayoutChanged = null;
   document.documentElement.removeAttribute("data-sidebar");
@@ -408,6 +409,8 @@ it("no saved layout: nothing is written until the user drags (the default is not
 });
 
 function sizedPanes(width: number) {
+  // vitest 4 returns the existing spy when a method is spied twice, so restore before capturing the original.
+  vi.restoreAllMocks();
   const rect = HTMLElement.prototype.getBoundingClientRect;
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     if (this.dataset.testid === "agent-chat-panes") return { width, height: 600, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 600, toJSON: () => ({}) } as DOMRect;
