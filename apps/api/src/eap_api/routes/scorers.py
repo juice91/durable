@@ -19,38 +19,27 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from eap_api.deps import SessionDep, get_scorer_store
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
-from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.runs import StoresDep, _get_run_or_404
 from eap_api.schemas import ErrorDetail
-from eap_processors import Re2PatternError, compile_re2
-from eap_run_store.scorers import (
+from eap_api.service_deps.evals import ScorerServiceDep
+from eap_api.services.scorers import (  # noqa: F401 - the messages are re-exported: tests import them from here
+    ALREADY_SCORED,
+    LIMIT_REACHED,
+    MAX_SCORE_SCORERS,
+    NAME_IN_USE,
+    REGEX_INVALID,
     SCORER_DESCRIPTION_MAX_CHARS,
     SCORER_NAME_MAX_CHARS,
-    ScorerLimitExceeded,
-    ScorerNameConflict,
-    ScorerNotFound,
-    ScorerRecord,
-    ScorerStore,
+    SCORER_NOT_FOUND,
+    validate_evaluator,
 )
-from eap_schemas.scorers import ScorerInvalid, validate_scorer_evaluator
-
-SCORER_NOT_FOUND = "Scorer not found"
-AGENT_NOT_FOUND = "Agent not found"
-NAME_IN_USE = "a scorer with this name already exists"
-LIMIT_REACHED = "the agent already has the maximum number of scorers"
-REGEX_INVALID = "pattern is not valid RE2 syntax or is too complex"
 
 router = APIRouter(
     tags=["scorers"],
@@ -58,9 +47,6 @@ router = APIRouter(
     route_class=GuardedJsonRoute,
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-ScorerStoreDep = Annotated[ScorerStore, Depends(get_scorer_store)]
 
 
 class ScorerCreate(BaseModel):
@@ -85,15 +71,11 @@ class Attachment(BaseModel):
     sampling_rate: Decimal = Field(default=Decimal(1), gt=0, le=1, max_digits=5, decimal_places=4)
 
 
-def _http(code: int, detail: str) -> HTTPException:
-    return HTTPException(status_code=code, detail=detail)
-
-
 def _iso(value: datetime) -> str:
     return value.isoformat()
 
 
-def _json(record: ScorerRecord) -> dict[str, Any]:
+def scorer_json(record: Any) -> dict[str, Any]:
     return {
         "id": record.id,
         "name": record.name,
@@ -106,144 +88,85 @@ def _json(record: ScorerRecord) -> dict[str, Any]:
     }
 
 
-def _check(evaluator: Any) -> dict[str, Any]:
-    """The validated evaluator, or a 422 naming the path with a fixed message."""
-    try:
-        spec = validate_scorer_evaluator(evaluator)
-    except ScorerInvalid as exc:
-        raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{exc.path}: {exc.reason}") from None
-    if spec["kind"] == "regex":
-        try:
-            compile_re2(spec["pattern"], allow_empty_match=True)
-        except Re2PatternError:
-            raise _http(status.HTTP_422_UNPROCESSABLE_CONTENT, f"evaluator.pattern: {REGEX_INVALID}") from None
-    return spec
-
-
-def _agent_or_404(db: Session, tenant_id: str, agent_id: uuid.UUID) -> None:
-    found = db.query(AgentModel.id).filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id).first()
-    if found is None:
-        raise _http(status.HTTP_404_NOT_FOUND, AGENT_NOT_FOUND)
+_json = scorer_json
 
 
 @router.post("/scorers", status_code=status.HTTP_201_CREATED)
-async def create_scorer(body: ScorerCreate, principal: PrincipalDep, store: ScorerStoreDep) -> JSONResponse:
-    spec = _check(body.evaluator)
-    try:
-        record = await run_in_threadpool(store.create, principal.tenant_id, body.name, spec, body.description)
-    except ScorerNameConflict:
-        raise _http(status.HTTP_409_CONFLICT, NAME_IN_USE) from None
+async def create_scorer(body: ScorerCreate, principal: PrincipalDep, service: ScorerServiceDep) -> JSONResponse:
+    record = await run_in_threadpool(
+        service.create, principal.tenant_id, body.name, body.evaluator, body.description
+    )
     return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=_json(record)), record.revision)
 
 
 @router.get("/scorers")
-async def list_scorers(principal: PrincipalDep, store: ScorerStoreDep) -> JSONResponse:
-    records = await run_in_threadpool(store.list, principal.tenant_id)
+async def list_scorers(principal: PrincipalDep, service: ScorerServiceDep) -> JSONResponse:
+    records = await run_in_threadpool(service.list, principal.tenant_id)
     return JSONResponse(content={"items": [_json(r) for r in records]})
 
 
 @router.get("/scorers/{scorer_id}", responses={**etag_responses(write=False)})
-async def get_scorer(scorer_id: uuid.UUID, principal: PrincipalDep, store: ScorerStoreDep) -> JSONResponse:
-    try:
-        record = await run_in_threadpool(store.get, principal.tenant_id, scorer_id)
-    except ScorerNotFound:
-        raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
+async def get_scorer(scorer_id: uuid.UUID, principal: PrincipalDep, service: ScorerServiceDep) -> JSONResponse:
+    record = await run_in_threadpool(service.get, principal.tenant_id, scorer_id)
     return read_response(_json(record), record.revision)
 
 
 @router.patch("/scorers/{scorer_id}", responses={**etag_responses()})
 async def update_scorer(
-    scorer_id: uuid.UUID, body: ScorerUpdate, principal: PrincipalDep, store: ScorerStoreDep, pre: IfMatch
+    scorer_id: uuid.UUID, body: ScorerUpdate, principal: PrincipalDep, service: ScorerServiceDep, pre: IfMatch
 ) -> JSONResponse:
     """Change a scorer. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
     with the current scorer (see eap_api.concurrency)."""
-    spec = _check(body.evaluator) if body.evaluator is not None else None
+    if body.evaluator is not None:
+        validate_evaluator(body.evaluator)  # 422 before any 412, as it always answered
+    tenant_id = principal.tenant_id
 
     def current() -> tuple[dict[str, Any], int]:
-        found = store.get(principal.tenant_id, scorer_id)
+        found = service.get(tenant_id, scorer_id)
         return _json(found), found.revision
 
-    try:
-        if pre.expected is not None:
-            pre.check((await run_in_threadpool(current))[1], lambda: current())
-        with pre.guard(current):
-            record = await run_in_threadpool(
-                lambda: store.update(
-                    principal.tenant_id, scorer_id, name=body.name, description=body.description,
-                    set_description="description" in body.model_fields_set, evaluator=spec,
-                    expected_revision=pre.expected,
-                )
+    if pre.expected is not None:
+        pre.check((await run_in_threadpool(current))[1], lambda: current())
+    with pre.guard(current):
+        record = await run_in_threadpool(
+            lambda: service.update(
+                tenant_id, scorer_id, name=body.name, description=body.description,
+                set_description="description" in body.model_fields_set, evaluator=body.evaluator,
+                expected_revision=pre.expected,
             )
-    except ScorerNotFound:
-        raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
-    except ScorerNameConflict:
-        raise _http(status.HTTP_409_CONFLICT, NAME_IN_USE) from None
+        )
     return pre.respond(_json(record), record.revision)
 
 
 @router.delete("/scorers/{scorer_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_scorer(scorer_id: uuid.UUID, principal: PrincipalDep, store: ScorerStoreDep) -> Response:
-    try:
-        await run_in_threadpool(store.delete, principal.tenant_id, scorer_id)
-    except ScorerNotFound:
-        raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
+async def delete_scorer(scorer_id: uuid.UUID, principal: PrincipalDep, service: ScorerServiceDep) -> Response:
+    await run_in_threadpool(service.delete, principal.tenant_id, scorer_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/agents/{agent_id}/scorers")
-async def list_agent_scorers(
-    agent_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, store: ScorerStoreDep
-) -> JSONResponse:
-    _agent_or_404(db, principal.tenant_id, agent_id)
-    items = await run_in_threadpool(store.attached_to_agent, principal.tenant_id, agent_id)
+async def list_agent_scorers(agent_id: uuid.UUID, principal: PrincipalDep, service: ScorerServiceDep) -> JSONResponse:
+    items = await run_in_threadpool(service.attached_to_agent, principal.tenant_id, agent_id)
     return JSONResponse(content={"items": items})
 
 
 @router.put("/agents/{agent_id}/scorers/{scorer_id}")
 async def attach_scorer(
-    agent_id: uuid.UUID, scorer_id: uuid.UUID, body: Attachment, principal: PrincipalDep, db: SessionDep,
-    store: ScorerStoreDep,
+    agent_id: uuid.UUID, scorer_id: uuid.UUID, body: Attachment, principal: PrincipalDep, service: ScorerServiceDep,
 ) -> JSONResponse:
-    _agent_or_404(db, principal.tenant_id, agent_id)
-    try:
-        await run_in_threadpool(store.attach, principal.tenant_id, agent_id, scorer_id, body.sampling_rate)
-    except ScorerNotFound:
-        raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
-    except ScorerLimitExceeded:
-        raise _http(status.HTTP_409_CONFLICT, LIMIT_REACHED) from None
-    items = await run_in_threadpool(store.attached_to_agent, principal.tenant_id, agent_id)
+    items = await run_in_threadpool(service.attach, principal.tenant_id, agent_id, scorer_id, body.sampling_rate)
     return JSONResponse(content={"items": items})
 
 
 @router.delete("/agents/{agent_id}/scorers/{scorer_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def detach_scorer(
-    agent_id: uuid.UUID, scorer_id: uuid.UUID, principal: PrincipalDep, db: SessionDep, store: ScorerStoreDep
+    agent_id: uuid.UUID, scorer_id: uuid.UUID, principal: PrincipalDep, service: ScorerServiceDep
 ) -> Response:
-    _agent_or_404(db, principal.tenant_id, agent_id)
-    await run_in_threadpool(store.detach, principal.tenant_id, agent_id, scorer_id)
+    await run_in_threadpool(service.detach, principal.tenant_id, agent_id, scorer_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------- score on demand
-
-RUN_NOT_FINISHED = "run_not_finished"
-ALREADY_SCORED = "already_scored"
-MAX_SCORE_SCORERS = 8
-SCORE_START_FAILED = "scoring could not be started; retry"
-LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
-
-
-def _already_scored(engine: Any, tenant_id: str, run_id: uuid.UUID, scorer_ids: list[str]) -> set[str]:
-    """The scorer ids that already have a `score:{id}` event on the run."""
-    from sqlalchemy import text
-
-    keys = {f"score:{s}": s for s in scorer_ids}
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT event_key FROM execution_events WHERE tenant_id = :t AND run_id = :r AND event_key = ANY(:k)"),
-            {"t": tenant_id, "r": str(run_id), "k": list(keys)},
-        )
-        return {keys[r[0]] for r in rows}
 
 
 class ScoreRequest(BaseModel):
@@ -258,8 +181,7 @@ class ScoreRequest(BaseModel):
     responses={503: {"model": ErrorDetail}},
 )
 async def score_run(
-    run_id: uuid.UUID, body: ScoreRequest, principal: PrincipalDep, stores: StoresDep, store: ScorerStoreDep,
-    launcher: LauncherDep,
+    run_id: uuid.UUID, body: ScoreRequest, principal: PrincipalDep, service: ScorerServiceDep,
 ) -> JSONResponse:
     """Score a finished run with the named scorers now (the Score button of the trace drawer).
     Enqueues DBOS workflow `eap.score_run`; the worker appends one `score` event per scorer (key
@@ -269,31 +191,13 @@ async def score_run(
     scorer; 409 `run_not_finished` unless the run is `completed` (a failed or cancelled run has no
     answer to score); 409 `{detail: "already_scored", already_scored: [...]}` when every requested
     scorer already has its event; 422 for 0 or more than 8 ids."""
-    run_store, _ = stores
-    tenant_id = principal.tenant_id
-    run = await run_in_threadpool(_get_run_or_404, run_store, tenant_id, run_id)
-    if run["status"] not in ("completed", "skipped"):  # scoring reads the answer: a failed or cancelled run has none
-        raise _http(status.HTTP_409_CONFLICT, RUN_NOT_FINISHED)
-    requested = list(dict.fromkeys(str(s) for s in body.scorer_ids))
-    for scorer_id in requested:
-        try:
-            await run_in_threadpool(store.get, tenant_id, scorer_id)
-        except ScorerNotFound:
-            raise _http(status.HTTP_404_NOT_FOUND, SCORER_NOT_FOUND) from None
-    done = await run_in_threadpool(_already_scored, run_store.engine, tenant_id, run_id, requested)
-    already = [s for s in requested if s in done]
-    scorer_ids = [s for s in requested if s not in done]
-    if not scorer_ids:  # a score event is first-write-wins: another request would write nothing
+    outcome = await run_in_threadpool(service.score_run, principal.tenant_id, run_id, body.scorer_ids)
+    if not outcome.scorer_ids:  # a score event is first-write-wins: another request would write nothing
         return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT, content={"detail": ALREADY_SCORED, "already_scored": already}
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": ALREADY_SCORED, "already_scored": outcome.already_scored},
         )
-    try:
-        await run_in_threadpool(
-            lambda: launcher.launch_score(run_id=run_id, tenant_id=tenant_id, scorer_ids=scorer_ids)
-        )
-    except Exception:  # noqa: BLE001 - nothing was recorded; the caller may retry
-        raise _http(status.HTTP_503_SERVICE_UNAVAILABLE, SCORE_START_FAILED) from None
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"run_id": str(run_id), "scorer_ids": scorer_ids, "already_scored": already},
+        content={"run_id": str(run_id), "scorer_ids": outcome.scorer_ids, "already_scored": outcome.already_scored},
     )
