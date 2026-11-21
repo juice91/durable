@@ -21,7 +21,7 @@ import pytest
 import requests
 
 import eap_observability as obs
-from eap_api.routes import logs as logs_module
+from eap_api.services import logs as logs_module
 from eap_api.routes.logs import (
     LOG_SERVICES,
     LokiClient,

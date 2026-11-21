@@ -28,11 +28,15 @@ RUN_FIELDS = (
 async def run_report(run_id: str, *, kind: str | None = None) -> dict[str, Any]:
     """A run as a bounded report: its status and usage, and input/output cut at 32 KiB. Shared by the
     `workflow.run.result` tool and the `pydanticos://runs/{id}/report` resource."""
-    from eap_api.routes.runs import get_run
+    from eap_api.services.runs import RunService
 
     ctx = current_ctx()
     await tenant_run(ctx, run_id, kind=kind)  # not_found for another tenant's run or a disallowed one
-    full = await call(ctx, get_run, run_id=uid(run_id, "run_id"), principal=ctx.actor, stores=ctx.stores, launcher=ctx.launcher)
+    stores = ctx.stores
+    full = await call_service(
+        ctx, lambda db: RunService(db, stores[0], stores[1], ctx.launcher),
+        lambda s: s.read_run_json(ctx.tenant_id, uid(run_id, "run_id")),
+    )
     report = {k: full.get(k) for k in RUN_FIELDS}
     report["input"], report["input_truncated"] = clip(full.get("input"))
     report["output"], report["output_truncated"] = clip(full.get("output"))

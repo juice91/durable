@@ -1,39 +1,35 @@
 """Run routes: start a run, list runs, read one, read its events, stream it (SSE with replay).
 
-Runs and events live in Postgres (eap_run_store, JSONB + row locks); on any other database these
+Runs and events live in Postgres (the run store, JSONB + row locks); on any other database these
 routes answer 503. Every lookup is tenant-scoped: another tenant's or an unknown id is a 404.
 """
 
 from __future__ import annotations
 
-import json
-import logging
+import inspect
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy.orm import Session
 
-from eap_observability import current_trace_context, log_failure
-
-from eap_api.deps import SessionDep, StoresDep, get_delta_source, get_span_store, get_stream_limiter, require_run_storage  # noqa: F401  (require_run_storage: re-exported)
 from eap_api.auth import Principal, current_principal
-from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
-from eap_api.agent_archive import refuse_if_archived
-from eap_api.models import AgentModel
-from eap_api.request_guard import GuardedJsonRoute
-from eap_api.run_options import (
-    DRAFT_HANDOFF_VERSION,
-    check_spec_payload_size,
-    resolve_run_options,
-    same_options,
-    version_row as _version_row,
+from eap_api.deps import (  # noqa: F401  (require_run_storage: re-exported)
+    RunLauncherDep,
+    SessionDep,
+    StoresDep,
+    get_delta_source,
+    get_stream_limiter,
+    require_run_storage,
 )
+from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail, RunCreate
+from eap_api.service_deps.runs import RunServiceDep, SpanServiceDep
+from eap_api.service_errors import to_http_exception
+from eap_api.services import runs as run_core
+from eap_api.services.errors import ServiceError
+from eap_api.services.runs import MAX_CURSOR_LENGTH, RunService, output_json as _output_json, run_json as _run_json  # noqa: F401
 from eap_api.sse import (
     DeltaSource,
     StreamLimiter,
@@ -43,19 +39,6 @@ from eap_api.sse import (
     release_stream_slot,
     run_event_stream,
 )
-from eap_run_store import (
-    ENQUEUE_FAILED_ERROR,
-    InvalidRunCursor,
-    MetricsQueryTimeout,
-    RunCursor,
-    RunIdConflict,
-    RunStore,
-)
-from eap_run_store.cursor import MAX_CURSOR_LENGTH
-from eap_run_store.spans import SpanStore
-from eap_run_store.store import run_tags
-
-log = logging.getLogger("eap_api")
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
@@ -64,216 +47,33 @@ router = APIRouter(
 )
 
 
-def _run_json(
-    run: dict[str, Any], chat: dict[str, Any] | None = None, recovery_attempts: int = 0
-) -> dict[str, Any]:
-    """The API's run shape: `run_id`/`version` match the POST response; timestamps as ISO strings.
-
-    `kind` is 'agent', 'tool', 'workflow' or 'kb_ingest' (a knowledge base ingest or reindex run:
-    `knowledge_base_id` set, `input` its JSON mode, see eap_api.launcher). An agent run has `agent_id`/`version` and `tool_id`
-    null; a tool run has `tool_id`, `agent_id`/`version` null, and `input`/`output` as JSON text; a
-    workflow run has `workflow_id`/`workflow_version`, input/output as JSON text. A workflow's agent
-    step runs as an agent run with `parent_run_id`/`parent_step_id` set (null otherwise).
-
-    A structured-output run (`runs.output_format` json, agent capabilities milestone) also has
-    `output_json`, the validated object; `output` stays its canonical JSON text. The key is absent
-    for text runs and for runs without output.
-
-    `chat` is the run's entry of RunStore.chat_usage (the agent's chat model only, as the trace's
-    `chat_*` split); without one, `chat_input_tokens`, `chat_output_tokens` and `chat_cost_usd`
-    are null (no usage recorded).
-
-    `recovery_attempts` is DBOS's count of how often the run's workflow was resumed after a worker crash or
-    a deploy (0 when DBOS has no row yet; RunLauncher.recovery_attempts). DBOS increments this on the first
-    start, so a run that was never recovered shows `recovery_attempts == 1`.
-    `recovered` is `True` only when the run was actually resumed (`recovery_attempts > 1`).
-    `restarts` is the number of times the run was resumed (`max(recovery_attempts - 1, 0)`).
-    The callers that have a launcher pass it; the others show 0 for all three."""
-    iso = lambda v: v.isoformat() if v is not None else None  # noqa: E731
-    restarts = max(recovery_attempts - 1, 0)
-    return {
-        "run_id": str(run["id"]),
-        "kind": run.get("kind") or "agent",
-        "agent_id": str(run["agent_id"]) if run["agent_id"] is not None else None,
-        "version": run["agent_version"],
-        "tool_id": run.get("tool_id"),
-        "workflow_id": run.get("workflow_id"),
-        "workflow_version": run.get("workflow_version"),
-        # The knowledge base of a kb_ingest run, or of a tool run of the knowledge base search tester.
-        "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") is not None else None,
-        "parent_run_id": run.get("parent_run_id"),
-        "parent_step_id": run.get("parent_step_id"),
-        # The earlier run this one repeats ("Run again"); null otherwise.
-        "rerun_of": run.get("rerun_of"),
-        # A step-by-step run: the worker waits after every top-level step.
-        "pause_after_each_step": bool(run.get("pause_after_each_step")),
-        "recovery_attempts": recovery_attempts,
-        "recovered": recovery_attempts > 1,
-        "restarts": restarts,
-        "status": run["status"],
-        "display_status": run["display_status"],
-        "input": run["input"],
-        "output": run["output"],
-        **_output_json(run),
-        "error": run["error"],
-        "heartbeat_at": iso(run["heartbeat_at"]),
-        "created_at": iso(run["created_at"]),
-        "updated_at": iso(run["updated_at"]),
-        "conversation_id": run.get("conversation_id"),
-        "turn": run.get("turn"),
-        "trace_id": run.get("trace_id"),
-        # Usage and cost (P0.1). Totals are null until the run finishes, and for runs recorded
-        # before usage existed ("not recorded"); cost_usd is a decimal string, null when any of the
-        # run's model requests had no price.
-        "model_id": run.get("model_id"),
-        "model_overridden": bool(run.get("model_overridden") or False),
-        "input_tokens": run.get("input_tokens"),
-        "output_tokens": run.get("output_tokens"),
-        "cost_usd": _decimal_str(run.get("cost_usd")),
-        # The agent's chat model alone (follow-up 3): the totals above also count moderation,
-        # observer / reflector and embedding requests. Null when no usage was recorded.
-        "chat_input_tokens": (chat or {}).get("chat_input_tokens"),
-        "chat_output_tokens": (chat or {}).get("chat_output_tokens"),
-        "chat_cost_usd": (chat or {}).get("chat_cost_usd"),
-        # The model that answered the run's last chat request: a fallback model when one did, so
-        # it differs from `model_id` (the requested model). Null before any chat request is recorded.
-        "answering_model_id": (chat or {}).get("answering_model_id"),
-        "started_at": iso(run.get("started_at")),
-        "finished_at": iso(run.get("finished_at")),
-        # Run options (P0.8): a draft test run has `version` null and `draft` true; the validated
-        # request context ({} when none).
-        "draft": run.get("draft_spec") is not None,
-        "request_context": run.get("request_context") or {},
-        # The settings as the caller sent them (re-postable as they are); the server's own attachment
-        # decision rides beside them, never inside (ModelSettings is extra="forbid").
-        "model_settings": {k: v for k, v in (run.get("model_settings") or {}).items() if k != ATTACHMENT_CAPABILITIES_KEY},
-        "attachment_capabilities": (run.get("model_settings") or {}).get(ATTACHMENT_CAPABILITIES_KEY),
-        # W2.2: tags derived from what the run records (eap_run_store.store.run_tags).
-        "tags": run_tags({**run, "kind": run.get("kind") or "agent"}),
-    }
-
-
-def recovery_for(launcher: RunLauncher, run_ids: list[str]) -> dict[str, int]:
-    """`recovery_attempts` per run id (one DBOS query for all of them); {} when the launcher cannot say."""
-    lookup = getattr(launcher, "recovery_attempts", None)
-    return lookup(run_ids) if lookup is not None else {}
-
-
-def _output_json(run: dict[str, Any]) -> dict[str, Any]:
-    """`{"output_json": <object>}` for a run whose output is structured (`output_format` json:
-    `output` is the canonical JSON text of the validated object), else `{}`, so the key is present
-    only for json runs. Output that does not parse (never written by the worker; a defence) is
-    `output_json: null`; a run without output yet (queued, running, failed) has no key either."""
-    if run.get("output_format") != "json" or run.get("output") is None:
-        return {}
+def _http(call: Any, *args: Any) -> Any:
+    """Run a service function for the routes that still call these helpers (conversations, AG-UI): its
+    refusal becomes the HTTPException they always raised."""
     try:
-        return {"output_json": json.loads(run["output"])}
-    except (ValueError, RecursionError):  # RecursionError: nesting deeper than the parser's limit
-        log.warning("run %s has output_format json but its output is not JSON", run.get("id"))
-        return {"output_json": None}
+        return call(*args)
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
-def _decimal_str(value: Any) -> str | None:
-    """A Numeric(20, 10) value as a plain decimal string ("0.0001230000"), or None."""
-    return None if value is None else format(value, "f")
+def recovery_for(launcher: Any, run_ids: list[str]) -> dict[str, int]:
+    return run_core.recovery_for(launcher, run_ids)
 
 
-def _get_run_or_404(run_store: RunStore, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
-    run = run_store.get_run(tenant_id, run_id)
-    if run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return run
+def _get_run_or_404(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
+    return _http(run_core.get_run_or_404, run_store, tenant_id, run_id)
 
 
-def check_payload_size(db: Session, agent_id: uuid.UUID | str, version: int, input_text: str) -> None:
-    version_row = _version_row(db, agent_id, version)
-    assert version_row is not None
-    check_spec_payload_size(version_row.spec, input_text)
-
-
-def lock_agent(db: Session, tenant_id: str, agent_id: uuid.UUID | str) -> AgentModel:
-    """The tenant's agent, or 404 `Agent not found` (another tenant's agent included), locked FOR
-    SHARE until the request's transaction ends: an archive (FOR NO KEY UPDATE, like publish) waits
-    for a run being recorded, or the request sees `archived` (eap_api.agent_archive)."""
-    agent = (
-        db.query(AgentModel)
-        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
-        .with_for_update(read=True)
-        .first()
-    )
-    if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    return agent
+def lock_agent(db: Any, tenant_id: str, agent_id: uuid.UUID | str) -> Any:
+    """The tenant's agent locked FOR SHARE, or 404 (see services.runs.lock_agent)."""
+    return _http(run_core.lock_agent, db, tenant_id, agent_id)
 
 
 def launch_recorded_run(
-    db: Session, launcher: RunLauncher, run_store: RunStore, tenant_id: str, run: dict[str, Any], created: bool
+    db: Any, launcher: Any, run_store: Any, tenant_id: str, run: dict[str, Any], created: bool
 ) -> dict[str, Any]:
-    """Hand the stored run to the orchestrator; returns the run as it stands afterwards.
-
-    Enqueues exactly what the stored row says (hand-off contract), so a retry starts the recorded
-    run, whether or not this request created the row: DBOS attaches a repeated workflow_id to the
-    existing workflow, so a crash between insert and enqueue heals when the client retries.
-
-    Same semantics as tool runs (POST /tools/{id}/runs). This request owns the hand-off of a row it
-    created, or of one an earlier failed hand-off left failed and it re-queues now. A failed
-    enqueue answers 503, and an owned run still `queued` is marked failed with ENQUEUE_FAILED_ERROR
-    so it is not left queued with no workflow; a retry with the same run_id and input re-queues it
-    and enqueues again. If DBOS did accept the enqueue that raised, the workflow runs anyway and
-    its start step (mark_running) clears that error. A conversation turn is only re-queued while it
-    is the latest turn: once a later turn has started, the retry answers 409.
-    """
-    run_id = uuid.UUID(str(run["id"]))
-    owns_handoff = created or run_store.requeue_after_enqueue_failure(tenant_id, run_id)
-    if not owns_handoff and run["conversation_id"] is not None:
-        current = run_store.get_run(tenant_id, run_id) or run
-        if current["status"] == "failed" and current["error"] == ENQUEUE_FAILED_ERROR:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This turn could not be started and a later turn has started since; start a new turn",
-            )
-    if run.get("draft_spec") is not None:
-        # A draft test run: always its recorded snapshot, never the live draft (P0.8).
-        spec, handoff_version = run["draft_spec"], DRAFT_HANDOFF_VERSION
-    else:
-        version_row = _version_row(db, run["agent_id"], run["agent_version"])
-        assert version_row is not None  # versions are immutable and never deleted
-        spec, handoff_version = version_row.spec, run["agent_version"]
-    try:
-        launcher.launch(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            agent_id=uuid.UUID(str(run["agent_id"])),
-            version=handoff_version,
-            spec_json=json.dumps(spec),
-            input_text=run["input"],
-            traceparent=run.get("traceparent"),
-        )
-    except Exception as exc:
-        # Type and code only: the error can quote the DBOS database URL or the enqueued payload.
-        log_failure(
-            log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
-            run_id=run["id"], tenant_id=tenant_id,
-        )
-        if owns_handoff:
-            try:
-                run_store.mark_enqueue_failed(tenant_id, run_id)
-            except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
-                log_failure(
-                    log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
-                    level=logging.ERROR, run_id=run["id"], tenant_id=tenant_id,
-                )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Run recorded but could not be started; retry the same request (same run_id)",
-        )
-    run = run_store.get_run(tenant_id, run_id) or run
-    if run["error"] == ENQUEUE_FAILED_ERROR:
-        # A concurrent request that owned the hand-off failed and marked the run failed, but this
-        # enqueue succeeded: the workflow exists, and its start step clears that error.
-        run = {**run, "status": "queued", "display_status": "queued", "error": None}
-    log.info("run %s queued: tenant=%s agent=%s version=%s", run["id"], tenant_id, run["agent_id"], run["agent_version"])
-    return run
+    """Hand the stored run to the orchestrator (see services.runs.launch_recorded_run); 503 / 409 on refusal."""
+    return _http(run_core.launch_recorded_run, db, launcher, run_store, tenant_id, run, created)
 
 
 def started_response(run: dict[str, Any], created: bool, extra: dict[str, Any] | None = None) -> JSONResponse:
@@ -301,7 +101,7 @@ def start_run(
     principal: PrincipalDep,
     db: SessionDep,
     stores: StoresDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    launcher: RunLauncherDep,
 ) -> JSONResponse:
     """Insert the run idempotently (client run_id), then enqueue its workflow (durability rule 1).
 
@@ -313,89 +113,20 @@ def start_run(
     The request's trace id and traceparent are stored on the run; the worker's run span joins that
     trace, and the response carries `trace_id`.
     """
-    run_store, _ = stores
-    tenant_id = principal.tenant_id
-    agent = lock_agent(db, tenant_id, agent_id)
-
-    # A retry of a recorded run is compared with the row (below) and relaunched as recorded; only a
-    # new run validates its options (a draft run against the live draft, then snapshotted).
-    run = run_store.get_run(tenant_id, body.run_id)
-    created = False
-    if run is None:
-        refuse_if_archived(agent)  # a new run only; a recorded one is replayed (eap_api.agent_archive)
-        options = resolve_run_options(
-            db, tenant_id, agent,
-            version=body.version, request_context=body.request_context, model=body.model, input_text=body.input,
-            model_settings=body.model_settings,
-        )
-        # The request span (FastAPI instrumentation) is current here; (None, None) when telemetry is off.
-        trace_id, traceparent = current_trace_context()
-        try:
-            run_id, created = run_store.create_run(
-                tenant_id, agent_id, options.target.version, body.input, body.run_id,
-                trace_id=trace_id, traceparent=traceparent, **options.store_kwargs(),
-            )
-        except RunIdConflict:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-        run = _get_run_or_404(run_store, tenant_id, run_id)
-
-    if not created and (
-        run["agent_id"] != str(agent_id)
-        or run["input"] != body.input
-        or run["conversation_id"] is not None
-        or not same_options(
-            db, run, version=body.version, request_context=body.request_context, model=body.model,
-            model_settings=body.model_settings,
-        )
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-        )
-
-    run = launch_recorded_run(db, launcher, run_store, tenant_id, run, created)
+    # TODO(layering): the Architect's _run_drafter still calls this function with db/stores/launcher; once it
+    # starts runs through RunStarter (services.runs.RunService), take `service: RunServiceDep` here instead.
+    service = RunService(db, stores[0], stores[1], launcher)
+    run, created = service.start_run(
+        principal.tenant_id, agent_id, run_id=body.run_id, input_text=body.input, version=body.version,
+        request_context=body.request_context, model=body.model, model_settings=body.model_settings,
+    )
     return started_response(run, created)
 
 
-MAX_STATUS_FILTERS = 10
-RUN_LIST_TIMEOUT_DETAIL = "Run list query timed out; narrow the time range or the filters"
-
-
-def _status_filter(values: list[str] | None) -> list[str] | None:
-    """`?status=a&status=b,c` as a de-duplicated list, None when absent (422 past MAX_STATUS_FILTERS)."""
-    if not values:
-        return None
-    statuses = list(dict.fromkeys(s.strip() for v in values for s in v.split(",") if s.strip()))
-    if len(statuses) > MAX_STATUS_FILTERS or any(len(s) > 32 for s in statuses):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"at most {MAX_STATUS_FILTERS} status values of at most 32 characters are allowed",
-        )
-    return statuses or None
-
-
-def _list_param(values: list[str] | None, name: str, *, split: bool) -> list[str] | None:
-    """A repeated query parameter, de-duplicated, at most 10 entries of at most 200 characters (422)."""
-    if not values:
-        return None
-    items = [s.strip() for v in values for s in (v.split(",") if split else [v]) if s.strip()]
-    items = list(dict.fromkeys(items))
-    if len(items) > 10 or any(len(i) > 200 for i in items):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"at most 10 {name} values of at most 200 characters are allowed",
-        )
-    return items or None
-
-
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-@router.get("/runs")
+@router.get("/runs", description=inspect.cleandoc(RunService.list_runs.__doc__ or ""))
 def list_runs(
     principal: PrincipalDep,
-    stores: StoresDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    service: RunServiceDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[
         str | None,
@@ -418,89 +149,18 @@ def list_runs(
     ] = None,
     q: Annotated[str | None, Query(min_length=1, max_length=200, description="Free text")] = None,
 ) -> JSONResponse:
-    """The tenant's runs, newest first (the Studio Traces and Logs pages), ordered by
-    (created_at, run id) descending. `next_before` is an opaque cursor naming the last item's
-    position when a full page came back (pass it back verbatim as `before`), else null. A cursor
-    this API did not issue is a 422. `kind` ('agent' | 'tool' | 'workflow' | 'kb_ingest' | 'eval' | 'kb_source_sync'; eval
-    runs exist from 0015_evals, until then the filter lists nothing), `tool_id`,
-    `workflow_id` and `knowledge_base_id` filter (a knowledge base's runs: its kb_ingest runs and its
-    search tester tool runs; add `kind=kb_ingest` for the ingest runs only). A workflow's child agent runs are listed only with `parent_run_id`.
-
-    Metrics drill-down (P0.6), same meaning as in GET /metrics/*: `status` may be repeated or
-    comma-separated (any of them; at most 10), `from` / `to` bound `created_at` to `[from, to)`
-    (ISO 8601, UTC without an offset; `from` must be before `to`), `model` (`provider:name`) and
-    `provider` keep runs that used that model, including through a workflow's child runs.
-
-    Trace list filters (W2.2): `tags` (repeated or comma-separated, at most 10, all must match; runs
-    carry derived tags, see eap_run_store.store.run_tags: `kind:agent`, `agent:<id>`, `model:<id>`,
-    `draft`, `model-override`, `ctx:<key>`), `metadata=key=value` (repeated, at most 10; matches the
-    run's request context value as text) and `q`, a case-insensitive substring of the run's input,
-    output, error, tool id or model id (span names and trace payloads are not searched). `q` runs
-    under the metrics statement timeout (503 when it fires)."""
-    statuses = _status_filter(run_status)
-    tag_list = _list_param(tags, "tags", split=True)
-    metadata_map = metadata_filter(metadata) or {}
-    start = _utc(created_from) if created_from is not None else None
-    end = _utc(created_to) if created_to is not None else None
-    if start is not None and end is not None and start >= end:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
-    run_store, _ = stores
-    cursor = None
-    if before is not None:
-        try:
-            cursor = RunCursor.decode(before)
-        except InvalidRunCursor:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="before is not a valid cursor; pass the previous page's next_before verbatim",
-            )
-    try:
-        runs = run_store.list_runs(
-            principal.tenant_id, limit=limit, before=cursor, agent_id=agent_id, status=statuses, kind=kind,
-            tool_id=tool_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
-            parent_run_id=parent_run_id, created_from=start, created_to=end, model=model, provider=provider,
-            tags=tag_list, metadata=metadata_map or None, text_query=q.strip() if q and q.strip() else None,
-        )
-    except MetricsQueryTimeout:
-        # Only with `model` / `provider` / `q`: those filters run under the metrics statement timeout.
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
-    next_before = RunCursor.after(runs[-1]).encode() if len(runs) == limit else None
-    chat = run_store.chat_usage(principal.tenant_id, [r["id"] for r in runs])
-    recovery = recovery_for(launcher, [str(r["id"]) for r in runs])
-    return JSONResponse(
-        content={
-            "items": [_run_json(r, chat.get(str(r["id"])), recovery.get(str(r["id"]), 0)) for r in runs],
-            "next_before": next_before,
-        }
-    )
-
-
-HISTOGRAM_DEFAULT_RANGE = timedelta(days=7)
-HISTOGRAM_HOURLY_UNDER = timedelta(hours=72)
-HISTOGRAM_MAX_RANGE = timedelta(days=366)
-
-
-SpanStoreDep = Annotated[SpanStore, Depends(get_span_store)]
-
-
-def metadata_filter(metadata: list[str] | None) -> dict[str, str] | None:
-    """`?metadata=key=value` pairs as a dict (422 for a malformed pair); None when absent."""
-    found: dict[str, str] = {}
-    for pair in _list_param(metadata, "metadata", split=False) or []:
-        key, sep, value = pair.partition("=")
-        if not sep or not key.strip() or len(key) > 64 or len(value) > 256:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="metadata must be key=value pairs (key up to 64 and value up to 256 characters)",
-            )
-        found[key.strip()] = value
-    return found or None
+    return JSONResponse(content=service.list_runs(
+        principal.tenant_id, limit=limit, before=before, agent_id=agent_id, run_status=run_status, kind=kind,
+        tool_id=tool_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
+        parent_run_id=parent_run_id, created_from=created_from, created_to=created_to, model=model,
+        provider=provider, tags=tags, metadata=metadata, q=q,
+    ))
 
 
 @router.get("/runs/histogram")
 def runs_histogram(
     principal: PrincipalDep,
-    spans: SpanStoreDep,
+    service: SpanServiceDep,
     agent_id: uuid.UUID | None = None,
     run_status: Annotated[list[str] | None, Query(alias="status")] = None,
     kind: Annotated[Literal["agent", "tool", "workflow", "kb_ingest", "eval", "kb_source_sync"] | None, Query()] = None,
@@ -520,55 +180,24 @@ def runs_histogram(
     `{interval, buckets: [{start, runs, failed}]}`, one bucket per UTC hour (a range under 72 hours)
     or day, zero-filled from the bucket holding `from` up to `to`. The range is `[from, to)`,
     default the last 7 days; `from` must be before `to` and the range at most 366 days (422)."""
-    now = datetime.now(UTC)
-    end = _utc(created_to) if created_to is not None else now
-    start = _utc(created_from) if created_from is not None else end - HISTOGRAM_DEFAULT_RANGE
-    if start >= end:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
-    if end - start > HISTOGRAM_MAX_RANGE:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the range is at most 366 days"
-        )
-    interval = "hour" if end - start < HISTOGRAM_HOURLY_UNDER else "day"
-    filters = {
-        "agent_id": agent_id, "status": _status_filter(run_status), "kind": kind, "tool_id": tool_id,
-        "workflow_id": workflow_id, "knowledge_base_id": knowledge_base_id, "parent_run_id": parent_run_id,
-        "model": model, "provider": provider, "tags": _list_param(tags, "tags", split=True),
-        "metadata": metadata_filter(metadata), "text_query": q.strip() if q and q.strip() else None,
-    }
-    try:
-        buckets = spans.runs_histogram(
-            principal.tenant_id, start, end, interval, {k: v for k, v in filters.items() if v is not None}
-        )
-    except MetricsQueryTimeout:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
-    return JSONResponse(content={
-        "interval": interval,
-        "buckets": [{**b, "start": b["start"].isoformat()} for b in buckets],
-    })
+    return JSONResponse(content=service.runs_histogram(
+        principal.tenant_id, agent_id=agent_id, run_status=run_status, kind=kind, tool_id=tool_id,
+        workflow_id=workflow_id, knowledge_base_id=knowledge_base_id, parent_run_id=parent_run_id,
+        created_from=created_from, created_to=created_to, model=model, provider=provider, tags=tags,
+        metadata=metadata, q=q,
+    ))
 
 
 @router.get("/runs/{run_id}")
-def get_run(
-    run_id: uuid.UUID,
-    principal: PrincipalDep,
-    stores: StoresDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
-) -> JSONResponse:
-    run_store, _ = stores
-    run = _get_run_or_404(run_store, principal.tenant_id, run_id)
-    chat = run_store.chat_usage(principal.tenant_id, [run["id"]])
-    recovery = recovery_for(launcher, [str(run["id"])])
-    return JSONResponse(content=_run_json(run, chat.get(str(run["id"])), recovery.get(str(run["id"]), 0)))
+def get_run(run_id: uuid.UUID, principal: PrincipalDep, service: RunServiceDep) -> JSONResponse:
+    return JSONResponse(content=service.read_run_json(principal.tenant_id, run_id))
 
 
 @router.get("/runs/{run_id}/events")
 def list_run_events(
-    run_id: uuid.UUID, principal: PrincipalDep, stores: StoresDep, after_seq: int = -1
+    run_id: uuid.UUID, principal: PrincipalDep, service: RunServiceDep, after_seq: int = -1
 ) -> JSONResponse:
-    run_store, event_log = stores
-    _get_run_or_404(run_store, principal.tenant_id, run_id)
-    events = event_log.list_events(principal.tenant_id, run_id, after_seq=after_seq)
+    events = service.list_events(principal.tenant_id, run_id, after_seq)
     return JSONResponse(content=[event_json(e) for e in events])
 
 
@@ -576,7 +205,7 @@ def list_run_events(
 def stream_run(
     run_id: uuid.UUID,
     principal: PrincipalDep,
-    stores: StoresDep,
+    service: RunServiceDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
     limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
@@ -584,9 +213,8 @@ def stream_run(
     last_event_id: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
     """SSE: replay after `Last-Event-ID` (wins) or `?after_seq=`, then live events and deltas."""
-    run_store, event_log = stores
     tenant_id = principal.tenant_id
-    _get_run_or_404(run_store, tenant_id, run_id)
+    service.require_run(tenant_id, run_id)
     if last_event_id is not None and last_event_id.strip():
         try:
             after_seq = int(last_event_id.strip())
@@ -605,8 +233,8 @@ def stream_run(
             run_event_stream(
                 run_id=str(run_id),
                 after_seq=after_seq,
-                load_events=lambda after: event_log.list_events(tenant_id, run_id, after_seq=after),
-                load_run=lambda: run_store.get_run(tenant_id, run_id),
+                load_events=lambda after: service.events_after(tenant_id, run_id, after),
+                load_run=lambda: service.get_run(tenant_id, run_id),
                 delta_source=delta_source,
                 settings=settings,
             ),
