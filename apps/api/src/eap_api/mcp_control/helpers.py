@@ -8,10 +8,14 @@ import time
 import uuid
 from typing import Any
 
-from starlette.concurrency import run_in_threadpool
 
-from eap_api.mcp_control.routing import Ctx, McpToolError
-from eap_run_store.store import TERMINAL_RUN_STATUSES
+from eap_api.mcp_control.routing import Ctx, McpToolError, call_service
+from eap_api.deps import approval_store_of, schedule_store_of
+from eap_api.ports import TERMINAL_RUN_STATUSES
+from eap_api.service_deps.runs import build_run_service
+from eap_api.services.approvals import ApprovalService
+from eap_api.services.schedules import ScheduleService
+from eap_api.services.workflow_runs import WorkflowRunService
 
 MAX_PAGE = 100
 DEFAULT_PAGE = 50
@@ -89,11 +93,28 @@ def require_workflow(ctx: Ctx, workflow_id: str) -> None:
         raise not_found("Workflow")
 
 
+def run_service(ctx: Ctx) -> Any:
+    """`build` for call_service: a RunService on this call's session."""
+    return lambda db: build_run_service(db, ctx.stores[0], ctx.stores[1], ctx.launcher)
+
+
+def schedules(ctx: Ctx) -> Any:
+    return lambda db: ScheduleService(db, schedule_store_of(ctx.app))
+
+
+def approvals(ctx: Ctx) -> Any:
+    return lambda _db: ApprovalService(approval_store_of(ctx.app), ctx.stores[1], ctx.launcher)
+
+
+def workflow_runs(ctx: Ctx) -> Any:
+    return lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher)
+
+
 async def tenant_run(ctx: Ctx, run_id: str, *, kind: str | None = None) -> dict[str, Any]:
     """The tenant's run row (another tenant's is not_found), optionally of one kind; a key restricted by
     allowlists sees only runs of its agents and workflows."""
-    run_store, _ = ctx.stores
-    run = await run_in_threadpool(run_store.get_run, ctx.tenant_id, uid(run_id, "run_id"))
+    rid = uid(run_id, "run_id")
+    run = await call_service(ctx, run_service(ctx), lambda s: s.get_run(ctx.tenant_id, rid))
     if run is None or (kind is not None and (run.get("kind") or "agent") != kind):
         raise not_found("Run")
     if run.get("kind") == "workflow" and run.get("workflow_id") and not ctx.workflow_allowed(str(run["workflow_id"])):

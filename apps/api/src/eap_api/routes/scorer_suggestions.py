@@ -23,18 +23,18 @@ shaped as asked), 502 `suggest_failed`, 504 `suggest_timeout`.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
 
+from eap_api.bodies import SuggestRequest
+from eap_api.service_deps.architect import ArchitectSuggesterPorts as SuggesterPorts
 from eap_api.auth import Principal, current_principal
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import ErrorDetail
 from eap_api.service_deps.architect import ArchitectServiceDep
 from eap_api.service_deps.evals import ScorerSuggestionServiceDep
-from eap_api.services.architect import ArchitectService
 from eap_api.services.scorer_suggestions import (  # noqa: F401 - re-exported: tests clear and read the cache and the prompt cap
     DEFAULT_SUGGESTIONS,
     MAX_PROMPT_CHARS,
@@ -50,26 +50,6 @@ router = APIRouter(
     route_class=GuardedJsonRoute,
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-class SuggestRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max: int = Field(default=DEFAULT_SUGGESTIONS, ge=1, le=MAX_SUGGESTIONS)
-    include_runs: bool = True
-
-
-class SuggesterPorts:
-    """The suggester agent and one run of it, through the Architect service's seeding and drafter run."""
-
-    def __init__(self, architect: ArchitectService, tenant_id: str) -> None:
-        self.architect, self.tenant_id = architect, tenant_id
-
-    def ensure_suggester(self, tenant_id: str, user_id: str) -> tuple[str, str | None]:
-        return self.architect.ensure_suggester(tenant_id, user_id)
-
-    def run_drafter(self, suggester_id: str, prompt: str) -> tuple[dict[str, Any], list[str], str, str, str | None]:
-        return self.architect.run_drafter(self.tenant_id, suggester_id, prompt, "scorer suggestions")
 
 
 @router.post("/agents/{agent_id}/scorer-suggestions", responses={409: {"description": "no_model"}})

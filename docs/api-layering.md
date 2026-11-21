@@ -31,9 +31,13 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
   service. Needing two or more entry points (MCP control, Architect) is only the signal for which existing
   logic to move first, not the definition of a service.
 - A large route file is split by sub-resource only when parallel work needs it.
-- A module on a ratchet list below leaves it when it is clean. An entry point that imports only a constant
-  or a type from `eap_run_store` (e.g. `TERMINAL_RUN_STATUSES`) is on the list for now; re-exporting those
-  through `eap_schemas` or the service module is acceptable later.
+- An entry point that needs only a constant, a type or a pure function from `eap_run_store`
+  (`TERMINAL_RUN_STATUSES`, `DefinitionError`, `validate_resource_id`) imports it from `eap_api.ports`, which
+  re-exports it in an import the linter sees. Request bodies and response shapes that the REST routes and the
+  MCP tools share live in `eap_api.bodies` and `eap_api.views`, not in a route module.
+- MCP control tools call services only, through `call_service` / `call_service_async`
+  (`eap_api/mcp_control/routing.py`); they never import `eap_api.routes`. Authentication lookups (API key,
+  Architect run token) go through `AuthLookupService` (`services/auth_lookup.py`).
 
 ## Enforcing checks
 
@@ -43,19 +47,26 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
   - "API dependency providers do not import entry points": `eap_api.deps` must not import `eap_api.routes`,
     `eap_api.mcp_control`, `eap_api.ag_ui` or `eap_api.services`.
   - "API entry points reach data only through services": the same three packages must not import
-    `eap_run_store`; same ratchet rule for its `ignore_imports`.
+    `eap_run_store`. No exceptions.
   - "Service providers do not import entry points": `eap_api.service_deps` must not import `eap_api.routes`,
     `eap_api.mcp_control` or `eap_api.ag_ui`.
   - "API entry points do not query the database": `eap_api.routes`, `eap_api.mcp_control` and `eap_api.ag_ui`
-    must not import `sqlalchemy`. Modules that did when the rule landed are listed in `ignore_imports`.
-    That list is a ratchet: remove a line when a module is clean, never add one. A new module fails lint if
-    it imports `sqlalchemy`.
+    must not import `sqlalchemy`. No exceptions.
+  - "MCP control does not import routes": `eap_api.mcp_control` must not import `eap_api.routes`.
 - "Observability core has no web framework imports": `eap_observability.redaction`, `.context`, `.logcontext` and
     `.pathredact` must not import fastapi, starlette or `eap_observability.http`. A service imports what it needs
     from those submodules directly (`from eap_observability.redaction import log_failure, redact`,
     `from eap_observability.context import current_trace_context`), never the package root or `.http`.
 - `apps/api/api_tests/test_architecture_app_state.py` parses every module under `eap_api` and fails on any
   `app.state` access outside `app.py` and `deps.py`.
+
+## History: the ratchet (completed on 2026-11-21)
+
+The two contracts "API entry points reach data only through services" and "API entry points do not query the
+database" started with `ignore_imports` lists of the modules that still broke them (a ratchet: a line left
+when its module was clean, none was ever added). The last lines went with the AG-UI conversation service, the
+credential lookup service and the retirement of the MCP route-function shim; the lists are gone and both
+contracts are absolute.
 
 ## Reviewer checklist
 

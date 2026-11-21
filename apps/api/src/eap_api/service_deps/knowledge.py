@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends
 from sqlalchemy import Engine
 
 from eap_api.deps import (
@@ -12,9 +12,13 @@ from eap_api.deps import (
     get_database_engine,
     get_knowledge_store,
     get_memory_store,
-    get_message_feedback_store,
     get_run_launcher,
+    get_message_feedback_store,
+    database_engine_of,
+    knowledge_store_of,
     require_run_storage,
+    run_launcher_of,
+    run_stores_of,
 )
 from eap_api.services.attachments import AttachmentService
 from eap_api.services.kb_sources import KbSourceService
@@ -72,14 +76,14 @@ AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_servi
 # --- for callers that hold an app but no request (the MCP control endpoint) ---------------------------
 
 
-def knowledge_service_of(request: Request, launcher=None) -> KnowledgeService:
-    """The service for `request` (a real Request, or the MCP context's stand-in with an `app`)."""
+def knowledge_service_of(app, launcher=None) -> KnowledgeService:
+    """The service for `app`; `launcher` is the one the caller resolved (a dependency override included)."""
     return KnowledgeService(
-        get_knowledge_store(request), require_run_storage(request)[0], launcher or get_run_launcher(request),
+        knowledge_store_of(app), run_stores_of(app)[0], launcher or run_launcher_of(app),
     )
 
 
-def kb_source_service_of(request: Request, launcher=None) -> KbSourceService:
+def kb_source_service_of(app, launcher=None) -> KbSourceService:
     return build_kb_source_service(
-        get_database_engine(request), require_run_storage(request)[0], launcher or get_run_launcher(request)
+        database_engine_of(app), run_stores_of(app)[0], launcher or run_launcher_of(app)
     )

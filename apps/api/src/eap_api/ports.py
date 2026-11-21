@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+# Types and constants of the data layer that an entry point may use; re-exported here (an import the
+# linter sees) so entry points depend on the port, not on eap_run_store.
+from eap_run_store.definition_errors import DefinitionError  # noqa: F401
+from eap_run_store.store import TERMINAL_RUN_STATUSES, validate_resource_id  # noqa: F401
+
 
 class RunLauncher(Protocol):
     def launch(
