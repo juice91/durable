@@ -1,0 +1,73 @@
+# Custom rules for this repository. Scanned by the sast job in .github/workflows/security.yml.
+rules:
+  - id: sqlalchemy-text-formatted-string
+    languages: [python]
+    # WARNING (reported to code scanning, does not fail the sast gate): dynamic SQL identifiers (table and
+    # schema names) are common here and safe when they come from constants or validated patterns, and this rule
+    # cannot tell them from user input. Plan: an upstream helper that quotes identifiers (sqlalchemy
+    # quoted_name / psycopg sql.Identifier); this rule then gets a pattern-not for that helper and goes back
+    # to ERROR. sqlalchemy-text-request-input below is the ERROR-level rule for request-derived values.
+    severity: WARNING
+    message: >-
+      The SQL passed to sqlalchemy text() is built by string formatting or concatenation
+      (f-string, %, .format() or +), which allows SQL injection if any part is untrusted.
+      Use bound parameters instead: text("... WHERE id = :id") and pass the values separately,
+      e.g. conn.execute(stmt, {"id": value}). Identifiers cannot be bound; take them from a
+      fixed allow-list of constants.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    patterns:
+      - pattern-either:
+          - pattern: sqlalchemy.text(f"...{$X}...", ...)
+          - pattern: sqlalchemy.text("..." % $X, ...)
+          - pattern: sqlalchemy.text("...".format(...), ...)
+          - pattern: sqlalchemy.text($A + $B, ...)
+          - pattern: sqlalchemy.sql.text(f"...{$X}...", ...)
+          - pattern: sqlalchemy.sql.text("..." % $X, ...)
+          - pattern: sqlalchemy.sql.text("...".format(...), ...)
+          - pattern: sqlalchemy.sql.text($A + $B, ...)
+      # Concatenating only string literals is a constant, not an injection risk.
+      - pattern-not: sqlalchemy.text("..." + "...", ...)
+      - pattern-not: sqlalchemy.sql.text("..." + "...", ...)
+
+  - id: sqlalchemy-text-request-input
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >-
+      A FastAPI request parameter (Query, Path, Body, Form, Header or Cookie) reaches the SQL passed to
+      sqlalchemy text(). Pass request values as bound parameters (":name" placeholders, values given
+      separately), never as part of the SQL string.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  def $F(..., $P = fastapi.$SRC(...), ...): ...
+              - pattern: |
+                  def $F(..., $P: $T = fastapi.$SRC(...), ...): ...
+              - pattern: |
+                  async def $F(..., $P = fastapi.$SRC(...), ...): ...
+              - pattern: |
+                  async def $F(..., $P: $T = fastapi.$SRC(...), ...): ...
+              - pattern: |
+                  def $F(..., $P: typing.Annotated[$T, fastapi.$SRC(...)], ...): ...
+              - pattern: |
+                  async def $F(..., $P: typing.Annotated[$T, fastapi.$SRC(...)], ...): ...
+          - metavariable-regex:
+              metavariable: $SRC
+              regex: ^(Query|Path|Body|Form|Header|Cookie)$
+          - focus-metavariable: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: sqlalchemy.text($X, ...)
+              - pattern: sqlalchemy.sql.text($X, ...)
+          - focus-metavariable: $X
+    pattern-sanitizers:
+      - pattern: int(...)
+      - pattern: float(...)
+      - pattern: bool(...)
