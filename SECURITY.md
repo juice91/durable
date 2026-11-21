@@ -20,6 +20,17 @@ The following components are in scope:
 
 Documentation, examples, and infrastructure code (`infrastructure/`, `scripts/`) are generally out of scope unless they directly expose user-controllable input.
 
+## Automated checks
+
+Every pull request and every push to `main` runs these scans, and a weekly scheduled run repeats them:
+
+- **Secrets**: gitleaks over the pull request's commits (the full history on `main` and on the schedule), plus GitHub secret scanning and push protection.
+- **Dependencies**: osv-scanner on `uv.lock` and `pnpm-lock.yaml`. A vulnerability rated high or critical that has a fixed version fails the check; the rest is reported in code scanning.
+- **Static analysis**: Semgrep (Python, TypeScript, Dockerfile and GitHub Actions rules) and CodeQL (`security-extended`, Python and JavaScript/TypeScript).
+- **Containers**: Trivy on the Dockerfiles and Kubernetes manifests, and on the built `python` and `studio` images (a critical vulnerability with a fix fails the check). A CycloneDX SBOM for each image is attached to the run.
+
+Dependency fixes are made in the upstream project and arrive here with the next sync, so a dependency finding on `main` can stay open until then.
+
 ## Response Expectations
 
 - You will receive an acknowledgment of your report within **7 days**.
