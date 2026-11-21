@@ -14,7 +14,7 @@ from eap_api.mcp_control.helpers import (
     DEFAULT_PAGE, MAX_REPORT_BYTES, MAX_WAIT_SECONDS, clip, not_found, page, require_agent, require_workflow,
     tenant_run, uid, wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, call
+from eap_api.mcp_control.routing import DB, call, call_service
 from eap_api.mcp_control.server import current_ctx
 
 # Fields of a run kept in a bounded report (never the request context or model settings).
@@ -143,46 +143,54 @@ def register_tools(tool: Any) -> None:
     @tool("kb.list")
     async def kb_list(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
         """The tenant's knowledge bases with document and chunk counts. Paged: limit <= 100."""
-        from eap_api.routes.knowledge import get_knowledge_store, list_knowledge_bases
+        from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        out = await call(ctx, list_knowledge_bases, principal=ctx.actor, store=get_knowledge_store(ctx.request))
-        return page(out["items"], limit, offset)
+        items = await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request), lambda s: s.list_knowledge_bases(ctx.tenant_id))
+        return page(items, limit, offset)
 
     @tool("kb.get")
     async def kb_get(kb_id: str) -> dict[str, Any]:
         """One knowledge base with counts and ingest spend."""
-        from eap_api.routes.knowledge import get_knowledge_base, get_knowledge_store
+        from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        return await call(ctx, get_knowledge_base, kb_id=str(uid(kb_id, "kb_id")), principal=ctx.actor,
-                          store=get_knowledge_store(ctx.request))
+        return await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request),
+            lambda s: s.get_knowledge_base(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.list")
     async def kb_source_list(kb_id: str) -> dict[str, Any]:
         """The data sources of a knowledge base (connection, provider, config, schedule state)."""
-        from eap_api.routes.kb_sources import list_sources
+        from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        return await call(ctx, list_sources, kb_id=str(uid(kb_id, "kb_id")), request=ctx.request, principal=ctx.actor)
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.list_sources(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.get")
     async def kb_source_get(kb_id: str, source_id: str) -> dict[str, Any]:
         """One data source of a knowledge base."""
-        from eap_api.routes.kb_sources import get_source
+        from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        return await call(ctx, get_source, kb_id=str(uid(kb_id, "kb_id")), source_id=str(uid(source_id, "source_id")),
-                          request=ctx.request, principal=ctx.actor)
+        view, _revision = await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.get_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id"))))
+        return view
 
     @tool("kb.source.syncs")
     async def kb_source_syncs(kb_id: str, source_id: str, limit: int = 20) -> dict[str, Any]:
         """Recent sync runs of a data source (status, counters, bounded errors), newest first."""
-        from eap_api.routes.kb_sources import list_syncs
+        from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        return await call(ctx, list_syncs, kb_id=str(uid(kb_id, "kb_id")), source_id=str(uid(source_id, "source_id")),
-                          request=ctx.request, principal=ctx.actor, limit=max(1, min(limit, 100)))
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.list_syncs(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
+                                   max(1, min(limit, 100))))
 
     @tool("settings.connection.list")
     async def connection_list() -> dict[str, Any]:

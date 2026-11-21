@@ -429,7 +429,7 @@ def test_bulk_reextract_revives_a_pending_document_whose_first_enqueue_failed(pg
 
 
 def test_bulk_reextract_survives_an_unexpected_error_for_one_document(pg, tenant_of, fake_dbos, kb_cleanup, monkeypatch):
-    import eap_api.routes.knowledge as routes
+    import eap_api.services.knowledge as routes
 
     client, _ = pg
     _, h = tenant_of()

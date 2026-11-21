@@ -1,7 +1,7 @@
 """P1.C5: the API sets `embed_split: true` on new kb_ingest runs; a run created before (no flag)
 is still recognised as the run of the same document version or generation."""
 
-from eap_api.routes.knowledge import _same_ingest_input, ingest_input, reindex_input
+from eap_api.services.knowledge import _same_ingest_input, ingest_input, reindex_input
 
 
 def test_new_inputs_carry_the_flag():
