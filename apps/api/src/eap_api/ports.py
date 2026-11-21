@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 
@@ -84,3 +85,50 @@ class RunLauncher(Protocol):
     def recovered_run_ids(self, *, since: datetime, until: datetime) -> list[str]: ...
 
     def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class StartedRun:
+    """A run recorded and handed to the orchestrator: the stored row (`run`, as RunStore.get_run returns it)
+    and whether this call created it (False: a retry of a recorded run_id)."""
+
+    run: dict[str, Any]
+    created: bool
+
+    @property
+    def run_id(self) -> UUID:
+        return UUID(str(self.run["id"]))
+
+
+class RunWaitTimeout(Exception):
+    """`RunStarter.wait_for_run` ran out of time; the run's tree was cancelled before this was raised."""
+
+
+class RunStarter(Protocol):
+    """What a service needs to run an agent once and read its answer (implemented by services.runs.RunService)."""
+
+    def start_agent_run(
+        self,
+        tenant_id: str,
+        agent_id: UUID,
+        *,
+        input_text: str,
+        run_id: UUID | None = None,
+        version: int | None = None,
+        request_context: dict[str, Any] | None = None,
+    ) -> StartedRun:
+        """Record a run of the tenant's agent (its latest published version unless `version`) idempotently
+        (a client `run_id`, default fresh) and hand it to the worker. Raises ServiceError: NotFound (agent),
+        Conflict (archived, no version, run_id used by a different run), Unavailable (hand-off failed)."""
+        ...
+
+    def wait_for_run(
+        self, tenant_id: str, run_id: UUID, *, timeout: float, poll_interval: float = 0.5
+    ) -> dict[str, Any]:
+        """Poll until the run has a terminal status and return the stored row; on timeout cancel the run's
+        tree and raise RunWaitTimeout."""
+        ...
+
+    def read_run_json(self, tenant_id: str, run_id: UUID) -> dict[str, Any]:
+        """The run as GET /runs/{id} answers it (NotFound for an unknown run or another tenant's)."""
+        ...
