@@ -30,7 +30,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from eap_api.deps import get_otlp_limiter
 from eap_api.auth import AgUiPrincipal, otlp_principal
 from eap_api.request_guard import read_capped_body, too_large_detail
-from eap_api.routes.runs import SpanStoreDep
+from eap_api.service_deps.connections import OtlpIngestServiceDep
 from eap_api.schemas import ErrorDetail
 from eap_observability.otlp import (
     JSON,
@@ -81,7 +81,7 @@ def _forward(endpoint: str, content_type: str, body: bytes) -> None:
 
 @router.post("/otlp/v1/traces")
 async def ingest_traces(
-    request: Request, principal: PrincipalDep, spans: SpanStoreDep, background: BackgroundTasks
+    request: Request, principal: PrincipalDep, service: OtlpIngestServiceDep, background: BackgroundTasks
 ) -> Response:
     """Store the spans of an OTLP export request for the key's tenant and answer the OTLP response."""
     caller = principal.key_id or f"dev:{principal.tenant_id}"
@@ -119,7 +119,7 @@ async def ingest_traces(
     if prepared.spans:
         from starlette.concurrency import run_in_threadpool
 
-        await run_in_threadpool(spans.insert_external, principal.tenant_id, principal.key_id, prepared.spans)
+        await run_in_threadpool(service.store_spans, principal.tenant_id, principal.key_id, prepared.spans)
     endpoint = os.environ.get("EAP_OTLP_FORWARD_ENDPOINT", "").strip()
     if endpoint:
         background.add_task(_forward, endpoint, content_type or JSON, body)

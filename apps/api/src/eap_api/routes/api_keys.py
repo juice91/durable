@@ -15,31 +15,27 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, Path, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from eap_api.deps import SessionDep
-from eap_api.auth import Principal, current_principal, get_api_key_store
-from eap_api.models import AgentModel
+from eap_api.auth import Principal, current_principal
 from eap_api.request_guard import guarded_json_route
 from eap_api.schemas import ErrorDetail
-from eap_api.workflows.models import WorkflowModel
-from eap_run_store import ApiKeyLimitExceeded, ApiKeyRecord, ApiKeyStore
-from eap_run_store.api_keys import (
+from eap_api.service_deps.connections import ApiKeyServiceDep
+from eap_api.services.api_keys import (
     API_KEY_ALLOWLIST_ID_MAX_CHARS,
     API_KEY_ALLOWLIST_MAX_ITEMS,
     API_KEY_NAME_MAX_CHARS,
+    API_KEY_NOT_FOUND_DETAIL,  # noqa: F401
     API_KEY_ORIGIN_MAX_CHARS,
     API_KEY_ORIGINS_MAX_ITEMS,
+    ApiKeyRecord,
 )
 
 MAX_API_KEY_BODY_BYTES = 64 * 1024
 MAX_API_KEY_BODY_DEPTH = 8
-API_KEY_NOT_FOUND_DETAIL = "API key not found"
 
 ApiKeyRoute = guarded_json_route(max_body_bytes=MAX_API_KEY_BODY_BYTES, max_depth=MAX_API_KEY_BODY_DEPTH)
 
@@ -48,7 +44,6 @@ router = APIRouter(
 )
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-ApiKeyStoreDep = Annotated[ApiKeyStore, Depends(get_api_key_store)]
 
 IdItem = Annotated[str, Field(min_length=1, max_length=API_KEY_ALLOWLIST_ID_MAX_CHARS)]
 OriginItem = Annotated[str, Field(min_length=1, max_length=API_KEY_ORIGIN_MAX_CHARS)]
@@ -117,52 +112,28 @@ def _out(record: ApiKeyRecord) -> dict:
     )
 
 
-def _unknown_ids(session: Session, model, tenant_id: str, ids: list[str] | None) -> list[str]:
-    if not ids:
-        return []
-    found = set(
-        session.execute(select(model.id).where(model.tenant_id == tenant_id, model.id.in_(ids))).scalars()
-    )
-    return [i for i in dict.fromkeys(ids) if i not in found]
-
-
 @router.post(
     "/api-keys",
     status_code=status.HTTP_201_CREATED,
     response_model=ApiKeyCreated,
     responses={409: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
-async def create_api_key(
-    body: ApiKeyCreate, principal: PrincipalDep, session: SessionDep, store: ApiKeyStoreDep
-) -> JSONResponse:
+async def create_api_key(body: ApiKeyCreate, principal: PrincipalDep, service: ApiKeyServiceDep) -> JSONResponse:
     """Create a key. 422 for an unknown agent or workflow id of this tenant, a bad origin or a past
     `expires_at`; 409 past the tenant's active-key cap. The response is the only place the
     plaintext key ever appears."""
-    unknown_agents = await run_in_threadpool(_unknown_ids, session, AgentModel, principal.tenant_id, body.agent_ids)
-    if unknown_agents:
-        raise HTTPException(status_code=422, detail=f"unknown agent ids: {', '.join(unknown_agents)}")
-    unknown_workflows = await run_in_threadpool(
-        _unknown_ids, session, WorkflowModel, principal.tenant_id, body.workflow_ids
-    )
-    if unknown_workflows:
-        raise HTTPException(status_code=422, detail=f"unknown workflow ids: {', '.join(unknown_workflows)}")
-    try:
-        created = await run_in_threadpool(
-            lambda: store.create(
-                principal.tenant_id,
-                name=body.name,
-                created_by=principal.user_id,
-                scopes=body.scopes,
-                agent_ids=body.agent_ids,
-                workflow_ids=body.workflow_ids,
-                allowed_origins=body.allowed_origins,
-                expires_at=body.expires_at,
-            )
+    created = await run_in_threadpool(
+        lambda: service.create(
+            principal.tenant_id,
+            principal.user_id,
+            name=body.name,
+            scopes=body.scopes,
+            agent_ids=body.agent_ids,
+            workflow_ids=body.workflow_ids,
+            allowed_origins=body.allowed_origins,
+            expires_at=body.expires_at,
         )
-    except ApiKeyLimitExceeded as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+    )
     payload = ApiKeyCreated(**_out(created.record), key=created.key)
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -172,19 +143,17 @@ async def create_api_key(
 
 
 @router.get("/api-keys", response_model=ApiKeyList)
-async def list_api_keys(principal: PrincipalDep, store: ApiKeyStoreDep) -> ApiKeyList:
-    records = await run_in_threadpool(store.list, principal.tenant_id)
+async def list_api_keys(principal: PrincipalDep, service: ApiKeyServiceDep) -> ApiKeyList:
+    records = await run_in_threadpool(service.list, principal.tenant_id)
     return ApiKeyList(items=[ApiKeyOut(**_out(r)) for r in records])
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 async def revoke_api_key(
     principal: PrincipalDep,
-    store: ApiKeyStoreDep,
+    service: ApiKeyServiceDep,
     key_id: Annotated[str, Path(max_length=64)],
 ) -> Response:
     """Revoke a key (idempotent). The key stops working at once (every request re-reads it)."""
-    record = await run_in_threadpool(store.revoke, principal.tenant_id, key_id)
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=API_KEY_NOT_FOUND_DETAIL)
+    await run_in_threadpool(service.revoke, principal.tenant_id, key_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

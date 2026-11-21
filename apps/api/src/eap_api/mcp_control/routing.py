@@ -25,6 +25,8 @@ from starlette.concurrency import run_in_threadpool
 from eap_api.auth import AgUiPrincipal, Principal
 from eap_api.concurrency import ConcurrencyError, Precondition
 from eap_api.deps import database_engine_of, get_run_launcher, run_launcher_of, run_stores_of
+from eap_api.service_errors import service_error_response
+from eap_api.services.errors import ServiceError
 from eap_run_store.definition_errors import DefinitionError
 
 # One word per HTTP status when a route gives no `code` of its own.
@@ -91,10 +93,23 @@ def unwrap(result: Any) -> Any:
     return result
 
 
+def service_error_to_tool_error(exc: ServiceError) -> McpToolError:
+    """A service's refusal as a tool error: the code the refusal names (a class's default code is the status's
+    word), the message, and for a stale revision `current_revision` (never the current resource)."""
+    response = service_error_response(exc)
+    body = json.loads(response.body)
+    body.pop("current", None)
+    if exc.code == type(exc).code:  # the class's own default: the word of its status, as for every refusal
+        body.pop("code", None)
+    return refusal(response.status_code, body)
+
+
 def translate(exc: BaseException) -> McpToolError:
     """Any refusal a route or shared service raises, as a tool error."""
     if isinstance(exc, McpToolError):
         return exc
+    if isinstance(exc, ServiceError):
+        return service_error_to_tool_error(exc)
     if isinstance(exc, HTTPException):
         return refusal(exc.status_code, {"detail": exc.detail} if not isinstance(exc.detail, dict) else exc.detail)
     if isinstance(exc, DefinitionError):
