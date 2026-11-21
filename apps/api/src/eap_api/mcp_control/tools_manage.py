@@ -88,7 +88,8 @@ def register_tools(tool: Any) -> None:
         pending_approvals}. A run that waits for approval is not done: decide each pending approval with
         approvals.decide, then read the finished run at pydanticos://runs/{run_id}/report (or send the next
         message on the same conversation once it is done). `done` false otherwise means the run goes on."""
-        from eap_api.routes.approvals import approval_json, get_approval_store
+        from eap_api.deps import get_approval_store
+        from eap_api.services.approvals import approval_json
         from eap_api.routes.conversations import create_conversation, start_turn
         from eap_api.schemas import ConversationCreate, TurnCreate
 
@@ -179,24 +180,34 @@ def register_tools(tool: Any) -> None:
                                  run_id: str | None = None) -> dict[str, Any]:
         """Start a run of a published workflow version (the latest unless `version`). `run_id` makes a retry
         idempotent. Returns {run_id, status, ...}; follow it with workflow.run.wait and workflow.run.result."""
-        from eap_api.routes.workflow_runs import WorkflowRunCreate, start_workflow_run
+        from eap_api.routes.workflow_runs import WorkflowRunCreate
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
         guard_json(input, "input", max_bytes=32 * 1024)
         body = _model(WorkflowRunCreate, input=input, version=version, run_id=uid(run_id, "run_id") if run_id else None)
-        return await call(ctx, start_workflow_run, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor,
-                          body=body, db=DB, stores=ctx.stores, launcher=ctx.launcher)
+        wid = uid(workflow_id, "workflow_id")
+        return await call(
+            ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).start(
+                ctx.tenant_id, wid, body.input, version=body.version, run_id=body.run_id,
+                rerun_of=body.rerun_of, pause_after_each_step=body.pause_after_each_step),
+            db=DB)
 
     @tool("workflow.run.cancel", manage=True)
     async def workflow_run_cancel(run_id: str) -> dict[str, Any]:
         """Cancel a workflow run and its whole tree (idempotent)."""
-        from eap_api.routes.workflow_runs import cancel_run
+        from eap_api.schemas import RunCancelResponse
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         await tenant_run(ctx, run_id, kind="workflow")
-        return await call(ctx, cancel_run, run_id=uid(run_id, "run_id"), principal=ctx.actor, stores=ctx.stores,
-                          launcher=ctx.launcher)
+        rid = uid(run_id, "run_id")
+        return await call(
+            ctx, lambda db: RunCancelResponse(
+                **WorkflowRunService(db, *ctx.stores, ctx.launcher).cancel(ctx.tenant_id, ctx.actor.user_id, rid)
+            ).model_dump(),
+            db=DB)
 
     @tool("workflow.schedule.set", manage=True)
     async def workflow_schedule_set(workflow_id: str, name: str | None = None, cron: str | None = None,
@@ -204,7 +215,8 @@ def register_tools(tool: Any) -> None:
                                     schedule_id: str | None = None, active: bool | None = None) -> dict[str, Any]:
         """Create a schedule (name and cron required; it runs the latest version with `input`), or with
         `schedule_id` change that schedule's fields or pause/resume it with `active`."""
-        from eap_api.routes.schedules import create_schedule, get_schedule_store, update_schedule
+        from eap_api.deps import get_schedule_store
+        from eap_api.services.schedules import ScheduleService
         from eap_schemas.workflows import WorkflowScheduleSpec, WorkflowScheduleUpdate
 
         ctx = current_ctx()
@@ -216,8 +228,12 @@ def register_tools(tool: Any) -> None:
             if name is None or cron is None:
                 raise McpToolError("invalid", "name and cron are required to create a schedule")
             body = _model(WorkflowScheduleSpec, name=name, cron=cron, timezone=timezone, input=input or {})
-            return await call(ctx, create_schedule, workflow_id=uid(workflow_id, "workflow_id"), body=body,
-                              principal=ctx.actor, db=DB, store=store)
+            wid = str(uid(workflow_id, "workflow_id"))
+            return await call(
+                ctx, lambda db: ScheduleService(db, store).create(
+                    ctx.tenant_id, wid, name=body.name, cron=body.cron, timezone_name=body.timezone,
+                    input=body.input)[0],
+                db=DB)
         given = {k: v for k, v in (("name", name), ("cron", cron), ("input", input), ("active", active)) if v is not None}
         if timezone != "UTC":
             given["timezone"] = timezone
@@ -233,8 +249,10 @@ def register_tools(tool: Any) -> None:
 
         return await call_with_revision(
             ctx, read_schedule_revision,
-            lambda pre: call(ctx, update_schedule, schedule_id=sid, body=update, principal=ctx.actor, db=DB,
-                             store=store, pre=pre),
+            lambda pre: call(
+                ctx, lambda db: ScheduleService(db, store).update(
+                    ctx.tenant_id, sid, update.model_dump(exclude_unset=True), pre.expected)[0],
+                db=DB),
             "schedule")
 
     # ------------------------------------------------------------------------------- knowledge
@@ -359,24 +377,35 @@ def register_tools(tool: Any) -> None:
         """Decide a pending approval: `kind` tool (key = tool_call_id) or step (key = step_id of a workflow
         approval or input step; an input step takes `resume_data` instead of a bare approve). A denial's
         comment reaches the model. Returns {decision, decided_by, notified, ...}; 409 when already decided."""
-        from eap_api.routes.approvals import ToolApprovalDecision, approve_tool_call, deny_tool_call
-        from eap_api.routes.workflow_runs import (
-            ApprovalDecision, ResumeSubmission, approve_step, reject_step, resume_step,
-        )
+        from eap_api.deps import get_approval_store
+        from eap_api.routes.approvals import ToolApprovalDecision
+        from eap_api.services.approvals import ApprovalService
+        from eap_api.routes.workflow_runs import ApprovalDecision, ResumeSubmission
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         await tenant_run(ctx, run_id)
         rid = uid(run_id, "run_id")
-        common = {"run_id": rid, "principal": ctx.actor, "stores": ctx.stores, "launcher": ctx.launcher}
         if kind == "tool":
             body = _model(ToolApprovalDecision, comment=comment)
-            fn = approve_tool_call if decision == "approve" else deny_tool_call
-            return await call(ctx, fn, tool_call_id=key, body=body, **common)
+            service = ApprovalService(get_approval_store(ctx.request), ctx.stores[1], ctx.launcher)
+            return await call(
+                ctx, lambda: service.decide_tool(
+                    ctx.tenant_id, ctx.actor.user_id, rid, key, "approved" if decision == "approve" else "denied",
+                    body.comment))
         if resume_data is not None:
             guard_json(resume_data, "resume_data", max_bytes=32 * 1024)
-            return await call(ctx, resume_step, step_id=key, body=_model(ResumeSubmission, data=resume_data, comment=comment), **common)
-        fn = approve_step if decision == "approve" else reject_step
-        return await call(ctx, fn, step_id=key, body=_model(ApprovalDecision, comment=comment), **common)
+            answer = _model(ResumeSubmission, data=resume_data, comment=comment)
+            return await call(
+                ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).resume_step(
+                    ctx.tenant_id, ctx.actor.user_id, rid, key, answer.data, answer.comment),
+                db=DB)
+        answer = _model(ApprovalDecision, comment=comment)
+        return await call(
+            ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).decide_step(
+                ctx.tenant_id, ctx.actor.user_id, rid, key, "approved" if decision == "approve" else "rejected",
+                answer.comment),
+            db=DB)
 
 
 def _override(ctx: Any, dependency: Any) -> Any:

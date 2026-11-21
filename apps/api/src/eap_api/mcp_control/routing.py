@@ -115,6 +115,8 @@ def translate(exc: BaseException) -> McpToolError:
     if isinstance(exc, HTTPException):
         return refusal(exc.status_code, {"detail": exc.detail} if not isinstance(exc.detail, dict) else exc.detail)
     if isinstance(exc, DefinitionError):
+        if isinstance(exc.detail, dict):  # a body whose `detail` is {code, message}, as an HTTPException's dict detail
+            return refusal(exc.status_code, exc.detail)
         return refusal(exc.status_code, exc.body)
     if isinstance(exc, ConcurrencyError):  # 412 revision_mismatch (and 428/400): no `current` body, the revision only
         return refusal(exc.status_code, {k: v for k, v in exc.body.items() if k != "current"})

@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from eap_api.routes import workflow_runs
+from eap_api.services import workflow_runs
 
 from .run_helpers import hard_timeout, requires_pg
 from .test_workflow_run_cancel_api import CancelClient, _events, _start
