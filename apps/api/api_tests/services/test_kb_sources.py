@@ -33,7 +33,7 @@ def make(found=None, kb=True):
     kb_store = types.SimpleNamespace(get_knowledge_base=lambda t, k: {"id": k} if kb else None)
     return svc.KbSourceService(
         kb_store, FakeSources(found), connections=None, syncs=None, run_store=None, engine=None,
-        launcher=None, trace_context=lambda: (None, None),
+        launcher=None,
     )
 
 

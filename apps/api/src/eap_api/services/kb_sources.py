@@ -15,7 +15,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
+from eap_api.ports import RunLauncher
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, ServiceError, Unavailable
+from eap_observability.context import current_trace_context
 from eap_kb_sources.check import load_providers
 from eap_kb_sources.errors import SOURCE_ADAPTER_NOT_FOUND, SourceError
 from eap_kb_sources.registry import adapter_for, list_adapters
@@ -149,8 +151,7 @@ class KbSourceService:
         syncs: SyncStore,
         run_store: RunStore,
         engine: Any,
-        launcher: Any,
-        trace_context: Callable[[], tuple[str | None, str | None]],
+        launcher: RunLauncher,
     ) -> None:
         self.kb_store = kb_store
         self.sources = sources
@@ -159,7 +160,6 @@ class KbSourceService:
         self.run_store = run_store
         self.engine = engine
         self.launcher = launcher
-        self._trace = trace_context
 
     # ------------------------------------------------------------------ catalogue
 
@@ -260,7 +260,7 @@ class KbSourceService:
         self, tenant_id: str, kb_id: str, source_id: str, body: SyncCreate, created_by: str | None
     ) -> dict[str, Any]:
         source = self._require_source(tenant_id, kb_id, source_id)
-        trace_id, traceparent = self._trace()
+        trace_id, traceparent = current_trace_context()
         try:
             return launch_sync(
                 self.engine, self.launcher, tenant_id=tenant_id, source_id=source.id, mode=body.mode,

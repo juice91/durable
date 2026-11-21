@@ -4,9 +4,7 @@
 Transport-independent: a method takes plain values and the principal's tenant id, returns plain data and
 refuses with the existing `DefinitionError` family (so every body stays what the routes always answered:
 `{"detail", ...}` with no `code` unless one was set) or a `ServiceError`. Collaborators (the knowledge store,
-the run store and the run launcher) come through the constructor. Trace ids are read by the route (the
-observability package root imports the HTTP middleware) and passed in.
-"""
+the run store and the run launcher) come through the constructor."""
 
 from __future__ import annotations
 
@@ -29,6 +27,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from eap_api.ports import RunLauncher
 from eap_api.schemas import DocumentPut, document_key_problem
 from eap_api.services.refusals import refusal
 from eap_knowledge import ExtractionFailed, ExtractLimits, UnsupportedMimeType, extract
@@ -43,6 +42,8 @@ from eap_knowledge.formats import (
     format_for_mime,
     has_pdf_signature,
 )
+from eap_observability.context import current_trace_context
+from eap_observability.redaction import log_failure
 from eap_pricing import (
     COST_QUANTUM,
     OVERRIDE_ONLY_PROVIDERS,
@@ -95,21 +96,6 @@ DEADLOCK_SQLSTATE = "40P01"
 
 KB_NOT_FOUND = "Knowledge base not found"
 DOCUMENT_NOT_FOUND = "Document not found"
-
-
-def _log_failure(
-    logger: logging.Logger, event: str, exc: BaseException, *, code: str, level: int = logging.WARNING, **ids: Any
-) -> None:
-    """Log a handled failure without its exception text: the fixed `event`, `code`, the exception type and ids
-    (the tenant and run ids are all a caller passes). The package-level helper lives in eap_observability, whose
-    root imports the HTTP middleware, so a service keeps its own."""
-    error_type = type(exc).__name__
-    context = "".join(f" {k}={v}" for k, v in ids.items() if v is not None)
-    logger.log(
-        level, "%s: error_code=%s error_type=%s%s", event, code, error_type, context,
-        extra={"eap.error_code": code, "exception.type": error_type, **{f"eap.{k}": str(v) for k, v in ids.items() if v is not None}},
-        stacklevel=2,
-    )
 
 
 def too_large_detail(limit: int) -> str:
@@ -230,7 +216,7 @@ def _policy() -> EmbeddingModelPolicy:
     try:
         return EmbeddingModelPolicy.from_env()
     except ValueError as exc:  # checked at startup; the environment changed under the process
-        _log_failure(log, "embedding model allowlist invalid", exc, code="embedding_policy_invalid", level=logging.ERROR)
+        log_failure(log, "embedding model allowlist invalid", exc, code="embedding_policy_invalid", level=logging.ERROR)
         raise refusal(503, "the embedding model allowlist (EAP_ALLOWED_EMBEDDING_MODELS) is misconfigured",
         )
 
@@ -339,7 +325,7 @@ def _limits_or_503() -> ExtractLimits:
     try:
         return extract_limits()
     except ValueError as exc:
-        _log_failure(log, "extraction limits invalid", exc, code="extract_limits_invalid", level=logging.ERROR)
+        log_failure(log, "extraction limits invalid", exc, code="extract_limits_invalid", level=logging.ERROR)
         raise refusal(503, "the knowledge base upload limits (EAP_KB_MAX_*) are misconfigured",
         ) from None
 
@@ -542,9 +528,6 @@ REINDEX_ENQUEUE_FAILED_DETAIL = (
     "Reindex could not be started and was cancelled; retry the request (without run_id, or with a new one)"
 )
 
-TraceContext = Callable[[], "tuple[str | None, str | None]"]
-
-
 class HandOffFailed(DefinitionError):
     """The enqueue of a recorded run failed: 503 {"detail", "run_id"}."""
 
@@ -561,12 +544,12 @@ def _run_in_use(exc: handoff.RunIdInUse) -> DefinitionError:
 
 def _create_ingest_run(
     run_store: RunStore, tenant_id: str, kb_id: str, input_json: str, run_id: uuid.UUID | str,
-    trace: tuple[str | None, str | None] = (None, None),
+    trace: tuple[str | None, str | None] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Create (or find, for a retry with the same run_id) the kb_ingest run. 409 when `run_id` is
     another tenant's or another request's run (callers resolve run_id before writing; this is the
     last guard against a race)."""
-    trace_id, traceparent = trace
+    trace_id, traceparent = trace if trace is not None else current_trace_context()
     try:
         return handoff.create_ingest_run(
             run_store, tenant_id, kb_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
@@ -588,7 +571,7 @@ _orphaned = handoff.orphaned
 
 def _hand_off(
     run_store: RunStore,
-    launcher: Any,
+    launcher: RunLauncher,
     tenant_id: str,
     run: dict[str, Any],
     created: bool,
@@ -602,7 +585,7 @@ def _hand_off(
         raise HandOffFailed(exc.run_id, exc.detail) from None
 
 
-def _replay(run_store: RunStore, launcher: Any, tenant_id: str, run: dict[str, Any]) -> dict[str, Any]:
+def _replay(run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any]) -> dict[str, Any]:
     """A retry of the request that created `run`: hand it off again unless it has finished."""
     try:
         return handoff.replay(run_store, launcher.launch_kb_ingest, tenant_id, run)
@@ -699,7 +682,7 @@ REEXTRACT_ENQUEUE_FAILED_DETAIL = (
 
 
 def _reextract_replay(
-    run_store: RunStore, launcher: Any, tenant_id: str, run: dict[str, Any], *, created: bool
+    run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any], *, created: bool
 ) -> dict[str, Any]:
     """Hand off a re-extract run this request created. A run it found (a retry or a concurrent
     duplicate with the same run_id) is answered as recorded, with no second dispatch, unless its
@@ -770,20 +753,13 @@ def search_view(run: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     return False, view
 
 
-def _no_trace() -> tuple[str | None, str | None]:
-    return None, None
-
-
 class KnowledgeService:
     """Knowledge bases, documents, ingest, re-extract, reindex and the search tester (tenant-scoped)."""
 
-    def __init__(
-        self, store: KnowledgeStore, run_store: RunStore, launcher: Any, trace_context: TraceContext = _no_trace
-    ) -> None:
+    def __init__(self, store: KnowledgeStore, run_store: RunStore, launcher: RunLauncher) -> None:
         self.store = store
         self.run_store = run_store
         self.launcher = launcher
-        self._trace = trace_context
 
     # ------------------------------------------------------------------ embedding models
 
@@ -912,7 +888,7 @@ class KnowledgeService:
             if not _has_text(extracted):
                 # Only dropped markup (script, style, nav, comments): nothing to chunk, so nothing is stored.
                 raise refusal(422, "the document has no extractable text")
-        trace_id, traceparent = self._trace()
+        trace_id, traceparent = current_trace_context()
         try:
             outcome = handoff.ingest_document(
                 store, self.run_store, self.launcher.launch_kb_ingest, tenant_id, kb["id"],
@@ -982,7 +958,7 @@ class KnowledgeService:
                     raise refusal(409, "another ingest run of the document was started concurrently")
                 if not _renew_claim(store, tenant_id, document, new_run_id):
                     raise refusal(409, "another ingest run of the document was started concurrently")
-                run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id, trace=self._trace())
+                run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id, trace=current_trace_context())
                 view = _hand_off(run_store, launcher, tenant_id, run, created)
         document = store.get_document(tenant_id, kb["id"], document_key) or document
         return {**view, "unchanged": False, "document": document_view(document)}
@@ -1026,7 +1002,7 @@ class KnowledgeService:
             # so the run of the version this request made is always created (a later version
             # supersedes it in the worker); a crash before that is the 60 s orphan rule's case.
             input_json = ingest_input(document["id"], document["latest_version"])
-            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id, trace=self._trace())
+            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id, trace=current_trace_context())
             view = _reextract_replay(run_store, launcher, tenant_id, run, created=created)
         document = store.get_document(tenant_id, kb["id"], document_key) or document
         return {**view, "unchanged": False, "document": document_view(document)}
@@ -1101,13 +1077,13 @@ class KnowledgeService:
             run_id = document["last_run_id"]
             input_json = ingest_input(document["id"], document["latest_version"])
             try:
-                run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, run_id, trace=self._trace())
+                run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, run_id, trace=current_trace_context())
                 view = _hand_off(run_store, launcher, tenant_id, run, created)
             except Exception as exc:  # noqa: BLE001 - one document's failure must not strand the others
                 # Its new version is stored with last_run_id = run_id: a reingest of the document starts
                 # (or re-queues) that run, also when the run row was never written (the orphan rule).
                 if not isinstance(exc, DefinitionError):
-                    _log_failure(
+                    log_failure(
                         log, "re-extract run start failed", exc, code="reextract_start_failed", level=logging.ERROR,
                         tenant_id=tenant_id, run_id=str(run_id),
                     )
@@ -1195,7 +1171,7 @@ class KnowledgeService:
                 raise refusal(409, "a retry of this reindex was started concurrently, or it was cancelled")
             try:
                 run, created = _create_ingest_run(
-                    run_store, tenant_id, kb["id"], reindex_input(pending), run_id or uuid.uuid4(), trace=self._trace()
+                    run_store, tenant_id, kb["id"], reindex_input(pending), run_id or uuid.uuid4(), trace=current_trace_context()
                 )
                 return accepted(_hand_off(run_store, launcher, tenant_id, run, created))
             except DefinitionError:
@@ -1212,7 +1188,7 @@ class KnowledgeService:
         generation = opened["pending_generation"]
         try:
             run, created = _create_ingest_run(
-                run_store, tenant_id, kb["id"], reindex_input(generation), run_id or uuid.uuid4(), trace=self._trace()
+                run_store, tenant_id, kb["id"], reindex_input(generation), run_id or uuid.uuid4(), trace=current_trace_context()
             )
             return accepted(
                 _hand_off(run_store, launcher, tenant_id, run, created, failed_detail=REINDEX_ENQUEUE_FAILED_DETAIL)
@@ -1252,7 +1228,7 @@ class KnowledgeService:
             raise refusal(422, safe_errors(exc, ["body"]))
         input_json = _canonical_json(validated.model_dump(mode="json"))
         rid = run_id or uuid.uuid4()
-        trace_id, traceparent = self._trace()
+        trace_id, traceparent = current_trace_context()
         try:
             _, created = run_store.create_tool_run(
                 tenant_id, KNOWLEDGE_SEARCH_TOOL_ID, input_json, rid,
@@ -1281,7 +1257,7 @@ class KnowledgeService:
                 input_json=run["input"], traceparent=run.get("traceparent"),
             )
         except Exception as exc:
-            _log_failure(
+            log_failure(
                 log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
                 run_id=str(run_id), tenant_id=tenant_id,
             )
@@ -1289,7 +1265,7 @@ class KnowledgeService:
                 try:
                     run_store.mark_enqueue_failed(tenant_id, run_id)
                 except Exception as mark_exc:  # noqa: BLE001 - the 503 is the answer either way
-                    _log_failure(
+                    log_failure(
                         log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
                         level=logging.ERROR, run_id=str(run_id), tenant_id=tenant_id,
                     )
