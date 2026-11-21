@@ -187,7 +187,7 @@ def test_workflow_child_runs_and_archived_agents_are_searched(client, tenant, fa
 def test_the_cap_keeps_the_newest_runs_and_is_200(client, tenant, fake_loki, monkeypatch):
     from sqlalchemy import update
     from datetime import timedelta
-    from eap_api.routes import logs as logs_route
+    from eap_api.services import logs as logs_route
     from eap_run_store.store import RunModel
 
     assert logs_route.MAX_AGENT_RUNS == 200

@@ -11,37 +11,24 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from eap_api.auth import Principal, current_principal
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.runs import (
-    RUN_LIST_TIMEOUT_DETAIL,
-    SpanStoreDep,
-    _list_param,
-    _status_filter,
-    _utc,
-    metadata_filter,
-)
 from eap_api.schemas import ErrorDetail
-from eap_run_store import MetricsQueryTimeout
-from eap_run_store.cursor import MAX_CURSOR_LENGTH
-from eap_run_store.spans import InvalidSpanCursor, SpanCursor
-from eap_run_store.trace import SPAN_KINDS
+from eap_api.service_deps.runs import SpanServiceDep
+from eap_api.services.runs import MAX_CURSOR_LENGTH
+from eap_api.services.spans import SPAN_KINDS
 
 router = APIRouter(tags=["spans"], responses={422: {"model": ErrorDetail}}, route_class=GuardedJsonRoute)
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
 @router.get("/spans")
 def list_spans(
     principal: PrincipalDep,
-    spans: SpanStoreDep,
+    service: SpanServiceDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[
         str | None,
@@ -72,32 +59,8 @@ def list_spans(
     and `agent_id` / `model` / `provider` (the run used that model; `model` and `provider` run under the
     metrics statement timeout, 503 when it fires). `next_before` is the opaque cursor when a full
     page came back (pass it back verbatim), else null; one this API did not issue is a 422."""
-    start = _utc(created_from) if created_from is not None else None
-    end = _utc(created_to) if created_to is not None else None
-    if start is not None and end is not None and start >= end:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="from must be before to")
-    cursor = None
-    if before is not None:
-        try:
-            cursor = SpanCursor.decode(before)
-        except InvalidSpanCursor:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="before is not a valid cursor; pass the previous page's next_before verbatim",
-            )
-    filters = {
-        "from": start, "to": end, "span_kind": span_kind, "source": source, "q": q.strip() if q and q.strip() else None,
-        "agent_id": agent_id, "status": _status_filter(run_status), "kind": kind, "tool_id": tool_id,
-        "workflow_id": workflow_id, "model": model, "provider": provider,
-        "tags": _list_param(tags, "tags", split=True), "metadata": metadata_filter(metadata),
-    }
-    try:
-        items, next_before = spans.list(
-            principal.tenant_id, {k: v for k, v in filters.items() if v is not None}, limit, cursor
-        )
-    except MetricsQueryTimeout:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=RUN_LIST_TIMEOUT_DETAIL)
-    return JSONResponse(content={
-        "items": [{**i, "run_id": str(i["run_id"]), "start": _iso(i["start"]), "end": _iso(i["end"])} for i in items],
-        "next_before": next_before,
-    })
+    return JSONResponse(content=service.list_spans(
+        principal.tenant_id, limit=limit, before=before, span_kind=span_kind, source=source, agent_id=agent_id,
+        run_status=run_status, kind=kind, tool_id=tool_id, workflow_id=workflow_id, created_from=created_from,
+        created_to=created_to, model=model, provider=provider, tags=tags, metadata=metadata, q=q,
+    ))

@@ -255,8 +255,6 @@ ignore_imports = [
     "eap_api.routes.architect -> sqlalchemy",
     "eap_api.routes.conversations -> sqlalchemy",
     "eap_api.routes.processors -> sqlalchemy",
-    "eap_api.routes.runs -> sqlalchemy",
-    "eap_api.routes.traces -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -290,25 +288,9 @@ ignore_imports = [
     "eap_api.routes.architect -> eap_run_store.workflow_checks",
     "eap_api.routes.conversations -> eap_run_store",
     "eap_api.routes.conversations -> eap_run_store.cursor",
-    "eap_api.routes.logs -> eap_run_store",
-    "eap_api.routes.metrics -> eap_run_store",
-    "eap_api.routes.metrics -> eap_run_store.metrics",
     "eap_api.routes.processors -> eap_run_store.store",
-    "eap_api.routes.runs -> eap_run_store",
-    "eap_api.routes.runs -> eap_run_store.chat_attachments",
-    "eap_api.routes.runs -> eap_run_store.cursor",
-    "eap_api.routes.runs -> eap_run_store.spans",
-    "eap_api.routes.runs -> eap_run_store.store",
-    "eap_api.routes.spans -> eap_run_store",
-    "eap_api.routes.spans -> eap_run_store.cursor",
-    "eap_api.routes.spans -> eap_run_store.spans",
-    "eap_api.routes.spans -> eap_run_store.trace",
     "eap_api.routes.tools -> eap_run_store",
     "eap_api.routes.tools -> eap_run_store.workflow_checks",
-    "eap_api.routes.traces -> eap_run_store.cursor",
-    "eap_api.routes.traces -> eap_run_store.spans",
-    "eap_api.routes.traces -> eap_run_store.trace",
-    "eap_api.routes.traces -> eap_run_store.trace_feedback",
 ]
 
 [tool.pytest.ini_options]

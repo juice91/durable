@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import update
 
-from eap_api.routes import logs as logs_route
+from eap_api.services import logs as logs_service
 from eap_api.routes.logs import build_logql
 from eap_run_store.store import RunModel
 
@@ -98,7 +98,7 @@ def test_runs_finished_before_or_created_after_the_window_are_left_out(client, t
 
 
 def test_more_runs_than_the_cap_are_limited_to_the_newest(client, tenant, fake_loki, monkeypatch):
-    monkeypatch.setattr(logs_route, "MAX_AGENT_RUNS", 2)
+    monkeypatch.setattr(logs_service, "MAX_AGENT_RUNS", 2)
     agent, runs = _agent_with_runs(client, tenant, 3)
     body = _get(client, tenant, agent_id=agent).json()
     assert (body["agent_runs"], body["agent_runs_limited"]) == (2, True)
