@@ -16,7 +16,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
 from eap_db.metadata import schema_diff
-from eap_db.testing import SCHEMA_ENV, drop_schema, schema_url
+from eap_db.testing import SCHEMA_ENV, create_schema, drop_schema, schema_url
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get(SCHEMA_ENV), reason="needs the eap_db pytest plugin's migrated schema (dev Postgres)"
@@ -144,7 +144,7 @@ def _migrated_schema():
     schema = f"eap_test_0014a_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     return base, schema, create_engine(schema_url(base, schema))
 

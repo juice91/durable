@@ -14,6 +14,7 @@ from eap_worker.config import WorkerSettings
 from eap_worker.runtime import WorkerRuntime
 
 from .conftest import APP_DB_URL
+from eap_db.testing import create_schema
 
 UPGRADE = "database schema is not at the latest migration; run: uv run alembic -c packages/db/alembic.ini upgrade head"
 
@@ -24,7 +25,7 @@ def test_unmigrated_database_fails_fast_and_is_left_untouched():
     schema = f"eap_test_unmigrated_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     try:
         url = base.update_query_dict({"options": f"-csearch_path={schema}"}).render_as_string(hide_password=False)
         settings = dataclasses.replace(WorkerSettings.from_env(), app_database_url=url)

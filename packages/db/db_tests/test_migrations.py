@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 
 from eap_db import NOT_AT_HEAD_MESSAGE, SchemaNotAtHead, current_revisions, head_revisions, require_schema_at_head
 from eap_db.metadata import schema_diff
-from eap_db.testing import SCHEMA_ENV, create_migrated_schema, drop_schema, schema_url
+from eap_db.testing import SCHEMA_ENV, create_migrated_schema, create_schema, drop_schema, schema_url
 
 URL = os.environ.get("EAP_TEST_DATABASE_URL", "")
 requires_schema = pytest.mark.skipif(
@@ -45,7 +45,7 @@ def test_empty_schema_is_refused_with_the_upgrade_command():
     schema = f"eap_test_empty_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     try:
@@ -94,7 +94,7 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
     schema = f"eap_test_0002_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     try:
@@ -154,7 +154,7 @@ def test_mcp_servers_revision_keeps_existing_rows_and_round_trips():
     schema = f"eap_test_0004_{uuid.uuid4().hex[:8]}"
     admin = create_engine(base)
     with admin.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        create_schema(conn, schema)
     admin.dispose()
     engine = create_engine(schema_url(base, schema))
     counted = ("agents", "agent_versions", "runs", "execution_events", "conversations", "side_effects")

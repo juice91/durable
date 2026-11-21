@@ -210,7 +210,7 @@ def test_processor_results_statement_timeout_is_503(client, tenant, user, monkey
     from sqlalchemy.orm import Session
 
     from eap_api.database import get_session
-    from eap_api.routes import processors as processors_routes
+    from eap_api.services import processors as processors_routes
 
     monkeypatch.setattr(processors_routes, "RESULTS_STATEMENT_TIMEOUT_MS", 50)
 
@@ -264,7 +264,7 @@ def test_processor_results_other_operational_errors_are_a_generic_503(client, te
     from sqlalchemy.orm import Session
 
     from eap_api.database import get_session
-    from eap_api.routes import processors as processors_routes
+    from eap_api.services import processors as processors_routes
 
     class BrokenSession(Session):
         def execute(self, statement, *args, **kwargs):

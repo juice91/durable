@@ -14,19 +14,20 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from eap_api.deps import get_eval_store, get_scorer_store
+from eap_api.deps import eval_store_of, scorer_store_of
 from eap_api.mcp_control.helpers import (
     DEFAULT_PAGE, guard_json, not_found, page, require_agent, require_unrestricted, require_workflow, uid,
 )
 from eap_api.mcp_control.routing import McpToolError, call_service, translate
 from eap_api.mcp_control.server import current_ctx
-from eap_api.routes.evals import (
-    agent_run_started_json, eval_run_json, result_json, suite_json, workflow_run_started_json,
+from eap_api.service_deps.architect import ArchitectSuggesterPorts
+from eap_api.views import (
+    agent_run_started_json, case_json, eval_run_json, result_json, scorer_json, suite_json,
+    workflow_run_started_json,
 )
-from eap_api.routes.evals import case_json
-from eap_api.routes.scorer_suggestions import SuggesterPorts
-from eap_api.routes.scorers import scorer_json
 from eap_api.services.evals import EvalService
+from eap_api.service_deps.architect import build_architect_service
+from eap_api.service_deps.runs import build_run_service
 from eap_api.services.scorer_suggestions import ScorerSuggestionService
 from eap_api.services.scorers import ScorerService
 from eap_observability import current_trace_context
@@ -48,11 +49,11 @@ def _one_target(agent_id: str | None, workflow_id: str | None) -> None:
 
 def _evals(ctx: Any) -> Any:
     """`build` for call_service: an EvalService on this call's session."""
-    return lambda db: EvalService(get_eval_store(ctx.request), db, ctx.stores[0], ctx.launcher)
+    return lambda db: EvalService(eval_store_of(ctx.app), db, ctx.stores[0], ctx.launcher)
 
 
 def _scorers(ctx: Any) -> Any:
-    return lambda db: ScorerService(get_scorer_store(ctx.request), db, ctx.stores[0], ctx.launcher)
+    return lambda db: ScorerService(scorer_store_of(ctx.app), db, ctx.stores[0], ctx.launcher)
 
 
 async def _suite_target(ctx: Any, suite_id: str) -> tuple[str | None, str | None]:
@@ -90,7 +91,7 @@ def register_tools(tool: Any) -> None:
         """Create a reusable scorer. `evaluator` is one of: {kind: contains, value, case_sensitive?},
         {kind: regex, pattern, negate?, field?} (RE2), {kind: schema_valid, json_schema?}, {kind: field_equals,
         path, value}, {kind: max_cost, usd}. Attach it to an agent with scorer.attach."""
-        from eap_api.routes.scorers import ScorerCreate
+        from eap_api.bodies import ScorerCreate
 
         ctx = current_ctx()
         require_unrestricted(ctx, "create scorers")
@@ -105,7 +106,7 @@ def register_tools(tool: Any) -> None:
     async def scorer_attach(agent_id: str, scorer_id: str, sampling_rate: float = 1.0) -> dict[str, Any]:
         """Attach a scorer to an agent: the worker scores that share of the agent's finished runs
         (`sampling_rate` in (0, 1]). Returns the agent's attached scorers. At most 10 per agent."""
-        from eap_api.routes.scorers import Attachment
+        from eap_api.bodies import Attachment
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
@@ -124,7 +125,7 @@ def register_tools(tool: Any) -> None:
         scorer or both it is also a valid scorer, so pass it to scorer.create; any spec goes into
         eval.suite.create's `evaluators`. Runs a model (about a minute at most); the answer is cached for 10
         minutes. Reads the definition and up to 5 recent run outputs, redacted; adds nothing."""
-        from eap_api.routes.scorer_suggestions import SuggestRequest
+        from eap_api.bodies import SuggestRequest
 
         ctx = current_ctx()
         _one_target(agent_id, workflow_id)
@@ -137,7 +138,8 @@ def register_tools(tool: Any) -> None:
             kind, target = "workflow", uid(workflow_id, "workflow_id")
 
         def build(db: Any) -> Any:
-            ports = SuggesterPorts(ctx.engine, ctx.actor, db, ctx.stores, ctx.launcher)
+            architect = build_architect_service(ctx.engine, build_run_service(db, ctx.stores[0], ctx.stores[1], ctx.launcher))
+            ports = ArchitectSuggesterPorts(architect, ctx.tenant_id)
             return ScorerSuggestionService(db, ctx.stores[0]), ports
 
         return await call_service(

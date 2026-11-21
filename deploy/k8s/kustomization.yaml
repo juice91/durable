@@ -13,6 +13,7 @@ resources:
   - worker.yaml
   - api.yaml
   - studio.yaml
+  - cloudflared.yaml
 images:
   - name: pydanticos-python
     newName: pydanticos-python

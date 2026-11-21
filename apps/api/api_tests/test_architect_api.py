@@ -400,7 +400,7 @@ def test_draft_invalid_returns_the_raw_text(api):
 
 
 def test_draft_failed_run_and_timeout(api, monkeypatch):
-    from eap_api.routes import architect
+    from eap_api.services import architect
 
     client, _, launcher, tenant_of = api
     _, h = tenant_of()
@@ -716,7 +716,7 @@ def test_draft_workflow_drops_what_is_not_offered(api):
 
 
 def test_draft_workflow_invalid_failed_timeout_and_model(api, monkeypatch):
-    from eap_api.routes import architect
+    from eap_api.services import architect
 
     client, _, launcher, tenant_of = api
     _, h = tenant_of()

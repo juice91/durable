@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, status
@@ -24,6 +23,8 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.bodies import Attachment, ScorerCreate
+from eap_api.views import scorer_json
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.request_guard import GuardedJsonRoute
@@ -49,14 +50,6 @@ router = APIRouter(
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
-class ScorerCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1, max_length=SCORER_NAME_MAX_CHARS)
-    description: str | None = Field(default=None, max_length=SCORER_DESCRIPTION_MAX_CHARS)
-    evaluator: dict[str, Any]
-
-
 class ScorerUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,27 +58,8 @@ class ScorerUpdate(BaseModel):
     evaluator: dict[str, Any] | None = None
 
 
-class Attachment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    sampling_rate: Decimal = Field(default=Decimal(1), gt=0, le=1, max_digits=5, decimal_places=4)
-
-
 def _iso(value: datetime) -> str:
     return value.isoformat()
-
-
-def scorer_json(record: Any) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "name": record.name,
-        "description": record.description,
-        "evaluator": record.evaluator,
-        "agent_ids": list(record.agent_ids),
-        "created_at": _iso(record.created_at),
-        "updated_at": _iso(record.updated_at),
-        "revision": record.revision,
-    }
 
 
 _json = scorer_json

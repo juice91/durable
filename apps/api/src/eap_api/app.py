@@ -25,7 +25,7 @@ def _reconcile_architect_seeds(app: FastAPI) -> None:
     import logging
 
     try:
-        from eap_api.routes.architect import reconcile_all_seeds
+        from eap_api.services.architect import reconcile_all_seeds
 
         reconcile_all_seeds(app.state.database_engine)
     except Exception:

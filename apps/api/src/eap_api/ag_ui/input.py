@@ -825,7 +825,7 @@ def thread_resource_id(options: AgUiRunOptions, *, user_id: str | None, api_key_
     """The resource_id of a conversation created for a thread: `forwardedProps.pydanticos.resourceId`
     (the store's rule: 422 for a dot-only id), else the dev bearer's user id when it fits the
     resource pattern, else `apikey:<key_id>` for an API key, else None (resource memory off)."""
-    from eap_run_store import validate_resource_id
+    from eap_api.ports import validate_resource_id
 
     if options.resource_id is not None:
         try:

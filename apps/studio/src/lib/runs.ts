@@ -1,7 +1,9 @@
 // Typed client for runs API with SSE streaming support
 import { parseSSE } from "./sse";
 
-export const BASE_URL = process.env.NEXT_PUBLIC_EAP_API_URL || "http://localhost:8000";
+import { BASE_URL } from "./base-url";
+
+export { BASE_URL };
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {

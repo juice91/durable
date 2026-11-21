@@ -1,3 +1,4 @@
+import { BASE_URL, resolveBaseUrl } from "./base-url";
 import { rememberRevision, revisionFromEtag, revisionKey, track, trackAll, writeResource } from "./revisions";
 
 /** An MCP tool an agent may call: `server` is the tenant MCP server's NAME, `tool` the tool's name on it. */
@@ -85,7 +86,7 @@ export class ApiError extends Error {
   }
 }
 
-export const BASE_URL = process.env.NEXT_PUBLIC_EAP_API_URL || "http://localhost:8000";
+export { BASE_URL, resolveBaseUrl };
 
 export function apiHeaders(extra: HeadersInit = {}): HeadersInit {
   const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
