@@ -48,7 +48,7 @@ from fastapi import status
 
 from eap_api.ag_ui.input import AgUiInputError, ResumeEntry
 from eap_api.ag_ui.translate import OpenApproval
-from eap_api.approvals import ApprovalKind, DecisionResult, decide
+from eap_api.approvals import ApprovalKind, DecisionResult
 from eap_schemas import RunEvent
 
 log = logging.getLogger("eap_api")
@@ -146,16 +146,14 @@ def resume_decisions(entries: Sequence[ResumeEntry]) -> list[ResumeDecision]:
     return out
 
 
-def apply_decisions(
-    event_log: Any, launcher: Any, tenant_id: str, decisions: Iterable[ResumeDecision], decided_by: str
-) -> list[DecisionResult]:
-    """Record every decision through `decide` (idempotent: an earlier decision answers `exists`).
-    An outcome other than `created`/`exists` (`not_waiting`: the run ended; `run_not_found`) records
-    nothing; it is logged, and the stream shows the run's end."""
+def apply_decisions(service: Any, tenant_id: str, decisions: Iterable[ResumeDecision], decided_by: str) -> list[DecisionResult]:
+    """Record every decision through the service's `decide_approval` (eap_api.approvals.decide: idempotent,
+    an earlier decision answers `exists`). An outcome other than `created`/`exists` (`not_waiting`: the run
+    ended; `run_not_found`) records nothing; it is logged, and the stream shows the run's end."""
     results = []
     for d in decisions:
-        result = decide(
-            event_log, launcher, tenant_id=tenant_id, run_id=d.ref.run_id, kind=d.ref.kind, key=d.ref.key,
+        result = service.decide_approval(
+            tenant_id, run_id=d.ref.run_id, kind=d.ref.kind, key=d.ref.key,
             decision=d.decision(), decided_by=decided_by, comment=d.comment,
         )
         if result.outcome not in ("created", "exists"):
@@ -204,7 +202,7 @@ def step_started_seq(events: Sequence[RunEvent], step_id: str) -> int | None:
     return next((e.seq for e in events if e.type == "step_started" and (e.data or {}).get("step_id") == step_id), None)
 
 
-def open_approvals(event_log: Any, tenant_id: str, open_rows: Iterable[Mapping[str, Any]]) -> list[OpenApproval]:
+def open_approvals(reader: Any, tenant_id: str, open_rows: Iterable[Mapping[str, Any]]) -> list[OpenApproval]:
     """The open approvals of `ThreadInterrupts.open_rows` with their waiting events' data, in the
     order they were requested (requested_at, then the waiting event's seq within a run). A row
     whose waiting event is missing (never expected) is left out."""
@@ -212,7 +210,7 @@ def open_approvals(event_log: Any, tenant_id: str, open_rows: Iterable[Mapping[s
     for row in open_rows:
         kind, key, run_id = row["kind"], str(row["approval_key"]), str(row["run_id"])
         event_key = f"tool:{key}:approval:waiting" if kind == "tool" else f"step:{key}:waiting"
-        event = event_log.get_event(tenant_id, uuid.UUID(run_id), event_key)
+        event = reader.get_event(tenant_id, uuid.UUID(run_id), event_key)
         if event is None:
             continue
         found.append((row.get("requested_at"), event.seq, OpenApproval(run_id, kind, key, dict(event.data or {}))))

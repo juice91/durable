@@ -65,19 +65,17 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_observability import log_failure
 
-from eap_api.deps import get_ag_ui_store, get_approval_store, get_chat_attachment_store, get_database_engine, get_delta_source, get_stream_limiter, require_run_storage
+from eap_api.deps import get_delta_source, get_stream_limiter
 from eap_api.ag_ui.frames import (
     KEEP_ALIVE,
     custom_frame,
@@ -94,7 +92,6 @@ from eap_api.ag_ui.input import (
     AgUiInput,
     AgUiInputError,
     NO_NEW_INPUT,
-    RESOURCE_MISMATCH,
     agui_max_body_bytes,
     check_agent_input,
     check_client_tool_clashes,
@@ -121,11 +118,7 @@ from eap_api.ag_ui.resume_entries import (
     thread_interrupts,
     waiting_seq,
 )
-from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
-from eap_run_store.chat_attachments import max_attachment_bytes
-from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY, ChatAttachmentStore, MessageFeedbackStore, accepts_by_capabilities
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
-from eap_api import model_discovery
 from eap_api.agent_archive import AGENT_ARCHIVED
 from eap_api.attachments_shared import (
     attachment_response,
@@ -134,15 +127,21 @@ from eap_api.attachments_shared import (
     read_upload,
     store_upload,
 )
-from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, get_api_key_store, require_agui_agent
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
-from eap_api.models import AgentModel
+from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, require_agui_agent
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
-from eap_api.routes.conversations import new_turn_options, record_and_launch_turn
-from eap_api.run_options import RunOptions
-from eap_api.routes.runs import launch_recorded_run, lock_agent
 from eap_api.schemas import ErrorDetail
+from eap_api.service_deps.agui import AgUiServiceDep
+from eap_api.service_errors import to_http_exception
+from eap_api.services.ag_ui import (
+    FINGERPRINT_CONFLICT_DETAIL,
+    UNKNOWN_RUN_DETAIL,
+    AgUiRunRecord,
+    AgUiService,
+    ThreadView,
+    TurnRun,
+)
+from eap_api.services.attachments import max_attachment_bytes
+from eap_api.services.errors import ServiceError
 from eap_api.sse import (
     DeltaSource,
     StreamLease,
@@ -155,29 +154,23 @@ from eap_api.sse import (
 from eap_api.streams.formatter import format_stream
 from eap_api.streams.native import run_items
 from eap_api.streams.resume import LastEventIdError, StreamPlan, parse_last_event_id, plan_stream
-from eap_run_store import (
-    AgUiRunModel,
-    AgUiRunRecord,
-    AgUiRunWrite,
-    AgUiScopeMismatch,
-    AgUiStore,
-    ApprovalStore,
-    ConversationIdConflict,
-    ConversationResourceConflict,
-    EventLog,
-    RunNotFound,
-    RunStore,
-    TurnInProgress,
-)
 from eap_schemas import RunEvent
+
+# TODO(layering): the turn recording below waits for the agents group's ConversationService
+# (record_and_launch_turn / new_turn_options without HTTPException); then these imports go.
+from sqlalchemy.orm import Session
+from eap_api.routes.conversations import new_turn_options, record_and_launch_turn
+from eap_api.routes.runs import lock_agent
+from eap_api.run_options import RunOptions
+from eap_run_store import AgUiRunWrite, AgUiScopeMismatch, TurnInProgress
+from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY
+import dataclasses
 
 log = logging.getLogger("eap_api")
 
 PREVIOUS_TURN_WAIT_ENV = "EAP_AGUI_PREVIOUS_TURN_WAIT_S"
 DEFAULT_PREVIOUS_TURN_WAIT_S = 120.0
 DEFAULT_KEY_RECHECK_S = 60.0
-UNKNOWN_RUN_DETAIL = "Unknown runId"
-FINGERPRINT_CONFLICT_DETAIL = "runId was already used with a different input"
 STREAM_LIMIT_DETAIL = "Concurrent SSE stream limit reached; retry after another stream closes"
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -223,21 +216,19 @@ def get_agui_settings() -> AgUiRouteSettings:
 
 @dataclass
 class _Ctx:
-    """What one request needs, off the event loop."""
+    """What one request needs: the service, the caller and the agent of the path."""
 
-    engine: Any
-    run_store: RunStore
-    event_log: EventLog
-    ag_ui: AgUiStore
-    approvals: ApprovalStore
-    api_keys: Any
+    svc: AgUiService
     principal: AgUiPrincipal
     agent_id: str
-    launcher: RunLauncher | None = None
 
     @property
     def tenant_id(self) -> str:
         return self.principal.tenant_id
+
+    @property
+    def via_api_key(self) -> bool:
+        return self.principal.is_api_key
 
     def key(self, thread_id: str, run_id: str) -> dict[str, str]:
         return {
@@ -248,19 +239,8 @@ class _Ctx:
         }
 
 
-def _ctx(request: Request, principal: AgUiPrincipal, agent_id: str, launcher: RunLauncher | None = None) -> _Ctx:
-    run_store, event_log = require_run_storage(request)
-    return _Ctx(
-        engine=get_database_engine(request),
-        run_store=run_store,
-        event_log=event_log,
-        ag_ui=get_ag_ui_store(request),
-        approvals=get_approval_store(request),
-        api_keys=get_api_key_store(request),
-        principal=principal,
-        agent_id=agent_id,
-        launcher=launcher,
-    )
+def _ctx(svc: AgUiService, principal: AgUiPrincipal, agent_id: str) -> _Ctx:
+    return _Ctx(svc=svc, principal=principal, agent_id=agent_id)
 
 
 # --------------------------------------------------------------------------- request checks
@@ -334,176 +314,13 @@ def _plan_or_raise(plan: StreamPlan) -> StreamPlan:
 # --------------------------------------------------------------------------- reads
 
 
-def _thread_message_ids(c: _Ctx, thread_id: str) -> list[tuple[str, ...]]:
-    """The client user-message ids recorded by each AG-UI run of this thread, oldest first."""
-    with Session(c.engine) as session:
-        rows = session.execute(
-            select(AgUiRunModel.input_message_ids)
-            .where(
-                AgUiRunModel.tenant_id == c.tenant_id,
-                AgUiRunModel.scope_kind == "agent",
-                AgUiRunModel.scope_id == c.agent_id,
-                AgUiRunModel.external_thread_id == thread_id,
-            )
-            .order_by(AgUiRunModel.created_at, AgUiRunModel.external_run_id)
-        ).scalars()
-        return [tuple(str(i) for i in (ids or []) if isinstance(i, str)) for ids in rows]
-
-
-@dataclass(frozen=True)
-class _TurnRun:
-    external_run_id: str
-    input_message_ids: tuple[str, ...]
-
-
-def _records_by_run(c: _Ctx, run_ids: list[str]) -> dict[str, _TurnRun]:
-    """The AG-UI run that started each of these turns (the row with the lowest from_seq)."""
-    if not run_ids:
-        return {}
-    with Session(c.engine) as session:
-        rows = session.execute(
-            select(AgUiRunModel)
-            .where(
-                AgUiRunModel.tenant_id == c.tenant_id,
-                AgUiRunModel.scope_kind == "agent",
-                AgUiRunModel.scope_id == c.agent_id,
-                AgUiRunModel.run_id.in_(run_ids),
-            )
-            .order_by(AgUiRunModel.from_seq.desc(), AgUiRunModel.created_at.desc())
-        ).scalars().all()
-        # The last assignment wins: the lowest from_seq.
-        return {
-            row.run_id: _TurnRun(row.external_run_id, tuple(str(i) for i in (row.input_message_ids or ())))
-            for row in rows
-        }
-
-
-def _end_seq(c: _Ctx, record: AgUiRunRecord) -> int | None:
-    """Where this AG-UI run ended when a later AG-UI run continues the same durable run (a resume
-    run after an interrupt, AGUI.8): the first later row's from_seq. None otherwise."""
-    with Session(c.engine) as session:
-        return session.execute(
-            select(func.min(AgUiRunModel.from_seq)).where(
-                AgUiRunModel.tenant_id == c.tenant_id,
-                AgUiRunModel.run_id == record.run_id,
-                AgUiRunModel.from_seq > record.from_seq,
-            )
-        ).scalar_one_or_none()
-
-
-def _model_requests(c: _Ctx, run_id: str) -> dict[str, Any]:
-    """`RunSummary` data for `RUN_FINISHED.usage`: the run's `run_model_requests` rows."""
-    with c.engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT model_id, request_key, operation, input_tokens, output_tokens,"
-                " cache_read_tokens, cache_write_tokens FROM run_model_requests"
-                " WHERE tenant_id = :t AND run_id = :r ORDER BY created_at, request_key"
-            ),
-            {"t": c.tenant_id, "r": run_id},
-        ).mappings().all()
-    return {"model_requests": [dict(r) for r in rows]}
-
-
-def _turn_entry(prefix: str, client_id: str | None, run: dict[str, Any], done: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """One earlier turn's AG-UI messages: from its stored messages when it completed with them,
-    else its user input (and a completed run's output as the assistant answer)."""
-    if done is not None and done.get("messages"):
-        structured = done.get("output") if run.get("output_format") == "json" else None
-        return turn_messages(prefix, done["messages"], user_message_client_id=client_id, structured_output=structured)
-    out: list[dict[str, Any]] = []
-    if run.get("input"):
-        out.append(user_message(prefix, run["input"], client_id))
-    if done is not None and done.get("output"):
-        out.append({"id": assistant_message_id(prefix, 0), "role": "assistant", "content": done["output"]})
-    return out
-
-
-@dataclass
-class _ThreadView:
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    runs: list[dict[str, Any]] = field(default_factory=list)
-    active_run_id: str | None = None
-
-
-def _thread_view(
-    c: _Ctx, conversation_id: str, before_turn: int | None = None, later_ids: tuple[str, ...] = ()
-) -> _ThreadView:
-    """The thread's turns below `before_turn` (all when None) as AG-UI messages, oldest first.
-    Ids follow D13 with the AG-UI runId that started each turn as the prefix (the native run id
-    for a turn started elsewhere, e.g. Studio's REST chat).
-
-    Regenerates (D5, D7): a turn whose user message a later turn sends again (a regenerate
-    re-POSTs the same user message under a new runId) is superseded: the later turn shows the
-    same first client id, or re-sends all of the earlier turn's ids. Its messages are
-    left out, so the thread shows the user message once, followed by the latest branch's answer,
-    and AG-UI message ids stay unique in the thread. The superseded turn stays in `runs` with
-    `superseded: true` (it is still a run, with its own usage and trace). `later_ids` are the
-    user-message ids of a turn after `before_turn` (the run being streamed), which supersede too."""
-    turns = c.run_store.list_turns(c.tenant_id, conversation_id)
-    if before_turn is not None:
-        turns = [t for t in turns if t["turn"] < before_turn]
-    if not turns:
-        return _ThreadView()
-    last = turns[-1]["turn"] + 1
-    completed = {str(t["run_id"]): t for t in c.run_store.completed_turns_before(c.tenant_id, conversation_id, last)}
-    records = _records_by_run(c, [str(t["id"]) for t in turns])
-    # Walk newest first. A turn shows its user message under its first client id, so an earlier
-    # turn is superseded when a later turn (or `later_ids`) shows the same first id, or re-sends
-    # all of its ids: ids stay unique, and a turn re-running only part of an earlier turn's
-    # messages (a regenerate of u1 after [u0, u1]) leaves that earlier turn's text in place.
-    later: list[tuple[str, ...]] = [later_ids] if later_ids else []
-    superseded: set[str] = set()
-    for t in reversed(turns):
-        rec = records.get(str(t["id"]))
-        ids = rec.input_message_ids if rec is not None else ()
-        if ids and any(l[0] == ids[0] or set(ids) <= set(l) for l in later):
-            superseded.add(str(t["id"]))
-        if ids:
-            later.append(ids)
-    view = _ThreadView()
-    for t in turns:
-        run_id = str(t["id"])
-        rec = records.get(run_id)
-        prefix = rec.external_run_id if rec is not None else run_id
-        client_id = rec.input_message_ids[0] if rec is not None and rec.input_message_ids else None
-        if run_id not in superseded:
-            view.messages += _turn_entry(prefix, client_id, t, completed.get(run_id))
-        view.runs.append(
-            {
-                "runId": rec.external_run_id if rec is not None else None,
-                "run_id": run_id,
-                "turn": t["turn"],
-                "status": t["status"],
-                "display_status": t["display_status"],
-                "superseded": run_id in superseded,
-            }
-        )
-        if t["status"] not in TERMINAL_STATUSES and rec is not None:
-            view.active_run_id = rec.external_run_id
-    view.messages = _with_attachment_parts(c, view.messages)
-    return view
-
-
-def _starter(c: _Ctx, record: AgUiRunRecord) -> _TurnRun:
-    """The AG-UI run that started the record's turn: the record itself, or for a resume run
-    (AGUI.8, from_seq > -1) the turn's first AG-UI run, whose ids the turn's messages keep."""
-    if record.from_seq < 0:
-        return _TurnRun(record.external_run_id, record.input_message_ids)
-    return _records_by_run(c, [record.run_id]).get(record.run_id) or _TurnRun(record.external_run_id, ())
-
-
 def _history(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord) -> list[dict[str, Any]]:
-    """`AgUiStreamContext.history`: the thread's earlier turns (those this run regenerates left
-    out, see _thread_view), then this run's user message."""
-    starter = _starter(c, record)
-    out = _thread_view(
-        c, str(run["conversation_id"]), before_turn=run["turn"], later_ids=starter.input_message_ids
-    ).messages
-    if run.get("input"):
-        client_id = starter.input_message_ids[0] if starter.input_message_ids else None
-        out.append(user_message(starter.external_run_id, run["input"], client_id))
-    return _with_attachment_parts(c, out)
+    """`AgUiStreamContext.history`: the thread's earlier turns, then this run's user message."""
+    return c.svc.history(c.tenant_id, c.agent_id, run, record, via_api_key=c.via_api_key)
+
+
+def _starter(c: _Ctx, record: AgUiRunRecord) -> TurnRun:
+    return c.svc.starter(c.tenant_id, c.agent_id, record)
 
 
 def _run_info(run: dict[str, Any]) -> dict[str, Any]:
@@ -552,11 +369,11 @@ class _Wait:
 
 
 def _prepare_known(c: _Ctx, record: AgUiRunRecord, *, same_fingerprint: bool, last_event_id: str | None,
-                   launch: Session | None) -> _Prepared:
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(record.run_id))
+                   relaunch: bool) -> _Prepared:
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(record.run_id))
     if run is None:  # deleted with its conversation's runs: the row cascades, so never expected
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
-    events = c.event_log.list_events(c.tenant_id, uuid.UUID(record.run_id))
+    events = c.svc.list_events(c.tenant_id, uuid.UUID(record.run_id))
     plan = _plan_or_raise(
         plan_stream(
             run_id=record.external_run_id,
@@ -566,13 +383,12 @@ def _prepare_known(c: _Ctx, record: AgUiRunRecord, *, same_fingerprint: bool, la
             from_seq=record.from_seq,
             last_event_id=last_event_id,
             max_seq=events[-1].seq if events else None,
-            end_seq=_end_seq(c, record),
+            end_seq=c.svc.end_seq(c.tenant_id, record),
         )
     )
-    if launch is not None:
+    if relaunch:
         # The POST of a known runId re-sends the hand-off: a crash between insert and enqueue heals.
-        assert c.launcher is not None
-        run = launch_recorded_run(launch, c.launcher, c.run_store, c.tenant_id, run, False)
+        run = c.svc.relaunch_turn(c.tenant_id, run)
     upto = plan.after_seq if plan.mode == "continue" else record.from_seq
     return _Prepared(
         plan=plan, run=run, record=record, prior=[e for e in events if e.seq <= upto], history=_history(c, run, record),
@@ -592,7 +408,7 @@ def _fresh(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord, created: bool) -
             max_seq=None,
         )
     )
-    prior = c.event_log.list_events(c.tenant_id, uuid.UUID(record.run_id)) if record.from_seq >= 0 else []
+    prior = c.svc.list_events(c.tenant_id, uuid.UUID(record.run_id)) if record.from_seq >= 0 else []
     return _Prepared(
         plan=plan, run=run, record=record, prior=[e for e in prior if e.seq <= record.from_seq],
         history=_history(c, run, record), prefix=_starter(c, record).external_run_id,
@@ -630,7 +446,7 @@ def _deduped(body: Any, mapped: AgUiInput, recorded_runs: list[tuple[str, ...]])
     the **latest** recorded run that holds any of the tail's ids, and only those (an earlier
     turn's message the tail still carries, e.g. [u1, u2] after a lost stream, stays deduped).
     The new turn then has exactly that run's ids, so it supersedes that turn alone in snapshots
-    (`_thread_view`)."""
+    (`AgUiService.thread_view`)."""
     recorded = {i for ids in recorded_runs for i in ids}
     if not recorded or not any(i in recorded for i in mapped.input_message_ids):
         return mapped
@@ -653,8 +469,7 @@ def _deduped(body: Any, mapped: AgUiInput, recorded_runs: list[tuple[str, ...]])
 
 
 def _latest_turn_id(c: _Ctx, conversation_id: str) -> str | None:
-    turns = c.run_store.list_turns(c.tenant_id, conversation_id)
-    return str(turns[-1]["id"]) if turns else None
+    return c.svc.latest_turn_id(c.tenant_id, conversation_id)
 
 
 def _open_and_decided_interrupts(c: _Ctx, latest: str | None) -> ThreadInterrupts:
@@ -662,8 +477,7 @@ def _open_and_decided_interrupts(c: _Ctx, latest: str | None) -> ThreadInterrupt
     terminal), and decided or otherwise known ones."""
     if latest is None:
         return ThreadInterrupts([], [], [])
-    rows = [r for r in c.approvals.list_for_run(c.tenant_id, latest) if r["run_id"] == latest]
-    return thread_interrupts(rows, kinds=("tool",))
+    return thread_interrupts(c.svc.open_and_decided_rows(c.tenant_id, latest), kinds=("tool",))
 
 
 def _resume_turn(c: _Ctx, mapped: AgUiInput, fp: str, turn_id: str, decisions: list[ResumeDecision]) -> _Prepared:
@@ -673,19 +487,14 @@ def _resume_turn(c: _Ctx, mapped: AgUiInput, fp: str, turn_id: str, decisions: l
     heals while the turn still waits on that batch (the ids are decided, check_resume_covers
     accepts them, `decide` answers `exists`); once the woken turn has opened a new batch, it is 422
     resume_missing_interrupt, and the client recovers through Q5 (a new runId without resume)."""
-    apply_decisions(c.event_log, c.launcher, c.tenant_id, decisions, c.principal.default_resource_id)
-    events = c.event_log.list_events(c.tenant_id, uuid.UUID(turn_id))
+    apply_decisions(c.svc, c.tenant_id, decisions, c.principal.default_resource_id)
+    events = c.svc.list_events(c.tenant_id, uuid.UUID(turn_id))
     seqs = [s for d in decisions if (s := waiting_seq(events, "tool", d.ref.key)) is not None]
     from_seq = max(seqs) if seqs else (events[-1].seq if events else -1)
-    try:
-        record, created = c.ag_ui.record_ag_ui_run(
-            c.tenant_id, **c.key(mapped.thread_id, mapped.run_id), run_id=turn_id, fingerprint=fp, from_seq=from_seq
-        )
-    except AgUiScopeMismatch:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another agent")
-    if not created and record.fingerprint != fp:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FINGERPRINT_CONFLICT_DETAIL)
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(turn_id))
+    record, created = c.svc.record_resume_run(
+        c.tenant_id, c.key(mapped.thread_id, mapped.run_id), turn_id=turn_id, fingerprint=fp, from_seq=from_seq
+    )
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(turn_id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
     log.info("ag-ui resume %s recorded on run %s: %d decision(s)", mapped.run_id, turn_id, len(decisions))
@@ -699,10 +508,10 @@ def _reinterrupt(
     is recorded; the stream is RUN_STARTED (unless the client holds it, `{runId}:-1`), CUSTOM run,
     MESSAGES_SNAPSHOT (the turn so far, naming the gated calls), one CUSTOM approval_required per
     open approval and RUN_FINISHED with all of them, in the order they were requested."""
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(turn_id))
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(turn_id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
-    events = c.event_log.list_events(c.tenant_id, uuid.UUID(turn_id))
+    events = c.svc.list_events(c.tenant_id, uuid.UUID(turn_id))
     max_seq = events[-1].seq if events else -1
     record = AgUiRunRecord(
         tenant_id=c.tenant_id, scope_kind="agent", scope_id=c.agent_id, external_thread_id=mapped.thread_id,
@@ -716,7 +525,7 @@ def _reinterrupt(
             prior_events=events, message_prefix=_starter(c, record).external_run_id,
         )
     )
-    approvals = open_approvals(c.event_log, c.tenant_id, interrupts.open_rows)
+    approvals = open_approvals(c.svc, c.tenant_id, interrupts.open_rows)
     log.info("ag-ui run %s re-sends %d open interrupt(s) of run %s; nothing recorded",
              mapped.run_id, len(approvals), turn_id)
     return _Prepared(
@@ -733,63 +542,15 @@ def _ensure_conversation(c: _Ctx, thread: AgentThread, mapped: AgUiInput) -> Non
         user_id=c.principal.user_id if not c.principal.is_api_key else None,
         api_key_id=c.principal.key_id if c.principal.is_api_key else None,
     )
-    try:
-        c.run_store.create_conversation(
-            c.tenant_id,
-            c.agent_id,
-            None,
-            thread.conversation_id,
-            resource_id=resource_id,
-            external_thread_id=thread.external_thread_id,
-        )
-    except ConversationResourceConflict:
-        # A concurrent first run of the thread created it with another resource.
-        raise AgUiInputError(
-            status.HTTP_409_CONFLICT,
-            RESOURCE_MISMATCH,
-            ["forwardedProps", "pydanticos", "resourceId"],
-            "this thread already has another resource; resourceId cannot change",
-        )
-    except ConversationIdConflict:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
+    c.svc.ensure_conversation(
+        c.tenant_id, c.agent_id, thread.conversation_id, thread.external_thread_id, resource_id
+    )
 
 
 def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> dict[str, Any] | None:
-    """422 before anything is written: every referenced attachment exists in this tenant, is not
-    already sent in another message, and the run's model takes its media type (W2.4).
-
-    Returns the run's attachment capabilities `{image, pdf, source}`, decided here once from
-    discovery (eap_api.model_discovery.capabilities_for); the run records them on
-    `runs.model_settings.attachment_capabilities` and the worker reads them back. None when the
-    request sends no file. A model whose capabilities are only `assumed` is refused with words that
-    say so, not as a fact about the model."""
-    if not mapped.attachments:
-        return None
-    provider, _, name = model_id.partition(":")
-    capabilities = model_discovery.capabilities_for(provider, name).public()
-    metas = ChatAttachmentStore(c.engine).metas(c.tenant_id, [i for _, ids in mapped.attachments for i in ids])
-    caller = created_by_for(c.principal)  # another principal's unsent upload is "not found"
-    for message_id, ids in mapped.attachments:
-        for attachment_id in ids:
-            meta = metas.get(attachment_id)
-            if meta is None or (meta.message_id is None and meta.created_by != caller):
-                raise AgUiInputError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_not_found", ["messages"],
-                    f"attachment {attachment_id} was not found; upload it with POST /attachments",
-                )
-            if meta.message_id is not None and meta.message_id != message_id:
-                raise AgUiInputError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_in_use", ["messages"],
-                    f"attachment {attachment_id} was already sent in another message",
-                )
-            if not accepts_by_capabilities(capabilities, meta.media_type):
-                error = AgUiInputError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_unsupported_by_model", ["messages"],
-                    _unsupported_message(model_id, meta.media_type, capabilities["source"]),
-                )
-                error.detail[0].update({"media_type": meta.media_type, "source": capabilities["source"]})
-                raise error
-    return capabilities
+    """422 before anything is written (AgUiService.check_attachments); the run's attachment
+    capabilities `{image, pdf, source}`, None when the request sends no file."""
+    return c.svc.check_attachments(c.tenant_id, created_by_for(c.principal), mapped.attachments, model_id)
 
 
 def _with_attachment_capabilities(options: RunOptions, capabilities: dict[str, Any] | None) -> RunOptions:
@@ -800,55 +561,9 @@ def _with_attachment_capabilities(options: RunOptions, capabilities: dict[str, A
     return dataclasses.replace(options, model_settings={**(options.model_settings or {}), ATTACHMENT_CAPABILITIES_KEY: capabilities})
 
 
-def _unsupported_message(model_id: str, media_type: str, source: str) -> str:
-    if source == "assumed":
-        return (
-            f"model {model_id} is assumed not to accept {media_type} (its provider did not report file "
-            "support, so this is a guess from the provider); text files are always accepted"
-        )
-    return f"model {model_id} does not accept {media_type} ({source} capabilities); text files are always accepted"
-
-
 def _link_attachments(c: _Ctx, mapped: AgUiInput, run_id: str) -> None:
-    """Link each message's uploads to run `run_id`. Only the caller's own uploads link (the same check
-    as `_check_attachments`, repeated here under the update so a race cannot slip a foreign one in):
-    another principal's upload is reported as not found, like an unknown id."""
-    store = ChatAttachmentStore(c.engine)
-    caller = created_by_for(c.principal)
-    for message_id, ids in mapped.attachments:
-        linked = store.link(c.tenant_id, ids, message_id=message_id, run_id=run_id, created_by=caller)
-        for attachment_id in ids:
-            if attachment_id not in linked:
-                raise AgUiInputError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT, "attachment_not_found", ["messages"],
-                    f"attachment {attachment_id} was not found; upload it with POST /attachments",
-                )
-
-
-def _with_attachment_parts(c: _Ctx, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """User messages that sent attachments carry AG-UI 1.0 media parts (text first)."""
-    ids = [m["id"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
-    by_message = ChatAttachmentStore(c.engine).for_messages(c.tenant_id, ids)
-    if not by_message:
-        return messages
-    # An API key fetches through the AG-UI twin; the dev bearer through the dev route.
-    base = "/api/v1/ag-ui/attachments" if c.principal.is_api_key else "/api/v1/attachments"
-    out: list[dict[str, Any]] = []
-    for m in messages:
-        files = by_message.get(m.get("id")) if m.get("role") == "user" else None
-        if not files:
-            out.append(m)
-            continue
-        parts: list[dict[str, Any]] = [{"type": "text", "text": m["content"]}] if m["content"] else []
-        for f in files:
-            kind = "image" if f.media_type.startswith("image/") else "document"
-            parts.append({
-                "type": kind,
-                "source": {"type": "url", "value": f"{base}/{f.id}", "mimeType": f.media_type},
-                "metadata": {"attachmentId": f.id, "filename": f.name, "size": f.size},
-            })
-        out.append({**m, "content": parts})
-    return out
+    """Link each message's uploads to run `run_id` (only the caller's own)."""
+    c.svc.link_attachments(c.tenant_id, created_by_for(c.principal), mapped.attachments, run_id)
 
 
 def _tool_dicts(mapped: AgUiInput) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
@@ -860,27 +575,25 @@ def _tool_dicts(mapped: AgUiInput) -> tuple[list[dict[str, Any]] | None, list[di
 def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
     """Record and hand off the turn (raises TurnInProgress while the previous turn runs). Validated
     again under the agent lock, so an archive or a version change during a wait is seen."""
-    assert c.launcher is not None
+    svc = c.svc
     mapped, effective = new.mapped, new.effective
     key = c.key(mapped.thread_id, mapped.run_id)
 
     def same_fingerprint(run: dict[str, Any]) -> bool:
         # A concurrent POST of this runId created the turn (created False): compare its AG-UI row.
-        record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
-        if record is None:
-            record, _ = c.ag_ui.record_ag_ui_run(
-                c.tenant_id, **key, run_id=str(run["id"]), fingerprint=new.fingerprint,
-                input_message_ids=effective.input_message_ids,
-            )
+        record = svc.record_concurrent(
+            c.tenant_id, key, run_id=str(run["id"]), fingerprint=new.fingerprint,
+            input_message_ids=effective.input_message_ids,
+        )
         return record.fingerprint == new.fingerprint
 
     tools, results = _tool_dicts(effective)
     _link_attachments(c, effective, new.native_run_id)  # before the launch: the worker reads them through the turn's message ids
-    with Session(c.engine) as db:
+    with Session(svc.engine) as db:
         agent = lock_agent(db, c.tenant_id, c.agent_id)
         try:
             run, created = record_and_launch_turn(
-                db, c.launcher, c.run_store, c.tenant_id, new.conversation_id,
+                db, svc.launcher, svc.run_store, c.tenant_id, new.conversation_id,
                 run_id=new.native_run_id,
                 new_options=lambda: _with_attachment_capabilities(
                     new_turn_options(
@@ -905,7 +618,7 @@ def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
         except AgUiScopeMismatch:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another agent")
         db.commit()
-    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
+    record = svc.get_ag_ui_run(c.tenant_id, **key)
     assert record is not None  # written with the turn, or by same_fingerprint
     if created:
         log.info("ag-ui run %s recorded: tenant=%s agent=%s", run["id"], c.tenant_id, c.agent_id)
@@ -920,25 +633,20 @@ def _prepare_post(
     fp = fingerprint(mapped)
     key = c.key(mapped.thread_id, mapped.run_id)
     native_run_id = derive_agent_run_id(c.tenant_id, c.agent_id, mapped.thread_id, mapped.run_id)
-    _load_agent_or_404(c)  # tenant-scoped: another tenant's agent is 404 before anything else
-    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
-    if record is None and c.run_store.get_run(c.tenant_id, uuid.UUID(native_run_id)) is not None:
+    c.svc.require_agent(c.tenant_id, c.agent_id)  # tenant-scoped: another tenant's agent is 404 before anything else
+    record = c.svc.get_ag_ui_run(c.tenant_id, **key)
+    if record is None and c.svc.get_run(c.tenant_id, uuid.UUID(native_run_id)) is not None:
         # The turn exists without its AG-UI row (recorded by a path that did not write it):
         # record it now, first writer wins, then treat the runId as known.
-        try:
-            record, _ = c.ag_ui.record_ag_ui_run(
-                c.tenant_id, **key, run_id=native_run_id, fingerprint=fp,
-                input_message_ids=mapped.input_message_ids,
-            )
-        except (AgUiScopeMismatch, RunNotFound):
-            record = None
+        record = c.svc.adopt_turn(
+            c.tenant_id, key, run_id=native_run_id, fingerprint=fp, input_message_ids=mapped.input_message_ids
+        )
     if record is not None:
         # A replay starts nothing new, so it takes no agent lock (an archive or publish never
         # waits for its event and history loads); an archived agent's runs still attach.
-        with Session(c.engine) as db:
-            return _prepare_known(
-                c, record, same_fingerprint=record.fingerprint == fp, last_event_id=header, launch=db
-            )
+        return _prepare_known(
+            c, record, same_fingerprint=record.fingerprint == fp, last_event_id=header, relaunch=True
+        )
     continuation = False
     if header:
         # Only `{runId}:-1` may name a runId not recorded yet: a client that lost the stream during
@@ -951,11 +659,11 @@ def _prepare_post(
         if not continuation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
 
-    with Session(c.engine) as db:
+    with Session(c.svc.engine) as db:
         agent = lock_agent(db, c.tenant_id, c.agent_id)
         # A new runId: validate everything before anything is written.
-        thread = resolve_agent_thread(c.run_store, c.tenant_id, c.agent_id, mapped.thread_id)
-        effective = _deduped(body, mapped, _thread_message_ids(c, mapped.thread_id))
+        thread = resolve_agent_thread(c.svc, c.tenant_id, c.agent_id, mapped.thread_id)
+        effective = _deduped(body, mapped, c.svc.thread_message_ids(c.tenant_id, c.agent_id, mapped.thread_id))
         options = new_turn_options(
             db, c.tenant_id, agent,
             version=effective.options.version,
@@ -969,7 +677,7 @@ def _prepare_post(
         if thread.exists:
             assert thread.conversation is not None
             check_thread_resource(thread.conversation, effective.options)
-            pending = c.ag_ui.pending_client_tool_calls(c.tenant_id, thread.conversation_id, before_run_id=native_run_id)
+            pending = c.svc.pending_client_tool_calls(c.tenant_id, thread.conversation_id, before_run_id=native_run_id)
             latest = _latest_turn_id(c, thread.conversation_id)
             interrupts = _open_and_decided_interrupts(c, latest)
         else:
@@ -1008,8 +716,10 @@ def _prepare_post(
 # --------------------------------------------------------------------------- streaming
 
 
-def _http_error_frame(exc: HTTPException) -> str:
+def _http_error_frame(exc: HTTPException | ServiceError) -> str:
     """A refusal after the stream opened (the previous-turn wait), as `RUN_ERROR`."""
+    if isinstance(exc, ServiceError):
+        exc = to_http_exception(exc)
     detail = exc.detail
     if isinstance(detail, list) and detail and isinstance(detail[0], dict):
         return run_error_frame(str(detail[0].get("msg") or "The run could not be started."), str(detail[0].get("type") or ""))
@@ -1046,11 +756,11 @@ def _frames(d: _StreamDeps, p: _Prepared, *, after_wait: bool = False) -> AsyncI
     items = run_items(
         run_id=p.record.run_id,
         after_seq=p.plan.after_seq,
-        load_events=lambda after: c.event_log.list_events(c.tenant_id, native, after_seq=after),
-        load_run=lambda: c.run_store.get_run(c.tenant_id, native),
+        load_events=lambda after: c.svc.list_events(c.tenant_id, native, after_seq=after),
+        load_run=lambda: c.svc.get_run(c.tenant_id, native),
         delta_source=d.delta_source,
         settings=d.settings,
-        load_summary=lambda: _model_requests(c, p.record.run_id),
+        load_summary=lambda: c.svc.model_requests(c.tenant_id, p.record.run_id),
         load_feedback=lambda: _viewer_feedback(c, p.record.run_id),
     )
     formatter = AgUiFormatter(
@@ -1083,14 +793,14 @@ async def _wait_then_stream(d: _StreamDeps, wait: _Wait) -> AsyncIterator[str]:
     deadline = time.monotonic() + d.agui.previous_turn_wait_s
     next_keep_alive = time.monotonic() + d.settings.heartbeat_interval
     while True:
-        previous = await asyncio.to_thread(c.run_store.get_run, c.tenant_id, uuid.UUID(busy))
+        previous = await asyncio.to_thread(c.svc.get_run, c.tenant_id, uuid.UUID(busy))
         if previous is None or previous["status"] in TERMINAL_STATUSES:
             try:
                 prepared = await run_in_threadpool(_record, c, new)
             except TurnInProgress as again:  # yet another turn started meanwhile: wait for it too
                 busy = again.run_id
                 continue
-            except HTTPException as exc:
+            except (HTTPException, ServiceError) as exc:
                 yield _http_error_frame(exc)
                 return
             break
@@ -1110,8 +820,7 @@ async def _wait_then_stream(d: _StreamDeps, wait: _Wait) -> AsyncIterator[str]:
 def _key_active(c: _Ctx) -> bool:
     """The stream's key is still active: a plain read of its row (revoked_at, expires_at), not
     `authenticate`, so the re-check neither needs the secret nor touches last_used_at."""
-    record = c.api_keys.get(c.tenant_id, c.principal.key_id or "")
-    return record is not None and record.status() == "active"
+    return c.svc.key_is_active(c.tenant_id, c.principal.key_id or "")
 
 
 async def _rechecking_key(stream: AsyncIterator[str], c: _Ctx, interval: float) -> AsyncIterator[str]:
@@ -1159,7 +868,7 @@ async def run_agent(
     agent_id: str,
     request: Request,
     principal: AgUiPrincipalDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    svc: AgUiServiceDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
     limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
@@ -1173,7 +882,7 @@ async def run_agent(
     check_agent_input(mapped)
     check_principal_options(mapped.options, is_api_key=principal.is_api_key)
     decisions = resume_decisions(mapped.resume)  # the D15 payload rules: 422 before anything else
-    c = _ctx(request, principal, agent, launcher)
+    c = _ctx(svc, principal, agent)
     lease = _acquire(limiter, principal)
     try:
         prepared = await run_in_threadpool(_prepare_post, c, body, mapped, last_event_id, decisions)
@@ -1187,41 +896,29 @@ async def run_agent(
     return _response(d, _frames(d, prepared), lease)
 
 
-def _load_agent_or_404(c: _Ctx) -> None:
-    with Session(c.engine) as db:
-        found = db.execute(
-            select(AgentModel.id).where(AgentModel.id == c.agent_id, AgentModel.tenant_id == c.tenant_id)
-        ).first()
-    if found is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-
-
 def _viewer_feedback(c: _Ctx, run_id: str) -> list[dict[str, Any]]:
     """The viewing user's own feedback on one turn, for the replay (a tenant-mate's rating or comment
     is never sent). API keys have no user, so they see none."""
     viewer = feedback_viewer(c.principal)
     if viewer is None:
         return []
-    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, [run_id], created_by=viewer)
-    return [{"message_id": r.message_id, "rating": r.rating, "comment": r.comment} for r in rows]
+    return c.svc.viewer_feedback(c.tenant_id, run_id, viewer)
 
 
 def _thread_feedback(c: _Ctx, conversation_id: str) -> dict[str, Any]:
     viewer = feedback_viewer(c.principal)
     if viewer is None:
         return {}
-    ids = [str(t["id"]) for t in c.run_store.list_turns(c.tenant_id, conversation_id)]
-    rows = MessageFeedbackStore(c.engine).for_runs(c.tenant_id, ids, created_by=viewer)
-    return {
-        r.message_id: {"rating": r.rating, "comment": r.comment, "updated_at": r.updated_at.isoformat()}
-        for r in rows
-    }
+    return c.svc.thread_feedback(c.tenant_id, conversation_id, viewer)
 
 
 def _thread_json(c: _Ctx, thread_id: str) -> dict[str, Any]:
-    _load_agent_or_404(c)
-    thread = resolve_agent_thread(c.run_store, c.tenant_id, c.agent_id, thread_key(thread_id))
-    view = _thread_view(c, thread.conversation_id) if thread.exists else _ThreadView()
+    c.svc.require_agent(c.tenant_id, c.agent_id)
+    thread = resolve_agent_thread(c.svc, c.tenant_id, c.agent_id, thread_key(thread_id))
+    view = (
+        c.svc.thread_view(c.tenant_id, c.agent_id, thread.conversation_id, via_api_key=c.via_api_key)
+        if thread.exists else ThreadView()
+    )
     return {
         "threadId": thread_id,
         "conversationId": thread.conversation_id if thread.exists else None,
@@ -1234,23 +931,25 @@ def _thread_json(c: _Ctx, thread_id: str) -> dict[str, Any]:
 
 
 @router.get("/agents/{agent_id}/threads/{thread_id}")
-async def get_thread(agent_id: str, thread_id: str, request: Request, principal: AgUiPrincipalDep) -> JSONResponse:
+async def get_thread(
+    agent_id: str, thread_id: str, request: Request, principal: AgUiPrincipalDep, svc: AgUiServiceDep
+) -> JSONResponse:
     """The thread's messages (AG-UI shape, D13 ids) for history loading, its turns, and
     `activeRunId`: the AG-UI runId of an unfinished turn to attach to (else null). An unknown
     thread is empty (200), like a thread before its first run."""
     agent = _agent_id_or_404(principal, agent_id)
     _check_params(request)
     thread_id = _path_id(thread_id, "Thread not found")
-    c = _ctx(request, principal, agent)
+    c = _ctx(svc, principal, agent)
     return JSONResponse(content=await run_in_threadpool(_thread_json, c, thread_id))
 
 
 def _prepare_attach(c: _Ctx, thread_id: str, run_id: str, last_event_id: str | None) -> _Prepared:
-    _load_agent_or_404(c)
-    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **c.key(thread_key(thread_id), run_id))
+    c.svc.require_agent(c.tenant_id, c.agent_id)
+    record = c.svc.get_ag_ui_run(c.tenant_id, **c.key(thread_key(thread_id), run_id))
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
-    return _prepare_known(c, record, same_fingerprint=True, last_event_id=last_event_id, launch=None)
+    return _prepare_known(c, record, same_fingerprint=True, last_event_id=last_event_id, relaunch=False)
 
 
 @router.get(
@@ -1264,6 +963,7 @@ async def attach_run(
     run_id: str,
     request: Request,
     principal: AgUiPrincipalDep,
+    svc: AgUiServiceDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
     limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
@@ -1280,7 +980,7 @@ async def attach_run(
     header = last_event_id if last_event_id and last_event_id.strip() else (
         f"{run_id}:{after}" if after is not None else None
     )
-    c = _ctx(request, principal, agent)
+    c = _ctx(svc, principal, agent)
     lease = _acquire(limiter, principal)
     try:
         prepared = await run_in_threadpool(_prepare_attach, c, thread_id, run_id, header)
@@ -1313,19 +1013,16 @@ async def upload_attachment(request: Request, principal: AgUiPrincipalDep, file:
 
 
 @_attachment_routes.get("/attachments/{attachment_id}", responses={410: {"description": "the blob is gone"}})
-async def get_attachment(attachment_id: str, request: Request, principal: AgUiPrincipalDep) -> Response:
+async def get_attachment(
+    attachment_id: str, request: Request, principal: AgUiPrincipalDep, svc: AgUiServiceDep
+) -> Response:
     """The bytes. A key sees what it uploaded and what is linked to a message of a conversation of an
     agent it may use; anything else (and another tenant's) is 404. The dev bearer sees the tenant's."""
-    store = get_chat_attachment_store(request)
-    if principal.is_api_key:
-        agents = None if principal.is_unrestricted else tuple(principal.agent_ids or ())
-        meta = await run_in_threadpool(
-            store.get_for_key, principal.tenant_id, attachment_id, created_by_for(principal), agents
-        )
-    else:
-        meta = await run_in_threadpool(store.get, principal.tenant_id, attachment_id)
-    if meta is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    meta = await run_in_threadpool(
+        svc.attachment_for_download, principal.tenant_id, attachment_id,
+        created_by=created_by_for(principal), via_api_key=principal.is_api_key,
+        agent_ids=None if principal.is_unrestricted else tuple(principal.agent_ids or ()),
+    )
     return await attachment_response(request, meta)
 
 
