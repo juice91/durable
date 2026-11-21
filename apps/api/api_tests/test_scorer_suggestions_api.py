@@ -188,7 +188,7 @@ def test_refusals(api, monkeypatch):
     launcher.script = lambda _in: {"rules": []}
     assert suggest(client, h, agent_id).status_code == 422
     launcher.never = True
-    monkeypatch.setattr("eap_api.routes.architect.DRAFT_TIMEOUT_S", 0.5)
+    monkeypatch.setattr("eap_api.services.architect.DRAFT_TIMEOUT_S", 0.5)
     r = suggest(client, h, agent_id)
     assert r.status_code == 504 and r.json()["code"] == "suggest_timeout"
 
