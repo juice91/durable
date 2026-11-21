@@ -92,26 +92,37 @@ def register_tools(tool: Any) -> None:
         message on the same conversation once it is done). `done` false otherwise means the run goes on."""
         from eap_api.deps import get_approval_store
         from eap_api.services.approvals import approval_json
-        from eap_api.routes.conversations import create_conversation, start_turn
         from eap_api.schemas import ConversationCreate, TurnCreate
+        from eap_api.service_deps.agents import build_conversation_service
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
         if len(message.encode("utf-8")) > MAX_CHAT_MESSAGE_BYTES:
             raise McpToolError("payload_too_large", "message must be at most 32 KiB")
         aid = uid(agent_id, "agent_id")
+        def conversations(db: Any) -> Any:
+            return build_conversation_service(db, ctx.stores[0], ctx.launcher)
+
         if conversation_id is None:
-            created = await call(
-                ctx, create_conversation, agent_id=aid, body=_model(ConversationCreate), principal=ctx.actor,
-                db=DB, stores=ctx.stores,
+            new = _model(ConversationCreate)
+            created, _ = await call_service(
+                ctx, conversations,
+                lambda s: s.create(
+                    ctx.tenant_id, ctx.actor.user_id, aid,
+                    title=new.title, conversation_id=new.conversation_id, resource_id=new.resource_id,
+                ),
             )
             conversation_id = created["id"]
-        started = await call(
-            ctx, start_turn, conversation_id=uid(conversation_id, "conversation_id"),
-            body=_model(TurnCreate, run_id=uuid.uuid4(), input=message), principal=ctx.actor, db=DB, stores=ctx.stores,
-            launcher=ctx.launcher,
+        turn = _model(TurnCreate, run_id=uuid.uuid4(), input=message)
+        started_run, _created = await call_service(
+            ctx, conversations,
+            lambda s: s.start_turn(
+                ctx.tenant_id, uid(conversation_id, "conversation_id"), run_id=turn.run_id, input_text=turn.input,
+                version=turn.version, request_context=turn.request_context, model=turn.model,
+                model_settings=turn.model_settings,
+            ),
         )
-        run_id = started["run_id"]
+        run_id = str(started_run["id"])
         run, _settled = await wait_for_run(ctx, run_id, min(wait_seconds, MAX_WAIT_SECONDS))
         text, truncated = clip(run.get("output"))
         terminal = run["status"] in TERMINAL_RUN_STATUSES
