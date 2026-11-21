@@ -11,8 +11,8 @@ The rule, enforced by the import-linter contract "API services have no web frame
 - A service receives its collaborators (stores, a database session, the run launcher, settings) through
   its constructor. It never builds them and never looks them up.
 - A service never imports `fastapi`, `starlette`, `eap_api.routes` or `eap_api.deps`, and never reads
-  `app.state`: the providers in `eap_api.deps` are the only code that does, and they hand the
-  collaborators to the service.
+  `app.state`: the providers in `eap_api.deps` are the only code that does, and the providers in
+  `eap_api.service_deps` hand the collaborators to the service.
 - A service refuses with a `ServiceError` subclass (`eap_api.services.errors`), never an `HTTPException`.
   One handler, `eap_api.service_errors.service_error_response`, turns it into the API's JSON error body.
 """

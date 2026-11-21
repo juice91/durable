@@ -96,6 +96,8 @@ def unwrap(result: Any) -> Any:
 def service_error_to_tool_error(exc: ServiceError) -> McpToolError:
     """A service's refusal as a tool error: the code the refusal names (a class's default code is the status's
     word), the message, and for a stale revision `current_revision` (never the current resource)."""
+    if isinstance(exc.detail_object, dict):  # a structured `detail` the route always answered: read it as that body
+        return refusal(service_error_response(exc).status_code, exc.detail_object)
     response = service_error_response(exc)
     body = json.loads(response.body)
     body.pop("current", None)
@@ -195,6 +197,26 @@ async def call(ctx: Ctx, fn: Callable[..., Any], **kwargs: Any) -> Any:
         return await run_in_threadpool(run)
     except McpToolError:
         raise
+    except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
+        raise translate(exc) from None
+
+
+async def call_service(ctx: Ctx, build: Callable[[Session], Any], fn: Callable[[Any], Any]) -> Any:
+    """Run `fn(service)` in a worker thread with `service = build(session)`, a fresh Session of this call
+    (the services take their collaborators through the constructor); return its data or raise McpToolError.
+    A `ServiceError` becomes the tool error a route's HTTP refusal gave (service_error_to_tool_error); any
+    other refusal a route or shared function raises is translated as `call` does."""
+
+    def run() -> Any:
+        with Session(ctx.engine) as db:
+            return fn(build(db))
+
+    try:
+        return await run_in_threadpool(run)
+    except McpToolError:
+        raise
+    except ServiceError as exc:
+        raise service_error_to_tool_error(exc) from None
     except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
         raise translate(exc) from None
 

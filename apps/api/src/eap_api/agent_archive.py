@@ -26,19 +26,21 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from eap_api.service_errors import to_http_exception
+from eap_api.services.agent_archive import AGENT_ARCHIVED
+from eap_api.services.agent_archive import refuse_if_archived as _refuse_if_archived
+from eap_api.services.errors import ServiceError
 from eap_run_store.definitions import referencing_workflows as _referencing_workflows
 
-AGENT_ARCHIVED = "Agent is archived; unarchive it to start runs, conversations or publish versions"
-
-
 def refuse_if_archived(agent: object) -> None:
-    """409 AGENT_ARCHIVED when `agent` (an AgentModel) is archived."""
-    if getattr(agent, "archived", False):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=AGENT_ARCHIVED)
+    """409 AGENT_ARCHIVED when `agent` (an AgentModel) is archived (the rule: eap_api.services.agent_archive)."""
+    try:
+        _refuse_if_archived(agent)
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
 def referencing_workflows(db: Session, tenant_id: str, agent_id: uuid.UUID | str) -> list[dict[str, Any]]:
