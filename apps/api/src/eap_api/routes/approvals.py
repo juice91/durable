@@ -21,24 +21,28 @@ both go through eap_api.approvals.decide.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from eap_api.deps import get_approval_store
-from eap_api.approvals import decide
 from eap_api.auth import Principal, current_principal
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
 from eap_api.request_guard import guarded_json_route
-from eap_api.routes.runs import StoresDep
 from eap_api.routes.workflow_runs import _parse_body
 from eap_api.schemas import ErrorDetail
-from eap_run_store import ApprovalStore, InvalidRunCursor
-from eap_run_store.cursor import MAX_CURSOR_LENGTH
+from eap_api.service_deps.approvals import ApprovalServiceDep
+from eap_api.services.approvals import (  # noqa: F401 - re-exported: the API's users and tests import them from here
+    ALREADY_DECIDED_DETAIL,
+    APPROVAL_NOT_FOUND_DETAIL,
+    INVALID_CURSOR_DETAIL,
+    MAX_APPROVAL_CURSOR_CHARS,
+    MAX_APPROVAL_LIMIT,
+    NOT_WAITING_DETAIL,
+    RUN_NOT_FOUND_DETAIL,
+    TOOL_CALL_NOT_FOUND_DETAIL,
+    approval_json,
+)
 
 # The comment a person may add to a tool decision; a denial's comment reaches the model.
 MAX_TOOL_COMMENT_CHARS = 500
@@ -49,26 +53,12 @@ MAX_DECISION_BODY_DEPTH = 8
 # without spaces, at most 256 characters, checked before any query or event key.
 TOOL_CALL_ID_PATTERN = r"^[\x21-\x7e]+$"
 MAX_TOOL_CALL_ID_CHARS = 256
-# An inbox cursor carries a provider-chosen tool call id, so it may run longer than a run cursor
-# (eap_run_store.approvals.ApprovalCursor.decode accepts up to 4x).
-MAX_APPROVAL_CURSOR_CHARS = 4 * MAX_CURSOR_LENGTH
-
-RUN_NOT_FOUND_DETAIL = "Run not found"
-TOOL_CALL_NOT_FOUND_DETAIL = "Tool call not found"
-ALREADY_DECIDED_DETAIL = "tool call is already decided"
-NOT_WAITING_DETAIL = "tool call is not waiting for approval"
-APPROVAL_NOT_FOUND_DETAIL = "Approval not found"
-INVALID_CURSOR_DETAIL = "cursor is not valid; pass the previous page's next_cursor verbatim"
 
 ApprovalRoute = guarded_json_route(max_body_bytes=MAX_DECISION_BODY_BYTES, max_depth=MAX_DECISION_BODY_DEPTH)
 
 router = APIRouter(tags=["approvals"], route_class=ApprovalRoute)
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
-
-
-ApprovalStoreDep = Annotated[ApprovalStore, Depends(get_approval_store)]
 
 
 class ToolApprovalDecision(BaseModel):
@@ -83,69 +73,10 @@ async def _decision_body(request: Request) -> ToolApprovalDecision:
     return await _parse_body(request, ToolApprovalDecision, allow_empty=True)
 
 
-def _iso(value: datetime | None) -> str | None:
-    return None if value is None else value.isoformat()
-
-
-def approval_json(row: dict[str, Any]) -> dict[str, Any]:
-    """One inbox item. `approval_key` is the tool call id (kind tool) or the step id (kind step),
-    also given as `tool_call_id` / `step_id`. `root_run_id` is the workflow run for a workflow
-    agent step's child run, else the run itself."""
-    tool = row["kind"] == "tool"
-    return {
-        "run_id": str(row["run_id"]),
-        "kind": row["kind"],
-        "approval_key": row["approval_key"],
-        "tool_call_id": row["approval_key"] if tool else None,
-        "step_id": None if tool else row["approval_key"],
-        "root_run_id": str(row["root_run_id"]),
-        "agent_id": row["agent_id"],
-        "workflow_id": row["workflow_id"],
-        "tool_name": row["tool_name"],
-        "args": row["args"],
-        "prompt": row["prompt"],
-        "status": row["status"],
-        "requested_at": _iso(row["requested_at"]),
-        "deadline": _iso(row["deadline"]),
-        "decided_at": _iso(row["decided_at"]),
-        "decision": row["decision"],
-        "decided_by": row["decided_by"],
-        "run_status": row["run_status"],
-    }
-
-
-def _step_extras(event_log: Any, tenant_id: str, row: dict[str, Any], *, detail: bool) -> dict[str, Any]:
-    if row["kind"] == "tool":
-        # `summary`: what the call would do, in words, as the waiting event carries it (null when the
-        # tool has no summariser).
-        waiting = event_log.get_event(tenant_id, row["run_id"], f"tool:{row['approval_key']}:approval:waiting")
-        text = waiting.data.get("summary") if waiting is not None and isinstance(waiting.data, dict) else None
-        return {"summary": text if isinstance(text, str) and text else None}
-    """What a workflow step's item adds from its events: `resume_schema` (an input step: the
-    schema the person fills in; every item), and for a decided one (`detail`, the single read) the
-    audit of the decision: `comment` and `resume_data` (what was submitted) beside who and when."""
-    waiting = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:waiting")
-    wdata = waiting.data if waiting is not None and isinstance(waiting.data, dict) else {}
-    schema = wdata.get("resume_schema")
-    # `pause`: a step-by-step run's pause ("Paused after {step}", answered with Continue or Stop).
-    extras: dict[str, Any] = {
-        "summary": None,
-        "resume_schema": schema if isinstance(schema, dict) else None,
-        "pause": wdata.get("pause") is True,
-    }
-    if detail:
-        decision = event_log.get_event(tenant_id, row["run_id"], f"step:{row['approval_key']}:decision")
-        data = decision.data if decision is not None and isinstance(decision.data, dict) else {}
-        extras["comment"] = data.get("comment")
-        extras["resume_data"] = data.get("resume_data")
-    return extras
-
-
 @router.get("/approvals", responses={422: {"model": ErrorDetail}})
 def list_approvals(
     principal: PrincipalDep,
-    store: ApprovalStoreDep,
-    stores: StoresDep,
+    service: ApprovalServiceDep,
     approval_status: Annotated[Literal["pending", "decided"], Query(alias="status")] = "pending",
     kind: Annotated[Literal["tool", "step"] | None, Query()] = None,
     agent_id: uuid.UUID | None = None,
@@ -153,27 +84,22 @@ def list_approvals(
         str | None,
         Query(max_length=MAX_APPROVAL_CURSOR_CHARS, description="Opaque: the previous page's next_cursor"),
     ] = None,
-    limit: Annotated[int, Query(ge=1, le=ApprovalStore.MAX_LIMIT)] = 50,
+    limit: Annotated[int, Query(ge=1, le=MAX_APPROVAL_LIMIT)] = 50,
 ) -> JSONResponse:
     """The tenant's approvals: {items, next_cursor}. `status=pending` (default): open approvals of
     runs that have not ended, newest request first; `status=decided`: newest decision first
     (decision approved | denied | timed_out; a rejected workflow step is `denied`). `kind`
     (tool | step) and `agent_id` filter. `next_cursor` is null on the last page; a cursor this API
     did not issue is a 422."""
-    try:
-        rows, next_cursor = store.list(
-            principal.tenant_id,
-            status=approval_status,
-            kind=kind,
-            agent_id=str(agent_id) if agent_id is not None else None,
-            cursor=cursor,
-            limit=limit,
-        )
-    except InvalidRunCursor:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=INVALID_CURSOR_DETAIL)
-    _, event_log = stores
-    items = [{**approval_json(r), **_step_extras(event_log, principal.tenant_id, r, detail=True)} for r in rows]
-    return JSONResponse(content={"items": items, "next_cursor": next_cursor})
+    page = service.list(
+        principal.tenant_id,
+        status=approval_status,
+        kind=kind,
+        agent_id=str(agent_id) if agent_id is not None else None,
+        cursor=cursor,
+        limit=limit,
+    )
+    return JSONResponse(content=page)
 
 
 @router.get("/approvals/{run_id}/{kind}/{key}", responses={404: {"model": ErrorDetail}, 422: {"model": ErrorDetail}})
@@ -182,8 +108,7 @@ def get_approval(
     kind: Annotated[Literal["tool", "step"], Path()],
     key: Annotated[str, Path(min_length=1, max_length=MAX_TOOL_CALL_ID_CHARS, pattern=TOOL_CALL_ID_PATTERN)],
     principal: PrincipalDep,
-    store: ApprovalStoreDep,
-    stores: StoresDep,
+    service: ApprovalServiceDep,
 ) -> JSONResponse:
     """One approval, pending or decided, in the inbox item's shape. `key` is the tool call id (kind
     tool) or the step id (kind step). A pending item of a run that has ended keeps `status:
@@ -191,11 +116,7 @@ def get_approval(
     another tenant's; 422 a malformed run id, kind or key. A workflow step also has `resume_schema`
     (set for an input step), and `comment` and `resume_data` once decided (the audit of the
     decision, with `decided_by` and `decided_at`)."""
-    row = store.get(principal.tenant_id, str(run_id), kind, key)
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=APPROVAL_NOT_FOUND_DETAIL)
-    _, event_log = stores
-    return JSONResponse(content={**approval_json(row), **_step_extras(event_log, principal.tenant_id, row, detail=True)})
+    return JSONResponse(content=service.get(principal.tenant_id, run_id, kind, key))
 
 
 ToolCallIdPath = Annotated[
@@ -209,45 +130,6 @@ _DECISION_RESPONSES: dict[int | str, dict[str, Any]] = {
     415: {"model": ErrorDetail},
     422: {"model": ErrorDetail},
 }
-
-
-def _decide_tool(
-    decision: Literal["approved", "denied"],
-    run_id: uuid.UUID,
-    tool_call_id: str,
-    principal: Principal,
-    body: ToolApprovalDecision,
-    stores: Any,
-    launcher: RunLauncher,
-) -> JSONResponse:
-    _, event_log = stores
-    result = decide(
-        event_log, launcher, tenant_id=principal.tenant_id, run_id=run_id, kind="tool", key=tool_call_id,
-        decision=decision, decided_by=principal.user_id, comment=body.comment,
-    )
-    if result.outcome == "run_not_found":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=RUN_NOT_FOUND_DETAIL)
-    if result.outcome == "exists":
-        # Who got there first: a person ({decision, decided_by}) or the timeout (decision
-        # "timed_out", decided_by null), and when.
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"detail": ALREADY_DECIDED_DETAIL, **(result.recorded_decision() or {})},
-        )
-    if result.outcome == "not_waiting":
-        if not result.waiting:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=TOOL_CALL_NOT_FOUND_DETAIL)
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=NOT_WAITING_DETAIL)
-    return JSONResponse(
-        content={
-            "run_id": str(run_id),
-            "tool_call_id": tool_call_id,
-            "decision": decision,
-            "decided_by": principal.user_id,
-            "comment": body.comment,
-            "notified": result.notified,
-        }
-    )
 
 
 _DECISION_BODY_DOC = {
@@ -268,8 +150,7 @@ def approve_tool_call(
     tool_call_id: ToolCallIdPath,
     principal: PrincipalDep,  # before the body: 401 wins over 422
     body: Annotated[ToolApprovalDecision, Depends(_decision_body)],
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: ApprovalServiceDep,
 ) -> JSONResponse:
     """Approve a gated tool call the run waits on: 200 {run_id, tool_call_id, decision:
     "approved", decided_by, comment, notified}. 404 unknown (or another tenant's) run, or a call
@@ -277,7 +158,8 @@ def approve_tool_call(
     waiting (the run ended); 422 a comment over 500 characters or a malformed tool call id. The
     "already decided" 409 also gives the recorded `decision` (approved | denied | timed_out),
     `decided_by` (null for a timeout) and `decided_at`."""
-    return _decide_tool("approved", run_id, tool_call_id, principal, body, stores, launcher)
+    result = service.decide_tool(principal.tenant_id, principal.user_id, run_id, tool_call_id, "approved", body.comment)
+    return JSONResponse(content=result)
 
 
 @router.post(
@@ -290,9 +172,9 @@ def deny_tool_call(
     tool_call_id: ToolCallIdPath,
     principal: PrincipalDep,
     body: Annotated[ToolApprovalDecision, Depends(_decision_body)],
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: ApprovalServiceDep,
 ) -> JSONResponse:
     """Deny a gated tool call: the tool never runs, the model sees the denial (with the comment)
     and the run continues. Same answers as approve, with decision "denied"."""
-    return _decide_tool("denied", run_id, tool_call_id, principal, body, stores, launcher)
+    result = service.decide_tool(principal.tenant_id, principal.user_id, run_id, tool_call_id, "denied", body.comment)
+    return JSONResponse(content=result)

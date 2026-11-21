@@ -124,16 +124,19 @@ def register_tools(tool: Any) -> None:
     @tool("workflow.schedule.list")
     async def workflow_schedule_list(workflow_id: str | None = None, limit: int = 50) -> dict[str, Any]:
         """The tenant's schedules (of one workflow when given), newest first; `next_before` pages."""
-        from eap_api.routes.schedules import get_schedule_store, list_all_schedules, list_workflow_schedules
+        from eap_api.deps import get_schedule_store
+        from eap_api.services.schedules import ScheduleService
 
         ctx = current_ctx()
         store = get_schedule_store(ctx.request)
         limit = max(1, min(limit, 100))
         if workflow_id is not None:
             require_workflow(ctx, workflow_id)
-            return await call(ctx, list_workflow_schedules, workflow_id=uid(workflow_id, "workflow_id"),
-                              principal=ctx.actor, db=DB, store=store, limit=limit, before=None)
-        out = await call(ctx, list_all_schedules, principal=ctx.actor, db=DB, store=store, limit=limit, before=None)
+            return await call(
+                ctx, lambda db: ScheduleService(db, store).page(
+                    ctx.tenant_id, str(uid(workflow_id, "workflow_id")), limit, None),
+                db=DB)
+        out = await call(ctx, lambda db: ScheduleService(db, store).page(ctx.tenant_id, None, limit, None), db=DB)
         out["items"] = [s for s in out["items"] if ctx.workflow_allowed(str(s.get("workflow_id")))]
         return out
 
@@ -223,15 +226,17 @@ def register_tools(tool: Any) -> None:
     async def approvals_list(status: Literal["pending", "decided"] = "pending", kind: Literal["tool", "step"] | None = None,
                              agent_id: str | None = None, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
         """The tenant's approvals (gated tool calls and workflow approval steps): {items, next_cursor}."""
-        from eap_api.routes.approvals import get_approval_store, list_approvals
+        from eap_api.deps import get_approval_store
+        from eap_api.services.approvals import ApprovalService
 
         ctx = current_ctx()
         if agent_id is not None:
             require_agent(ctx, agent_id)
+        service = ApprovalService(get_approval_store(ctx.request), ctx.stores[1], ctx.launcher)
         out = await call(
-            ctx, list_approvals, principal=ctx.actor, store=get_approval_store(ctx.request), stores=ctx.stores,
-            approval_status=status, kind=kind, agent_id=uid(agent_id, "agent_id") if agent_id else None,
-            cursor=cursor, limit=max(1, min(limit, 100)),
+            ctx, lambda: service.list(
+                ctx.tenant_id, status=status, kind=kind, agent_id=str(uid(agent_id, "agent_id")) if agent_id else None,
+                cursor=cursor, limit=max(1, min(limit, 100))),
         )
         out["items"] = [i for i in out["items"] if (i.get("agent_id") is None or ctx.agent_allowed(str(i["agent_id"])))
                         and (i.get("workflow_id") is None or ctx.workflow_allowed(str(i["workflow_id"])))]

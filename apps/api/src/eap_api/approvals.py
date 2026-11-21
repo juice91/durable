@@ -24,12 +24,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
-from eap_observability import log_failure
+from eap_observability.redaction import log_failure
 from eap_run_store import EventLog, RunNotFound
 from eap_run_store.approvals import DECISION_BY_EVENT_TYPE, waiting_event_key
 from eap_schemas import RunEvent
 
-from eap_api.launcher import RunLauncher
+from eap_api.ports import RunLauncher
 
 log = logging.getLogger("eap_api")
 

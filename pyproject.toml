@@ -258,10 +258,8 @@ ignore_imports = [
     "eap_api.routes.knowledge -> sqlalchemy",
     "eap_api.routes.processors -> sqlalchemy",
     "eap_api.routes.runs -> sqlalchemy",
-    "eap_api.routes.schedules -> sqlalchemy",
     "eap_api.routes.traces -> sqlalchemy",
     "eap_api.routes.workflow_explanations -> sqlalchemy",
-    "eap_api.routes.workflow_runs -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -288,8 +286,6 @@ ignore_imports = [
     "eap_api.routes.ag_ui -> eap_run_store",
     "eap_api.routes.ag_ui -> eap_run_store.chat_attachments",
     "eap_api.routes.ag_ui_workflows -> eap_run_store",
-    "eap_api.routes.approvals -> eap_run_store",
-    "eap_api.routes.approvals -> eap_run_store.cursor",
     "eap_api.routes.architect -> eap_run_store.agent_checks",
     "eap_api.routes.architect -> eap_run_store.definition_errors",
     "eap_api.routes.architect -> eap_run_store.definitions",
@@ -319,9 +315,6 @@ ignore_imports = [
     "eap_api.routes.runs -> eap_run_store.cursor",
     "eap_api.routes.runs -> eap_run_store.spans",
     "eap_api.routes.runs -> eap_run_store.store",
-    "eap_api.routes.schedules -> eap_run_store",
-    "eap_api.routes.schedules -> eap_run_store.cursor",
-    "eap_api.routes.schedules -> eap_run_store.definition_errors",
     "eap_api.routes.spans -> eap_run_store",
     "eap_api.routes.spans -> eap_run_store.cursor",
     "eap_api.routes.spans -> eap_run_store.spans",
@@ -333,9 +326,6 @@ ignore_imports = [
     "eap_api.routes.traces -> eap_run_store.trace",
     "eap_api.routes.traces -> eap_run_store.trace_feedback",
     "eap_api.routes.workflow_explanations -> eap_run_store.definition_errors",
-    "eap_api.routes.workflow_runs -> eap_run_store",
-    "eap_api.routes.workflow_runs -> eap_run_store.definition_errors",
-    "eap_api.routes.workflow_runs -> eap_run_store.store",
 ]
 
 [tool.pytest.ini_options]
