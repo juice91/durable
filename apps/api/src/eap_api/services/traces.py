@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentVersionModel
+from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_api.services.runs import run_json
 from eap_api.workflows.models import WorkflowVersionModel
@@ -24,6 +25,7 @@ TIMEOUT_DETAIL = "Trace query timed out; retry later"
 TRACE_NOT_FOUND = "Trace not found"
 
 
+@plain_refusals
 class TraceService:
     def __init__(self, db: Session, run_store: RunStore, feedback: TraceFeedbackStore) -> None:
         self.db = db

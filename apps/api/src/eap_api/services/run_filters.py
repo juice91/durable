@@ -5,6 +5,7 @@ Every refusal is an `InvalidInput` (422)."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from eap_api.services.errors import InvalidInput
 
@@ -61,3 +62,28 @@ def time_window(created_from: datetime | None, created_to: datetime | None) -> t
 
 def text_query(q: str | None) -> str | None:
     return q.strip() if q and q.strip() else None
+
+
+def plain_refusals(cls: type) -> type:
+    """Class decorator: every public method's `ServiceError` answers the body these routes always had,
+    `{"detail": <message>}` without a `code` (a refusal that already carries a `detail_object` keeps it)."""
+    import functools
+
+    from eap_api.services.errors import ServiceError
+
+    def wrap(fn: Any) -> Any:
+        @functools.wraps(fn)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except ServiceError as exc:
+                if exc.detail_object is None:
+                    exc.detail_object = exc.message
+                raise
+
+        return call
+
+    for name, member in list(vars(cls).items()):
+        if not name.startswith("_") and callable(member):
+            setattr(cls, name, wrap(member))
+    return cls

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
+from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, Unavailable
 from eap_run_store import METRICS, MetricsQuery, MetricsQueryTimeout, MetricsRangeError, MetricsStore
 from eap_run_store.metrics import MAX_GROUPS, default_interval
@@ -79,6 +80,7 @@ def _call(fn: Any, *args: Any, **kwargs: Any) -> Any:
         raise Unavailable(TIMEOUT_DETAIL) from None
 
 
+@plain_refusals
 class MetricsService:
     def __init__(self, store: MetricsStore, db: Session, launcher: RunLauncher) -> None:
         self.store = store

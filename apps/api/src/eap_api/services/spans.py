@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_api.services.run_filters import (
     BAD_CURSOR,
@@ -42,6 +43,7 @@ def _cursor(before: str | None) -> SpanCursor | None:
         raise InvalidInput(BAD_CURSOR) from None
 
 
+@plain_refusals
 class SpanService:
     def __init__(self, spans: SpanStore, run_store: RunStore) -> None:
         self.spans = spans

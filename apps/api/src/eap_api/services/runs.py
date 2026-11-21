@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher, RunWaitTimeout, StartedRun
 from eap_api.services.agent_archive import refuse_if_archived
+from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, Unavailable
 from eap_api.services.run_filters import (
     BAD_CURSOR,
@@ -262,6 +263,7 @@ def launch_recorded_run(
     return run
 
 
+@plain_refusals
 class RunService:
     """Runs of agents: start (idempotently), read, list, events, histogram, wait. Implements RunStarter."""
 

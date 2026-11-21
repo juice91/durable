@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
+from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_observability.redaction import log_failure
 from eap_run_store import RunStore
@@ -308,6 +309,7 @@ def _unprocessable(message: str) -> InvalidInput:
     return InvalidInput(message)
 
 
+@plain_refusals
 class LogService:
     def __init__(self, run_store: RunStore, db: Session) -> None:
         self.run_store = run_store
