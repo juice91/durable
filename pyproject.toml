@@ -259,7 +259,6 @@ ignore_imports = [
     "eap_api.routes.processors -> sqlalchemy",
     "eap_api.routes.runs -> sqlalchemy",
     "eap_api.routes.traces -> sqlalchemy",
-    "eap_api.routes.workflow_explanations -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -325,7 +324,6 @@ ignore_imports = [
     "eap_api.routes.traces -> eap_run_store.spans",
     "eap_api.routes.traces -> eap_run_store.trace",
     "eap_api.routes.traces -> eap_run_store.trace_feedback",
-    "eap_api.routes.workflow_explanations -> eap_run_store.definition_errors",
 ]
 
 [tool.pytest.ini_options]
