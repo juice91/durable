@@ -182,37 +182,39 @@ def register_tools(tool: Any) -> None:
     @tool("settings.connection.list")
     async def connection_list() -> dict[str, Any]:
         """The tenant's connections to external providers. `credential_refs` are `secret:<name>` references only."""
-        from eap_api.routes.connections import list_connections
+        from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
-        return await call(ctx, list_connections, request=ctx.request, principal=ctx.actor)
+        return await call(ctx, build_connection_service(ctx.engine).list, tenant_id=ctx.tenant_id)
 
     @tool("settings.connection.check")
     async def connection_check(connection_id: str) -> dict[str, Any]:
         """Check a connection against its provider: {ok, checked_at, error_code}; never a token or a provider body."""
-        from eap_api.routes.connections import check
+        from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
-        return await call(ctx, check, connection_id=str(uid(connection_id, "connection_id")), request=ctx.request,
-                          principal=ctx.actor)
+        return await call(ctx, build_connection_service(ctx.engine).check, tenant_id=ctx.tenant_id,
+                          connection_id=str(uid(connection_id, "connection_id")))
 
     @tool("mcp.server.list")
     async def mcp_server_list(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
         """The MCP servers registered for the tenant's agents (header and env variable names only, never values)."""
-        from eap_api.routes.mcp_servers import list_mcp_servers
+        from eap_api.mcp_servers.managed import get_mcp_runtime
+        from eap_api.service_deps.connections import build_mcp_server_service, get_outbound_policy
 
         ctx = current_ctx()
-        rows = await call(ctx, list_mcp_servers, principal=ctx.actor, db=DB)
+        rows = await call(ctx, lambda db: build_mcp_server_service(
+            db, ctx.engine, get_outbound_policy(), get_mcp_runtime()).list(ctx.tenant_id), db=DB)
         return page(rows, limit, offset)
 
     @tool("mcp.catalog.search")
     async def mcp_catalog_search(query: str | None = None, limit: int = 20, after: str | None = None,
                                  source: Literal["toolhive", "official"] | None = None) -> dict[str, Any]:
         """Search the mirrored MCP registry: {items, next_after}."""
-        from eap_api.routes.mcp_catalog import search_catalog
+        from eap_api.service_deps.connections import build_mcp_catalog_service
 
         ctx = current_ctx()
-        return await call(ctx, search_catalog, request=ctx.request, principal=ctx.actor, q=query,
+        return await call(ctx, build_mcp_catalog_service(ctx.engine).search, q=query,
                           limit=max(1, min(limit, 50)), after=after, source=source)
 
     @tool("approvals.list")

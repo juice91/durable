@@ -290,7 +290,7 @@ def register_tools(tool: Any) -> None:
         """Register a connection to an external provider (`config.provider` names the adapter). Credentials are
         `secret:<name>` references to secrets stored through Studio; a value is refused, and no tool stores
         or reads a secret."""
-        from eap_api.routes.connections import create_connection
+        from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
         guard_json(config, "config", max_bytes=64 * 1024, max_depth=6)
@@ -299,7 +299,7 @@ def register_tools(tool: Any) -> None:
         for key, value in (("kind", kind), ("base_url", base_url)):
             if value is not None:
                 payload[key] = value
-        return await call(ctx, create_connection, request=ctx.request, principal=ctx.actor, payload=payload)
+        return await call(ctx, build_connection_service(ctx.engine).create, tenant_id=ctx.tenant_id, payload=payload)
 
     @tool("mcp.server.install", manage=True)
     async def mcp_server_install(catalog_name: str, package_index: int | None = None, remote_index: int | None = None,
@@ -308,7 +308,6 @@ def register_tools(tool: Any) -> None:
         once), a remote registers as an external one. `env` carries variables the entry declares; a variable
         the entry marks secret must be a `secret:<name>` reference (values are refused, headers are not
         accepted here): store the secret in Studio first."""
-        from eap_api.routes.mcp_servers import install_from_catalog
         from eap_run_store.mcp_catalog import CatalogStore
 
         ctx = current_ctx()
@@ -331,21 +330,22 @@ def register_tools(tool: Any) -> None:
         if env:
             payload["env"] = env
         from eap_api.mcp_servers.managed import get_mcp_runtime
-        from eap_api.routes.mcp_servers import get_outbound_policy
+        from eap_api.service_deps.connections import build_mcp_server_service, get_outbound_policy
 
-        return await call(ctx, install_from_catalog, request=ctx.request, principal=ctx.actor, db=DB,
-                          policy=_override(ctx, get_outbound_policy), runtime=_override(ctx, get_mcp_runtime),
-                          payload=payload)
+        policy, runtime = _override(ctx, get_outbound_policy), _override(ctx, get_mcp_runtime)
+        return await call(ctx, lambda db: build_mcp_server_service(db, ctx.engine, policy, runtime)
+                          .install_from_catalog(ctx.tenant_id, payload), db=DB)
 
     @tool("mcp.server.runtime", manage=True)
     async def mcp_server_runtime(server_id: str, action: Literal["start", "stop", "restart"]) -> dict[str, Any]:
         """Start, stop or restart a managed MCP server's pod; returns the runtime state."""
         from eap_api.mcp_servers.managed import get_mcp_runtime
-        from eap_api.routes.mcp_servers import control_runtime
+        from eap_api.service_deps.connections import build_mcp_runtime_service
 
         ctx = current_ctx()
-        return await call(ctx, control_runtime, server_id=uid(server_id, "server_id"), action=action,
-                          principal=ctx.actor, db=DB, runtime=_override(ctx, get_mcp_runtime))
+        runtime = _override(ctx, get_mcp_runtime)
+        return await call(ctx, lambda db: build_mcp_runtime_service(db, ctx.engine, runtime)
+                          .control(ctx.tenant_id, uid(server_id, "server_id"), action), db=DB)
 
     # ------------------------------------------------------------------------------- approvals
 

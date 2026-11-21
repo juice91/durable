@@ -145,7 +145,7 @@ def test_patch_headers_keeps_env_secrets_and_managed_servers_take_no_url_or_head
 
 
 def test_test_route_uses_the_managed_endpoint_and_needs_a_running_pod(runtime_world, monkeypatch):
-    from eap_api.routes import mcp_servers as routes
+    from eap_api.services import mcp_connection, mcp_runtime
 
     client, app, fake, tenant_of = runtime_world
     _t, h = tenant_of()
@@ -159,9 +159,9 @@ def test_test_route_uses_the_managed_endpoint_and_needs_a_running_pod(runtime_wo
         from eap_api.mcp_servers.connection import ProbeResult
         return ProbeResult(status="ok", tools=[{"name": "t", "description": None, "input_schema": {}}])
 
-    monkeypatch.setattr(routes, "list_server_tools", fake_list)
+    monkeypatch.setattr(mcp_connection, "list_server_tools", fake_list)
     monkeypatch.setenv("EAP_MCP_TEST_START_TIMEOUT_SECONDS", "0.2")
-    monkeypatch.setattr(routes, "START_POLL_S", 0.05)
+    monkeypatch.setattr(mcp_runtime, "START_POLL_S", 0.05)
     r = client.post(f"{BASE}/{sid}/test", headers=h)
     assert r.json()["error_code"] == "runtime_starting" and r.json()["status"] == "error"
     fake.make_ready()
@@ -264,21 +264,22 @@ def test_api_starts_and_reconcile_set_last_used_at(runtime_world):
 
 def _resolve(app, sid, tenant, fake):
     import anyio
-    from starlette.requests import Request
-
-    from eap_api.routes import mcp_servers as routes
+    from eap_observability import log_failure
+    from eap_api.mcp_servers.models import McpServerModel
+    from eap_api.services.mcp_runtime import McpRuntimeService, target_of
     from sqlalchemy.orm import Session
     from eap_secrets.outbound import OutboundPolicy
 
-    with Session(app.state.database_engine) as db:
-        server = db.get(routes.McpServerModel, sid)
-        target = routes._target(db, server)
-    request = Request({"type": "http", "app": app, "headers": []})
+    engine = app.state.database_engine
+    with Session(engine) as db:
+        server = db.get(McpServerModel, sid)
+        target = target_of(db, server)
 
     async def public(host, port):
         return ["93.184.215.14"]
 
-    return anyio.run(routes._resolve_target, request, tenant, sid, target, fake, OutboundPolicy(resolver=public))
+    service = McpRuntimeService(None, engine, fake, log_failure)
+    return anyio.run(service.resolve_target, tenant, sid, target, OutboundPolicy(resolver=public))
 
 
 def test_idle_is_resolved_like_running_and_touches_last_used_at(runtime_world):
@@ -329,7 +330,7 @@ def test_runtime_logs_mask_the_other_assignment_shapes(runtime_world):
 
 def _stopped_world(runtime_world, monkeypatch, *, ready_on_start: bool, timeout: str = "5"):
     from eap_api.mcp_servers.connection import ProbeResult
-    from eap_api.routes import mcp_servers as routes
+    from eap_api.services import mcp_connection, mcp_runtime
 
     client, app, fake, tenant_of = runtime_world
     _t, h = tenant_of()
@@ -350,9 +351,9 @@ def _stopped_world(runtime_world, monkeypatch, *, ready_on_start: bool, timeout:
     async def fake_list(url, headers, policy, timeout):
         return ProbeResult(status="ok", tools=[{"name": "t", "description": None, "input_schema": {}}])
 
-    monkeypatch.setattr(routes, "list_server_tools", fake_list)
+    monkeypatch.setattr(mcp_connection, "list_server_tools", fake_list)
     monkeypatch.setenv("EAP_MCP_TEST_START_TIMEOUT_SECONDS", timeout)
-    monkeypatch.setattr(routes, "START_POLL_S", 0.05)
+    monkeypatch.setattr(mcp_runtime, "START_POLL_S", 0.05)
     return client, app, fake, sid, h
 
 
