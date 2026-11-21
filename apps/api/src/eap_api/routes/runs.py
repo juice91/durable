@@ -16,9 +16,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from eap_api.auth import Principal, current_principal
 from eap_api.deps import (  # noqa: F401  (require_run_storage: re-exported)
-    RunLauncherDep,
-    SessionDep,
-    StoresDep,
     get_delta_source,
     get_stream_limiter,
     require_run_storage,
@@ -99,9 +96,7 @@ def start_run(
     agent_id: uuid.UUID,
     body: RunCreate,
     principal: PrincipalDep,
-    db: SessionDep,
-    stores: StoresDep,
-    launcher: RunLauncherDep,
+    service: RunServiceDep,
 ) -> JSONResponse:
     """Insert the run idempotently (client run_id), then enqueue its workflow (durability rule 1).
 
@@ -113,9 +108,6 @@ def start_run(
     The request's trace id and traceparent are stored on the run; the worker's run span joins that
     trace, and the response carries `trace_id`.
     """
-    # TODO(layering): the Architect's _run_drafter still calls this function with db/stores/launcher; once it
-    # starts runs through RunStarter (services.runs.RunService), take `service: RunServiceDep` here instead.
-    service = RunService(db, stores[0], stores[1], launcher)
     run, created = service.start_run(
         principal.tenant_id, agent_id, run_id=body.run_id, input_text=body.input, version=body.version,
         request_context=body.request_context, model=body.model, model_settings=body.model_settings,

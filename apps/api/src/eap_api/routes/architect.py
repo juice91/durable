@@ -19,7 +19,7 @@ tenant's MCP servers and knowledge bases) with the rule the worker applies to it
 against it, so the page cannot grant what the options route did not offer.
 
 Publishing on the page is the signed-in user's own decision: it calls the shared
-eap_run_store.definitions publish with `created_by` = the user and `created_via` = "architect-page".
+definitions publish with `created_by` = the user and `created_via` = "architect-page".
 A refused publish saves nothing (one transaction).
 """
 
