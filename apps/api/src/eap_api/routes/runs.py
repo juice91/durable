@@ -15,7 +15,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from eap_api.auth import Principal, current_principal
-from eap_api.deps import (  # noqa: F401  (require_run_storage: re-exported)
+from eap_api.deps import (  # noqa: F401  (re-exported: other routes import these from here)
+    RunLauncherDep,
+    SessionDep,
+    StoresDep,
     get_delta_source,
     get_stream_limiter,
     require_run_storage,
