@@ -358,3 +358,93 @@ spec:
             cidr: 192.168.5.2/32
       ports:
         - {protocol: TCP, port: 4001}
+---
+# Public access (cloudflared.yaml). The connector dials out to the Cloudflare edge (the argotunnel.com anycast
+# ranges, TCP/UDP 7844, with TCP 443 as the HTTP/2 fallback) and nowhere else on the internet; the private ranges
+# are excluded like the worker's rule. DNS is already allowed for every pod (allow-dns-and-otlp).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-egress-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 192.168.5.2/32
+      ports:
+        - {protocol: TCP, port: 7844}
+        - {protocol: UDP, port: 7844}
+        - {protocol: TCP, port: 443}
+---
+# The tunnel's two origins: Studio on 3000 and the API on 8000 (path ^/api/).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-egress-origins
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: studio
+      ports:
+        - {protocol: TCP, port: 3000}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+      ports:
+        - {protocol: TCP, port: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: studio-ingress-cloudflared
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: studio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - {protocol: TCP, port: 3000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress-cloudflared
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - {protocol: TCP, port: 8000}

@@ -508,4 +508,14 @@ kubectl_for_profile -n "$NAMESPACE" rollout status deployment/api --timeout=5m
 kubectl_for_profile -n "$NAMESPACE" scale deployment/studio --replicas=1
 kubectl_for_profile -n "$NAMESPACE" rollout status deployment/studio --timeout=5m
 
+# The Cloudflare Tunnel connector (deploy/k8s/cloudflared.yaml) runs only when the deploy secret carries a tunnel
+# token. Without one it stays at 0 replicas and the deploy still succeeds. The token is never printed.
+if [[ -n "$(dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN)" ]]; then
+  kubectl_for_profile -n "$NAMESPACE" scale deployment/cloudflared --replicas=1
+  kubectl_for_profile -n "$NAMESPACE" rollout status deployment/cloudflared --timeout=5m
+else
+  kubectl_for_profile -n "$NAMESPACE" scale deployment/cloudflared --replicas=0
+  printf 'No CLOUDFLARE_TUNNEL_TOKEN in the deploy secrets: the Cloudflare Tunnel connector stays at 0 replicas.\n'
+fi
+
 printf 'Deployed %s and %s to %s.\n' "$python_image" "$studio_image" "$EXPECTED_CONTEXT"
