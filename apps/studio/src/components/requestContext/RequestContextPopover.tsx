@@ -20,6 +20,7 @@ import { Button, focusRing } from "@/components/ui/Button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/Popover";
 import { Sheet, SheetBody, SheetContent, SheetHeader } from "@/components/ui/Sheet";
 import { RequestContextForm, type ContextValidationState } from "./RequestContextForm";
+import { Select } from "@/components/ui/Select";
 
 /** Below 640 px the popover is a Sheet (layout rule 7). */
 export const CONTEXT_SHEET_QUERY = "(max-width: 639.98px)";
@@ -323,7 +324,7 @@ function PresetControls({
   // Saving, cancelling or deleting removes or disables the focused control: focus moves to the
   // preset select, else Save as…, else the presets group, never to the page body.
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const selectRef = useRef<HTMLSelectElement | null>(null);
+  const selectRef = useRef<HTMLButtonElement | null>(null);
   const saveAsRef = useRef<HTMLButtonElement | null>(null);
   const [refocus, setRefocus] = useState(0);
   useEffect(() => {
@@ -381,12 +382,12 @@ function PresetControls({
   return (
     <div ref={rootRef} tabIndex={-1} aria-label="Presets" role="group" className="space-y-2 outline-none" data-testid="context-presets">
       <div className="flex flex-wrap items-center gap-2">
-        <select
+        <Select
           ref={selectRef}
           aria-label="Preset"
           className={selectClass}
           value={selected ?? ""}
-          onChange={(event) => choose(event.target.value)}
+          onValueChange={(v) => choose(v)}
           disabled={presets.length === 0}
         >
           <option value="">{presets.length === 0 ? "No presets yet" : "Choose a preset…"}</option>
@@ -395,7 +396,7 @@ function PresetControls({
               {preset.name}
             </option>
           ))}
-        </select>
+        </Select>
         <div className="flex flex-wrap gap-1">
           <Button
             ref={saveAsRef}

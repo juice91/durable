@@ -20,7 +20,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from eap_api.auth import Principal, current_principal
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.runs import StoresDep
 from eap_api.schemas import ErrorDetail

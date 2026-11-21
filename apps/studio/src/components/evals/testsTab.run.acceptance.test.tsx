@@ -12,6 +12,7 @@ import { routes } from "@/lib/routes";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { TestsTab } from "./TestsTab";
 import { AGENT, SUITE, callsTo, holdStart, installFakeApi, spec, suiteOf, versionOf, type FakeApi } from "./evalsFakeApi";
+import { optionsOf } from "@/test/select";
 
 vi.mock("next/navigation", async () => (await import("@/test/nextRouterMock")).navigationModule);
 
@@ -49,7 +50,7 @@ describe("the target", () => {
     const dialog = await openDialog();
     const target = within(dialog).getByTestId("eval-run-target");
     expect(target).toHaveValue("2");
-    expect(within(target).getAllByRole("option").map((o) => o.textContent)).toEqual(["v2 (latest)", "v1", "Draft"]);
+    expect(optionsOf(target).map((o) => o.textContent)).toEqual(["v2 (latest)", "v1", "Draft"]);
     fireEvent.click(within(dialog).getByTestId("eval-run-start"));
     await waitFor(() => expect(startCalls()).toHaveLength(1));
     expect(startBody()).toMatchObject({ suite_id: SUITE, version: 2, max_concurrency: 4 });

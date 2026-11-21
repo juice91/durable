@@ -6,6 +6,7 @@ import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
 import { setWindowWidth } from "@/components/frame/frameTesting";
 import { routes } from "@/lib/routes";
 import { ThreadsPage } from "./ThreadsPage";
+import { findSelectOption } from "@/test/select";
 
 const nav = vi.hoisted(() => ({ search: "", replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
@@ -77,7 +78,7 @@ describe("Threads page", () => {
   it("writes an agent choice and a search to the URL", async () => {
     render(<ThreadsPage />);
     await screen.findAllByTestId("thread-row");
-    await waitFor(() => expect(screen.getByRole("option", { name: "Other bot" })).toBeInTheDocument());
+    await findSelectOption("Other bot");
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "a2" } });
     expect(nav.replace).toHaveBeenLastCalledWith("/threads?agent_id=a2");
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "refund" } });

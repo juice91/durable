@@ -14,6 +14,7 @@ import { TraceFilterBar, filterInputClass, filterLabelClass } from "@/components
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { TracesTabs } from "@/components/traces/TracesTabs";
 import { usePendingQuery } from "@/components/traces/usePendingQuery";
+import { Select } from "@/components/ui/Select";
 
 function SpansPageBody() {
   const searchParams = useSearchParams();
@@ -58,17 +59,17 @@ function SpansPageBody() {
               extra={
                 <div className="flex min-w-0 flex-col gap-1">
                   <label htmlFor="span-kind-filter" className={filterLabelClass}>Span kind</label>
-                  <select
+                  <Select
                     id="span-kind-filter"
                     value={filters.span_kind ?? "all"}
-                    onChange={(e) => setFilters({ span_kind: e.target.value === "all" ? null : (e.target.value as SpanFilters["span_kind"]) })}
+                    onValueChange={(v) => setFilters({ span_kind: v === "all" ? null : (v as SpanFilters["span_kind"]) })}
                     className={filterInputClass}
                   >
                     <option value="all">All</option>
                     {SPAN_KINDS.map((kind) => (
                       <option key={kind} value={kind}>{KIND_LABELS[kind]}</option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
               }
             />

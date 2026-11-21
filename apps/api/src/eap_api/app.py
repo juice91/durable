@@ -101,6 +101,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     concurrency.register(app)  # 412 / 428 / 400 of ETag + If-Match (eap_api.concurrency)
 
+    from eap_api import service_errors
+
+    service_errors.register(app)  # a service's ServiceError -> the API's JSON error body
+
     # Import and register routes
     from eap_api.routes import router as agents_router
     
@@ -225,7 +229,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # for mutations). See eap_api.mcp_control and docs/mcp-control.md.
     from eap_api.mcp_control.server import mount_mcp_control
 
-    mount_mcp_control(app)
+    app.state.mcp_control_app = mount_mcp_control(app)
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

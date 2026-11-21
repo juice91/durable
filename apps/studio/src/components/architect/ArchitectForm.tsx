@@ -21,6 +21,7 @@ import {
 } from "@/lib/architect";
 import { routes } from "@/lib/routes";
 import { DrafterFailure } from "./ArchitectModel";
+import { Select } from "@/components/ui/Select";
 
 const labelClass = "mb-1 block text-label font-medium text-foreground";
 const fieldClass =
@@ -204,12 +205,12 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
         </div>
         <div>
           <label htmlFor={id("model")} className={labelClass}>Model</label>
-          <select id={id("model")} className={fieldClass} value={form.model} onChange={(event) => set("model", event.target.value)}>
+          <Select id={id("model")} className={fieldClass} value={form.model} onValueChange={(v) => set("model", v)}>
             <option value="">{options?.default_model ? `Default (${options.default_model})` : "Default"}</option>
             {(options?.models ?? []).map((model) => (
               <option key={model.id} value={model.id}>{model.id}</option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <fieldset className="min-w-0">

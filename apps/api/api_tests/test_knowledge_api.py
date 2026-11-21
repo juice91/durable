@@ -376,7 +376,7 @@ def test_force_delete(pg, tenant_of, fake_dbos, kb_cleanup):
 def test_delete_retries_once_on_deadlock():
     from sqlalchemy.exc import OperationalError
 
-    from eap_api.routes.knowledge import _retry_deadlock_once
+    from eap_api.services.knowledge import _retry_deadlock_once
 
     class Orig(Exception):
         def __init__(self, sqlstate):
@@ -683,7 +683,7 @@ def test_crash_between_run_insert_and_enqueue_is_recovered(pg, tenant_of, fake_d
 
 
 def test_stalled_request_cannot_start_a_second_run_after_a_recovery(pg, tenant_of, fake_dbos, kb_cleanup):
-    from eap_api.routes.knowledge import _renew_claim
+    from eap_api.services.knowledge import _renew_claim
 
     client, app = pg
     tenant, headers = tenant_of()
@@ -736,7 +736,7 @@ def test_failed_hand_off_of_a_reindex_retry_restores_reindex_failed(pg, tenant_o
 
 
 def test_orphan_recovery_loses_to_a_stalled_owners_lease_renewal(pg, tenant_of, fake_dbos, kb_cleanup):
-    from eap_api.routes.knowledge import _renew_claim
+    from eap_api.services.knowledge import _renew_claim
 
     client, app = pg
     tenant, headers = tenant_of()

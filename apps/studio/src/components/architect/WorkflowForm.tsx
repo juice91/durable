@@ -38,6 +38,7 @@ import {
   type WfSaved,
   type WfSpec,
 } from "@/lib/architect-workflow";
+import { Select } from "@/components/ui/Select";
 
 export interface WorkflowFormProps {
   /** GET /architect/options: the tools and the Architect-made agents a step may use. */
@@ -79,11 +80,11 @@ function AgentSelect({ id, value, onChange, options, agents, label = "Agent" }: 
   return (
     <div className="space-y-1">
       <label htmlFor={id} className={labelClass}>{label}</label>
-      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} className={field}>
+      <Select id={id} value={value} onValueChange={(v) => onChange(v)} className={field}>
         <option value="">Choose an agent</option>
         {options.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
         {value && !offered ? <option value={value}>{known?.name ?? value} ({value}, not available)</option> : null}
-      </select>
+      </Select>
     </div>
   );
 }
@@ -107,10 +108,10 @@ function PromptField({ id, value, onChange, placeholders }: {
     <div className="space-y-1">
       <div className="flex items-center justify-between gap-2">
         <label htmlFor={id} className={labelClass}>Prompt</label>
-        <select aria-label="Insert placeholder" value="" onChange={(e) => insert(e.target.value)} className="rounded-md border border-input bg-background px-2 py-1 text-caption text-foreground">
+        <Select aria-label="Insert placeholder" value="" onValueChange={(v) => insert(v)} className="rounded-md border border-input bg-background px-2 py-1 text-caption text-foreground">
           <option value="">Insert placeholder</option>
           {placeholders.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
+        </Select>
       </div>
       <textarea ref={ref} id={id} value={value} onChange={(e) => onChange(e.target.value)} rows={3} maxLength={4000} className={`${field} font-mono`} />
     </div>
@@ -324,11 +325,11 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
                 <>
                   <div className="space-y-1">
                     <label htmlFor={`${row.key}-tool`} className={labelClass}>Tool</label>
-                    <select id={`${row.key}-tool`} value={row.tool} onChange={(e) => patchRow(row.key, { tool: e.target.value })} className={field}>
+                    <Select id={`${row.key}-tool`} value={row.tool} onValueChange={(v) => patchRow(row.key, { tool: v })} className={field}>
                       <option value="">Choose a tool</option>
                       {options.tools.map((t) => <option key={t.id} value={t.id}>{t.title} ({t.id}){t.requires_approval ? " · needs approval" : ""}</option>)}
                       {row.tool && !options.tools.some((t) => t.id === row.tool) ? <option value={row.tool}>{row.tool} (not available)</option> : null}
-                    </select>
+                    </Select>
                   </div>
                   <div className="space-y-1">
                     <label htmlFor={`${row.key}-params`} className={labelClass}>Parameters</label>

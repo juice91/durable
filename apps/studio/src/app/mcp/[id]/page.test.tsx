@@ -8,6 +8,7 @@ import { mcpServers, type McpServer } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { MCP_USAGE_TIMEOUT_MS } from "@/components/mcp/mcpUsage";
+import { getSelectOption } from "@/test/select";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ useParams: () => ({ id: "srv-1" }), useRouter: () => ({ push }) }));
@@ -90,7 +91,7 @@ describe("MCP server detail page", () => {
     const empty = await screen.findByTestId("mcp-run-empty");
     fireEvent.click(within(empty).getByRole("button", { name: "Test connection" }));
     const select = await screen.findByLabelText("Tool");
-    expect(within(select).getByRole("option", { name: "search" })).toBeInTheDocument();
+    expect(getSelectOption("search", select)).toBeTruthy();
   });
 
   it("gives a not-found state for an unknown id", async () => {

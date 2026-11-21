@@ -22,6 +22,7 @@ import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { routes } from "@/lib/routes";
 import { parseWorkflowTab, WORKFLOW_TAB_PARAM, WORKFLOW_TRACE_TAB_PARAM } from "@/lib/routes/workflows";
+import { Select } from "@/components/ui/Select";
 
 /** How many runs the Graph tab's Recent runs card lists. */
 const RECENT_RUNS = 5;
@@ -118,19 +119,19 @@ function WorkflowDetail() {
   const versionSelect = workflow ? (
     <div className="flex items-center gap-2">
       <label htmlFor="workflow-version" className="text-label text-muted-foreground">Version</label>
-      <select
+      <Select
         id="workflow-version"
         data-testid="workflow-version-select"
-        value={selectedVersion ?? ""}
+        value={String(selectedVersion ?? "")}
         disabled={versions.length === 0}
-        onChange={(event) => { setSelectedVersion(Number(event.target.value)); setSelectedStepId(null); }}
+        onValueChange={(v) => { setSelectedVersion(Number(v)); setSelectedStepId(null); }}
         className={selectClass}
       >
         {versions.length === 0 ? <option value="">No published version</option> : null}
         {versions.map((v) => (
           <option key={v.version} value={v.version}>v{v.version}{v.version === workflow.latest_version ? " (latest)" : ""}</option>
         ))}
-      </select>
+      </Select>
     </div>
   ) : null;
 

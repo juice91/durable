@@ -10,6 +10,7 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { buildExtractConfig, createKnowledgeBase, EMPTY_EXTRACT_FORM, type ExtractForm, type KnowledgeBase, type KnowledgeBaseCreate } from "@/lib/knowledge";
 import { EmbeddingModelPicker, pickedModelId, useEmbeddingModels } from "./EmbeddingModelPicker";
 import { alertClass, fieldClass, hintClass, labelClass } from "./knowledgeUi";
+import { Select } from "@/components/ui/Select";
 
 interface KnowledgeBaseDialogProps {
   onCreated: (kb: KnowledgeBase) => void;
@@ -111,20 +112,20 @@ export function KnowledgeBaseDialog({ onCreated, onClose }: KnowledgeBaseDialogP
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <div className="min-w-0 space-y-1">
                   <label htmlFor={`${id}-md-flavor`} className={labelClass}>Markdown</label>
-                  <select id={`${id}-md-flavor`} data-testid="knowledge-create-markdown-flavor" value={extract.markdownFlavor} disabled={saving} onChange={(event) => setExtract({ ...extract, markdownFlavor: event.target.value as ExtractForm["markdownFlavor"] })} className={fieldClass}>
+                  <Select id={`${id}-md-flavor`} data-testid="knowledge-create-markdown-flavor" value={extract.markdownFlavor} disabled={saving} onValueChange={(v) => setExtract({ ...extract, markdownFlavor: v as ExtractForm["markdownFlavor"] })} className={fieldClass}>
                     <option value="">Plain</option>
                     <option value="doxygen">Doxygen</option>
-                  </select>
+                  </Select>
                   <p className={hintClass}>Doxygen turns \page, \section, \note and \code into headings, notes and code.</p>
                 </div>
                 <div className="min-w-0 space-y-1">
                   <label htmlFor={`${id}-pdf-headings`} className={labelClass}>PDF headings</label>
-                  <select id={`${id}-pdf-headings`} data-testid="knowledge-create-pdf-headings" value={extract.pdfHeadings} disabled={saving} onChange={(event) => setExtract({ ...extract, pdfHeadings: event.target.value as ExtractForm["pdfHeadings"] })} className={fieldClass}>
+                  <Select id={`${id}-pdf-headings`} data-testid="knowledge-create-pdf-headings" value={extract.pdfHeadings} disabled={saving} onValueChange={(v) => setExtract({ ...extract, pdfHeadings: v as ExtractForm["pdfHeadings"] })} className={fieldClass}>
                     <option value="">Default (bookmarks, else font size)</option>
                     <option value="outline">Bookmarks</option>
                     <option value="font">Font size</option>
                     <option value="pages">One section per page</option>
-                  </select>
+                  </Select>
                 </div>
               </div>
               <div className="min-w-0 space-y-1">

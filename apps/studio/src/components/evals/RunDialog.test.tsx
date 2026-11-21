@@ -4,6 +4,7 @@ import "@testing-library/jest-dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Agent } from "@/lib/api";
 import { RunDialog } from "./RunDialog";
+import { optionsOf } from "@/test/select";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const suite = { id: "s1", agent_id: null, workflow_id: "wf1", name: "Suite", description: null, evaluators: [], case_count: 2, archived: false, archived_at: null, created_at: null, updated_at: null };
@@ -34,7 +35,7 @@ describe("RunDialog", () => {
     const onStarted = vi.fn();
     render(<RunDialog target={{ kind: "workflow", id: "wf1", name: "Triage" }} versions={[{ version: 1 }, { version: 2 }]} suite={suite} hasMemory={false} onStarted={onStarted} onClose={vi.fn()} />);
     const select = screen.getByTestId("eval-run-target") as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["2", "1"]);
+    expect(optionsOf(select).map((o) => o.value)).toEqual(["2", "1"]);
     expect(select.value).toBe("2");
     expect(screen.getByTestId("eval-run-dialog")).toHaveTextContent("its own workflow run");
     await waitFor(() => expect(screen.getByTestId("eval-run-start")).toBeEnabled());
@@ -52,7 +53,7 @@ describe("RunDialog", () => {
     const onStarted = vi.fn();
     render(<RunDialog target={{ kind: "agent", id: "a1", name: "Bot" }} agent={agent} versions={[{ version: 1 }]} suite={agentSuite} hasMemory={false} onStarted={onStarted} onClose={vi.fn()} />);
     const select = screen.getByTestId("eval-run-target") as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["1", "draft"]);
+    expect(optionsOf(select).map((o) => o.value)).toEqual(["1", "draft"]);
     await waitFor(() => expect(calls.some((c) => c.path === "/agents/a1/evals/warnings")).toBe(true));
     await waitFor(() => expect(screen.getByTestId("eval-run-start")).toBeEnabled());
     fireEvent.click(screen.getByTestId("eval-run-start"));

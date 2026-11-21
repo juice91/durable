@@ -2,7 +2,7 @@
 twins for API keys (`/ag-ui/attachments`): one validation, one storage path, one response shape.
 
 An upload is validated (size, type, sniff) and hashed first, then streamed into the BlobStore
-(`app.state.blob_store`); the row records its `storage_key`. A download streams out of the store.
+(the app's `blob_store`); the row records its `storage_key`. A download streams out of the store.
 """
 
 from __future__ import annotations
@@ -16,17 +16,17 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 from urllib.parse import quote
 
+from eap_api.deps import get_chat_attachment_store, get_blob_store
 from fastapi import HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 import anyio.from_thread
 from starlette.concurrency import run_in_threadpool
 
-from eap_blob_store import BlobNotFound, BlobStore, attachment_key
+from eap_blob_store import BlobNotFound, attachment_key
 from eap_run_store.chat_attachments import (
     ALLOWED_MEDIA_TYPES,
     ATTACHMENT_NAME_MAX_CHARS,
     IMAGE_TYPES,
-    ChatAttachmentStore,
     AttachmentMeta,
     PDF_TYPE,
     is_text_type,
@@ -34,17 +34,6 @@ from eap_run_store.chat_attachments import (
 
 logger = logging.getLogger(__name__)
 _CHUNK = 64 * 1024
-
-
-def attachment_store(request: Request) -> ChatAttachmentStore:
-    store = getattr(request.app.state, "chat_attachment_store", None)
-    if store is None:
-        store = request.app.state.chat_attachment_store = ChatAttachmentStore(request.app.state.database_engine)
-    return store
-
-
-def blob_store(request: Request) -> BlobStore:
-    return request.app.state.blob_store
 
 
 def created_by_for(principal: Any) -> str:
@@ -168,7 +157,7 @@ async def store_upload(
     """Put the validated bytes in the BlobStore (503 when it is down), record the row, 201 with its meta."""
     attachment_id = str(uuid.uuid4())
     key = attachment_key(tenant_id, attachment_id)
-    store = blob_store(request)
+    store = get_blob_store(request)
 
     async def chunks() -> AsyncIterator[bytes]:
         while piece := await file.read(_CHUNK):
@@ -181,7 +170,7 @@ async def store_upload(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="attachment storage is unavailable") from exc
     try:
         meta = await run_in_threadpool(
-            attachment_store(request).create,
+            get_chat_attachment_store(request).create,
             tenant_id, attachment_id=attachment_id, name=uploaded.name, media_type=uploaded.media_type,
             size=uploaded.size, sha256=uploaded.sha256, storage_key=key, created_by=created_by,
         )
@@ -206,7 +195,7 @@ async def _with_first(first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator
 async def attachment_response(request: Request, meta: AttachmentMeta) -> Response:
     """The bytes of a found attachment (410 `attachment_gone` when its blob is missing), nosniff, inline
     only for images and PDFs."""
-    stream = blob_store(request).open(meta.storage_key)
+    stream = get_blob_store(request).open(meta.storage_key)
     try:
         first = await anext(stream)  # a missing blob raises here, before any byte is sent
     except BlobNotFound:
@@ -241,13 +230,13 @@ async def delete_unsent_attachment(request: Request, tenant_id: str, attachment_
     """Discard an upload that no message references: 204; 409 `attachment_in_use` once a message
     references it; 404 when it is unknown, another tenant's or another creator's. The row is read
     locked, then the blob is deleted, then the row (see `ChatAttachmentStore.delete_unsent`)."""
-    store = blob_store(request)
+    store = get_blob_store(request)
 
     def remove_blob(key: str) -> None:  # runs in the worker thread that holds the row lock
         anyio.from_thread.run(store.delete, key)
 
     outcome = await run_in_threadpool(
-        attachment_store(request).delete_unsent, tenant_id, attachment_id, created_by, remove_blob=remove_blob
+        get_chat_attachment_store(request).delete_unsent, tenant_id, attachment_id, created_by, remove_blob=remove_blob
     )
     if outcome == "missing":
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")

@@ -40,6 +40,7 @@ import { routes } from "@/lib/routes";
 import { formatWhen } from "./knowledgeUi";
 import { ConflictNotice } from "@/components/shared/ConflictNotice";
 import { useConflict } from "@/lib/useConflict";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const TERMINAL = new Set(["completed", "failed", "needs_attention", "cancelled"]);
@@ -129,12 +130,12 @@ function AddSourceSheet({ kbId, onClose, onAdded }: { kbId: string; onClose: () 
           <SheetBody className="flex flex-col gap-4">
             <div className="space-y-1">
               <label htmlFor="source-connection" className="block text-sm font-medium text-foreground">Connection</label>
-              <select id="source-connection" value={connectionId} onChange={(e) => setConnectionId(e.target.value)} className={inputClass}>
+              <Select id="source-connection" value={connectionId} onValueChange={(v) => setConnectionId(v)} className={inputClass}>
                 <option value="">Choose a connection…</option>
                 {connections.map((item) => (
                   <option key={item.id} value={item.id}>{item.name}</option>
                 ))}
-              </select>
+              </Select>
               {connections.length === 0 ? <p className="text-caption text-muted-foreground">Add a connection in Settings first.</p> : null}
             </div>
             <div className="space-y-1">
@@ -241,11 +242,11 @@ function RunSyncSheet({ source, onClose, onStarted }: { source: Source; onClose:
           <SheetBody className="flex flex-col gap-4">
             <div className="space-y-1">
               <label htmlFor="sync-mode" className="block text-sm font-medium text-foreground">Mode</label>
-              <select id="sync-mode" value={mode} onChange={(e) => setMode(e.target.value as SyncMode)} className={inputClass}>
+              <Select id="sync-mode" value={mode} onValueChange={(v) => setMode(v as SyncMode)} className={inputClass}>
                 {SYNC_MODES.map((item) => (
                   <option key={item} value={item}>{modeLabel[item]}</option>
                 ))}
-              </select>
+              </Select>
             </div>
             {mode === "targeted" ? (
               <div className="space-y-1">

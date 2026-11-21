@@ -73,6 +73,7 @@ from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import get_ag_ui_store, get_approval_store, get_database_engine, get_delta_source, get_stream_limiter, require_run_storage
 from eap_api.ag_ui.input import (
     AGUI_NS,
     WORKFLOW_INPUT_INVALID,
@@ -97,14 +98,14 @@ from eap_api.ag_ui.resume_entries import (
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext, ChildPrior, OpenApproval, step_interrupt_id, tool_interrupt_id
 from eap_api.agent_archive import archived_step_problems
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, require_agui_workflow
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.routes.ag_ui import (
     FINGERPRINT_CONFLICT_DETAIL,
     UNKNOWN_RUN_DETAIL,
     AgUiRoute,
     AgUiRouteSettings,
     _acquire,
-    _app_store,
     _check_params,
     _checked_json_body,
     _Ctx,
@@ -123,8 +124,6 @@ from eap_api.sse import (
     StreamLimiter,
     StreamSettings,
     TERMINAL_STATUSES,
-    get_delta_source,
-    get_stream_limiter,
     get_stream_settings,
 )
 from eap_api.streams.formatter import format_stream
@@ -138,8 +137,6 @@ from eap_run_store import (
     AgUiRunModel,
     AgUiRunRecord,
     AgUiScopeMismatch,
-    AgUiStore,
-    ApprovalStore,
     RunIdConflict,
 )
 from eap_api.auth import get_api_key_store
@@ -197,13 +194,13 @@ class _WCtx(_Ctx):
 
 
 def _wctx(request: Request, principal: AgUiPrincipal, workflow_id: str, launcher: RunLauncher | None = None) -> _WCtx:
-    run_store, event_log = request.app.state.run_stores
+    run_store, event_log = require_run_storage(request)
     return _WCtx(
-        engine=request.app.state.database_engine,
+        engine=get_database_engine(request),
         run_store=run_store,
         event_log=event_log,
-        ag_ui=_app_store(request, "ag_ui_store", AgUiStore),
-        approvals=_app_store(request, "approval_store", ApprovalStore),
+        ag_ui=get_ag_ui_store(request),
+        approvals=get_approval_store(request),
         api_keys=get_api_key_store(request),
         principal=principal,
         agent_id=workflow_id,

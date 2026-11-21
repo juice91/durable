@@ -8,6 +8,7 @@ import { getRun } from "@/lib/runs";
 import { SEARCH_DEBOUNCE_MS, searchLogs, type LogItem } from "@/components/logs/logsQuery";
 import LogsPage from "./page";
 import { routes } from "@/lib/routes";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 const RUN = "11111111-2222-3333-4444-555555555555";
 const OTHER_RUN = "99999999-2222-3333-4444-555555555555";
@@ -171,7 +172,7 @@ describe("Logs page", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(searchLogs).mockResolvedValue(response([]));
     render(<LogsPage />);
-    await screen.findByRole("option", { name: "Support bot" });
+    await findSelectOption("Support bot");
     fireEvent.change(screen.getByLabelText("Search messages"), { target: { value: "x" } });
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: AGENT } });
     fireEvent.change(screen.getByLabelText("Time range"), { target: { value: "6h" } });
@@ -232,7 +233,7 @@ describe("Logs page", () => {
     expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({
       limit: 100, run_id: RUN, from: "2026-11-05T09:59:00.000000Z", to: "2026-11-05T10:00:07.000000Z",
     });
-    expect(screen.getByRole("option", { name: "Run lifetime" })).toBeInTheDocument();
+    expect(getSelectOption("Run lifetime")).toBeTruthy();
   });
 
   it("leaves the window to the API when the run cannot be loaded, and says so", async () => {
@@ -241,7 +242,7 @@ describe("Logs page", () => {
     render(<LogsPage />);
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(1));
     expect(vi.mocked(searchLogs).mock.calls[0][0]).toEqual({ limit: 100, run_id: RUN });
-    expect(await screen.findByRole("option", { name: "Since the run started" })).toBeInTheDocument();
+    await findSelectOption("Since the run started");
   });
 
   it("an unknown agent says Agent not found and offers to clear the agent filter", async () => {

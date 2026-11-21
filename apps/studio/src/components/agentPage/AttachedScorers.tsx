@@ -13,6 +13,7 @@ import {
   type AttachedScorer,
   type ReusableScorer,
 } from "@/lib/scorers";
+import { Select } from "@/components/ui/Select";
 
 /**
  * The reusable scorers attached to an agent (self-contained Config section): attach one from the
@@ -93,10 +94,10 @@ export function AttachedScorers({ agentId }: { agentId: string }) {
         <form onSubmit={attach} aria-label="Attach a scorer" className="flex flex-wrap items-end gap-2">
           <label className="flex min-w-0 flex-col gap-1 text-caption text-muted-foreground">
             Scorer
-            <select value={choice} onChange={(e) => setChoice(e.target.value)} className="rounded-md border border-input bg-surface px-2 py-1 text-caption text-foreground">
+            <Select value={choice} onValueChange={(v) => setChoice(v)} className="rounded-md border border-input bg-surface px-2 py-1 text-caption text-foreground">
               <option value="">Choose…</option>
               {options.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            </Select>
           </label>
           <label className="flex w-20 flex-col gap-1 text-caption text-muted-foreground">
             Sample %

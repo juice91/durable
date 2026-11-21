@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useId, useState } from "react";
 import type { ArchitectOptions } from "@/lib/architect";
+import { Select } from "@/components/ui/Select";
 
 /** The model of the built-in Architect agents and the way to change it (PUT /architect/model). */
 export interface ArchitectModelValue {
@@ -44,17 +45,17 @@ export function ModelPicker({ label }: { label: string }) {
 
   return (
     <span className="inline-flex flex-wrap items-center gap-2">
-      <select
+      <Select
         id={id}
         aria-label={label}
         disabled={busy}
         value={value.model ?? ""}
-        onChange={(event) => void choose(event.target.value)}
+        onValueChange={(v) => void choose(v)}
         className="rounded-md border border-input bg-surface px-2 py-1 text-label text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
       >
         {value.model ? null : <option value="">Choose a model</option>}
         {ids.map((model) => <option key={model} value={model}>{model}</option>)}
-      </select>
+      </Select>
       {applied ? <span className="text-caption text-muted-foreground">Model set to {applied}. Fill in the form again.</span> : null}
       {error ? <span role="alert" className="text-caption text-destructive-text">{error}</span> : null}
     </span>

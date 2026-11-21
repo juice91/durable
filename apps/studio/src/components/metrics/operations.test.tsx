@@ -20,6 +20,7 @@ import {
   type UsageValues,
 } from "@/lib/metrics";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
+import { optionsOf } from "@/test/select";
 
 // RM.19: the Metrics `operation` filter, the embedding and memory KPI row and Usage by operation.
 
@@ -83,11 +84,11 @@ describe("MetricsFilterBar operation and kind", () => {
     const onChange = vi.fn();
     render(<MetricsFilterBar state={DEFAULT_PAGE_STATE} onChange={onChange} range={RANGE} />);
     const op = screen.getByLabelText("Operation") as HTMLSelectElement;
-    expect(Array.from(op.options).map((o) => o.value)).toEqual(["", "chat", "embedding", "memory", "observer", "reflector", "moderation", "judge"]); // AC.17: + judge
+    expect(optionsOf(op).map((o) => o.value)).toEqual(["", "chat", "embedding", "memory", "observer", "reflector", "moderation", "judge"]); // AC.17: + judge
     fireEvent.change(op, { target: { value: "observer" } });
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ operation: "observer" }));
     const kind = screen.getByLabelText("Kind") as HTMLSelectElement;
-    expect(Array.from(kind.options).map((o) => o.value)).toContain("kb_ingest");
+    expect(optionsOf(kind).map((o) => o.value)).toContain("kb_ingest");
   });
 
   it("Clear filters drops the operation", () => {

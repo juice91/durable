@@ -16,6 +16,13 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 WORKFLOW_NAMES = tuple(sorted(p.name for p in WORKFLOW_DIR.glob("*.yml")))
 SHA = re.compile(r"^[^\s@]+@[0-9a-f]{40}$")
 UNTRUSTED_EVENT = re.compile(r"\$\{\{[^}]*github\.event\.", re.IGNORECASE)
+# Workflows that need more than read-only contents by design. They skip only the read-only-default, the
+# issue_comment / write-permission and the secrets rules (the last still allows the built-in GITHUB_TOKEN);
+# test_privileged_workflows_never_check_out_or_run_pr_code holds them to a stricter rule of their own.
+PRIVILEGED_WORKFLOWS = {
+    "cla.yml": "the CLA bot must comment on pull requests and record signatures; it never checks out or runs pull-request code",
+}
+CLA_SENTENCE = "I have read the CLA Document and I hereby sign the CLA"
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -47,6 +54,8 @@ def test_every_action_is_pinned_to_a_full_commit_sha():
 
 def test_workflows_default_to_read_only_contents():
     for name in WORKFLOW_NAMES:
+        if name in PRIVILEGED_WORKFLOWS:
+            continue
         assert _load(name).get("permissions") == {"contents": "read"}, name
 
 
@@ -114,6 +123,8 @@ def test_run_blocks_do_not_interpolate_untrusted_event_fields():
 def test_deploy_credentials_do_not_come_from_github_secrets():
     for name in WORKFLOW_NAMES:
         text = (WORKFLOW_DIR / name).read_text()
+        if name in PRIVILEGED_WORKFLOWS:
+            text = text.replace("secrets.GITHUB_TOKEN", "")
         assert not re.search(r"\$\{\{\s*secrets\.", text), name
 
 
@@ -124,10 +135,39 @@ def test_hosted_ci_never_builds_studio():
 
 def test_no_workflow_lists_issue_comment_or_a_write_permission():
     for name in WORKFLOW_NAMES:
+        if name in PRIVILEGED_WORKFLOWS:
+            continue
         text = (WORKFLOW_DIR / name).read_text()
         assert "issue_comment" not in text, name
         assert "contents: write" not in text, name
         assert "pull-requests: write" not in text, name
+
+
+def test_privileged_workflows_never_check_out_or_run_pr_code():
+    present = [name for name in PRIVILEGED_WORKFLOWS if name in WORKFLOW_NAMES]
+    if not present:
+        print(f"no privileged workflow present ({', '.join(PRIVILEGED_WORKFLOWS)}): nothing to check")
+        return
+    allowed_comments = {"github.event.comment.body == 'recheck'", f"github.event.comment.body == '{CLA_SENTENCE}'"}
+    for name in present:
+        workflow = _load(name)
+        assert PRIVILEGED_WORKFLOWS[name], name
+        for job_name, job in workflow["jobs"].items():
+            assert not _may_be_self_hosted(job), f"{name}/{job_name}"
+            for step in job.get("steps", []):
+                assert not str(step.get("uses", "")).startswith("actions/checkout"), f"{name}/{job_name}"
+                assert "run" not in step, f"{name}/{job_name}: {step.get('name')}"
+                if "uses" in step:
+                    assert SHA.fullmatch(step["uses"]), f"{name}/{job_name}: {step['uses']}"
+            # Every clause of the job condition is either the pull_request_target event or one of the two
+            # exact comment bodies; anything else (a looser match, another event) fails.
+            clauses = [c.strip() for c in " ".join(job["if"].split()).split("||")]
+            assert clauses, f"{name}/{job_name}"
+            for clause in clauses:
+                assert clause == "github.event_name == 'pull_request_target'" or clause in allowed_comments, (
+                    f"{name}/{job_name}: {clause}"
+                )
+            assert allowed_comments <= set(clauses), f"{name}/{job_name}"
 
 
 def test_hosted_path_filters_skip_unaffected_jobs():

@@ -24,7 +24,9 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import AgUiPrincipal, Principal
 from eap_api.concurrency import ConcurrencyError, Precondition
-from eap_api.launcher import get_run_launcher
+from eap_api.deps import database_engine_of, get_run_launcher, run_launcher_of, run_stores_of
+from eap_api.service_errors import service_error_response
+from eap_api.services.errors import ServiceError
 from eap_run_store.definition_errors import DefinitionError
 
 # One word per HTTP status when a route gives no `code` of its own.
@@ -91,13 +93,30 @@ def unwrap(result: Any) -> Any:
     return result
 
 
+def service_error_to_tool_error(exc: ServiceError) -> McpToolError:
+    """A service's refusal as a tool error: the code the refusal names (a class's default code is the status's
+    word), the message, and for a stale revision `current_revision` (never the current resource)."""
+    if isinstance(exc.detail_object, dict):  # a structured `detail` the route always answered: read it as that body
+        return refusal(service_error_response(exc).status_code, exc.detail_object)
+    response = service_error_response(exc)
+    body = json.loads(response.body)
+    body.pop("current", None)
+    if exc.code == type(exc).code:  # the class's own default: the word of its status, as for every refusal
+        body.pop("code", None)
+    return refusal(response.status_code, body)
+
+
 def translate(exc: BaseException) -> McpToolError:
     """Any refusal a route or shared service raises, as a tool error."""
     if isinstance(exc, McpToolError):
         return exc
+    if isinstance(exc, ServiceError):
+        return service_error_to_tool_error(exc)
     if isinstance(exc, HTTPException):
         return refusal(exc.status_code, {"detail": exc.detail} if not isinstance(exc.detail, dict) else exc.detail)
     if isinstance(exc, DefinitionError):
+        if isinstance(exc.detail, dict):  # a body whose `detail` is {code, message}, as an HTTPException's dict detail
+            return refusal(exc.status_code, exc.detail)
         return refusal(exc.status_code, exc.body)
     if isinstance(exc, ConcurrencyError):  # 412 revision_mismatch (and 428/400): no `current` body, the revision only
         return refusal(exc.status_code, {k: v for k, v in exc.body.items() if k != "current"})
@@ -126,22 +145,22 @@ class Ctx:
 
     @property
     def request(self) -> Any:
-        """Stands in for the `Request` of routes that only read `request.app.state`."""
+        """Stands in for the `Request` of routes that only read the app's state."""
         return SimpleNamespace(app=self.app)
 
     @property
     def stores(self) -> Any:
-        return self.app.state.run_stores
+        return run_stores_of(self.app)
 
     @property
     def launcher(self) -> Any:
         """The launcher FastAPI would inject (honours a dependency override, as the API's tests install)."""
         override = self.app.dependency_overrides.get(get_run_launcher)
-        return override() if override is not None else self.app.state.run_launcher
+        return override() if override is not None else run_launcher_of(self.app)
 
     @property
     def engine(self) -> Any:
-        return self.app.state.database_engine
+        return database_engine_of(self.app)
 
     def agent_allowed(self, agent_id: str) -> bool:
         return self.principal.allows_agent(agent_id)
@@ -180,6 +199,26 @@ async def call(ctx: Ctx, fn: Callable[..., Any], **kwargs: Any) -> Any:
         return await run_in_threadpool(run)
     except McpToolError:
         raise
+    except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
+        raise translate(exc) from None
+
+
+async def call_service(ctx: Ctx, build: Callable[[Session], Any], fn: Callable[[Any], Any]) -> Any:
+    """Run `fn(service)` in a worker thread with `service = build(session)`, a fresh Session of this call
+    (the services take their collaborators through the constructor); return its data or raise McpToolError.
+    A `ServiceError` becomes the tool error a route's HTTP refusal gave (service_error_to_tool_error); any
+    other refusal a route or shared function raises is translated as `call` does."""
+
+    def run() -> Any:
+        with Session(ctx.engine) as db:
+            return fn(build(db))
+
+    try:
+        return await run_in_threadpool(run)
+    except McpToolError:
+        raise
+    except ServiceError as exc:
+        raise service_error_to_tool_error(exc) from None
     except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
         raise translate(exc) from None
 

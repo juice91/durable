@@ -18,30 +18,18 @@ be set; `base_url`, when given, is an https URL.
 
 from __future__ import annotations
 
-import uuid
 from typing import Annotated, Any
-from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Body, Depends, Request, Response, status
+from fastapi import APIRouter, Body, Depends, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
 from eap_api.request_guard import guarded_json_route
-from eap_api.routes.secrets import get_secret_store
-from eap_kb_sources.check import check_connection
-from eap_kb_sources.errors import CONNECTION_NOT_FOUND, SourceError
-from eap_run_store.kb_sources import (
-    API_TOKEN_REF_KEYS,
-    CONNECTION_KINDS,
-    Connection,
-    ConnectionInUse,
-    ConnectionNameConflict,
-    ConnectionStore,
-)
-from eap_schemas.secrets import is_secret_ref
+from eap_api.service_deps.connections import ConnectionServiceDep
+from eap_api.services.connections import parse_uuid  # noqa: F401  (kb_sources imports it from here)
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_BODY_DEPTH = 6
@@ -54,6 +42,7 @@ PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
 def problem(code: str, detail: str, http: int = status.HTTP_422_UNPROCESSABLE_CONTENT, **extra: Any) -> JSONResponse:
+    """A `{detail, code}` refusal; kb_sources answers its own refusals with it (until it moves to a service)."""
     return JSONResponse(status_code=http, content={"detail": detail, "code": code, **extra})
 
 
@@ -68,186 +57,42 @@ def parse_body(payload: Any, model: type[BaseModel]) -> Any:
         return problem("invalid_request", "; ".join(parts))
 
 
-def parse_uuid(value: str) -> str | None:
-    try:
-        return str(uuid.UUID(value))
-    except ValueError:
-        return None
-
-
-class ConnectionCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, Field(min_length=1, max_length=100)]
-    kind: str = CONNECTION_KINDS[0]
-    base_url: Annotated[str, Field(max_length=500)] | None = None
-    config: dict[str, Any] = Field(default_factory=dict)
-    credential_refs: dict[str, Any] = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class ConnectionPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, Field(min_length=1, max_length=100)] | None = None
-    base_url: Annotated[str, Field(max_length=500)] | None = None
-    config: dict[str, Any] | None = None
-    credential_refs: dict[str, Any] | None = None
-    enabled: bool | None = None
-
-
-def view(c: Connection) -> dict[str, Any]:
-    checked = c.last_checked_at
-    return {
-        "id": c.id, "name": c.name, "kind": c.kind, "base_url": c.base_url, "config": c.config,
-        "credential_refs": c.credential_refs, "enabled": c.enabled,
-        "last_checked_at": checked.isoformat() if checked is not None else None,
-        "last_status": c.last_status, "last_error_code": c.last_error_code,
-        "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(), "revision": c.revision,
-    }
-
-
-def _refs_problem(refs: dict[str, Any] | None) -> JSONResponse | None:
-    if refs is None:
-        return None
-    for key, ref in refs.items():
-        if not isinstance(key, str) or not key or is_secret_ref(ref) is None:
-            return problem("secret_ref_required", "credential_refs maps logical names to 'secret:<name>' references")
-    return None
-
-
-def _url_problem(base_url: str | None) -> JSONResponse | None:
-    if base_url is None:
-        return None
-    parts = urlsplit(base_url)
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
-        return problem("invalid_request", "base_url must be an https URL without credentials")
-    return None
-
-
-def _provider_problem(config: dict[str, Any] | None) -> JSONResponse | None:
-    if config is None:
-        return None
-    provider = config.get("provider")
-    if not isinstance(provider, str) or not provider:
-        return problem("invalid_request", "config.provider is required")
-    return None
-
-
-def _store(request: Request) -> ConnectionStore:
-    return ConnectionStore(request.app.state.database_engine)
-
-
-def _not_found() -> JSONResponse:
-    return problem(CONNECTION_NOT_FOUND, "connection not found", status.HTTP_404_NOT_FOUND)
-
-
 @router.post("/settings/connections", status_code=status.HTTP_201_CREATED)
 async def create_connection(
-    request: Request, principal: PrincipalDep, payload: Annotated[Any, Body()] = None
+    service: ConnectionServiceDep, principal: PrincipalDep, payload: Annotated[Any, Body()] = None
 ) -> JSONResponse:
-    body = parse_body(payload, ConnectionCreate)
-    if isinstance(body, JSONResponse):
-        return body
-    if body.kind not in CONNECTION_KINDS:
-        return problem("invalid_request", "unknown connection kind")
-    if body.kind == "api_token" and not set(body.credential_refs) <= API_TOKEN_REF_KEYS:
-        return problem("invalid_request", "an api_token connection takes only the 'token' reference")
-    for refused in (_refs_problem(body.credential_refs), _url_problem(body.base_url), _provider_problem(body.config)):
-        if refused is not None:
-            return refused
-    try:
-        made = await run_in_threadpool(
-            lambda: _store(request).create(
-                principal.tenant_id, name=body.name, kind=body.kind, base_url=body.base_url, config=body.config,
-                credential_refs=body.credential_refs, enabled=body.enabled,
-            )
-        )
-    except ConnectionNameConflict:
-        return problem("connection_name_conflict", "a connection with this name exists", status.HTTP_409_CONFLICT)
-    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=view(made)), made.revision)
+    made = await run_in_threadpool(service.create, principal.tenant_id, payload)
+    return stamp(JSONResponse(status_code=status.HTTP_201_CREATED, content=made), made["revision"])
 
 
 @router.get("/settings/connections")
-async def list_connections(request: Request, principal: PrincipalDep) -> JSONResponse:
-    rows = await run_in_threadpool(_store(request).list, principal.tenant_id)
-    return JSONResponse(content={"items": [view(c) for c in rows]})
+async def list_connections(service: ConnectionServiceDep, principal: PrincipalDep) -> JSONResponse:
+    return JSONResponse(content=await run_in_threadpool(service.list, principal.tenant_id))
 
 
 @router.get("/settings/connections/{connection_id}", responses={**etag_responses(write=False)})
-async def get_connection(connection_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
-    cid = parse_uuid(connection_id)
-    found = await run_in_threadpool(_store(request).get, principal.tenant_id, cid) if cid else None
-    return view_or_404(found)
-
-
-def view_or_404(found: Connection | None) -> JSONResponse:
-    return _not_found() if found is None else read_response(view(found), found.revision)
+async def get_connection(connection_id: str, service: ConnectionServiceDep, principal: PrincipalDep) -> JSONResponse:
+    found = await run_in_threadpool(service.get, principal.tenant_id, connection_id)
+    return read_response(found, found["revision"])
 
 
 @router.patch("/settings/connections/{connection_id}", responses={**etag_responses()})
 async def update_connection(
-    connection_id: str, request: Request, principal: PrincipalDep, pre: IfMatch,
+    connection_id: str, service: ConnectionServiceDep, principal: PrincipalDep, pre: IfMatch,
     payload: Annotated[Any, Body()] = None,
 ) -> JSONResponse:
     """Change a connection. Send the ETag you read as `If-Match`: a stale one is 412 `revision_mismatch`
     with the current connection (see eap_api.concurrency)."""
-    body = parse_body(payload, ConnectionPatch)
-    if isinstance(body, JSONResponse):
-        return body
-    cid = parse_uuid(connection_id)
-    if cid is None:
-        return _not_found()
-    for refused in (_refs_problem(body.credential_refs), _url_problem(body.base_url), _provider_problem(body.config)):
-        if refused is not None:
-            return refused
-    def current() -> tuple[dict[str, Any], int]:
-        found = _store(request).get(principal.tenant_id, cid)
-        return (view(found), found.revision) if found is not None else ({}, 0)
-
-    try:
-        if pre.expected is not None:
-            body_now, revision_now = await run_in_threadpool(current)
-            if revision_now:  # a missing row is the 404 below
-                pre.check(revision_now, lambda: (body_now, revision_now))
-        with pre.guard(current):
-            changed = await run_in_threadpool(
-                lambda: _store(request).update(
-                    principal.tenant_id, cid, name=body.name, base_url=body.base_url, config=body.config,
-                    credential_refs=body.credential_refs, enabled=body.enabled, expected_revision=pre.expected,
-                )
-            )
-    except ConnectionNameConflict:
-        return problem("connection_name_conflict", "a connection with this name exists", status.HTTP_409_CONFLICT)
-    if changed is None:
-        return _not_found()
-    return pre.respond(view(changed), changed.revision)
+    changed = await run_in_threadpool(service.update, principal.tenant_id, connection_id, payload, pre.expected)
+    return pre.respond(changed, changed["revision"])
 
 
 @router.delete("/settings/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
-async def delete_connection(connection_id: str, request: Request, principal: PrincipalDep) -> Response:
-    cid = parse_uuid(connection_id)
-    if cid is None:
-        return _not_found()
-    try:
-        removed = await run_in_threadpool(_store(request).delete, principal.tenant_id, cid)
-    except ConnectionInUse:
-        return problem("connection_in_use", "a source refers to this connection", status.HTTP_409_CONFLICT)
-    if not removed:
-        return _not_found()
+async def delete_connection(connection_id: str, service: ConnectionServiceDep, principal: PrincipalDep) -> Response:
+    await run_in_threadpool(service.delete, principal.tenant_id, connection_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/settings/connections/{connection_id}/check")
-async def check(connection_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
-    cid = parse_uuid(connection_id)
-    if cid is None:
-        return _not_found()
-    secrets = get_secret_store(request)
-    try:
-        result = await check_connection(request.app.state.database_engine, principal.tenant_id, cid, secrets)
-    except SourceError as exc:
-        if exc.code == CONNECTION_NOT_FOUND:
-            return _not_found()
-        raise
-    return JSONResponse(content=result)
+async def check(connection_id: str, service: ConnectionServiceDep, principal: PrincipalDep) -> JSONResponse:
+    return JSONResponse(content=await service.check(principal.tenant_id, connection_id))

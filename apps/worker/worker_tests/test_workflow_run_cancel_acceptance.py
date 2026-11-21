@@ -220,7 +220,7 @@ def test_api_crash_between_cascade_and_end_is_finished_by_the_reconciler(
 ):
     from dbos import DBOS
 
-    from eap_api.routes import workflow_runs
+    from eap_api.services import workflow_runs
     from eap_worker.cancel_reconcile import (
         CANCEL_RECONCILE_SCHEDULE_NAME, ReconcileConfig, apply_cancel_reconcile_schedule,
     )
@@ -251,7 +251,7 @@ def test_api_crash_between_cascade_and_end_is_finished_by_the_reconciler(
 
 
 def test_a_retried_cancel_after_the_crash_finishes_at_once(worker, client, api, tenant, defs, gate, monkeypatch):
-    from eap_api.routes import workflow_runs
+    from eap_api.services import workflow_runs
 
     run_id, ids = _gated_tree(worker, api, tenant, gate)
     real = workflow_runs._finish_cancel

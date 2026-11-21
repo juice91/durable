@@ -27,6 +27,7 @@ import {
 import { canonicalJson } from "../specSections";
 import { fieldClass, labelClass } from "./fieldStyles";
 import { hintClass, problemClass } from "./knowledgeMemoryFields";
+import { Select } from "@/components/ui/Select";
 
 const smallField = `${fieldClass} py-1.5`;
 const ITEM_TYPES = BUILDER_TYPES.filter((t): t is BuilderItemType => t !== "array");
@@ -110,10 +111,10 @@ function FieldRows({
                 <label htmlFor={`output-field-${field.key}-type`} className={labelClass}>
                   Type
                 </label>
-                <select
+                <Select
                   id={`output-field-${field.key}-type`}
                   value={field.type}
-                  onChange={(e) => update(index, withBuilderType(field, e.target.value as BuilderType))}
+                  onValueChange={(v) => update(index, withBuilderType(field, v as BuilderType))}
                   className={smallField}
                 >
                   {BUILDER_TYPES.map((type) => (
@@ -121,17 +122,17 @@ function FieldRows({
                       {type === "array" ? "list" : type}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
               {field.type === "array" ? (
                 <div className="min-w-0 flex-[1_1_7rem]">
                   <label htmlFor={`output-field-${field.key}-items`} className={labelClass}>
                     List of
                   </label>
-                  <select
+                  <Select
                     id={`output-field-${field.key}-items`}
                     value={field.itemType}
-                    onChange={(e) => update(index, { ...field, itemType: e.target.value as BuilderItemType, itemRest: {} })}
+                    onValueChange={(v) => update(index, { ...field, itemType: v as BuilderItemType, itemRest: {} })}
                     className={smallField}
                   >
                     {ITEM_TYPES.map((type) => (
@@ -139,7 +140,7 @@ function FieldRows({
                         {type}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
               ) : null}
               <IconButton label={`Remove ${label}`} icon={<X aria-hidden="true" />} tooltip={false} onClick={() => remove(index)} />

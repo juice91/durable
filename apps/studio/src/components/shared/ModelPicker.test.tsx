@@ -7,6 +7,7 @@ import { setWindowWidth } from "@/components/frame/frameTesting";
 import type { ModelOption } from "@/components/agents/specSections";
 import type { ProviderStatus } from "@/lib/providers";
 import { ModelPicker } from "./ModelPicker";
+import { getSelectOption, optionsOf } from "@/test/select";
 
 afterEach(cleanup);
 
@@ -47,7 +48,7 @@ describe("ModelPicker", () => {
         const onChange = vi.fn();
     render(<Harness onChange={onChange} />);
     const provider = screen.getByLabelText("Model provider");
-    expect(within(provider).getAllByRole("option").map((o) => o.textContent)).toEqual([
+    expect(optionsOf(provider).map((o) => o.textContent)).toEqual([
       "Select a provider…",
       "litellm (Connected, 2 models)",
       "openai (Unreachable)",
@@ -104,7 +105,7 @@ describe("ModelPicker", () => {
 
   it("marks a stored provider the list does not offer", () => {
     render(<Harness initial={{ provider: "mistral", name: "x" }} />);
-    expect(screen.getByRole("option", { name: "mistral (not in the allowlist)" })).toBeInTheDocument();
+    expect(getSelectOption("mistral (not in the allowlist)")).toBeTruthy();
   });
 
   it("falls back to free text, with the reason, for a provider whose list could not be discovered", async () => {
@@ -155,7 +156,7 @@ describe("ModelPicker", () => {
 
     act(() => modelInput.blur());
     expect(screen.getByTestId("model-picker")).toHaveAttribute("data-mode", "list");
-    expect(screen.getByLabelText("Model provider").tagName).toBe("SELECT");
+    expect(screen.getByLabelText("Model provider")).toHaveAttribute("data-select-trigger");
     expect(screen.getByLabelText("Model provider")).toHaveValue("litellm");
     expect(screen.getByLabelText("Model name")).toHaveTextContent("qwen3.8");
   });
@@ -163,7 +164,7 @@ describe("ModelPicker", () => {
   it("shows the list at once when it arrives while the free-text fields are not focused", () => {
     const { rerender } = render(<Harness models={null as unknown as ModelOption[]} />);
     rerender(<Harness models={MODELS} />);
-    expect(screen.getByLabelText("Model provider").tagName).toBe("SELECT");
+    expect(screen.getByLabelText("Model provider")).toHaveAttribute("data-select-trigger");
   });
 
   it("shows the problem under the model and links it to the field", () => {

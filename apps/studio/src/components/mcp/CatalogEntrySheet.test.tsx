@@ -8,6 +8,7 @@ import { mcpCatalog } from "@/lib/mcpCatalog";
 import { ApiError } from "@/lib/api";
 import * as secrets from "@/lib/secrets";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 vi.mock("@/lib/mcpCatalog", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/mcpCatalog")>();
@@ -79,7 +80,7 @@ describe("CatalogEntrySheet", () => {
     vi.mocked(mcpCatalog.install).mockResolvedValue(created);
     render(<CatalogEntrySheet entry={LOCAL_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
     fireEvent.change(screen.getByLabelText(/^ROOT_DIR/), { target: { value: "/data" } });
-    await screen.findByRole("option", { name: "Use a stored secret" });
+    await findSelectOption("Use a stored secret");
     fireEvent.change(screen.getByLabelText("Source for API_TOKEN"), { target: { value: "stored" } });
     expect(screen.queryByLabelText(/^API_TOKEN/)).toBeNull();
     fireEvent.change(screen.getByLabelText("Stored secret for API_TOKEN"), { target: { value: "slack-token" } });
@@ -91,7 +92,7 @@ describe("CatalogEntrySheet", () => {
   it("needs a stored secret to be picked when that source is chosen", async () => {
     render(<CatalogEntrySheet entry={LOCAL_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
     fireEvent.change(screen.getByLabelText(/^ROOT_DIR/), { target: { value: "/data" } });
-    await screen.findByRole("option", { name: "Use a stored secret" });
+    await findSelectOption("Use a stored secret");
     fireEvent.change(screen.getByLabelText("Source for API_TOKEN"), { target: { value: "stored" } });
     fireEvent.click(screen.getByRole("button", { name: "Run server" }));
     expect(screen.getByRole("alert")).toHaveTextContent(/API_TOKEN/);
@@ -102,13 +103,13 @@ describe("CatalogEntrySheet", () => {
     vi.mocked(secrets.listSecrets).mockResolvedValue([]);
     render(<CatalogEntrySheet entry={LOCAL_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
     await waitFor(() => expect(secrets.listSecrets).toHaveBeenCalled());
-    expect(screen.getByRole("option", { name: "Use a stored secret" })).toBeDisabled();
+    expect(getSelectOption("Use a stored secret")?.disabled).toBe(true);
   });
 
   it("refuses a new-secret name that already exists, and does not install", async () => {
     render(<CatalogEntrySheet entry={LOCAL_ENTRY} onClose={vi.fn()} onInstalled={vi.fn()} />);
     fireEvent.change(screen.getByLabelText(/^ROOT_DIR/), { target: { value: "/data" } });
-    await screen.findByRole("option", { name: "Use a stored secret" });
+    await findSelectOption("Use a stored secret");
     fireEvent.change(screen.getByLabelText(/^API_TOKEN/), { target: { value: FAKE } });
     fireEvent.change(screen.getByLabelText("Secret name for API_TOKEN"), { target: { value: "slack-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Run server" }));

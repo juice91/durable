@@ -191,9 +191,12 @@ describe("Metrics Overview", () => {
 
   it("changing the date range updates the Metrics URL; the dimension filters are on the same bar", async () => {
     mockFetch(okResponder);
-    render(<MetricsPage />);
+    const { rerender } = render(<MetricsPage />);
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "30d" } });
     expect(replace).toHaveBeenCalledWith(routes.metrics({ range: "30d" }), { scroll: false });
+    // The URL is mocked: show the page as it would be on 30d, then pick the default again.
+    search = "range=30d";
+    rerender(<MetricsPage />);
     fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "7d" } });
     expect(replace).toHaveBeenLastCalledWith(routes.metrics(), { scroll: false });
     expect(screen.getByLabelText("Agent")).toBeInTheDocument();

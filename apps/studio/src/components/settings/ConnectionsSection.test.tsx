@@ -28,6 +28,7 @@ vi.mock("@/lib/secrets", async (importOriginal) => ({ ...(await importOriginal<o
 import { ConnectionsSection } from "./ConnectionsSection";
 import { KbSourceError } from "@/lib/kbSources";
 import { AXE_TIMEOUT_MS, expectNoAxeViolations } from "@/test/a11y";
+import { findSelectOption, getSelectOption } from "@/test/select";
 
 const ADAPTERS = [
   { kind: "product_catalog", provider: "acme", distribution: "eap-kb-sources-acme", display_name: "Acme Parts", connection_kind: "oauth2_client_credentials", base_url: "https://api.acme.test", token_url: "https://auth.acme.test/token", config_schema: null },
@@ -80,7 +81,7 @@ describe("ConnectionsSection", () => {
     await screen.findByText("ti-prod");
     fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
     const sheet = await screen.findByRole("dialog");
-    expect(within(sheet).getByRole("option", { name: "Zeta Catalogue" })).toBeInTheDocument();
+    expect(getSelectOption("Zeta Catalogue", sheet)).toBeTruthy();
   });
 
   it("lists name, provider, status chip and when it was checked, in a labelled region", async () => {
@@ -114,7 +115,7 @@ describe("ConnectionsSection", () => {
     expect(within(sheet).getByLabelText("Base URL")).toHaveValue("https://api.acme.test");
     expect(within(sheet).getByLabelText("Token URL")).toHaveValue("https://auth.acme.test/token");
     fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "ti-new" } });
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("conn-id"));
+    await findSelectOption("conn-id");
     fireEvent.change(within(sheet).getByLabelText("Client ID"), { target: { value: "conn-id" } });
     fireEvent.change(within(sheet).getByLabelText("Client secret"), { target: { value: "conn-secret" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Add connection" }));
@@ -141,7 +142,7 @@ describe("ConnectionsSection", () => {
     fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "repos" } });
     // the token is optional: a public repository needs none
     expect(within(sheet).getByRole("button", { name: "Add connection" })).toBeEnabled();
-    await waitFor(() => expect(within(sheet).getByLabelText("Token")).toHaveTextContent("conn-id"));
+    await findSelectOption("conn-id");
     fireEvent.change(within(sheet).getByLabelText("Token"), { target: { value: "conn-secret" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Add connection" }));
     await waitFor(() => expect(mocks.createConnection).toHaveBeenCalled());
@@ -265,7 +266,7 @@ describe("ConnectionsSection", () => {
 
   it("has no axe violations, with the add sheet open too", async () => {
     const sheet = await openAdd();
-    await waitFor(() => expect(within(sheet).getByLabelText("Client ID")).toHaveTextContent("conn-id"));
+    await findSelectOption("conn-id");
     await expectNoAxeViolations(document.body);
   }, AXE_TIMEOUT_MS);
 });

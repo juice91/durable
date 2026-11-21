@@ -29,6 +29,7 @@ import {
 } from "@/lib/evals";
 import { useEvalRun } from "./useEvalRun";
 import { CaseStatusBadge, Kpi, ProgressBar, alertClass, cardClass, fieldClass, hintClass, kpiGridClass, labelClass, sectionTitleClass } from "./evalsUi";
+import { Select } from "@/components/ui/Select";
 
 /** The result Sheet's query parameter (`?result=<case id>`). */
 export const RESULT_PARAM = "result";
@@ -128,14 +129,14 @@ export function EvalRunView({ agentId, kind = "agent", suiteId, runId, otherRuns
         <div className="flex min-w-0 flex-wrap items-end gap-2">
           <div className="min-w-0 flex-1 space-y-1 sm:max-w-xs">
             <label htmlFor="eval-compare-with" className={labelClass}>Compare with</label>
-            <select id="eval-compare-with" className={fieldClass} value={compareWith} onChange={(e) => setCompareWith(e.target.value)} data-testid="eval-compare-with">
+            <Select id="eval-compare-with" className={fieldClass} value={compareWith} onValueChange={(v) => setCompareWith(v)} data-testid="eval-compare-with">
               <option value="">Choose a run</option>
               {others.map((r) => (
                 <option key={r.run_id} value={r.run_id}>
                   {runTargetLabel(r)} · {new Date(r.created_at).toLocaleString()} · {formatRate(r.aggregates?.pass_rate)}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
           <Button
             disabled={compareWith === ""}

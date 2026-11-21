@@ -26,19 +26,21 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from eap_api.service_errors import to_http_exception
+from eap_api.services.agent_archive import AGENT_ARCHIVED, archived_step_problems  # noqa: F401 - re-exported
+from eap_api.services.agent_archive import refuse_if_archived as _refuse_if_archived
+from eap_api.services.errors import ServiceError
 from eap_run_store.definitions import referencing_workflows as _referencing_workflows
 
-AGENT_ARCHIVED = "Agent is archived; unarchive it to start runs, conversations or publish versions"
-
-
 def refuse_if_archived(agent: object) -> None:
-    """409 AGENT_ARCHIVED when `agent` (an AgentModel) is archived."""
-    if getattr(agent, "archived", False):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=AGENT_ARCHIVED)
+    """409 AGENT_ARCHIVED when `agent` (an AgentModel) is archived (the rule: eap_api.services.agent_archive)."""
+    try:
+        _refuse_if_archived(agent)
+    except ServiceError as exc:
+        raise to_http_exception(exc) from None
 
 
 def referencing_workflows(db: Session, tenant_id: str, agent_id: uuid.UUID | str) -> list[dict[str, Any]]:
@@ -46,24 +48,6 @@ def referencing_workflows(db: Session, tenant_id: str, agent_id: uuid.UUID | str
     agent step (see eap_run_store.definitions.referencing_workflows, which the archive and the
     Architect's archive tool share)."""
     return _referencing_workflows(db.connection(), tenant_id, agent_id)
-
-
-def archived_step_problems(db: Session, tenant_id: str, steps: Any) -> list[str]:
-    """One message per agent step (of a workflow spec's `steps`) whose agent is the tenant's and
-    archived: POST /workflows/{id}/runs refuses such a run with 409 before anything runs."""
-    ids = {str(s.agent_id): s.id for s in steps if getattr(s, "type", None) == "agent"}
-    if not ids:
-        return []
-    rows = db.execute(
-        text("SELECT id, name FROM agents WHERE tenant_id = :t AND archived IS TRUE AND id = ANY(:ids)"),
-        {"t": tenant_id, "ids": list(ids)},
-    ).fetchall()
-    archived = {str(r.id): r.name for r in rows}
-    return [
-        f"step '{s.id}': agent '{archived[str(s.agent_id)]}' is archived; unarchive it to run this workflow"
-        for s in steps
-        if getattr(s, "type", None) == "agent" and str(s.agent_id) in archived
-    ]
 
 
 __all__ = ["AGENT_ARCHIVED", "archived_step_problems", "referencing_workflows", "refuse_if_archived"]

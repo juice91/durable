@@ -14,6 +14,7 @@ const PATTERN = /select-none|user-select\s*:\s*none|userSelect\s*:\s*["']none["'
 const ALLOWED: Record<string, string> = {
   "components/ui/Command.tsx": "command palette items are controls",
   "components/ui/DropdownMenu.tsx": "menu items are controls",
+  "components/ui/Select.tsx": "list options are controls",
   "components/agents/VersionCompare.tsx": "the diff's line-number and +/- gutter is decoration; the line text is selectable",
 };
 

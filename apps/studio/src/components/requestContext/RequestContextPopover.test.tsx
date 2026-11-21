@@ -17,6 +17,7 @@ import {
   type RequestContextInfo,
 } from "@/lib/requestContext";
 import { routes } from "@/lib/routes";
+import { optionsOf } from "@/test/select";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => null,
@@ -215,7 +216,7 @@ describe("Request context popover (P0.16 page tests, SL.10)", () => {
       routes.agentEditor("agent-2", { step: "request-context" }),
     );
     expect(getRequestContext).toHaveBeenCalledWith("agent-2", "draft");
-    const options = Array.from((screen.getByRole("combobox", { name: "Version" }) as HTMLSelectElement).options).map((option) => option.textContent);
+    const options = optionsOf(screen.getByRole("combobox", { name: "Version" })).map((option) => option.textContent);
     expect(options).toEqual(["Draft (unpublished)"]);
   });
 

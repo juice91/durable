@@ -261,5 +261,6 @@ describe("DataList scale", () => {
     expect(names.every((name) => name?.startsWith("Agent 09"))).toBe(true);
     const filteredTools = toolsColumn();
     expect(filteredTools).toEqual([...filteredTools].sort((a, b) => a - b));
-  });
+    // The role queries over 1,000 rows are slow in jsdom; the 3 s budgets above are the real assertions.
+  }, 60_000);
 });

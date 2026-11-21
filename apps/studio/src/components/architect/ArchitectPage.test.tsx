@@ -14,6 +14,7 @@ vi.mock("@/components/agentPage/ChatTab", () => ({ ChatTab: ({ agentId }: { agen
 import { FrameHarness } from "@/components/frame/frameTesting";
 import ArchitectPageRoute from "@/app/architect/page";
 import { DRAFT_RESPONSE, OPTIONS, SEEDED_STATE, stubArchitectApi } from "./architectFixtures";
+import { chooseValue, optionsOf } from "@/test/select";
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_EAP_DEV_TOKEN", "test-token");
@@ -135,7 +136,7 @@ describe("Architect page", () => {
   test("the model picker only offers the option models", async () => {
     mount({ "GET /architect": SEEDED_STATE });
     const model = await screen.findByLabelText("Model");
-    const values = within(model).getAllByRole("option").map((o) => (o as HTMLOptionElement).value).filter(Boolean);
+    const values = optionsOf(model).map((o) => (o as HTMLOptionElement).value).filter(Boolean);
     expect(values).toEqual(["litellm:qwen3.8", "litellm:other"]);
   });
 
@@ -247,8 +248,8 @@ describe("Architect page", () => {
     });
     expect(await screen.findByTestId("architect-model")).toHaveTextContent("Model: litellm:qwen3.8");
     const picker = screen.getByLabelText("Change model");
-    expect(within(picker).getAllByRole("option").map((o) => (o as HTMLOptionElement).value)).toEqual(["litellm:qwen3.8", "litellm:other"]);
-    await user.type(picker, "litellm:other");
+    expect(optionsOf(picker).map((o) => (o as HTMLOptionElement).value)).toEqual(["litellm:qwen3.8", "litellm:other"]);
+    chooseValue(picker, "litellm:other");
     await waitFor(() => expect(screen.getByTestId("architect-model")).toHaveTextContent("Model: litellm:other"));
     expect(api.calls.find((c) => c.key === "PUT /architect/model")?.body).toEqual({ model: "litellm:other" });
   });
@@ -259,7 +260,7 @@ describe("Architect page", () => {
       "PUT /architect/model": () => ({ status: 422, body: { detail: "The model 'litellm:other' is not available.", code: "model_not_allowed" } }),
     });
     await screen.findByTestId("architect-model");
-    await user.type(screen.getByLabelText("Change model"), "litellm:other");
+    chooseValue(screen.getByLabelText("Change model"), "litellm:other");
     expect(await screen.findByRole("alert")).toHaveTextContent("not available");
     expect(screen.getByTestId("architect-model")).toHaveTextContent("Model: litellm:qwen3.8");
   });
@@ -282,7 +283,7 @@ describe("Architect page", () => {
     expect(details.open).toBe(false);
     expect(details).toHaveTextContent("Sure! Here is a poem.");
     expect(alert).not.toHaveTextContent(/retr(y|ies)/i);
-    await user.type(within(alert).getByLabelText("Drafter model"), "litellm:other");
+    chooseValue(within(alert).getByLabelText("Drafter model"), "litellm:other");
     await waitFor(() => expect(api.calls.some((c) => c.key === "PUT /architect/model")).toBe(true));
     expect(screen.getByLabelText("Describe it")).toHaveValue("something");
   });
