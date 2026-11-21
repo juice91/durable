@@ -94,7 +94,7 @@ Never start with a full catalogue. Stage it: (1) check the connection; (2) a tar
 report (`discovered 1`, `failed 0`, one datasheet queued, `kb_ingest` completes); (3) a targeted sync of 10-100 parts;
 (4) one listing page in `full` mode and confirm the checkpoint and the resume on the next run; (5) only then a full walk,
 which spans days under the provider's daily quota. Provider-specific parts, hosts, quotas and secret field names live on the
-provider page (for Acme Semiconductor: `packages/kb-sources-acme/README.md`).
+provider page of that plug-in's distribution.
 
 ## Writing a provider plug-in
 
@@ -131,12 +131,11 @@ the built-in GitHub adapter) registering the same (kind, provider) raise `Duplic
 distributions. `eap_kb_sources.list_adapters()` returns every adapter with the distribution it came from.
 
 **Packaging.** Ship it as its own distribution (`eap-kb-sources-acme`, package `eap_kb_sources_acme`) that depends on
-`eap-kb-sources` and nothing of the platform's web, worker or database layers (`lint-imports` enforces this for the in-repo
-example, `packages/kb-sources-acme`). The core must never import it. Keep its tests and fixtures inside the package.
+`eap-kb-sources` and nothing of the platform's web, worker or database layers (`lint-imports` forbids the platform's web, worker and database
+modules from a plug-in's source modules). The core must never import it. Keep its tests and fixtures inside the package.
 
-**How a deployment installs it.** Today the repository's uv workspace includes `packages/kb-sources-acme`, so
-`uv sync --all-packages` installs it into the API and worker image; dropping a plug-in from a deployment means removing its member
-from the workspace. Later a plug-in is a wheel installed into the image with pip or uv. Nothing else changes: the entry point is
+**How a deployment installs it.** Add the plug-in's distribution to the environment of the API and the worker: a uv
+workspace member of your deployment repository, or a wheel installed into the image with pip or uv. Nothing else changes: the entry point is
 found from the installed distribution's metadata.
 
 **Credentials.** A plug-in never carries credentials. A connection holds `secret:<name>` references; the adapter resolves them
