@@ -133,17 +133,3 @@ class RunStarter(Protocol):
         """The run as GET /runs/{id} answers it (NotFound for an unknown run or another tenant's)."""
         ...
 
-
-class AgentRunPort(Protocol):
-    """Run an agent once and read the run back (implemented by services.runs.RunService)."""
-
-    def start_agent_run(
-        self, *, tenant_id: str, user_id: str, agent_id: str, run_id: str, input_text: str
-    ) -> dict[str, Any]:
-        """Record a run of the tenant's agent (latest published version) idempotently under `run_id` and hand it
-        to the worker; returns the recorded run (`id`, `status`, ...). Raises ServiceError."""
-        ...
-
-    def get_run(self, tenant_id: str, run_id: str) -> dict[str, Any] | None: ...
-
-    def cancel_run_tree(self, tenant_id: str, run_id: str) -> None: ...
