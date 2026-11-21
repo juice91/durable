@@ -10,12 +10,17 @@ class ServiceError(Exception):
 
     code: str = "service_error"
 
-    def __init__(self, message: str, *, code: str | None = None, details: list[Any] | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str | None = None, details: list[Any] | None = None, detail_object: Any = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         if code is not None:
             self.code = code
         self.details = details
+        # When set, the REST body is exactly `{"detail": detail_object}` (a body the API has always
+        # answered with a structured `detail`, e.g. `{code, case, errors}`); `message` is still the text.
+        self.detail_object = detail_object
 
 
 class NotFound(ServiceError):
@@ -38,10 +43,11 @@ class Conflict(ServiceError):
         *,
         code: str | None = None,
         details: list[Any] | None = None,
+        detail_object: Any = None,
         current: Any = None,
         current_revision: int | None = None,
     ) -> None:
-        super().__init__(message, code=code, details=details)
+        super().__init__(message, code=code, details=details, detail_object=detail_object)
         self.current = current
         self.current_revision = current_revision
 
@@ -62,3 +68,9 @@ class Unavailable(ServiceError):
     """A collaborator the operation needs is missing or down (not configured, unreachable)."""
 
     code = "unavailable"
+
+
+class PayloadTooLarge(ServiceError):
+    """The input exceeds a size limit the platform enforces (413)."""
+
+    code = "payload_too_large"
